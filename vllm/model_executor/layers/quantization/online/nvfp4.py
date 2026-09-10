@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
     FLOAT4_E2M1_MAX,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     amax_for_moe_weight_quant,
     kNvfp4Dynamic,
     kNvfp4Static,
@@ -87,20 +88,22 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
     (SM100) only.
     """
 
+    default_activation_quant_key = kNvfp4Dynamic
+
     def __init__(
         self,
-        *,
         moe: FusedMoEConfig,
+        activation_quant_key: "QuantKey | None" = kNvfp4Dynamic,
     ):
         if not current_platform.is_device_capability_family(100):
             raise ValueError(
                 "nvfp4_per_token online quantization requires a Blackwell (SM100) GPU."
             )
-        super().__init__(moe)
+        super().__init__(moe=moe, activation_quant_key=activation_quant_key)
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
-            activation_key=kNvfp4Dynamic,
+            activation_key=activation_quant_key,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:

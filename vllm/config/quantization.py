@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Annotated, Any
+from dataclasses import field
+from typing import Annotated, Any, cast
 
 import regex as re
 from pydantic import (
@@ -26,6 +27,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4Static,
 )
 
@@ -40,6 +42,16 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "mxfp8": kMxfp8Dynamic,
     "mxfp4": kMxfp4Dynamic,
     "int8_per_channel_static": kInt8StaticChannelSym,
+}
+
+# Ambiguous format names select the appropriate dynamic/static behavior
+# for either activation (dynamic) or weight (static).
+# Explicit ``*_static`` and ``*_dynamic`` names above retain
+# their field-independent meanings.
+# TODO: possibly deprecate the ``*_static`` and ``*_dynamic`` variants.
+_WEIGHT_QUANT_KEY_NAMES: dict[str, QuantKey] = {
+    "mxfp8": kMxfp8Static,
+    "mxfp4": kMxfp4Static,
 }
 
 
@@ -68,20 +80,54 @@ QuantKeyField = Annotated[
     ),
 ]
 
+_UNSET = cast(QuantKey | None, object())
+
 
 @config
 class QuantSpec:
     """Quantization spec for one layer kind (linear or MoE).
 
-    `None` on either side means the method class falls back to its own default
-    (typically inherited from the checkpoint, or unquantized for online).
+    An omitted activation key lets the quantization implementation choose its
+    default. An explicitly configured ``activation: null`` requests no
+    activation quantization; methods that do not support that request raise an
+    error.
     """
 
-    weight: QuantKeyField = None
+    weight: QuantKeyField = _UNSET
     """Weight quantization key, or a name from QUANT_KEY_NAMES."""
 
-    activation: QuantKeyField = None
+    activation: QuantKeyField = _UNSET
     """Activation quantization key, or a name from QUANT_KEY_NAMES."""
+
+    _fields_set: frozenset[str] = field(init=False, repr=False, compare=False)
+    """Names explicitly provided when constructing this spec."""
+
+    @field_validator("weight", mode="before")
+    @classmethod
+    def _coerce_weight_quant_key(cls, v: Any) -> Any:
+        if isinstance(v, str) and v in _WEIGHT_QUANT_KEY_NAMES:
+            return _WEIGHT_QUANT_KEY_NAMES[v]
+        return v
+
+    def __post_init__(self) -> None:
+        """
+        We need a way to distinguish cases where `activation` is set by the
+        user or is a default `None`, as `_ONLINE_SHORTHANDS` do not hold the
+        default activation quant key, but may be overridden by users, including
+        to `null`.
+        """
+        fields_set = set()
+        for field_name in ("weight", "activation"):
+            if getattr(self, field_name) is _UNSET:
+                setattr(self, field_name, None)
+            else:
+                fields_set.add(field_name)
+        self._fields_set = frozenset(fields_set)
+
+    @property
+    def fields_set(self) -> frozenset[str]:
+        """Names explicitly provided when constructing this spec."""
+        return self._fields_set
 
     def __str__(self) -> str:
         def quant_key_str(quant_key: QuantKey | None) -> str:
@@ -90,12 +136,16 @@ class QuantSpec:
             return next(
                 (
                     name
-                    for name, known_quant_key in QUANT_KEY_NAMES.items()
+                    for name, known_quant_key in (
+                        *QUANT_KEY_NAMES.items(),
+                        *_WEIGHT_QUANT_KEY_NAMES.items(),
+                    )
                     if known_quant_key == quant_key
                 ),
                 str(quant_key),
             )
 
+        # TODO: QuantKey itself should define `__str__`, instead of having this logic.
         return quant_key_str(self.weight)
 
 
@@ -117,11 +167,12 @@ class QuantizationConfigArgs:
     """Layers to skip quantization for. Online quantization also supports
     fnmatch-style patterns."""
 
-    targets: dict[str, str] | None = None
+    targets: dict[str, str | QuantSpec] | None = None
     """Per-layer online quantization overrides, keyed by exact layer name or
     regex patterns with a `re:`, or fnmatch-style patterns for online
-    quantization, mapping to an online shorthand name (see
-    `_ONLINE_SHORTHANDS`). A layer that matches no pattern is left unquantized.
+    quantization. A target can map to an online shorthand name (see
+    `_ONLINE_SHORTHANDS`) or a quantization spec containing `weight` and
+    `activation` keys. A layer that matches no pattern is left unquantized.
     Mutually exclusive with `linear` and `moe`.
     """
 
@@ -130,6 +181,8 @@ class QuantizationConfigArgs:
     def _coerce_spec(cls, v: Any, info: ValidationInfo) -> Any:
         if not isinstance(v, str):
             return v
+
+        # e.g. `--quantization-config.moe mxfp4`
         field_name = info.field_name
         assert field_name is not None
         if v in _ONLINE_SHORTHANDS:
@@ -148,16 +201,25 @@ class QuantizationConfigArgs:
             return v
         if not isinstance(v, dict):
             raise TypeError(f"targets must be a dict, got {type(v).__name__}")
-        for pattern, shorthand in v.items():
+        targets: dict[str, str | QuantSpec] = {}
+        for pattern, target in v.items():
             if not isinstance(pattern, str):
                 raise ValueError(
                     f"targets keys must be strings, got {type(pattern).__name__}"
                 )
-            if not isinstance(shorthand, str) or shorthand not in _ONLINE_SHORTHANDS:
+            if isinstance(target, str):
+                if target not in _ONLINE_SHORTHANDS:
+                    raise ValueError(
+                        f"targets[{pattern}] = {target} is not a valid "
+                        f"online shorthand name; expected one of "
+                        f"{sorted(_ONLINE_SHORTHANDS)}"
+                    )
+            elif isinstance(target, dict):
+                target = QuantSpec(**target)
+            elif not isinstance(target, QuantSpec):
                 raise ValueError(
-                    f"targets[{pattern}] = {shorthand} is not a valid "
-                    f"online shorthand name; expected one of "
-                    f"{sorted(_ONLINE_SHORTHANDS)}"
+                    f"targets[{pattern}] must be an online shorthand name or "
+                    f"a quantization spec, got {type(target).__name__}"
                 )
             if pattern.startswith("re:"):
                 try:
@@ -166,7 +228,8 @@ class QuantizationConfigArgs:
                     raise ValueError(
                         f"targets key {pattern} is not a valid regex: {e}"
                     ) from e
-        return v
+            targets[pattern] = target
+        return targets
 
     @model_validator(mode="after")
     def _validate_targets_exclusivity(self) -> "QuantizationConfigArgs":
@@ -200,14 +263,16 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
         moe=QuantSpec(weight=kFp8StaticChannelSym),
     ),
     "mxfp8": QuantizationConfigArgs(
-        linear=QuantSpec(weight=kMxfp8Dynamic),
-        moe=QuantSpec(weight=kMxfp8Dynamic),
+        linear=QuantSpec(weight=kMxfp8Static),
+        moe=QuantSpec(weight=kMxfp8Static),
     ),
     "mxfp4": QuantizationConfigArgs(
         linear=QuantSpec(weight=kMxfp4Static),
         moe=QuantSpec(weight=kMxfp4Static),
     ),
     # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
+    # TODO: this is broken since at least #41566, as Int8OnlineMoEMethod
+    # defaults to activation_quant_key=kInt8DynamicTokenSym.
     "int8_per_channel_weight_only": QuantizationConfigArgs(
         moe=QuantSpec(weight=kInt8StaticChannelSym),
     ),
@@ -270,9 +335,31 @@ def resolve_quantization_config(
     if base is None:
         return quantization_config
 
+    def merge_spec(
+        base_spec: QuantSpec | None,
+        override_spec: QuantSpec | None,
+    ) -> QuantSpec | None:
+        if override_spec is None:
+            return base_spec
+        if base_spec is None:
+            return override_spec
+
+        weight = (
+            override_spec.weight
+            if "weight" in override_spec.fields_set
+            else base_spec.weight
+        )
+
+        if "activation" in override_spec.fields_set:
+            return QuantSpec(weight=weight, activation=override_spec.activation)
+        if "activation" in base_spec.fields_set:
+            return QuantSpec(weight=weight, activation=base_spec.activation)
+
+        return QuantSpec(weight=weight)
+
     return QuantizationConfigArgs(
-        linear=quantization_config.linear or base.linear,
-        moe=quantization_config.moe or base.moe,
+        linear=merge_spec(base.linear, quantization_config.linear),
+        moe=merge_spec(base.moe, quantization_config.moe),
         ignore=quantization_config.ignore or base.ignore,
         targets=quantization_config.targets or base.targets,
     )

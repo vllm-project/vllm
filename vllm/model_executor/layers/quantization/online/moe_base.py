@@ -10,7 +10,9 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader.reload.layerwise import (
     initialize_online_processing,
 )
@@ -23,6 +25,15 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
     """
 
     uses_meta_device: bool = True
+    default_activation_quant_key: QuantKey | None
+
+    def __init__(
+        self,
+        moe: FusedMoEConfig,
+        activation_quant_key: QuantKey | None,
+    ) -> None:
+        super().__init__(moe)
+        self.activation_quant_key = activation_quant_key
 
     def create_weights(
         self,
