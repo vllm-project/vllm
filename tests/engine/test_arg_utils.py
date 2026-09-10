@@ -47,6 +47,39 @@ def test_optional_type():
 
 
 @pytest.mark.parametrize(
+    "options",
+    [
+        ["--engram-config", '{"cpu_offload": false, "embedding_across_dp": true}'],
+        [
+            "--engram-config.cpu_offload",
+            "false",
+            "--engram-config.embedding_across_dp",
+            "true",
+        ],
+    ],
+)
+def test_engram_config_cli(options, monkeypatch):
+    """CLI settings take precedence over the legacy offload environment."""
+    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", "1")
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args(options))
+    assert args.engram_config is not None
+    assert args.engram_config.cpu_offload is False
+    assert args.engram_config.embedding_across_dp is True
+
+
+@pytest.mark.parametrize(
+    "options, provided",
+    [([], False), (["--engram-config", "{}"], True)],
+)
+def test_engram_config_cli_optional(options, provided):
+    """An explicit empty config must remain distinct from an omitted config."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args(options))
+    assert (args.engram_config is not None) == provided
+
+
+@pytest.mark.parametrize(
     ("type_hint", "type", "expected"),
     [
         (int, int, True),
@@ -462,6 +495,25 @@ def test_attention_config():
     engine_args = EngineArgs.from_cli_args(args)
     with pytest.raises(ValueError, match="mutually exclusive"):
         engine_args.create_engine_config()
+
+
+def test_multi_node_world_size_includes_pcp(monkeypatch):
+    """PCP expands the process world size, so the --nnodes divisibility check
+    must include it. Without this, TP=1/PCP=2 over 2 nodes computes a world
+    size of 1 and the launch is rejected before the engine starts."""
+    import vllm.config.vllm
+
+    # PCP requires the V2 model runner, which is gated on Triton.
+    monkeypatch.setattr(vllm.config.vllm, "HAS_TRITON", True)
+
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        tensor_parallel_size=1,
+        prefill_context_parallel_size=2,
+        nnodes=2,
+    )
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.parallel_config.world_size == 2
 
 
 def test_prefix_cache_default():
