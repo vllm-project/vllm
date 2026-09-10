@@ -80,10 +80,17 @@ class Step3p5Config(PretrainedConfig):
 
         self.att_impl_type = att_impl_type
         self.use_head_wise_attn_gate = use_head_wise_attn_gate
-        # For some reason the checkpoint has longer layer_types than num_hidden_layers
+        # Keep a vLLM-only copy of the MTP layer metadata, but crop the public
+        # `layer_types` to the base model so Hugging Face config validation
+        # still accepts the checkpoint.
+        vllm_layer_types = layer_types
         if layer_types is not None:
-            layer_types = layer_types[: self.num_hidden_layers]
+            num_mtp_layers = max(num_nextn_predict_layers, 0)
+            max_layer_types = self.num_hidden_layers + num_mtp_layers
+            vllm_layer_types = layer_types[:max_layer_types]
+            layer_types = vllm_layer_types[: self.num_hidden_layers]
         self.layer_types = layer_types
+        self.vllm_layer_types = vllm_layer_types
         self.use_rope_layers = use_rope_layers
         self.yarn_only_types = yarn_only_types
         self.attention_other_setting = attention_other_setting
