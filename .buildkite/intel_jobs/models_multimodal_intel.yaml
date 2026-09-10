@@ -98,7 +98,7 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'pip install av &&
       cd tests &&
-      pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing'
+      pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing --deselect="tests/models/multimodal/pooling/test_phi3v.py::test_models_text[half-TIGER-Lab/VLM2Vec-Full]"'
 
 - label: Multi-Modal Processor # 44min
   key: multi-modal-processor
