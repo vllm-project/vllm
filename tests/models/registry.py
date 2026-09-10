@@ -1539,6 +1539,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
         use_original_num_layers=True,  # DSpark has >1 draft block
     ),
+    "DSparkV41DraftModel": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4.1-Flash",
+        speculative_model="deepseek-ai/DeepSeek-V4.1-Flash",  # draft in mtp.*
+        is_available_online=False,
+        use_original_num_layers=True,  # DSpark has >1 draft block
+    ),
     "K3DSparkModel": _HfExamplesInfo(
         "moonshotai/Kimi-K3",
         speculative_model="Inferact/Kimi-K3-DSpark",
