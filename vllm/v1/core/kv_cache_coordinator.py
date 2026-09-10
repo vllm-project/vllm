@@ -340,14 +340,14 @@ class KVCacheCoordinator(ABC):
                 (including tokens that are already cached).
         """
         boundaries = self.get_replay_boundaries(request)
-        # Only cache tokens with finalized KV. The last num_reprefillable_tokens
-        # tokens can be re-prefilled during multi-module MTP.
-        num_tokens_to_cache = max(
-            0, num_computed_tokens - self.num_reprefillable_tokens
-        )
         for manager in self.single_type_managers:
             if not manager.enable_caching:
                 continue
+            # Only cache tokens with finalized KV. The last num_reprefillable_tokens
+            # tokens can be re-prefilled during multi-module MTP.
+            num_tokens_to_cache = max(
+                0, num_computed_tokens - self.num_reprefillable_tokens
+            )
             manager.cache_blocks(
                 request,
                 num_tokens_to_cache,
