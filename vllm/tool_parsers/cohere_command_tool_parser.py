@@ -4,12 +4,12 @@
 from collections.abc import Sequence
 
 try:
-    from cohere_melody import PyFilter, PyFilterOptions
+    from cohere_melody import FilterAggregatedResult, PyFilter, PyFilterOptions
 except ImportError as e:
     raise ImportError(
         "The Cohere tool parser requires the `cohere_melody` "
         "package, which is not installed. Install it with:\n"
-        "    pip install 'cohere-melody>=0.11.1'"
+        "    pip install 'cohere-melody>=0.14.0'"
     ) from e
 
 from vllm.entrypoints.generate.base.protocol import (
@@ -32,6 +32,8 @@ from vllm.tool_parsers.utils import Tool
 
 
 class BaseCohereCommandToolParser(ToolParser):
+    engine_based_streaming = True
+
     def __init__(
         self,
         tokenizer: TokenizerLike,
@@ -62,7 +64,12 @@ class BaseCohereCommandToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        r = self.melody_streaming.write_decoded(delta_text)
+        return self._to_delta(self.melody_streaming.write_decoded(delta_text))
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        return self._to_delta(self.melody_streaming.flush_partials())
+
+    def _to_delta(self, r: FilterAggregatedResult) -> DeltaMessage | None:
         if r.content is not None:
             return DeltaMessage(content=r.content)
         if r.reasoning is not None:

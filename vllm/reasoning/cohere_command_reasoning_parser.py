@@ -11,12 +11,12 @@ import regex as re
 import xgrammar as xgr
 
 try:
-    from cohere_melody import PyFilter, PyFilterOptions
+    from cohere_melody import FilterAggregatedResult, PyFilter, PyFilterOptions
 except ImportError as e:
     raise ImportError(
         "The Cohere reasoning parser requires the `cohere_melody` "
         "package, which is not installed. Install it with:\n"
-        "    pip install 'cohere-melody>=0.11.1'"
+        "    pip install 'cohere-melody>=0.14.0'"
     ) from e
 
 
@@ -487,6 +487,8 @@ def _melody_citations_to_vllm(
 
 
 class BaseCohereCommandReasoningParser(ReasoningParser):
+    engine_based_streaming = True
+
     def __init__(
         self,
         tokenizer: TokenizerLike,
@@ -546,7 +548,15 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        r = self.melody_streaming.write_decoded(delta_text)
+        return self._to_delta(self.melody_streaming.write_decoded(delta_text))
+
+    def has_engine_confirmed_reasoning_end(self) -> bool:
+        return not self.melody_streaming.is_reasoning()
+
+    def finish_streaming(self) -> DeltaMessage | None:
+        return self._to_delta(self.melody_streaming.flush_partials())
+
+    def _to_delta(self, r: FilterAggregatedResult) -> CohereDeltaMessage | None:
         citations = _melody_citations_to_vllm(
             getattr(r, "citations", None), self._position_to_source
         )

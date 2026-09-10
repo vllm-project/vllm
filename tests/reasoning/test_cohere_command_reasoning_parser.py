@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 from collections import UserDict
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import regex as re
 from pydantic import ValidationError
 
 from vllm.entrypoints.generate.base.protocol import (
@@ -21,6 +23,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.parser import ParserManager
 from vllm.reasoning.cohere_command_reasoning_parser import (
     CohereCommand3ReasoningParser,
     CohereCommand4ReasoningParser,
@@ -106,21 +109,35 @@ REASONING_CASES = [
 ]
 
 
+_SPECIAL_TOKEN_RE = re.compile(r"(<\|[A-Z_]+\|>)")
+
+
 class MockCohereTokenizer:
     """Minimal byte-level stand-in for the Cohere tokenizer.
 
-    ``encode``/``decode`` round-trip through UTF-8 bytes so splitting a
-    multi-byte character (e.g. an emoji) across "tokens" reproduces the
-    trailing U+FFFD buffering that real streaming exhibits. Cohere special
-    tokens map to distinct synthetic ids; everything else shares a default id.
-    ``adjust_request`` only needs the token ids, not real tokenization.
+    Text round-trips through UTF-8 bytes so splitting a multi-byte character
+    (e.g. an emoji) across "tokens" reproduces the trailing U+FFFD buffering
+    that real streaming exhibits. Cohere special tokens are single ids (>= 256)
+    so token-id based reasoning-end detection works as with the real tokenizer.
     """
 
     _SPECIAL_TOKEN_IDS = {
-        "<|START_THINKING|>": -1,
-        "<|END_THINKING|>": -2,
-        "<|CHATBOT_TOKEN|>": -3,
+        tok: 256 + i
+        for i, tok in enumerate(
+            (
+                "<|START_THINKING|>",
+                "<|END_THINKING|>",
+                "<|CHATBOT_TOKEN|>",
+                "<|START_RESPONSE|>",
+                "<|END_RESPONSE|>",
+                "<|START_TEXT|>",
+                "<|END_TEXT|>",
+                "<|START_ACTION|>",
+                "<|END_ACTION|>",
+            )
+        )
     }
+    _ID_TO_SPECIAL_TOKEN = {v: k for k, v in _SPECIAL_TOKEN_IDS.items()}
 
     def convert_tokens_to_ids(self, token: str) -> int:
         return self._SPECIAL_TOKEN_IDS.get(token, 0)
@@ -129,10 +146,24 @@ class MockCohereTokenizer:
         return {}
 
     def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
-        return list(text.encode("utf-8"))
+        ids: list[int] = []
+        for part in _SPECIAL_TOKEN_RE.split(text):
+            if part in self._SPECIAL_TOKEN_IDS:
+                ids.append(self._SPECIAL_TOKEN_IDS[part])
+            else:
+                ids.extend(part.encode("utf-8"))
+        return ids
 
     def decode(self, ids: list[int], skip_special_tokens: bool = False) -> str:
-        return bytes(ids).decode("utf-8", errors="replace")
+        out: list[str] = []
+        for special, run in itertools.groupby(
+            ids, self._ID_TO_SPECIAL_TOKEN.__contains__
+        ):
+            if not special:
+                out.append(bytes(run).decode("utf-8", errors="replace"))
+            elif not skip_special_tokens:
+                out.extend(self._ID_TO_SPECIAL_TOKEN[i] for i in run)
+        return "".join(out)
 
 
 @pytest.fixture(scope="module")
@@ -148,14 +179,15 @@ def request_obj():
 REPLACEMENT_CHAR = "\ufffd"
 
 
-def _token_deltas(tokenizer, text: str) -> list[str]:
+def _token_deltas(tokenizer, text: str, chunk_size: int = 1) -> list[str]:
     """Progressively decode the token sequence and return per-step string
-    deltas.  Incomplete multi-byte sequences (trailing U+FFFD) are buffered
-    until the next token completes them, matching real streaming behaviour."""
+    deltas of ``chunk_size`` tokens.  Incomplete multi-byte sequences (trailing
+    U+FFFD) are buffered until the next step completes them, matching real
+    streaming behaviour."""
     ids = tokenizer.encode(text, add_special_tokens=False)
     deltas: list[str] = []
     prev = ""
-    for i in range(1, len(ids) + 1):
+    for i in range(chunk_size, len(ids) + chunk_size, chunk_size):
         current = tokenizer.decode(ids[:i], skip_special_tokens=False)
         if current.endswith(REPLACEMENT_CHAR):
             continue
@@ -794,3 +826,60 @@ class TestParserStreamingEndToEnd:
         # boundary and never emits a delta with both fields set.
         for d in deltas:
             assert not (d.reasoning is not None and d.content is not None)
+
+
+class TestDelegatingParserStreaming:
+    @staticmethod
+    def _stream(parser, chunks: list[str], request):
+        results = [
+            parser.parse_delta(
+                chunk,
+                parser.model_tokenizer.encode(chunk),
+                request,
+                finished=i == len(chunks) - 1,
+            )
+            for i, chunk in enumerate(chunks)
+        ]
+        reasoning = "".join(r.reasoning for r in results if r and r.reasoning)
+        content = "".join(r.content for r in results if r and r.content)
+        tool_calls = [tc for r in results if r and r.tool_calls for tc in r.tool_calls]
+        return reasoning, content, tool_calls
+
+    @pytest.mark.parametrize(
+        ("parser_name", "content_tags"),
+        [
+            pytest.param(
+                "cohere_command4", ("<|START_TEXT|>", "<|END_TEXT|>"), id="cmd4"
+            ),
+            pytest.param(
+                "cohere_command3", ("<|START_RESPONSE|>", "<|END_RESPONSE|>"), id="cmd3"
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("chunk_size", [1, 4], ids=["per_token", "batched"])
+    @pytest.mark.parametrize("with_tools", [False, True], ids=["no_tools", "tools"])
+    def test_content_framing_tokens_stripped(
+        self, tokenizer, parser_name, content_tags, chunk_size, with_tools
+    ):
+        parser_cls = ParserManager.get_parser(
+            parser_name, parser_name, enable_auto_tools=True
+        )
+        parser = parser_cls(tokenizer)
+        tools = [{"type": "function", "function": {"name": "foo"}}]
+        request = ChatCompletionRequest(
+            messages=[], model="test-model", tools=tools if with_tools else None
+        )
+        parser.adjust_request(request)
+
+        start_tag, end_tag = content_tags
+        generation = (
+            f"<|START_THINKING|>Think deeply. The user greets us.<|END_THINKING|>"
+            f"{start_tag}I'm doing well, thank you{end_tag}"
+        )
+        chunks = _token_deltas(tokenizer, generation, chunk_size)
+
+        reasoning, content, tool_calls = self._stream(parser, chunks, request)
+
+        assert reasoning == "Think deeply. The user greets us."
+        assert tool_calls == []
+        assert content == "I'm doing well, thank you"
