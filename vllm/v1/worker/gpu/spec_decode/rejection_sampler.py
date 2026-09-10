@@ -9,8 +9,9 @@ import torch
 from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    DeclarativeTritonJitKernel,
+    DispatchSpec,
     TritonWarmupTensor,
+    triton_kernel,
 )
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
@@ -83,34 +84,32 @@ def _flatten_sampled_kernel(
         tl.store(flat_sampled_ptr + start_idx + i, token_id)
 
 
-class FlattenSampledKernel(DeclarativeTritonJitKernel):
-    kernel = staticmethod(_flatten_sampled_kernel)
+def _flatten_sampled_warmup_inputs(*, num_speculative_steps: int) -> dict[str, Any]:
+    return dict(
+        flat_sampled=TritonWarmupTensor(torch.int64),
+        sampled=TritonWarmupTensor(
+            torch.int64,
+            shape=(1, num_speculative_steps + 1),
+        ),
+        num_sampled=TritonWarmupTensor(torch.int32),
+        cu_num_logits=TritonWarmupTensor(torch.int32),
+    )
 
-    def warmup_cases(self, *, num_speculative_steps: int) -> dict[str, Any]:
-        int32_ptr = TritonWarmupTensor(torch.int32)
-        int64_ptr = TritonWarmupTensor(torch.int64)
-        return dict(
-            grid=(1,),
-            flat_sampled_ptr=int64_ptr,
-            sampled_ptr=int64_ptr,
-            sampled_stride=num_speculative_steps + 1,
-            num_sampled_ptr=int32_ptr,
-            cu_num_logits_ptr=int32_ptr,
-            num_warps=1,
-        )
 
-    def launch_spec(
-        self,
-        grid: tuple[int, ...],
-        flat_sampled_ptr: torch.Tensor,
-        sampled_ptr: torch.Tensor,
-        sampled_stride: int,
-        num_sampled_ptr: torch.Tensor,
-        cu_num_logits_ptr: torch.Tensor,
-        *,
-        num_warps: int,
-    ) -> tuple[tuple[int, ...], dict[str, Any]]:
-        return grid, dict(num_warps=num_warps)
+@triton_kernel(
+    kernel=_flatten_sampled_kernel,
+    warmup_inputs=_flatten_sampled_warmup_inputs,
+)
+def _dispatch_flatten_sampled(
+    flat_sampled: torch.Tensor,
+    sampled: torch.Tensor,
+    num_sampled: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+) -> DispatchSpec:
+    return (num_sampled.shape[0],), dict(
+        sampled_stride=sampled.stride(0),
+        num_warps=1,
+    )
 
 
 class RejectionSampler:
@@ -124,7 +123,7 @@ class RejectionSampler:
     ):
         self.sampler = sampler
         self.num_speculative_steps = spec_config.num_speculative_tokens
-        _FLATTEN_SAMPLED_KERNEL.register_warmup(
+        _dispatch_flatten_sampled.register_warmup(
             num_speculative_steps=self.num_speculative_steps
         )
         self.enable_adaptive_verification = spec_config.enable_adaptive_verification
@@ -188,14 +187,11 @@ class RejectionSampler:
         flat_sampled = torch.zeros(
             num_logits, dtype=sampled.dtype, device=sampled.device
         )
-        _FLATTEN_SAMPLED_KERNEL(
-            (num_reqs,),
+        _dispatch_flatten_sampled(
             flat_sampled,
             sampled,
-            sampled.stride(0),
             num_sampled,
             cu_num_logits,
-            num_warps=1,
         )
         expanded_logits = num_logits != num_reqs
         cu_num_generated_tokens: list[int] | torch.Tensor | None = None
@@ -374,6 +370,3 @@ class RejectionSampler:
             num_sampled=num_sampled,
             num_rejected=num_rejected,
         )
-
-
-_FLATTEN_SAMPLED_KERNEL = FlattenSampledKernel()
