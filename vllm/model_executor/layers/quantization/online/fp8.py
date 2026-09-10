@@ -33,6 +33,9 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    quantize_fp8_per_tensor,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     amax_for_moe_weight_quant,
@@ -122,6 +125,11 @@ class OnlineLinearBase(LinearMethodBase):
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
+    def _capture_mla_bmm(self, layer: Module) -> None:
+        builder = getattr(layer, "_mla_bmm_builder", None)
+        if builder is not None:
+            layer.mla_bmm = builder(self, layer.weight)
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -208,11 +216,12 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
+        self._capture_mla_bmm(layer)
         layer.input_scale = None
         amax = weight_amax(layer.weight).reshape(1)
         amax = amax_for_tp_weight_quant(amax, _is_tp_sharded(layer))
         weight_scale = _fp8_scale(amax)
-        qweight, _ = ops.scaled_fp8_quant(layer.weight, scale=weight_scale)
+        qweight, _ = quantize_fp8_per_tensor(layer.weight, weight_scale)
 
         # Update layer with new values.
         replace_parameter(layer, "weight", qweight.t().data)

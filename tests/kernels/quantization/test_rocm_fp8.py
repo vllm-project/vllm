@@ -30,7 +30,6 @@ fp8_only = pytest.mark.skipif(
 
 ENV_DEFAULTS = {
     "VLLM_ROCM_FP8_PADDING": True,
-    "VLLM_ROCM_USE_AITER_FP8BMM": True,
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": False,
 }
 
@@ -216,8 +215,6 @@ def test_rocm_fp8_env_defaults(monkeypatch):
     [
         ("VLLM_ROCM_FP8_PADDING", "0", False),
         ("VLLM_ROCM_FP8_PADDING", "1", True),
-        ("VLLM_ROCM_USE_AITER_FP8BMM", "0", False),
-        ("VLLM_ROCM_USE_AITER_FP8BMM", "1", True),
         ("VLLM_ROCM_FP8_MFMA_PAGE_ATTN", "0", False),
         ("VLLM_ROCM_FP8_MFMA_PAGE_ATTN", "1", True),
     ],
@@ -251,30 +248,6 @@ def test_maybe_pad_fp8_weight_respects_env(monkeypatch):
         _reload_envs()
         unpadded = _maybe_pad_fp8_weight(weight)
         assert unpadded.data_ptr() == weight.data_ptr()
-
-
-@fp8_only
-@pytest.mark.parametrize(
-    ("use_aiter", "fp8bmm_enabled", "expected"),
-    [
-        (True, True, True),
-        (True, False, False),
-        (False, True, False),
-    ],
-)
-def test_aiter_fp8bmm_enabled_api_respects_env(
-    use_aiter, fp8bmm_enabled, expected, monkeypatch
-):
-    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-
-    assert is_aiter_found_and_supported()
-
-    with monkeypatch.context() as mp:
-        mp.setenv("VLLM_ROCM_USE_AITER", "1" if use_aiter else "0")
-        mp.setenv("VLLM_ROCM_USE_AITER_FP8BMM", "1" if fp8bmm_enabled else "0")
-        _reload_envs()
-        rocm_aiter_ops.refresh_env_variables()
-        assert rocm_aiter_ops.is_fp8bmm_enabled() is expected
 
 
 @fp8_only

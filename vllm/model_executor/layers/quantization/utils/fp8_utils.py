@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_activation_quant,
     get_fp8_min_max,
+    weight_amax,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d,
@@ -77,6 +78,21 @@ def input_to_float8(
     scale = finfo.max / amax
     x_scl_sat = (x * scale).clamp(min=finfo.min, max=finfo.max)
     return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
+
+
+def quantize_fp8_per_tensor(
+    weight: torch.Tensor, scale: torch.Tensor | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize an arbitrary-rank weight with one FP8 scale."""
+    if scale is None:
+        fp8_max = torch.tensor(
+            get_fp8_min_max()[1], device=weight.device, dtype=torch.float32
+        )
+        scale = weight_amax(weight).reshape(1).to(torch.float32) / fp8_max
+    quantized, _ = ops.scaled_fp8_quant(
+        weight.reshape(-1, weight.shape[-1]), scale=scale
+    )
+    return quantized.reshape(weight.shape), scale
 
 
 @triton.jit

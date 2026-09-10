@@ -99,20 +99,8 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         q_nope = q_nope.transpose(0, 1)  # (N, tokens, P)
 
-        if self.is_aiter_triton_fp4_bmm_enabled:
-            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-            ql_nope = batched_gemm_a16wfp4(
-                q_nope, self.W_K, self.W_K_scale, transpose_bm=True, prequant=True
-            )
-        elif self.is_aiter_triton_fp8_bmm_enabled:
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            ql_nope = rocm_aiter_ops.triton_fp8_bmm(
-                q_nope, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
-            )
-        else:
-            ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
+        assert self.kv_b_proj.mla_bmm is not None
+        ql_nope = self.kv_b_proj.mla_bmm.qk(q_nope)
 
         return ql_nope, q_pe
 
@@ -151,25 +139,8 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             num_actual, self.num_local_heads, self.v_head_dim
         )
 
-        if self.is_aiter_triton_fp4_bmm_enabled:
-            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-            batched_gemm_a16wfp4(
-                x, self.W_V, self.W_V_scale, out_view, transpose_bm=True, prequant=True
-            )
-        elif self.is_aiter_triton_fp8_bmm_enabled:
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            rocm_aiter_ops.triton_fp8_bmm(
-                x,
-                self.W_V,
-                self.W_V_scale,
-                group_size=128,
-                transpose_bm=True,
-                YQ=out_view,
-            )
-        else:
-            torch.bmm(x, self.W_UV, out=out_view.transpose(0, 1))
+        assert self.kv_b_proj.mla_bmm is not None
+        self.kv_b_proj.mla_bmm.uv(x, out_view)
 
     @eager_break_during_capture
     def _fused_attention(
