@@ -116,6 +116,22 @@ def server(
         yield remote.url_root
 
 
+@contextmanager
+def reusable_server(*args, **kwargs):
+    """Reuse one server and clean the parent only after server shutdown.
+
+    Callers use pytest.mark.skip_global_cleanup so function-scoped cleanup
+    does not run while this longer-lived server still owns GPU resources.
+    """
+    try:
+        with server(*args, **kwargs) as url:
+            yield url
+    finally:
+        from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
+
+        cleanup_dist_env_and_memory()
+
+
 # ---------------------------------------------------------------------------
 # Polling helper (200-lie workaround)
 # ---------------------------------------------------------------------------

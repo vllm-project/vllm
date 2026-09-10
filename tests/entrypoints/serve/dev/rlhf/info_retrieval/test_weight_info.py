@@ -13,15 +13,18 @@ import requests
 from tests.entrypoints.serve.dev.rlhf.conftest import (
     gen,
     ok,
-    server,
+    reusable_server,
     update_weight_version_response,
     weight_info_response,
 )
 
+# Parent cleanup runs once after the shared server has fully shut down.
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 @pytest.fixture(scope="module")
 def server_state():
-    with server(
+    with reusable_server(
         enable_sleep_mode=False, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1"}
     ) as url:
         initial_response = weight_info_response(url)

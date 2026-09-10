@@ -16,15 +16,20 @@ import requests
 from tests.entrypoints.serve.dev.rlhf.conftest import (
     ensure_awake,
     is_sleeping,
-    server,
+    reusable_server,
     sleep_response,
     wake_response,
 )
 
+# Parent cleanup runs once after the shared server has fully shut down.
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 @pytest.fixture(scope="module")
 def server_url():
-    with server(dummy_weights=True, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1"}) as url:
+    with reusable_server(
+        dummy_weights=True, env_dict={"VLLM_USE_V2_MODEL_RUNNER": "1"}
+    ) as url:
         try:
             yield url
         finally:
