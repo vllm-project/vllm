@@ -3,7 +3,7 @@
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field, fields, make_dataclass
+from dataclasses import dataclass, field, fields
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -17,6 +17,7 @@ from typing_extensions import runtime_checkable
 
 from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import _layout_from_name
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MambaSpec
@@ -475,7 +476,9 @@ def make_local_attention_virtual_batches(
     block_size: int = 0,
 ) -> tuple[CommonAttentionMetadata, Callable[[torch.Tensor], torch.Tensor]]:
     query_start_loc_np = common_attn_metadata.query_start_loc_cpu.numpy()
-    seq_lens_np = common_attn_metadata.seq_lens_cpu.numpy()
+    with gpu_sync_allowed():
+        # TODO see https://github.com/vllm-project/vllm/pull/31852
+        seq_lens_np = common_attn_metadata.seq_lens_cpu.numpy()
     block_table = common_attn_metadata.block_table_tensor
     device = common_attn_metadata.query_start_loc.device
 
@@ -623,8 +626,13 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         # Skip computing fast prefill path
         return common_attn_metadata
 
-    assert common_attn_metadata.logits_indices_padded is not None
-    assert common_attn_metadata.num_logits_indices is not None
+    if (
+        common_attn_metadata.logits_indices_padded is None
+        or common_attn_metadata.num_logits_indices is None
+    ):
+        # Fast prefill not armed for this step (e.g. cudagraph capture, or a
+        # pure-decode step): run the KV-sharing layers on the full batch.
+        return common_attn_metadata
 
     logits_indices_padded = common_attn_metadata.logits_indices_padded
     num_logits_indices = common_attn_metadata.num_logits_indices
@@ -970,19 +978,6 @@ def reshape_attn_output_for_spec_decode(attn_output: torch.Tensor) -> torch.Tens
     assert attn_output.dim() == 4, f"attn_output must be 4D, got {attn_output.dim()}D"
     total_tokens = attn_output.shape[0] * attn_output.shape[1]
     return attn_output.view(total_tokens, attn_output.shape[2], attn_output.shape[3])
-
-
-def subclass_attention_metadata(
-    name_prefix: str,
-    metadata_cls: Any,
-    fields: list[tuple[str, Any, Any]],
-) -> Any:
-    """
-    Return a new subclass of `metadata_cls` with additional fields
-    """
-    name: str = name_prefix + metadata_cls.__name__  # type: ignore
-    Wrapped = make_dataclass(name, fields, bases=(metadata_cls,))
-    return Wrapped
 
 
 @runtime_checkable

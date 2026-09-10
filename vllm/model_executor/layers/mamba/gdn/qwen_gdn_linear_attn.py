@@ -12,6 +12,7 @@ from torch import nn
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
@@ -99,8 +100,9 @@ def _resolve_gdn_prefill_backend(
     * ``requested in ["flashinfer", "auto"]``;
     * ``platform == cuda``;
     * one of the following:
-      - Hopper (SM90) — no further constraints;
-      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``.
+      - Hopper (SM90) - no further constraints;
+      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``;
+      - Blackwell (SM12.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``.
 
     In-tree CuteDSL GDN prefill kernel is chosen when:
     * "cutedsl" is requested; (opt-in only)
@@ -133,6 +135,13 @@ def _resolve_gdn_prefill_backend(
     ):
         supports_flashinfer = True
         supports_cutedsl = True
+    elif (
+        current_platform.is_device_capability_family(120)
+        and head_k_dim == 128
+        and current_platform.get_cuda_runtime_major() >= 13
+    ):
+        # The in-tree CuteDSL kernel targets SM100 only, so it stays off here.
+        supports_flashinfer = True
 
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
         return backend, "flashinfer"
@@ -150,6 +159,15 @@ def _log_gdn_backend_decision(
     head_k_dim = getattr(
         vllm_config.model_config.hf_text_config, "linear_key_head_dim", None
     )
+
+    if current_platform.is_cpu():
+        logger.info_once(
+            "Using %s GDN prefill kernel (head_k_dim=%s).",
+            "CPU",
+            head_k_dim,
+        )
+        return
+
     chosen = {
         "flashinfer": "FlashInfer",
         "cutedsl": "CuteDSL",
@@ -197,6 +215,8 @@ def fi_chunk_gated_delta_rule(
     fi_state = initial_state.to(torch.float32)
     fi_g = g.to(torch.float32)
     fi_beta = beta.to(torch.float32)
+    if cu_seqlens is not None:
+        cu_seqlens = cu_seqlens.to(torch.int64)
     result = chunk_gated_delta_rule_fi(
         q=q,
         k=k,
@@ -490,7 +510,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
         self.gdn_decode_kernel = envs.VLLM_GDN_DECODE_KERNEL.strip().lower()
-        if self.gdn_decode_kernel == "cuda":
+        if self.gdn_decode_kernel == "cuda" and current_platform.is_cuda_alike():
             reason = self._fused_gdn_decode_unsupported_reason(vllm_config)
             if reason is not None:
                 if "VLLM_GDN_DECODE_KERNEL" in os.environ:
@@ -501,6 +521,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     "Falling back to the Triton GDN decode path: %s", reason
                 )
                 self.gdn_decode_kernel = "triton"
+        elif current_platform.is_cpu():
+            self.gdn_decode_kernel = "CPU"
+
         self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
         logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
 
@@ -517,7 +540,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.gqa_interleaved_layout
             or self.head_k_dim != 128
             or self.head_v_dim != 128
-            or self.norm.activation != "silu"
+            or self.norm.activation not in ("silu", "sigmoid")
             or vllm_config.model_config.dtype != torch.bfloat16
             or conv_state_dtype != torch.bfloat16
             or recurrent_state_dtype not in FUSED_GDN_STATE_DTYPES
@@ -525,9 +548,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ):
             return (
                 "the fused CUDA kernel requires a BF16 GDN model with "
-                "K=V=128, SiLU gating, non-interleaved GQA layout, BF16 "
-                "convolution cache, BF16 or FP32 recurrent state, and a "
-                "GPU with compute capability 8.0+"
+                "K=V=128, SiLU or sigmoid gating, non-interleaved GQA "
+                "layout, BF16 convolution cache, BF16 or FP32 recurrent "
+                "state, and a GPU with compute capability 8.0+"
             )
         if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
             return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
@@ -1764,6 +1787,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             out=core_attn_out,
             scale=self.head_k_dim**-0.5,
             norm_eps=self.layer_norm_epsilon,
+            output_gate_activation=self.norm.activation,
         )
 
     def _forward_core_fused_norm_packed(
@@ -1894,6 +1918,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
 
 
+@eager_break_during_capture
 def qwen_gdn_attention_core(
     qkv_or_qkvz: torch.Tensor,
     b_or_ba: torch.Tensor,
@@ -1934,26 +1959,14 @@ def qwen_gdn_attention_core(
         )
 
 
-def gdn_attention_core_fake(
-    qkv_or_qkvz: torch.Tensor,
-    b_or_ba: torch.Tensor,
-    a_or_z_out: torch.Tensor,
-    core_attn_out: torch.Tensor,
-    layer_name: LayerNameType,
-    use_aiter: bool = False,
-) -> None:
-    """Fake implementation for torch.compile."""
-    return
-
-
 direct_register_custom_op(
     op_name="qwen_gdn_attention_core",
     op_func=qwen_gdn_attention_core,
     mutates_args=["a_or_z_out", "core_attn_out"],
-    fake_impl=gdn_attention_core_fake,
 )
 
 
+@eager_break_during_capture
 def qwen_gdn_attention_core_fused_norm_packed(
     mixed_qkvz: torch.Tensor,
     ba: torch.Tensor,
@@ -1970,20 +1983,10 @@ def qwen_gdn_attention_core_fused_norm_packed(
     )
 
 
-def gdn_attention_core_fused_norm_packed_fake(
-    mixed_qkvz: torch.Tensor,
-    ba: torch.Tensor,
-    core_attn_out: torch.Tensor,
-    layer_name: LayerNameType,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="qwen_gdn_attention_core_fused_norm_packed",
     op_func=qwen_gdn_attention_core_fused_norm_packed,
     mutates_args=["core_attn_out"],
-    fake_impl=gdn_attention_core_fused_norm_packed_fake,
 )
 
 
