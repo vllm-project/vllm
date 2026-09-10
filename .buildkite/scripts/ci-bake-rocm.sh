@@ -1000,7 +1000,20 @@ create_and_bootstrap_builder() {
 }
 
 init_config() {
+    # shellcheck source=.buildkite/scripts/rocm/build-config.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/rocm/build-config.sh"
+
     TARGET="${1:-test-ci}"
+    if [[ "${VLLM_USE_ROCK:-0}" == "1" ]]; then
+        if [[ -z "${BASE_IMAGE:-}" ]]; then
+            echo "Rock builds require BASE_IMAGE from the Rock base handoff" >&2
+            return 1
+        fi
+        if ! is_ci_base_target && [[ -z "${CI_BASE_IMAGE:-}" ]]; then
+            echo "Rock test builds require CI_BASE_IMAGE from the Rock ci_base handoff" >&2
+            return 1
+        fi
+    fi
     BAKE_TARGETS=("${TARGET}")
     DEPENDENCY_CACHE_TARGETS=()
     CI_HCL_SOURCE="${CI_HCL_SOURCE:-${CI_HCL_FILE:-${DEFAULT_CI_HCL_SOURCE}}}"
@@ -1013,7 +1026,7 @@ init_config() {
     CI_BASE_DOCKERFILE_STAGES="${CI_BASE_DOCKERFILE_STAGES:-${DEFAULT_CI_BASE_DOCKERFILE_STAGES}}"
     CI_BASE_METADATA_VERSION="${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}"
     CI_BASE_IMAGE_TAG="${CI_BASE_IMAGE_TAG:-rocm/vllm-dev:ci_base}"
-    export PYTORCH_ROCM_ARCH
+    export PYTORCH_ROCM_ARCH CI_BASE_DOCKERFILE
 
     SCRIPT_TMP_DIR=$(mktemp -d -t ci-bake-rocm.XXXXXX)
     CI_HCL_PATH="${SCRIPT_TMP_DIR}/ci.hcl"
@@ -1069,6 +1082,11 @@ load_ci_hcl() {
 
 init_bake_files() {
     BAKE_FILES=(-f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}")
+    if [[ "${VLLM_USE_ROCK:-0}" == "1" ]]; then
+        # Initial Rock evaluations reuse local cache without replacing the
+        # standard ROCm registry caches for the same commit or branch.
+        BAKE_FILES+=(--set '*.cache-to=')
+    fi
 }
 
 compute_ci_base_hash_if_needed() {
@@ -1804,7 +1822,7 @@ compute_rocm_csrc_content_hash() {
     local -a content_args=()
 
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
-    dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
+    dockerfile_rocm="${CI_BASE_DOCKERFILE:-${bake_dir}/Dockerfile.rocm}"
     read -r -a content_paths <<< "${content_files}"
     mapfile -t content_args < <(
         get_content_arg_names "${dockerfile_rocm}" "${stages}" "${ROCM_CSRC_CONTENT_ARGS:-}"
@@ -1853,7 +1871,7 @@ compute_rocm_rust_content_hash() {
     local -a content_args=()
 
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
-    dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
+    dockerfile_rocm="${CI_BASE_DOCKERFILE:-${bake_dir}/Dockerfile.rocm}"
     read -r -a content_paths <<< "${content_files}"
     mapfile -t content_args < <(
         get_content_arg_names \
@@ -1943,7 +1961,7 @@ write_rocm_build_arg_override() {
     local arg_value=""
 
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
-    dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
+    dockerfile_rocm="${CI_BASE_DOCKERFILE:-${bake_dir}/Dockerfile.rocm}"
     mapfile -t arg_names < <(
         {
             get_content_arg_names \
@@ -2259,7 +2277,7 @@ extract_dependency_pins() {
     local val=""
 
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
-    dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
+    dockerfile_rocm="${CI_BASE_DOCKERFILE:-${bake_dir}/Dockerfile.rocm}"
     physical_dockerfile="${dockerfile_rocm}"
     if [[ -n "${ROCM_BUILD_CONTEXT_ROOT:-}" && "${dockerfile_rocm}" != /* ]]; then
         physical_dockerfile="${ROCM_BUILD_CONTEXT_ROOT}/${dockerfile_rocm}"
@@ -2280,7 +2298,7 @@ extract_dependency_pins() {
         )
         if [[ -n "${val}" ]]; then
             export "${var}=${val}"
-            echo "Extracted ${var}=${val} from Dockerfile.rocm"
+            echo "Extracted ${var}=${val} from ${dockerfile_rocm}"
         fi
     done
 }
@@ -2297,7 +2315,7 @@ compute_dependency_cache_keys() {
     local deepep_material=""
 
     bake_dir=$(dirname "${VLLM_BAKE_FILE}")
-    dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
+    dockerfile_rocm="${CI_BASE_DOCKERFILE:-${bake_dir}/Dockerfile.rocm}"
     nixl_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "NIXL_BRANCH")
     ucx_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "UCX_BRANCH")
     rocshmem_branch=$(resolve_dockerfile_arg_value "${dockerfile_rocm}" "ROCSHMEM_BRANCH")

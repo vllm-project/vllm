@@ -106,6 +106,7 @@ clear_ci_orchestration_env() {
     VLLM_CI_REQUIRE_WORKSPACE_MOUNT \
     VLLM_TEST_COMMANDS \
     VLLM_CI_BRANCH \
+    VLLM_USE_ROCK \
     VLLM_CI_BASE_IMAGE \
     VLLM_CI_FALLBACK_IMAGE \
     VLLM_CI_DOCKER_DISABLED \
@@ -225,6 +226,9 @@ prepare_artifact_image() {
   metadata_file=$(find "${artifact_work_dir}" -name "ci-base-image.txt" -type f | head -1)
   if [[ -n "${metadata_file}" && -s "${metadata_file}" ]]; then
     base_image=$(tr -d '[:space:]' < "${metadata_file}")
+  elif [[ "${VLLM_USE_ROCK:-0}" == "1" ]]; then
+    echo "Rock ci_base metadata is missing; using the full CI image"
+    return 1
   fi
 
   echo "--- Preparing local ROCm test image"

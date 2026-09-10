@@ -4,6 +4,9 @@
 
 set -euo pipefail
 
+# shellcheck source=.buildkite/scripts/rocm/build-config.sh
+source "$(dirname "${BASH_SOURCE[0]}")/build-config.sh"
+
 DOCKERFILE="${ROCM_BASE_DOCKERFILE:-docker/Dockerfile.rocm_base}"
 BASE_REPO="${ROCM_BASE_IMAGE_REPO:-rocm/vllm-dev}"
 CACHE_REPO="${ROCM_BASE_CACHE_REPO:-${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}}"
@@ -12,7 +15,11 @@ DEFAULT_ROCM_BASE_METADATA_VERSION="2"
 DEFAULT_ROCM_BASE_CONTENT_FILES="${DOCKERFILE}"
 
 ROCM_BASE_LAYER_CACHE_REF=""
-ROCM_BASE_TRUSTED_LAYER_CACHE_REF="${CACHE_REPO}:rocm-base-main"
+BASE_CACHE_PREFIX="rocm-base"
+if [[ "${VLLM_USE_ROCK:-0}" == "1" ]]; then
+    BASE_CACHE_PREFIX="rock-base"
+fi
+ROCM_BASE_TRUSTED_LAYER_CACHE_REF="${CACHE_REPO}:${BASE_CACHE_PREFIX}-main"
 ROCM_BASE_STABLE_TAG_UPDATED=0
 declare -a ROCM_BASE_CACHE_ARGS=()
 
@@ -120,7 +127,7 @@ configure_rocm_base_layer_cache() {
     fi
 
     scope=$(rocm_base_layer_cache_scope)
-    ROCM_BASE_LAYER_CACHE_REF="${CACHE_REPO}:rocm-base-${scope}"
+    ROCM_BASE_LAYER_CACHE_REF="${CACHE_REPO}:${BASE_CACHE_PREFIX}-${scope}"
     ROCM_BASE_CACHE_ARGS+=(
         --cache-from "type=registry,ref=${ROCM_BASE_LAYER_CACHE_REF}"
     )
@@ -423,6 +430,13 @@ build_base_image() {
     pytorch_arg="$(extract_arg_default PYTORCH_BRANCH)"
     pytorch_vision_arg="$(extract_arg_default PYTORCH_VISION_BRANCH)"
     pytorch_audio_arg="$(extract_arg_default PYTORCH_AUDIO_BRANCH)"
+    if [[ "${VLLM_USE_ROCK:-0}" == "1" ]]; then
+        rocm_version="$(extract_arg_default ROCM_SDK_VERSION)"
+        triton_arg="$(extract_arg_default TRITON_VERSION)"
+        pytorch_arg="$(extract_arg_default TORCH_VERSION)"
+        pytorch_vision_arg="$(extract_arg_default TORCHVISION_VERSION)"
+        pytorch_audio_arg="$(extract_arg_default TORCHAUDIO_VERSION)"
+    fi
     fa_arg="$(extract_arg_default FA_BRANCH)"
     aiter_arg="$(extract_arg_default AITER_BRANCH)"
     mori_arg="$(extract_arg_default MORI_BRANCH)"
@@ -565,6 +579,10 @@ build_base_image() {
 }
 
 main() {
+    if [[ "${VLLM_USE_ROCK:-0}" == "1" && "${ROCM_BASE_REFRESH_SKIP:-0}" == "1" ]]; then
+        echo "VLLM_USE_ROCK=1 requires ROCM_BASE_REFRESH_SKIP=0 to select the Rock base" >&2
+        return 2
+    fi
     metadata_set "rocm-base-refresh" "0"
 
     if [[ "${ROCM_BASE_REFRESH_SKIP:-0}" == "1" ]]; then

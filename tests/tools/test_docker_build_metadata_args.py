@@ -6,6 +6,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER = REPO_ROOT / ".buildkite" / "scripts" / "docker-build-metadata-args.sh"
 ROCM_CI_BAKE = REPO_ROOT / ".buildkite" / "scripts" / "ci-bake-rocm.sh"
@@ -199,8 +201,9 @@ def test_rocm_ci_base_metadata_inputs_cover_ci_base_files() -> None:
         assert expected in ci_bake
 
 
-def test_rocm_ci_smoke_runs_in_shared_buildkit_graph() -> None:
-    dockerfile = (REPO_ROOT / "docker" / "Dockerfile.rocm").read_text()
+@pytest.mark.parametrize("dockerfile_name", ["Dockerfile.rocm", "Dockerfile.rock"])
+def test_rocm_ci_smoke_runs_in_shared_buildkit_graph(dockerfile_name: str) -> None:
+    dockerfile = (REPO_ROOT / "docker" / dockerfile_name).read_text()
     ci_hcl = (REPO_ROOT / "docker" / "ci-rocm.hcl").read_text()
     full_image_group = ci_hcl.split('group "test-rocm-ci-with-wheel"', maxsplit=1)[
         1
@@ -357,3 +360,110 @@ def test_rocm_git_fetch_disables_automatic_maintenance(tmp_path: Path) -> None:
         "origin",
         "HEAD",
     ]
+
+
+@pytest.mark.parametrize("use_rock", ["0", "1"])
+def test_amd_stack_selection_preserves_handoff_and_protects_stable_images(
+    use_rock: str,
+) -> None:
+    """Nightly Rock builds must keep the runtime contract without promoting ROCm."""
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            """
+source "$1/.buildkite/scripts/ci-bake-rocm.sh"
+init_config ci-base-rocm-ci-with-deps
+configure_ci_base_image_refs
+printf 'dockerfile=%s\n' "$CI_BASE_DOCKERFILE"
+printf 'handoff=%s\n' "$CI_BASE_IMAGE_TAG_BUILD_REF"
+if wants_stable_ci_base_tag; then echo ci_stable=yes; else echo ci_stable=no; fi
+if [[ "$VLLM_USE_ROCK" == 1 ]]; then
+    resolve_ci_base_dependency_targets
+    printf 'targets=%s\n' "${BAKE_TARGETS[*]}"
+fi
+source "$1/.buildkite/scripts/rocm/refresh-base-image.sh"
+configure_rocm_base_layer_cache
+printf 'base=%s\ncache=%s\n' "$DOCKERFILE" "$ROCM_BASE_LAYER_CACHE_REF"
+if should_push_stable_tag; then echo base_stable=yes; else echo base_stable=no; fi
+""",
+            "bash",
+            str(REPO_ROOT),
+        ],
+        env={
+            "PATH": os.environ["PATH"],
+            "VLLM_USE_ROCK": use_rock,
+            "BUILDKITE": "true",
+            "BUILDKITE_BUILD_ID": "test-build",
+            "BUILDKITE_COMMIT": "a" * 40,
+            "BUILDKITE_BRANCH": "main",
+            "BUILDKITE_REPO": "https://github.com/vllm-project/vllm.git",
+            "NIGHTLY": "1",
+            "ROCM_BASE_PUSH_STABLE_TAG": "1",
+            "CI_BASE_PUSH_STABLE_TAG": "1",
+            "CI_BASE_CONTENT_HASH": "b" * 64,
+            "BASE_IMAGE": "rocm/vllm-dev:base@sha256:" + "c" * 64,
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    lines = result.stdout.splitlines()
+    stack = "rock" if use_rock == "1" else "rocm"
+    stable = "no" if use_rock == "1" else "yes"
+    assert f"dockerfile=docker/Dockerfile.{stack}" in lines
+    assert f"base=docker/Dockerfile.{stack}_base" in lines
+    assert "handoff=rocm/vllm-dev:ci_base-build-test-build" in lines
+    assert f"cache=rocm/vllm-ci-cache:{stack}-base-main" in lines
+    assert f"ci_stable={stable}" in lines
+    assert f"base_stable={stable}" in lines
+    if use_rock == "1":
+        assert "targets=ci-base-rocm-ci" in lines
+
+
+@pytest.mark.parametrize(
+    ("target", "base_image", "missing"),
+    [
+        ("ci-base-rocm-ci-with-deps", "", "BASE_IMAGE"),
+        ("test-rocm-ci-with-wheel", "rock-base", "CI_BASE_IMAGE"),
+    ],
+)
+def test_rock_build_requires_selected_base_handoffs(
+    target: str, base_image: str, missing: str
+) -> None:
+    result = subprocess.run(
+        ["bash", str(ROCM_CI_BAKE), target],
+        env={
+            "PATH": os.environ["PATH"],
+            "VLLM_USE_ROCK": "1",
+            "BASE_IMAGE": base_image,
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert f"require {missing} from the Rock" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("use_rock", "skip", "error"),
+    [
+        ("invalid", "0", "VLLM_USE_ROCK must be 0 or 1"),
+        ("1", "1", "requires ROCM_BASE_REFRESH_SKIP=0"),
+    ],
+)
+def test_rock_base_selection_rejects_unsafe_fallbacks(
+    use_rock: str, skip: str, error: str
+) -> None:
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / ".buildkite/scripts/rocm/refresh-base-image.sh")],
+        env={
+            "PATH": os.environ["PATH"],
+            "VLLM_USE_ROCK": use_rock,
+            "ROCM_BASE_REFRESH_SKIP": skip,
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert error in result.stderr
