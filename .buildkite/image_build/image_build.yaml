@@ -83,8 +83,8 @@ steps:
 
   - label: ":docker: Build Zen CPU image"
     key: image-build-zen-cpu
-    # Minimal confirmation build: run the zen image build on the generic x86
-    # premerge queue to verify it succeeds. Reuses the shared `-cpu` image as its
+    # Minimal confirmation build: run the zen image build on the AMD CPU build
+    # device to verify it succeeds. Reuses the shared `-cpu` image as its
     # base, so it must run after the CPU image build.
     #
     # Gated on the zen/cpu build inputs. Changes to setup.py,
@@ -92,8 +92,8 @@ steps:
     # all jobs via run_all_patterns in .buildkite/ci_config.yaml.
     depends_on:
       - image-build-cpu
-    agents:
-      queue: small_cpu_queue_premerge
+    device: amd_cpu
+    no_plugin: true
     source_file_dependencies:
       - ".buildkite/image_build/image_build.yaml"
       - ".buildkite/image_build/image_build_zen_cpu.sh"
