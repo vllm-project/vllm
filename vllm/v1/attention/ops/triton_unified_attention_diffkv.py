@@ -46,12 +46,8 @@ logger = init_logger(__name__)
 
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 
-# Debug overrides for the 2D/3D launch choice below, both defaulting to the
-# automatic behaviour. The 3D (split-KV) grid is taken only for decode-only
-# batches, so on hardware where the two geometries do not behave alike there is
-# otherwise no way to put decode on the same launch prefill uses. Two knobs
-# rather than one because forcing 2D also changes TILE_SIZE, which would
-# conflate the grid with the tile size when bisecting.
+# Overrides for the 2D/3D launch choice below; both default to the automatic
+# behaviour. Separate knobs because forcing 2D also changes TILE_SIZE.
 force_2d = envs.VLLM_DIFFKV_FORCE_2D
 tile_size_override = envs.VLLM_DIFFKV_TILE_SIZE
 

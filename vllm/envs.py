@@ -646,13 +646,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Force the 2D launch in the Triton DiffKV attention kernel, even for
     # decode-only batches that would otherwise take the 3D (split-KV) grid.
-    # Debug/bisection override for hardware where the two launch geometries do
-    # not behave alike; unset (default) keeps the automatic choice.
     "VLLM_DIFFKV_FORCE_2D": lambda: bool(int(os.getenv("VLLM_DIFFKV_FORCE_2D", "0"))),
     # Override TILE_SIZE in the Triton DiffKV attention kernel. Unset (default)
-    # derives it from the launch geometry: 32 for 2D, and for 3D 16 at >=2-byte
-    # dtypes else 32. Because forcing 2D also changes TILE_SIZE, this exists so
-    # the two variables can be separated when bisecting.
+    # derives it from the launch geometry.
     "VLLM_DIFFKV_TILE_SIZE": lambda: maybe_convert_int(
         os.environ.get("VLLM_DIFFKV_TILE_SIZE", None)
     ),
