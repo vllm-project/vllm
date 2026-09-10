@@ -21,7 +21,6 @@ from run_ci_command import (
     COMMAND_RUN_CI,
     COMMAND_RUN_CI_ALL,
     COMMAND_RUN_CI_NIGHTLY,
-    MAX_COMMITS_BEHIND_MAIN,
     RETRY_STATES,
     RUN_CI_COMMAND_ENV,
     ApiError,
@@ -540,9 +539,9 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertTrue(github.comments[0].startswith("✅ "))
         self.assertIn("Buildkite CI #123", github.comments[0])
 
-    def test_run_variants_enforce_main_lag_limit_without_changing_commit(self) -> None:
+    def test_run_variants_require_current_main_without_changing_commit(self) -> None:
         for command in RUN_CI_COMMAND_ENV:
-            for behind in (0, MAX_COMMITS_BEHIND_MAIN, MAX_COMMITS_BEHIND_MAIN + 1):
+            for behind in (0, 1, 5):
                 with self.subTest(command=command, behind=behind):
                     github = FakeGitHub(
                         behind=behind, pr=make_pr(base={"ref": "release"})
@@ -551,7 +550,7 @@ class RunCiCommandTest(unittest.TestCase):
                     run(make_event(command), github, buildkite)
 
                     self.assertEqual(github.lag_queries, [github.pr["head"]["sha"]])
-                    if behind <= MAX_COMMITS_BEHIND_MAIN:
+                    if behind == 0:
                         self.assertEqual(
                             buildkite.created_builds[0]["commit"],
                             github.pr["head"]["sha"],
@@ -564,7 +563,9 @@ class RunCiCommandTest(unittest.TestCase):
                         self.assertEqual(buildkite.created_builds, [])
                         self.assertTrue(github.comments[0].startswith("❌ "))
                         self.assertIn(str(behind), github.comments[0])
-                        self.assertIn(str(MAX_COMMITS_BEHIND_MAIN), github.comments[0])
+                        self.assertIn(
+                            "No new CI build was started.", github.comments[0]
+                        )
                         self.assertIn(command, github.comments[0])
 
     def test_main_lag_query_validates_github_count(self) -> None:
@@ -610,8 +611,8 @@ class RunCiCommandTest(unittest.TestCase):
                 self.assertTrue(github.comments[0].startswith("❌ "))
                 self.assertNotIn("Triggered", github.comments[0])
 
-    def test_filtered_retry_also_refuses_a_pr_over_main_lag_limit(self) -> None:
-        github = FakeGitHub(behind=MAX_COMMITS_BEHIND_MAIN + 1)
+    def test_filtered_retry_also_requires_current_main(self) -> None:
+        github = FakeGitHub(behind=1)
         source = {
             "number": 122,
             "commit": "earlier-head",
@@ -628,7 +629,7 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertEqual(github.lag_queries, [github.pr["head"]["sha"]])
         self.assertEqual(buildkite.created_builds, [])
         self.assertEqual(buildkite.retry_calls, [])
-        self.assertIn(str(MAX_COMMITS_BEHIND_MAIN + 1), github.comments[0])
+        self.assertIn("1 commit behind upstream `main`", github.comments[0])
 
     def test_amd_run_ignores_blocked_builds(self) -> None:
         for metadata in ({}, {"github-comment-id": "98"}):

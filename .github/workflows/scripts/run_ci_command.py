@@ -53,7 +53,7 @@ RETRY_COMMANDS = frozenset({COMMAND_RETRY_FAILED, COMMAND_RETRY_AMD_FAILED})
 CANCEL_COMMANDS = frozenset({COMMAND_CANCEL_CI, COMMAND_CANCEL_AMD_CI})
 ALL_CI_COMMANDS = UPSTREAM_CI_COMMANDS | AMD_CI_COMMANDS
 CI_AUTHORIZED_COMMENT_MARKER = "<!-- vllm-ci-authorized -->"
-MAX_COMMITS_BEHIND_MAIN = 5
+MAX_COMMITS_BEHIND_MAIN = 0
 READY_LABELS = {"ready", "ready-run-all-tests"}
 TRUSTED_PERMISSIONS = {"admin", "maintain", "write"}
 ACTIVE_BUILD_STATES = {
@@ -765,8 +765,8 @@ def notify_authorized(
         (
             f"✅ @{author}, CI is now available for this PR.\n\n"
             "- `/ci run` starts upstream CI; `/amd-ci run` starts AMD CI only.\n"
-            f"- New builds require the PR to be at most {MAX_COMMITS_BEHIND_MAIN} "
-            "commits behind upstream `main`. Update your branch if CI is blocked.\n"
+            "- New builds require the PR to include current upstream `main`. "
+            "Update your branch if CI is blocked.\n"
             "- `/ci retry` retries failed jobs in the CI build for the current "
             "PR head. If the current head has no CI build, it starts a new CI "
             "build for the current head containing only jobs that failed in "
@@ -837,9 +837,11 @@ def require_fresh_pr(
             f"Comment `{command}` again."
         )
     if behind > MAX_COMMITS_BEHIND_MAIN:
+        commits = "commit" if behind == 1 else "commits"
         raise CiPreparationError(
-            f"This PR is {behind} commits behind upstream `main`; "
-            f"the limit is {MAX_COMMITS_BEHIND_MAIN}. No new CI build was started. "
+            f"This PR is {behind} {commits} behind upstream `main`. "
+            "New builds require the branch to be up to date. "
+            "No new CI build was started. "
             f"Update your branch from upstream `main`, then comment `{command}` again."
         )
     return current_pr

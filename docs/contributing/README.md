@@ -316,11 +316,13 @@ review process:
   or the corresponding `/amd-ci` variants. New commits do not start upstream
   CI automatically.
 - Before creating a Buildkite build, `/ci run` and `/amd-ci run`, including
-  `all` and `nightly`, check the requested PR commit against the latest upstream
-  `main` (`origin/main`). A PR may be at most **5 commits behind**.
-- If the PR is further behind, the bot reports the count and asks you to merge
-  or rebase upstream `main` into your branch before running the command again.
-  No new build is created, and the workflow does not modify your branch.
+  `all` and `nightly`, check the requested PR commit against upstream `main`
+  (`origin/main`). The PR must include `main` as it exists at that check:
+  **zero commits behind**.
+- If the PR is behind, the bot reports the count without creating a new build.
+  Manually merge or rebase upstream `main` into your branch and rerun the command.
+  If `main` advances while you prepare the branch, update it and try again.
+  The workflow does not modify your branch.
 - The same check applies when `/ci retry` creates a new build. Retrying jobs in
   an existing build and cancelling builds do not run this check. Direct
   Buildkite launches are outside this workflow. No additional token is needed.
