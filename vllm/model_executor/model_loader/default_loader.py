@@ -282,6 +282,9 @@ class DefaultModelLoader(BaseModelLoader):
                         max_workers=extra_config.get(
                             "num_threads", self.DEFAULT_NUM_THREADS
                         ),
+                        shuffle_safetensors_files=(
+                            self.load_config.shuffle_safetensors_files
+                        ),
                     )
                 else:
                     weights_iterator = safetensors_weights_iterator(
@@ -294,6 +297,9 @@ class DefaultModelLoader(BaseModelLoader):
                         ),
                         safetensors_prefetch_block_size=(
                             self.load_config.safetensors_prefetch_block_size
+                        ),
+                        shuffle_safetensors_files=(
+                            self.load_config.shuffle_safetensors_files
                         ),
                     )
         else:
