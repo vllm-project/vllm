@@ -376,6 +376,20 @@ class MoRIIOConnectorScheduler:
         )
         self.kv_transfer_config = vllm_config.kv_transfer_config
         self.block_size = vllm_config.cache_config.block_size
+        # Number of speculative-decoding lookahead tokens (0 when spec is off).
+        # Under speculative decoding (e.g. MTP) with block_size=1 the producer
+        # (prefill) KV-cache manager reserves this many trailing lookahead
+        # slots that the consumer (decode) never allocates, so the producer's
+        # local_block_ids run longer than the consumer's remote_block_ids by
+        # exactly this count. We drop those trailing lookahead blocks from the
+        # WRITE producer save path so only real prompt KV is recorded.
+        spec_config = vllm_config.speculative_config
+        self.num_speculative_tokens = (
+            spec_config.num_speculative_tokens
+            if spec_config is not None
+            and spec_config.num_speculative_tokens is not None
+            else 0
+        )
         self.engine_id: EngineId = engine_id
         self.mode = get_moriio_mode(self.kv_transfer_config)
         self.host_ip = resolve_host_ip(
@@ -802,6 +816,37 @@ class MoRIIOConnectorScheduler:
 
             params["do_remote_prefill"] = False
 
+    def _drop_spec_lookahead_blocks(
+        self, req_id: ReqId, local_block_ids: list[int]
+    ) -> list[int]:
+        """Drop the trailing speculative-decoding lookahead blocks from a
+        WRITE producer save so only the non-spec prompt blocks are recorded.
+
+        Under speculative decoding (e.g. MTP) with block_size=1 the producer
+        (prefill) KV-cache manager reserves ``num_speculative_tokens`` trailing
+        lookahead slots that the consumer (decode) never allocates, so the
+        producer's local_block_ids exceed the consumer's remote_block_ids by
+        exactly ``num_speculative_tokens``. The save path has no
+        remote_block_ids to clamp against, so we drop the trailing
+        ``num_speculative_tokens`` block ids here — equivalent to
+        ``local[:len(remote)]`` in the spec case. This runs only on the
+        final-chunk save, where the full local set (including the lookahead
+        blocks) has been assembled.
+        """
+        n = self.num_speculative_tokens
+        if n <= 0 or len(local_block_ids) <= n:
+            return local_block_ids
+        trimmed = local_block_ids[:-n]
+        logger.info(
+            "MoRIIO WRITE producer: dropped %d trailing speculative lookahead "
+            "block(s) from request %s save (%d -> %d blocks)",
+            n,
+            req_id,
+            len(local_block_ids),
+            len(trimmed),
+        )
+        return trimmed
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -838,9 +883,15 @@ class MoRIIOConnectorScheduler:
                         kv_params = self._req_kv_params.pop(
                             req_id, req.kv_transfer_params or {}
                         )
+                        # Final chunk holds the full local set including the
+                        # speculative lookahead blocks; drop them so only the
+                        # prompt KV is saved/recorded.
+                        save_block_ids = self._drop_spec_lookahead_blocks(
+                            req_id, self._reqs_need_pending_save[req_id][1]
+                        )
                         meta.add_new_req(
                             request_id=req_id,
-                            local_block_ids=self._reqs_need_pending_save[req_id][1],
+                            local_block_ids=save_block_ids,
                             kv_transfer_params=kv_params,
                             write_mode=True,
                         )
@@ -861,9 +912,12 @@ class MoRIIOConnectorScheduler:
                 # not last chunk prefill
                 self._reqs_need_pending_save[req_id] = (req, block_ids)
                 continue
+            # Final/only chunk: drop the trailing speculative lookahead blocks
+            # so only the prompt KV is saved/recorded.
+            save_block_ids = self._drop_spec_lookahead_blocks(req_id, block_ids)
             meta.add_new_req(
                 request_id=req_id,
-                local_block_ids=block_ids,
+                local_block_ids=save_block_ids,
                 kv_transfer_params=kv_params,
                 write_mode=True,
             )
@@ -1088,6 +1142,18 @@ class MoRIIOConnectorWorker:
         self.moriio_config = MoRIIOConfig.from_vllm_config(vllm_config)
         self.mode = (
             MoRIIOMode.READ if self.moriio_config.read_mode else MoRIIOMode.WRITE
+        )
+        # Speculative-decoding lookahead count (0 when spec is off). Under
+        # spec decode (e.g. MTP) with block_size=1 the producer's
+        # local_block_ids run longer than the consumer's remote_block_ids by
+        # exactly this count; used as a defensive exact-diff check in the
+        # WRITE transfer-offset path below.
+        _spec_config = vllm_config.speculative_config
+        self.num_speculative_tokens = (
+            _spec_config.num_speculative_tokens
+            if _spec_config is not None
+            and _spec_config.num_speculative_tokens is not None
+            else 0
         )
 
         logger.info("Initializing MoRIIO worker %s", engine_id)
@@ -2568,6 +2634,29 @@ class MoRIIOConnectorWorker:
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             is_mla=self._is_mla_cache_layer(layer_name),
         )
+        # Defensive belt-and-suspenders for the WRITE producer transfer:
+        # compute_block_transfer_offsets deliberately raises when local is
+        # longer than remote (a genuine READ bug). Under speculative decoding
+        # (e.g. MTP, block_size=1) the producer holds num_speculative_tokens
+        # trailing lookahead blocks the consumer never allocated, so local
+        # legitimately exceeds remote by *exactly* that count. The scheduler
+        # save path already trims these before recording, but clamp here too so
+        # an unexpected surplus still fails loud. Gated to WRITE; READ stays
+        # unclamped so the layout raise still guards real READ bugs.
+        if (
+            self.mode == MoRIIOMode.WRITE
+            and len(local_block_ids) > len(remote_block_ids)
+        ):
+            surplus = len(local_block_ids) - len(remote_block_ids)
+            if surplus != self.num_speculative_tokens:
+                raise ValueError(
+                    "MoRIIO WRITE local_block_ids longer than remote_block_ids "
+                    f"by {surplus}, expected exactly num_speculative_tokens="
+                    f"{self.num_speculative_tokens} "
+                    f"(local {len(local_block_ids)} vs remote "
+                    f"{len(remote_block_ids)})"
+                )
+            local_block_ids = local_block_ids[: len(remote_block_ids)]
         local, remote, sizes = compute_block_transfer_offsets(
             layer_name=layer_name,
             kv_cache=self.kv_caches[layer_name],
