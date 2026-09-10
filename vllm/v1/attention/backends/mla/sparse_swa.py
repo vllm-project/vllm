@@ -5,6 +5,7 @@ from typing import Any, ClassVar, cast
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.warmup.jit_warmup import (
@@ -69,6 +70,21 @@ def _layer_type_for(compress_ratio: int) -> str:
     )
 
 
+@dataclass(frozen=True, kw_only=True)
+class DeepseekV4SWAReplaySpec(SlidingWindowMLASpec):
+    """SWA cache kept out of prefix caching; a hit replays the window instead.
+
+    Selected by ``VLLM_DEEPSEEK_V4_SWA_BOUNDED_REPLAY``. The cache stays paged
+    and windowed as usual; only the paged MLA group takes part in prefix
+    caching and KV connectors, and the scheduler recomputes the trailing
+    ``sliding_window`` tokens of every hit to rebuild this cache.
+    """
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return False
+
+
 class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
     def __init__(
         self,
@@ -108,7 +124,12 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         # fp8_ds_mla's UE8M0 paged layout needs 576B alignment; contiguous
         # bf16/fp8 cache uses the natural element-size page.
         uses_fp8_ds_mla_layout = self.cache_config.cache_dtype == "fp8_ds_mla"
-        return SlidingWindowMLASpec(
+        spec_cls = (
+            DeepseekV4SWAReplaySpec
+            if envs.VLLM_DEEPSEEK_V4_SWA_BOUNDED_REPLAY
+            else SlidingWindowMLASpec
+        )
+        return spec_cls(
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
