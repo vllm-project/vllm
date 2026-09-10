@@ -141,19 +141,20 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors"
+- label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors Shard %N"
   device: h200_35gb
   key: v1-kv-connectors
   timeout_in_minutes: 45
+  parallelism: 4
   source_file_dependencies: *v1-core-kv-metrics-deps
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
-    - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit
+    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI300) V1 KV Connectors"
+      label: ":amd: (MI300) V1 KV Connectors Shard %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 45
