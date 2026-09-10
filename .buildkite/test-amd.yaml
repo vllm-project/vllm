@@ -2021,7 +2021,8 @@ steps:
   - vllm/v1/attention/backends/
   - vllm/v1/attention/selector.py
   - tests/models/language/pooling/test_embedding.py
-  - tests/models/language/generation/test_common.py
+  - tests/models/language/generation/core_slow/
+  - tests/models/language/generation/_common_models.py
   - tests/models/language/pooling/test_classification.py
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py

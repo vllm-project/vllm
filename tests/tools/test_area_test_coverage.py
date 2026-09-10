@@ -160,3 +160,22 @@ def test_parse_invocation_handles_env_var_shard_flags_and_quotes():
     assert cmd.k_expr == "not granite-4.0-tiny-preview"
     assert cmd.sharded
     assert not cmd.is_whole_dir
+
+
+def test_real_language_yaml_passes():
+    """The real language area YAML must pass the guard over the generation tree.
+
+    Integration test over the checked-in files: the one-job-per-directory
+    language YAML plus the CPU hardware lane (whose recursive ``-m cpu_model``
+    command is the lane-filter exception). Pooling/PPL/MTEB commands are
+    out-of-tree for ``tests/models/language/generation`` and ignored.
+    """
+    tree = REPO_ROOT / "tests/models/language/generation"
+    yamls = [
+        REPO_ROOT / ".buildkite/test_areas/models_language.yaml",
+        REPO_ROOT / ".buildkite/hardware_tests/cpu.yaml",
+    ]
+
+    violations, _ = check_coverage(tree, yamls)
+
+    assert violations == []

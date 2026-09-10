@@ -11,9 +11,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language
   commands:
-    # Test standard language models, excluding a subset of slow tests
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m 'core_model and (not slow_test)'
+    # The core/ directory is run whole. The pooling selection stays
+    # marker-based: pooling is out of the folder-sharding split scope and
+    # cannot be one-job-per-directory under the 20-minute budget.
+    - pytest -v -s models/language/generation/core
+    - pytest -v -s models/language/pooling -m 'core_model and (not slow_test)'
   mirror:
     amd:
       label: ":amd: (MI300) Language Models (Standard)"
@@ -23,24 +26,26 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Language Models (Extra Standard) Shard %N"
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Extra Standard)"
   device: h200_35gb
   key: language-models-tests-extra-standard
   timeout_in_minutes: 40
   source_file_dependencies:
   - vllm/model_executor/models/
   - tests/models/language/pooling/test_embedding.py
-  - tests/models/language/generation/test_common.py
+  - tests/models/language/generation/core_slow/
+  - tests/models/language/generation/_common_models.py
   - tests/models/language/pooling/test_classification.py
   commands:
-    # Shard slow subset of standard language models tests. Only run when model
-    # source is modified, or when specified test files are modified
+    # Only run when model source is modified, or when specified test files
+    # are modified. core_slow/ is run whole; the pooling slow selection stays
+    # marker-based (out of split scope, same as the Standard job).
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-  parallelism: 2
+    - pytest -v -s models/language/generation/core_slow
+    - pytest -v -s models/language/pooling -m 'core_model and slow_test'
   mirror:
     amd:
-      label: ":amd: (MI300) Language Models (Extra Standard) Shard %N"
+      label: ":amd: (MI300) Language Models (Extra Standard)"
       dind: false
       device: mi300_1
       timeout_in_minutes: 40
@@ -53,36 +58,32 @@ steps:
       - vllm/v1/attention/backends/
       - vllm/v1/attention/selector.py
       - tests/models/language/pooling/test_embedding.py
-      - tests/models/language/generation/test_common.py
+      - tests/models/language/generation/core_slow/
+      - tests/models/language/generation/_common_models.py
       - tests/models/language/pooling/test_classification.py
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
-- label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid) Shard %N"
+
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid 01)"
   device: h200_35gb
-  key: language-models-tests-hybrid
+  key: language-models-tests-hybrid-01
   timeout_in_minutes: 65
-  env:
-    # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
-    # CI image. Force Git's smart protocol to use HTTP/1.1 for source installs.
-    GIT_CONFIG_COUNT: "1"
-    GIT_CONFIG_KEY_0: http.version
-    GIT_CONFIG_VALUE_0: HTTP/1.1
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
-  - tests/models/language/generation
+  - tests/models/language/generation/hybrid/01/
+  - tests/models/language/generation/_hybrid_models.py
+  - docker/language-deps/
+  - docker/Dockerfile
   commands:
-    # Install fast path packages for testing against transformers
-    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
-    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
-    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
-    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
-    # Shard the hybrid language model tests that are numerically stable on Hopper.
-    - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-  parallelism: 2
+    # The shared mamba/causal-conv1d dependencies are prebuilt into the test
+    # image (ticket 06); the verifier aborts early on any mismatch.
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language/generation/hybrid/01
   mirror:
     amd:
-      label: ":amd: (MI300) Language Models (Hybrid) Shard %N"
+      label: ":amd: (MI300) Language Models (Hybrid 01)"
       dind: false
       device: mi300_1
       timeout_in_minutes: 60
@@ -91,7 +92,203 @@ steps:
       commands:
       - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
       - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
-      - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+      - pytest -v -s models/language/generation/hybrid/01
+
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid 02)"
+  device: h200_35gb
+  key: language-models-tests-hybrid-02
+  timeout_in_minutes: 65
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/models/language/generation/hybrid/02/
+  - tests/models/language/generation/_hybrid_models.py
+  - docker/language-deps/
+  - docker/Dockerfile
+  commands:
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language/generation/hybrid/02
+  mirror:
+    amd:
+      label: ":amd: (MI300) Language Models (Hybrid 02)"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+      commands:
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation/hybrid/02
+
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid 03)"
+  device: h200_35gb
+  key: language-models-tests-hybrid-03
+  timeout_in_minutes: 65
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/models/language/generation/hybrid/03/
+  - tests/models/language/generation/_hybrid_models.py
+  - docker/language-deps/
+  - docker/Dockerfile
+  commands:
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language/generation/hybrid/03
+  mirror:
+    amd:
+      label: ":amd: (MI300) Language Models (Hybrid 03)"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+      commands:
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation/hybrid/03
+
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid 04)"
+  device: h200_35gb
+  key: language-models-tests-hybrid-04
+  timeout_in_minutes: 65
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/models/language/generation/hybrid/04/
+  - tests/models/language/generation/_hybrid_models.py
+  - docker/language-deps/
+  - docker/Dockerfile
+  commands:
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language/generation/hybrid/04
+  mirror:
+    amd:
+      label: ":amd: (MI300) Language Models (Hybrid 04)"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+      commands:
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation/hybrid/04
+
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid 05)"
+  device: h200_35gb
+  key: language-models-tests-hybrid-05
+  timeout_in_minutes: 65
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/models/language/generation/hybrid/05/
+  - tests/models/language/generation/_hybrid_models.py
+  - docker/language-deps/
+  - docker/Dockerfile
+  commands:
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language/generation/hybrid/05
+  mirror:
+    amd:
+      label: ":amd: (MI300) Language Models (Hybrid 05)"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+      commands:
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation/hybrid/05
+
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid 06)"
+  device: h200_35gb
+  key: language-models-tests-hybrid-06
+  timeout_in_minutes: 65
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/models/language/generation/hybrid/06/
+  - tests/models/language/generation/_hybrid_models.py
+  - docker/language-deps/
+  - docker/Dockerfile
+  commands:
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language/generation/hybrid/06
+  mirror:
+    amd:
+      label: ":amd: (MI300) Language Models (Hybrid 06)"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+      commands:
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation/hybrid/06
+
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid 07)"
+  device: h200_35gb
+  key: language-models-tests-hybrid-07
+  timeout_in_minutes: 65
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/models/language/generation/hybrid/07/
+  - tests/models/language/generation/_hybrid_models.py
+  - docker/language-deps/
+  - docker/Dockerfile
+  commands:
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language/generation/hybrid/07
+  mirror:
+    amd:
+      label: ":amd: (MI300) Language Models (Hybrid 07)"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+      commands:
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation/hybrid/07
+
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Hybrid 08)"
+  device: h200_35gb
+  key: language-models-tests-hybrid-08
+  timeout_in_minutes: 65
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/models/language/generation/hybrid/08/
+  - tests/models/language/generation/_hybrid_models.py
+  - docker/language-deps/
+  - docker/Dockerfile
+  commands:
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language/generation/hybrid/08
+  mirror:
+    amd:
+      label: ":amd: (MI300) Language Models (Hybrid 08)"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+      commands:
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation/hybrid/08
 
 # Granite 4 hybrid generation is sensitive to hardware-specific Triton SSD
 # autotuning (https://github.com/vllm-project/vllm/issues/25194). Keep this one
@@ -104,33 +301,43 @@ steps:
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
-  - tests/models/language/generation
+  - tests/models/language/generation/hybrid_granite/
+  - tests/models/language/generation/_hybrid_models.py
+  - docker/language-deps/
+  - docker/Dockerfile
   commands:
-    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
-    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
-    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
-    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
-    - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pytest -v -s models/language/generation/hybrid_granite
+  mirror:
+    amd:
+      label: ":amd: (MI300) Language Models (Hybrid Granite)"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+      commands:
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation/hybrid_granite
 
-- label: ":nvidia: (H200 MIG 35GB) Language Models (Extended Generation)"
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Extended 01)"
   device: h200_35gb
-  key: language-models-test-extended-generation
+  key: language-models-test-extended-01
   timeout_in_minutes: 80
   optional: true
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
-  - tests/models/language/generation
+  - tests/models/language/generation/extended/01/
+  - docker/language-deps/
+  - docker/Dockerfile
   commands:
-    # Install fast path packages for testing against transformers
-    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
-    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
-    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
-    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
-    - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pytest -v -s models/language/generation/extended/01
   mirror:
     amd:
-      label: ":amd: (MI355) Language Models (Extended Generation)"
+      label: ":amd: (MI355) Language Models (Extended 01)"
       dind: false
       device: mi355_1
       timeout_in_minutes: 70
@@ -139,7 +346,202 @@ steps:
       commands:
       - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
       - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
-      - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
+      - pytest -v -s models/language/generation/extended/01
+
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Extended 02)"
+  device: h200_35gb
+  key: language-models-test-extended-02
+  timeout_in_minutes: 80
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/models/language/generation/extended/02/
+  - tests/models/language/generation/_granite_models.py
+  - docker/language-deps/
+  - docker/Dockerfile
+  commands:
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pytest -v -s models/language/generation/extended/02
+  mirror:
+    amd:
+      label: ":amd: (MI355) Language Models (Extended 02)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 70
+      depends_on:
+      - image-build-amd
+      commands:
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation/extended/02
+
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Extended 03)"
+  device: h200_35gb
+  key: language-models-test-extended-03
+  timeout_in_minutes: 80
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/models/language/generation/extended/03/
+  - tests/models/language/generation/_granite_models.py
+  - docker/language-deps/
+  - docker/Dockerfile
+  commands:
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pytest -v -s models/language/generation/extended/03
+  mirror:
+    amd:
+      label: ":amd: (MI355) Language Models (Extended 03)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 70
+      depends_on:
+      - image-build-amd
+      commands:
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation/extended/03
+
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Extended 04)"
+  device: h200_35gb
+  key: language-models-test-extended-04
+  timeout_in_minutes: 80
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/models/language/generation/extended/04/
+  - docker/language-deps/
+  - docker/Dockerfile
+  commands:
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pytest -v -s models/language/generation/extended/04
+  mirror:
+    amd:
+      label: ":amd: (MI355) Language Models (Extended 04)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 70
+      depends_on:
+      - image-build-amd
+      commands:
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation/extended/04
+
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Extended 05)"
+  device: h200_35gb
+  key: language-models-test-extended-05
+  timeout_in_minutes: 80
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/models/language/generation/extended/05/
+  - tests/models/language/generation/_common_models.py
+  - docker/language-deps/
+  - docker/Dockerfile
+  commands:
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pytest -v -s models/language/generation/extended/05
+  mirror:
+    amd:
+      label: ":amd: (MI355) Language Models (Extended 05)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 70
+      depends_on:
+      - image-build-amd
+      commands:
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation/extended/05
+
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Extended 06)"
+  device: h200_35gb
+  key: language-models-test-extended-06
+  timeout_in_minutes: 80
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/models/language/generation/extended/06/
+  - tests/models/language/generation/_common_models.py
+  - docker/language-deps/
+  - docker/Dockerfile
+  commands:
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pytest -v -s models/language/generation/extended/06
+  mirror:
+    amd:
+      label: ":amd: (MI355) Language Models (Extended 06)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 70
+      depends_on:
+      - image-build-amd
+      commands:
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation/extended/06
+
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Extended 07)"
+  device: h200_35gb
+  key: language-models-test-extended-07
+  timeout_in_minutes: 80
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/models/language/generation/extended/07/
+  - tests/models/language/generation/_common_models.py
+  - docker/language-deps/
+  - docker/Dockerfile
+  commands:
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pytest -v -s models/language/generation/extended/07
+  mirror:
+    amd:
+      label: ":amd: (MI355) Language Models (Extended 07)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 70
+      depends_on:
+      - image-build-amd
+      commands:
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation/extended/07
+
+- label: ":nvidia: (H200 MIG 35GB) Language Models (Extended 08)"
+  device: h200_35gb
+  key: language-models-test-extended-08
+  timeout_in_minutes: 80
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - "!vllm/distributed/kv_transfer/"
+  - tests/models/language/generation/extended/08/
+  - tests/models/language/generation/_common_models.py
+  - docker/language-deps/
+  - docker/Dockerfile
+  commands:
+    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    - pytest -v -s models/language/generation/extended/08
+  mirror:
+    amd:
+      label: ":amd: (MI355) Language Models (Extended 08)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 70
+      depends_on:
+      - image-build-amd
+      commands:
+      - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation/extended/08
 
 - label: ":nvidia: (H200 MIG 18GB) Language Models (PPL)"
   key: language-models-test-ppl

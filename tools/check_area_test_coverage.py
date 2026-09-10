@@ -209,7 +209,11 @@ def check_coverage(
     tests_root: Path, yaml_paths: list[Path]
 ) -> tuple[list[str], list[str]]:
     """Run the guard. Returns (violations, notes)."""
-    tests_dir = tests_root.parents[1]  # the tests/ directory
+    # Locate the ancestor directory named "tests" (the tree may sit at any
+    # depth below it, e.g. tests/models/language/generation).
+    tests_root = tests_root.resolve()
+    parts = tests_root.parts
+    tests_dir = Path(*parts[: len(parts) - 1 - parts[::-1].index("tests") + 1])
     tree_rel = tests_root.relative_to(tests_dir).as_posix()
     commands = load_commands(yaml_paths, tree_rel)
     whole_dirs = {t for c in commands if c.is_whole_dir for t in c.dir_targets}

@@ -8,12 +8,17 @@ steps:
   source_file_dependencies:
     - .buildkite/release-pipeline.yaml
     - .buildkite/scripts/docker-build-metadata-args.sh
+    - .buildkite/test_areas/models_language.yaml
+    - .buildkite/hardware_tests/cpu.yaml
     - docker/Dockerfile
     - docker/Dockerfile.cpu
     - docker/docker-bake.hcl
     - tests/tools/test_docker_build_metadata_args.py
+    - tests/tools/test_area_test_coverage.py
+    - tools/check_area_test_coverage.py
   commands:
     - pytest -v -s tools/test_docker_build_metadata_args.py
+    - pytest -v -s tools/test_area_test_coverage.py
   mirror:
     amd:
       label: ":amd: (MI250) Docker Build Metadata"
