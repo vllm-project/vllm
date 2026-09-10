@@ -135,7 +135,7 @@ def test_triton_kernel_decorator_returns_launcher(
         "first_stride0",
         "aliased_ptr",
         "aliased_stride_0",
-        "second",
+        "SECOND",
         "CONST",
     )
 
@@ -151,7 +151,7 @@ def test_triton_kernel_decorator_returns_launcher(
         return (2,), dict(aliased_ptr=first, CONST=config)
 
     def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
-        return {TritonJitKey(id(kernel), "fake", 0, kwargs["second"])}
+        return {TritonJitKey(id(kernel), "fake", 0, kwargs["SECOND"])}
 
     monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
 
@@ -169,7 +169,7 @@ def test_triton_kernel_decorator_returns_launcher(
                 torch.float32, shape=(2, 3), strides=(5, 1)
             ),
             "aliased_stride_0": 5,
-            "second": 1,
+            "SECOND": 1,
             "CONST": 7,
         }
     ]
@@ -184,7 +184,7 @@ def test_triton_kernel_decorator_returns_launcher(
                 "first_stride0": 5,
                 "aliased_ptr": first,
                 "aliased_stride_0": 5,
-                "second": 2,
+                "SECOND": 2,
                 "CONST": 7,
             },
         )

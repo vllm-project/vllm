@@ -504,13 +504,7 @@ def _EAGLE_STEP_SLOT_MAPPING_METADATA_KERNEL(
     batch_size: int,
     input_batch_size: int,
 ) -> DispatchSpec:
-    return (input_batch_size,), dict(
-        block_size=block_size,
-        max_model_len=max_model_len,
-        n_blocks_per_req=n_blocks_per_req,
-        PAD_ID=PAD_ID,
-        batch_size=batch_size,
-    )
+    return (input_batch_size,), {}
 
 
 def _eagle_prepare_inputs_warmup_inputs(*, max_batch_size: int):
@@ -579,7 +573,7 @@ def _EAGLE_PREPARE_NEXT_TOKEN_PADDED_KERNEL(
     *,
     BLOCK_SIZE_TOKENS: int,
 ) -> DispatchSpec:
-    return (num_reqs,), dict(BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS)
+    return (num_reqs,), {}
 
 
 def _copy_and_expand_eagle_warmup_inputs(
@@ -641,7 +635,7 @@ def _COPY_AND_EXPAND_EAGLE_INPUTS_KERNEL(
     batch_size: int,
     num_blocks: int,
 ) -> DispatchSpec:
-    return (batch_size, num_blocks), dict(BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS)
+    return (batch_size, num_blocks), {}
 
 
 @triton.jit
@@ -817,14 +811,7 @@ def _COPY_AND_EXPAND_DFLASH_INPUTS_KERNEL(
     num_reqs = query_start_loc_ptr.shape[0] - 1
     num_blocks = triton.cdiv(max_tokens_per_req, triton_block_size)
     return (num_reqs, num_blocks), dict(
-        block_table_stride=block_table_stride,
-        parallel_drafting_token_id=parallel_drafting_token_id,
-        block_size=block_size,
-        num_query_per_req=num_query_per_req,
-        num_speculative_tokens=num_speculative_tokens,
-        total_input_tokens=total_input_tokens,
         BLOCK_SIZE=triton_block_size,
-        HAS_NUM_REJECTED=has_num_rejected,
     )
 
 

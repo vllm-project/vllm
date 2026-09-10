@@ -742,7 +742,7 @@ def _wna16_warmup_inputs(
     kernel=fused_moe_kernel_gptq_awq,
     warmup_inputs=_wna16_warmup_inputs,
 )
-def _dispatch_wna16(
+def _wna16(
     a: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
@@ -772,8 +772,6 @@ def _dispatch_wna16(
     return grid, dict(
         N=N,
         K=K,
-        EM=EM,
-        num_valid_tokens=num_valid_tokens,
         stride_am=a.stride(0),
         stride_ak=a.stride(1),
         stride_be=b.stride(0),
@@ -788,18 +786,12 @@ def _dispatch_wna16(
         stride_bzk=b_zp.stride(2) if b_zp is not None else 0,
         stride_bzn=b_zp.stride(1) if b_zp is not None else 0,
         block_k_diviable=K % config["BLOCK_SIZE_K"] == 0,
-        group_size=group_size,
         BLOCK_SIZE_M=config["BLOCK_SIZE_M"],
         BLOCK_SIZE_N=config["BLOCK_SIZE_N"],
         BLOCK_SIZE_K=config["BLOCK_SIZE_K"],
         GROUP_SIZE_M=config["GROUP_SIZE_M"],
         SPLIT_K=config["SPLIT_K"],
-        MUL_ROUTED_WEIGHT=mul_routed_weight,
-        top_k=top_k,
-        compute_type=compute_type,
         has_zp=b_zp is not None,
-        use_int4_w4a16=use_int4_w4a16,
-        use_int8_w8a16=use_int8_w8a16,
         num_warps=config.get("num_warps", 4),
         num_stages=config.get("num_stages", 3),
     )
@@ -912,7 +904,7 @@ def invoke_fused_moe_wna16_triton_kernel(
         )
     )
 
-    _dispatch_wna16(
+    _wna16(
         A,
         B,
         C,

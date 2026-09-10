@@ -75,14 +75,14 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
 
         self.cudagraph_manager: SpeculatorCudaGraphManager | None = None
 
-        _dispatch_prepare_input_buffers.register_warmup(speculator=self)
-        _dispatch_prepare_input_hidden_states.register_warmup(speculator=self)
-        _dispatch_pad_trailing_draft_slots.register_warmup(
+        _prepare_input_buffers.register_warmup(speculator=self)
+        _prepare_input_hidden_states.register_warmup(speculator=self)
+        _pad_trailing_draft_slots.register_warmup(
             slot_mappings_stride0=self.max_num_tokens
         )
-        _dispatch_cache_inputs.register_warmup(speculator=self)
-        _dispatch_shift_input_ids.register_warmup()
-        _dispatch_shift_input_embeds.register_warmup(speculator=self)
+        _cache_inputs.register_warmup(speculator=self)
+        _shift_input_ids.register_warmup()
+        _shift_input_embeds.register_warmup(speculator=self)
 
     def load_draft_model(
         self,
@@ -629,7 +629,7 @@ def prepare_input_buffers(
     max_num_reqs: int,
     num_speculative_steps: int,
 ) -> None:
-    _dispatch_prepare_input_buffers(
+    _prepare_input_buffers(
         last_token_indices,
         input_buffers.input_ids,
         input_buffers.positions,
@@ -775,7 +775,7 @@ def prepare_input_hidden_states_and_embeddings(
     num_rejected: torch.Tensor,
     num_speculative_steps: int,
 ) -> None:
-    _dispatch_prepare_input_hidden_states(
+    _prepare_input_hidden_states(
         hidden_states,
         target_hidden_states,
         cached_target_hidden_states,
@@ -823,7 +823,7 @@ def pad_trailing_draft_slots(
     num_reqs: int,
 ) -> None:
     num_groups = slot_mappings.shape[0]
-    _dispatch_pad_trailing_draft_slots(
+    _pad_trailing_draft_slots(
         slot_mappings,
         query_start_loc,
         last_token_indices,
@@ -932,7 +932,7 @@ def cache_inputs(
     num_speculative_steps: int,
     use_input_embeds: bool,
 ) -> None:
-    _dispatch_cache_inputs(
+    _cache_inputs(
         input_buffers.input_ids,
         draft_input_embeds,
         draft_input_hidden_states,
@@ -1046,7 +1046,7 @@ def update_draft_inputs(
     idx_mapping: torch.Tensor,
     num_reqs: int,
 ) -> None:
-    _dispatch_shift_input_ids(
+    _shift_input_ids(
         input_buffers.input_ids,
         idx_mapping,
         input_buffers.query_start_loc,
@@ -1056,7 +1056,7 @@ def update_draft_inputs(
     )
     if input_embeds is not None:
         assert draft_embeds is not None
-        _dispatch_shift_input_embeds(
+        _shift_input_embeds(
             input_embeds,
             draft_embeds,
             idx_mapping,
@@ -1103,7 +1103,7 @@ def _prepare_input_buffers_warmup_inputs(
     kernel=_prepare_input_buffers_kernel,
     warmup_inputs=_prepare_input_buffers_warmup_inputs,
 )
-def _dispatch_prepare_input_buffers(
+def _prepare_input_buffers(
     last_token_indices: torch.Tensor,
     draft_input_ids: torch.Tensor,
     draft_positions: torch.Tensor,
@@ -1163,7 +1163,7 @@ def _prepare_input_hidden_states_warmup_inputs(
     kernel=_prepare_input_hidden_states_and_embeddings_kernel,
     warmup_inputs=_prepare_input_hidden_states_warmup_inputs,
 )
-def _dispatch_prepare_input_hidden_states(
+def _prepare_input_hidden_states(
     hidden_states: torch.Tensor,
     target_hidden_states: torch.Tensor,
     cached_target_hidden_states: torch.Tensor | None,
@@ -1221,7 +1221,7 @@ def _pad_trailing_draft_slots_warmup_inputs(
     kernel=_pad_trailing_draft_slots_kernel,
     warmup_inputs=_pad_trailing_draft_slots_warmup_inputs,
 )
-def _dispatch_pad_trailing_draft_slots(
+def _pad_trailing_draft_slots(
     slot_mappings: torch.Tensor,
     query_start_loc: torch.Tensor,
     last_token_indices: torch.Tensor,
@@ -1268,7 +1268,7 @@ def _cache_inputs_warmup_inputs(
 
 
 @triton_kernel(kernel=_cache_inputs_kernel, warmup_inputs=_cache_inputs_warmup_inputs)
-def _dispatch_cache_inputs(
+def _cache_inputs(
     draft_input_ids: torch.Tensor,
     draft_input_embeds: torch.Tensor | None,
     draft_input_hidden_states: torch.Tensor,
@@ -1298,7 +1298,6 @@ def _dispatch_cache_inputs(
         cached_draft_input_embeds_ptr=cached_embeds_ptr,
         hidden_size=hidden_size,
         BLOCK_SIZE=1024,
-        USE_INPUT_EMBEDS=use_input_embeds,
     )
 
 
@@ -1317,7 +1316,7 @@ def _shift_input_ids_warmup_inputs() -> dict[str, Any]:
     kernel=_shift_input_ids_kernel,
     warmup_inputs=_shift_input_ids_warmup_inputs,
 )
-def _dispatch_shift_input_ids(
+def _shift_input_ids(
     input_ids: torch.Tensor,
     idx_mapping: torch.Tensor,
     query_start_loc: torch.Tensor,
@@ -1350,7 +1349,7 @@ def _shift_input_embeds_warmup_inputs(
     kernel=_shift_input_embeds_kernel,
     warmup_inputs=_shift_input_embeds_warmup_inputs,
 )
-def _dispatch_shift_input_embeds(
+def _shift_input_embeds(
     input_embeds: torch.Tensor,
     draft_embeds: torch.Tensor,
     idx_mapping: torch.Tensor,

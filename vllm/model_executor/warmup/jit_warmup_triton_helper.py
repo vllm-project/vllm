@@ -191,10 +191,21 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         runtime_launcher_arg_count = kwargs.pop("_runtime_launcher_arg_count", 0)
         arg_names = self._kernel_arg_names_for(kernel)
         arg_name_set = set(arg_names)
+        unmatched_inputs = []
         for name, value in inputs.items():
-            target = name if name in arg_name_set else f"{name}_ptr"
-            if target in arg_name_set and target not in kwargs:
+            if name in arg_name_set:
+                target = name
+            elif (target := f"{name}_ptr") not in arg_name_set:
+                unmatched_inputs.append((name, value))
+                continue
+            if target not in kwargs:
                 kwargs[target] = value
+        for name, value in unmatched_inputs:
+            for target in (name.upper(), f"{name}_ptr".upper()):
+                if target in arg_name_set:
+                    if target not in kwargs:
+                        kwargs[target] = value
+                    break
         missing = object()
         for target in arg_names:
             if target in kwargs:

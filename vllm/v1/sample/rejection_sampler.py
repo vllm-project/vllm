@@ -94,14 +94,12 @@ class RejectionSampler(nn.Module):
                 device=device,
             )
         self.synthetic_mode = self.synthetic_conditional_rates is not None
-        _dispatch_rejection_greedy_sample.register_warmup(
-            synthetic_mode=self.synthetic_mode
-        )
-        _dispatch_rejection_random_sample.register_warmup(
+        _rejection_greedy_sample.register_warmup(synthetic_mode=self.synthetic_mode)
+        _rejection_random_sample.register_warmup(
             synthetic_mode=self.synthetic_mode,
         )
-        _dispatch_expand.register_warmup()
-        _dispatch_sample_recovered_tokens.register_warmup(
+        _expand.register_warmup()
+        _sample_recovered_tokens.register_warmup(
             use_fp64_gumbel=self.use_fp64_gumbel,
         )
 
@@ -469,7 +467,7 @@ def rejection_sample(
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_logits.argmax(dim=-1)
-        _dispatch_rejection_greedy_sample(
+        _rejection_greedy_sample(
             output_token_ids,
             cu_num_draft_tokens,
             draft_token_ids,
@@ -503,7 +501,7 @@ def rejection_sample(
 
     # Rejection sampling for random sampling requests.
     assert uniform_probs is not None
-    _dispatch_rejection_random_sample(
+    _rejection_random_sample(
         output_token_ids,
         cu_num_draft_tokens,
         draft_token_ids,
@@ -606,7 +604,7 @@ def expand_batch_to_tokens(
     batch_size = x.shape[0]
     assert cu_num_tokens.shape[0] == batch_size
     expanded_x = x.new_empty(num_tokens)
-    _dispatch_expand(
+    _expand(
         expanded_x,
         x,
         cu_num_tokens,
@@ -705,7 +703,7 @@ def sample_recovered_tokens(
     inv_q = q.reciprocal()
 
     recovered_token_ids = torch.empty_like(draft_token_ids)
-    _dispatch_sample_recovered_tokens(
+    _sample_recovered_tokens(
         recovered_token_ids,
         cu_num_draft_tokens,
         draft_token_ids,
@@ -988,7 +986,7 @@ def _rejection_greedy_sample_warmup_inputs(
     kernel=rejection_greedy_sample_kernel,
     warmup_inputs=_rejection_greedy_sample_warmup_inputs,
 )
-def _dispatch_rejection_greedy_sample(
+def _rejection_greedy_sample(
     output_token_ids: torch.Tensor,
     cu_num_draft_tokens: torch.Tensor,
     draft_token_ids: torch.Tensor,
@@ -1035,7 +1033,7 @@ def _rejection_random_sample_warmup_inputs(
     kernel=rejection_random_sample_kernel,
     warmup_inputs=_rejection_random_sample_warmup_inputs,
 )
-def _dispatch_rejection_random_sample(
+def _rejection_random_sample(
     output_token_ids: torch.Tensor,
     cu_num_draft_tokens: torch.Tensor,
     draft_token_ids: torch.Tensor,
@@ -1068,7 +1066,7 @@ def _expand_warmup_inputs() -> dict[str, object]:
 
 
 @triton_kernel(kernel=expand_kernel, warmup_inputs=_expand_warmup_inputs)
-def _dispatch_expand(
+def _expand(
     output: torch.Tensor,
     input: torch.Tensor,
     cu_num_tokens: torch.Tensor,
@@ -1106,7 +1104,7 @@ def _sample_recovered_tokens_warmup_inputs(
     kernel=sample_recovered_tokens_kernel,
     warmup_inputs=_sample_recovered_tokens_warmup_inputs,
 )
-def _dispatch_sample_recovered_tokens(
+def _sample_recovered_tokens(
     output_token_ids: torch.Tensor,
     cu_num_draft_tokens: torch.Tensor,
     draft_token_ids: torch.Tensor,

@@ -100,7 +100,7 @@ def _flatten_sampled_warmup_inputs(*, num_speculative_steps: int) -> dict[str, A
     kernel=_flatten_sampled_kernel,
     warmup_inputs=_flatten_sampled_warmup_inputs,
 )
-def _dispatch_flatten_sampled(
+def _flatten_sampled(
     flat_sampled: torch.Tensor,
     sampled: torch.Tensor,
     num_sampled: torch.Tensor,
@@ -120,7 +120,7 @@ class RejectionSampler:
     ):
         self.sampler = sampler
         self.num_speculative_steps = spec_config.num_speculative_tokens
-        _dispatch_flatten_sampled.register_warmup(
+        _flatten_sampled.register_warmup(
             num_speculative_steps=self.num_speculative_steps
         )
         self.enable_adaptive_verification = spec_config.enable_adaptive_verification
@@ -184,7 +184,7 @@ class RejectionSampler:
         flat_sampled = torch.zeros(
             num_logits, dtype=sampled.dtype, device=sampled.device
         )
-        _dispatch_flatten_sampled(
+        _flatten_sampled(
             flat_sampled,
             sampled,
             num_sampled,
