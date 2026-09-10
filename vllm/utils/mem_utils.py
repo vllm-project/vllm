@@ -151,6 +151,37 @@ def cap_unified_memory_budget(
     return max(honest_cap, 0)
 
 
+def allocator_ceiling_bytes(
+    requested_memory: int,
+    free_memory: int,
+    total_memory: int,
+    explicit_kv_cache_bytes: int | None,
+) -> int:
+    """Pick the ceiling to hand :func:`limit_torch_allocator_to_budget`.
+
+    Normally that is the budget itself (``util * total``, already capped to the
+    host reserve). When ``kv_cache_memory_bytes`` is set the user has opted out
+    of ``gpu_memory_utilization`` for sizing the cache, so a utilization-derived
+    ceiling would bound a cache the setting is meant to free from it -- with
+    ``util=0.1`` on a 120 GiB pool the ceiling is 12 GiB, below a 20 GiB cache
+    on its own. Use the host-reserve ceiling there instead: that is what keeps
+    the OS alive, which explicit sizing must not opt out of.
+
+    Args:
+        requested_memory: The capped budget, in bytes.
+        free_memory: Currently available memory, in bytes.
+        total_memory: Total pool size, in bytes.
+        explicit_kv_cache_bytes: ``cache_config.kv_cache_memory_bytes``, or None.
+
+    Returns:
+        The allocation ceiling in bytes.
+    """
+    if not explicit_kv_cache_bytes:
+        return requested_memory
+    reserve = unified_memory_host_reserve_bytes(total_memory)
+    return max(requested_memory, free_memory - reserve)
+
+
 def limit_torch_allocator_to_budget(
     device: torch.types.Device,
     budget_memory: int,

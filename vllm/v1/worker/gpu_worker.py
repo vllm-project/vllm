@@ -69,6 +69,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import (
     MemoryProfilingResult,
     MemorySnapshot,
+    allocator_ceiling_bytes,
     format_gib,
     limit_torch_allocator_to_budget,
     memory_profiling,
@@ -559,9 +560,17 @@ class Worker(WorkerBase):
         # Weights, the profiling transient and the KV cache are all sized to fit
         # inside this budget, so the cap only stops a transient that would have
         # failed the budget check anyway. No-op on discrete GPUs.
+        # `kv_cache_memory_bytes` opts out of `gpu_memory_utilization`, so the
+        # ceiling must not be derived from it -- see allocator_ceiling_bytes().
+        allocator_ceiling = allocator_ceiling_bytes(
+            self.requested_memory,
+            self.init_snapshot.free_memory,
+            self.init_snapshot.total_memory,
+            self.cache_config.kv_cache_memory_bytes,
+        )
         limit_torch_allocator_to_budget(
             self.device,
-            self.requested_memory,
+            allocator_ceiling,
             self.init_snapshot.total_memory,
         )
 
