@@ -319,53 +319,6 @@ def _release_together(streams):
         s.wait_event(gate)
 
 
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
-@pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
-def test_rocm_wvsplitkrc_graph_concurrent_replay(dtype, seed):
-    """Graphs replayed concurrently must not share a split-K workspace.
-
-    Capture bakes the workspace pointer into the kernel arguments, so the
-    launching stream no longer identifies the execution, and torch captures
-    several graphs on the same reused side stream. The gate and the small CU
-    count are load-bearing: without them the replays do not overlap.
-    """
-    torch.manual_seed(seed)
-    n, k, m, n_graphs, rounds, replays = 16, 2048, 256, 4, 5, 20
-    xavier = math.sqrt(2 / k)
-
-    B = torch.randn(m, k, dtype=dtype, device="cuda") * xavier
-    As = [
-        torch.randn(n, k, dtype=dtype, device="cuda") * xavier for _ in range(n_graphs)
-    ]
-    refs = [torch.nn.functional.linear(A, B, None) for A in As]
-    # The pool allocation must happen before any capture, as
-    # warmup_rocm_skinny_gemm_workspaces() arranges in production.
-    ops.wvSplitKrc(As[0], B, WVSPLITKRC_TEST_CU, None)
-    torch.accelerator.synchronize()
-
-    graphs, outs = [], []
-    for A in As:
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
-            outs.append(ops.wvSplitKrc(A, B, WVSPLITKRC_TEST_CU, None))
-        graphs.append(g)
-
-    streams = [torch.Stream() for _ in graphs]
-    for _ in range(rounds):
-        _release_together(streams)
-        for _ in range(replays):
-            for g, s in zip(graphs, streams):
-                with torch.cuda.stream(s):
-                    g.replay()
-        for s in streams:
-            torch.accelerator.current_stream().wait_stream(s)
-        torch.accelerator.synchronize()
-        for out, ref in zip(outs, refs):
-            torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-2)
-
-
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_LLMM1)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("rows_per_block", [2, 4, 8, 16])

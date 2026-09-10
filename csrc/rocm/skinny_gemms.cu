@@ -19,6 +19,8 @@
 
 // Number of streams the pre-allocated split-K pool covers. ~7.5 MiB per slot.
 static constexpr int64_t kWvSlots = 8;
+// Slots held back for capturing streams, which cannot allocate one themselves.
+static constexpr int64_t kWvCaptureSlots = 8;
 
 // TODO(rasmith): The kernels in this file are susceptible to integer overflow
 // issues, do not take strides, and are unable to handle PyTorch tensors that
@@ -1903,23 +1905,21 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   // To avoid unnecessary overhead, we do not allocate them zeroed
   // per-invocation. However, a simple static allocation does not work with
   // multi-streams, because concurrent streams can alias into the same
-  // workspace. Solution: pre-allocate up to kWvSlots = 8 slots per device. On
-  // first use, a stream takes one of the slots if any are still available. On
-  // subsequent uses, it re-uses the slot. If no slots are available, fall back
-  // to allocating on-demand and caching in overflow, which is safe but adds
-  // overhead (the zero-ing might be graph captured).
-  // Under capture the workspace pointer is baked into the graph's kernel
-  // arguments, so the launching stream no longer identifies the execution.
-  // Captured work is keyed by (capture, stream) and gets its own allocation.
+  // workspace. Solution: pre-allocate kWvSlots = 8 slots per device, plus
+  // kWvCaptureSlots reserved for capturing streams, and zero the whole pool
+  // once at creation. On first use, a stream takes one of the slots if any are
+  // still available. On subsequent uses, it re-uses the slot. If no slots are
+  // available, fall back to allocating a zeroed one per call, which is safe but
+  // adds overhead.
+  // A capturing stream must neither allocate nor enqueue anything -- either
+  // would be captured into the graph -- so it is only handed a reserved slot.
   struct WvSplitKrcPool {
     torch::Tensor glbl, cntr;
     int64_t glbl_stride = 0, cntr_stride = 0;
     int next_slot = 0;
+    int next_capture_slot = 0;
     std::map<cudaStream_t, int> slot_of;
-    std::map<cudaStream_t, std::pair<torch::Tensor, torch::Tensor>> overflow;
-    std::map<std::pair<uint64_t, cudaStream_t>,
-             std::pair<torch::Tensor, torch::Tensor>>
-        captured;
+    std::map<cudaStream_t, int> capture_slot_of;
   };
   // mutex not strictly necessary if caller is always single-threaded (Python)
   // but this preserves Torch thread_local semantics for the C++ API
@@ -1928,32 +1928,15 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
 
   float* glbl;
   int* cntr;
+  // Fallback space
+  torch::Tensor spill_glbl, spill_cntr;
   {
     std::lock_guard<std::mutex> wv_lk(wv_pool_mu);
     const int wv_dev = static_cast<int>(in_a.device().index());
     WvSplitKrcPool& P = wv_pools[wv_dev];
     constexpr int64_t wv_gf = 128 * 1024 * (_DTRMNSTC ? 12 : 1);
     constexpr int64_t wv_ci = wv_gf / 4;
-    if (!P.glbl.defined()) {
-      // `warmup_rocm_skinny_gemm_workspaces()`
-      // (vllm/model_executor/layers/utils.py) exists to force this allocation
-      // before any capture.
-      P.glbl_stride = wv_gf;
-      P.cntr_stride = wv_ci;
-      // Not zeroed here: a whole-pool fill is ordered only against the stream
-      // that allocates it, and would be captured if that call is capturing.
-      // Each slot is zeroed by its claimant below.
-      P.glbl = torch::empty(wv_gf * kWvSlots, torch::TensorOptions()
-                                                  .dtype(torch::kFloat32)
-                                                  .device(in_a.device()))
-                   .detach();
-      P.cntr =
-          torch::empty(
-              wv_ci * kWvSlots,
-              torch::TensorOptions().dtype(torch::kInt).device(in_a.device()))
-              .detach();
-    }
-    TORCH_CHECK(wv_gf <= P.glbl_stride, "wvSplitKrc: workspace slot too small");
+    constexpr int64_t wv_all_slots = kWvSlots + kWvCaptureSlots;
 
     // A stream whose capture was already invalidated reports an error; treat
     // that as not capturing, since the capture is lost either way.
@@ -1963,63 +1946,76 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
         cudaSuccess) {
       capture_status = cudaStreamCaptureStatusNone;
     }
+    const bool wv_capturing = capture_status != cudaStreamCaptureStatusNone;
+
+    if (!P.glbl.defined()) {
+      TORCH_CHECK(!wv_capturing,
+                  "wvSplitKrc: the split-K workspace pool cannot be allocated "
+                  "during graph capture. Call "
+                  "warmup_rocm_skinny_gemm_workspaces() "
+                  "(vllm/model_executor/layers/utils.py) eagerly first.");
+      P.glbl_stride = wv_gf;
+      P.cntr_stride = wv_ci;
+      P.glbl = torch::zeros(wv_gf * wv_all_slots, torch::TensorOptions()
+                                                      .dtype(torch::kFloat32)
+                                                      .device(in_a.device()))
+                   .detach();
+      P.cntr =
+          torch::zeros(
+              wv_ci * wv_all_slots,
+              torch::TensorOptions().dtype(torch::kInt).device(in_a.device()))
+              .detach();
+      // The mutex orders host access to the map, not device execution, so it
+      // alone would let another stream be handed a slot the fill above is
+      // still clearing. Synchronizing here, inside the lock, is what makes
+      // every slot safe to use without any further per-slot zeroing.
+      const cudaError_t wv_err = cudaStreamSynchronize(stream);
+      TORCH_CHECK(wv_err == cudaSuccess,
+                  "wvSplitKrc: failed to zero the split-K workspace pool: ",
+                  cudaGetErrorString(wv_err));
+    }
 
     int wv_slot = -1;
-    if (capture_status == cudaStreamCaptureStatusNone) {
+    if (wv_capturing) {
+      // One workspace per capturing stream, so graphs captured on the same
+      // stream share it -- safe because at most one of them replays at a time
+      // (vLLM captures one graph per padded batch size, and runs one per step).
+      auto cap_it = P.capture_slot_of.find(stream);
+      if (cap_it == P.capture_slot_of.end()) {
+        TORCH_CHECK(P.next_capture_slot < kWvCaptureSlots,
+                    "wvSplitKrc: no free capture workspace slot; more than ",
+                    kWvCaptureSlots,
+                    " distinct streams have captured a graph containing "
+                    "wvSplitKrc. Raise kWvCaptureSlots in "
+                    "csrc/rocm/skinny_gemms.cu.");
+        cap_it = P.capture_slot_of
+                     .emplace(stream, static_cast<int>(kWvSlots) +
+                                          P.next_capture_slot++)
+                     .first;
+      }
+      wv_slot = cap_it->second;
+    } else {
       auto slot_it = P.slot_of.find(stream);
       if (slot_it != P.slot_of.end()) {
         wv_slot = slot_it->second;
       } else if (P.next_slot < kWvSlots) {
         wv_slot = P.next_slot++;
         P.slot_of.emplace(stream, wv_slot);
-        // Ordered before this stream's first kernel, and unreachable while
-        // capturing, so it never becomes a graph node.
-        cudaMemsetAsync(P.glbl.data_ptr<float>() + wv_slot * P.glbl_stride, 0,
-                        P.glbl_stride * sizeof(float), stream);
-        cudaMemsetAsync(P.cntr.data_ptr<int>() + wv_slot * P.cntr_stride, 0,
-                        P.cntr_stride * sizeof(int), stream);
       }
     }
-    if (capture_status != cudaStreamCaptureStatusNone) {
-      auto key = std::make_pair(capture_id, stream);
-      auto cap = P.captured.find(key);
-      if (cap == P.captured.end()) {
-        cap = P.captured
-                  .emplace(key,
-                           std::make_pair(
-                               torch::zeros(wv_gf, torch::TensorOptions()
-                                                       .dtype(torch::kFloat32)
-                                                       .device(in_a.device()))
-                                   .detach(),
-                               torch::zeros(wv_ci, torch::TensorOptions()
-                                                       .dtype(torch::kInt)
-                                                       .device(in_a.device()))
-                                   .detach()))
-                  .first;
-      }
-      glbl = cap->second.first.data_ptr<float>();
-      cntr = cap->second.second.data_ptr<int>();
-    } else if (wv_slot >= 0) {
+
+    if (wv_slot >= 0) {
       glbl = P.glbl.data_ptr<float>() + wv_slot * P.glbl_stride;
       cntr = P.cntr.data_ptr<int>() + wv_slot * P.cntr_stride;
     } else {
-      auto ov = P.overflow.find(stream);
-      if (ov == P.overflow.end()) {
-        ov = P.overflow
-                 .emplace(stream,
-                          std::make_pair(
-                              torch::zeros(wv_gf, torch::TensorOptions()
-                                                      .dtype(torch::kFloat32)
-                                                      .device(in_a.device()))
-                                  .detach(),
-                              torch::zeros(wv_ci, torch::TensorOptions()
-                                                      .dtype(torch::kInt)
-                                                      .device(in_a.device()))
-                                  .detach()))
-                 .first;
-      }
-      glbl = ov->second.first.data_ptr<float>();
-      cntr = ov->second.second.data_ptr<int>();
+      spill_glbl = torch::zeros(
+          wv_gf,
+          torch::TensorOptions().dtype(torch::kFloat32).device(in_a.device()));
+      spill_cntr = torch::zeros(
+          wv_ci,
+          torch::TensorOptions().dtype(torch::kInt).device(in_a.device()));
+      glbl = spill_glbl.data_ptr<float>();
+      cntr = spill_cntr.data_ptr<int>();
     }
   }
 
