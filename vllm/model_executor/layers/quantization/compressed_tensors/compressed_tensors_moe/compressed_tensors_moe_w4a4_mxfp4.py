@@ -12,9 +12,6 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (  # noqa: F401
-    CutlassExpertsMxfp4,
-)
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     convert_weight_to_mxfp4_moe_kernel_format,
@@ -24,9 +21,6 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
-)
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (  # noqa: F401
-    prepare_moe_fp4_layer_for_marlin,
 )
 from vllm.model_executor.utils import set_weight_attrs
 
