@@ -6285,7 +6285,9 @@ class GPUModelRunner(
                 builder_cls = attn_backend.get_builder_cls()
 
                 cg_support = builder_cls.get_cudagraph_support(
-                    self.vllm_config, kv_cache_group.kv_cache_spec
+                    self.vllm_config,
+                    kv_cache_group.kv_cache_spec,
+                    kv_cache_group.layer_names,
                 )
                 if cg_support.value < min_cg_support.value:
                     min_cg_support = cg_support
