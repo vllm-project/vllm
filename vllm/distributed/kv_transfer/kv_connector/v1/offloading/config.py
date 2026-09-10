@@ -4,7 +4,11 @@
 
 from typing import TYPE_CHECKING
 
-from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+from vllm.utils.math_utils import round_up
+from vllm.v1.core.kv_cache_utils import (
+    resolve_dcp_kv_block_size,
+    resolve_kv_cache_block_sizes,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
@@ -41,13 +45,9 @@ def build_offloading_config(
     parallel_config = vllm_config.parallel_config
     groups = tuple(
         OffloadingGroupConfig(
-            tokens_per_block=(
-                group.kv_cache_spec.block_size
-                * (
-                    parallel_config.decode_context_parallel_size
-                    if isinstance(group.kv_cache_spec, AttentionSpec)
-                    else 1
-                )
+            tokens_per_block=resolve_dcp_kv_block_size(
+                group.kv_cache_spec,
+                parallel_config.decode_context_parallel_size,
             ),
             layer_names=tuple(group.layer_names),
         )
@@ -91,8 +91,16 @@ def build_offloading_config(
         )
 
         tokens_per_block = unique_tokens_per_block.pop()
-        assert tokens_per_chunk_int % tokens_per_block == 0
-        blocks_per_chunk = tokens_per_chunk_int // tokens_per_block
+        if tokens_per_chunk_int % tokens_per_block == 0:
+            blocks_per_chunk = tokens_per_chunk_int // tokens_per_block
+        else:
+            raise ValueError(
+                f"'block_size'={tokens_per_chunk_int} in kv_connector_extra_config "
+                f"must be a multiple of the GPU KV cache block size "
+                f"({tokens_per_block} tokens). Use "
+                f"{round_up(tokens_per_chunk_int, tokens_per_block)} instead, or set "
+                f"'blocks_per_chunk' to express the chunk size in blocks."
+            )
 
     worker_kv_bytes_per_block = 0
     if kv_cache_config.num_blocks > 0 and kv_cache_config.kv_cache_tensors:
