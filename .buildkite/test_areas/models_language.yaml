@@ -68,6 +68,14 @@ steps:
   device: h200_35gb
   key: language-models-tests-hybrid
   timeout_in_minutes: 65
+  env:
+    # GitHub intermittently rejects HTTP/2 upload-pack requests from the CI
+    # image; force Git's smart protocol to HTTP/1.1. The NVIDIA jobs no longer
+    # fetch from git, but their AMD mirrors inherit this env and still build
+    # mamba/causal-conv1d from source.
+    GIT_CONFIG_COUNT: "1"
+    GIT_CONFIG_KEY_0: http.version
+    GIT_CONFIG_VALUE_0: HTTP/1.1
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
@@ -77,7 +85,7 @@ steps:
   - docker/Dockerfile
   commands:
     # The shared mamba/causal-conv1d dependencies are prebuilt into the test
-    # image (ticket 06); the verifier aborts early on any mismatch.
+    # image; the verifier aborts early on any mismatch.
     - python3 /opt/vllm-ci/language-deps/language_deps.py check
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language/generation/hybrid --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
