@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from .aiter import *
+from .cpu import *
 from .tilelang import *
 from .torch import *
 from .triton import *
@@ -14,6 +15,9 @@ __all__ = [
     "mhc_post_aiter",
     "mhc_fused_post_pre_aiter",
     "hc_head_fused_aiter",
+    "mhc_pre_cpu",
+    "mhc_post_cpu",
+    "hc_head_fused_cpu",
     "mhc_pre_tilelang",
     "mhc_post_tilelang",
     "mhc_fused_post_pre_tilelang",
