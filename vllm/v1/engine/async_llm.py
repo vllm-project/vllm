@@ -1064,6 +1064,9 @@ class AsyncLLM(EngineClient):
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
+    async def drop_peer(self, engine_id: str) -> None:
+        await self.engine_core.drop_peer_async(engine_id)
+
     async def wake_up(self, tags: list[str] | None = None) -> None:
         await self.engine_core.wake_up_async(tags)
 

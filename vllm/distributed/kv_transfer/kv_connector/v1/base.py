@@ -595,6 +595,16 @@ class KVConnectorBase_V1(ABC):
         # scheduler alive (e.g. extend has_unfinished_requests).
         return False
 
+    def drop_peer(self, engine_id: str) -> None:
+        """Notify the connector that a remote engine has died.
+
+        Called by the scheduler (router-driven) after all requests routed to
+        the peer have been aborted. Connectors that track per-peer state
+        should release it so a replacement reusing the engine id can
+        re-handshake. The default implementation is a no-op.
+        """
+        return
+
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
         """

@@ -343,7 +343,11 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # - finished P blocks awaiting WRITE completion, or
         # - pending D registrations the worker has not yet shipped, or
         # - newly finished blocks not yet shipped to P workers.
-        return bool(self._finished_request_blocks or self._push_pending_registrations)
+        return bool(
+            self._finished_request_blocks
+            or self._push_pending_registrations
+            or super().has_pending_push_work()
+        )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Clean up finished request blocks after push completes."""

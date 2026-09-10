@@ -185,6 +185,17 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def drop_peer(self, engine_id: str) -> None:
+        """Release all resources tied to a remote engine declared dead.
+
+        The router calls this (e.g. via the ``/drop_peer`` endpoint) when a
+        peer engine in a disaggregated deployment (e.g. a whole decode
+        instance) goes down: requests routed to the peer are aborted, their
+        deferred blocks freed, and the connector's per-peer state released.
+        """
+        ...
+
+    @abstractmethod
     async def wake_up(self, tags: list[str] | None = None) -> None:
         """Wake up the engine"""
         ...

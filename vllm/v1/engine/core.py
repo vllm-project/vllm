@@ -495,6 +495,16 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
+    def drop_peer(self, engine_id: str) -> None:
+        """Release all resources tied to a remote engine declared dead.
+
+        Called by the router (e.g. via the ``/drop_peer`` endpoint) when a
+        peer engine (whole decode instance) goes down. Aborts this engine's
+        requests routed to the peer, freeing deferred prefill blocks
+        immediately, and clears the connector's per-peer state.
+        """
+        self.scheduler.drop_peer(engine_id)
+
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""

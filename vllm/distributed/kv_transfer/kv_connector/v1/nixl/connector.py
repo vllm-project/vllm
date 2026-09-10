@@ -291,6 +291,10 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             return self.connector_scheduler.has_pending_push_work()
         return False
 
+    def drop_peer(self, engine_id: EngineId) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.drop_peer(engine_id)
+
     def shutdown(self):
         if self.connector_worker is not None:
             self.connector_worker.shutdown()
