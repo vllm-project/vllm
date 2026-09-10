@@ -517,7 +517,11 @@ class IterationStats:
 
         for event in events:
             if event.type == EngineCoreEventType.QUEUED:
-                req_stats.queued_ts = event.timestamp
+                # Streaming-input sessions re-queue the request for each
+                # prompt chunk; keep the queue interval anchored at the
+                # first QUEUED event (mirrors the SCHEDULED guard below).
+                if req_stats.queued_ts == 0.0:
+                    req_stats.queued_ts = event.timestamp
                 lora_states.request_waiting(req_id, lora_name)
             elif event.type == EngineCoreEventType.SCHEDULED:
                 if req_stats.scheduled_ts == 0.0:  # ignore preemptions
