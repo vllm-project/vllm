@@ -4,6 +4,7 @@
 from unittest.mock import patch
 
 import pytest
+from openai.types.responses import CustomTool, FunctionTool, ResponseCustomToolCall
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
@@ -16,13 +17,18 @@ from openai.types.responses.response_reasoning_item import (
     Summary,
 )
 
+from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.openai.responses.utils import (
     _construct_message_from_response_item,
+    build_response_output_items,
     construct_chat_messages_with_tool_call,
     construct_input_messages,
+    decode_custom_tool_input,
+    decode_custom_tool_input_prefix,
+    decode_reasoning_state,
+    encode_reasoning_state,
     should_continue_final_message,
 )
-from vllm.exceptions import VLLMValidationError
 
 
 def _single_chat_message(item):
@@ -224,9 +230,9 @@ class TestResponsesUtils:
             encrypted_content="TOP_SECRET_MESSAGE",
             status=None,
         )
-        with pytest.raises(VLLMValidationError) as exc_info:
-            construct_chat_messages_with_tool_call([item])
-        assert exc_info.value.parameter == "input"
+        formatted_item = _single_chat_message(item)
+        assert formatted_item["role"] == "assistant"
+        assert formatted_item["reasoning"] == ""
 
         output_item = ResponseOutputMessage(
             id="msg_bf585bbbe3d500e0",
@@ -246,6 +252,98 @@ class TestResponsesUtils:
         formatted_item = _single_chat_message(output_item)
         assert formatted_item["role"] == "assistant"
         assert formatted_item["content"] == "dongyi"
+
+
+class TestCustomToolsAndEncryptedReasoning:
+    def test_custom_tool_call_output_item(self):
+        tools = [
+            CustomTool(type="custom", name="emit_command", format={"type": "text"}),
+            FunctionTool(
+                type="function", name="get_weather", parameters={}, strict=None
+            ),
+        ]
+        custom, function = build_response_output_items(
+            reasoning=None,
+            content=None,
+            tool_calls=[
+                FunctionCall(
+                    id="call_1", name="emit_command", arguments='{"input": "pwd"}'
+                ),
+                FunctionCall(
+                    id="call_2", name="get_weather", arguments='{"city": "Paris"}'
+                ),
+            ],
+            tools=tools,
+        )
+        assert isinstance(custom, ResponseCustomToolCall)
+        assert (custom.call_id, custom.input) == ("call_1", "pwd")
+        assert custom.id.startswith("ctc_")
+        assert isinstance(function, ResponseFunctionToolCall)
+        assert function.arguments == '{"city": "Paris"}'
+
+    def test_encrypted_reasoning_only_when_requested(self):
+        (plain,) = build_response_output_items(
+            reasoning="think", content=None, tool_calls=None
+        )
+        assert plain.encrypted_content is None
+        (encrypted,) = build_response_output_items(
+            reasoning="think", content=None, tool_calls=None, encrypted_reasoning=True
+        )
+        assert decode_reasoning_state(encrypted.encrypted_content) == "think"
+        assert decode_reasoning_state("not-ours") is None
+
+    def test_custom_tool_history_replays_through_function_shim(self):
+        messages = construct_chat_messages_with_tool_call(
+            [
+                make_reasoning_item(content_text="Run pwd."),
+                ResponseCustomToolCall(
+                    type="custom_tool_call",
+                    id="ctc_1",
+                    call_id="call_exec",
+                    name="emit_command",
+                    input='echo "hi"',
+                ),
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_exec",
+                    "output": "hi",
+                },
+                {"role": "user", "content": "Continue"},
+            ]
+        )
+        assert messages == [
+            {
+                "role": "assistant",
+                "reasoning": "Run pwd.",
+                "tool_calls": [
+                    {
+                        "id": "call_exec",
+                        "type": "function",
+                        "function": {
+                            "name": "emit_command",
+                            "arguments": '{"input": "echo \\"hi\\""}',
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "content": "hi", "tool_call_id": "call_exec"},
+            {"role": "user", "content": "Continue"},
+        ]
+
+    def test_decode_custom_tool_input(self):
+        assert decode_custom_tool_input('{"input": "pwd"}') == "pwd"
+        assert decode_custom_tool_input('{"cmd": "pwd"}') == "pwd"
+        assert decode_custom_tool_input("pwd") == "pwd"
+
+    def test_decode_custom_tool_input_prefix(self):
+        assert decode_custom_tool_input_prefix('{"inp') == ""
+        assert decode_custom_tool_input_prefix('{"input": "ls \\"dir') == 'ls "dir'
+        assert decode_custom_tool_input_prefix('{"input": "a\\') == "a"
+        assert decode_custom_tool_input_prefix('{"input": "\\ud83d') == ""
+        assert (
+            decode_custom_tool_input_prefix('{"input": "\\ud83d\\ude00!"}')
+            == "\U0001f600!"
+        )
 
 
 class TestReasoningItemContentPriority:
@@ -351,29 +449,25 @@ class TestReasoningItemContentPriority:
         formatted = _single_chat_message(item)
         assert formatted["reasoning"] == ""
 
-    def test_encrypted_content_raises(self):
-        """Encrypted content should raise VLLMValidationError."""
-        item = ResponseReasoningItem(
-            id="reasoning_6",
-            summary=[
-                Summary(
-                    text="Some summary",
-                    type="summary_text",
-                )
-            ],
-            type="reasoning",
-            content=[
-                Content(
-                    text="Some content",
-                    type="reasoning_text",
-                )
-            ],
-            encrypted_content="ENCRYPTED",
-            status=None,
+    def test_content_preferred_over_encrypted_content(self):
+        item = make_reasoning_item(
+            content_text="Some content",
+            encrypted_content=encode_reasoning_state("Other trace"),
         )
-        with pytest.raises(VLLMValidationError) as exc_info:
-            construct_chat_messages_with_tool_call([item])
-        assert exc_info.value.parameter == "input"
+        assert _single_chat_message(item)["reasoning"] == "Some content"
+
+    def test_encrypted_content_restores_reasoning(self):
+        """A store=false client may replay nothing but the opaque blob."""
+        item = make_reasoning_item(
+            encrypted_content=encode_reasoning_state("Restored trace")
+        )
+        assert _single_chat_message(item)["reasoning"] == "Restored trace"
+
+    def test_foreign_encrypted_content_falls_back_to_summary(self):
+        item = make_reasoning_item(
+            summary_text="Some summary", encrypted_content="ENCRYPTED"
+        )
+        assert _single_chat_message(item)["reasoning"] == "Some summary"
 
     @patch("vllm.entrypoints.openai.responses.utils.logger")
     def test_summary_with_multiple_entries_uses_first(self, mock_logger):

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from openai.types.responses import CustomTool, ResponseCustomToolCall
+
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -11,6 +13,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     _StateType,
     split_delta,
 )
+from vllm.entrypoints.openai.responses.utils import decode_reasoning_state
 
 
 def _make_tool_call(
@@ -124,3 +127,75 @@ class TestProcessorCompoundDeltas:
         types = [e.type for e in events]
         assert "response.reasoning_text.delta" in types
         assert "response.output_text.delta" in types
+
+
+class TestSimpleItemShapes:
+    def test_done_items_match_final_shape(self):
+        processor = SimpleStreamingEventProcessor()
+        events = _run_through_processor(processor, DeltaMessage(reasoning="r"))
+        events += _run_through_processor(processor, DeltaMessage(content="c"))
+        events += processor.close_current()
+
+        added = [e.item for e in events if e.type == "response.output_item.added"]
+        done = [e.item for e in events if e.type == "response.output_item.done"]
+        assert [item.id for item in done] == [item.id for item in added]
+        assert done[0].id.startswith("rs_")
+        assert done[1].id.startswith("msg_")
+        assert "summary" not in done[1].model_dump()
+        assert done[0].encrypted_content is None
+
+    def test_encrypted_reasoning_on_done_item(self):
+        processor = SimpleStreamingEventProcessor(encrypt_reasoning=True)
+        events = _run_through_processor(processor, DeltaMessage(reasoning="secret"))
+        events += processor.close_current()
+        assert decode_reasoning_state(events[-1].item.encrypted_content) == "secret"
+
+    def test_arguments_done_emitted_without_deltas(self):
+        processor = SimpleStreamingEventProcessor()
+        events = _run_through_processor(
+            processor, DeltaMessage(tool_calls=[_make_tool_call(0, name="noop")])
+        )
+        events += processor.close_current()
+        assert [e.type for e in events] == [
+            "response.output_item.added",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+        ]
+        assert events[-1].item.id.startswith("fc_")
+
+
+class TestCustomToolStreaming:
+    def test_custom_tool_input_events(self):
+        processor = SimpleStreamingEventProcessor(
+            tools=[CustomTool(type="custom", name="emit_command")]
+        )
+        events = _run_through_processor(
+            processor,
+            DeltaMessage(
+                tool_calls=[
+                    _make_tool_call(0, name="emit_command", arguments='{"input": "ls ')
+                ]
+            ),
+        )
+        events += _run_through_processor(
+            processor,
+            DeltaMessage(tool_calls=[_make_tool_call(0, arguments='-la \\"x\\""}')]),
+        )
+        events += processor.close_current()
+
+        assert [e.type for e in events] == [
+            "response.output_item.added",
+            "response.custom_tool_call_input.delta",
+            "response.custom_tool_call_input.delta",
+            "response.custom_tool_call_input.done",
+            "response.output_item.done",
+        ]
+        done = events[-1].item
+        assert isinstance(done, ResponseCustomToolCall)
+        assert done.input == 'ls -la "x"'
+        assert "".join(e.delta for e in events[1:3]) == done.input
+        assert events[3].input == done.input
+        assert events[0].item.type == "custom_tool_call"
+        assert events[0].item.id == done.id
+        assert done.id.startswith("ctc_")
+        assert done.call_id.startswith("call_")

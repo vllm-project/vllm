@@ -507,15 +507,38 @@ def _detect_developer_role_support(chat_template: str) -> bool:
     return '"developer"' in chat_template or "'developer'" in chat_template
 
 
+DEVELOPER_BLOCK_LABEL = "Developer instructions:"
+
+
+def _label_developer_content(content: Any) -> Any:
+    if isinstance(content, str):
+        return f"{DEVELOPER_BLOCK_LABEL}\n{content}"
+    if isinstance(content, list):
+        for index, part in enumerate(content):
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                labelled = {**part, "text": f"{DEVELOPER_BLOCK_LABEL}\n{part['text']}"}
+                return [*content[:index], labelled, *content[index + 1 :]]
+        return [{"type": "text", "text": DEVELOPER_BLOCK_LABEL}, *content]
+    return content
+
+
 def _convert_developer_to_system(
     conversation: list[ConversationMessage],
 ) -> list[ConversationMessage]:
+    """Collapse ``developer`` to ``system``.
+
+    Alongside a system message the block is labelled, so the instruction tier
+    survives instead of reading as one more paragraph of the system prompt.
+    """
+    has_system = any(msg["role"] == "system" for msg in conversation)
     converted: list[ConversationMessage] = []
     for msg in conversation:
         if msg["role"] == "developer":
             new_msg = dict(msg)
             new_msg["role"] = "system"
             new_msg.pop("tools", None)
+            if has_system:
+                new_msg["content"] = _label_developer_content(new_msg.get("content"))
             converted.append(new_msg)  # type: ignore[arg-type]
         else:
             converted.append(msg)

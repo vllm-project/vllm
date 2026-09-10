@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from openai.types.responses import CustomTool
 from xgrammar import Grammar, StructuralTag
 from xgrammar.testing import _is_grammar_accept_string
 
@@ -448,6 +449,19 @@ def test_get_model_structural_tag_supports_named_tool_choice(
     )
 
     assert isinstance(tag, StructuralTag)
+
+
+def test_glm_4_7_forced_custom_tool_uses_function_shim():
+    tools = [CustomTool(type="custom", name="emit_command", description="Emit.")]
+    tag = get_model_structural_tag(
+        model="glm_4_7",
+        tools=tools,
+        tool_choice="required",
+        reasoning=False,
+    )
+
+    assert isinstance(tag, StructuralTag)
+    assert "emit_command" in tag.model_dump_json()
 
 
 @pytest.mark.parametrize(
