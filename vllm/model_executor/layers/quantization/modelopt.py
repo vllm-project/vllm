@@ -40,6 +40,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
@@ -100,7 +101,11 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
@@ -819,6 +824,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         quant_config: NVFP4 Quant Config
     """
 
+    supports_pre_processed_weights = True
+
     def __init__(
         self,
         quant_config: ModelOptNvFp4Config,
@@ -969,6 +976,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
+        if is_weights_pre_processed():
+            if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
+                raise RuntimeError(
+                    "pre-processed weights require FLASHINFER_TRTLLM backend, "
+                    f"moe backend, got {self.nvfp4_backend}"
+                )
+            self._restore_padded_moe_dims(layer)
+            self._build_moe_kernel(layer)
+            return
 
         # Use a single gscale for w13.
         if self.moe.is_act_and_mul and not torch.allclose(
@@ -1013,7 +1029,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
         replace_parameter(layer, "w2_input_scale", a2_scale)
 
-        # Setup modular kernel.
+        self._build_moe_kernel(layer)
+
+    def _build_moe_kernel(self, layer: RoutedExperts) -> None:
+        """Build the modular MoE kernel from the (already in-format) weights."""
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None
         self.moe_kernel = make_nvfp4_moe_kernel(
@@ -1024,6 +1043,16 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             routing_tables=layer._expert_routing_tables(),
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+
+    def _restore_padded_moe_dims(self, layer: RoutedExperts) -> None:
+        """Recover the padded ``moe_config`` dims from the exported weights."""
+        mc = layer.moe_config
+        padded_hidden = layer.w2_weight.shape[1]
+        if padded_hidden != mc.hidden_dim:
+            if mc.hidden_dim_unpadded is None:
+                mc.hidden_dim_unpadded = mc.hidden_dim
+            mc.hidden_dim = padded_hidden
+        mc.intermediate_size_per_partition = layer.w2_weight.shape[2] * 2
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         return make_nvfp4_moe_quant_config(
@@ -2438,6 +2467,12 @@ class ModelOptLinearMethod(LinearMethodBase):
         # NVFP4 methods.
         self.kernel: Any = None
 
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        # TODO(Isotr0py): support fp8/mxfp8 ModelOpt kernels transpose/repack.
+        w = self.spec.weight
+        return isinstance(w, QuantKey) and w.dtype == FP4_DTYPE
+
     def create_weights(
         self,
         layer,
@@ -2476,6 +2511,8 @@ class ModelOptLinearMethod(LinearMethodBase):
         expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer) -> None:
+        if is_weights_pre_processed():
+            return
         self.fmt.pre_process(layer)
         self.wkey.process(layer, WEIGHT)
         if self.akey:

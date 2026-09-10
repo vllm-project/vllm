@@ -88,6 +88,13 @@ def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     return kv_cache_dtype.endswith("per_token_head")
 
 
+def is_meta_module(module: torch.nn.Module) -> bool:
+    """Return True if module contains any meta parameters or buffers."""
+    return any(p.is_meta for p in module.parameters()) or any(
+        b.is_meta for b in module.buffers()
+    )
+
+
 def is_strictly_contiguous(t: torch.Tensor) -> bool:
     """
     Check if tensor is contiguous AND has no degenerate strides.
