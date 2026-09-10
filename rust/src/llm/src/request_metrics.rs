@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use vllm_engine_core_client::protocol::output::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreOutput,
 };
-use vllm_engine_core_client::protocol::stats::PrefillStats;
+use vllm_engine_core_client::protocol::stats::{CacheHitSource, PrefillStats};
 use vllm_metrics::{
     EngineLabels, Family, FinishedReasonLabels, HistogramMetric, METRICS, PromptTokenSourceLabels,
     U64Counter,
@@ -60,6 +60,7 @@ struct RequestMetricHandles {
     prompt_tokens_local_cache_hit: U64Counter,
     prompt_tokens_external_kv_transfer: U64Counter,
     prompt_tokens_cached: U64Counter,
+    prompt_tokens_cached_by_source: [U64Counter; CacheHitSource::ALL.len()],
     generation_tokens: U64Counter,
 
     // Request lifecycle counters and histograms.
@@ -208,6 +209,16 @@ impl RequestMetricsTracker {
         self.handles.prompt_tokens_local_cache_hit.inc_by(local_cache_hit);
         self.handles.prompt_tokens_external_kv_transfer.inc_by(external_kv_transfer);
         self.handles.prompt_tokens_cached.inc_by(prefill_stats.num_cached_tokens as u64);
+        let cached_by_source = &self.handles.prompt_tokens_cached_by_source;
+        cached_by_source[CacheHitSource::Device as usize].inc_by(local_cache_hit);
+        if prefill_stats.external_cached_token_sources.is_empty() {
+            // Older engines only supply the aggregate external count.
+            cached_by_source[CacheHitSource::External as usize].inc_by(external_kv_transfer);
+        } else {
+            for &(source, num_tokens) in &prefill_stats.external_cached_token_sources {
+                cached_by_source[source as usize].inc_by(num_tokens as u64);
+            }
+        }
     }
 
     /// Record request event counters through cached metric handles.
@@ -267,6 +278,7 @@ fn resolve_request_metric_handles(model_name: &str, engine: u32) -> RequestMetri
             ),
         ),
         prompt_tokens_cached: metrics.prompt_tokens_cached.get_or_create_owned(&labels),
+        prompt_tokens_cached_by_source: resolve_cache_source_metric_handles(model_name, engine),
         generation_tokens: metrics.generation_tokens.get_or_create_owned(&labels),
         request_success: metrics.request_success.clone(),
         request_prompt_tokens: metrics.request_prompt_tokens.get_or_create_owned(&labels),
@@ -303,6 +315,17 @@ fn resolve_request_metric_handles(model_name: &str, engine: u32) -> RequestMetri
             .get_or_create_owned(&labels),
         labels,
     }
+}
+
+pub(crate) fn resolve_cache_source_metric_handles(
+    model_name: &str,
+    engine: u32,
+) -> [U64Counter; CacheHitSource::ALL.len()] {
+    CacheHitSource::ALL.map(|source| {
+        METRICS.request.prompt_tokens_cached_by_source.get_or_create_owned(
+            &prompt_token_source_labels(model_name, engine, source.as_str()),
+        )
+    })
 }
 
 fn prompt_token_source_labels(
@@ -343,9 +366,93 @@ pub fn current_unix_timestamp_secs() -> f64 {
 #[cfg(test)]
 mod tests {
     use vllm_engine_core_client::protocol::output::{EngineCoreEvent, EngineCoreEventType};
-    use vllm_engine_core_client::protocol::stats::PrefillStats;
+    use vllm_engine_core_client::protocol::stats::{CacheHitSource, PrefillStats};
 
     use super::{RequestMetricsTracker, diff_or_zero};
+
+    #[test]
+    fn cache_sources_count_once_at_first_token_with_legacy_external_fallback() {
+        use vllm_engine_core_client::protocol::output::EngineCoreOutput;
+
+        let model = "cache-source-lifecycle".to_string();
+        let mut tracker = RequestMetricsTracker::new(model.clone(), 0, 100.0, 64, None, 1);
+        let mut output = EngineCoreOutput {
+            prefill_stats: Some(PrefillStats {
+                num_prompt_tokens: 64,
+                num_computed_tokens: 8,
+                num_cached_tokens: 56,
+                num_local_cached_tokens: 16,
+                num_external_cached_tokens: 40,
+                external_cached_token_sources: vec![
+                    (CacheHitSource::Host, 3),
+                    (CacheHitSource::Disk, 12),
+                    (CacheHitSource::Host, 5),
+                    (CacheHitSource::P2p, 16),
+                    (CacheHitSource::External, 4),
+                    (CacheHitSource::Disk, 0),
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let counts = |tracker: &RequestMetricsTracker| {
+            tracker.handles.prompt_tokens_cached_by_source.each_ref().map(|c| c.get())
+        };
+        tracker.observe_output(10.0, 100.2, &output);
+        assert_eq!(counts(&tracker), [0; 5]);
+
+        output.new_token_ids = vec![1];
+        tracker.observe_output(11.0, 101.2, &output);
+        let first_token = counts(&tracker);
+        assert_eq!(
+            first_token.iter().sum::<u64>(),
+            tracker.handles.prompt_tokens_cached.get()
+        );
+        output.events = Some(vec![EngineCoreEvent {
+            r#type: EngineCoreEventType::Preempted,
+            timestamp: 11.5,
+        }]);
+        tracker.observe_output(12.0, 102.2, &output);
+        assert_eq!(counts(&tracker), first_token);
+
+        let mut aborted = RequestMetricsTracker::new(model.clone(), 0, 103.0, 64, None, 1);
+        output.new_token_ids.clear();
+        aborted.observe_output(13.0, 103.2, &output);
+        aborted.record_finished(103.2, crate::FinishReason::Abort);
+        assert_eq!(counts(&aborted), first_token);
+
+        let mut legacy = RequestMetricsTracker::new(model, 0, 104.0, 64, None, 1);
+        output.prefill_stats.as_mut().unwrap().external_cached_token_sources.clear();
+        output.new_token_ids = vec![2];
+        legacy.observe_output(14.0, 104.2, &output);
+        expect_test::expect![[r#"
+            (
+                [
+                    16,
+                    8,
+                    12,
+                    16,
+                    4,
+                ],
+                [
+                    32,
+                    8,
+                    12,
+                    16,
+                    44,
+                ],
+            )
+        "#]]
+        .assert_debug_eq(&(first_token, counts(&legacy)));
+        assert_eq!(
+            counts(&legacy).iter().sum::<u64>(),
+            legacy.handles.prompt_tokens_cached.get()
+        );
+
+        let other_engine =
+            RequestMetricsTracker::new("cache-source-lifecycle".to_string(), 1, 100.0, 64, None, 1);
+        assert_eq!(counts(&other_engine), [0; 5]);
+    }
 
     #[test]
     fn tracker_updates_timing_state_across_prefill_decode_and_finish() {
