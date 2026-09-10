@@ -21,6 +21,7 @@ Only tensor and expert parallelism are supported; pipeline and data
 parallelism are rejected at launch.
 """
 
+import contextlib
 import fcntl
 import multiprocessing
 import os
