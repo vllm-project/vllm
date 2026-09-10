@@ -3,6 +3,8 @@
 
 //! Shared lowering from batched preprocessor output to per-item engine kwargs.
 
+use std::collections::HashMap;
+
 use itertools::izip;
 use llm_multimodal::{FieldLayout, PreprocessedEncoderInputs};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -22,6 +24,17 @@ pub(super) fn build_batched_items(
     uuids: Vec<Option<String>>,
     float_dtype: ModelDtype,
 ) -> Result<Vec<PreparedItem>> {
+    let tensors = tensor::collect_tensors(preprocessed, spec.primary_key(), float_dtype)?;
+    build_items(spec, tensors, hashes, uuids)
+}
+
+/// Apply the model's field layouts to either raw-media or metadata-only inputs.
+pub(super) fn build_items(
+    spec: &ResolvedMultimodalSpec,
+    tensors: HashMap<String, tensor::KwargValue>,
+    hashes: Vec<String>,
+    uuids: Vec<Option<String>>,
+) -> Result<Vec<PreparedItem>> {
     let len = hashes.len();
     if uuids.len() != len {
         bail_multimodal!(
@@ -29,7 +42,6 @@ pub(super) fn build_batched_items(
             uuids.len()
         );
     }
-    let tensors = tensor::collect_tensors(preprocessed, spec.primary_key(), float_dtype)?;
 
     let mut items = Vec::with_capacity(len);
     for (index, (hash, uuid)) in izip!(hashes, uuids).enumerate() {

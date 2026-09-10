@@ -424,7 +424,7 @@ fn to_template_openai_content(
                     Ok(TemplateContentPart::Text { text: text.clone() })
                 }
                 // All multimodal contents are normalized to `{ "type": <modality> }`.
-                ChatContentPart::ImageUrl { .. } => {
+                ChatContentPart::ImageUrl { .. } | ChatContentPart::ImageEmbeds { .. } => {
                     multimodal
                         .and_then(|multimodal| multimodal.image_token.as_ref())
                         .ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
@@ -458,7 +458,7 @@ fn to_template_string_content(
             for part in parts {
                 match part {
                     ChatContentPart::Text { text } => out.push_str(text),
-                    ChatContentPart::ImageUrl { .. } => {
+                    ChatContentPart::ImageUrl { .. } | ChatContentPart::ImageEmbeds { .. } => {
                         let image_token = multimodal
                             .and_then(|multimodal| multimodal.image_token.as_ref())
                             .ok_or(Error::UnsupportedMultimodalContent("image_url"))?;

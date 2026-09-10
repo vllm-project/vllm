@@ -333,6 +333,9 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                     detail: image_url.detail,
                     uuid,
                 }),
+                ContentPart::ImageEmbeds { image_embeds, uuid } => {
+                    Ok(ChatContentPart::ImageEmbeds { image_embeds, uuid })
+                }
                 ContentPart::VideoUrl { video_url, uuid } => Ok(ChatContentPart::VideoUrl {
                     video_url: video_url.url,
                     uuid,
@@ -944,6 +947,32 @@ mod tests {
                     strict: Some(true),
                 }]),
             )]
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_json_image_metadata() {
+        let request: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": [{
+                "type": "image_embeds",
+                "image_embeds": {"image_grid_thw": [1, 32, 48]},
+                "uuid": "encoder-image"
+            }]}]
+        }))
+        .unwrap();
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::user(vec![ChatContentPart::ImageEmbeds {
+                image_embeds: serde_json::json!({"image_grid_thw": [1, 32, 48]}),
+                uuid: "encoder-image".to_owned(),
+            }])]
         );
     }
 

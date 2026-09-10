@@ -57,7 +57,8 @@ pub enum ChatContentPart {
     },
     // ImageData...
     // VideoData...
-    // ImageEmbeds...
+    /// Metadata-only encoder-cache image reference.
+    ImageEmbeds { image_embeds: Value, uuid: String },
 }
 
 impl ChatContentPart {
@@ -105,6 +106,7 @@ impl ChatContentPart {
     pub(crate) fn as_text(&self) -> Result<&str> {
         match self {
             Self::Text { text } => Ok(text),
+            Self::ImageEmbeds { .. } => Err(Error::UnsupportedMultimodalContent("image_embeds")),
             Self::ImageUrl { .. } => Err(Error::UnsupportedMultimodalContent("image_url")),
             Self::VideoUrl { .. } => Err(Error::UnsupportedMultimodalContent("video_url")),
             Self::InputAudio { .. } => Err(Error::UnsupportedMultimodalContent("input_audio")),
@@ -121,7 +123,8 @@ impl ChatContentPart {
     pub(crate) fn is_multimodal(&self) -> bool {
         match self {
             Self::Text { .. } => false,
-            Self::ImageUrl { .. }
+            Self::ImageEmbeds { .. }
+            | Self::ImageUrl { .. }
             | Self::VideoUrl { .. }
             | Self::InputAudio { .. }
             | Self::AudioUrl { .. } => true,

@@ -40,6 +40,7 @@ mod audio;
 mod expand;
 mod image;
 mod item;
+mod metadata;
 mod tensor;
 mod video;
 
@@ -49,6 +50,7 @@ use self::expand::expand_prompt_token_ids;
 #[derive(Clone)]
 pub struct MultimodalModelInfo {
     context: MultimodalModelContext,
+    pub(crate) enable_mm_embeds: bool,
     image: Option<ModalitySupport>,
     video: Option<ModalitySupport>,
     audio: Option<AudioModalitySupport>,
@@ -403,6 +405,7 @@ impl MultimodalModelInfo {
         )?);
 
         Ok(Some(Self {
+            enable_mm_embeds: false,
             context,
             image,
             video,
@@ -551,6 +554,22 @@ pub(crate) async fn finalize_rendered_prompt(
         Prompt::TokenIds(token_ids) => token_ids,
     };
     let media_parts = extract_media_parts(request)?;
+    if media_parts
+        .iter()
+        .any(|part| matches!(part, MediaContentPart::ImageEmbeds { .. }))
+    {
+        let args = request.sampling_params.vllm_xargs.as_ref();
+        let remote_kv = args
+            .and_then(|args| args.get("kv_transfer_params"))
+            .and_then(|params| params.get("do_remote_prefill"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if !remote_kv && !args.is_some_and(|args| args.contains_key("ec_transfer_params")) {
+            bail_multimodal!(
+                "metadata-only image_embeds requires EC or remote-prefill KV transfer parameters"
+            );
+        }
+    }
     let prepared = info.prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype).await?;
 
     Ok((Prompt::TokenIds(prompt_token_ids), Some(prepared)))
@@ -585,6 +604,12 @@ fn extract_media_parts(request: &ChatRequest) -> Result<Vec<MediaContentPart>> {
                     detail: *detail,
                     uuid: uuid.clone(),
                 }),
+                ChatContentPart::ImageEmbeds { image_embeds, uuid } => {
+                    all_parts.push(MediaContentPart::ImageEmbeds {
+                        payload: image_embeds.clone(),
+                        uuid: Some(uuid.clone()),
+                    })
+                }
                 ChatContentPart::VideoUrl { video_url, uuid } => {
                     all_parts.push(MediaContentPart::VideoUrl {
                         url: video_url.clone(),
@@ -686,9 +711,33 @@ impl MultimodalModelInfo {
             return Ok(Vec::new());
         }
         self.validate_mm_limits(&media_parts)?;
-        let fetched = self.fetch_media(media_parts).await?;
-
+        let mut raw_media = Vec::new();
+        let mut image_metadata = Vec::new();
+        for part in media_parts {
+            match part {
+                MediaContentPart::ImageEmbeds { payload, uuid } => {
+                    image_metadata.push((payload, uuid));
+                }
+                part => raw_media.push(part),
+            }
+        }
         let mut prepared = Vec::new();
+        if !image_metadata.is_empty() {
+            if raw_media.iter().any(|part| {
+                matches!(
+                    part,
+                    MediaContentPart::ImageUrl { .. } | MediaContentPart::ImageData { .. }
+                )
+            }) {
+                bail_multimodal!("mixing image and image_embeds is not supported");
+            }
+            let support = self
+                .image
+                .as_ref()
+                .ok_or_else(|| multimodal!("image_embeds requires a supported image model"))?;
+            prepared.push(self.prepare_metadata_only(support, image_metadata, model_dtype)?);
+        }
+        let fetched = self.fetch_media(raw_media).await?;
         if !fetched.images.is_empty() {
             prepared
                 .push(self.prepare_images(fetched.images, fetched.image_uuids, model_dtype).await?);
@@ -880,7 +929,7 @@ mod tests {
         .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
     }
 
-    fn test_info(
+    pub(super) fn test_info(
         model_type: &str,
         config: serde_json::Value,
         tokenizer: TestTokenizer,
@@ -888,7 +937,7 @@ mod tests {
         test_info_with_limits(model_type, config, tokenizer, HashMap::new())
     }
 
-    fn llama4_info() -> MultimodalModelInfo {
+    pub(super) fn llama4_info() -> MultimodalModelInfo {
         let config = serde_json::json!({
             "model_type": "llama4",
             "image_token_index": LLAMA4_PATCH_ID,
