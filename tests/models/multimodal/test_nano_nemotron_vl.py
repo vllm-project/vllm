@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -11,7 +11,11 @@ from vllm.model_executor.models.nano_nemotron_vl import (
     NanoNemotronVLMultiModalProcessor,
     NemotronH_Nano_VL_V2,
 )
-from vllm.multimodal.parse import MultiModalDataItems, VideoProcessorItems
+from vllm.multimodal.parse import (
+    ImageEmbeddingItems,
+    MultiModalDataItems,
+    VideoProcessorItems,
+)
 
 
 class _TextOnlyMultiModalConfig:
@@ -180,3 +184,53 @@ def test_extract_audio_from_videos_rejects_oversized_audio():
 
     assert audio_items == []
     assert has_audio == [False]
+
+
+class _SizedEmbedding:
+    """Stand-in for a precomputed image embedding that exposes only its
+    feature count, which is all the prompt replacement needs."""
+
+    def __init__(self, feature_size: int) -> None:
+        self._feature_size = feature_size
+
+    def __len__(self) -> int:
+        return self._feature_size
+
+
+def test_prompt_repl_image_embeds_without_patch_count():
+    """Precomputed image embeddings carry no patch-count metadata, so the
+    nested replacement callback receives a list of None values. It must not
+    coerce None to int (which raises TypeError) and instead pass num_patches
+    through as None."""
+    feature_size = 384
+
+    image_items = object.__new__(ImageEmbeddingItems)
+    image_items.data = [_SizedEmbedding(feature_size)]
+
+    mm_items = Mock()
+    mm_items.get_items.return_value = image_items
+
+    tokenizer = Mock()
+    tokenizer.get_vocab.return_value = {"<image>": 0}
+
+    info = Mock()
+    info.get_tokenizer.return_value = tokenizer
+
+    hf_processor = Mock()
+
+    processor = object.__new__(NanoNemotronVLMultiModalProcessor)
+    processor.info = info
+
+    repl = processor._get_prompt_repl_image(
+        mm_items, hf_processor, {"image_embeds": [_SizedEmbedding(feature_size)]}
+    )
+
+    replacement = repl.replacement
+    assert callable(replacement)
+    # Must not raise TypeError: int() argument ... not 'NoneType'.
+    replacement(0)
+
+    hf_processor.get_image_repl.assert_called_once()
+    call_feature_size, call_num_patches = hf_processor.get_image_repl.call_args.args
+    assert call_feature_size == feature_size
+    assert call_num_patches is None
