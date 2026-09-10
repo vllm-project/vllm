@@ -156,15 +156,6 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     ############################################################
 
     def get_finished_count(self) -> int | None:
-        parallel_config = self._vllm_config.parallel_config
-        if (
-            self.kv_transfer_config.kv_role == "kv_producer"
-            and parallel_config.prefill_context_parallel_size > 1
-        ):
-            return (
-                parallel_config.tensor_parallel_size
-                * parallel_config.pipeline_parallel_size
-            )
         return None
 
     def get_num_new_matched_tokens(
@@ -241,13 +232,7 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        done_sending, done_recving = self.connector_worker.get_finished()
-        if (
-            self.kv_transfer_config.kv_role == "kv_producer"
-            and self.connector_worker.pcp_rank > 0
-        ):
-            done_sending.clear()
-        return done_sending, done_recving
+        return self.connector_worker.get_finished()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get block IDs that failed to load via NIXL."""
