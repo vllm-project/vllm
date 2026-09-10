@@ -210,6 +210,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+docker.cache" bash build_rust.sh && \
     if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 
+# build_rust.sh installed rustup here via rustup.rs; put it on PATH so the
+# child stage below finds it on disk instead of re-downloading it.
+ENV PATH="/root/.cargo/bin:${PATH}"
+
 # Relink with the exact Git-derived package version.
 FROM rust-build-cache AS rust-build
 
