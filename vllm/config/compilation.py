@@ -103,6 +103,38 @@ class CUDAGraphMode(enum.Enum):
         return self != CUDAGraphMode.NONE
 
 
+# Max size of the input tensor per world size per device capability
+# to use flashinfer fused allreduce.  Kept here rather than in
+# allreduce_rms_fusion.py (which never reads it back) so that config
+# resolution can look up the table without importing the fusion pass
+# module — importing it eagerly drags in flashinfer, whose import
+# initializes CUDA as a side effect.
+FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
+    90: {
+        2: 64,  # 64MB
+        4: 2,  # 2MB
+        8: 0.5,  # 0.5MB
+    },
+    100: {
+        2: 64,  # 64MB
+        4: 32,  # 32MB
+        8: 1,  # 1MB
+        16: 64,  # 64MB (mnnvl multi-node)
+    },
+    103: {
+        2: 64,  # 64MB
+        4: 64,  # 64MB
+        8: 4,  # 4MB
+        16: 64,  # 64MB (mnnvl multi-node)
+    },
+    107: {
+        2: 64,  # 64MB
+        4: 64,  # 64MB
+        8: 2,  # 2MB
+    },
+}
+
+
 @config
 class PassConfig:
     """Configuration for custom Inductor passes.
@@ -164,18 +196,8 @@ class PassConfig:
     float in MB.
     Unspecified will fallback to default values
     which are compute capability and world size dependent.
-        FI_ALLREDUCE_FUSION_MAX_SIZE_MB = {
-            90: {
-                2: 64,  # 64MB
-                4: 2,  # 2MB
-                8: 1,  # 1MB
-            },
-            100: {
-                2: 64,  # 64MB
-                4: 32,  # 32MB
-                8: 1,  # 1MB
-            },
-        }, where key is the device capability"""
+    See :data:`FI_ALLREDUCE_FUSION_MAX_SIZE_MB`, keyed by device
+    capability."""
     sp_min_token_num: int | None = None
     """The minimum number of tokens above which vllm should use
     sequence parallelism. Specified as an integer token count.
@@ -203,9 +225,6 @@ class PassConfig:
 
     @staticmethod
     def default_fi_allreduce_fusion_max_size_mb() -> dict[int, float]:
-        from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
-            FI_ALLREDUCE_FUSION_MAX_SIZE_MB,
-        )
         from vllm.platforms import current_platform
 
         if not current_platform.is_cuda():
