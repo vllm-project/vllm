@@ -7,8 +7,7 @@ set -e
 # Default values
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
 DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
-# NOTE: This is currently targeting the nv_dev branch tip due to sm120 support
-DEEPGEMM_GIT_REF="8b1392b978f5a03c828dd1711090d7fb50958b8a"
+DEEPGEMM_GIT_REF="39d8c4cacc2c07c1fa9921c6c29c6a8a2da75359"
 WHEEL_DIR=""
 
 # Parse command line arguments
@@ -91,6 +90,7 @@ pushd "$INSTALL_DIR/deepgemm"
 
 # Checkout the specific reference
 git checkout "$DEEPGEMM_GIT_REF"
+git submodule update --init --recursive
 
 # Clean previous build artifacts
 # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)

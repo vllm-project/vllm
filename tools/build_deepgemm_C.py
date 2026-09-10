@@ -50,7 +50,7 @@ includes = [
     str(src / "deep_gemm/include"),
     str(src / "third-party/cutlass/include"),
     str(src / "third-party/cutlass/tools/util/include"),
-    str(src / "third-party/fmt/include"),
+    str(src / "third-party/deep_jit/include"),
     *cpp_extension.include_paths(device_type="cuda"),
 ]
 
@@ -77,7 +77,6 @@ cmd = [
     "-lc10",
     "-lc10_cuda",
     "-lcudart",
-    "-lnvrtc",
     "-o",
     str(out / f"_C{info['EXT_SUFFIX']}"),
 ]

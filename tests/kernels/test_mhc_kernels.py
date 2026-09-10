@@ -9,9 +9,11 @@ import torch.nn.functional as F
 
 import vllm.model_executor.kernels.mhc  # noqa: F401
 import vllm.model_executor.layers.mhc as mhc_layers
+import vllm.models.deepseek_v4_1.nvidia.ops.mega_mhc as mega_mhc_ops
 from vllm.model_executor.kernels.mhc.tilelang import (
     _tilelang_hc_prenorm_gemm,
     _torch_hc_prenorm_gemm,
+    mhc_post_tilelang,
     mhc_pre_delayed_tilelang,
 )
 from vllm.model_executor.kernels.mhc.torch import mhc_pre_delayed_torch
@@ -31,6 +33,10 @@ from vllm.models.deepseek_v4.nvidia.model import (
 )
 from vllm.models.deepseek_v4_1.nvidia.model import (
     DeepseekV4DecoderLayer as DeepseekV41DecoderLayer,
+)
+from vllm.models.deepseek_v4_1.nvidia.ops.mega_mhc import (
+    is_mega_mhc_supported,
+    mhc_shifted_post_pre_deep_gemm,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -289,6 +295,12 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         "vllm.models.deepseek_v4_1.nvidia.model.mhc_pre_delayed_tilelang",
         reference,
     )
+    monkeypatch.setattr(mega_mhc_ops, "mhc_pre_delayed_tilelang", reference)
+    monkeypatch.setattr(
+        mega_mhc_ops,
+        "is_mega_mhc_supported",
+        lambda hidden_size, hc_mult: False,
+    )
     expected = decoder(x, positions, None, **kwargs)
     for result, ref in zip(actual, expected, strict=True):
         torch.testing.assert_close(result, ref, atol=2e-2, rtol=1e-2)
@@ -306,6 +318,82 @@ def test_mhc_pre_delayed_custom_op_supports_compile(carried):
     torch.library.opcheck(
         torch.ops.vllm.mhc_pre_delayed_tilelang.default,
         (x, fn, scale, base, 1e-20, 1e-6, 1e-6, 2.0, 20, pre_mix),
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="DeepGEMM Mega mHC requires SM100-family CUDA",
+)
+def test_deep_gemm_mega_mhc_correctness():
+    num_tokens, hidden_size, hc_mult = 17, 7168, 4
+    if not is_mega_mhc_supported(hidden_size, 4):
+        pytest.skip("DeepGEMM Mega mHC is not available")
+
+    x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    residual = torch.randn(
+        num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE
+    )
+    previous_mix = torch.rand(num_tokens, hc_mult, device=DEVICE)
+    post_mix = torch.rand(num_tokens, hc_mult, 1, device=DEVICE)
+    res_mix = torch.rand(num_tokens, hc_mult, hc_mult, device=DEVICE)
+    fn = torch.randn(24, hc_mult * hidden_size, device=DEVICE) * 0.01
+    scale = torch.randn(3, device=DEVICE) * 0.1
+    base = torch.randn(24, device=DEVICE) * 0.1
+    norm_weight = torch.empty(
+        hidden_size, dtype=torch.bfloat16, device=DEVICE
+    ).uniform_(0.9, 1.1)
+
+    expected_residual = mhc_post_tilelang(x, residual, post_mix, res_mix)
+    (
+        expected_post_mix,
+        expected_res_mix,
+        expected_y_bf16,
+        expected_previous_mix,
+    ) = mhc_pre_delayed_tilelang(
+        expected_residual,
+        fn,
+        scale,
+        base,
+        2e-5,
+        3e-4,
+        2e-6,
+        1.25,
+        10,
+        pre_mix=previous_mix,
+        norm_weight=norm_weight,
+        norm_eps=7e-6,
+    )
+    (
+        actual_residual,
+        actual_post_mix,
+        actual_res_mix,
+        actual_y_bf16,
+        actual_previous_mix,
+    ) = mhc_shifted_post_pre_deep_gemm(
+        x,
+        residual,
+        previous_mix,
+        post_mix,
+        res_mix,
+        fn,
+        scale,
+        base,
+        2e-5,
+        3e-4,
+        1.25,
+        2e-6,
+        10,
+        norm_weight,
+        7e-6,
+    )
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(actual_residual, expected_residual, atol=1e-5, rtol=1e-2)
+    torch.testing.assert_close(actual_post_mix, expected_post_mix, atol=1e-6, rtol=1e-3)
+    torch.testing.assert_close(actual_res_mix, expected_res_mix, atol=1e-6, rtol=1e-3)
+    torch.testing.assert_close(actual_y_bf16, expected_y_bf16, atol=1e-5, rtol=1e-2)
+    torch.testing.assert_close(
+        actual_previous_mix, expected_previous_mix, atol=1e-6, rtol=1e-3
     )
 
 
