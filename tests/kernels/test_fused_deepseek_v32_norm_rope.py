@@ -503,6 +503,126 @@ def test_fused_norm_rope_ds_mla(num_tokens: int):
     assert (topk == 7).all(), "topk buffer should be untouched (no indexer)"
 
 
+E2M1_MAGNITUDES = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+
+
+def quantize_to_e2m1(x: torch.Tensor) -> torch.Tensor:
+    """Round to nearest e2m1, saturating to +-6 like cvt.rn.satfinite.e2m1x2.f32."""
+    mags = torch.tensor(E2M1_MAGNITUDES, dtype=torch.float32, device=x.device)
+    a = x.float().abs().clamp_max(6.0)
+    mids = (mags[:-1] + mags[1:]) / 2
+    code = torch.bucketize(a, mids, right=True)
+    on_tie = (a.unsqueeze(-1) == mids).any(dim=-1)
+    tie_code = torch.bucketize(a, mids, right=False)
+    code = torch.where(on_tie, tie_code + (tie_code & 1), code)
+    return (torch.signbit(x).to(torch.uint8) << 3) | code.to(torch.uint8)
+
+
+def nvfp4_sf_byte(s: torch.Tensor) -> torch.Tensor:
+    """Scale-factor byte permutation shared with FlashMLA: 8*(s&3) + (s>>2)."""
+    return 8 * (s % 4) + (s // 4)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability(100),
+    reason="nvfp4_ds_mla requires SM100 (Blackwell)",
+)
+@pytest.mark.parametrize("num_tokens", [1, 4, 17, 512])
+def test_fused_norm_rope_nvfp4_ds_mla(num_tokens: int):
+    """nvfp4_ds_mla MLA cache layout (FlashMLA sparse, SM100 only).
+
+    Per-token 352-byte entry: 256 B of 512 e2m1 NoPE packed 2/byte (low nibble
+    = even element) | 64 B unscaled e4m3 RoPE | 32 B byte-permuted e4m3 tile
+    scales, one per 16 NoPE elements.
+    """
+    torch.manual_seed(5)
+    dev = "cuda"
+    max_pos = 8192
+    pos = torch.arange(num_tokens, device=dev, dtype=torch.int64) % max_pos
+
+    q_c = torch.randn(num_tokens, Q_LORA, device=dev, dtype=torch.bfloat16)
+    kv_c = torch.randn(num_tokens, KV_LORA, device=dev, dtype=torch.bfloat16)
+    # Tile 0 is deliberately low-magnitude: amax/6 lands between two e4m3
+    # subnormals (spaced a flat 2^-9 there), so round-to-nearest picks a scale
+    # BELOW amax/6 and the tile's peak saturates at +-6. Asserted below, so a
+    # future change to the scale rule cannot silently stop covering this.
+    # amax must land in (6, 9) * 2^-9 after rms_norm; 7.5 sits mid-band, with
+    # margin for the per-token RMS to vary.
+    kv_c[:, :16] = (
+        7.5 * (2.0**-9) * torch.linspace(0.2, 1.0, 16, device=dev, dtype=torch.bfloat16)
+    )
+    k_pe = torch.randn(num_tokens, ROPE_DIM, device=dev, dtype=torch.bfloat16)
+    qw = torch.randn(Q_LORA, device=dev, dtype=torch.bfloat16)
+    kvw = torch.ones(KV_LORA, device=dev, dtype=torch.bfloat16)
+    mla_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
+
+    bs = max_pos
+    mla_cache = torch.zeros(1, bs, 352, device=dev, dtype=torch.uint8)
+    slot = torch.arange(num_tokens, device=dev, dtype=torch.int64)
+    topk = torch.full((num_tokens, 2048), 7, device=dev, dtype=torch.int32)
+
+    q_out = K.fused_norm_rope(
+        pos,
+        q_c,
+        qw,
+        EPS,
+        kv_c,
+        kvw,
+        EPS,
+        k_pe,
+        mla_cos_sin,
+        None,
+        None,
+        None,
+        EPS,
+        None,
+        topk,
+        slot_mapping=slot,
+        indexer_k_cache=None,
+        mla_kv_cache=mla_cache,
+        mla_kv_cache_dtype="nvfp4_ds_mla",
+        mla_k_scale=None,
+        has_indexer=False,
+        index_rope_interleave=False,
+    )
+
+    assert_bf16(q_out, rms_norm(q_c, qw), "q_c rmsnorm (nvfp4_ds_mla)")
+
+    kv_ref = rms_norm(kv_c, kvw)  # [N, 512] fp32
+    kpe_ref = rope(k_pe.float(), pos, mla_cos_sin, interleave=True)  # [N, 64]
+    tiles = kv_ref.view(num_tokens, 32, 16)
+    amax = tiles.abs().amax(dim=-1)
+    scale_target = torch.clamp_min(amax / 6.0, 2.0**-9)
+    ref_scale = scale_target.to(FP8)  # round-to-nearest
+
+    # The crafted tile must actually exercise the saturating path.
+    assert (ref_scale[:, 0].float() < scale_target[:, 0]).all(), (
+        "tile 0 should round its scale DOWN; adjust the crafted magnitude"
+    )
+    assert (amax[:, 0] / ref_scale[:, 0].float() > 6.0).all(), (
+        "tile 0 should saturate e2m1; adjust the crafted magnitude"
+    )
+
+    ref_codes = quantize_to_e2m1(tiles / ref_scale.float().unsqueeze(-1))
+    ref_codes = ref_codes.reshape(num_tokens, KV_LORA)
+
+    cache = mla_cache[0, :num_tokens]  # [N, 352] uint8
+    packed = cache[:, : KV_LORA // 2]
+    got_codes = torch.stack([packed & 0xF, packed >> 4], dim=-1)
+    got_codes = got_codes.reshape(num_tokens, KV_LORA)  # low nibble = even elem
+    torch.testing.assert_close(got_codes, ref_codes, rtol=0, atol=0)
+
+    got_rope = cache[:, KV_LORA // 2 : KV_LORA // 2 + ROPE_DIM].view(FP8)
+    assert_fp8(got_rope, kpe_ref.to(FP8), "nvfp4_ds_mla RoPE e4m3")
+
+    perm = nvfp4_sf_byte(torch.arange(32, device=dev))
+    got_scale = cache[:, KV_LORA // 2 + ROPE_DIM :].view(FP8)[:, perm]
+    torch.testing.assert_close(got_scale.float(), ref_scale.float(), rtol=0, atol=0)
+
+    # No indexer on this call: top-k buffer must be untouched.
+    assert (topk == 7).all(), "topk buffer should be untouched (no indexer)"
+
+
 def test_fused_norm_rope_supports_large_token_count():
     """Keep the token count off CUDA grid-y at its 65,536-block boundary."""
     num_tokens = 65536

@@ -547,9 +547,10 @@ def fused_norm_rope(
     if mla_kv_cache is not None:
         mla_block_size = mla_kv_cache.shape[1]
         if mla_cache_ds_mla:
-            # 656-byte custom layout addressed in bytes; mla_cache_ptr is the
-            # 1-byte fp8 view, so block/entry strides are byte offsets and the
-            # fp32/bf16 views share the same buffer.
+            # Custom byte-addressed layout: 656 B/token for fp8_ds_mla, 352 B
+            # for nvfp4_ds_mla. mla_cache_ptr is the 1-byte fp8 view, so
+            # block/entry strides are byte offsets and the fp32/bf16 views
+            # (fp8_ds_mla only) share the same buffer.
             assert kv_dim == 512, "ds_mla layouts require kv_lora_rank == 512"
             mla_num_tiles = kv_dim // 16 if mla_cache_nvfp4 else kv_dim // 128
             u8_cache = mla_kv_cache.view(torch.uint8)
