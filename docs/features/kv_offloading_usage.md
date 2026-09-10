@@ -121,6 +121,18 @@ The filesystem and object-store tiers can publish hash-only `BlockStored` KV eve
 
 Set the optional `locality` tier field to `LOCAL` or `REMOTE` to describe the tier's storage location relative to the publishing vLLM instance. `LOCAL` marks storage local to that instance, while `REMOTE` marks storage that is not local to it. When the setting is omitted, locality is unspecified. vLLM does not infer it from the tier type, so an `obj` tier is not implicitly `REMOTE`. A KV event includes `locality` only when the tier explicitly configures it. This metadata describes the tier property without implying that a consumer can already route requests to its blocks.
 
+### Model Configuration and Cache Reuse
+
+The filesystem, object-store and P2P tiers include a model configuration fingerprint when identifying compatible KV blocks. It captures the Hugging Face text configuration, model computation dtype and construction-time `max_model_len` before loading the model. The metadata fields `_commit_hash`, `_name_or_path` and `transformers_version` are excluded.
+
+Changing RoPE settings can change the cached keys even with identical weights and token IDs. Such changes use a separate filesystem directory or object-key namespace. The same configuration can reuse its namespace across restarts. This separation also applies to canonical cache layouts: rearranging the stored tensors does not make different positional encodings compatible.
+
+The fingerprint conservatively includes the full text configuration. Changes to output-related HF fields, or to `max_model_len` when it only acts as a limit for a particular model, can therefore cause extra cache misses. Keep these settings consistent across instances intended to share cached prefixes. The fingerprint identifies configuration; it does not verify weight contents or every runtime quantization or kernel choice.
+
+When upgrading from a version without this fingerprint, filesystem and object-store tiers start with a cold namespace. Existing files and objects remain intact and are not read as a fallback. Plan for the initial prefill and storage cost while the new namespace fills.
+
+P2P uses the same configuration in its handshake fingerprint. When both peers advertise nonempty fingerprints, a mismatch is rejected, including between old and new versions with different fingerprint fields. During a rolling upgrade, route transfers between peers with matching fingerprints. The existing compatibility behavior still accepts an absent peer fingerprint, so this change does not guarantee isolation from every legacy or custom peer.
+
 ### Filesystem (FS)
 
 The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
@@ -138,7 +150,7 @@ Each thread group prefers its own queue but pulls from the other when its primar
 
 #### On-Disk Layout
 
-Under `root_dir`, vLLM creates a subdirectory `<model>_<digest>`, where `<model>` is the model name with `/` replaced by `_` (so HuggingFace IDs like `meta-llama/Llama-3-8B` don't nest), and `<digest>` is a short SHA256 prefix derived from the run configuration (model, block size, parallelism, dtype, etc.). Runs with the same configuration share the same subdirectory; runs with different configurations live side-by-side under the same `root_dir` without colliding.
+Under `root_dir`, vLLM creates a subdirectory `<model>_<digest>`, where `<model>` is the model name with `/` replaced by `_` (so HuggingFace IDs like `meta-llama/Llama-3-8B` don't nest), and `<digest>` is a short SHA256 prefix derived from the run configuration (model, block size, parallelism, dtype, [model configuration fingerprint](#model-configuration-and-cache-reuse), etc.). Runs with the same configuration share the same subdirectory; runs with different configurations live side-by-side under the same `root_dir` without colliding.
 
 Inside that subdirectory, blocks are sharded across hash-prefix subdirectories to limit directory fan-out:
 
@@ -156,7 +168,7 @@ Inside that subdirectory, blocks are sharded across hash-prefix subdirectories t
 
 #### Cross-Process Sharing
 
-KV cache sharing between multiple vLLM instances using the same `root_dir` (e.g., via a shared PVC) works by default: `NONE_HASH` (the chain-hash seed for block content hashes) is derived from a fixed default seed, so identical token content produces identical block filenames across instances. To use a custom shared seed instead, set the `PYTHONHASHSEED` environment variable to the same value on every instance.
+KV cache sharing between multiple vLLM instances using the same cache namespace under `root_dir` (e.g., via a shared PVC) works by default: `NONE_HASH` (the chain-hash seed for block content hashes) is derived from a fixed default seed, so identical token content produces identical block filenames across instances. See [Model Configuration and Cache Reuse](#model-configuration-and-cache-reuse) for namespace compatibility. To use a custom shared seed instead, set the `PYTHONHASHSEED` environment variable to the same value on every instance.
 
 The exception is the non-cryptographic `xxhash` and `xxhash_cbor` values of `--prefix-caching-hash-algo`, which seed `NONE_HASH` randomly per process so the seed stays unpredictable. Sharing a cache across instances with those algorithms requires setting the same `PYTHONHASHSEED` on every instance.
 
@@ -167,6 +179,8 @@ PYTHONHASHSEED=<shared-value> vllm serve ...
 ### Object Store (OBJ)
 
 The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object store through the NIXL OBJ backend.
+
+The [model configuration and migration rules](#model-configuration-and-cache-reuse) also apply to object-key namespaces within the configured bucket and prefix.
 
 | Key | Required | Default | Notes |
 | --- | --- | --- | --- |
@@ -188,11 +202,13 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `region` | no | `""` | Bucket region, if the endpoint requires one. |
 | `ca_bundle` | no | `""` | CA bundle path for TLS verification. |
 
-Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) behavior applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content; set a shared `PYTHONHASHSEED` if you want a custom seed. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
+Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) behavior applies to shared buckets as well, so instances sharing a bucket, prefix and cache namespace produce identical keys for identical content; set a shared `PYTHONHASHSEED` if you want a custom seed. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
 
 ### P2P (Including P/D)
 
 The P2P tier (`type: "p2p"`) shares completed KV blocks between vLLM instances over RDMA via NIXL. Each instance binds a control socket on `host:port` and exchanges blocks directly with peers — no shared filesystem required.
+
+Peers must satisfy the [configuration fingerprint compatibility rules](#model-configuration-and-cache-reuse), including the rolling-upgrade limitations, as well as the block-hash seed check below.
 
 Block content hashes must match across instances for peers to exchange blocks (see [Cross-Process Sharing](#cross-process-sharing)). This works by default via the deterministic `NONE_HASH` seed, so setting `PYTHONHASHSEED` is optional. If you do set it, it must be the same value on all nodes. Each peer's effective seed is verified during the connect handshake — a peer advertising a different seed is rejected. With the `xxhash`/`xxhash_cbor` algorithms the seed is random per process, so `PYTHONHASHSEED` must be set on every peer or the handshake rejects them.
 
@@ -304,7 +320,7 @@ Implement `SecondaryTierManager` (`vllm/v1/kv_offload/tiering/base.py`) in your 
 - For single-tier (CPU-only) setups, set `cpu_bytes_to_use` larger than the aggregate GPU KV cache. Because offloading is immediate, a smaller CPU tier just mirrors what the GPU already holds and adds no hit rate.
 - `block_size` / `blocks_per_chunk`: larger offloaded chunks reduce per-block bookkeeping overhead but increase the granularity of lookups.
 - FS thread counts: tune `n_read_threads` and `n_write_threads` to the parallelism your storage can sustain. Reads are latency-sensitive on the prefill path, so prefer more read threads when prefill hit rates are high.
-- Sharing `root_dir` across runs: runs with the same model, `block_size`, parallelism layout, and dtype share files under the same `<digest>` subdirectory. Changing any of these produces a new subdirectory; old ones are orphaned but harmless. Delete them to reclaim disk.
+- Sharing `root_dir` across runs: runs whose recorded configuration produces the same `<digest>` share files. Configuration changes that alter the digest create a separate subdirectory; see [Model Configuration and Cache Reuse](#model-configuration-and-cache-reuse). Supported canonical layouts can normalize parallelism differences while retaining model configuration identity. Old directories remain intact; remove them when they are no longer needed to reclaim disk.
 
 ## Per-Request Selective Offload
 
