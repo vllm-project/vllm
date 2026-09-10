@@ -177,7 +177,7 @@ def _triton_gemm_config_is_tuned(config_name: str, N: int, K: int) -> bool:
 
 
 def _ck_gemm_shape_is_tuned(
-    N: int, K: int, q_dtype_w: torch.dtype, csv_attr: str
+    N: int, K: int, q_dtype_w: torch.dtype | None, csv_attr: str
 ) -> bool:
     l_m = (
         [1, 2, 4]
@@ -188,15 +188,21 @@ def _ck_gemm_shape_is_tuned(
     try:
         from aiter.ops.gemm_op_a8w8 import (
             AITER_CONFIGS,
+            get_CKGEMM_config,
             get_GEMM_config_with_quant_type,
         )
 
         csv_path = getattr(AITER_CONFIGS, csv_attr)
-        return any(
-            get_GEMM_config_with_quant_type(M, N, K, q_dtype_w, csv_path) is not None
-            for M in l_m
+        # CSVs without a q_dtype_w column are keyed on (gfx, cu_num, M, N, K).
+        lookup = (
+            (lambda M: get_CKGEMM_config(M, N, K, csv_path))
+            if q_dtype_w is None
+            else (
+                lambda M: get_GEMM_config_with_quant_type(M, N, K, q_dtype_w, csv_path)
+            )
         )
-    except (AttributeError, ImportError, OSError):
+        return any(lookup(M) is not None for M in l_m)
+    except (AttributeError, ImportError, KeyError, OSError):
         logger.warning_once(
             "Could not read aiter CK GEMM configs from AITER_CONFIGS.%s; "
             "treating all shapes as untuned.",
@@ -3162,17 +3168,13 @@ class rocm_aiter_ops:
         return _ck_gemm_shape_is_tuned(N, K, q_dtype_w, "AITER_CONFIG_GEMM_A8W8_FILE")
 
     @staticmethod
+    @functools.cache
     def is_blockscale_bpreshuffle_tuned(n: int, k: int) -> bool:
         """Whether (N, K) has a tuned aiter blockscale bpreshuffle config."""
         if not current_platform.is_rocm():
             return False
-        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
-
-        csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
-        gfx = aiter_gemm_a8w8_ops.get_gfx()
-        cu_num = aiter_gemm_a8w8_ops.get_cu_num()
-        return (n, k) in _load_gemm_tuned_configs(
-            csv_path, (("gfx", gfx), ("cu_num", cu_num)), key_cols=("N", "K")
+        return _ck_gemm_shape_is_tuned(
+            n, k, None, "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE"
         )
 
     @staticmethod
