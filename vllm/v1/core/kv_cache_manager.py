@@ -183,7 +183,6 @@ class KVCacheManager:
                     manager.fine_grained_prefix_cache = True
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
-        self.hisparse_coordinator = self.coordinator.hisparse_coordinator
         self.retained_hit_group_ids = tuple(
             manager.kv_cache_group_id
             for manager in self.coordinator.single_type_managers
@@ -378,14 +377,20 @@ class KVCacheManager:
         apply_admission_cap: bool = False,
     ) -> bool:
         """Check that mandatory allocations fit in their pools."""
-        if not self.hisparse_coordinator.can_allocate_host_blocks(
-            request_id,
-            num_tokens,
-            new_computed_blocks,
-            total_computed_tokens,
-            num_local_computed_tokens,
-        ):
-            return False
+        for i, manager in enumerate(self.coordinator.single_type_managers):
+            if manager.block_pool is self.block_pool:
+                continue
+            required = manager.get_num_blocks_to_allocate(
+                request_id,
+                num_tokens,
+                new_computed_blocks[i],
+                total_computed_tokens,
+                num_local_computed_tokens,
+                num_tokens_main_model,
+                apply_admission_cap=apply_admission_cap,
+            )
+            if required > manager.block_pool.get_num_free_blocks():
+                return False
 
         required = self.coordinator.get_num_blocks_to_allocate(
             request_id,
@@ -668,13 +673,24 @@ class KVCacheManager:
         return self.coordinator.pop_blocks_for_free(request.request_id)
 
     def free_blocks(self, blocks: Iterable[KVCacheBlock]) -> None:
-        """Return blocks to their owning physical pool."""
-        device_blocks = (
-            self.hisparse_coordinator.free_host_blocks(blocks)
-            if self.hisparse_coordinator.has_host_cache
-            else blocks
-        )
-        self.block_pool.free_blocks(device_blocks)
+        """Return deferred blocks to their owning pool."""
+        remaining = list(blocks)
+        for pool in dict.fromkeys(
+            manager.block_pool for manager in self.coordinator.single_type_managers
+        ):
+            if pool is self.block_pool:
+                continue
+            owned: list[KVCacheBlock] = []
+            other: list[KVCacheBlock] = []
+            for block in remaining:
+                belongs = (
+                    block.block_id < len(pool.blocks)
+                    and pool.blocks[block.block_id] is block
+                )
+                (owned if belongs else other).append(block)
+            pool.free_blocks(owned)
+            remaining = other
+        self.block_pool.free_blocks(remaining)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
@@ -682,10 +698,7 @@ class KVCacheManager:
         Args:
             block_ids: Set of block IDs to evict from cache.
         """
-        # Connector eviction IDs refer to the persistent/source domain. Other
-        # pools can reuse the same numeric IDs for ephemeral allocations.
-        if not self.hisparse_coordinator.evict_host_blocks(block_ids):
-            self.block_pool.evict_blocks(block_ids)
+        self.block_pool.evict_blocks(block_ids)
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -696,9 +709,10 @@ class KVCacheManager:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        if not self.hisparse_coordinator.reset_prefix_cache():
-            return False
-        if not self.block_pool.reset_prefix_cache():
+        pools = dict.fromkeys(
+            manager.block_pool for manager in self.coordinator.single_type_managers
+        )
+        if not all([pool.reset_prefix_cache() for pool in pools]):
             return False
         if self.log_stats:
             assert self.prefix_cache_stats is not None
@@ -745,8 +759,10 @@ class KVCacheManager:
         Returns:
             A list of KV cache events.
         """
-        events = self.block_pool.take_events()
-        events.extend(self.hisparse_coordinator.take_events())
+        pools = dict.fromkeys(
+            manager.block_pool for manager in self.coordinator.single_type_managers
+        )
+        events = [event for pool in pools for event in pool.take_events()]
         for event in events:
             if not isinstance(event, BlockStored):
                 continue
@@ -878,13 +894,8 @@ class KVCacheManager:
     def take_new_block_ids(self) -> list[int]:
         """Drain and return new attention block IDs for zeroing."""
         ids: list[int] = []
-        for group, mgr in zip(
-            self.kv_cache_config.kv_cache_groups,
-            self.coordinator.single_type_managers,
-        ):
-            new_ids = mgr.take_new_block_ids()
-            if not group.host_resident:
-                ids.extend(new_ids)
+        for mgr in self.coordinator.single_type_managers:
+            ids.extend(mgr.take_new_block_ids())
         return ids
 
     def get_zeroing_block_ids_in_range(
@@ -926,7 +937,6 @@ class KVCacheManager:
             KVCacheBlockCopy(
                 src_block_id=source_block.block_id,
                 dst_block_id=cow_block.block_id,
-                host_resident=self.hisparse_coordinator.owns_block(source_block),
             )
             for source_block, cow_block in pending_copies
         ]

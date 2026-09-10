@@ -28,7 +28,6 @@ def _make_connector(
     backend.get_kv_connector_kv_cache_events.return_value = None
     backend.build_connector_worker_meta.return_value = None
     backend.clear_connector_metadata.side_effect = lambda: events.append("clear")
-    backend.requires_pre_forward_start = False
     monkeypatch.setattr(kv_connector_module, "get_kv_transfer_group", lambda: backend)
     monkeypatch.setattr(
         kv_connector_module, "is_forward_context_available", lambda: True
@@ -68,7 +67,10 @@ def test_load_start_phase(
     request_ids = ["first", "second"]
     attn_metadata = {"layer": object()}
     connector.pre_forward(  # type: ignore[arg-type]
-        output, request_indices, request_ids, attn_metadata
+        output,
+        request_state_indices=request_indices,
+        request_ids=request_ids,
+        attn_metadata=attn_metadata,
     )
     assert events == (
         ["handle", "bind", "start"] if has_sync_kv_loads else ["handle", "bind"]
@@ -85,11 +87,7 @@ def test_load_start_phase(
     # A subsequent step without a forward must not reuse the prior batch.
     connector.no_forward(_scheduler_output(False))  # type: ignore[arg-type]
     assert connector.kv_connector.start_load_kv.call_count == 2
-    assert connector.kv_connector.start_load_kv.call_args.kwargs == {
-        "request_state_indices": None,
-        "request_ids": None,
-        "attn_metadata": None,
-    }
+    assert connector.kv_connector.start_load_kv.call_args.kwargs == {}
 
 
 def test_no_forward_starts_deferred_load_once(monkeypatch: pytest.MonkeyPatch):
@@ -99,19 +97,3 @@ def test_no_forward_starts_deferred_load_once(monkeypatch: pytest.MonkeyPatch):
     connector.no_forward(_scheduler_output(False))  # type: ignore[arg-type]
 
     assert events == ["handle", "bind", "start", "clear"]
-
-
-def test_connector_can_require_pre_forward_start(monkeypatch: pytest.MonkeyPatch):
-    events: list[str] = []
-    connector = _make_connector(monkeypatch, events)
-    connector.kv_connector.requires_pre_forward_start = True
-    attn_metadata = {"layer": object()}
-
-    connector.pre_forward(  # type: ignore[arg-type]
-        _scheduler_output(False), attn_metadata=attn_metadata
-    )
-
-    assert events == ["handle", "bind", "start"]
-    assert connector.kv_connector.start_load_kv.call_args.kwargs["attn_metadata"] is (
-        attn_metadata
-    )

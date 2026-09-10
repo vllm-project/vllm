@@ -315,14 +315,12 @@ def test_multi_example_connector_consistency():
         "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
-    # First three events are from initialization. During generate(), the host
-    # mirror mapping is staged before the connector metadata is bound, and layer
-    # hooks run before the deferred load starts after the forward pass.
+    # First three events are from initialization. Layer hooks run before the
+    # deferred load starts after the forward pass.
     expected_worker_prefix = [
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
         "get_handshake_metadata",
-        "stage_host_mirror_mapping 106",
         "handle_preemptions",
         "bind_connector_metadata",
         "wait_for_layer_load",

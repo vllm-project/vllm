@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
@@ -37,11 +38,13 @@ def test_cache_manager_binding_preserves_hisparse_and_legacy_pool_hooks(nested):
         parent = object.__new__(MultiConnector)
         parent._connectors = [connector]
         connector = parent
-    manager = SimpleNamespace(block_pool=object(), hisparse_coordinator=object())
+    from tests.v1.core.test_prefix_caching import make_hisparse_kv_cache_manager
+
+    manager = make_hisparse_kv_cache_manager(16, 16)
 
     connector.bind_kv_cache_manager(manager)
 
-    assert hisparse.connector_scheduler.coordinator is manager.hisparse_coordinator
+    assert hisparse.connector_scheduler.coordinator is get_hisparse_coordinator(manager)
     legacy.bind_gpu_block_pool.assert_called_once_with(manager.block_pool)
 
 
@@ -83,7 +86,7 @@ def test_full_graph_step_prepares_host_mirror_outside_model():
     worker.is_host_writer = True
     worker._enqueue_row_dma = MagicMock()
     worker.start_step = MagicMock(
-        side_effect=lambda *_args: worker._clear_forward_mirror_state()
+        side_effect=lambda *_args, **_kwargs: worker._clear_forward_mirror_state()
     )
 
     connector = object.__new__(HiSparseConnector)

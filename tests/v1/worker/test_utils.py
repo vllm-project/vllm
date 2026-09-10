@@ -25,7 +25,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.hisparse.layout import HISPARSE_RESIDENT_SUFFIX
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
@@ -44,6 +43,8 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._next_host_write_event = 0
     worker.dma_stream = None
     worker.shared_host_region = None
+    worker._completed_host_copy_dst_ids = []
+    worker._slot_mapping_staging = None
     return worker
 
 
@@ -111,14 +112,10 @@ def test_hisparse_appends_reference_slots_within_a_mirror_phase(monkeypatch):
     monkeypatch.setattr(hisparse_worker_module, "current_stream", lambda: main_stream)
     monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
 
-    worker.stage_row_mirror_mapping(
-        {"layer" + HISPARSE_RESIDENT_SUFFIX: torch.tensor([7, 8], dtype=torch.int64)},
-        2,
-    )
-    worker.stage_row_mirror_mapping(
-        {"layer" + HISPARSE_RESIDENT_SUFFIX: torch.tensor([9, 10], dtype=torch.int64)},
-        2,
-    )
+    handle.slot_mapping = torch.tensor([7, 8], dtype=torch.int64)
+    worker._stage_row_mirror_mapping(2)
+    handle.slot_mapping = torch.tensor([9, 10], dtype=torch.int64)
+    worker._stage_row_mirror_mapping(2)
 
     torch.testing.assert_close(state.slots, torch.tensor([7, 8, 9, 10]))
     assert state.stream.wait_stream.call_args_list == [call(main_stream)] * 2
@@ -724,7 +721,7 @@ def test_hisparse_shared_host_block_copy_has_one_writer(
     worker.host_caches = (torch.empty(4, 1),)
     worker.host_num_blocks = 4
     previous_event = MagicMock()
-    copies = (KVCacheBlockCopy(0, 1, None),)
+    copies = (KVCacheBlockCopy(0, 1),)
     copy_blocks = MagicMock()
     tp_group = MagicMock()
     monkeypatch.setattr(
@@ -739,6 +736,8 @@ def test_hisparse_shared_host_block_copy_has_one_writer(
 
     assert copy_blocks.call_count == expected_copies
     tp_group.barrier.assert_called_once_with()
+    assert worker.take_completed_host_copies() == [1]
+    assert worker.take_completed_host_copies() == []
 
 
 def test_hisparse_empty_step_does_not_replay_stale_host_mirror(monkeypatch):

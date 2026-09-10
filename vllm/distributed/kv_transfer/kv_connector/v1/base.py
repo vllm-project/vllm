@@ -208,11 +208,6 @@ class KVConnectorBase_V1(ABC):
         """
         return self._kv_transfer_config.is_kv_producer
 
-    @property
-    def requires_pre_forward_start(self) -> bool:
-        """Whether every step's connector state must be bound before forward."""
-        return False
-
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -300,12 +295,6 @@ class KVConnectorBase_V1(ABC):
     # TODO(NickLucche): group model-runner lifecycle hooks in the interface.
     def finish_forward(self) -> None:
         """Notify the connector that the model no longer reads this step's KV."""
-        return
-
-    def stage_host_mirror_mapping(
-        self, slot_mappings: dict[str, torch.Tensor], num_tokens: int
-    ) -> None:
-        """Stage GPU slot mappings for host mirroring."""
         return
 
     def reset_capture_state(self) -> None:

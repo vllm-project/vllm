@@ -255,6 +255,25 @@ class KVCacheSpec:
             isinstance(spec, uniform_type_base_spec) for spec in kv_cache_specs.values()
         )
 
+    @property
+    def has_layer_views(self) -> bool:
+        """Whether each layer's cache is a ``[B, H, N, C]`` view of its tensor.
+
+        Specs without a per-layer shape keep the raw backing tensor and lay it
+        out themselves. They also have no attention module of their own, so
+        they take no part in attention-backend or kernel-block selection.
+        """
+        return True
+
+    @property
+    def uses_slot_mapping(self) -> bool:
+        """Whether the worker computes a per-token slot mapping for this spec.
+
+        Specs that address their pages themselves (raw storage, ring buffers)
+        take no slot mapping row.
+        """
+        return True
+
 
 def group_kernel_blocks(cache: torch.Tensor, num_blocks: int) -> torch.Tensor:
     """View a kernel-block-granular layer cache with manager blocks as dim 0.
@@ -418,6 +437,14 @@ class HiSparseHotSpec(KVCacheSpec):
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         return self.blocks_per_request
 
+    @property
+    def has_layer_views(self) -> bool:
+        return False
+
+    @property
+    def uses_slot_mapping(self) -> bool:
+        return False
+
 
 @dataclass(frozen=True, kw_only=True)
 class HiSparseResidentSpec(KVCacheSpec):
@@ -446,6 +473,10 @@ class HiSparseResidentSpec(KVCacheSpec):
 
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         return cdiv(max_len, self.block_size)
+
+    @property
+    def has_layer_views(self) -> bool:
+        return False
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -871,6 +902,10 @@ class CircularBufferSpec(AttentionSpec):
     def prefix_cacheable(self) -> bool:
         return False
 
+    @property
+    def uses_slot_mapping(self) -> bool:
+        return False
+
 
 @dataclass(frozen=True, kw_only=True)
 class SlidingWindowMLASpec(SlidingWindowSpec):
@@ -1240,6 +1275,10 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
             for spec in self.kv_cache_specs.values()
         )
+
+    @property
+    def uses_slot_mapping(self) -> bool:
+        return self.first_spec.uses_slot_mapping
 
 
 def iter_layer_specs(kv_cache_spec: KVCacheSpec) -> Collection[KVCacheSpec]:

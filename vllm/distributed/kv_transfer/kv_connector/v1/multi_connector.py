@@ -223,10 +223,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)
 
-    @property
-    def requires_pre_forward_start(self) -> bool:
-        return any(c.requires_pre_forward_start for c in self._connectors)
-
     @classmethod
     def _get_connector_classes_and_configs(
         cls, vllm_config: "VllmConfig"
@@ -308,12 +304,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def finish_forward(self) -> None:
         for c in self._connectors:
             c.finish_forward()
-
-    def stage_host_mirror_mapping(
-        self, slot_mappings: dict[str, torch.Tensor], num_tokens: int
-    ) -> None:
-        for c in self._connectors:
-            c.stage_host_mirror_mapping(slot_mappings, num_tokens)
 
     def reset_capture_state(self) -> None:
         for c in self._connectors:

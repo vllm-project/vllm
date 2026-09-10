@@ -15,6 +15,7 @@ from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
@@ -326,3 +327,66 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(
             torch.testing.assert_close(
                 cache[dst_start + physical_idx], expected[layer_idx][physical_idx]
             )
+
+
+def test_allocate_kv_cache_host_pool_and_view_less_specs():
+    """Host tensors get their own backing; view-less specs keep the raw one."""
+    spec = FullAttentionSpec(
+        block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float32
+    )
+    page = spec.page_size_bytes
+    resident_spec = HiSparseResidentSpec(block_size=2, page_size=page)
+    device_size = 4 * page
+    config = KVCacheConfig(
+        num_blocks=4,
+        hisparse_host_num_blocks=3,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=3 * page,
+                layers=["source"],
+                layer_stride=3 * page,
+                block_stride=page,
+                host_resident=True,
+            ),
+            KVCacheTensor(
+                size=device_size,
+                layers=["indexer"],
+                layer_stride=device_size,
+                block_stride=page,
+            ),
+            KVCacheTensor(
+                size=device_size,
+                layers=["resident"],
+                layer_stride=device_size,
+                block_stride=page,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["source"], spec, host_resident=True),
+            KVCacheGroupSpec(["indexer"], spec),
+            KVCacheGroupSpec(["resident"], resident_spec),
+        ],
+    )
+    host_buffers: list[torch.Tensor] = []
+
+    def host_allocator(size: int) -> torch.Tensor:
+        host_buffers.append(torch.zeros(size, dtype=torch.int8))
+        return host_buffers[-1]
+
+    caches = allocate_kv_cache(
+        config, torch.device("cpu"), KVCacheLayout.LBHNC, host_allocator=host_allocator
+    )
+
+    assert [buf.numel() for buf in host_buffers] == [3 * page]
+    assert caches["source"].shape[0] == 3
+    assert (
+        caches["source"].untyped_storage().data_ptr()
+        == host_buffers[0].untyped_storage().data_ptr()
+    )
+    assert caches["indexer"].shape[0] == 4
+    backing = caches["resident"]
+    assert backing.dtype == torch.int8 and backing.numel() == device_size
+    assert (
+        backing.untyped_storage().data_ptr()
+        == caches["indexer"].untyped_storage().data_ptr()
+    )

@@ -39,6 +39,7 @@ from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
+from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -156,19 +157,21 @@ def test_get_num_unfinished_requests():
 def _bind_hisparse_connector(scheduler):
     connector = object.__new__(HiSparseConnector)
     connector.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)
-    connector.connector_scheduler.bind_coordinator(
-        scheduler.kv_cache_manager.hisparse_coordinator
-    )
+    from tests.v1.core.test_prefix_caching import make_hisparse_kv_cache_manager
+
+    coordinator = get_hisparse_coordinator(make_hisparse_kv_cache_manager(16, 16))
+    connector.connector_scheduler.bind_coordinator(coordinator)
     composite = object.__new__(MultiConnector)
     composite._connectors = (connector,)
     scheduler.connector = composite
+    return coordinator
 
 
 def test_pending_hisparse_spill_keeps_scheduler_alive():
     """A final host spill must complete after the last request finishes."""
     scheduler = create_scheduler()
-    _bind_hisparse_connector(scheduler)
-    pending = scheduler.kv_cache_manager.hisparse_coordinator.pending_spills
+    coordinator = _bind_hisparse_connector(scheduler)
+    pending = coordinator.pending_spills
     pending[0] = Mock()
     assert scheduler.has_requests()
     pending.clear()
@@ -1229,12 +1232,12 @@ def test_pending_hisparse_reclamation_defers_preemption(monkeypatch):
     monkeypatch.setattr(
         scheduler.kv_cache_manager, "allocate_slots", Mock(return_value=None)
     )
-    _bind_hisparse_connector(scheduler)
+    coordinator = _bind_hisparse_connector(scheduler)
     monkeypatch.setattr(
         scheduler.connector, "build_connector_meta", Mock(return_value=None)
     )
     monkeypatch.setattr(
-        scheduler.kv_cache_manager.hisparse_coordinator,
+        coordinator,
         "has_pending_reclamation",
         Mock(return_value=True),
     )

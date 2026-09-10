@@ -23,7 +23,6 @@ from vllm.utils.torch_utils import current_stream
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
-    HISPARSE_RESIDENT_SUFFIX,
 )
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle, release_pinned_state
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
@@ -307,6 +306,7 @@ class HiSparseConnectorWorker:
             )
         self.hot_backing = hot_backing
         self._pending_invalid_block_ids: list[int] = []
+        self._completed_host_copy_dst_ids: list[int] = []
         self._post_forward_transfers: list[SparseKVPageTransfer] = []
         self._enqueued_transfer_ids: list[int] = []
         self._pending_transfer_events: deque[tuple[torch.Event, tuple[int, ...]]] = (
@@ -365,7 +365,9 @@ class HiSparseConnectorWorker:
         metadata: HiSparseConnectorMetadata,
         request_state_indices: torch.Tensor | None,
         request_ids: list[str] | None = None,
+        num_tokens: int = 0,
     ) -> None:
+        self._stage_row_mirror_mapping(num_tokens)
         previous_host_write_event = self.host_write_event
         self.host_write_event = self.host_write_events[self._next_host_write_event]
         self._next_host_write_event ^= 1
@@ -412,31 +414,14 @@ class HiSparseConnectorWorker:
             if metadata is not None:
                 handle.prepare_group_for_batch(metadata)
 
-    def stage_row_mirror_mapping(
-        self, slot_mappings: Mapping[str, torch.Tensor], num_tokens: int
-    ) -> None:
-        if not self.is_host_writer:
-            return
+    def _stage_row_mirror_mapping(self, num_tokens: int) -> None:
         state = self._slot_mapping_staging
-        assert state is not None
-        mapping = next(
-            (
-                (
-                    slot_mappings[layer_name + HISPARSE_RESIDENT_SUFFIX],
-                    handle.runtime.resident_source_index,
-                )
-                for layer_name, handle in zip(
-                    self.cache_layer_names, self.cache_handles, strict=True
-                )
-                if layer_name + HISPARSE_RESIDENT_SUFFIX in slot_mappings
-            ),
-            None,
-        )
-        if mapping is None:
+        if state is None or not num_tokens:
             return
-        slots, source_index = mapping
-        if slots.ndim != 1:
-            raise ValueError("HiSparse requires per-layer slot mappings.")
+        handle = self.cache_handles[0]
+        slots = handle.slot_mapping
+        assert slots is not None
+        source_index = handle.runtime.resident_source_index
         start = state.num_tokens
         end = start + num_tokens
         if end > state.slots.shape[0]:
@@ -473,6 +458,9 @@ class HiSparseConnectorWorker:
         host_block_copies: Sequence[KVCacheBlockCopy],
         previous_host_write_event: torch.Event,
     ) -> None:
+        self._completed_host_copy_dst_ids.extend(
+            copy.dst_block_id for copy in host_block_copies
+        )
         if self.shared_host_region is not None and host_block_copies:
             if get_tensor_model_parallel_rank() == 0:
                 copy_kv_cache_blocks_inplace(
@@ -814,6 +802,12 @@ class HiSparseConnectorWorker:
             else:
                 self.host_write_event.record(compute_stream)
         self._release_completed_dma_descriptors()
+
+    def take_completed_host_copies(self) -> list[int]:
+        """Drain host copies this worker has enqueued for this step."""
+        completed = self._completed_host_copy_dst_ids
+        self._completed_host_copy_dst_ids = []
+        return completed
 
     def take_transfer_updates(self) -> tuple[list[int], list[int]]:
         enqueued = self._enqueued_transfer_ids

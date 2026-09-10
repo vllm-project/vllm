@@ -67,8 +67,6 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
-    CircularBufferSpec,
-    HiSparseHotSpec,
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -587,9 +585,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             layer_spec = (
                 spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
             )
-            slot_mapping_enabled.append(
-                not isinstance(layer_spec, (HiSparseHotSpec, CircularBufferSpec))
-            )
+            slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
             # Let each cache type account for CP. Attention KV is DCP-sharded,
             # while Mamba/GDN recurrent state is replicated across DCP ranks.
             max_num_blocks = spec.max_num_blocks_per_req(
@@ -728,10 +724,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.device,
             attn_groups_iter=(
                 attn_group
-                for cache_group, attn_groups in zip(
-                    self.kv_cache_config.kv_cache_groups, self.attn_groups
-                )
-                if not cache_group.host_resident
+                for attn_groups in self.attn_groups
                 for attn_group in attn_groups
             ),
             kernel_block_sizes=self.kernel_block_sizes,
@@ -1169,11 +1162,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_kv_cache_blocks_inplace(
                 (cache for cache in self.kv_caches if cache.device == self.device),
                 self.kv_cache_config.num_blocks,
-                [
-                    copy
-                    for copy in scheduler_output.kv_cache_block_copies
-                    if not copy.host_resident
-                ],
+                scheduler_output.kv_cache_block_copies,
             )
 
     def gather_batch_req_state(
@@ -1741,10 +1730,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             slot_mappings_by_layer = build_slot_mappings_by_layer(
                 slot_mappings, self.kv_cache_config
             )
-            if not dummy_run:
-                self.kv_connector.stage_host_mirror_mapping(
-                    slot_mappings_by_layer, input_batch.num_tokens
-                )
             assert block_tables is not None
             attn_groups = self.attn_groups
             if dummy_run and is_profile:
@@ -1844,9 +1829,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.cudagraph_manager is not None
             self.kv_connector.pre_forward(
                 scheduler_output,
-                input_batch.idx_mapping,
-                input_batch.req_ids,
-                attn_metadata,
+                request_state_indices=input_batch.idx_mapping,
+                request_ids=input_batch.req_ids,
+                attn_metadata=attn_metadata,
+                num_tokens=input_batch.num_tokens,
             )
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
@@ -1873,8 +1859,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ):
                 self.kv_connector.pre_forward(
                     scheduler_output,
-                    input_batch.idx_mapping,
-                    input_batch.req_ids,
+                    request_state_indices=input_batch.idx_mapping,
+                    request_ids=input_batch.req_ids,
+                    attn_metadata=attn_metadata,
+                    num_tokens=0 if dummy_run else input_batch.num_tokens,
                 )
                 if ubatch_state is not None:
                     assert self.ubatch_runner is not None

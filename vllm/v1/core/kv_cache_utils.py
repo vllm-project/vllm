@@ -232,7 +232,6 @@ class KVCacheBlock:
 class KVCacheBlockCopy(NamedTuple):
     src_block_id: int
     dst_block_id: int
-    host_resident: bool = False
 
 
 class FreeKVCacheBlockQueue:

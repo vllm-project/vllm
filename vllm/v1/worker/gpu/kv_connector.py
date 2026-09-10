@@ -32,18 +32,11 @@ class KVConnector:
     def pre_forward(
         self,
         scheduler_output: "SchedulerOutput",
-        batch_request_indices: torch.Tensor | None = None,
-        batch_request_ids: list[str] | None = None,
-        attn_metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> None:
         pass
 
     def finish_forward(self) -> None:
-        pass
-
-    def stage_host_mirror_mapping(
-        self, slot_mappings: dict[str, torch.Tensor], num_tokens: int
-    ) -> None:
         pass
 
     def post_forward(
@@ -77,9 +70,7 @@ class ActiveKVConnector(KVConnector):
     def pre_forward(
         self,
         scheduler_output: "SchedulerOutput",
-        batch_request_indices: torch.Tensor | None = None,
-        batch_request_ids: list[str] | None = None,
-        attn_metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> None:
         if self._disabled:
             return
@@ -88,16 +79,9 @@ class ActiveKVConnector(KVConnector):
         assert kv_connector_metadata is not None
         self.kv_connector.handle_preemptions(kv_connector_metadata)
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
-        self._pending_load_kwargs = {
-            "request_state_indices": batch_request_indices,
-            "request_ids": batch_request_ids,
-            "attn_metadata": attn_metadata,
-        }
+        self._pending_load_kwargs = kwargs
 
-        if (
-            scheduler_output.has_sync_kv_loads
-            or self.kv_connector.requires_pre_forward_start
-        ):
+        if scheduler_output.has_sync_kv_loads:
             # Sync loads need to run before this step's forward.
             self._start_load_kv()
         # Otherwise defer the async load to post-forward, keeping its host-side
@@ -123,12 +107,6 @@ class ActiveKVConnector(KVConnector):
     def finish_forward(self) -> None:
         if not self._disabled:
             self.kv_connector.finish_forward()
-
-    def stage_host_mirror_mapping(
-        self, slot_mappings: dict[str, torch.Tensor], num_tokens: int
-    ) -> None:
-        if not self._disabled:
-            self.kv_connector.stage_host_mirror_mapping(slot_mappings, num_tokens)
 
     def reset_capture_state(self) -> None:
         self.kv_connector.reset_capture_state()

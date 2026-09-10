@@ -24,6 +24,7 @@ from vllm.distributed.kv_events import (
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
+    HiSparseConnectorWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
@@ -50,7 +51,9 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
     make_block_hash_with_group_id,
 )
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiSparseHotSpec,
@@ -133,7 +136,10 @@ def make_kv_cache_manager(kv_cache_config: KVCacheConfig, **kwargs) -> KVCacheMa
             kv_cache_config,
             prefix_cache_retention_interval=kwargs.pop("retention_interval"),
         )
-    return KVCacheManager(kv_cache_config, **kwargs)
+    manager = KVCacheManager(kv_cache_config, **kwargs)
+    if kv_cache_config.hisparse_host_num_blocks is not None:
+        get_hisparse_coordinator(manager)
+    return manager
 
 
 def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
@@ -239,7 +245,7 @@ def test_hisparse_builds_dma_row_mirrors_across_pages():
         sha256,
     )
     assert manager.allocate_slots(request, num_new_tokens=32) is not None
-    coordinator = manager.hisparse_coordinator
+    coordinator = get_hisparse_coordinator(manager)
     resident_blocks = coordinator.resident_managers[0].req_to_blocks[request.request_id]
     host_blocks = coordinator.host_manager.req_to_blocks[request.request_id]
 
@@ -302,7 +308,7 @@ def test_hisparse_reports_when_context_is_fully_resident():
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
     request = make_request("request", tokens, HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(request, num_new_tokens=len(tokens)) is not None
-    coordinator = manager.hisparse_coordinator
+    coordinator = get_hisparse_coordinator(manager)
     scheduled = ((request.request_id, len(tokens) - 1, 1),)
     assert coordinator.all_context_pages_resident(scheduled)
 
@@ -327,9 +333,9 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
     original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
-    spills = manager.hisparse_coordinator.build_offload_command().page_transfers
+    spills = get_hisparse_coordinator(manager).build_offload_command().page_transfers
     spill_counts = {spill.transfer_id: 1 for spill in spills}
-    manager.hisparse_coordinator.update_spills(spill_counts, spill_counts)
+    get_hisparse_coordinator(manager).update_spills(spill_counts, spill_counts)
     _, indexer_blocks, _, _ = manager.get_blocks(original.request_id).blocks
     evicted_indexer_id = indexer_blocks[2].block_id
     manager.free(original)
@@ -369,13 +375,13 @@ def test_hisparse_indexer_offload_is_capped_by_missing_host_prefix():
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
     original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(original, num_new_tokens=len(tokens)) is not None
-    spills = manager.hisparse_coordinator.build_offload_command().page_transfers
+    spills = get_hisparse_coordinator(manager).build_offload_command().page_transfers
     spill_counts = {spill.transfer_id: 1 for spill in spills}
-    manager.hisparse_coordinator.update_spills(spill_counts, spill_counts)
+    get_hisparse_coordinator(manager).update_spills(spill_counts, spill_counts)
     host_blocks, _, _, _ = manager.get_blocks(original.request_id).blocks
     evicted_host_id = host_blocks[0].block_id
     manager.free(original)
-    assert manager.hisparse_coordinator.evict_host_blocks({evicted_host_id})
+    assert get_hisparse_coordinator(manager).evict_host_blocks({evicted_host_id})
 
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
     _, num_local, _ = manager.get_computed_blocks(resumed)
@@ -460,7 +466,7 @@ def test_connector_completes_partial_prefix_without_importing_missing_host_kv(
     manager.free(resumed)
 
     # A surviving indexer offload must not make absent host KV look computed.
-    manager.hisparse_coordinator.evict_host_blocks({missing_host})
+    get_hisparse_coordinator(manager).evict_host_blocks({missing_host})
     retry = make_request("retry", tokens, HISPARSE_BLOCK_SIZE, sha256)
     _, local, _, _ = Scheduler._get_local_prefix_cache_hit(scheduler, retry)
     assert local == 0
@@ -495,7 +501,7 @@ def test_hisparse_keeps_resident_pages_until_hot_buffer_is_allocated(enable_cach
     assert manager.allocate_slots(first, num_new_tokens=1) is not None
     second = make_request("second", [1000] * 16, HISPARSE_BLOCK_SIZE, sha256)
     manager.allocate_slots(second, num_new_tokens=16)
-    coordinator = manager.hisparse_coordinator
+    coordinator = get_hisparse_coordinator(manager)
     scheduled = (("first", 128, 1),)
     assert coordinator.all_context_pages_resident(scheduled)
     assert all(not m.has_hot("first") for m in coordinator.hot_managers)
@@ -519,7 +525,9 @@ def test_hisparse_full_pool_keeps_pages_pinned_until_preemption():
     assert manager.block_pool.get_num_free_blocks() == 1
     first.num_computed_tokens = 128
     assert manager.allocate_slots(first, num_new_tokens=1) is None
-    assert manager.hisparse_coordinator.all_context_pages_resident((("first", 127, 1),))
+    assert get_hisparse_coordinator(manager).all_context_pages_resident(
+        (("first", 127, 1),)
+    )
 
     manager.free(first)
     second = make_request("second", [1000] * 16, HISPARSE_BLOCK_SIZE, sha256)
@@ -543,7 +551,7 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
     assert len(blocks[2]) == 2
     assert blocks[3] == []
 
-    spills = manager.hisparse_coordinator.build_offload_command().page_transfers
+    spills = get_hisparse_coordinator(manager).build_offload_command().page_transfers
     assert len(spills) == 2
     assert all(spill.after_forward for spill in spills)
     resident_blocks = manager.get_blocks(request.request_id).blocks[2]
@@ -558,17 +566,17 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
     _, num_computed, _ = manager.get_computed_blocks(duplicate)
     assert num_computed == 0
 
-    manager.hisparse_coordinator.update_spills(spill_counts, {})
+    get_hisparse_coordinator(manager).update_spills(spill_counts, {})
     assert [block.ref_cnt for block in resident_blocks] == [2, 2]
     _, num_computed, _ = manager.get_computed_blocks(duplicate)
     assert num_computed == 0
 
-    manager.hisparse_coordinator.update_spills({}, {spills[1].transfer_id: 1})
+    get_hisparse_coordinator(manager).update_spills({}, {spills[1].transfer_id: 1})
     assert [block.ref_cnt for block in resident_blocks] == [2, 1]
     _, num_computed, _ = manager.get_computed_blocks(duplicate)
     assert num_computed == 0
 
-    manager.hisparse_coordinator.update_spills({}, {spills[0].transfer_id: 1})
+    get_hisparse_coordinator(manager).update_spills({}, {spills[0].transfer_id: 1})
     _, num_computed, _ = manager.get_computed_blocks(duplicate)
     assert num_computed == 2 * HISPARSE_BLOCK_SIZE
     blocks = manager.get_block_ids(request.request_id)
@@ -583,7 +591,7 @@ def test_hisparse_materialization_respects_per_step_spill_budget():
         16,
         enable_caching=True,
     )
-    coordinator = manager.hisparse_coordinator
+    coordinator = get_hisparse_coordinator(manager)
     coordinator.max_spill_pages = 1
     tokens = list(range(2 * HISPARSE_BLOCK_SIZE))
     request = make_request("bounded", tokens, HISPARSE_BLOCK_SIZE, sha256)
@@ -598,23 +606,21 @@ def test_hisparse_materialization_respects_per_step_spill_budget():
     assert first[0].transfer_id != second[0].transfer_id
 
 
-def test_hisparse_free_blocks_preserves_host_and_device_ownership():
-    """Equal numeric block IDs must still be freed to their respective pools."""
+def test_hisparse_deferred_free_retains_host_blocks_until_fence():
+    """Detaching a request must not make in-flight host pages reusable."""
     manager = make_hisparse_kv_cache_manager(16, 16)
-    host_pool = manager.hisparse_coordinator.get_host_block_pool()
+    host_pool = get_hisparse_coordinator(manager).get_host_block_pool()
     assert host_pool is not None
-    device_pool = manager.block_pool
     host_free = host_pool.get_num_free_blocks()
-    device_free = device_pool.get_num_free_blocks()
-    host_block = host_pool.get_new_blocks(1)[0]
-    device_block = device_pool.get_new_blocks(1)[0]
-    assert host_block.block_id == device_block.block_id
-
-    manager.free_blocks([host_block, device_block])
-
-    assert host_block.ref_cnt == device_block.ref_cnt == 0
+    device_free = manager.block_pool.get_num_free_blocks()
+    request = make_request("free", list(range(16)), HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, 16, delay_cache_blocks=True) is not None
+    blocks = manager.pop_blocks_for_free(request)
+    assert host_pool.get_num_free_blocks() < host_free
+    assert blocks and any(host_pool.blocks[b.block_id] is b for b in blocks)
+    manager.free_blocks(reversed(blocks))
     assert host_pool.get_num_free_blocks() == host_free
-    assert device_pool.get_num_free_blocks() == device_free
+    assert manager.block_pool.get_num_free_blocks() == device_free
 
 
 def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
@@ -629,14 +635,30 @@ def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
         "cow", HISPARSE_BLOCK_SIZE, HISPARSE_BLOCK_SIZE
     )
     new_block_ids = manager.take_new_block_ids()
-    copies, retained = manager.take_kv_cache_block_copies()
+    coordinator = get_hisparse_coordinator(manager)
+    assert manager.take_kv_cache_block_copies() == ([], [])
+    connector = HiSparseConnectorScheduler(async_speculative=False)
+    connector.bind_coordinator(coordinator)
+    output = SchedulerOutput.make_empty()
+    copies = connector.build_connector_meta(output).host_block_copies
+    assert output.has_sync_kv_loads
 
     assert new_blocks and new_block_ids == []
     assert len(copies) == 1
-    assert copies[0].host_resident
     assert copies[0].src_block_id == source_block.block_id
     assert copies[0].dst_block_id == new_blocks[0].block_id
-    assert retained == [source_block, new_blocks[0]]
+    source_manager.free("cow")
+    assert source_block.ref_cnt > 0 and new_blocks[0].ref_cnt > 0
+    assert coordinator.has_pending_work()
+    connector.update_connector_output(
+        KVConnectorOutput(
+            kv_connector_worker_meta=HiSparseConnectorWorkerMetadata(
+                {}, {}, completed_host_copy_dst_ids=(copies[0].dst_block_id,)
+            )
+        )
+    )
+    assert source_block.ref_cnt == new_blocks[0].ref_cnt == 0
+    assert not coordinator.has_pending_work()
 
 
 def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
@@ -723,7 +745,7 @@ def test_hisparse_import_capacity_includes_hits_and_cow(
 ):
     """Touching an evictable hit and copying a partial hit consume capacity."""
     manager = make_hisparse_kv_cache_manager(32, free_blocks + 2 - int(evictable))
-    coordinator = manager.hisparse_coordinator
+    coordinator = get_hisparse_coordinator(manager)
     host_pool = coordinator.get_host_block_pool()
     assert host_pool is not None
     hit = host_pool.get_new_blocks(1)[0]
@@ -731,11 +753,11 @@ def test_hisparse_import_capacity_includes_hits_and_cow(
         host_pool.free_blocks([hit])
     assert host_pool.get_num_free_blocks() == free_blocks
     assert (
-        coordinator.can_allocate_host_blocks(
-            "waiting", 64, ([hit], [], [], []), 32, local_tokens
+        coordinator.host_manager.get_num_blocks_to_allocate(
+            "waiting", 64, [hit], 32, local_tokens, 64
         )
-        == admitted
-    )
+        <= host_pool.get_num_free_blocks()
+    ) == admitted
 
 
 @pytest.mark.parametrize("enable_caching", [False, True])
@@ -744,7 +766,7 @@ def test_hisparse_host_exhaustion_keeps_gpu_pages_readable(enable_caching):
     manager = make_hisparse_kv_cache_manager(32, 2, enable_caching=enable_caching)
     request = make_request("resident", list(range(64)), HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(request, 64) is not None
-    coordinator = manager.hisparse_coordinator
+    coordinator = get_hisparse_coordinator(manager)
     host = coordinator.host_manager
     assert host is not None
     assert [b.is_null for b in host.req_to_blocks[request.request_id]] == [
@@ -771,19 +793,19 @@ def test_hisparse_host_exhaustion_keeps_gpu_pages_readable(enable_caching):
 def test_hisparse_host_cow_takes_priority_over_new_pages():
     """The last host block must hold the private tail, not a fresh page."""
     manager = make_hisparse_kv_cache_manager(32, 3)
-    coordinator = manager.hisparse_coordinator
+    coordinator = get_hisparse_coordinator(manager)
     host = coordinator.host_manager
     assert host is not None
     source = host.block_pool.get_new_blocks(1)[0]
     host.req_to_blocks["cow"] = [source]
     host._partial_hit_reqs["cow"] = (0, source)
 
-    coordinator.allocate_host_blocks("cow", 32, 32)
+    host.allocate_new_blocks("cow", 32, 32)
 
     private, missing = host.req_to_blocks["cow"]
     assert not private.is_null and private is not source
     assert missing.is_null
-    assert host.take_pending_cow_copies() == [(source, private)]
+    assert host.take_host_cow_copies() == [(source, private)]
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -795,7 +817,7 @@ def test_host_receive_completion_without_spill_metadata(failed):
     request.num_computed_tokens = 32
     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
     scheduler = HiSparseConnectorScheduler(async_speculative=False)
-    scheduler.bind_coordinator(manager.hisparse_coordinator)
+    scheduler.bind_coordinator(get_hisparse_coordinator(manager))
     scheduler.requests[request.request_id] = request
     connector = object.__new__(HiSparseConnector)
     connector.connector_scheduler = scheduler
@@ -807,7 +829,7 @@ def test_host_receive_completion_without_spill_metadata(failed):
             failed_recving={request.request_id} if failed else set(),
         )
     )
-    state = manager.hisparse_coordinator.request_states.get(request.request_id)
+    state = get_hisparse_coordinator(manager).request_states.get(request.request_id)
     if failed:
         assert state is None
     else:
@@ -817,7 +839,7 @@ def test_host_receive_completion_without_spill_metadata(failed):
 def test_hisparse_host_import_ignores_unsealed_tail():
     """A partial imported page must not become readable from stale host data."""
     manager = make_hisparse_kv_cache_manager(16, 16)
-    coordinator = manager.hisparse_coordinator
+    coordinator = get_hisparse_coordinator(manager)
 
     coordinator.complete_host_import("partial", HISPARSE_BLOCK_SIZE + 1)
 
@@ -842,7 +864,7 @@ def test_hisparse_resident_request_can_grow_without_hot_capacity():
 def test_hisparse_capacity_query_does_not_require_hot_blocks():
     """A read-only capacity query must not mutate hot-block requirements."""
     manager = make_hisparse_kv_cache_manager(16, 16)
-    coordinator = manager.hisparse_coordinator
+    coordinator = get_hisparse_coordinator(manager)
     host_pool = coordinator.get_host_block_pool()
     assert host_pool is not None
     computed: tuple[list[KVCacheBlock], ...] = (
@@ -870,9 +892,9 @@ def test_hisparse_capacity_query_does_not_require_hot_blocks():
 
 def _publish_hisparse_pages(manager: KVCacheManager) -> None:
     """Ack all planned spills so host pages publish to the prefix cache."""
-    command = manager.hisparse_coordinator.build_offload_command()
+    command = get_hisparse_coordinator(manager).build_offload_command()
     counts = {spill.transfer_id: 1 for spill in command.page_transfers}
-    manager.hisparse_coordinator.update_spills(counts, counts)
+    get_hisparse_coordinator(manager).update_spills(counts, counts)
 
 
 def test_hisparse_events_report_host_and_device_placement():
@@ -897,7 +919,7 @@ def test_hisparse_events_report_host_and_device_placement():
     }
 
     host_block = manager.get_blocks(request.request_id).blocks[0][0]
-    manager.evict_blocks({host_block.block_id})
+    get_hisparse_coordinator(manager).evict_host_blocks({host_block.block_id})
     [removed] = manager.take_events()
     assert isinstance(removed, BlockRemoved)
     assert removed.medium == MEDIUM_CPU
@@ -967,7 +989,7 @@ def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
         original_resident_ids[:3]
     )
     assert not any(block.is_null for block in resident_blocks[:3])
-    assert manager.hisparse_coordinator.all_context_pages_resident(
+    assert get_hisparse_coordinator(manager).all_context_pages_resident(
         ((resumed.request_id, num_computed, len(tokens) - num_computed),)
     )
 
@@ -1002,7 +1024,7 @@ def test_hisparse_finished_request_leaves_free_copies():
     _publish_hisparse_pages(manager)
     manager.free(original)
 
-    coordinator = manager.hisparse_coordinator
+    coordinator = get_hisparse_coordinator(manager)
     assert coordinator.copies
     pool = manager.block_pool
     assert pool.get_num_free_blocks() == pool.num_gpu_blocks - 1
@@ -1020,7 +1042,7 @@ def test_hisparse_reset_prefix_cache_drops_copies():
     _publish_hisparse_pages(manager)
     manager.free(request)
 
-    coordinator = manager.hisparse_coordinator
+    coordinator = get_hisparse_coordinator(manager)
     assert coordinator.copies
     assert manager.reset_prefix_cache()
     assert not coordinator.copies
@@ -5800,3 +5822,24 @@ def test_swa_shared_prefix_reuse_under_zero_retention():
     assert last_req_hit(retention=0, pin=False) == 0
     # retention=0 with the pin keeps the junction window -> reuse restored.
     assert last_req_hit(retention=0, pin=True) == 4 * block_size
+
+
+def test_device_eviction_keeps_host_prefix():
+    """Device eviction must not target a same-numbered host block."""
+    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    request = make_request("producer", list(range(64)), HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(request, 64) is not None
+    _publish_hisparse_pages(manager)
+    host, indexer, _, _ = manager.get_blocks(request.request_id).blocks
+    device_block = indexer[0]
+    host_block = host[0]
+    assert device_block.block_id == host_block.block_id
+    manager.free(request)
+    assert host_block.block_hash is not None and device_block.block_hash is not None
+    manager.evict_blocks({device_block.block_id})
+    assert device_block.block_hash is None, (
+        "Device eviction left the indexer prefix cached"
+    )
+    assert host_block.block_hash is not None, (
+        "Device eviction invalidated unrelated host KV"
+    )

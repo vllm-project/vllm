@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.hisparse.types import SparseKVOffloadCommand, SparseKVRowMirror
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
@@ -48,6 +49,7 @@ class HiSparseConnectorMetadata(KVConnectorMetadata):
 class HiSparseConnectorWorkerMetadata(KVConnectorWorkerMetadata):
     enqueued_transfer_counts: dict[int, int]
     completed_transfer_counts: dict[int, int]
+    completed_host_copy_dst_ids: tuple[int, ...] = ()
 
     def aggregate(self, other: KVConnectorWorkerMetadata) -> KVConnectorWorkerMetadata:
         assert isinstance(other, HiSparseConnectorWorkerMetadata)
@@ -64,6 +66,10 @@ class HiSparseConnectorWorkerMetadata(KVConnectorWorkerMetadata):
             ),
             completed_transfer_counts=add_counts(
                 self.completed_transfer_counts, other.completed_transfer_counts
+            ),
+            # Every worker runs the same copies, so a union is the ack.
+            completed_host_copy_dst_ids=tuple(
+                {*self.completed_host_copy_dst_ids, *other.completed_host_copy_dst_ids}
             ),
         )
 
@@ -88,15 +94,12 @@ class HiSparseConnectorScheduler:
         self, scheduler_output: SchedulerOutput
     ) -> HiSparseConnectorMetadata:
         assert self.coordinator is not None
+        scheduler_output.has_sync_kv_loads = True
         scheduler_output.block_table_updates = (
             self.coordinator.take_block_table_updates() or None
         )
         command = self.coordinator.build_offload_command()
-        host_block_copies = tuple(
-            copy
-            for copy in scheduler_output.kv_cache_block_copies or ()
-            if copy.host_resident
-        )
+        host_block_copies = self.coordinator.take_host_block_copies()
         source_group_id = self.coordinator.host_group_id
         assert source_group_id is not None
         source_block_ids = [
@@ -171,6 +174,9 @@ class HiSparseConnectorScheduler:
         if metadata is None:
             return
         assert isinstance(metadata, HiSparseConnectorWorkerMetadata)
+        self.coordinator.release_completed_host_copies(
+            metadata.completed_host_copy_dst_ids
+        )
         self.coordinator.update_spills(
             metadata.enqueued_transfer_counts,
             metadata.completed_transfer_counts,
@@ -215,15 +221,13 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         if self.role != KVConnectorRole.SCHEDULER:
             raise ValueError("Only the scheduler connector accepts a coordinator")
         assert self.connector_scheduler is not None
-        self.connector_scheduler.bind_coordinator(kv_cache_manager.hisparse_coordinator)
+        self.connector_scheduler.bind_coordinator(
+            get_hisparse_coordinator(kv_cache_manager)
+        )
 
     @property
     def requires_kv_delivery(self) -> bool:
         return False
-
-    @property
-    def requires_pre_forward_start(self) -> bool:
-        return True
 
     def has_pending_push_work(self) -> bool:
         assert self.connector_scheduler is not None
@@ -238,12 +242,6 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     def finish_forward(self) -> None:
         assert self.connector_worker is not None
         self.connector_worker.finish_forward()
-
-    def stage_host_mirror_mapping(
-        self, slot_mappings: dict[str, torch.Tensor], num_tokens: int
-    ) -> None:
-        assert self.connector_worker is not None
-        self.connector_worker.stage_row_mirror_mapping(slot_mappings, num_tokens)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         assert self.connector_worker is not None
@@ -269,6 +267,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
             metadata,
             request_state_indices,
             request_ids,
+            num_tokens=int(kwargs.get("num_tokens") or 0),
         )
         self.connector_worker.prepare_forward(attn_metadata)
 
@@ -290,11 +289,13 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
         assert self.connector_worker is not None
         enqueued, completed = self.connector_worker.take_transfer_updates()
-        if not enqueued and not completed:
+        host_copies = self.connector_worker.take_completed_host_copies()
+        if not enqueued and not completed and not host_copies:
             return None
         return HiSparseConnectorWorkerMetadata(
             enqueued_transfer_counts={transfer_id: 1 for transfer_id in enqueued},
             completed_transfer_counts={transfer_id: 1 for transfer_id in completed},
+            completed_host_copy_dst_ids=tuple(host_copies),
         )
 
     def shutdown(self) -> None:
