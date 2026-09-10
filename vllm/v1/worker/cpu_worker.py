@@ -12,7 +12,8 @@ from typing import Any
 import psutil
 import torch
 
-from vllm.config import VllmConfig
+from vllm import envs
+from vllm.config import CompilationMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.profiler.wrapper import TorchProfilerWrapper
@@ -197,8 +198,23 @@ class CPUWorker(Worker):
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 
+    def _should_warm_up_model(self) -> bool:
+        # VLLM_CPU_CI_ENV always skips warmup to save CI time.
+        if envs.VLLM_CPU_CI_ENV:
+            return False
+        # With eager (CompilationMode.NONE) execution and an explicit KV
+        # cache size, warmup serves no purpose: there's no compiled graph to
+        # prewarm, and the auto KV-cache-size calc below -- which relies on
+        # a warmup forward pass having already bumped RSS to a realistic
+        # steady-state value -- is bypassed whenever the size is explicit.
+        return not (
+            self.compilation_config.mode == CompilationMode.NONE
+            and self.cache_config.kv_cache_memory_bytes is not None
+        )
+
     def determine_available_memory(self) -> int:
-        self.model_runner.warming_up_model()
+        if self._should_warm_up_model():
+            self.model_runner.warming_up_model()
 
         allowed_cpu_list = get_allowed_cpu_list()
         cpu_core = allowed_cpu_list[0]
@@ -259,7 +275,7 @@ class CPUWorker(Worker):
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: the model has been compiled in determine_available_memory(),
         # Only compile here for models without kv cache
-        if len(self.model_runner.kv_caches) == 0:
+        if len(self.model_runner.kv_caches) == 0 and self._should_warm_up_model():
             self.model_runner.warming_up_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
