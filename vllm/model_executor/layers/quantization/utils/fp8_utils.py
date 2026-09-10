@@ -919,9 +919,23 @@ def per_token_group_quant_fp8(
                 if x.dim() == 2
                 else (tma_aligned_m * sf_k, 1, tma_aligned_m)
             )
-            x_s = torch.empty_strided(
-                shape, stride, device=x.device, dtype=torch.float32
-            )
+            # Allocate the full physical backing store and initialise to
+            # 1.0 so that TMA-alignment padding rows (indices
+            # [m, tma_aligned_m) within each column) contain a valid
+            # power-of-two scale value.  DeepGEMM 2.6+ has a device-side
+            # assertion that every FP32 scale satisfies
+            # (bits & 0x807fffff) == 0 (i.e. is an exact power of two).
+            # Uninitialized garbage violates this and causes a CUDA
+            # context error (issue #49783).  1.0 == 2^0 passes the check
+            # and is inert for any padding row that is never read by the
+            # GEMM kernel.
+            if x.dim() == 2:
+                storage_size = sf_k * tma_aligned_m
+            else:
+                storage_size = x.shape[0] * sf_k * tma_aligned_m
+            x_s = torch.ones(
+                storage_size, device=x.device, dtype=torch.float32
+            ).as_strided(shape, stride)
         else:
             shape = x.shape[:-2] + (x.shape[-1] // group_size, x.shape[-2])
             x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(
