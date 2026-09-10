@@ -258,11 +258,23 @@ def test_option_and_token_handling(command, test_file, expected):
             "kernels/test_a.py",
             False,
         ),
-        # ...but an intermediate pipe stage before `xargs pytest` is fine.
+        # ...but only a *non-filtering* intermediate stage. `sort` reorders,
+        # every match still reaches pytest.
         (
             "find kernels -name 'test_*.py' | sort | xargs pytest",
             "kernels/test_a.py",
             True,
+        ),
+        # `head` drops all but one match - the sweep is not fully tethered.
+        (
+            "find kernels -name 'test_*.py' | head -n 1 | xargs pytest",
+            "kernels/test_a.py",
+            False,
+        ),
+        (
+            "find kernels -name 'test_*.py' | grep attention | xargs pytest",
+            "kernels/test_a.py",
+            False,
         ),
         # `xargs` runs `echo` here, not pytest - the trailing `pytest` is echo's
         # argument.
@@ -367,6 +379,12 @@ def test_find_pipeline_parses_as_find_selection():
             "v1/e2e/test_x.py",
             True,
         ),
+        # `python -m <module>` runs the module, not a script - only `-m pytest`
+        # collects tests. `compileall kernels` byte-compiles, it does not run.
+        ("python -m compileall kernels", "kernels/test_a.py", False),
+        ("python -m mypy kernels/test_a.py", "kernels/test_a.py", False),
+        # `coverage run -m pytest` still resolves through to pytest.
+        ("coverage run -m pytest kernels/test_a.py", "kernels/test_a.py", True),
     ],
 )
 def test_direct_runners(command, test_file, expected):
@@ -386,6 +404,8 @@ def test_direct_runners(command, test_file, expected):
         "uv pip install -r requirements/test/cuda.in",
         "bash tests/does_not_exist.sh",
         "echo 'pytest kernels/test_a.py'",
+        # `pytest` as an argument to another command - `echo` runs, not pytest.
+        "echo pytest kernels/test_a.py",
         'pytest -v -s "unbalanced',
         # A `.sh` that is only an *argument* (Buildkite printing / copying a
         # filename) is not a script invocation.

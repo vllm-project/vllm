@@ -487,7 +487,9 @@ def _classify_subcommand(tokens: list[str], visited: set[str]) -> list[Selection
         find_selection = _parse_find_command(tokens)
         return [find_selection] if find_selection is not None else []
 
-    if any(token in PYTEST_COMMANDS for token in tokens):
+    # A `pytest` token only counts when `pytest` is the command that actually
+    # runs - `echo pytest kernels` prints text, it does not collect anything.
+    if _runs_pytest(tokens):
         return [_parse_pytest_command(tokens)]
 
     # Resolve the real command word past `FOO=1` / `env` / `if ! ...` wrappers,
@@ -510,11 +512,20 @@ def _classify_subcommand(tokens: list[str], visited: set[str]) -> list[Selection
 
     # `python` / `torchrun` / `coverage <file>.py`.
     if command_name in FILE_RUNNER_COMMANDS:
+        rest = tokens[cmd_index + 1 :]
+        # `-m <module>` picks the module, not a script: only `-m pytest` runs
+        # tests. `python -m compileall kernels` collects nothing - the trailing
+        # `kernels` is compileall's argv, not a test path.
+        if "-m" in rest:
+            after_m = rest[rest.index("-m") + 1 :]
+            if after_m[:1] and after_m[0] in PYTEST_COMMANDS:
+                return [_parse_pytest_command(after_m)]
+            return []
         # `python foo.py a b/c --suffix v1` executes only `foo.py`; the tokens
         # after it are that script's argv - treating them as test paths tethers
         # whatever directory an argument happens to name (`v1` -> `tests/v1`).
         script = next(
-            (t for t in tokens[cmd_index + 1 :] if _token_is_test_path(t)), None
+            (t for t in rest if t.endswith(".py") and _token_is_test_path(t)), None
         )
         if script is not None:
             return [PytestSelection(included_paths=[script])]
@@ -552,13 +563,21 @@ def _runs_pytest(tokens: list[str]) -> bool:
     return idx < len(tokens) and tokens[idx] in PYTEST_COMMANDS
 
 
+# Pipe stages that reorder or echo the stream without dropping any line, so
+# every `find` match still reaches a downstream `xargs pytest`. Anything else
+# (`head`, `grep`, `shuf`, `sed -n`, ...) filters, and then only some matches
+# run - not enough to claim the whole sweep is tethered.
+_PIPE_PASSTHROUGH = {"sort", "tee", "cat", "tac"}
+
+
 def _find_feeds_pytest(stages: list[tuple[str, list[str]]], find_index: int) -> bool:
     """True if the ``find`` stage at ``find_index`` actually runs its matches
     through ``pytest``: a *terminated* ``-exec pytest ... \\;`` / ``... +`` in the
     ``find`` itself, or an ``xargs`` whose command operand is ``pytest``, reached
-    through consecutive ``|`` pipes. A ``find`` piped to ``wc`` / an
-    ``xargs echo``, an unterminated ``-exec``, or a ``pytest`` in a separate
-    ``;`` / ``&&`` command, runs nothing."""
+    through ``|`` pipes of non-filtering stages only. A ``find`` piped to
+    ``wc`` / ``head`` / an ``xargs echo``, an unterminated ``-exec``, or a
+    ``pytest`` in a separate ``;`` / ``&&`` command, runs nothing (or not the
+    whole sweep)."""
     find_tokens = stages[find_index][1]
     for i, token in enumerate(find_tokens):
         if token in ("-exec", "-execdir"):
@@ -570,6 +589,9 @@ def _find_feeds_pytest(stages: list[tuple[str, list[str]]], find_index: int) -> 
             break
         if tokens[:1] == ["xargs"] and _runs_pytest(_xargs_command_tokens(tokens[1:])):
             return True
+        if tokens[:1] and tokens[0] in _PIPE_PASSTHROUGH:
+            continue
+        break
     return False
 
 
