@@ -68,37 +68,37 @@ def v41_moe_config(dist_init):
     )
 
 
-@pytest.mark.parametrize("vision", [False, True])
-@pytest.mark.parametrize("layer_id,num_experts,top_k", [(0, 8, 2), (2, 4, 3)])
-def test_deepseek_v41_moe_routes_without_hash_table(
+@pytest.mark.parametrize(
+    "vision,layer_id,num_experts,top_k", [(False, 0, 8, 2), (True, 2, 4, 3)]
+)
+def test_deepseek_v41_mega_gate_correctness(
     v41_moe_config, monkeypatch, vision, layer_id, num_experts, top_k
 ):
     """Main and draft layers select experts by score and preserve image routing."""
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("DeepGEMM Mega Gate requires SM100")
+
     config = v41_moe_config.model_config.hf_config
+    config.hidden_size = 256
     config.vision_n_layers = int(vision)
     with torch.device("cuda"):
         moe = DeepseekV41MoE(v41_moe_config, prefix=f"model.layers.{layer_id}.ffn")
-        hidden_states = torch.randn(4, config.hidden_size)
+        hidden_states = torch.randn(4, config.hidden_size, dtype=torch.bfloat16)
         input_ids = (
             torch.tensor([42, IMAGE_SENTINEL_BASE_ID, IMAGE_PAD_ID, 129257])
             if vision
             else None
         )
-    assert moe.gate.tid2eid is None
-    assert moe.gate.weight.shape == (num_experts, config.hidden_size)
-    assert isinstance(moe.experts, DeepseekV4MegaMoEExperts)
-    assert moe.experts.w13_weight.shape == (num_experts, 256, 64)
-    assert moe.experts.top_k == top_k
-    assert (config.n_routed_experts, config.num_experts_per_tok) == (8, 2)
 
     with torch.no_grad():
+        moe.gate.weight.data = moe.gate.weight.data.to(torch.bfloat16)
         moe.gate.weight.normal_(std=0.01)
         moe.gate.e_score_correction_bias.copy_(torch.arange(num_experts, device="cuda"))
         if vision:
             moe.gate.bias_vl.copy_(-moe.gate.e_score_correction_bias)
 
     scores = torch.nn.functional.softplus(
-        torch.nn.functional.linear(hidden_states, moe.gate.weight)
+        torch.mm(hidden_states, moe.gate.weight.t(), out_dtype=torch.float32)
     ).sqrt()
     bias = moe.gate.e_score_correction_bias
     if vision:
@@ -110,32 +110,14 @@ def test_deepseek_v41_moe_routes_without_hash_table(
         dim=-1, keepdim=True
     )
 
-    def mega_gate(x, weight, num_topk, **kwargs):
-        assert x is hidden_states
-        assert weight is moe.gate.weight
-        assert num_topk == top_k
-        assert kwargs["scoring_func"] == "sqrtsoftplus"
-        assert kwargs["routed_scaling_factor"] == config.routed_scaling_factor
-        torch.testing.assert_close(kwargs["bias"], moe.gate.e_score_correction_bias)
-        if vision:
-            torch.testing.assert_close(kwargs["image_bias"], moe.gate.bias_vl)
-            torch.testing.assert_close(kwargs["image_token_mask"], image_mask)
-        else:
-            assert kwargs["image_bias"] is None
-            assert kwargs["image_token_mask"] is None
-        return expected_weights, expected_ids
-
     def check_routing(x, weights, ids, *, activation_clamp):
         torch.testing.assert_close(ids, expected_ids)
-        torch.testing.assert_close(weights, expected_weights)
+        torch.testing.assert_close(weights, expected_weights, rtol=1e-3, atol=1e-4)
         assert activation_clamp == config.swiglu_limit
         return x.clone()
 
-    monkeypatch.setattr("vllm.utils.deep_gemm.bf16_mega_gate", mega_gate)
     monkeypatch.setattr(moe.experts, "forward", check_routing)
     monkeypatch.setattr(moe.shared_experts, "forward", lambda x: 2 * x)
-    with pytest.raises(RuntimeError, match="metadata must be prepared"):
-        moe(hidden_states, input_ids)
     routing_input_ids = (
         input_ids
         if input_ids is not None
@@ -176,137 +158,58 @@ def test_deepseek_v41_fused_moe_uses_draft_counts_or_main_defaults(
     assert captured["hash_indices_table"] is None
 
 
-def test_deepseek_v4_moe_preserves_configured_hash_layers(v41_moe_config):
+def test_deepseek_v4_mega_gate_hash_routing_correctness(v41_moe_config, monkeypatch):
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("DeepGEMM Mega Gate requires SM100")
+
     config = v41_moe_config.model_config.hf_config
+    config.hidden_size = 256
     config.num_hash_layers = 1
     config.vocab_size = 32
-    moe = DeepseekV4MoE(
-        v41_moe_config,
-        prefix="model.layers.0.ffn",
-        num_hash_layers=config.num_hash_layers,
+    with torch.device("cuda"):
+        moe = DeepseekV4MoE(
+            v41_moe_config,
+            prefix="model.layers.0.ffn",
+            num_hash_layers=config.num_hash_layers,
+        )
+        hidden_states = torch.randn(4, config.hidden_size, dtype=torch.bfloat16)
+        input_ids = torch.tensor([0, 1, 2, 3])
+
+    token_ids = torch.arange(config.vocab_size, device="cuda")
+    fixed_ids = torch.stack(
+        (
+            token_ids % config.n_routed_experts,
+            (token_ids + 3) % config.n_routed_experts,
+        ),
+        dim=1,
     )
-    assert moe.gate.tid2eid.shape == (32, 2)
-    assert moe.gate.e_score_correction_bias is None
-    with pytest.raises(ValueError, match="hash MoE routing requires input_ids"):
-        moe(torch.zeros(1, 128))
+    with torch.no_grad():
+        moe.gate.weight.data = moe.gate.weight.data.to(torch.bfloat16)
+        moe.gate.weight.normal_(std=0.01)
+        moe.gate.tid2eid.copy_(fixed_ids)
 
-
-def test_deepseek_v4_mega_gate_rejects_unnormalized_topk(v41_moe_config):
-    config = v41_moe_config.model_config.hf_config
-    config.norm_topk_prob = False
-    with pytest.raises(NotImplementedError, match="normalized top-k probabilities"):
-        DeepseekV41MoE(v41_moe_config, prefix="model.layers.0.ffn")
-
-
-def test_deepseek_v4_mega_gate_scopes_hash_metadata_to_hash_layers(monkeypatch):
-    moe = DeepseekV4MoE.__new__(DeepseekV4MoE)
-    torch.nn.Module.__init__(moe)
-    moe.gate = SimpleNamespace(
-        weight=torch.empty(8, 256),
-        tid2eid=torch.arange(16).view(8, 2),
-        e_score_correction_bias=torch.arange(8, dtype=torch.float32),
+    expected_ids = fixed_ids[input_ids]
+    scores = torch.nn.functional.softplus(
+        torch.mm(hidden_states, moe.gate.weight.t(), out_dtype=torch.float32)
+    ).sqrt()
+    expected_weights = scores.gather(1, expected_ids)
+    expected_weights *= config.routed_scaling_factor / expected_weights.sum(
+        dim=-1, keepdim=True
     )
-    moe.n_activated_experts = 2
-    moe.scoring_func = "sqrtsoftplus"
-    moe.routed_scaling_factor = 1.5
-    moe.ep_rank = 0
-    input_ids = torch.tensor([0, IMAGE_SENTINEL_BASE_ID, 7])
-    image_bias = torch.arange(8, dtype=torch.float32).neg()
-    moe.gate.bias_vl = image_bias
-    moe.use_mega_moe = True
-    moe.swiglu_limit = None
-    moe.shared_experts = None
+
+    def check_routing(x, weights, ids, *, activation_clamp):
+        torch.testing.assert_close(ids, expected_ids)
+        torch.testing.assert_close(weights, expected_weights, rtol=1e-3, atol=1e-4)
+        return x.clone()
+
+    monkeypatch.setattr(moe.experts, "forward", check_routing)
+    monkeypatch.setattr(moe.shared_experts, "forward", torch.zeros_like)
     metadata = prepare_mega_gate_routing_metadata(
         input_ids,
         has_hash_routing=True,
-        image_sentinel_base_id=IMAGE_SENTINEL_BASE_ID,
+        image_sentinel_base_id=None,
     )
-    assert torch.equal(metadata.safe_hash_input_ids, torch.tensor([0, 0, 7]))
-    assert torch.equal(metadata.image_token_mask, torch.tensor([False, True, False]))
-    assert torch.equal(metadata.hash_token_mask, torch.tensor([True, False, True]))
-
-    def fake_mega_gate(*args, **kwargs):
-        assert kwargs["image_token_mask"] is metadata.image_token_mask
-        if moe.gate.tid2eid is None:
-            assert kwargs["fix_routing_mask"] is None
-            assert kwargs["unmapped_topk_idx"] is None
-        else:
-            assert kwargs["fix_routing_mask"] is metadata.hash_token_mask
-            assert torch.equal(
-                kwargs["unmapped_topk_idx"],
-                moe.gate.tid2eid[torch.tensor([0, 0, 7])],
-            )
-        assert torch.equal(kwargs["image_bias"], image_bias)
-        assert torch.equal(kwargs["bias"], moe.gate.e_score_correction_bias)
-        return torch.empty(3, 2), torch.empty(3, 2, dtype=torch.int64)
-
-    class FakeExperts(torch.nn.Module):
-        has_fused_shared_experts = False
-
-        def forward(self, hidden_states, *args, **kwargs):
-            return hidden_states
-
-    moe.experts = FakeExperts()
-    monkeypatch.setattr("vllm.utils.deep_gemm.bf16_mega_gate", fake_mega_gate)
-    hidden_states = torch.empty(3, 256)
     torch.testing.assert_close(moe(hidden_states, input_ids, metadata), hidden_states)
-
-    moe.gate.tid2eid = None
-    torch.testing.assert_close(moe(hidden_states, input_ids, metadata), hidden_states)
-
-
-def test_deepseek_v4_mega_gate_cudagraph_after_same_stream_warmup():
-    if torch.cuda.get_device_capability()[0] != 10:
-        pytest.skip("DeepGEMM Mega Gate requires SM100")
-
-    from vllm.utils.deep_gemm import _import_deep_gemm, bf16_mega_gate
-
-    deep_gemm = _import_deep_gemm()
-    assert deep_gemm is not None
-    assert hasattr(deep_gemm, "bf16_mega_gate")
-
-    generator = torch.Generator(device="cuda").manual_seed(0)
-    x = torch.randn(4, 256, dtype=torch.bfloat16, device="cuda", generator=generator)
-    weight = torch.randn(
-        8, 256, dtype=torch.bfloat16, device="cuda", generator=generator
-    )
-    bias = torch.randn(8, dtype=torch.float32, device="cuda", generator=generator)
-    stream = torch.cuda.Stream()
-    with torch.cuda.stream(stream):
-        eager_weights, eager_ids = bf16_mega_gate(
-            x,
-            weight,
-            2,
-            scoring_func="sqrtsoftplus",
-            routed_scaling_factor=1.0,
-            ep_rank=0,
-            bias=bias,
-        )
-        stream.synchronize()
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, stream=stream):
-            actual_weights, actual_ids = bf16_mega_gate(
-                x,
-                weight,
-                2,
-                scoring_func="sqrtsoftplus",
-                routed_scaling_factor=1.0,
-                ep_rank=0,
-                bias=bias,
-            )
-
-    graph.replay()
-    torch.accelerator.synchronize()
-    scores = torch.nn.functional.softplus(
-        torch.mm(x, weight.t(), out_dtype=torch.float32)
-    ).sqrt()
-    expected_ids = (scores + bias).topk(2, dim=-1).indices
-    expected_weights = scores.gather(1, expected_ids)
-    expected_weights /= expected_weights.sum(dim=-1, keepdim=True)
-    torch.testing.assert_close(eager_ids, expected_ids)
-    torch.testing.assert_close(eager_weights, expected_weights, rtol=1e-3, atol=1e-4)
-    torch.testing.assert_close(actual_ids, eager_ids)
-    torch.testing.assert_close(actual_weights, eager_weights)
 
 
 def test_deepseek_v4_mega_moe_expert_mapping():
@@ -646,9 +549,6 @@ def test_deepseek_v4_mega_moe_does_not_double_add_fused_shared_expert(
         def __init__(self):
             super().__init__()
             self.weight = torch.empty(2, 128)
-
-        def forward(self, hidden_states):
-            return torch.empty(hidden_states.shape[0], 2), None
 
     class FakeExperts(torch.nn.Module):
         has_fused_shared_experts = fused

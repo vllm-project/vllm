@@ -81,6 +81,7 @@ steps:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - vllm/models/deepseek_v4/nvidia/
+  - vllm/utils/deep_gemm.py
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
   - tests/models/test_deepseek_v4_mega_moe.py
   commands:
