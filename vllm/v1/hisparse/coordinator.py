@@ -53,7 +53,7 @@ class _HiSparseRequestState:
     exists), clean (``valid_pages``: the host copy is complete) and unpinned
     (``unpinned_pages``: clean, and its allocation reference was released so
     the pool may reuse it). ``pinned_clean`` tracks clean pages still holding
-    their reference, which only happens before the request can read from host.
+    their reference, including the active tail and pages awaiting a hot buffer.
     """
 
     valid_pages: set[int] = field(default_factory=set)
@@ -103,9 +103,9 @@ class HiSparseCoordinator:
     """Own HiSparse host allocation, host publication, spills, and GPU residency.
 
     GPU-resident pages are a write-back cache of the host tier. Once a page's
-    host copy is durable and its owner can read from host (it has, or has
-    asked for, a hot region), the page's allocation reference is released with
-    ``BlockPool.unpin_blocks``: the block stays in the block table and keeps
+    host copy is durable and its owner has an allocated hot region, the page's
+    reference is released with ``BlockPool.unpin_blocks``. It stays in the
+    block table and keeps
     being read, but the pool counts it as free and may hand it out, at which
     point the owner's page is nulled and its block table republished.
     """
@@ -402,8 +402,7 @@ class HiSparseCoordinator:
     def _can_read_from_host(self, request_id: str) -> bool:
         """Whether resident pages may be dropped under the request."""
         return bool(self.hot_managers) and all(
-            manager.has_hot(request_id) or request_id in manager.hot_required
-            for manager in self.hot_managers
+            manager.has_hot(request_id) for manager in self.hot_managers
         )
 
     def _resident_page_blocks(
@@ -477,8 +476,9 @@ class HiSparseCoordinator:
 
         A request that can read from host releases every clean sealed page to
         the pool. One that cannot keeps its pages pinned until the shared pool
-        runs low, then asks for a hot region and releases them; the region is
-        allocated on its next scheduling pass, before the block table is used.
+        runs low, then asks for a hot region. Pages stay pinned until a later
+        allocation provides that region: another request in the same batch
+        could otherwise reuse them before this request can read from host.
         """
         if not self.resident_managers:
             return
@@ -489,6 +489,7 @@ class HiSparseCoordinator:
                 return
             for manager in self.hot_managers:
                 manager.require_hot(request_id)
+            return
         self._unpin_clean_pages(request_id, state)
 
     # ------------------------------------------------------------------

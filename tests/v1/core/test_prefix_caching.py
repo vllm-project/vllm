@@ -306,6 +306,7 @@ def test_hisparse_reports_when_context_is_fully_resident():
 
     for hot_manager in coordinator.hot_managers:
         hot_manager.require_hot(request.request_id)
+    assert manager.allocate_slots(request, num_new_tokens=len(tokens)) is not None
     _publish_hisparse_pages(manager)
     pool = manager.block_pool
     pool.get_new_blocks(pool.get_num_free_blocks())
@@ -407,39 +408,51 @@ def allocate_external_prefix(
     )
 
 
-def test_hisparse_low_pool_releases_clean_pages_for_admission():
-    """A request that fills the pool starts reading from host so others fit."""
-    manager = make_hisparse_kv_cache_manager(18, 18, max_model_len=160)
+@pytest.mark.parametrize("enable_caching", [False, True])
+def test_hisparse_keeps_resident_pages_until_hot_buffer_is_allocated(enable_caching):
+    """Later admissions must not remove a scheduled request's only readable tier."""
+    manager = make_hisparse_kv_cache_manager(
+        32, 32, max_model_len=256, enable_caching=enable_caching
+    )
+    first = make_request("first", list(range(160)), HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(first, num_new_tokens=128) is not None
+    _publish_hisparse_pages(manager)
+    first.num_computed_tokens = 128
+    pool = manager.block_pool
+    held = pool.get_new_blocks(pool.get_num_free_blocks() - 3)
+
+    assert manager.allocate_slots(first, num_new_tokens=1) is not None
+    second = make_request("second", [1000] * 16, HISPARSE_BLOCK_SIZE, sha256)
+    manager.allocate_slots(second, num_new_tokens=16)
     coordinator = manager.hisparse_coordinator
+    scheduled = (("first", 128, 1),)
+    assert coordinator.all_context_pages_resident(scheduled)
+    assert all(not m.has_hot("first") for m in coordinator.hot_managers)
+
+    # Once another allocation finishes, A can acquire its hot buffer and
+    # safely release its clean pages for other requests to reuse.
+    pool.free_blocks(held)
+    assert manager.allocate_slots(first, num_new_tokens=1) is not None
+    assert all(m.has_hot("first") for m in coordinator.hot_managers)
+    pool.get_new_blocks(pool.get_num_free_blocks())
+    assert not coordinator.all_context_pages_resident(scheduled)
+    assert "first" in coordinator.take_block_table_updates()
+
+
+def test_hisparse_full_pool_keeps_pages_pinned_until_preemption():
+    """Without room for a hot buffer, admission must defer instead of losing KV."""
+    manager = make_hisparse_kv_cache_manager(18, 18, max_model_len=160)
     first = make_request("first", list(range(128)), HISPARSE_BLOCK_SIZE, sha256)
     assert manager.allocate_slots(first, num_new_tokens=128) is not None
-    pool = manager.block_pool
-    assert pool.get_num_free_blocks() == 1
-
-    second = make_request(
-        "second", list(range(HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
-    )
-    admit = dict(num_new_tokens=16, full_sequence_must_fit=True)
-    assert manager.allocate_slots(second, **admit) is None
-
-    # Filling the pool past the watermark asked for a hot region; once the
-    # eager spills land, every sealed page is released to the free queue.
-    assert all(
-        first.request_id in hot_manager.hot_required
-        for hot_manager in coordinator.hot_managers
-    )
     _publish_hisparse_pages(manager)
-    assert pool.get_num_free_blocks() == 1 + 6
-    assert manager.allocate_slots(second, **admit) is not None
-
-    first_resident = manager.get_blocks(first.request_id).blocks[2]
-    assert first_resident[0].is_null
-    updates = coordinator.take_block_table_updates()
-    assert updates[first.request_id] == manager.get_block_ids(first.request_id)
-
+    assert manager.block_pool.get_num_free_blocks() == 1
     first.num_computed_tokens = 128
-    assert manager.allocate_slots(first, num_new_tokens=16) is not None
-    assert len(manager.get_blocks(first.request_id).blocks[3]) == 2
+    assert manager.allocate_slots(first, num_new_tokens=1) is None
+    assert manager.hisparse_coordinator.all_context_pages_resident((("first", 127, 1),))
+
+    manager.free(first)
+    second = make_request("second", [1000] * 16, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.allocate_slots(second, num_new_tokens=16) is not None
 
 
 def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
