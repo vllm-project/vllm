@@ -1112,7 +1112,16 @@ async fn generate_validates_preprocessed_model_limits_and_prompt() {
     let mut truncated = text.clone();
     text.prompt = Some(pb::generate_request::Prompt::Text("hello".to_owned()));
     truncated.truncate_prompt_tokens = 1;
-    for request in [over_limit, bad_range, unsupported, text, truncated] {
+    let empty_identifier =
+        preprocessed_grpc_request(vec![preprocessed_grpc_media(pb::Modality::Image, "", 0, 1)]);
+    for request in [
+        over_limit,
+        bad_range,
+        unsupported,
+        text,
+        truncated,
+        empty_identifier,
+    ] {
         let status = client.generate(request.clone()).await.expect_err("invalid multimodal input");
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
         let status = client

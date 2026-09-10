@@ -28,9 +28,7 @@ use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
-use vllm_engine_core_client::protocol::multimodal::{
-    InlineMmFeatures, MmFeatureSpec, MmFeatures, MmKwargsItem,
-};
+use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures, MmKwargsItem};
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
@@ -43,6 +41,7 @@ mod expand;
 mod image;
 mod input;
 mod item;
+mod preprocessed;
 mod tensor;
 mod video;
 
@@ -686,17 +685,17 @@ impl MultimodalModelInfo {
         Ok(())
     }
 
-    /// Validate preprocessed features against this model's supported modalities,
-    /// item-count limits, and the final prompt length.
+    /// Validate inline storage, batching, and placeholder ranges, then check
+    /// this model's supported modalities and item-count limits.
     ///
-    /// Storage and batching metadata are validated by [`InlineMmFeatures`].
     /// `prompt_len` must include all expanded multimodal placeholders.
     pub(crate) fn prepare_preprocessed(
         &self,
-        features: InlineMmFeatures,
+        mut features: MmFeatures,
         prompt_len: usize,
     ) -> Result<MmFeatures> {
-        for feature in features.as_slice() {
+        preprocessed::validate_features(&mut features, prompt_len)?;
+        for feature in &features {
             let supported = match feature.modality {
                 MmModality::Image => self.image.is_some(),
                 MmModality::Video => self.video.is_some(),
@@ -708,8 +707,8 @@ impl MultimodalModelInfo {
                 });
             }
         }
-        self.validate_modality_limits(features.as_slice().iter().map(|feature| feature.modality))?;
-        Ok(features.into_features(prompt_len)?)
+        self.validate_modality_limits(features.iter().map(|feature| feature.modality))?;
+        Ok(features)
     }
 
     /// Run media fetch, per-modality preprocessing, prompt expansion, and

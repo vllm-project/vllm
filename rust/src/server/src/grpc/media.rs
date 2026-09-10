@@ -3,23 +3,29 @@
 
 //! Protobuf media adaptation into the shared multimodal preparation boundary.
 
+use std::io::Cursor;
+
+use serde::Deserialize as _;
 use thiserror_ext::AsReport as _;
 use tonic::Status;
 use url::Url;
 use vllm_chat::MediaContentPart;
 use vllm_chat::multimodal::MultimodalInput;
 use vllm_engine_core_client::protocol::multimodal::{
-    InlineMmError, InlineMmFeatures, MAX_INLINE_MM_BYTES, MmFeatureSpec, MmModality,
-    PlaceholderRange, decode_inline_mm_kwargs,
+    MmFeatureSpec, MmKwargsItem, MmModality, PlaceholderRange,
 };
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 
 use super::pb;
 
+/// Maximum total serialized kwargs size accepted in one gRPC request.
+const MAX_INLINE_MM_BYTES: usize = 16 * 1024 * 1024;
+const MAX_MSGPACK_DEPTH: usize = 32;
+
 /// Adapt a request containing either raw media or preprocessed features.
 ///
 /// Require a single input kind and bound the total kwargs size before decoding.
-/// Shared media preparation checks model support, item limits, and prompt bounds.
+/// Shared media preparation validates features, model support, item limits, and prompt bounds.
 pub(super) fn from_proto(media: Vec<pb::MediaItem>) -> Result<MultimodalInput, Status> {
     if !media
         .iter()
@@ -35,9 +41,9 @@ pub(super) fn from_proto(media: Vec<pb::MediaItem>) -> Result<MultimodalInput, S
         encoded_bytes = encoded_bytes.saturating_add(feature.kwargs.as_ref().map_or(0, Vec::len));
     }
     if encoded_bytes > MAX_INLINE_MM_BYTES {
-        return Err(inline_error(InlineMmError::PayloadTooLarge {
-            limit: MAX_INLINE_MM_BYTES,
-        }));
+        return Err(Status::resource_exhausted(format!(
+            "inline multimodal payload exceeds {MAX_INLINE_MM_BYTES} bytes"
+        )));
     }
     let features = media
         .into_iter()
@@ -48,9 +54,7 @@ pub(super) fn from_proto(media: Vec<pb::MediaItem>) -> Result<MultimodalInput, S
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    InlineMmFeatures::new(features)
-        .map(MultimodalInput::Preprocessed)
-        .map_err(inline_error)
+    Ok(MultimodalInput::Preprocessed(features))
 }
 
 fn feature_from_proto(item: pb::MediaItem) -> Result<MmFeatureSpec, Status> {
@@ -80,7 +84,7 @@ fn feature_from_proto(item: pb::MediaItem) -> Result<MmFeatureSpec, Status> {
     };
     Ok(MmFeatureSpec {
         modality,
-        data: Some(decode_inline_mm_kwargs(&bytes).map_err(inline_error)?),
+        data: Some(decode_inline_mm_kwargs(&bytes)?),
         identifier: feature.identifier,
         mm_hash: feature.mm_hash,
         mm_position: PlaceholderRange {
@@ -91,12 +95,22 @@ fn feature_from_proto(item: pb::MediaItem) -> Result<MmFeatureSpec, Status> {
     })
 }
 
-fn inline_error(error: InlineMmError) -> Status {
-    let message = error.to_report_string();
-    match error {
-        InlineMmError::PayloadTooLarge { .. } => Status::resource_exhausted(message),
-        _ => Status::invalid_argument(message),
+/// Decode one inline item using the engine protocol's typed serde schema.
+fn decode_inline_mm_kwargs(bytes: &[u8]) -> Result<MmKwargsItem, Status> {
+    let mut decoder = rmp_serde::Deserializer::new(Cursor::new(bytes));
+    decoder.set_max_depth(MAX_MSGPACK_DEPTH);
+    let kwargs = MmKwargsItem::deserialize(&mut decoder).map_err(|error| {
+        Status::invalid_argument(format!(
+            "invalid multimodal kwargs MessagePack: {}",
+            error.as_report()
+        ))
+    })?;
+    if decoder.position() != bytes.len() as u64 {
+        return Err(Status::invalid_argument(
+            "kwargs contains trailing MessagePack data",
+        ));
     }
+    Ok(kwargs)
 }
 
 fn mixed_media_error() -> Status {
@@ -198,7 +212,7 @@ mod tests {
 
     use super::*;
     use vllm_engine_core_client::protocol::multimodal::{
-        MmBatchedField, MmField, MmFieldElem, MmKwargValue,
+        MmBatchedField, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmSlice, SliceSpec,
     };
 
     fn preprocessed() -> pb::MediaItem {
@@ -268,5 +282,60 @@ mod tests {
         feature.kwargs = Some(vec![0; MAX_INLINE_MM_BYTES / 2 + 1]);
         let error = from_proto(vec![item.clone(), item]).unwrap_err();
         assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+    }
+
+    #[test]
+    fn kwargs_decoder_rejects_trailing_truncated_and_deeply_nested_input() {
+        let kwargs = BTreeMap::from([(
+            "pixels".to_owned(),
+            MmFieldElem {
+                data: Some(MmKwargValue::Int(1)),
+                field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
+            },
+        )]);
+        let valid = rmp_serde::to_vec_named(&kwargs).unwrap();
+        assert_eq!(decode_inline_mm_kwargs(&valid).unwrap(), kwargs);
+        let mut trailing = valid.clone();
+        trailing.push(0);
+        let mut nested_kwargs = kwargs.clone();
+        let mut value = MmKwargValue::Int(1);
+        for _ in 0..64 {
+            value = MmKwargValue::List(vec![value]);
+        }
+        nested_kwargs.get_mut("pixels").unwrap().data = Some(value);
+        let nested = rmp_serde::to_vec_named(&nested_kwargs).unwrap();
+        // A declared array length must not drive a proportional allocation.
+        let huge_array = vec![
+            0x81, 0xa1, b'x', 0x81, 0xa4, b'd', b'a', b't', b'a', 0xdd, 0xff, 0xff, 0xff, 0xff,
+        ];
+        for bytes in [&valid[..valid.len() - 1], &trailing, &nested, &huge_array] {
+            assert!(decode_inline_mm_kwargs(bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn kwargs_decode_python_encoder_tensor_and_factory_tuple() {
+        // MsgpackEncoder(size_threshold=1 << 30), vLLM 6cbb3c154e:
+        // pixel_values = tensor([1., 2.]), MultiModalFlatField(slices=[slice(0, 2)]).
+        let bytes = b"\x81\xacpixel_values\x82\xa4data\x93\xa7float32\x91\x02\xd7\x03\
+            \x00\x00\x80\x3f\x00\x00\x00\x40\
+            \xa5field\x92\xa4flat\x83\xabkeep_on_cpu\xc2\
+            \xa6slices\x91\x93\x00\x02\xc0\xa3dim\x00";
+        let kwargs = decode_inline_mm_kwargs(bytes).unwrap();
+        let expected = MmFieldElem {
+            data: Some(MmKwargValue::Tensor(
+                WireTensor::from_f32(vec![2], vec![1., 2.]).unwrap(),
+            )),
+            field: MmField::Flat(MmFlatField {
+                slices: vec![MmSlice::Slice(SliceSpec {
+                    start: Some(0),
+                    stop: Some(2),
+                    step: None,
+                })],
+                dim: 0,
+                keep_on_cpu: false,
+            }),
+        };
+        assert_eq!(kwargs["pixel_values"], expected);
     }
 }
