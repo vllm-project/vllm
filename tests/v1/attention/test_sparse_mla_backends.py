@@ -427,6 +427,7 @@ def test_sparse_backend_decode_correctness(
         v_head_dim=v_head_dim,
         model_type="deepseek_v2",
     )
+    del model_config.hf_config.index_topk  # Composite configs only nest this field.
     model_config.dtype = dtype
     model_config.get_num_attention_heads = MethodType(
         lambda self, parallel_config: num_heads,
@@ -1154,6 +1155,7 @@ def test_sparse_backend_prefill_correctness(
         v_head_dim=v_head_dim,
         model_type="deepseek_v2",
     )
+    del model_config.hf_config.index_topk  # Composite configs only nest this field.
     model_config.dtype = dtype
     model_config.model_arch_config.total_num_attention_heads = num_heads
     model_config.get_num_attention_heads = MethodType(
@@ -1745,6 +1747,7 @@ def _build_sparse_dcp_vllm_config(
     model_config = vllm_config.model_config
     model_config.dtype = torch.bfloat16
     model_config.hf_text_config = SimpleNamespace(
+        index_topk=topk_tokens,
         q_lora_rank=None,
         kv_lora_rank=kv_lora_rank,
         qk_nope_head_dim=qk_nope_head_dim,
@@ -1752,6 +1755,7 @@ def _build_sparse_dcp_vllm_config(
         v_head_dim=v_head_dim,
         model_type="deepseek_v2",
     )
+    del model_config.hf_config.index_topk  # Composite configs only nest this field.
     model_config.get_num_attention_heads = MethodType(
         lambda self, parallel_config: local_heads, model_config
     )

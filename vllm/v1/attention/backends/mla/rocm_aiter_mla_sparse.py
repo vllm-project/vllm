@@ -428,7 +428,7 @@ class ROCMAiterMLASparseMetadataBuilder(
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens = vllm_config.model_config.hf_config.index_topk
+        self.topk_tokens = vllm_config.model_config.hf_text_config.index_topk
         attention_context = vllm_config.compilation_config.static_forward_context
         # Sink decode must use AITER's nonpersistent path. In particular,
         # gfx942 has no persistent+LSE kernel, and its metadata heuristic

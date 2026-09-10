@@ -385,7 +385,7 @@ class BuildPrefillChunkMetadataKernel(
 
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
         max_tokens = max(1, min(vllm_config.scheduler_config.max_num_batched_tokens, 8))
-        hf_config = vllm_config.model_config.hf_config
+        hf_text_config = vllm_config.model_config.hf_text_config
         parallel_config = vllm_config.parallel_config
         dcp_world = parallel_config.decode_context_parallel_size
         dcp_interleave = parallel_config.cp_kv_cache_interleave_size
@@ -394,12 +394,12 @@ class BuildPrefillChunkMetadataKernel(
             dict.fromkeys(
                 max(1, int(ratio))
                 for ratio in (
-                    *(getattr(hf_config, "compress_ratios", None) or (1,)),
-                    getattr(hf_config, "index_kpool", 1) or 1,
+                    *(getattr(hf_text_config, "compress_ratios", None) or (1,)),
+                    getattr(hf_text_config, "index_kpool", 1) or 1,
                 )
             )
         )
-        index_kpool = getattr(hf_config, "index_kpool", None)
+        index_kpool = getattr(hf_text_config, "index_kpool", None)
         if index_kpool and index_kpool > 1 and index_kpool not in compress_ratios:
             compress_ratios = compress_ratios + (index_kpool,)
         return self._trace_dispatch(self.dispatch)(

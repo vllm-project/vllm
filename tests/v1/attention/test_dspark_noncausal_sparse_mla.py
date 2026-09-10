@@ -176,6 +176,7 @@ def _run_sparse_backend_vs_sdpa(
         v_head_dim=v_head_dim,
         model_type="deepseek_v2",
     )
+    del model_config.hf_config.index_topk  # Composite configs only nest this field.
     model_config.dtype = dtype
     model_config.get_num_attention_heads = MethodType(
         lambda self, parallel_config: num_heads, model_config
