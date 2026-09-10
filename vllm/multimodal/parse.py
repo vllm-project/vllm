@@ -547,6 +547,9 @@ class MultiModalDataParser:
     Args:
         target_sr (float, optional): Enables automatic resampling of audio
             items to the model's expected sampling rate.
+        audio_resample_method (str): Backend used for the resampling above.
+            Defaults to torchaudio; models with specific needs may override
+            (e.g. phi4mm uses scipy).
         target_channels (int, optional): Target number of audio channels.
             If provided, normalizes audio to this many channels (e.g., 1 for mono).
             If None, audio channels are passed through unchanged.
@@ -602,7 +605,9 @@ class MultiModalDataParser:
         *,
         target_sr: float | None = None,
         target_channels: int | None = None,
-        audio_resample_method: Literal["pyav", "scipy", "soxr"] = "pyav",
+        audio_resample_method: Literal["pyav", "scipy", "soxr", "torchaudio"] = (
+            "torchaudio"
+        ),
         video_needs_metadata: bool = False,
         expected_hidden_size: int | None = None,
         allow_missing_mm_embeddings: bool = False,
@@ -673,7 +678,7 @@ class MultiModalDataParser:
         if self.is_embeddings(data):
             return AudioEmbeddingItems(data, self.expected_hidden_size)
 
-        data_items: list[AudioItem]
+        data_items: list[AudioItem | None]
         if (
             (is_list_of(data, float) and len(data) > 0)
             or (isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 1)
@@ -685,8 +690,13 @@ class MultiModalDataParser:
         else:
             data_items = data  # type: ignore[assignment]
 
-        new_audios = list[np.ndarray]()
+        new_audios = list[np.ndarray | None]()
         for data_item in data_items:
+            # Requests can omit audio samples when reusing a cached UUID.
+            if data_item is None:
+                new_audios.append(None)
+                continue
+
             audio, orig_sr = self._get_audio_with_sr(data_item)
             if orig_sr is None:
                 new_audio = audio
