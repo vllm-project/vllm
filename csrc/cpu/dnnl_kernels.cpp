@@ -521,7 +521,6 @@ int64_t create_onednn_mm_handler(const torch::Tensor& b,
   // bf16:bf16:fp32 then cast output down to bf16.
   if (b.scalar_type() == at::kBFloat16 && b.size(1) >= 64000) {
     args.c_type = dnnl::memory::data_type::f32;
-    args.bf16_in_fp32_out = true;
   }
 #endif
 
@@ -540,7 +539,11 @@ void onednn_mm(torch::Tensor& c,        // [M, OC], row-major
       reinterpret_cast<MatMulPrimitiveHandler*>(handler_tensor.item<int64_t>());
 
   torch::Tensor dnnl_output = c;
-  if (ptr->bf16_in_fp32_out) {
+  // AArch64 specific case where we do a bf16 x bf16 -> fp32 matmul
+  const bool convert_output =
+      ptr->get_output_type() == dnnl::memory::data_type::f32 &&
+      c.scalar_type() != at::kFloat;
+  if (convert_output) {
     dnnl_output = torch::empty(c.sizes(), c.options().dtype(at::kFloat));
   }
 
@@ -550,6 +553,7 @@ void onednn_mm(torch::Tensor& c,        // [M, OC], row-major
 #endif
 
   MatMulPrimitiveHandler::ExecArgs exec_args;
+  exec_args.c_ptr = dnnl_output.data_ptr();
 
 #ifdef VLLM_USE_ACL
   exec_args.a_m_size = a_contig.size(0);
@@ -559,10 +563,6 @@ void onednn_mm(torch::Tensor& c,        // [M, OC], row-major
   exec_args.a_m_stride = a.stride(0);
 #endif
   VLLM_DISPATCH_FLOATING_TYPES(a.scalar_type(), "onednn_mm", [&] {
-    exec_args.c_ptr = c.data_ptr<scalar_t>();
-    if (ptr->bf16_in_fp32_out) {
-      exec_args.c_ptr = dnnl_output.data_ptr<float>();
-    }
     if (bias.has_value()) {
       exec_args.use_bias = true;
       exec_args.bias_type = get_dnnl_type<scalar_t>();
@@ -588,7 +588,7 @@ void onednn_mm(torch::Tensor& c,        // [M, OC], row-major
     ptr->execute(exec_args);
   });
 
-  if (ptr->bf16_in_fp32_out) {
+  if (convert_output) {
     c.copy_(dnnl_output);
   }
 }
