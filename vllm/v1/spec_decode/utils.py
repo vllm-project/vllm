@@ -9,7 +9,7 @@ from vllm.model_executor.warmup.jit_warmup import (
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
-    triton_kernel,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -127,7 +127,7 @@ def eagle_step_update_slot_mapping_and_metadata(
         input_batch_size = batch_size
 
     n_blocks_per_req = block_table_tensor.shape[1]
-    _EAGLE_STEP_SLOT_MAPPING_METADATA_KERNEL(
+    _eagle_step_slot_mapping_metadata(
         positions_1d,
         block_table_tensor,
         block_table_tensor.stride(0),
@@ -485,11 +485,11 @@ def _eagle_step_warmup_inputs(*, max_model_len: int, max_batch_size: int):
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=eagle_step_slot_mapping_metadata_kernel,
     warmup_inputs=_eagle_step_warmup_inputs,
 )
-def _EAGLE_STEP_SLOT_MAPPING_METADATA_KERNEL(
+def _eagle_step_slot_mapping_metadata(
     positions: torch.Tensor,
     block_table: torch.Tensor,
     block_table_stride: int,
@@ -519,11 +519,11 @@ def _eagle_prepare_inputs_warmup_inputs(*, max_batch_size: int):
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=eagle_prepare_inputs_padded_kernel,
     warmup_inputs=_eagle_prepare_inputs_warmup_inputs,
 )
-def _EAGLE_PREPARE_INPUTS_PADDED_KERNEL(
+def _eagle_prepare_inputs_padded(
     cu_num_draft_tokens: torch.Tensor,
     valid_sampled_tokens_count: torch.Tensor,
     query_start_loc_gpu: torch.Tensor,
@@ -556,11 +556,11 @@ def _eagle_prepare_next_token_warmup_inputs(
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=eagle_prepare_next_token_padded_kernel,
     warmup_inputs=_eagle_prepare_next_token_warmup_inputs,
 )
-def _EAGLE_PREPARE_NEXT_TOKEN_PADDED_KERNEL(
+def _eagle_prepare_next_token_padded(
     sampled_token_ids: torch.Tensor,
     discard_request_mask: torch.Tensor,
     backup_next_token_ids: torch.Tensor,
@@ -609,11 +609,11 @@ def _copy_and_expand_eagle_warmup_inputs(
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=copy_and_expand_eagle_inputs_kernel,
     warmup_inputs=_copy_and_expand_eagle_warmup_inputs,
 )
-def _COPY_AND_EXPAND_EAGLE_INPUTS_KERNEL(
+def _copy_and_expand_eagle_inputs(
     target_token_ids_ptr: torch.Tensor,
     target_positions_ptr: torch.Tensor,
     next_token_ids_ptr: torch.Tensor,
@@ -781,11 +781,11 @@ def _copy_and_expand_dflash_warmup_inputs(
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=copy_and_expand_dflash_inputs_kernel,
     warmup_inputs=_copy_and_expand_dflash_warmup_inputs,
 )
-def _COPY_AND_EXPAND_DFLASH_INPUTS_KERNEL(
+def _copy_and_expand_dflash_inputs(
     *,
     next_token_ids_ptr: torch.Tensor,
     target_positions_ptr: torch.Tensor,

@@ -16,7 +16,7 @@ from vllm.model_executor.warmup.jit_warmup import WarmupChoices
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
-    triton_kernel,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
@@ -982,7 +982,7 @@ def _rejection_greedy_sample_warmup_inputs(
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=rejection_greedy_sample_kernel,
     warmup_inputs=_rejection_greedy_sample_warmup_inputs,
 )
@@ -1029,7 +1029,7 @@ def _rejection_random_sample_warmup_inputs(
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=rejection_random_sample_kernel,
     warmup_inputs=_rejection_random_sample_warmup_inputs,
 )
@@ -1065,7 +1065,9 @@ def _expand_warmup_inputs() -> dict[str, object]:
     )
 
 
-@triton_kernel(kernel=expand_kernel, warmup_inputs=_expand_warmup_inputs)
+@triton_kernel_dispatcher_with_warmup(
+    kernel=expand_kernel, warmup_inputs=_expand_warmup_inputs
+)
 def _expand(
     output: torch.Tensor,
     input: torch.Tensor,
@@ -1100,7 +1102,7 @@ def _sample_recovered_tokens_warmup_inputs(
     )
 
 
-@triton_kernel(
+@triton_kernel_dispatcher_with_warmup(
     kernel=sample_recovered_tokens_kernel,
     warmup_inputs=_sample_recovered_tokens_warmup_inputs,
 )

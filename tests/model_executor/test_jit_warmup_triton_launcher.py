@@ -18,7 +18,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     VllmTritonJitKernel,
     kernel_launcher,
-    triton_kernel,
+    triton_kernel_dispatcher_with_warmup,
     triton_warmup_inputs,
 )
 from vllm.triton_utils import tl, triton
@@ -146,7 +146,7 @@ def test_triton_kernel_decorator_returns_launcher(
             config=7,
         )
 
-    @triton_kernel(kernel=kernel, warmup_inputs=warmup_inputs)
+    @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
     def launch(first: str, second: int, config: int) -> LaunchSpec:
         return (2,), dict(aliased_ptr=first, CONST=config)
 
@@ -204,7 +204,7 @@ def test_triton_kernel_decorator_compacts_large_ranges(
         tokens: Any = WarmupIntRange(1, 8193)
         return dict(first="warmup", second=tokens)
 
-    @triton_kernel(kernel=kernel, warmup_inputs=warmup_inputs)
+    @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
     def dispatch(first: str, second: int) -> LaunchSpec:
         dispatched.append(second)
         return (second,), dict(CONST=7 if second <= 17 else 8)
@@ -231,7 +231,7 @@ def test_triton_kernel_dispatch_uses_cuda_fake_tensors(
             second=1,
         )
 
-    @triton_kernel(kernel=kernel, warmup_inputs=warmup_inputs)
+    @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
     def dispatch(first: torch.Tensor, second: int) -> LaunchSpec:
         assert isinstance(first, torch.Tensor)
         assert first.is_cuda
@@ -263,7 +263,7 @@ def test_triton_kernel_decorates_native_launchers(
             CONST=7,
         )
 
-    launcher = triton_kernel(warmup_inputs=warmup_inputs)(kernel)
+    launcher = triton_kernel_dispatcher_with_warmup(warmup_inputs=warmup_inputs)(kernel)
     launcher[(3,)]("runtime", 4, CONST=8)
 
     assert kernel.runtime_calls == [((3,), ("runtime", 4), {"CONST": 8})]

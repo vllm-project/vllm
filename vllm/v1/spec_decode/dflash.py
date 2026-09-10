@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.utils import (
-    _COPY_AND_EXPAND_DFLASH_INPUTS_KERNEL,
+    _copy_and_expand_dflash_inputs,
     next_power_of_2,
 )
 
@@ -79,7 +79,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         self.dflash_causal = not dflash_has_any_non_causal(
             self.draft_model_config.hf_config
         )
-        _COPY_AND_EXPAND_DFLASH_INPUTS_KERNEL.register_warmup(
+        _copy_and_expand_dflash_inputs.register_warmup(
             block_table_stride=(self.max_model_len + self.block_size - 1)
             // self.block_size,
             parallel_drafting_token_id=self.parallel_drafting_token_id,
@@ -146,7 +146,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         BLOCK_SIZE = min(256, next_power_of_2(max_tokens_per_req))
 
         has_num_rejected = num_rejected_tokens_gpu is not None
-        _COPY_AND_EXPAND_DFLASH_INPUTS_KERNEL(
+        _copy_and_expand_dflash_inputs(
             # Inputs
             next_token_ids_ptr=next_token_ids,
             target_positions_ptr=target_positions,
