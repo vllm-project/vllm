@@ -103,6 +103,34 @@ class PerLayerParameters:
     has_same_all_params: bool | None = field(default=None, compare=False)
 
 
+def get_num_attention_heads_from_layers(
+    vllm_config: VllmConfig, layer_names: list[str]
+) -> int | None:
+    """Per-TP-rank ``num_heads`` shared by the named Attention layers.
+
+    Returns ``None`` when no matching Attention layer is found.
+    All layers in one attention group must agree on ``num_heads``; asserted.
+    """
+    from typing import Any, cast
+
+    attn_layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+        layer_names,
+    )
+    if not attn_layers:
+        return None
+    heads = {
+        cast(Any, getattr(layer, "impl", layer)).num_heads
+        for layer in attn_layers.values()
+    }
+    assert len(heads) == 1, (
+        f"All layers in one attention group must share num_heads; "
+        f"got {{heads}} for {{layer_names}}."
+    )
+    return heads.pop()
+
+
 def get_per_layer_parameters(
     vllm_config: VllmConfig, layer_names: list[str], cls_: type["AttentionImpl"]
 ) -> dict[str, PerLayerParameters]:

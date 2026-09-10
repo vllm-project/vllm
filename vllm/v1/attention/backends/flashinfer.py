@@ -56,6 +56,7 @@ from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
     get_dcp_local_seq_lens,
     get_kv_cache_layout,
+    get_num_attention_heads_from_layers,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
@@ -677,6 +678,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         cls: type["FlashInferMetadataBuilder"],
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
+        layer_names: list[str] | None = None,
     ) -> AttentionCGSupport:
         """Get the cudagraph support level for FlashInfer attention.
 
@@ -692,7 +694,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
             else [kv_cache_spec]
         )
-        num_qo_heads = vllm_config.model_config.get_num_attention_heads(
+        num_qo_heads = (
+            get_num_attention_heads_from_layers(vllm_config, layer_names)
+            if layer_names is not None
+            else None
+        ) or vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
         has_trtllm_support: bool = len(kv_specs) > 0
