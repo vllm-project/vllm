@@ -2575,6 +2575,24 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    def is_blockscale_bpreshuffle_tuned(n: int, k: int) -> bool:
+        from aiter.jit.core import AITER_CONFIGS
+        from aiter.ops.gemm_op_a8w8 import get_CKGEMM_config
+
+        config_file = (
+            AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
+        )
+        # Selection is per weight, not per runtime M: a shuffled weight is
+        # used for both prefill and decode. Probe representative M values
+        # rather than M=1 only (FlyDSL/ASM rows are often prefill-sized).
+        sample_m = (
+            [32768, 8192, 4096, 3307, 2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1]
+        )
+        return any(
+            get_CKGEMM_config(m, n, k, config_file) is not None for m in sample_m
+        )
+
+    @staticmethod
     def fused_moe(
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
