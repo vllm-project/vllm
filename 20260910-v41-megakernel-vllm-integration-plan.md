@@ -272,6 +272,34 @@ Exit: accuracy report on gsm8k, gpqa and one long-context task; KV capacity and 
 
 ---
 
+## 4b. Phase 0 results (2026-09-10, GB200, upstream FlashMLA @ 07a1089 built into vLLM)
+
+`benchmarks/kernels/benchmark_dsv41_fused_attention.py`, `h_q = 64`, decode over
+`topk_swa = 128` (V4 584 B SWA cache) + `topk_extra = 512` (V4 compressed cache),
+prefill over `topk = 640`; medians of 50 iterations in microseconds. "split-KV total"
+is Q RoPE (torch) + `flash_mla_with_kvcache` + `fused_inv_rope_fp8_quant`.
+
+| decode `s_q` | fused (graph) | split-KV attn only (graph) | split-KV total (graph) | fused (eager) | split-KV attn (eager) |
+| --: | --: | --: | --: | --: | --: |
+| 1 | 22.7 | 22.7 | 43.2 | 27.7 | 41.4 |
+| 6 | 24.0 | 22.7 | 47.2 | 27.0 | 38.1 |
+| 16 | 24.7 | 23.4 | 47.3 | 27.2 | 36.9 |
+| 64 | 24.7 | 23.9 | 59.6 | 28.2 | 36.2 |
+| 256 | 48.9 | 47.3 | 126.8 | 50.4 | 48.0 |
+| 1024 | 153.8 | 160.6 | 443.1 | 154.8 | 161.0 |
+
+| prefill `s_q` | fused | `flash_mla_sparse_fwd` + Q RoPE + O quant |
+| --: | --: | --: |
+| 184 | 30.3 | 386.2 |
+| 2123 | 163.0 | 785.0 |
+
+Conclusions: the fused decode kernel matches the split-KV attention kernel even at
+`s_q = 1` (the bs1 concern in section 5 did not materialize at this top-k), and it
+halves the decode attention segment once the two surrounding kernels are counted.
+CUDA-graph capture and replay of the fused decode works. `dsv4_fused_decode_min_tokens`
+therefore defaults to 0 (fused everywhere); the split-KV fallback path stays as an
+escape hatch.
+
 ## 5. Risks and open questions
 
 | Risk | Mitigation |

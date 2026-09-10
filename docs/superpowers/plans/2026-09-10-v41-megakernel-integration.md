@@ -247,6 +247,18 @@ git commit -m "[DSv4.1] Add fused-kernel layout permutation helpers"
 
 ### Task 2: Build `_flashmla_C` from the PR-221 FlashMLA tree
 
+> **Revision (user direction, 2026-09-10):** pin `flashmla.cmake` to upstream
+> `deepseek-ai/FlashMLA` at `07a1089857b63e74e3133630c02b083b75e8d4b2` ("Add
+> kernels for DeepSeek v4.1 (#221)") instead of `FLASH_MLA_SRC_DIR`. Upstream is
+> a pybind11 module, so `_flashmla_C` is built without `USE_SABI` /
+> `TORCH_TARGET_VERSION`, linked against `torch_python`, and the vendored
+> Python files get `import vllm._flashmla_C as flash_mla_cuda`. Upstream has no
+> `csrc/extension` (the `_flashmla_extension_C` target is built only when that
+> directory exists) and its Python interface has no `out=`, which
+> `vllm/v1/attention/ops/flashmla.py` now emulates with a copy. The steps below
+> describe the original `FLASH_MLA_SRC_DIR` variant; the committed
+> `flashmla.cmake` is the reference.
+
 **Files:**
 
 - Modify: `cmake/external_projects/flashmla.cmake:76-140` (source list, includes)
