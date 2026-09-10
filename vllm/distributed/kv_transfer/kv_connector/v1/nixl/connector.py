@@ -232,17 +232,7 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        done_sending, done_recving = self.connector_worker.get_finished()
-        if (
-            self.kv_transfer_config.kv_role == "kv_producer"
-            and self.connector_worker.pcp_rank > 0
-        ):
-            # Replicated-KV PCP: this rank does not transfer, but every worker
-            # must report so the aggregator (and MultiConnector's per-request
-            # extra-save accounting) sees world_size finishes per request.
-            done_sending = set(self.connector_worker._replicated_pcp_done_sending)
-            self.connector_worker._replicated_pcp_done_sending.clear()
-        return done_sending, done_recving
+        return self.connector_worker.get_finished()
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get block IDs that failed to load via NIXL."""

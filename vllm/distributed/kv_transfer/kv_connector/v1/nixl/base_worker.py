@@ -2036,6 +2036,9 @@ class NixlBaseConnectorWorker:
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
 
+        done_sending.update(self._replicated_pcp_done_sending)
+        self._replicated_pcp_done_sending.clear()
+
         # Drain queue of requests where handshake or transfer setup failed.
         failed_recv_reqs = set[ReqId]()
         while not self._failed_recv_reqs.empty():
