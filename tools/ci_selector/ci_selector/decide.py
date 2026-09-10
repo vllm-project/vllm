@@ -59,6 +59,10 @@ class Decision:
     coverage_note: str = ""
     # Steps whose row no longer describes them, so it cannot authorise a drop.
     stale_steps: int = 0
+    # Rows nothing in this checkout can address, and the size of the table they
+    # sit in. They already behave as `no row`.
+    unreadable_rows: int = 0
+    rows: int = 0
     reasons: dict = field(default_factory=dict)
 
     @property
@@ -92,6 +96,12 @@ def decide(
         out.coverage_note = table.unavailable
         return out
 
+    out.rows = len(table)
+    # Only askable with a built state. Every live caller has one; the tests that
+    # pass None are exercising the rules rather than the tally.
+    if getattr(state, "pipelines", None):
+        out.unreadable_rows = _unreadable_rows(state, table)
+
     try:
         _apply_record(out, table, selection, repo, base, head, mode)
     except Exception as exc:  # noqa: BLE001 - see the module docstring
@@ -102,6 +112,28 @@ def decide(
         out.dropped_by_coverage.clear()
         out.coverage_note = f"coverage unusable ({type(exc).__name__}: {exc})"
     return out
+
+
+def _unreadable_rows(state, table: Table) -> int:
+    """Rows filed under a key no step in this checkout reconstructs.
+
+    A row is filed under the identity Buildkite published, and a step reaches it
+    by rebuilding that identity from the yaml. Move a label and the row is never
+    read again: no error, no reason code, no change in any count, because an
+    unreachable row and a step that was never recorded are the same `NO_ROW`.
+    Selection is unaffected either way, which is exactly why this needs saying
+    out loud -- the record shrinks and the answer still looks healthy.
+
+    `test_every_recorded_row_is_readable_by_some_step` asks this at the table's
+    OWN commit, deliberately, since spelling a row recorded elsewhere is a
+    different question. Nothing asked it of the tree being selected against.
+    """
+    readable = {
+        step.buildkite_key or step.label
+        for pipeline in state.pipelines
+        for step in pipeline.steps
+    }
+    return len(set(table._rows) - readable)
 
 
 def _steps_at(repo: Path, ref: str) -> tuple[frozenset[str], frozenset[tuple]]:

@@ -304,3 +304,41 @@ class TestFreshnessDefault:
         _stub_keys(monkeypatch)
         decide(None, _selection("vllm_ci:elsewhere"), tmp_repo.root, *diff, table=table)
         assert called, "the gate was not consulted with the env var set"
+
+
+class _Step:
+    def __init__(self, key):
+        self.buildkite_key = key
+        self.label = key
+
+
+class _Pipeline:
+    def __init__(self, steps):
+        self.steps = steps
+
+
+class _State:
+    """Just enough state to answer "which keys can this checkout spell"."""
+
+    def __init__(self, keys):
+        self.pipelines = [_Pipeline([_Step(k) for k in keys])]
+
+
+def test_a_row_no_step_can_address_is_counted_but_not_acted_on(
+    table, tmp_repo, diff, unstaled
+):
+    """The record decaying has to be visible somewhere.
+
+    A row filed under a key nothing reconstructs takes the same `NO_ROW` path as
+    a step that was never recorded, so every count in the answer is identical
+    either way. That is the whole problem: the table shrinks and the decision
+    still looks healthy. The tally is the only place it shows.
+    """
+    sel = _selection("vllm_ci:no-row")
+    # `elsewhere` has a row, but this checkout knows only `runs-mod`.
+    seen = decide(_State(["runs-mod"]), sel, tmp_repo.root, *diff, table=table)
+    assert (seen.unreadable_rows, seen.rows) == (1, 2)
+
+    blind = decide(None, sel, tmp_repo.root, *diff, table=table)
+    assert seen.steps == blind.steps
+    assert seen.dropped_by_coverage == blind.dropped_by_coverage

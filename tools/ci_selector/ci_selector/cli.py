@@ -147,7 +147,8 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"coverage: +{len(d.added_by_coverage)} added, "
                 f"-{len(d.dropped_by_coverage)} dropped "
-                f"({d.stale_steps} steps held by the freshness gate)",
+                f"({d.stale_steps} steps held by the freshness gate, "
+                f"{d.unreadable_rows}/{d.rows} rows unreadable)",
                 file=sys.stderr,
             )
         sel = _restrict(sel, d.steps)
