@@ -360,6 +360,20 @@ class Platform:
         )
 
     @classmethod
+    def ray_accelerator_id_to_physical_device_id(cls, ray_accelerator_id: str) -> int:
+        """Translate one entry from Ray's ``get_accelerator_ids()`` to a
+        physical device ID.
+
+        Most Ray accelerator managers (e.g. for NVIDIA GPUs) already report
+        physical (global) IDs consistent with the device-control env var, so
+        this defaults to the same direct conversion used elsewhere. Override
+        this for platforms whose Ray accelerator manager instead reports a
+        visible ordinal relative to whatever the launching process could
+        already see (see XPUPlatform for an example).
+        """
+        return cls.device_control_id_to_physical_device_id(ray_accelerator_id)
+
+    @classmethod
     def import_kernels(cls) -> None:
         """Import any platform-specific C kernels."""
         try:

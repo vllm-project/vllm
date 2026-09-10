@@ -148,7 +148,7 @@ class RayWorkerProc(WorkerProc):
             )
         physical_gpu_ids = ray.get_runtime_context().get_accelerator_ids()[device_key]
         return node_id, [
-            current_platform.device_control_id_to_physical_device_id(str(x))
+            current_platform.ray_accelerator_id_to_physical_device_id(str(x))
             for x in physical_gpu_ids
         ]
 

@@ -130,6 +130,19 @@ class XPUPlatform(Platform):
     ]
 
     @classmethod
+    def ray_accelerator_id_to_physical_device_id(cls, ray_accelerator_id: str) -> int:
+        """Ray's Intel GPU accelerator manager tracks visibility via
+        ``ONEAPI_DEVICE_SELECTOR``, which is separate from ``ZE_AFFINITY_MASK``.
+        When ``ZE_AFFINITY_MASK`` is set before Ray starts, Ray only sees the
+        devices it allows and reports IDs relative to that restricted view
+        (e.g. always "0" for a single visible device), not the true physical
+        ID. Translate through the process's own ZE_AFFINITY_MASK to recover
+        the physical ID; this is a no-op when ZE_AFFINITY_MASK is unset,
+        since Ray's IDs already match physical IDs in that case.
+        """
+        return cls.visible_device_id_to_physical_device_id(int(ray_accelerator_id))
+
+    @classmethod
     def import_kernels(cls) -> None:
         # Do not import vllm._C
         with contextlib.suppress(ImportError):
