@@ -6,6 +6,7 @@ with the eager ``mask_dcp_empty_shards_`` pass it replaces."""
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.attention.ops.dcp import (
     _dcp_a2a_lse_pack_dim,
     _dcp_a2a_pack_send,
@@ -13,7 +14,8 @@ from vllm.v1.attention.ops.dcp import (
 )
 
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="needs a GPU for the Triton pack kernel"
+    not current_platform.is_cuda_alike(),
+    reason="needs a CUDA or ROCm device for the Triton pack kernel",
 )
 
 
