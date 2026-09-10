@@ -38,6 +38,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .utils import AutoWeightsLoader, WeightsMapper
 from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
@@ -92,7 +93,10 @@ class Idefics2VisionEmbeddings(nn.Module):
         max_patches = flat_patch_attention_mask.shape[-1]
 
         if tgt_sizes is not None:
-            tgt_sizes = tgt_sizes.to(device=device, non_blocking=True)
+            # tgt_sizes may come from CPU-side mm_kwargs; use a pinned async
+            # copy to stay clean under VLLM_GPU_SYNC_CHECK.
+            if tgt_sizes.device != device:
+                tgt_sizes = async_tensor_h2d(tgt_sizes, device)
             nb_patches_h = tgt_sizes[:, 0]
             nb_patches_w = tgt_sizes[:, 1]
         else:
@@ -127,7 +131,10 @@ class Idefics2VisionEmbeddings(nn.Module):
 
         position_ids = torch.where(flat_patch_attention_mask, pos_ids.to(torch.long), 0)
 
-        return position_ids.to(self.position_embedding.weight.device)
+        target_device = self.position_embedding.weight.device
+        if position_ids.device != target_device:
+            position_ids = async_tensor_h2d(position_ids, target_device)
+        return position_ids
 
     def forward(
         self,

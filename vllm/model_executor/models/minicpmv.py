@@ -100,7 +100,7 @@ from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.collection_utils import flatten_2d_lists, is_list_of
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import set_default_torch_dtype
+from vllm.utils.torch_utils import async_tensor_h2d, set_default_torch_dtype
 from vllm.v1.worker.encoder_cudagraph_defs import (
     ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG,
     EncoderCudaGraphCaptureInputs,
@@ -231,7 +231,10 @@ class Resampler2_5(BaseResampler):
         if not torch.cuda.is_current_stream_capturing():
             self._adjust_pos_cache(tgt_sizes, device=device)
 
-        tgt_sizes = tgt_sizes.to(device=x.device, non_blocking=True)
+        # tgt_sizes is pinned-copied only when it comes from the CPU-side
+        # mm_kwargs; during capture/replay it is already a GPU buffer.
+        if tgt_sizes.device != x.device:
+            tgt_sizes = async_tensor_h2d(tgt_sizes, x.device)
         patch_len = tgt_sizes[:, 0] * tgt_sizes[:, 1]
         max_patch_len = x.shape[1]
 
@@ -1874,11 +1877,10 @@ class _MiniCPMVEncoderCudaGraphMixin(MiniCPMVBaseModel, SupportsEncoderCudaGraph
         device = next(self.vpm.parameters()).device
         tgt_sizes_raw = _mcpmv_tgt_sizes_tensor(mm_kwargs, video=video)
         if isinstance(tgt_sizes_raw, list):
-            tgt_sizes = torch.cat(tgt_sizes_raw, dim=0).to(
-                device=device, dtype=torch.long
-            )
-        else:
-            tgt_sizes = tgt_sizes_raw.to(device=device, dtype=torch.long)
+            tgt_sizes_raw = torch.cat(tgt_sizes_raw, dim=0)
+        # tgt_sizes arrives from CPU-side mm_kwargs; use a pinned async copy
+        # to stay clean under VLLM_GPU_SYNC_CHECK.
+        tgt_sizes = async_tensor_h2d(tgt_sizes_raw, device, dtype=torch.long)
 
         patches_per_slice = tgt_sizes.prod(-1).clamp(max=max_patches)
         col_idx = torch.arange(max_patches, device=device)
