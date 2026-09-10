@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -21,7 +22,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -296,7 +297,7 @@ class DraftModelSpeculator(BaseSpeculator):
         if dcp_local_seq_lens is None and self.block_tables.cp_size > 1:
             # Draft steps advance and rewind their own global sequence lengths,
             # so the target model's DCP-local lengths may already be stale.
-            prepare_dcp_local_seq_lens(
+            dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
                 self.input_buffers.seq_lens,
                 num_reqs,
@@ -304,7 +305,6 @@ class DraftModelSpeculator(BaseSpeculator):
                 self.block_tables.cp_rank,
                 self.block_tables.cp_interleave,
             )
-            dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens
         attn_metadata = build_attn_metadata(
             attn_groups=self.attn_groups,
             num_reqs=num_reqs_padded,
@@ -409,3 +409,22 @@ class DraftModelSpeculator(BaseSpeculator):
         # idx_mapping for CG padded requests points to -1, which is ignored
         # during sampling to prevent writing stale values to draft logits.
         self.idx_mapping[num_reqs:].fill_(-1)
+
+    def _build_uniform_batch_dp_sync(
+        self,
+        target_dp_sync: DPSyncState,
+        num_reqs: int,
+        num_query_per_req: int = 1,
+    ) -> tuple[DPSyncState, int]:
+        num_batch_tokens = target_dp_sync.num_reqs * num_query_per_req
+        assert num_reqs * num_query_per_req <= num_batch_tokens, (
+            "reusing a DP sync that does not cover this batch's requests"
+        )
+        return replace(
+            target_dp_sync,
+            num_tokens_across_dp=torch.full_like(
+                target_dp_sync.num_tokens_across_dp, num_batch_tokens
+            ),
+            uniform_token_count=num_query_per_req,
+            eager=False,
+        ), num_batch_tokens
