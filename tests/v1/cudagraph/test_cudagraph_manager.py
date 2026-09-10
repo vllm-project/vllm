@@ -235,6 +235,44 @@ def _make_spec_decode_manager(
     return manager
 
 
+@pytest.mark.parametrize("sampled_capture", [False, True])
+@pytest.mark.parametrize("full_captured", [False, True])
+def test_memory_profile_dispatch_only_replays_captured_full_graphs(
+    monkeypatch, sampled_capture, full_captured
+):
+    manager = _make_spec_decode_manager(monkeypatch)
+    manager._max_full_descs_to_capture = 2 if sampled_capture else None
+    full, piecewise = manager._candidates[(12, 0)]
+    if full_captured:
+        manager.graphs[full] = MagicMock()
+
+    actual = manager.dispatch(4, 12, uniform_token_count=3, num_active_loras=0)
+
+    if sampled_capture and not full_captured:
+        assert actual == piecewise
+    else:
+        # Normal serving must not silently hide a missing captured graph.
+        assert actual == full
+        if full_captured:
+            manager.run_fullgraph(actual)
+            manager.graphs[full].replay.assert_called_once()
+        else:
+            with pytest.raises(AssertionError, match="No cudagraph"):
+                manager.run_fullgraph(actual)
+
+
+def test_memory_profile_dispatch_without_captured_candidate_runs_eager(monkeypatch):
+    manager = _make_spec_decode_manager(monkeypatch)
+    manager._max_full_descs_to_capture = 2
+    manager._candidates[(12, 0)] = manager._candidates[(12, 0)][:1]
+
+    actual = manager.dispatch(4, 12, uniform_token_count=3, num_active_loras=0)
+
+    assert actual.cg_mode == CUDAGraphMode.NONE
+    assert actual.num_tokens == 12
+    assert actual.num_reqs == 4
+
+
 def test_uniform_decode_pads_up_to_full_graph(monkeypatch):
     manager = _make_spec_decode_manager(monkeypatch)
     assert [

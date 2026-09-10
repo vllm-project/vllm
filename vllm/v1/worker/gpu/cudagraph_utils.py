@@ -450,7 +450,15 @@ class CudaGraphManager:
         effective_loras = self._resolve_effective_loras(num_active_loras)
         key = (num_tokens, effective_loras)
         if self._graphs_captured and num_tokens > 0 and key in self._candidates:
+            # Memory profiling captures only a sample of the planned FULL graphs.
+            sampled_capture = self._max_full_descs_to_capture is not None
             for desc in self._candidates[key]:
+                if (
+                    sampled_capture
+                    and desc.cg_mode == CUDAGraphMode.FULL
+                    and desc not in self.graphs
+                ):
+                    continue
                 if _is_compatible(
                     desc,
                     num_reqs,
