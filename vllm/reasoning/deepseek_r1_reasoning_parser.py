@@ -47,7 +47,7 @@ class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
             and self.start_token_id not in previous_token_ids
             and self.start_token_id not in delta_token_ids
         ):
-            if self.end_token_id in delta_token_ids:
+            if self.end_token in delta_text:
                 # end token in delta with more tokens,
                 # extract reasoning content and content
                 end_index = delta_text.find(self.end_token)
@@ -57,6 +57,10 @@ class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
                     reasoning=reasoning,
                     content=content if content else None,
                 )
+            elif self.end_token_id in delta_token_ids:
+                # end token ID arrived but text is still buffered
+                # (output_text_buffer_length delay); wait for text flush
+                return None
             elif self.end_token_id in previous_token_ids:
                 # end token in previous, thinking content ends
                 return DeltaMessage(content=delta_text)
