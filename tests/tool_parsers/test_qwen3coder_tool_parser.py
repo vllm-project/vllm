@@ -9,17 +9,17 @@ import pytest
 from openai.types.responses.function_tool import FunctionTool
 from xgrammar import StructuralTag
 
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
+    FunctionCall,
+    ToolCall,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
     FunctionDefinition,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    FunctionCall,
-    ToolCall,
 )
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.tokenizers import TokenizerLike, get_tokenizer

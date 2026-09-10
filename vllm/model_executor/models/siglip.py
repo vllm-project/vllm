@@ -56,6 +56,7 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .clip import dual_encoder_has_text_tokens, merge_dual_encoder_text_and_vision
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
@@ -126,13 +127,15 @@ class SiglipProcessingInfo(BaseProcessingInfo):
 
         pooler_config = self.ctx.model_config.pooler_config
         assert pooler_config is not None
+        pooling_type = pooler_config.seq_pooling_type
+        assert pooling_type is not None
 
         return get_num_selected_vision_tokens(
             vision_encoder_info.get_num_image_tokens(
                 image_width=image_width,
                 image_height=image_height,
             ),
-            _get_vision_feature_select_strategy(pooler_config.seq_pooling_type),
+            _get_vision_feature_select_strategy(pooling_type),
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -1010,7 +1013,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         flip_indices_cpu = (
             starts_cpu[sequence_ids_cpu] + ends_cpu[sequence_ids_cpu]
         ) - (1 + current_positions_cpu)
-        flip_indices = flip_indices_cpu.to(features.device, non_blocking=True)
+        flip_indices = async_tensor_h2d(flip_indices_cpu, features.device)
 
         return features[flip_indices]
 
@@ -1020,9 +1023,9 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> torch.Tensor:
         if feature_select_strategy is None:
-            feature_select_strategy = _get_vision_feature_select_strategy(
-                self.pooler_config.seq_pooling_type
-            )
+            pooling_type = self.pooler_config.seq_pooling_type
+            assert pooling_type is not None
+            feature_select_strategy = _get_vision_feature_select_strategy(pooling_type)
 
         pooled_output = self.vision_model(
             pixel_values=pixel_values,

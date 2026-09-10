@@ -30,6 +30,11 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicUsage,
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.generate.base.protocol import (
+    JsonSchemaResponseFormat,
+    ResponseFormat,
+    StreamOptions,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
@@ -38,14 +43,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    JsonSchemaResponseFormat,
-    ResponseFormat,
-    StreamOptions,
-    UsageInfo,
-)
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.renderers.online_renderer import OnlineRenderer

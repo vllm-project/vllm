@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
@@ -30,6 +31,8 @@ else:
     def on_gfx1151() -> bool:
         return False
 
+logger = init_logger(__name__)
+
 
 @functools.cache
 def _get_aiter_topk_ops() -> tuple[Callable[..., None], Callable[..., None]] | None:
@@ -43,8 +46,25 @@ def _get_aiter_topk_ops() -> tuple[Callable[..., None], Callable[..., None]] | N
     return top_k_per_row_prefill, top_k_per_row_decode
 
 
+@functools.cache
+def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_mla_enabled():
+        return None
+    try:
+        from aiter.ops.pa_sparse_prefill_opus import pa_sparse_prefill_opus
+    except ImportError:
+        return None
+    logger.info_once("Using AITER OPUS for large sparse MLA prefill on gfx950")
+    return pa_sparse_prefill_opus
+
+
 _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
 _GFX950_C4A_NATIVE_MAX_ROWS = 256
+# Conservative perf gate, not a correctness bound: OPUS is correct for any query
+# count, but Triton stays faster below this measured crossover.
+_GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES = 1024
 
 
 def _get_aiter_top_k_kernel(
@@ -661,7 +681,6 @@ def rocm_fp8_paged_mqa_logits(
                 KVBlockSize=block_size,
                 WavePerEU=2,
             )
-            out_logits.nan_to_num_(float("-inf"))
             return out_logits
         deepgemm_fp8_paged_mqa_logits_stage1 = (
             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
@@ -913,6 +932,7 @@ def rocm_aiter_sparse_attn_indexer(
     has_decode = layer_attn_metadata.num_decodes > 0
     has_prefill = layer_attn_metadata.num_prefills > 0
     num_decode_tokens = layer_attn_metadata.num_decode_tokens
+    topk_indices_buffer[: hidden_states.shape[0]] = -1
 
     # during speculative decoding, k may be padded to the CUDA graph batch
     # size while slot_mapping only covers actual tokens.
@@ -1205,14 +1225,17 @@ def _get_cached_wo_a_bf16(
     cached = getattr(wo_a, "_dsv4_wo_a_bf16", None)
     if cached is not None:
         return cached
-    if hasattr(wo_a, "weight_scale_inv"):
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        get_fp8_block_weight_scale,
+    )
+
+    wo_a_scale_param = get_fp8_block_weight_scale(wo_a)
+    if wo_a_scale_param is not None:
         wo_a_weight = wo_a.weight.view(n_local_groups, o_lora_rank, hidden_dim).to(
             torch.float32
         )
         wo_a_scale = _expand_2d_block_scales(
-            wo_a.weight_scale_inv.view(
-                n_local_groups, -1, wo_a.weight_scale_inv.shape[-1]
-            ),
+            wo_a_scale_param.view(n_local_groups, -1, wo_a_scale_param.shape[-1]),
             o_lora_rank,
             hidden_dim,
         )
@@ -1255,15 +1278,31 @@ _DSV4_SPARSE_NOPE_DIM = 448
 _DSV4_SPARSE_ROPE_DIM = 64
 
 
+def _validate_sparse_dims(
+    head_dim: int,
+    nope_head_dim: int,
+    rope_head_dim: int,
+    op_name: str,
+) -> None:
+    assert head_dim > 0, f"{op_name} expected a positive head_dim, got {head_dim}"
+    assert nope_head_dim > 0, (
+        f"{op_name} expected a positive NoPE dimension, got {nope_head_dim}"
+    )
+    assert rope_head_dim >= 0, (
+        f"{op_name} expected a non-negative RoPE dimension, got {rope_head_dim}"
+    )
+    assert head_dim == nope_head_dim + rope_head_dim, (
+        f"{op_name} expected head_dim={nope_head_dim + rope_head_dim}, got {head_dim}"
+    )
+
+
 def _validate_dsv4_sparse_dims(
     head_dim: int,
     nope_head_dim: int,
     rope_head_dim: int,
     op_name: str,
 ) -> None:
-    assert head_dim == nope_head_dim + rope_head_dim, (
-        f"{op_name} expected head_dim={nope_head_dim + rope_head_dim}, got {head_dim}"
-    )
+    _validate_sparse_dims(head_dim, nope_head_dim, rope_head_dim, op_name)
     assert (
         nope_head_dim == _DSV4_SPARSE_NOPE_DIM
         and rope_head_dim == _DSV4_SPARSE_ROPE_DIM
@@ -1356,6 +1395,12 @@ def _as_int32_contiguous_1d(x: torch.Tensor) -> torch.Tensor:
 
 
 @triton.jit
+def _sparse_kv_row_offset(slot, stride):
+    # A global token slot fits in int32, but its byte/element offset may not.
+    return slot.to(tl.int64) * stride
+
+
+@triton.jit
 def _sparse_attn_prefill_ragged_kernel(
     q_ptr,
     kv_ptr,
@@ -1418,7 +1463,7 @@ def _sparse_attn_prefill_ragged_kernel(
 
         kv = tl.load(
             kv_ptr
-            + safe_slot[:, None] * kv_stride_n
+            + _sparse_kv_row_offset(safe_slot[:, None], kv_stride_n)
             + dim_offsets[None, :] * kv_stride_d,
             mask=valid[:, None] & dim_mask[None, :],
             other=0.0,
@@ -2577,7 +2622,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     assert indptr.numel() == num_queries + 1, (
         f"expected indptr shape [{num_queries + 1}], got {indptr.shape}"
     )
-    _validate_dsv4_sparse_dims(
+    _validate_sparse_dims(
         head_dim,
         nope_head_dim,
         rope_head_dim,
@@ -2588,7 +2633,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     block_d = triton.next_power_of_2(head_dim)
     block_k = 16 if head_dim >= 256 else 32
     num_warps = 4
-    out = torch.empty_like(q, dtype=torch.bfloat16)
+    out = torch.empty_like(q)
     _sparse_attn_prefill_ragged_kernel[(num_queries, triton.cdiv(num_heads, block_h))](
         q,
         kv,
@@ -2644,6 +2689,66 @@ def _rocm_sparse_attn_prefill_triton(
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
     )
+
+
+def _can_use_aiter_sparse_prefill_opus(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    attn_sink: torch.Tensor | None,
+    output: torch.Tensor,
+    on_gfx950: bool = _ON_GFX950,
+) -> bool:
+    return (
+        on_gfx950
+        and q.shape[0] >= _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES
+        and q.is_cuda
+        and output.shape == q.shape
+        and kv.shape[-1] == q.shape[-1]
+        and q.dtype in (torch.bfloat16, torch.float16)
+        and kv.dtype == q.dtype
+        and output.dtype == q.dtype
+        and kv.device == q.device
+        and output.device == q.device
+        and q.stride(-1) == 1
+        and kv.stride(-1) == 1
+        and output.stride() == q.stride()
+        and attn_sink is not None
+        and attn_sink.shape == (q.shape[1],)
+        and attn_sink.dtype == torch.float32
+        and attn_sink.device == q.device
+    )
+
+
+def _rocm_sparse_attn_prefill_ragged_aiter_opus(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    indptr: torch.Tensor,
+    scale: float,
+    attn_sink: torch.Tensor,
+    output: torch.Tensor,
+) -> bool:
+    pa_sparse_prefill_opus = _get_aiter_sparse_prefill_opus()
+    if pa_sparse_prefill_opus is None:
+        return False
+
+    indices = _as_int32_contiguous_1d(indices)
+    indptr = _as_int32_contiguous_1d(indptr)
+    empty_indices = indices[:0]
+    empty_indptr = torch.zeros_like(indptr)
+    pa_sparse_prefill_opus(
+        q,
+        kv,
+        indices,
+        indptr,
+        kv[:1],
+        empty_indices,
+        empty_indptr,
+        attn_sink.contiguous(),
+        float(scale),
+        out=output,
+    )
+    return True
 
 
 @functools.lru_cache
@@ -3129,7 +3234,7 @@ def _rocm_sparse_attn_decode_triton(
 def rocm_sparse_attn_prefill(
     q: torch.Tensor,
     kv: torch.Tensor,
-    indices: torch.Tensor,
+    indices: torch.Tensor | None,
     topk_length: torch.Tensor | None,
     scale: float,
     head_dim: int,
@@ -3143,12 +3248,39 @@ def rocm_sparse_attn_prefill(
     assert kv.ndim == 3 and kv.shape[1] == 1, (
         f"ROCm Triton sparse prefill expects kv=[skv,1,d], got {kv.shape}"
     )
-    _validate_dsv4_sparse_dims(
+    _validate_sparse_dims(
         head_dim,
         nope_head_dim,
         rope_head_dim,
         "rocm_sparse_attn_prefill",
     )
+    opus_attn_sink = None if attn_sink is None else attn_sink[: q.shape[1]]
+    if (
+        _can_use_aiter_sparse_prefill_opus(q, kv.squeeze(1), opus_attn_sink, output)
+        and _get_aiter_sparse_prefill_opus() is not None
+    ):
+        if ragged_indices is None or ragged_indptr is None:
+            assert indices is not None
+            indices_2d = indices.reshape(indices.shape[0], -1)
+            ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
+                indices_2d,
+                topk_length
+                if topk_length is not None
+                else (indices_2d >= 0).sum(dim=-1, dtype=torch.int32),
+                num_rows=kv.shape[0],
+            )
+        assert opus_attn_sink is not None
+        if _rocm_sparse_attn_prefill_ragged_aiter_opus(
+            q=q,
+            kv=kv.squeeze(1),
+            indices=ragged_indices,
+            indptr=ragged_indptr,
+            scale=scale,
+            attn_sink=opus_attn_sink,
+            output=output,
+        ):
+            return
+
     if ragged_indices is not None and ragged_indptr is not None:
         output_chunk = _rocm_sparse_attn_prefill_ragged_triton(
             q=q,
@@ -3161,6 +3293,7 @@ def rocm_sparse_attn_prefill(
             rope_head_dim=rope_head_dim,
         )
     else:
+        assert indices is not None
         indices_2d = indices.reshape(indices.shape[0], -1)
         output_chunk = _rocm_sparse_attn_prefill_triton(
             q=q,
@@ -3172,7 +3305,7 @@ def rocm_sparse_attn_prefill(
             rope_head_dim=rope_head_dim,
             topk_length=topk_length,
         )
-    output.copy_(output_chunk.to(output.dtype))
+    output.copy_(output_chunk[..., : output.shape[-1]].to(output.dtype))
 
 
 def rocm_sparse_attn_decode(

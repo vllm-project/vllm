@@ -259,6 +259,66 @@ def test_dplb_burst_round_robins_despite_snapshot_rebinds():
     assert sorted(client.engine_inflight.values()) == [2, 2, 2, 2]
 
 
+@pytest.mark.asyncio
+async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
+    """A coordinator snapshot during scale-down must only route to survivors."""
+    import msgspec
+    import zmq.asyncio
+
+    client = _make_dplb_client(num_engines=4)
+    client.engine_ranks_managed = list(range(4))
+    client.engines_running = True
+    client.current_wave = 0
+    client.resources = SimpleNamespace(stats_update_task=None)
+    client.stats_update_address = "inproc://scale-down-stats"
+    client.first_req_sock_addr = "inproc://scale-down-first-request"
+    pause_started = asyncio.Event()
+
+    async def pause_scheduler(*args, **kwargs):
+        pause_started.set()
+        await asyncio.Future()
+
+    client._call_utility_async = pause_scheduler
+
+    with (
+        zmq.asyncio.Context() as ctx,
+        ctx.socket(zmq.XPUB) as coordinator,
+        ctx.socket(zmq.PAIR) as first_req_socket,
+    ):
+        client.ctx = ctx
+        coordinator.bind(client.stats_update_address)
+        first_req_socket.bind(client.first_req_sock_addr)
+        client._ensure_stats_update_task()
+        scale_task = None
+        try:
+            # Wait for subscription so the snapshot cannot be dropped.
+            await asyncio.wait_for(coordinator.recv(), timeout=5)
+            scale_task = asyncio.create_task(client._commit_scale_down_elastic_ep(2))
+            await asyncio.wait_for(pause_started.wait(), timeout=5)
+
+            # The coordinator still knows about all four engines while the
+            # client has already stopped routing to the two removed engines.
+            counts = [[0, 0, 0.0], [0, 0, 0.0], [1, 0, 0.0], [1, 0, 0.0]]
+            await coordinator.send(msgspec.msgpack.encode((counts, 1, True)))
+
+            async def wait_for_snapshot():
+                while client.current_wave != 1:
+                    await asyncio.sleep(0)
+
+            await asyncio.wait_for(wait_for_snapshot(), timeout=5)
+            chosen = client.get_core_engine_for_request(
+                _make_pooling_request("scale-down-request")
+            )
+            assert chosen == client.core_engines[0]
+        finally:
+            tasks = [client.resources.stats_update_task]
+            if scale_task is not None:
+                tasks.append(scale_task)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def test_dplb_snapshot_backpressure_overrides_inflight():
     """An engine reported heavily loaded by the coordinator is avoided even
     when this client has routed nothing to it."""
