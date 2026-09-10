@@ -543,3 +543,27 @@ def test_unified_attn_prefers_block_contiguous_layout():
 
     assert unified_preferred.is_block_contiguous is True
     assert rocm_attn_preferred.is_block_contiguous is False
+
+
+def test_unified_attn_drops_lhbnc_with_kv_connector():
+    """Connectors move a block as one contiguous byte range, which LHBNC breaks."""
+    from vllm.config import KVTransferConfig, VllmConfig, set_current_vllm_config
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionBackend,
+    )
+    from vllm.v1.kv_cache_interface import KVCacheLayout
+
+    assert KVCacheLayout.LHBNC in (
+        RocmAiterUnifiedAttentionBackend.supported_kv_cache_layouts()
+    )
+
+    config = VllmConfig(
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="SharedStorageConnector", kv_role="kv_both"
+        )
+    )
+    with set_current_vllm_config(config):
+        layouts = RocmAiterUnifiedAttentionBackend.supported_kv_cache_layouts()
+
+    assert layouts
+    assert all(layout.is_block_compact for layout in layouts)
