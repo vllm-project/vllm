@@ -317,10 +317,6 @@ class Worker(WorkerBase):
     def compute_weight_checksums(self) -> dict[str, str]:
         """Return SHA-256 hex digests for every named parameter AND buffer.
 
-        Both named_parameters() and named_buffers() are included because some
-        quantization schemes (e.g. custom quantizers, LoRA) register
-        weight-bearing tensors as buffers, not as parameters.
-
         Copies each tensor to CPU before hashing so the result is the same
         regardless of which GPU the worker is on.  Non-persistent buffers
         (RoPE sin/cos caches recomputed from config) are skipped because they
@@ -358,8 +354,7 @@ class Worker(WorkerBase):
         Tensors outside the checksum coverage remain unchanged.
         """
         for _, tensor in _iter_checksum_targets(self.model_runner.model):
-            # Overwrite the tensor in place so reset does not allocate another
-            # full-sized tensor alongside large model weights.
+            # Write in place: a full-sized temp tensor would double weight memory.
             if tensor.numel() == 0:
                 continue
             if tensor.is_contiguous():

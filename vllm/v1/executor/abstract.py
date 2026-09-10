@@ -23,6 +23,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.worker.utils import combine_weight_checksums
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 if TYPE_CHECKING:
@@ -374,23 +375,11 @@ class Executor(ABC):
         if not self.sleeping_tags:
             self.is_sleeping = False
 
-    def compute_weight_checksums(self) -> dict:
-        """Return SHA-256 digests for all named parameters across workers.
-
-        Worker keys include their DP, PP, PCP, TP, and EP ranks, so shards of
-        the same logical weight are distinct entries.
-
-        For TP=1 the list has one element and we return it directly.
-        """
-        results: list[dict] = self.collective_rpc("compute_weight_checksums")
-        combined: dict = {}
-        for worker_result in results:
-            duplicate_keys = combined.keys() & worker_result.keys()
-            if duplicate_keys:
-                duplicates = ", ".join(sorted(duplicate_keys))
-                raise RuntimeError(f"Duplicate weight checksum keys: {duplicates}")
-            combined.update(worker_result)
-        return combined
+    def compute_weight_checksums(self) -> dict[str, str]:
+        """Return SHA-256 digests for all checksum-covered tensors across workers."""
+        return combine_weight_checksums(
+            self.collective_rpc("compute_weight_checksums")
+        )
 
     def reset_weights(self) -> None:
         """Overwrite all weight-bearing tensors with random values on every

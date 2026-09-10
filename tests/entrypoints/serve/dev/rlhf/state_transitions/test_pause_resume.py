@@ -19,25 +19,29 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
     ok,
     pause,
     resume,
-    server,
+    reusable_server,
     start_stream,
 )
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 @pytest.fixture(scope="module", params=[False, True], ids=["MRV1", "MRV2"])
 def use_v2(request):
+    """Run the suite against both model-runner implementations."""
     return request.param
 
 
 @pytest.fixture(scope="module")
 def server_url(use_v2):
+    """Start one dev server per model runner and yield its URL."""
     env_vars = {
         "VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2 else "0",
     }
 
     with (
         patch.dict(os.environ, env_vars),
-        server(
+        reusable_server(
             extra_args=[
                 "--enable-prefix-caching",
                 "--enable-prompt-tokens-details",
@@ -49,6 +53,7 @@ def server_url(use_v2):
 
 @pytest.fixture(autouse=True)
 def restore_unpaused_state(server_url):
+    """Resume around every test so a paused server never leaks state."""
     assert resume(server_url) == 200
     yield
     assert resume(server_url) == 200

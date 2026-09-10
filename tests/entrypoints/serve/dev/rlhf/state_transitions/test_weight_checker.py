@@ -2,10 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """HTTP checksum baselines, corruption detection, and checkpoint restoration.
 
-The API smoke uses one real small model so reset can always be undone. Rank
-aggregation additionally runs with TP2/DP2/EP on four GPUs. Pure baseline and
-merge errors are covered by entrypoints/unit_tests/test_weight_checker.py;
-transport correctness remains in tests/distributed/test_weight_transfer.py.
+The API smoke uses one real small model so reset can always be undone; rank
+aggregation additionally runs with TP2/DP2/EP on four GPUs.
 """
 
 import os
@@ -19,12 +17,15 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
     gen,
     health,
     ok,
-    server,
+    reusable_server,
     weight_checker,
 )
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 def _mode(tp: int, dp: int = 1, ep: bool = False, real_weights: bool = False):
+    """Build a parametrized parallel-mode spec for the server fixture."""
     key = f"tp{tp}"
     if dp > 1:
         key += f"dp{dp}"
@@ -47,6 +48,7 @@ _MODE_TP2DP2EP = _mode(2, dp=2, ep=True, real_weights=True)
 
 
 def _requested_modes(available: list) -> list:
+    """Keep only the modes named in VLLM_TEST_MODES, or all of them if unset."""
     want = os.environ.get("VLLM_TEST_MODES", "")
     if not want:
         return available
@@ -59,6 +61,7 @@ _DISTRIBUTED_MODES = _requested_modes([_MODE_TP2DP2EP])
 
 
 def _mode_args(mode: dict) -> list[str]:
+    """Translate a mode spec into vLLM server CLI flags."""
     args: list[str] = []
     if mode["tp"] > 1:
         args += ["--tensor-parallel-size", str(mode["tp"])]
@@ -85,7 +88,7 @@ def wc_server(request, num_gpus_available):
         if mode["ep"]
         else os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
     )
-    with server(
+    with reusable_server(
         model=model,
         timeout=900,
         dummy_weights=not mode["real_weights"],

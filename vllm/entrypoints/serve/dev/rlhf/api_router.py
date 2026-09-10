@@ -13,12 +13,10 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.serve.dev.rlhf.weight_checker import (
-    _merge_weight_checksums,
-    _WeightCheckerState,
-)
+from vllm.entrypoints.serve.dev.rlhf.weight_checker import _WeightCheckerState
 from vllm.logger import init_logger
 from vllm.v1.engine import PauseMode
+from vllm.v1.worker.utils import combine_weight_checksums
 
 logger = init_logger(__name__)
 
@@ -292,7 +290,7 @@ async def weight_checker(raw_request: Request) -> JSONResponse:
             detail="No engine returned weight checksums",
         )
     try:
-        checksums = _merge_weight_checksums(per_engine)
+        checksums = combine_weight_checksums(per_engine)
     except RuntimeError as exc:
         raise HTTPException(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,

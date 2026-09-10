@@ -1,20 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Rank-qualified checksum merging and one-shot comparison state."""
-
-
-def _merge_weight_checksums(
-    per_engine: list[dict[str, str]],
-) -> dict[str, str]:
-    """Merge engine results using the complete parallel-rank-qualified key."""
-    merged: dict[str, str] = {}
-    for engine_checksums in per_engine:
-        duplicate_keys = merged.keys() & engine_checksums.keys()
-        if duplicate_keys:
-            duplicates = ", ".join(sorted(duplicate_keys))
-            raise RuntimeError(f"Duplicate weight checksum keys: {duplicates}")
-        merged.update(engine_checksums)
-    return merged
+"""One-shot checksum baseline state for the Weight Checker endpoint."""
 
 
 class _WeightCheckerState:
