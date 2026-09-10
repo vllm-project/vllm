@@ -433,14 +433,15 @@ def test_from_optional_forwards_reasoning_eos_policy():
 
 
 def test_from_optional_preserves_positional_include_stop_str_in_output():
-    # thinking_token_budget is the 13th positional arg; include_stop_str_in_output
-    # must still bind at the 14th, not to reasoning_eos_policy.
+    # thinking_token_budget is the 14th positional arg; include_stop_str_in_output
+    # must still bind at the 15th, not to reasoning_eos_policy.
     params = SamplingParams.from_optional(
         1,
         0.0,
         0.0,
         1.0,
         1.0,
+        False,
         1.0,
         0,
         0.0,
