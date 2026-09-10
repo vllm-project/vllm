@@ -21,7 +21,7 @@ from transformers import (
 from transformers.processing_utils import ProcessorMixin
 
 from vllm.multimodal.image import convert_image_mode
-from vllm.multimodal.processing import PromptUpdateDetails
+from vllm.multimodal.processing import PromptUpdateDetails, cached_encode
 from vllm.tokenizers.hf import HfTokenizer
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -444,7 +444,7 @@ class InternVLProcessor(ProcessorMixin):
         self,
         num_patches: int | None,
         num_features: int | None = None,
-    ) -> PromptUpdateDetails[str]:
+    ) -> PromptUpdateDetails:
         if num_patches is None:
             assert num_features is not None
         else:
@@ -453,9 +453,11 @@ class InternVLProcessor(ProcessorMixin):
         repl_features = self.ctx_image_token * num_features
         repl_full = self.start_image_token + repl_features + self.end_image_token
 
-        return PromptUpdateDetails.select_text(repl_full, self.ctx_image_token)
+        full_ids = cached_encode(self.tokenizer, repl_full, add_special_tokens=False)
 
-    def get_video_repl(self, num_patches: int) -> PromptUpdateDetails[str]:
+        return PromptUpdateDetails.select_token_id(full_ids, self.ctx_image_token_id)
+
+    def get_video_repl(self, num_patches: int) -> PromptUpdateDetails:
         assert self.ctx_video_token is not None
 
         repl_features = self.ctx_video_token * self.image_seq_length
@@ -467,7 +469,10 @@ class InternVLProcessor(ProcessorMixin):
             [f"Frame{i + 1}: {repl_features_with_sep}" for i in range(num_patches)]
         )
 
-        return PromptUpdateDetails.select_text(repl_full, self.ctx_video_token)
+        full_ids = cached_encode(self.tokenizer, repl_full, add_special_tokens=False)
+        assert self.ctx_video_token_id is not None
+
+        return PromptUpdateDetails.select_token_id(full_ids, self.ctx_video_token_id)
 
     def __call__(
         self,
@@ -523,7 +528,13 @@ class InternVLProcessor(ProcessorMixin):
                     while image_token in new_prompt:
                         new_prompt = new_prompt.replace(image_token, "<placeholder>", 1)
                         image_repl = self.get_image_repl(image_num_patches[image_index])
-                        replace_strings.append(image_repl.full)
+                        # Convert the token IDs back to text for the
+                        # string-based replacement below
+                        replace_strings.append(
+                            self.tokenizer.decode(
+                                image_repl.full, skip_special_tokens=False
+                            )
+                        )
                         image_index += 1
 
                     while "<placeholder>" in new_prompt:
@@ -548,7 +559,13 @@ class InternVLProcessor(ProcessorMixin):
                     while video_token in new_prompt:
                         new_prompt = new_prompt.replace(video_token, "<placeholder>", 1)
                         video_repl = self.get_video_repl(video_num_patches[video_index])
-                        replace_strings.append(video_repl.full)
+                        # Convert the token IDs back to text for the
+                        # string-based replacement below
+                        replace_strings.append(
+                            self.tokenizer.decode(
+                                video_repl.full, skip_special_tokens=False
+                            )
+                        )
                         video_index += 1
 
                     while "<placeholder>" in new_prompt:

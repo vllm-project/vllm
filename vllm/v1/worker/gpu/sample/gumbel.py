@@ -13,6 +13,12 @@ from vllm.triton_utils import HAS_TRITON, tl, tldevice, triton
 # attribute is `None`, and `tl.constexpr(...)` would crash at import time.
 _TL_RAND_MIN = tl.constexpr(4.6566127342e-10) if HAS_TRITON else 4.6566127342e-10
 
+# Offset salt keeping the draft's Gumbel noise disjoint from the target's.
+# Verification is a probability-ratio test, not a Gumbel coupling, so a proposal
+# and the residual it is resampled from must not share a noise vector.
+# Positions are int64 and never approach 2**30, so the streams cannot collide.
+_DRAFT_NOISE_SALT = tl.constexpr(1 << 30) if HAS_TRITON else (1 << 30)
+
 
 @triton.jit
 def _temperature_kernel(
@@ -82,6 +88,49 @@ def tl_rand32(seed, offset, includes_zero: tl.constexpr):
 
 
 @triton.jit
+def gumbel_noised_argmax(
+    logits,
+    keys,
+    mask,
+    seed,
+    pos,
+    temp,
+    IS_DRAFTING: tl.constexpr,
+    USE_FP64: tl.constexpr,
+    APPLY_TEMPERATURE: tl.constexpr = True,
+):
+    """Argmax of logits under Gumbel-max sampling, or plain argmax at temp 0.
+
+    `keys` indexes the noise, so the same token draws the same noise wherever it
+    appears; `pos` and `seed` place the draw in the request's stream, which is
+    what lets a draft and its verification agree.
+    """
+    if temp != 0.0 and APPLY_TEMPERATURE:
+        # Match the behavior of _temperature_kernel: if that kernel uses
+        # tl.div_rn, this must too.
+        logits = logits / temp
+
+    # fp32 is the default reduction dtype; fp64 is ~1/32-1/64x the throughput
+    # on H100/Ada/Blackwell and empirically indistinguishable for Gumbel-max.
+    if USE_FP64:
+        logits = logits.to(tl.float64)
+    if temp != 0.0:
+        if IS_DRAFTING:
+            pos = pos + _DRAFT_NOISE_SALT
+        gumbel_seed = tl.randint(seed, pos)
+        if USE_FP64:
+            u = tl_rand64(gumbel_seed, keys, includes_zero=False)
+            gumbel_noise = -tl.log(-tl.log(u))
+        else:
+            u = tl_rand32(gumbel_seed, keys, includes_zero=False)
+            # log1p keeps the winning tail at u -> 0, where fp32 resolves it.
+            gumbel_noise = -tl.log(-tldevice.log1p(-u))
+        logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
+
+    return tl.max(logits, axis=0, return_indices=True)
+
+
+@triton.jit
 def gumbel_block_argmax(
     logits,
     block,
@@ -91,10 +140,13 @@ def gumbel_block_argmax(
     temp_ptr,
     seeds_ptr,
     pos_ptr,
+    # [max_num_reqs, num_cols, vocab_size]
     logits_cache_ptr,
-    logits_cache_stride,
+    logits_cache_stride_0,
+    logits_cache_stride_1,
     logits_cache_col_ptr,
     vocab_size,
+    IS_DRAFTING: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr = False,
@@ -115,47 +167,26 @@ def gumbel_block_argmax(
             col = tl.load(logits_cache_col_ptr)
         tl.store(
             logits_cache_ptr
-            + req_state_idx * logits_cache_stride
-            + col * vocab_size
+            + req_state_idx * logits_cache_stride_0
+            + col * logits_cache_stride_1
             + block,
             logits,
             mask=mask & is_valid_req,
         )
 
-    if temp != 0.0 and APPLY_TEMPERATURE:
-        # Apply temperature.
-        # NOTE(woosuk): Match the behavior of _temperature_kernel.
-        # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
-        logits = logits / temp
-
-    # fp32 is the default reduction dtype; fp64 is ~1/32–1/64x the throughput
-    # on H100/Ada/Blackwell and empirically indistinguishable for Gumbel-max.
-    if USE_FP64:
-        logits = logits.to(tl.float64)
-    if temp != 0.0:
-        # Calculate the seed for gumbel noise.
-        seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
-        pos = tl.load(pos_ptr + token_idx)
-        gumbel_seed = tl.randint(seed, pos)
-
-        if USE_FP64:
-            u = tl_rand64(gumbel_seed, block, includes_zero=False)
-            gumbel_noise = -tl.log(-tl.log(u))
-        else:
-            u = tl_rand32(gumbel_seed, block, includes_zero=False)
-            # Draw the large-noise tail (which decides the argmax winner) from u -> 0,
-            # where fp32 has fine resolution, instead of u -> 1, where fp32 spacing is
-            # ~2**-24. The naive `-log(-log(u))` puts the winning tail at u -> 1,
-            # hard-capping the noise at ~16.6 and coarsely quantizing it; using
-            # `log1p(-u)` == `log(1 - u)` keeps the tail in the well-resolved region.
-            # Note `1 - u` would lose precision for small u, so `log1p` is required.
-            gumbel_noise = -tl.log(-tldevice.log1p(-u))
-
-        # Apply gumbel noise.
-        logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
-
-    value, idx = tl.max(logits, axis=0, return_indices=True)
-    return value, idx
+    seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
+    pos = tl.load(pos_ptr + token_idx)
+    return gumbel_noised_argmax(
+        logits,
+        block,
+        mask,
+        seed,
+        pos,
+        temp,
+        IS_DRAFTING=IS_DRAFTING,
+        USE_FP64=USE_FP64,
+        APPLY_TEMPERATURE=APPLY_TEMPERATURE,
+    )
 
 
 @triton.jit
@@ -164,8 +195,10 @@ def _gumbel_sample_kernel(
     local_argmax_stride,
     local_max_ptr,
     local_max_stride,
+    # [max_num_reqs, num_cols, vocab_size]
     logits_cache_ptr,
-    logits_cache_stride,
+    logits_cache_stride_0,
+    logits_cache_stride_1,
     logits_cache_col_ptr,
     logits_ptr,
     logits_stride,
@@ -175,6 +208,7 @@ def _gumbel_sample_kernel(
     temp_ptr,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
+    IS_DRAFTING: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
@@ -200,9 +234,11 @@ def _gumbel_sample_kernel(
         seeds_ptr,
         pos_ptr,
         logits_cache_ptr,
-        logits_cache_stride,
+        logits_cache_stride_0,
+        logits_cache_stride_1,
         logits_cache_col_ptr,
         vocab_size,
+        IS_DRAFTING=IS_DRAFTING,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
         USE_FP64=USE_FP64,
         PER_TOKEN_COL=PER_TOKEN_COL,
@@ -219,6 +255,7 @@ def gumbel_sample(
     seed: torch.Tensor,  # [max_num_reqs]
     pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
+    is_drafting: bool,
     logits_cache: torch.Tensor | None = None,  # [max_num_reqs, num_cols, vocab_size]
     logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
@@ -229,6 +266,12 @@ def gumbel_sample(
     if logits_cache_col is not None:
         logits_cache_col = logits_cache_col.contiguous()
     num_tokens, vocab_size = logits.shape
+    if logits_cache is not None:
+        assert logits_cache.size(-1) >= vocab_size, (
+            f"draft logits cache vocab dim ({logits_cache.size(-1)}) is narrower "
+            f"than the sampled logits ({vocab_size}). Cached logits would be "
+            "truncated."
+        )
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
@@ -242,6 +285,7 @@ def gumbel_sample(
         local_max.stride(0),
         logits_cache,
         logits_cache.stride(0) if logits_cache is not None else 0,
+        logits_cache.stride(1) if logits_cache is not None else 0,
         logits_cache_col,
         logits,
         logits.stride(0),
@@ -251,6 +295,7 @@ def gumbel_sample(
         temperature,
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
+        IS_DRAFTING=is_drafting,
         APPLY_TEMPERATURE=apply_temperature,
         USE_FP64=use_fp64,
         PER_TOKEN_COL=per_token_col,

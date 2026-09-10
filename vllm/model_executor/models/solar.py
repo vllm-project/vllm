@@ -318,9 +318,11 @@ class SolarModel(nn.Module):
         for i in range(self.start_layer, self.end_layer):
             if i in self.config.bskcn_1:
                 bskcn_h_1 = hidden_states.clone()
+                assert residual is not None
                 bskcn_r_1 = residual.clone()
             if i in self.config.bskcn_2:
                 bskcn_h_2 = hidden_states.clone()
+                assert residual is not None
                 bskcn_r_2 = residual.clone()
             if i in self.config.bskcn_3:
                 hidden_states = bskcn_h_1 * bskcn_tv + hidden_states * (1 - bskcn_tv)
@@ -386,7 +388,7 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
-                self.lm_head.weight = self.model.embed_tokens.weight
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(

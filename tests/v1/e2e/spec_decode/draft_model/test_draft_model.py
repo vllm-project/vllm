@@ -4,17 +4,16 @@
 from dataclasses import dataclass
 
 import pytest
-import torch
 
 from tests.utils import multi_gpu_only, single_gpu_only
-from vllm import LLM, SamplingParams
-from vllm.config import VllmConfig, replace
-from vllm.distributed import cleanup_dist_env_and_memory
+from vllm import SamplingParams
+from vllm.config import CompilationConfig, VllmConfig, replace
+from vllm.config.kernel import MoEBackend
 from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import current_platform
 
 from ..utils import (
     Messages,
-    _skip_if_insufficient_gpus_for_tp,
     compute_acceptance_len,
     compute_acceptance_rate,
     evaluate_llm_for_gsm8k,
@@ -23,10 +22,6 @@ from ..utils import (
     greedy_sampling,
     stochastic_sampling,
 )
-
-
-class AsyncSchedulingNotEnabledError(AssertionError):
-    """Raised when draft-model spec decode does not enable async scheduling."""
 
 
 @dataclass
@@ -46,7 +41,8 @@ class ArgsTest:
     max_model_len: int = 2048
     gpu_memory_utilization: float = 0.5
     dataset: str = "test_prompts"
-    num_prompts: int = 100
+    # Doubling 100 to 200 reduces sampling standard error by about 29%.
+    num_prompts: int = 200
 
 
 def get_messages(dataset: str, n: int) -> list[Messages]:
@@ -93,23 +89,13 @@ cases = [
 @pytest.mark.parametrize("args", cases)
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @single_gpu_only
-# TODO: Fix async_scheduling & engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
-@pytest.mark.xfail(
-    raises=AsyncSchedulingNotEnabledError,
-    reason="draft_model does not yet enable async_scheduling: issue #38929",
-)
-def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
+def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool, vllm_runner):
     args.enforce_eager = enforce_eager
-    assert_draft_model_correctness(args)
+    assert_draft_model_correctness(args, vllm_runner)
 
 
 @single_gpu_only
-# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
-@pytest.mark.xfail(
-    raises=AsyncSchedulingNotEnabledError,
-    reason="draft_model does not yet enable async_scheduling: issue #38929",
-)
-def test_draft_model_realistic_example():
+def test_draft_model_realistic_example(vllm_runner):
     args = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
         draft_model="Qwen/Qwen3-0.6B",
@@ -120,16 +106,11 @@ def test_draft_model_realistic_example():
         expected_acceptance_len=2.6,  # ref: 2.86
         expected_acceptance_rate=0.5,  # ref: 0.62
     )
-    assert_draft_model_correctness(args)
+    assert_draft_model_correctness(args, vllm_runner)
 
 
 @single_gpu_only
-# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
-@pytest.mark.xfail(
-    raises=AsyncSchedulingNotEnabledError,
-    reason="draft_model does not yet enable async_scheduling: issue #38929",
-)
-def test_draft_model_parallel_drafting():
+def test_draft_model_parallel_drafting(vllm_runner):
     args = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
         draft_model="amd/PARD-Qwen3-0.6B",
@@ -141,7 +122,7 @@ def test_draft_model_parallel_drafting():
         expected_acceptance_len=2.3,  # ref: 2.52
         expected_acceptance_rate=0.4,  # ref: 0.51
     )
-    assert_draft_model_correctness(args)
+    assert_draft_model_correctness(args, vllm_runner)
 
 
 @pytest.mark.parametrize(
@@ -155,12 +136,9 @@ def test_draft_model_parallel_drafting():
 )
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @single_gpu_only
-# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
-@pytest.mark.xfail(
-    raises=AsyncSchedulingNotEnabledError,
-    reason="draft_model does not yet enable async_scheduling: issue #38929",
-)
-def test_draft_model_quantization(models: tuple[str, str], enforce_eager: bool):
+def test_draft_model_quantization(
+    models: tuple[str, str], enforce_eager: bool, vllm_runner
+):
     tgt_model, draft_model = models
     sd_case = ArgsTest(
         target_model=tgt_model,
@@ -168,18 +146,12 @@ def test_draft_model_quantization(models: tuple[str, str], enforce_eager: bool):
         **some_high_acceptance_metrics(),
         enforce_eager=enforce_eager,
     )
-    assert_draft_model_correctness(sd_case)
+    assert_draft_model_correctness(sd_case, vllm_runner)
 
 
 @multi_gpu_only(num_gpus=2)
-# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
-@pytest.mark.xfail(
-    raises=AsyncSchedulingNotEnabledError,
-    reason="draft_model does not yet enable async_scheduling: issue #38929",
-)
-def test_draft_model_tensor_parallelism():
+def test_draft_model_tensor_parallelism(vllm_runner):
     """Ensure spec decode works when running with TP > 1."""
-    _skip_if_insufficient_gpus_for_tp(2)
     sd_case = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
         target_tensor_parallel_size=2,
@@ -189,15 +161,13 @@ def test_draft_model_tensor_parallelism():
         enforce_eager=False,
         expected_gsm8k_accuracy=0.5,
     )
-    assert_draft_model_correctness(sd_case)
+    assert_draft_model_correctness(sd_case, vllm_runner)
 
 
 @multi_gpu_only(num_gpus=2)
 def test_draft_model_engine_args_tensor_parallelism():
     """Ensure the vllm_config for the draft model is created correctly,
     and independently of the target model (quantization, TP, etc.)"""
-    _skip_if_insufficient_gpus_for_tp(2)
-
     engine_args = EngineArgs(
         model="Qwen/Qwen3-1.7B-FP8",  # <<< tgt quantized
         tensor_parallel_size=2,
@@ -241,13 +211,24 @@ def _apply_draft_moe_backend(vllm_config: VllmConfig) -> VllmConfig:
     return vllm_config
 
 
-def test_draft_model_moe_backend_override():
+def _platform_moe_backend(monkeypatch: pytest.MonkeyPatch) -> MoEBackend:
+    if current_platform.is_rocm():
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        return "aiter"
+    if current_platform.is_cuda():
+        return "flashinfer_trtllm"
+    return "auto"
+
+
+def test_draft_model_moe_backend_override(monkeypatch: pytest.MonkeyPatch):
     """When moe_backend is set in speculative_config, the draft VllmConfig
     should use it while the target keeps its own setting."""
+    target_moe_backend = _platform_moe_backend(monkeypatch)
     engine_args = EngineArgs(
         model="Qwen/Qwen3-1.7B",
         tensor_parallel_size=1,
-        moe_backend="flashinfer_trtllm",
+        moe_backend=target_moe_backend,
         speculative_config={
             "model": "Qwen/Qwen3-0.6B",
             "method": "draft_model",
@@ -256,22 +237,23 @@ def test_draft_model_moe_backend_override():
         },
     )
     tgt_config: VllmConfig = engine_args.create_engine_config()
-    assert tgt_config.kernel_config.moe_backend == "flashinfer_trtllm"
+    assert tgt_config.kernel_config.moe_backend == target_moe_backend
     assert tgt_config.speculative_config.moe_backend == "triton"
 
     draft_config = _apply_draft_moe_backend(tgt_config)
     assert draft_config.kernel_config.moe_backend == "triton"
     # Target config must be unaffected.
-    assert tgt_config.kernel_config.moe_backend == "flashinfer_trtllm"
+    assert tgt_config.kernel_config.moe_backend == target_moe_backend
 
 
-def test_draft_model_moe_backend_inherits_target():
+def test_draft_model_moe_backend_inherits_target(monkeypatch: pytest.MonkeyPatch):
     """When moe_backend is not set in speculative_config, the draft should
     inherit the target's moe_backend."""
+    target_moe_backend = _platform_moe_backend(monkeypatch)
     engine_args = EngineArgs(
         model="Qwen/Qwen3-1.7B",
         tensor_parallel_size=1,
-        moe_backend="flashinfer_cutlass",
+        moe_backend=target_moe_backend,
         speculative_config={
             "model": "Qwen/Qwen3-0.6B",
             "method": "draft_model",
@@ -279,11 +261,11 @@ def test_draft_model_moe_backend_inherits_target():
         },
     )
     tgt_config: VllmConfig = engine_args.create_engine_config()
-    assert tgt_config.kernel_config.moe_backend == "flashinfer_cutlass"
+    assert tgt_config.kernel_config.moe_backend == target_moe_backend
     assert tgt_config.speculative_config.moe_backend is None
 
     draft_config = _apply_draft_moe_backend(tgt_config)
-    assert draft_config.kernel_config.moe_backend == "flashinfer_cutlass"
+    assert draft_config.kernel_config.moe_backend == target_moe_backend
     assert draft_config is tgt_config
 
 
@@ -322,19 +304,23 @@ def test_draft_model_engine_args_rejects_invalid_tp_argname():
             "tensor_parallel_size": 1,  # <<< invalid arg name
         },
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="draft_tensor_parallel_size"):
         engine_args.create_engine_config()
 
 
-def assert_draft_model_correctness(args: ArgsTest):
+def assert_draft_model_correctness(args: ArgsTest, vllm_runner):
     """Compare the outputs using and not using speculative decoding.
     In the greedy decoding case, the outputs must match EXACTLY."""
     test_prompts: list[Messages] = get_messages(
         dataset=args.dataset, n=args.num_prompts
     )
 
-    spec_llm = LLM(
-        model=args.target_model,
+    with vllm_runner(
+        args.target_model,
+        block_size=None,
+        trust_remote_code=False,
+        enable_chunked_prefill=None,
+        compilation_config=CompilationConfig(),
         speculative_config={
             "model": args.draft_model,
             "method": "draft_model",
@@ -350,39 +336,41 @@ def assert_draft_model_correctness(args: ArgsTest):
         tensor_parallel_size=args.target_tensor_parallel_size,
         enforce_eager=args.enforce_eager,
         disable_log_stats=False,  # enables get_metrics()
-    )
+    ) as spec_runner:
+        spec_llm = spec_runner.llm
 
-    # we don't check the outputs, only check the metrics
-    spec_llm.chat(test_prompts, args.sampling_config)
-    metrics = spec_llm.get_metrics()
-    acceptance_rate: float = compute_acceptance_rate(metrics)
-    acceptance_len: float = compute_acceptance_len(metrics)
+        # we don't check the outputs, only check the metrics
+        spec_llm.chat(test_prompts, args.sampling_config)
+        metrics = spec_llm.get_metrics()
+        acceptance_rate: float = compute_acceptance_rate(metrics)
+        acceptance_len: float = compute_acceptance_len(metrics)
 
-    # Need to evaluate after getting metrics to avoid polluting the AR
-    evaluate_llm_for_gsm8k(
-        spec_llm, expected_accuracy_threshold=args.expected_gsm8k_accuracy
-    )
-
-    print(
-        f"spec-decode: target={args.target_model}, draft={args.draft_model}, "
-        f"temperature={args.sampling_config.temperature:.2f}, "
-        f"acceptance_rate={acceptance_rate:.2f}, "
-        f"acceptance_len={acceptance_len:.2f}, "
-    )
-
-    assert acceptance_rate >= args.expected_acceptance_rate
-    assert acceptance_len >= args.expected_acceptance_len
-    # draft_model supports async scheduling; assert it is active by default.
-    # Raise AsyncSchedulingNotEnabledError (a subclass of AssertionError) so that
-    # @pytest.mark.xfail(raises=AsyncSchedulingNotEnabledError) catches only this
-    # specific failure — leaving all other assertion failures (e.g. correctness or
-    # acceptance-rate checks above) visible as real test failures.
-    has_async = spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
-    del spec_llm  # CLEANUP
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
-    if not has_async:
-        raise AsyncSchedulingNotEnabledError(
-            "Expected async_scheduling=True for draft_model spec decode, got False."
-            " See https://github.com/vllm-project/vllm/issues/38929"
+        # Need to evaluate after getting metrics to avoid polluting the AR
+        evaluate_llm_for_gsm8k(
+            spec_llm, expected_accuracy_threshold=args.expected_gsm8k_accuracy
         )
+
+        print(
+            f"spec-decode: target={args.target_model}, draft={args.draft_model}, "
+            f"temperature={args.sampling_config.temperature:.2f}, "
+            f"acceptance_rate={acceptance_rate:.2f}, "
+            f"acceptance_len={acceptance_len:.2f}, "
+        )
+
+        context = (
+            f"draft_model target={args.target_model}, draft={args.draft_model}, "
+            f"eager={args.enforce_eager}, "
+            f"acceptance_rate={acceptance_rate:.3f}, "
+            f"acceptance_len={acceptance_len:.3f}"
+        )
+        assert acceptance_rate >= args.expected_acceptance_rate, (
+            f"{context}; expected acceptance_rate >= "
+            f"{args.expected_acceptance_rate:.3f}"
+        )
+        assert acceptance_len >= args.expected_acceptance_len, (
+            f"{context}; expected acceptance_len >= {args.expected_acceptance_len:.3f}"
+        )
+        # draft_model supports async scheduling; assert it is active by default.
+        has_async = spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+
+    assert has_async, "Expected async_scheduling=True for draft_model spec decode"

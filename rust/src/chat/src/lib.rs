@@ -18,7 +18,7 @@ pub use backend::{
 pub use error::{Error, Result};
 pub use event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantMessageExt,
-    AssistantToolCall, ChatEvent,
+    AssistantToolCall, ChatEvent, ChatTokenUsage,
 };
 use futures::{StreamExt, TryStreamExt as _};
 pub use llm_multimodal::MediaContentPart;
@@ -26,24 +26,25 @@ pub use output::{
     ChatOutputProcessor, DefaultChatOutputProcessor, DynChatOutputProcessor,
     HarmonyChatOutputProcessor,
 };
-pub use parser::ParserSelection;
 pub use parser::reasoning::{
     ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory,
 };
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
+pub use parser::{ParserSelection, validate_parser_overrides};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
-    ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer,
-    HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, RenderedPrompt,
+    ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer,
+    DynChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, RenderedPrompt,
     RendererSelection,
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
-    ChatToolChoice, GenerationPromptMode, ReasoningEffort, SamplingParams,
+    ChatToolChoice, GenerationPromptMode, ReasoningEffort, ResolvedToolContext, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
 pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 pub use vllm_llm::FinishReason;
+pub use vllm_text::GenerationConfigMode;
 
 mod backend;
 mod error;
@@ -61,42 +62,16 @@ use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
 
-/// Validate explicit parser override names without starting request processing.
-pub fn validate_parser_overrides(
-    tool_call_parser: &ParserSelection,
-    reasoning_parser: &ParserSelection,
-) -> Result<()> {
-    let tool_parser_factory = ToolParserFactory::global();
-    if let ParserSelection::Explicit(name) = tool_call_parser
-        && !tool_parser_factory.contains(name)
-    {
-        return Err(Error::ParserUnavailableByName {
-            kind: "tool",
-            name: name.clone(),
-            available_names: tool_parser_factory.list(),
-        });
-    }
-
-    let reasoning_parser_factory = ReasoningParserFactory::global();
-    if let ParserSelection::Explicit(name) = reasoning_parser
-        && !reasoning_parser_factory.contains(name)
-    {
-        return Err(Error::ParserUnavailableByName {
-            kind: "reasoning",
-            name: name.clone(),
-            available_names: reasoning_parser_factory.list(),
-        });
-    }
-
-    Ok(())
-}
-
 /// Chat request preparation shared by inference and render-only frontends.
 pub struct ChatRequestProcessor {
     backend: DynChatBackend,
     /// Effective model dtype reported by the engine.
     /// Absent for text-only frontends without an engine handshake.
     model_dtype: Option<ModelDtype>,
+    /// Tool-call parser selection used when preparing generation requests.
+    tool_call_parser: ParserSelection,
+    /// Reasoning parser selection used when preparing generation requests.
+    reasoning_parser: ParserSelection,
 }
 
 impl ChatRequestProcessor {
@@ -106,6 +81,8 @@ impl ChatRequestProcessor {
         Self {
             backend,
             model_dtype: Some(model_dtype),
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
         }
     }
 
@@ -114,7 +91,20 @@ impl ChatRequestProcessor {
         Self {
             backend,
             model_dtype: None,
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
         }
+    }
+
+    /// Configure the parser selections used to prepare generation requests.
+    pub fn with_parser_selections(
+        mut self,
+        tool_call_parser: ParserSelection,
+        reasoning_parser: ParserSelection,
+    ) -> Self {
+        self.tool_call_parser = tool_call_parser;
+        self.reasoning_parser = reasoning_parser;
+        self
     }
 
     async fn finalize_rendered_prompt(
@@ -175,6 +165,7 @@ impl ChatRequestProcessor {
             sampling_params: request.sampling_params,
             decode_options: request.decode_options,
             intermediate: request.intermediate,
+            prompt_truncation: request.prompt_truncation,
             priority: request.priority,
             cache_salt: request.cache_salt,
             add_special_tokens: request.add_special_tokens,
@@ -196,10 +187,15 @@ impl ChatRequestProcessor {
     pub async fn prepare(
         &self,
         mut request: ChatRequest,
-        options: NewChatOutputProcessorOptions<'_>,
     ) -> Result<(TextRequest, DynChatOutputProcessor)> {
         request.validate()?;
-        let output_processor = self.backend.new_chat_output_processor(&mut request, options)?;
+        let output_processor = self.backend.new_chat_output_processor(
+            &mut request,
+            NewChatOutputProcessorOptions {
+                tool_call_parser: &self.tool_call_parser,
+                reasoning_parser: &self.reasoning_parser,
+            },
+        )?;
         let text_request = self.prepare_text_request(request).await?;
         Ok((text_request, output_processor))
     }
@@ -213,10 +209,6 @@ impl ChatRequestProcessor {
 pub struct ChatLlm {
     text: TextLlm,
     processor: ChatRequestProcessor,
-    /// Tool-call parser selection.
-    tool_call_parser: ParserSelection,
-    /// Reasoning parser selection.
-    reasoning_parser: ParserSelection,
 }
 
 impl ChatLlm {
@@ -228,8 +220,6 @@ impl ChatLlm {
         Self {
             text,
             processor: ChatRequestProcessor::new(backend, model_dtype),
-            tool_call_parser: ParserSelection::Auto,
-            reasoning_parser: ParserSelection::Auto,
         }
     }
 
@@ -242,13 +232,13 @@ impl ChatLlm {
 
     /// Set tool-call parser selection.
     pub fn with_tool_call_parser(mut self, selection: ParserSelection) -> Self {
-        self.tool_call_parser = selection;
+        self.processor.tool_call_parser = selection;
         self
     }
 
     /// Set reasoning parser selection.
     pub fn with_reasoning_parser(mut self, selection: ParserSelection) -> Self {
-        self.reasoning_parser = selection;
+        self.processor.reasoning_parser = selection;
         self
     }
 
@@ -306,38 +296,17 @@ impl ChatLlm {
 
     /// Effective tool-call parser name for this model, if parsing is enabled.
     pub fn tool_call_parser_name(&self) -> Option<&str> {
-        match &self.tool_call_parser {
-            ParserSelection::Auto => {
-                ToolParserFactory::global().resolve_name_for_model(self.model_id())
-            }
-            ParserSelection::None => None,
-            ParserSelection::Explicit(name) => Some(name),
-        }
+        self.processor.tool_call_parser.resolve_tool_name(self.model_id())
     }
 
     /// Effective reasoning parser name for this model, if parsing is enabled.
     pub fn reasoning_parser_name(&self) -> Option<&str> {
-        match &self.reasoning_parser {
-            ParserSelection::Auto => {
-                ReasoningParserFactory::global().resolve_name_for_model(self.model_id())
-            }
-            ParserSelection::None => None,
-            ParserSelection::Explicit(name) => Some(name),
-        }
+        self.processor.reasoning_parser.resolve_reasoning_name(self.model_id())
     }
 
     /// Render, tokenize, and submit one chat request.
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
-        let (text_request, output_processor) = self
-            .processor
-            .prepare(
-                request,
-                NewChatOutputProcessorOptions {
-                    tool_call_parser: &self.tool_call_parser,
-                    reasoning_parser: &self.reasoning_parser,
-                },
-            )
-            .await?;
+        let (text_request, output_processor) = self.processor.prepare(request).await?;
         let request_id = text_request.request_id.clone();
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
 
@@ -394,7 +363,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, granite4, hermes, hy_v3, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, minimax_m2, minimax_m3, mistral, phi4_mini_json, qwen3_coder, qwen3_xml, seed_oss)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, granite4, hermes, hy_v3, hy_v4, inkling, internlm, kimi_k2, kimi_k3, llama3_json, llama4_json, minimax_m2, minimax_m3, mistral, phi4_mini_json, qwen3_coder, qwen3_xml, seed_oss)"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -405,6 +374,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, inkling, kimi, kimi_k2, kimi_k3, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, deepseek_v41, gemma4, glm45, glm47, hy_v3, hy_v4, inkling, kimi, kimi_k2, kimi_k3, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
     }
 }

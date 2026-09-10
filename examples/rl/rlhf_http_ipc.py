@@ -1,45 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Demonstrates reinforcement learning from human feedback (RLHF) using vLLM
-via HTTP API, with IPC-based weight syncing APIs.
+RLHF weight syncing against a `vllm serve` HTTP server, using CUDA IPC for the
+data plane.
 
-Unlike rlhf_nccl.py which uses NCCL and can use separate GPUs, this script
-uses CUDA IPC which requires the training model and vLLM server to be on the
-same GPU. Memory must be carefully managed to fit both models.
+  * OpenAI-compatible API for inference requests
+  * HTTP endpoints for the weight-transfer control plane
+  * CUDA IPC handles for the weight data plane
 
-Unlike rlhf.py which creates a vLLM instance programmatically, this script
-assumes you have already started a vLLM server using `vllm serve`. It uses:
-- OpenAI-compatible API for inference requests
-- HTTP endpoints for weight transfer control plane
-- CUDA IPC for actual weight data transfer
+1-GPU layout (single node): IPC shares GPU memory directly, so the server (TP=1)
+and the training model both live on GPU 0. The server is started with
+`--gpu-memory-utilization 0.5` to leave room for the training model.
 
-Prerequisites:
-    Start a vLLM server with weight transfer enabled and reduced GPU memory
-    utilization to leave room for the training model:
+The script starts the server itself, then:
 
-    $ VLLM_SERVER_DEV_MODE=1 VLLM_ALLOW_INSECURE_SERIALIZATION=1 \
-        vllm serve facebook/opt-125m --enforce-eager \
-        --weight-transfer-config '{"backend": "ipc"}' \
-        --load-format dummy \
-        --gpu-memory-utilization 0.5
+  1. Generate over HTTP → gibberish (server started with dummy weights).
+  2. Pause generation, sync real weights trainer → server over IPC, resume.
+  3. Generate again → sensible output.
 
-    Then run this script:
+IPC handles are pickled for HTTP transport, so both sides need
+`VLLM_ALLOW_INSECURE_SERIALIZATION=1`; this script sets it for itself and for
+the server it spawns.
 
-    $ python rlhf_http_ipc.py
-
-The example performs the following steps:
-
-* Load the training model on GPU 0 (same GPU as the vLLM server).
-* Generate text using the vLLM server via OpenAI-compatible API. The output
-  is expected to be nonsense because the server is initialized with dummy weights.
-* Initialize weight transfer via HTTP endpoint (no-op for IPC).
-* Broadcast the real weights from the training model to the vLLM server
-  using CUDA IPC handles.
-* Generate text again to show normal output after the weight update.
+Run:
+    $ python examples/rl/rlhf_http_ipc.py
 """
 
 import os
+import subprocess
+import sys
+import time
 
 import requests
 import torch
@@ -53,11 +43,75 @@ from vllm.distributed.weight_transfer import (
 )
 from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 
-BASE_URL = "http://localhost:8000"
 MODEL_NAME = "facebook/opt-125m"
 
-# Enable insecure serialization for IPC handle serialization
+SERVER_PORT = 8000
+BASE_URL = f"http://localhost:{SERVER_PORT}"
+
+# IPC requires colocation: the server and the training model share this GPU.
+SERVER_DEVICE_IDS = "0"
+TRAINER_DEVICE = "cuda:0"
+# Leave room on the shared GPU for the training model.
+SERVER_GPU_MEMORY_UTILIZATION = 0.5
+
+# Needed to (de)serialize IPC handles across the HTTP boundary.
 os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
+PROMPTS = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
+
+
+def start_vllm_server() -> subprocess.Popen:
+    """Spawn `vllm serve` and block until it is healthy."""
+    serve_args = [
+        "vllm",
+        "serve",
+        MODEL_NAME,
+        "--tensor-parallel-size",
+        "1",
+        "--device-ids",
+        SERVER_DEVICE_IDS,
+        "--enforce-eager",
+        "--load-format",
+        "dummy",
+        "--gpu-memory-utilization",
+        str(SERVER_GPU_MEMORY_UTILIZATION),
+        "--port",
+        str(SERVER_PORT),
+        "--weight-transfer-config",
+        '{"backend": "ipc"}',
+    ]
+    env = os.environ.copy()
+    # Exposes the weight-transfer and pause/resume endpoints.
+    env["VLLM_SERVER_DEV_MODE"] = "1"
+    env["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+    print(f"[server] Launching: {' '.join(serve_args)}")
+    proc = subprocess.Popen(
+        serve_args,
+        env=env,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        start_new_session=True,
+    )
+
+    deadline = time.monotonic() + 900
+    while True:
+        if proc.poll() is not None:
+            raise RuntimeError("vLLM server exited before becoming ready.")
+        try:
+            if requests.get(f"{BASE_URL}/health", timeout=5).status_code == 200:
+                break
+        except requests.RequestException:
+            pass
+        if time.monotonic() > deadline:
+            raise RuntimeError("vLLM server failed to start in time.")
+        time.sleep(2)
+    print("[server] Ready.")
+    return proc
 
 
 def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list[str]:
@@ -76,100 +130,70 @@ def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list
 
 def pause_generation(base_url: str) -> None:
     """Pause generation via HTTP endpoint."""
-    url = f"{base_url}/pause"
-    response = requests.post(url, timeout=60)
-    response.raise_for_status()
+    requests.post(f"{base_url}/pause", timeout=60).raise_for_status()
 
 
 def resume_generation(base_url: str) -> None:
     """Resume generation via HTTP endpoint."""
-    url = f"{base_url}/resume"
-    response = requests.post(url, timeout=60)
-    response.raise_for_status()
+    requests.post(f"{base_url}/resume", timeout=60).raise_for_status()
 
 
-def get_world_size(base_url: str) -> int:
-    """Get world size from the vLLM server."""
-    url = f"{base_url}/get_world_size"
-    response = requests.get(url, timeout=10)
-    response.raise_for_status()
-    return response.json()["world_size"]
-
-
-def main():
-    # IPC requires the training model to be on the same GPU as the vLLM server
-    # The server should be started on GPU 0 with reduced memory utilization
-    device = "cuda:0"
-    torch.accelerator.set_device_index(device)
-
-    # Load the training model on the same GPU as the server
-    # Use bfloat16 to reduce memory footprint
-    print(f"Loading training model: {MODEL_NAME} on {device}")
-    print(
-        "Note: Ensure the vLLM server was started with --gpu-memory-utilization 0.5 "
-        "or lower to leave room for the training model."
-    )
-    train_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.bfloat16)
-    train_model.to(device)
-    train_model.eval()  # Set to eval mode to save memory
-
-    # Create OpenAI client pointing to the vLLM server
-    client = OpenAI(
-        base_url=f"{BASE_URL}/v1",
-        api_key="EMPTY",  # vLLM doesn't require an API key by default
-    )
-
-    # Test prompts
-    prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-
-    # Generate text before weight update. The output is expected to be nonsense
-    # because the server is initialized with dummy weights.
+def print_generations(label: str, prompts: list[str], outputs: list[str]) -> None:
     print("-" * 50)
-    print("Generating text BEFORE weight update (expect nonsense):")
+    print(label)
     print("-" * 50)
-    outputs = generate_completions(client, MODEL_NAME, prompts)
     for prompt, generated_text in zip(prompts, outputs):
         print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
         print("-" * 50)
 
-    print("Initializing weight transfer (IPC backend)...")
 
-    # The trainer engine drives the inference side over HTTP. init for IPC is a
-    # no-op rendezvous; the same client carries start/update/finish.
-    engine = WeightTransferTrainerFactory.trainer_init(
-        init_info=IPCTrainerInitInfo(rank=0, packed=False),  # rank 0 = sender
-        client=HTTPVLLMWeightSyncClient(BASE_URL),
-        source=ModuleSource(train_model),
-    )
+def main():
+    server_proc = start_vllm_server()
+    try:
+        # The training model must sit on the same physical GPU as the server.
+        torch.accelerator.set_device_index(TRAINER_DEVICE)
 
-    # Pause generation before weight sync
-    pause_generation(BASE_URL)
+        print(f"[trainer] Loading training model: {MODEL_NAME} on {TRAINER_DEVICE}")
+        train_model = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME, dtype=torch.bfloat16
+        )
+        train_model.to(TRAINER_DEVICE)
+        train_model.eval()  # eval mode to save memory on the shared GPU
 
-    print("Broadcasting weights via CUDA IPC (HTTP)...")
-    # One call drives start_weight_update / update_weights / finish_weight_update.
-    engine.send_weights()
+        client = OpenAI(base_url=f"{BASE_URL}/v1", api_key="EMPTY")
 
-    # Resume generation after weight sync
-    resume_generation(BASE_URL)
+        # Generate with dummy weights — expect nonsense.
+        outputs = generate_completions(client, MODEL_NAME, PROMPTS)
+        print_generations("BEFORE weight sync (dummy weights):", PROMPTS, outputs)
 
-    # Generate text after weight update. The output is expected to be normal
-    # because the real weights are now loaded.
-    print("-" * 50)
-    print("Generating text AFTER weight update:")
-    print("-" * 50)
-    outputs_updated = generate_completions(client, MODEL_NAME, prompts)
-    for prompt, generated_text in zip(prompts, outputs_updated):
-        print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
-        print("-" * 50)
+        # IPC needs no data-plane rendezvous; `trainer_init` only ships the
+        # `packed` flag, which the server must decode with.
+        print("[transfer] Initializing IPC weight transfer...")
+        engine = WeightTransferTrainerFactory.trainer_init(
+            init_info=IPCTrainerInitInfo(rank=0, packed=False),  # rank 0 = sender
+            client=HTTPVLLMWeightSyncClient(BASE_URL),
+            source=ModuleSource(train_model),
+        )
 
-    # Note: The training model and IPC handles remain in memory.
-    # In a real RLHF training loop, you would update the training model
-    # and create new IPC handles for each weight update.
+        pause_generation(BASE_URL)
+
+        # Drives start_weight_update / update_weights / finish_weight_update.
+        print("[sync] Sharing weights via CUDA IPC...")
+        engine.send_weights()
+        print("[sync] Weight transfer complete.")
+
+        resume_generation(BASE_URL)
+
+        # Generate with the synced weights — expect sensible output.
+        outputs_updated = generate_completions(client, MODEL_NAME, PROMPTS)
+        print_generations("AFTER weight sync (real weights):", PROMPTS, outputs_updated)
+    finally:
+        print("[server] Shutting down...")
+        server_proc.terminate()
+        try:
+            server_proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            server_proc.kill()
 
 
 if __name__ == "__main__":
