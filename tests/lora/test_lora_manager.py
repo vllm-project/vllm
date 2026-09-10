@@ -1138,10 +1138,15 @@ def test_lru_cache_worker_adapter_manager_loaded_state(
         return manager.get_loaded_names(manager.get_loaded_state())
 
     assert names() == ([], [], [])
+    assert manager.get_loaded_ranks(manager.get_loaded_state()) == {}
 
     manager.add_adapter(request(1))
     manager.add_adapter(request(2))
     assert names() == (["adapter-1", "adapter-2"], ["adapter-1", "adapter-2"], [])
+    assert manager.get_loaded_ranks(manager.get_loaded_state()) == {
+        "adapter-1": 8,
+        "adapter-2": 8,
+    }
 
     # Third add: GPU slots are full, so 1 drops to the CPU tier.
     manager.add_adapter(request(3))

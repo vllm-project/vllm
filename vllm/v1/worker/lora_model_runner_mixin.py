@@ -65,6 +65,7 @@ class LoRAModelRunnerMixin:
                 gpu_adapters=gpu_adapters,
                 cpu_adapters=cpu_adapters,
                 pinned_adapters=pinned_adapters,
+                ranks=self.lora_manager.get_loaded_ranks(state),
                 loads=loads,
             )
         )

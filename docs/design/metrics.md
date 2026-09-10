@@ -399,9 +399,10 @@ engine notification channel (`vllm/v1/notifications.py`), which the
 worker updates whenever its adapter caches change, including on an
 idle engine with statically configured adapters:
 
-- `vllm:lora_adapter_loaded{adapter_name, level="gpu"|"cpu", pinned}`:
+- `vllm:lora_adapter_loaded{adapter_name, level="gpu"|"cpu", pinned, rank}`:
   one series per resident adapter, present while it is loaded and
-  removed when it is evicted.
+  removed when it is evicted; `rank` is the adapter's LoRA rank, a
+  proxy for its size and load cost.
 - `vllm:num_gpu_loaded_lora_adapters` and
   `vllm:num_cpu_loaded_lora_adapters`: counts per tier.
 - `vllm:max_gpu_lora_adapters` and `vllm:max_cpu_lora_adapters`: the

@@ -299,6 +299,15 @@ class WorkerLoRAManager:
             names(state.pinned_ids),
         )
 
+    def get_loaded_ranks(self, state: LoRALoadedState) -> dict[str, int]:
+        """Rank of every resident adapter, keyed like `get_loaded_names`."""
+        ranks: dict[str, int] = {}
+        for lora_id in state.registered_ids:
+            adapter = self._adapter_manager.get_adapter(lora_id)
+            if adapter is not None:
+                ranks[self._adapter_names.get(lora_id, str(lora_id))] = adapter.rank
+        return ranks
+
 
 class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     """WorkerLoRAManager that manages LoRA models on the worker side.

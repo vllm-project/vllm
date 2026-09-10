@@ -1075,7 +1075,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.gauge_lora_cpu_adapters: dict[int, PromMetric] = {}
         # Label tuples emitted by the last load event, per engine, so series
         # for evicted adapters can be removed.
-        self._lora_loaded_series: dict[int, set[tuple[str, str, str, str, str]]] = {}
+        self._lora_loaded_series: dict[
+            int, set[tuple[str, str, str, str, str, str]]
+        ] = {}
         if vllm_config.lora_config is not None:
             if len(self.engine_indexes) > 1:
                 logger.warning(
@@ -1154,10 +1156,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     "Whether a LoRA adapter is loaded in the worker's adapter "
                     "caches. The series exists (value 1) while the adapter is "
                     "resident; 'level' is 'gpu' when the adapter is active in "
-                    "a GPU slot and 'cpu' when it is only in the host cache."
+                    "a GPU slot and 'cpu' when it is only in the host cache. "
+                    "'rank' is the adapter's LoRA rank."
                 ),
                 multiprocess_mode="mostrecent",
-                labelnames=labelnames + ["adapter_name", "level", "pinned"],
+                labelnames=labelnames + ["adapter_name", "level", "pinned", "rank"],
             )
 
             histogram_lora_load_seconds = self._histogram_cls(
@@ -1210,6 +1213,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 adapter_name,
                 "gpu" if adapter_name in gpu_adapters else "cpu",
                 str(adapter_name in pinned_adapters).lower(),
+                str(event.ranks.get(adapter_name, 0)),
             )
             for adapter_name in event.cpu_adapters
         }
