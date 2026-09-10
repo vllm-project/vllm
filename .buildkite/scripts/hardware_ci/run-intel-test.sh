@@ -246,8 +246,6 @@ pull_image_with_retry() {
 
     echo "Pull attempt ${attempt}/${max_attempts} failed for ${image}." >&2
     if (( attempt < max_attempts )); then
-      # Drop partial layers before retrying.
-      docker image prune -f >/dev/null 2>&1 || true
       echo "Retrying in ${delay}s..." >&2
       sleep "${delay}"
       delay=$(( delay * 2 ))
