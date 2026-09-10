@@ -231,11 +231,107 @@ def _uint32_to_uniform(value):
 
 
 @triton.jit
+def _philox_context_state(
+    contexts_row_ptr,
+    key_0,
+    key_1,
+    CONTEXT_WIDTH: tl.constexpr,
+):
+    """Absorb one context row into the Philox state. Scalar, once per program."""
+    state_0 = tl.full((), _CONTEXT_DOMAIN, tl.uint32)
+    state_1 = tl.full((), CONTEXT_WIDTH, tl.uint32)
+    state_2 = tl.full((), 0, tl.uint32)
+    state_3 = tl.full((), 0, tl.uint32)
+    for offset in range(0, CONTEXT_WIDTH, 4):
+        context_0 = tl.load(contexts_row_ptr + offset).to(tl.uint32)
+        if offset + 1 < CONTEXT_WIDTH:
+            context_1 = tl.load(contexts_row_ptr + offset + 1).to(tl.uint32)
+        else:
+            context_1 = tl.full((), _UINT32_MASK - 1, tl.uint32)
+        if offset + 2 < CONTEXT_WIDTH:
+            context_2 = tl.load(contexts_row_ptr + offset + 2).to(tl.uint32)
+        else:
+            context_2 = tl.full((), _UINT32_MASK - 2, tl.uint32)
+        if offset + 3 < CONTEXT_WIDTH:
+            context_3 = tl.load(contexts_row_ptr + offset + 3).to(tl.uint32)
+        else:
+            context_3 = tl.full((), _UINT32_MASK - 3, tl.uint32)
+        state_0, state_1, state_2, state_3 = _philox4x32_10(
+            (state_0 ^ context_0) & _UINT32_MASK,
+            (state_1 ^ context_1) & _UINT32_MASK,
+            (state_2 ^ context_2) & _UINT32_MASK,
+            (state_3 ^ context_3) & _UINT32_MASK,
+            (key_0 ^ offset) & _UINT32_MASK,
+            key_1,
+        )
+    return state_0, state_1, state_2, state_3
+
+
+@triton.jit
+def _philox_candidate_words(groups, state_0, state_1, state_2, state_3, key_0, key_1):
+    """One Philox call per group of 4 tokens. Token 4g+j reads output j."""
+    candidate_words = groups.to(tl.uint32)
+    vector_zero = candidate_words * 0
+    return _philox4x32_10(
+        candidate_words & _UINT32_MASK,
+        state_0 + vector_zero,
+        state_1 + vector_zero,
+        state_2 + vector_zero,
+        ((key_0 ^ state_3) & _UINT32_MASK) + vector_zero,
+        ((key_1 ^ _TOKEN_DOMAIN) & _UINT32_MASK) + vector_zero,
+    )
+
+
+@triton.jit
+def _philox_gumbel_from_logits(logits, word):
+    logits = tl.where(logits != logits, float("-inf"), logits)
+    uniform = _uint32_to_uniform(word)
+    return logits - tl.log(-tl.log(uniform))
+
+
+@triton.jit
 def _gumbel_value(logits_ptr, output, mask):
     logits = tl.load(logits_ptr, mask=mask, other=float("-inf")).to(tl.float32)
-    logits = tl.where(logits != logits, float("-inf"), logits)
-    uniform = _uint32_to_uniform(output)
-    return logits - tl.log(-tl.log(uniform))
+    return _philox_gumbel_from_logits(logits, output)
+
+
+@triton.jit
+def philox_gumbel_block_argmax(
+    logits,
+    mask,
+    block_idx,
+    contexts_row_ptr,
+    key_0,
+    key_1,
+    CONTEXT_WIDTH: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Keyed Gumbel-max argmax over one vocab block of in-register logits.
+
+    Shares the PRF with `_philox_gumbel_kernel`, so for a given
+    (context, token) the uniform is bit-identical. The returned value is fp32
+    regardless of the caller's Gumbel precision: the watermark draw must stay a
+    function of (context, token) alone so detection keeps working.
+    """
+    tl.static_assert(BLOCK_SIZE % 4 == 0)
+    state_0, state_1, state_2, state_3 = _philox_context_state(
+        contexts_row_ptr, key_0, key_1, CONTEXT_WIDTH
+    )
+    groups = block_idx * (BLOCK_SIZE // 4) + tl.arange(0, BLOCK_SIZE // 4)
+    output_0, output_1, output_2, output_3 = _philox_candidate_words(
+        groups, state_0, state_1, state_2, state_3, key_0, key_1
+    )
+    # Lay the per-group words out in token order: 4g+0, 4g+1, 4g+2, 4g+3.
+    words = tl.interleave(
+        tl.interleave(output_0, output_2),
+        tl.interleave(output_1, output_3),
+    )
+    values = tl.where(
+        mask,
+        _philox_gumbel_from_logits(logits.to(tl.float32), words),
+        float("-inf"),
+    )
+    return tl.max(values, axis=0, return_indices=True)
 
 
 @triton.jit
@@ -309,48 +405,11 @@ def _philox_gumbel_kernel(
 
     key_0 = key_0_value.to(tl.uint32)
     key_1 = key_1_value.to(tl.uint32)
-    state_0 = tl.full((), _CONTEXT_DOMAIN, tl.uint32)
-    state_1 = tl.full((), CONTEXT_WIDTH, tl.uint32)
-    state_2 = tl.full((), 0, tl.uint32)
-    state_3 = tl.full((), 0, tl.uint32)
-    for offset in range(0, CONTEXT_WIDTH, 4):
-        context_0 = tl.load(contexts_ptr + row * context_stride + offset).to(tl.uint32)
-        if offset + 1 < CONTEXT_WIDTH:
-            context_1 = tl.load(contexts_ptr + row * context_stride + offset + 1).to(
-                tl.uint32
-            )
-        else:
-            context_1 = tl.full((), _UINT32_MASK - 1, tl.uint32)
-        if offset + 2 < CONTEXT_WIDTH:
-            context_2 = tl.load(contexts_ptr + row * context_stride + offset + 2).to(
-                tl.uint32
-            )
-        else:
-            context_2 = tl.full((), _UINT32_MASK - 2, tl.uint32)
-        if offset + 3 < CONTEXT_WIDTH:
-            context_3 = tl.load(contexts_ptr + row * context_stride + offset + 3).to(
-                tl.uint32
-            )
-        else:
-            context_3 = tl.full((), _UINT32_MASK - 3, tl.uint32)
-        state_0, state_1, state_2, state_3 = _philox4x32_10(
-            (state_0 ^ context_0) & _UINT32_MASK,
-            (state_1 ^ context_1) & _UINT32_MASK,
-            (state_2 ^ context_2) & _UINT32_MASK,
-            (state_3 ^ context_3) & _UINT32_MASK,
-            (key_0 ^ offset) & _UINT32_MASK,
-            key_1,
-        )
-
-    candidate_words = groups.to(tl.uint32)
-    vector_zero = candidate_words * 0
-    output_0, output_1, output_2, output_3 = _philox4x32_10(
-        candidate_words & _UINT32_MASK,
-        state_0 + vector_zero,
-        state_1 + vector_zero,
-        state_2 + vector_zero,
-        ((key_0 ^ state_3) & _UINT32_MASK) + vector_zero,
-        ((key_1 ^ _TOKEN_DOMAIN) & _UINT32_MASK) + vector_zero,
+    state_0, state_1, state_2, state_3 = _philox_context_state(
+        contexts_ptr + row * context_stride, key_0, key_1, CONTEXT_WIDTH
+    )
+    output_0, output_1, output_2, output_3 = _philox_candidate_words(
+        groups, state_0, state_1, state_2, state_3, key_0, key_1
     )
     candidate_0 = groups * 4
     candidate_1 = candidate_0 + 1

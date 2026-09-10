@@ -20,8 +20,10 @@ from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import (
     DraftWatermarker,
+    _resolve_watermark_key,
     create_speculative_draft_watermarker,
     create_speculative_target_watermarker,
+    speculative_target_watermark_key,
 )
 from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -160,6 +162,35 @@ def test_speculative_decoding_uses_fixed_dual_key_roles():
     assert target.prf.key == derive_watermark_key(42, b"key_b")
     assert draft is not None
     assert draft.watermarker.prf.key == derive_watermark_key(42, b"key_a")
+
+
+def test_recovery_key_rejects_the_unsplit_dual_key_watermarker():
+    """The in-kernel recovery draw must never fall back to the draft's key A."""
+    watermarker = create_watermarker(
+        WatermarkConfig(algorithm="dual_key_gumbel", key=42, alpha=0.25)
+    )
+
+    with pytest.raises(ValueError, match="keys the target role separately"):
+        _resolve_watermark_key(watermarker)
+
+    target = create_speculative_target_watermarker(watermarker)
+    assert _resolve_watermark_key(target) == derive_watermark_key(42, b"key_b")
+
+
+@pytest.mark.parametrize("algorithm", ["gumbel", "dual_key_gumbel"])
+def test_config_key_resolution_matches_the_model_runner(algorithm: str):
+    """Callers without a sampler must reproduce the runtime's kernel key.
+
+    The JIT warmup has no sampler to read the key off, so it derives it from the
+    config; if that drifts from the model runner it warms a specialization the
+    engine never launches.
+    """
+    config = WatermarkConfig(algorithm=algorithm, key=42, alpha=0.25)
+    runtime_key = _resolve_watermark_key(
+        create_speculative_target_watermarker(create_watermarker(config))
+    )
+
+    assert speculative_target_watermark_key(config) == runtime_key
 
 
 def test_target_only_speculative_watermarking_skips_draft_watermarker():

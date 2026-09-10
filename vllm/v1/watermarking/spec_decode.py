@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import numpy as np
+from typing import Any, cast
+
 import torch
 
 from vllm.config import SpeculativeConfig
+from vllm.config.watermarking import WatermarkConfig
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
+from vllm.v1.watermarking.gumbel import GumbelWatermarker
+from vllm.v1.watermarking.prfs import PhiloxPRF
 from vllm.v1.watermarking.watermarker import (
     SupportsSpeculativeDecoding,
     Watermarker,
@@ -83,9 +87,55 @@ def create_speculative_draft_watermarker(
     )
 
 
+def _philox_key(watermarker: Watermarker) -> int:
+    if not (
+        isinstance(watermarker, GumbelWatermarker)
+        and type(watermarker.prf) is PhiloxPRF
+    ):
+        raise NotImplementedError(
+            "In-kernel watermarked recovery supports only the Philox PRF "
+            "GumbelWatermarker"
+        )
+    return watermarker.prf.key
+
+
+def _resolve_watermark_key(watermarker: Watermarker) -> int:
+    """Philox key of the watermarker driving the in-kernel recovery draw.
+
+    Raises:
+        ValueError: if a role-splitting watermarker is passed instead of its
+            target role, which would key the recovery draw with the draft key.
+    """
+    key = _philox_key(watermarker)
+    if (
+        isinstance(watermarker, SupportsSpeculativeDecoding)
+        and _philox_key(watermarker.create_target_watermarker()) != key
+    ):
+        raise ValueError(
+            f"{type(watermarker).__name__} keys the target role separately from "
+            "the draft. Pass create_speculative_target_watermarker(watermarker) "
+            "so the recovery draw carries the target's key."
+        )
+    return key
+
+
+def speculative_target_watermark_key(watermark_config: WatermarkConfig) -> int:
+    """Philox key the resample kernel is launched with for ``watermark_config``.
+
+    Mirrors how the model runner builds the sampler's watermarker, so callers
+    that never construct a sampler (the JIT warmup) can reproduce the exact
+    kernel argument the engine will use.
+    """
+    from vllm.v1.watermarking.factory import create_watermarker
+
+    return _resolve_watermark_key(
+        create_speculative_target_watermarker(create_watermarker(watermark_config))
+    )
+
+
 def watermarked_rejection_sample(
     target_logits: torch.Tensor,
-    draft_logits: torch.Tensor,
+    draft_logits: torch.Tensor | None,
     draft_sampled: torch.Tensor,
     cu_num_logits: torch.Tensor,
     pos: torch.Tensor,
@@ -100,7 +150,15 @@ def watermarked_rejection_sample(
     watermarker: Watermarker,
     use_fp64: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    sampled, num_sampled = rejection_sample(
+    """Rejection sampling whose recovered token carries the target's key.
+
+    The token the target supplies itself (the residual draw after the first
+    rejection, or the bonus token) is drawn inside the resample kernel with
+    keyed Philox noise over the row's watermark context. Rows that are opted
+    out, greedy, or padded keep the stock seeded draw.
+    """
+    assert contexts.shape == (target_logits.shape[0], watermarker.context_width)
+    return rejection_sample(
         target_logits,
         draft_logits,
         draft_sampled,
@@ -113,79 +171,9 @@ def watermarked_rejection_sample(
         seed,
         num_speculative_steps,
         use_fp64=use_fp64,
-    )
-
-    _apply_watermarked_recovery(
-        sampled,
-        num_sampled,
-        target_logits,
-        draft_logits,
-        draft_sampled,
-        cu_num_logits,
-        expanded_idx_mapping,
-        temperature,
-        contexts,
-        watermarking,
-        watermarker,
-    )
-    return sampled, num_sampled
-
-
-def _apply_watermarked_recovery(
-    sampled: torch.Tensor,
-    num_sampled: torch.Tensor,
-    target_logits: torch.Tensor,
-    draft_logits: torch.Tensor,
-    draft_sampled: torch.Tensor,
-    cu_num_logits: torch.Tensor,
-    expanded_idx_mapping: torch.Tensor,
-    temperature: torch.Tensor,
-    contexts: torch.Tensor,
-    watermarking: torch.Tensor,
-    watermarker: Watermarker,
-) -> None:
-    resample_steps = num_sampled.to(torch.int64) - 1
-    resample_rows = cu_num_logits[:-1].to(torch.int64) + resample_steps
-    req_state_indices = expanded_idx_mapping[resample_rows].to(torch.int64)
-    request_temperatures = temperature[req_state_indices]
-    enabled = watermarking[req_state_indices] & (request_temperatures != 0)
-    target_rows = target_logits[resample_rows]
-    is_bonus = resample_rows == cu_num_logits[1:] - 1
-    next_rows = (resample_rows + 1).clamp_max(draft_sampled.shape[0] - 1)
-    has_rejected_draft = draft_sampled[next_rows] >= 0
-    needs_residual = ~is_bonus & has_rejected_draft
-
-    draft_steps = resample_steps.clamp_max(draft_logits.shape[1] - 1)
-    draft_rows = draft_logits[req_state_indices, draft_steps].float()
-    vocab_size = min(target_rows.shape[-1], draft_rows.shape[-1])
-    target_rows = target_rows[:, :vocab_size]
-    draft_rows = draft_rows[:, :vocab_size]
-    target_rows = torch.where(target_rows.isnan(), float("-inf"), target_rows).float()
-    draft_rows = torch.where(draft_rows.isnan(), float("-inf"), draft_rows)
-    safe_temperatures = torch.where(request_temperatures == 0, 1, request_temperatures)
-    draft_rows = draft_rows / safe_temperatures.unsqueeze(-1)
-    target_log_probs = torch.log_softmax(target_rows, dim=-1)
-    draft_log_probs = torch.log_softmax(draft_rows, dim=-1)
-    ratio = torch.exp(draft_log_probs - target_log_probs)
-    residual_logits = torch.where(
-        ratio < 1,
-        target_log_probs + torch.log1p(-ratio.clamp_max(1)),
-        float("-inf"),
-    )
-    recovery_logits = torch.where(
-        needs_residual.unsqueeze(-1), residual_logits, target_rows
-    )
-
-    output_positions = num_sampled.to(torch.int64) - 1
-    request_indices = torch.arange(sampled.shape[0], device=sampled.device)
-    ordinary_recovery = sampled[request_indices, output_positions]
-    watermarked_recovery = watermarker.sample(
-        recovery_logits,
-        contexts[resample_rows],
-        lambda _: ordinary_recovery,
-    ).token_ids
-    sampled[request_indices, output_positions] = torch.where(
-        enabled, watermarked_recovery, ordinary_recovery
+        contexts=contexts,
+        watermarking=watermarking,
+        watermark_key=_resolve_watermark_key(watermarker),
     )
 
 
@@ -199,49 +187,21 @@ class WatermarkedRejectionSampler(RejectionSampler):
     ) -> None:
         super().__init__(sampler, spec_config, device)
         self.watermarker = watermarker
+        self._watermark_key = _resolve_watermark_key(watermarker)
 
-    def _verify(
+    def _extra_rejection_sample_kwargs(
         self,
-        logits: torch.Tensor,
-        draft_logits: torch.Tensor | None,
         draft_sampled: torch.Tensor,
-        pos: torch.Tensor,
-        cu_num_logits: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        idx_mapping_np: np.ndarray,
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        processed_logits, sampled, num_sampled = super()._verify(
-            logits,
-            draft_logits,
-            draft_sampled,
-            pos,
-            cu_num_logits,
-            idx_mapping,
-            idx_mapping_np,
-            expanded_idx_mapping,
-            expanded_local_pos,
-        )
-        sampler = self.sampler
-        assert isinstance(sampler, GPUWatermarkSampler)
-        assert draft_logits is not None
-        contexts = sampler._get_contexts(
-            expanded_idx_mapping,
-            expanded_local_pos,
-            draft_sampled,
-        )
-        _apply_watermarked_recovery(
-            sampled,
-            num_sampled,
-            processed_logits,
-            draft_logits,
-            draft_sampled,
-            cu_num_logits,
-            expanded_idx_mapping,
-            sampler.sampling_states.temperature.gpu,
-            contexts,
-            sampler.watermarking.gpu,
-            self.watermarker,
-        )
-        return processed_logits, sampled, num_sampled
+    ) -> dict[str, Any]:
+        sampler = cast("GPUWatermarkSampler", self.sampler)
+        return {
+            "contexts": sampler._get_contexts(
+                expanded_idx_mapping,
+                expanded_local_pos,
+                draft_sampled,
+            ),
+            "watermarking": sampler.watermarking.gpu,
+            "watermark_key": self._watermark_key,
+        }

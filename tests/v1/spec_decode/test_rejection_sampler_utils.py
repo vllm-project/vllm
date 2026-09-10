@@ -9,6 +9,7 @@ import torch
 from vllm.v1.watermarking import GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import watermarked_rejection_sample
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
@@ -836,3 +837,217 @@ def test_chunked_requests_match_full_batch(has_draft_logits: bool):
     steps = torch.arange(num_speculative_steps + 1, device=device)
     valid = steps.unsqueeze(0) < num_sampled.unsqueeze(1)
     assert torch.equal(chunked_sampled[valid], sampled[valid])
+
+
+def _residual_recovery_logits(
+    inputs: dict,
+    num_sampled: torch.Tensor,
+    vocab_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-request recovery logits and the verification row they belong to.
+
+    Mirrors the residual `_resample_kernel` builds in registers:
+    bonus and -1-placeholder rows recover from the target logits, everything
+    else from log(max(p - q, 0)).
+    """
+    target_logits = inputs["target_logits"]
+    draft_logits = inputs["draft_logits"]
+    cu_num_logits = inputs["cu_num_logits"]
+    resample_rows = cu_num_logits[:-1].to(torch.int64) + num_sampled.to(torch.int64) - 1
+    req_state_indices = inputs["expanded_idx_mapping"][resample_rows].to(torch.int64)
+    temperatures = inputs["temperature"][req_state_indices]
+
+    is_bonus = resample_rows == cu_num_logits[1:] - 1
+    next_rows = (resample_rows + 1).clamp_max(inputs["draft_sampled"].shape[0] - 1)
+    needs_residual = ~is_bonus & (inputs["draft_sampled"][next_rows] >= 0)
+
+    target_rows = target_logits[resample_rows][:, :vocab_size].float()
+    target_rows = torch.where(target_rows.isnan(), float("-inf"), target_rows)
+    if draft_logits is None:
+        rejected = inputs["draft_sampled"][next_rows].clamp_min(0)
+        one_hot = torch.arange(vocab_size, device=target_rows.device).unsqueeze(
+            0
+        ) == rejected.unsqueeze(-1)
+        residual_logits = torch.where(one_hot, float("-inf"), target_rows)
+    else:
+        draft_steps = (num_sampled.to(torch.int64) - 1).clamp_max(
+            draft_logits.shape[1] - 1
+        )
+        draft_rows = draft_logits[req_state_indices, draft_steps][
+            :, :vocab_size
+        ].float()
+        draft_rows = torch.where(draft_rows.isnan(), float("-inf"), draft_rows)
+        draft_rows = draft_rows / temperatures.unsqueeze(-1)
+        target_log_probs = torch.log_softmax(target_rows, dim=-1)
+        draft_log_probs = torch.log_softmax(draft_rows, dim=-1)
+        ratio = torch.exp(draft_log_probs - target_log_probs)
+        residual_logits = torch.where(
+            ratio < 1,
+            target_log_probs + torch.log1p(-ratio.clamp_max(1)),
+            float("-inf"),
+        )
+    recovery = torch.where(needs_residual.unsqueeze(-1), residual_logits, target_rows)
+    return recovery, resample_rows
+
+
+def _watermark_inputs(
+    num_trials: int,
+    num_speculative_steps: int,
+    context_width: int,
+    vocab_size: int,
+    one_hot_draft: bool,
+    temperature: float = 1.0,
+) -> tuple[dict, torch.Tensor]:
+    device = "cuda"
+    target_logits_1d = torch.randn(vocab_size, device=device) / temperature
+    draft_logits_1d = torch.randn(vocab_size, device=device)
+    inputs = _build_rejection_sample_inputs(
+        target_logits_1d,
+        draft_logits_1d,
+        num_speculative_steps,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+    if one_hot_draft:
+        inputs["draft_logits"] = None
+    # -1 placeholder drafts recover from the target logits, not the residual.
+    inputs["draft_sampled"].view(num_trials, num_speculative_steps + 1)[::5, 1] = -1
+    num_logits = inputs["target_logits"].shape[0]
+    contexts = torch.randint(
+        0, vocab_size, (num_logits, context_width), dtype=torch.int64, device=device
+    )
+    # Prompt positions arrive as -1 and must hash like the PyTorch PRF does.
+    contexts[::7, 0] = -1
+    return inputs, contexts
+
+
+@pytest.mark.parametrize("one_hot_draft", [False, True])
+# The resample kernel tiles the vocabulary in RESAMPLE_BLOCK_SIZE (1024) blocks
+# and each block must offset its Philox group indices by block_idx. 1024 is a
+# single full block (block_idx is always 0, and no lane is masked off); 3500 is
+# four blocks with a partial tail, so it pins both the per-block group offset --
+# a production vocabulary is ~149 blocks, and dropping the offset would mis-key
+# every token outside the first -- and the tail mask.
+@pytest.mark.parametrize("vocab_size", [1024, 3500])
+def test_watermarked_recovery_matches_philox_gumbel_sample(
+    one_hot_draft: bool, vocab_size: int
+):
+    """The in-kernel key-B draw must equal philox_gumbel_sample on the residual.
+
+    The kernel now builds the residual once, in registers, and draws from it
+    with keyed Philox noise. This pins that draw to the standalone watermark
+    kernel the detector's PRF is defined by.
+    """
+    torch.manual_seed(7)
+    key = 0xDA39A3EE5E6B4B0D
+    context_width = 4
+    inputs, contexts = _watermark_inputs(
+        num_trials=128,
+        num_speculative_steps=2,
+        context_width=context_width,
+        vocab_size=vocab_size,
+        one_hot_draft=one_hot_draft,
+    )
+    watermarker = GumbelWatermarker(key=key, context_width=context_width)
+
+    sampled, num_sampled = watermarked_rejection_sample(
+        **inputs,
+        num_speculative_steps=2,
+        contexts=contexts,
+        watermarking=torch.ones(128, dtype=torch.bool, device="cuda"),
+        watermarker=watermarker,
+    )
+
+    recovery, resample_rows = _residual_recovery_logits(inputs, num_sampled, vocab_size)
+    expected = philox_gumbel_sample(recovery, contexts[resample_rows], key)
+    recovered = sampled[torch.arange(128, device="cuda"), num_sampled.long() - 1]
+    torch.testing.assert_close(recovered, expected, rtol=0, atol=0)
+
+    # The recovery shapes must actually occur, or the assertion is vacuous.
+    is_bonus = resample_rows == inputs["cu_num_logits"][1:] - 1
+    next_rows = (resample_rows + 1).clamp_max(inputs["draft_sampled"].shape[0] - 1)
+    is_placeholder = ~is_bonus & (inputs["draft_sampled"][next_rows] < 0)
+    assert int((~is_bonus & ~is_placeholder).sum()) > 0
+    assert int(is_placeholder.sum()) > 0
+    if not one_hot_draft:
+        # One-hot drafts are accepted with probability p(draft token), which is
+        # ~1/V here, so they practically never reach the bonus row.
+        assert int(is_bonus.sum()) > 0
+
+
+def test_watermarked_recovery_leaves_disabled_rows_on_the_stock_draw():
+    """Opted-out and greedy rows must stay bit-identical to rejection_sample."""
+    torch.manual_seed(11)
+    num_trials = 96
+    vocab_size = 512
+    inputs, contexts = _watermark_inputs(
+        num_trials=num_trials,
+        num_speculative_steps=3,
+        context_width=2,
+        vocab_size=vocab_size,
+        one_hot_draft=False,
+    )
+    watermarking = torch.zeros(num_trials, dtype=torch.bool, device="cuda")
+    watermarking[::2] = True
+    # Greedy requests are never watermarked, even when opted in.
+    inputs["temperature"][:8] = 0.0
+
+    stock_sampled, stock_num_sampled = rejection_sample(
+        **inputs, num_speculative_steps=3
+    )
+    sampled, num_sampled = watermarked_rejection_sample(
+        **inputs,
+        num_speculative_steps=3,
+        contexts=contexts,
+        watermarking=watermarking,
+        watermarker=GumbelWatermarker(key=99, context_width=2),
+    )
+
+    torch.testing.assert_close(num_sampled, stock_num_sampled, rtol=0, atol=0)
+    rows = torch.arange(num_trials, device="cuda")
+    positions = num_sampled.long() - 1
+    disabled = ~watermarking | (inputs["temperature"] == 0)
+    torch.testing.assert_close(
+        sampled[rows[disabled], positions[disabled]],
+        stock_sampled[rows[disabled], positions[disabled]],
+        rtol=0,
+        atol=0,
+    )
+    # Accepted draft tokens are untouched by the recovery draw.
+    for req in range(num_trials):
+        n = int(num_sampled[req]) - 1
+        torch.testing.assert_close(
+            sampled[req, :n], stock_sampled[req, :n], rtol=0, atol=0
+        )
+    assert int(disabled.sum()) > 0 and int((~disabled).sum()) > 0
+
+
+def test_watermarked_recovery_is_unchanged_by_fp64_gumbel():
+    """use_fp64 must not move the keyed draw: the detector's uniform is fp32."""
+    torch.manual_seed(13)
+    inputs, contexts = _watermark_inputs(
+        num_trials=64,
+        num_speculative_steps=2,
+        context_width=4,
+        vocab_size=2048,
+        one_hot_draft=False,
+    )
+    watermarker = GumbelWatermarker(key=2**63 + 12345, context_width=4)
+    kwargs = dict(
+        num_speculative_steps=2,
+        contexts=contexts,
+        watermarking=torch.ones(64, dtype=torch.bool, device="cuda"),
+        watermarker=watermarker,
+    )
+    sampled32, num_sampled32 = watermarked_rejection_sample(**inputs, **kwargs)
+    sampled64, num_sampled64 = watermarked_rejection_sample(
+        **inputs, **kwargs, use_fp64=True
+    )
+    rows = torch.arange(64, device="cuda")
+    torch.testing.assert_close(num_sampled64, num_sampled32, rtol=0, atol=0)
+    torch.testing.assert_close(
+        sampled64[rows, num_sampled64.long() - 1],
+        sampled32[rows, num_sampled32.long() - 1],
+        rtol=0,
+        atol=0,
+    )

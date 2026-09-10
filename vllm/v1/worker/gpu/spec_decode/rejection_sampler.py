@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Iterator
+from typing import Any
 
 import numpy as np
 import torch
@@ -141,6 +142,15 @@ class RejectionSampler:
             in ("raw_logits", "processed_logits"),
         )
 
+    def _extra_rejection_sample_kwargs(
+        self,
+        draft_sampled: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+    ) -> dict[str, Any]:
+        """Extra `rejection_sample` kwargs. Watermarking hooks in here."""
+        return {}
+
     def _verify(
         self,
         logits: torch.Tensor,
@@ -177,6 +187,9 @@ class RejectionSampler:
             self.synthetic_conditional_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,
+            **self._extra_rejection_sample_kwargs(
+                draft_sampled, expanded_idx_mapping, expanded_local_pos
+            ),
         )
         return processed_logits, sampled, num_sampled
 
