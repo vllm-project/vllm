@@ -93,7 +93,11 @@ def run_mixed_prefill_decode_warmup(
     mixed_step_context: AbstractContextManager[object] | None = None,
     req_id_prefix: str = "_v2_mixed_warmup",
 ) -> bool:
-    """Run a V2 mixed prefill+decode step through normal scheduler inputs."""
+    """Run a V2 mixed prefill+decode step through normal scheduler inputs.
+
+    Returns ``True`` after all synthetic accelerator work is complete, or
+    ``False`` if warmup is skipped before launching accelerator work.
+    """
     if model_runner.is_pooling_model or model_runner.max_num_reqs < 2 or num_tokens < 3:
         return False
 
@@ -206,6 +210,8 @@ def run_mixed_prefill_decode_warmup(
         worker_execute_model(cleanup_output)
     finally:
         model_runner.kv_connector.set_disabled(False)
+    # Do not let asynchronous mixed-warmup work overlap later warmup phases.
+    torch.accelerator.synchronize()
     return True
 
 
