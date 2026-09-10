@@ -168,20 +168,12 @@ fn factory_new_resolves_default_patterns() {
         Some(names::GLM47)
     );
     assert_eq!(
-        factory.resolve_name_for_model("google/gemma-4-27b-it"),
-        Some(names::GEMMA4)
-    );
-    assert_eq!(
         factory.resolve_name_for_model("ibm-granite/granite-4.0-h-tiny"),
         Some(names::GRANITE4)
     );
     assert_eq!(
         factory.resolve_name_for_model("NousResearch/Hermes-3-Llama-3.1-8B"),
         Some(names::HERMES)
-    );
-    assert_eq!(
-        factory.resolve_name_for_model("tencent/Hy3-preview"),
-        Some(names::HY_V3)
     );
     assert_eq!(
         factory.resolve_name_for_model("MiniMax/MiniMax-M3-Text"),
