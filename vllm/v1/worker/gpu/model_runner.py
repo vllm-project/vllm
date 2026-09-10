@@ -1422,9 +1422,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def prepare_dummy_attn(
         self, input_batch: InputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        block_tables = pcp.maybe_get_pcp_dummy_block_tables(
-            self.pcp_manager, self.block_tables, input_batch.num_reqs
-        )
+        block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
         if valid_state_slots:
             state_slots = torch.arange(
                 1,
@@ -1593,14 +1591,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if batch_req_state is not None:
             num_toks = batch_req_state.num_tokens
             if self.pcp_manager is not None:
-                num_reqs, num_toks, max_query_len = (
-                    self.pcp_manager.get_dispatch_batch_shape(
-                        batch_req_state.num_scheduled_tokens,
-                        batch_req_state.is_prefilling_np,
-                    )
-                )
-                uniform_tok_count = get_uniform_decode_token_count(
-                    num_reqs, num_toks, max_query_len, batch_req_state.has_prefill
+                num_toks = self.pcp_manager.get_num_tokens_for_dispatch(
+                    batch_req_state.num_scheduled_tokens,
+                    batch_req_state.is_prefilling_np,
                 )
 
         num_active_loras = 0
@@ -1848,7 +1841,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
-                pcp_moe_should_all_reduce=pcp.moe_should_all_reduce(batch_desc.cg_mode),
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 if ubatch_state is not None:
