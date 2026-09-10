@@ -2333,7 +2333,8 @@ def test_dcp_mixed_cache_loads_fine_grained_external_hit() -> None:
         new_reqs={producer.request_id: producer_blocks.get_block_ids()},
     )
     store_output.kv_connector_block_state = KVConnectorBlockState(
-        block_ids={},
+        req_ids=set(),
+        resolve_block_ids=lambda _: (),
         boundary_state_offloads={
             producer.request_id: [
                 (1, mamba_blocks[0].block_id, mamba_block_size),
@@ -2454,7 +2455,8 @@ def test_finished_eager_store_caches_fa_partial_tail_for_hybrid_hit() -> None:
         new_reqs={producer.request_id: producer_blocks.get_block_ids()},
     )
     store_output.kv_connector_block_state = KVConnectorBlockState(
-        block_ids={},
+        req_ids=set(),
+        resolve_block_ids=lambda _: (),
         boundary_state_offloads={
             producer.request_id: [
                 (1, mamba_blocks[4].block_id, total_cached_tokens),
@@ -2600,7 +2602,8 @@ def test_eager_store_does_not_scan_mamba_blocks_positionally() -> None:
         new_reqs={req.request_id: kv_blocks.get_block_ids()},
     )
     output.kv_connector_block_state = KVConnectorBlockState(
-        block_ids={},
+        req_ids=set(),
+        resolve_block_ids=lambda _: (),
         boundary_state_offloads={
             req.request_id: [(1, gpu_blocks[1].block_id, 2 * block_size)]
         },
@@ -2722,7 +2725,8 @@ def test_boundary_handoff_dropped_for_departing_request(gone_via: str) -> None:
         new_reqs={req.request_id: kv_blocks.get_block_ids()},
     )
     output.kv_connector_block_state = KVConnectorBlockState(
-        block_ids={},
+        req_ids=set(),
+        resolve_block_ids=lambda _: (),
         boundary_state_offloads={
             req.request_id: [(1, mamba_blocks[1].block_id, 2 * block_size)]
         },
@@ -2780,7 +2784,8 @@ def test_boundary_handoff_keeps_block_meta_index_parallel() -> None:
         new_reqs={req.request_id: kv_blocks.get_block_ids()},
     )
     output.kv_connector_block_state = KVConnectorBlockState(
-        block_ids={},
+        req_ids=set(),
+        resolve_block_ids=lambda _: (),
         boundary_state_offloads={
             req.request_id: [(1, mamba_blocks[1].block_id, 2 * block_size)]
         },
