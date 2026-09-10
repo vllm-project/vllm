@@ -38,7 +38,10 @@ try:
         get_registered_kernels,
     )
     from vllm.kernels.helion.ops import import_all_kernels
-    from vllm.kernels.helion.utils import get_canonical_gpu_name
+    from vllm.kernels.helion.utils import (
+        get_config_gpu_name,
+        get_gpu_name,
+    )
     from vllm.logger import init_logger
     from vllm.utils.import_utils import has_helion
 except ImportError as e:
@@ -88,7 +91,6 @@ def check_requirements() -> bool:
 
 def autotune_kernel(
     kernel_name: str,
-    platform: str,
     config_manager: ConfigManager,
     force: bool = False,
     autotune_effort: str = "quick",
@@ -109,6 +111,8 @@ def autotune_kernel(
             failed=0,
             configs={},
         )
+
+    platform = get_config_gpu_name(kernel_wrapper.use_variant_config)
 
     try:
         with FakeTensorMode():
@@ -402,7 +406,7 @@ def main():
     if not check_requirements():
         sys.exit(1)
 
-    platform = get_canonical_gpu_name()
+    platform = get_gpu_name()
     logger.info("Detected GPU platform: %s", platform)
 
     config_manager = (
@@ -427,7 +431,7 @@ def main():
     results = {}
     for kernel_name in kernels_to_autotune:
         result = autotune_kernel(
-            kernel_name, platform, config_manager, args.force, args.autotune_effort
+            kernel_name, config_manager, args.force, args.autotune_effort
         )
         results[kernel_name] = result
 
