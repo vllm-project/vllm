@@ -9,10 +9,6 @@ from typing import Any, Literal
 
 import regex as re
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
 DEFAULT_GLOBAL_SEGMENT_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 DEFAULT_TENANT_ID = "default"
@@ -61,13 +57,13 @@ class MooncakeStoreConfig:
             if config.get(name)
         ]
         if unsupported_ssd_fields:
-            logger.warning(
-                "Mooncake Store clients ignore %s in their JSON config; "
-                "these fields do not enable local SSD offload in vLLM workers. "
+            raise ValueError(
+                "Mooncake Store clients do not support "
+                f"{', '.join(unsupported_ssd_fields)} in their JSON config. "
+                "These settings do not enable local SSD offload in vLLM workers. "
                 "For KV cache SSD offload, use mode='standalone-store' with "
                 "enable_offload=true and configure SSD storage on an external "
-                "mooncake_client.",
-                ", ".join(unsupported_ssd_fields),
+                "mooncake_client."
             )
         return MooncakeStoreConfig(
             metadata_server=config.get("metadata_server", ""),
