@@ -69,10 +69,8 @@ steps:
   key: language-models-tests-hybrid-01
   timeout_in_minutes: 65
   env:
-    # GitHub intermittently rejects HTTP/2 upload-pack requests from the CI
-    # image; force Git's smart protocol to HTTP/1.1. The NVIDIA jobs no longer
-    # fetch from git, but their AMD mirrors inherit this env and still build
-    # mamba/causal-conv1d from source.
+    # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
+    # CI image. Force Git's smart protocol to use HTTP/1.1 for source installs.
     GIT_CONFIG_COUNT: "1"
     GIT_CONFIG_KEY_0: http.version
     GIT_CONFIG_VALUE_0: HTTP/1.1
@@ -81,12 +79,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/hybrid/01/
   - tests/models/language/generation/_hybrid_models.py
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    # The shared mamba/causal-conv1d dependencies are prebuilt into the test
-    # image; the verifier aborts early on any mismatch.
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language/generation/hybrid/01
   mirror:
@@ -107,10 +105,8 @@ steps:
   key: language-models-tests-hybrid-02
   timeout_in_minutes: 65
   env:
-    # GitHub intermittently rejects HTTP/2 upload-pack requests from the CI
-    # image; force Git's smart protocol to HTTP/1.1. The NVIDIA jobs no longer
-    # fetch from git, but their AMD mirrors inherit this env and still build
-    # mamba/causal-conv1d from source.
+    # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
+    # CI image. Force Git's smart protocol to use HTTP/1.1 for source installs.
     GIT_CONFIG_COUNT: "1"
     GIT_CONFIG_KEY_0: http.version
     GIT_CONFIG_VALUE_0: HTTP/1.1
@@ -119,10 +115,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/hybrid/02/
   - tests/models/language/generation/_hybrid_models.py
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language/generation/hybrid/02
   mirror:
@@ -143,10 +141,8 @@ steps:
   key: language-models-tests-hybrid-03
   timeout_in_minutes: 65
   env:
-    # GitHub intermittently rejects HTTP/2 upload-pack requests from the CI
-    # image; force Git's smart protocol to HTTP/1.1. The NVIDIA jobs no longer
-    # fetch from git, but their AMD mirrors inherit this env and still build
-    # mamba/causal-conv1d from source.
+    # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
+    # CI image. Force Git's smart protocol to use HTTP/1.1 for source installs.
     GIT_CONFIG_COUNT: "1"
     GIT_CONFIG_KEY_0: http.version
     GIT_CONFIG_VALUE_0: HTTP/1.1
@@ -155,10 +151,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/hybrid/03/
   - tests/models/language/generation/_hybrid_models.py
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language/generation/hybrid/03
   mirror:
@@ -179,10 +177,8 @@ steps:
   key: language-models-tests-hybrid-04
   timeout_in_minutes: 65
   env:
-    # GitHub intermittently rejects HTTP/2 upload-pack requests from the CI
-    # image; force Git's smart protocol to HTTP/1.1. The NVIDIA jobs no longer
-    # fetch from git, but their AMD mirrors inherit this env and still build
-    # mamba/causal-conv1d from source.
+    # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
+    # CI image. Force Git's smart protocol to use HTTP/1.1 for source installs.
     GIT_CONFIG_COUNT: "1"
     GIT_CONFIG_KEY_0: http.version
     GIT_CONFIG_VALUE_0: HTTP/1.1
@@ -191,10 +187,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/hybrid/04/
   - tests/models/language/generation/_hybrid_models.py
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language/generation/hybrid/04
   mirror:
@@ -215,10 +213,8 @@ steps:
   key: language-models-tests-hybrid-05
   timeout_in_minutes: 65
   env:
-    # GitHub intermittently rejects HTTP/2 upload-pack requests from the CI
-    # image; force Git's smart protocol to HTTP/1.1. The NVIDIA jobs no longer
-    # fetch from git, but their AMD mirrors inherit this env and still build
-    # mamba/causal-conv1d from source.
+    # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
+    # CI image. Force Git's smart protocol to use HTTP/1.1 for source installs.
     GIT_CONFIG_COUNT: "1"
     GIT_CONFIG_KEY_0: http.version
     GIT_CONFIG_VALUE_0: HTTP/1.1
@@ -227,10 +223,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/hybrid/05/
   - tests/models/language/generation/_hybrid_models.py
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language/generation/hybrid/05
   mirror:
@@ -251,10 +249,8 @@ steps:
   key: language-models-tests-hybrid-06
   timeout_in_minutes: 65
   env:
-    # GitHub intermittently rejects HTTP/2 upload-pack requests from the CI
-    # image; force Git's smart protocol to HTTP/1.1. The NVIDIA jobs no longer
-    # fetch from git, but their AMD mirrors inherit this env and still build
-    # mamba/causal-conv1d from source.
+    # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
+    # CI image. Force Git's smart protocol to use HTTP/1.1 for source installs.
     GIT_CONFIG_COUNT: "1"
     GIT_CONFIG_KEY_0: http.version
     GIT_CONFIG_VALUE_0: HTTP/1.1
@@ -263,10 +259,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/hybrid/06/
   - tests/models/language/generation/_hybrid_models.py
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language/generation/hybrid/06
   mirror:
@@ -287,10 +285,8 @@ steps:
   key: language-models-tests-hybrid-07
   timeout_in_minutes: 65
   env:
-    # GitHub intermittently rejects HTTP/2 upload-pack requests from the CI
-    # image; force Git's smart protocol to HTTP/1.1. The NVIDIA jobs no longer
-    # fetch from git, but their AMD mirrors inherit this env and still build
-    # mamba/causal-conv1d from source.
+    # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
+    # CI image. Force Git's smart protocol to use HTTP/1.1 for source installs.
     GIT_CONFIG_COUNT: "1"
     GIT_CONFIG_KEY_0: http.version
     GIT_CONFIG_VALUE_0: HTTP/1.1
@@ -299,10 +295,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/hybrid/07/
   - tests/models/language/generation/_hybrid_models.py
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language/generation/hybrid/07
   mirror:
@@ -323,10 +321,8 @@ steps:
   key: language-models-tests-hybrid-08
   timeout_in_minutes: 65
   env:
-    # GitHub intermittently rejects HTTP/2 upload-pack requests from the CI
-    # image; force Git's smart protocol to HTTP/1.1. The NVIDIA jobs no longer
-    # fetch from git, but their AMD mirrors inherit this env and still build
-    # mamba/causal-conv1d from source.
+    # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
+    # CI image. Force Git's smart protocol to use HTTP/1.1 for source installs.
     GIT_CONFIG_COUNT: "1"
     GIT_CONFIG_KEY_0: http.version
     GIT_CONFIG_VALUE_0: HTTP/1.1
@@ -335,10 +331,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/hybrid/08/
   - tests/models/language/generation/_hybrid_models.py
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language/generation/hybrid/08
   mirror:
@@ -363,10 +361,8 @@ steps:
   num_devices: 1
   timeout_in_minutes: 65
   env:
-    # GitHub intermittently rejects HTTP/2 upload-pack requests from the CI
-    # image; force Git's smart protocol to HTTP/1.1. The NVIDIA jobs no longer
-    # fetch from git, but their AMD mirrors inherit this env and still build
-    # mamba/causal-conv1d from source.
+    # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
+    # CI image. Force Git's smart protocol to use HTTP/1.1 for source installs.
     GIT_CONFIG_COUNT: "1"
     GIT_CONFIG_KEY_0: http.version
     GIT_CONFIG_VALUE_0: HTTP/1.1
@@ -375,10 +371,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/hybrid_granite/
   - tests/models/language/generation/_hybrid_models.py
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation/hybrid_granite
   mirror:
     amd:
@@ -402,10 +400,12 @@ steps:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/extended/01/
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation/extended/01
   mirror:
     amd:
@@ -430,10 +430,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/extended/02/
   - tests/models/language/generation/_granite_models.py
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation/extended/02
   mirror:
     amd:
@@ -458,10 +460,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/extended/03/
   - tests/models/language/generation/_granite_models.py
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation/extended/03
   mirror:
     amd:
@@ -485,10 +489,12 @@ steps:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/extended/04/
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation/extended/04
   mirror:
     amd:
@@ -513,10 +519,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/extended/05/
   - tests/models/language/generation/_common_models.py
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation/extended/05
   mirror:
     amd:
@@ -541,10 +549,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/extended/06/
   - tests/models/language/generation/_common_models.py
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation/extended/06
   mirror:
     amd:
@@ -569,10 +579,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/extended/07/
   - tests/models/language/generation/_common_models.py
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation/extended/07
   mirror:
     amd:
@@ -597,10 +609,12 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation/extended/08/
   - tests/models/language/generation/_common_models.py
-  - docker/language-deps/
-  - docker/Dockerfile
   commands:
-    - python3 /opt/vllm-ci/language-deps/language_deps.py check
+    # Install fast path packages for testing against transformers
+    # torch>=2.14 nightly requires C++20 for ATen headers (pytorch/pytorch#178150);
+    # mamba@v2.3.0 pins -std=c++17, so build from a patched checkout instead of the git URL.
+    - rm -rf /tmp/mamba-src && git clone --depth 1 --branch v2.3.0 https://github.com/state-spaces/mamba /tmp/mamba-src && sed -i 's/-std=c++17/-std=c++20/g' /tmp/mamba-src/setup.py && MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation /tmp/mamba-src
+    - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation/extended/08
   mirror:
     amd:
