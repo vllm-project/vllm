@@ -183,7 +183,7 @@ class EMABackpressureDetector(BackpressureDetector):
         tier with ``"locality": "REMOTE"``): CephFS sustains ~1.5 GB/s.
         high=0.020 s/MiB (~50 MB/s); low=0.005 s/MiB (~200 MB/s).
 
-    ``obj`` and ``p2p`` tiers get NETWORK defaults automatically. An
+    ``obj`` tiers get NETWORK defaults automatically. An
     ``fs`` tier defaults to LOCAL (appropriate for NVMe/SSD); set
     ``"locality": "REMOTE"`` in the tier config for network-backed
     filesystems like CephFS.
