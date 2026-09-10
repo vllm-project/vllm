@@ -1212,14 +1212,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
     ):
         super().__init__(moe, weight_quant_key, activation_quant_key)
 
-        # TODO: this should eventually be removed, this is the
-        # oracle / backends job.
-        if self.activation_quant_key == kFp8DynamicTensorSym:
-            raise NotImplementedError(
-                "QuarkOCP_MX_MoEMethod with dynamic FP8 input scales is "
-                "currently not implemented. Please open an issue."
-            )
-
         self.mxfp4_backend: Mxfp4MoeBackend = Mxfp4MoeBackend.NONE
         self.experts_cls: type[mk.FusedMoEExperts] | None = None
         self.moe_kernel: mk.FusedMoEKernel | None = None
@@ -1227,14 +1219,22 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # Used for triton kernel precision configs (W4A8, TRITON backends)
         self.w13_precision_config = None
         self.w2_precision_config = None
-        if weight_quant_key == kMxfp4Static:
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, activation_key=self.activation_quant_key
-            )
         self.static_input_scales = (
             self.activation_quant_key is not None
             and self.activation_quant_key.scale.static
         )
+        if weight_quant_key == kMxfp4Static:
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+                moe, activation_key=self.activation_quant_key
+            )
+
+        # TODO: this should eventually be removed, this is the
+        # oracle / backends job.
+        if self.activation_quant_key == kFp8DynamicTensorSym:
+            raise NotImplementedError(
+                "QuarkOCP_MX_MoEMethod with dynamic FP8 input scales is "
+                "currently not implemented. Please open an issue."
+            )
 
         self.model_type = getattr(
             get_current_vllm_config().model_config.hf_config, "model_type", None
