@@ -21,7 +21,7 @@ use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutp
 /// </｜DSML｜function_calls>
 /// ```
 ///
-/// Arguments are emitted only after a full `invoke` block is parsed.
+/// Stable argument fragments are emitted incrementally while the `invoke` block is parsed.
 ///
 /// DeepSeek V3.2 relies on DSML markers such as `｜DSML｜`, which are
 /// represented as special tokens in the tokenizer and therefore must be

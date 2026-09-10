@@ -110,6 +110,14 @@ impl ToolSchemas {
         let tool_schema = self.tools.get(function_name).unwrap_or(ToolSchema::empty());
         tool_schema.convert(name, value.into())
     }
+
+    /// Return whether a parameter can be streamed as raw JSON without scalar coercion.
+    pub(super) fn can_stream_raw_param(&self, function_name: &str, name: &str) -> bool {
+        self.tools
+            .get(function_name)
+            .and_then(|schema| schema.params.get(name))
+            .is_some_and(JsonParamType::can_stream_raw)
+    }
 }
 
 impl ToolSchema {
@@ -149,6 +157,15 @@ impl ToolSchema {
 }
 
 impl JsonParamType {
+    /// Return whether this schema type can preserve raw incremental JSON fragments.
+    fn can_stream_raw(&self) -> bool {
+        match self {
+            Self::Object { .. } | Self::Array { .. } => true,
+            Self::OneOf(types) => !types.is_empty() && types.iter().all(Self::can_stream_raw),
+            Self::String | Self::Integer | Self::Number | Self::Boolean | Self::Null => false,
+        }
+    }
+
     /// Normalize one parameter property schema.
     fn from_schema(schema: &Value) -> Option<Self> {
         let schema = schema.as_object()?;
