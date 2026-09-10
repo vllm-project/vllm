@@ -2,11 +2,11 @@ group: Miscellaneous
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200 MIG 18GB) V1 Sample + Logits"
-  key: v1-sample-logits
-  timeout_in_minutes: 83
+- label: ":nvidia: (H200 MIG 18GB) V1 Sample"
+  key: v1-sample
+  timeout_in_minutes: 35
   device: h200_18gb
-  source_file_dependencies:
+  source_file_dependencies: &v1-sample-logits-deps
     - vllm/config/
     - vllm/distributed/
     - "!vllm/distributed/kv_transfer/"
@@ -27,30 +27,42 @@ steps:
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s v1/sample
-    - pytest -v -s v1/logits_processors
-    - pytest -v -s v1/test_oracle.py
-    - pytest -v -s v1/test_request.py
-    - pytest -v -s v1/test_outputs.py
   mirror:
     amd:
-      label: ":amd: (MI300) V1 Sample + Logits"
+      label: ":amd: (MI300) V1 Sample"
       dind: false
       device: mi300_1
       timeout_in_minutes: 70
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) V1 Core + KV + Metrics"
+- label: ":nvidia: (H200 MIG 18GB) V1 Logits + Oracle"
+  key: v1-logits-oracle
+  timeout_in_minutes: 35
+  device: h200_18gb
+  source_file_dependencies: *v1-sample-logits-deps
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    # Keep these in separate pytest processes because the CUDA-initializing
+    # correctness tests interfere with the fork-based logits processor tests.
+    - pytest -v -s v1/logits_processors
+    - pytest -v -s v1/test_oracle.py
+    - pytest -v -s v1/test_request.py
+    - pytest -v -s v1/test_outputs.py
+  mirror:
+    amd:
+      label: ":amd: (MI300) V1 Logits + Oracle"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 70
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) V1 Core"
   device: h200_35gb
-  key: v1-core-kv-metrics
-  timeout_in_minutes: 100
-  env:
-    # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
-    # CI image. Force Git's smart protocol to use HTTP/1.1 for source installs.
-    GIT_CONFIG_COUNT: "1"
-    GIT_CONFIG_KEY_0: http.version
-    GIT_CONFIG_VALUE_0: HTTP/1.1
-  source_file_dependencies:
+  key: v1-core
+  timeout_in_minutes: 45
+  source_file_dependencies: &v1-core-kv-metrics-deps
     - vllm/config/
     - vllm/distributed/
     - "!vllm/distributed/kv_transfer/"
@@ -80,24 +92,95 @@ steps:
     - tests/v1/metrics
     - tests/entrypoints/openai/correctness/test_lmeval.py
   commands:
-    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s -m 'not cpu_test' v1/core
+  mirror:
+    amd:
+      label: ":amd: (MI300) V1 Core"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) V1 Executor + Worker"
+  device: h200_35gb
+  key: v1-executor-worker
+  timeout_in_minutes: 45
+  source_file_dependencies: *v1-core-kv-metrics-deps
+  commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     # split the test to avoid interference
-    - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor
-    - pytest -v -s v1/kv_offload
-    - pytest -v -s v1/simple_kv_offload
     - pytest -v -s v1/worker
     - pytest -v -s v1/streaming_input
+  mirror:
+    amd:
+      label: ":amd: (MI300) V1 Executor + Worker"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) V1 KV Offload"
+  device: h200_35gb
+  key: v1-kv-offload
+  timeout_in_minutes: 45
+  source_file_dependencies: *v1-core-kv-metrics-deps
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s v1/kv_offload
+    - pytest -v -s v1/simple_kv_offload
+  mirror:
+    amd:
+      label: ":amd: (MI300) V1 KV Offload"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) V1 KV Connectors"
+  device: h200_35gb
+  key: v1-kv-connectors
+  timeout_in_minutes: 45
+  source_file_dependencies: *v1-core-kv-metrics-deps
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit
+  mirror:
+    amd:
+      label: ":amd: (MI300) V1 KV Connectors"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) V1 Metrics + LM Eval"
+  device: h200_35gb
+  key: v1-metrics-lmeval
+  timeout_in_minutes: 45
+  env:
+    # GitHub intermittently rejects HTTP/2 upload-pack requests from the H200
+    # CI image. Force Git's smart protocol to use HTTP/1.1 for source installs.
+    GIT_CONFIG_COUNT: "1"
+    GIT_CONFIG_KEY_0: http.version
+    GIT_CONFIG_VALUE_0: HTTP/1.1
+    GIT_TERMINAL_PROMPT: "0"
+  source_file_dependencies: *v1-core-kv-metrics-deps
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s -m 'not cpu_test' v1/metrics
     # Integration test for streaming correctness (requires special branch).
     - pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
   mirror:
     amd:
-      label: ":amd: (MI300) V1 Core + KV + Metrics"
+      label: ":amd: (MI300) V1 Metrics + LM Eval"
       dind: false
       device: mi300_1
       timeout_in_minutes: 65
@@ -336,12 +419,12 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":computer: (CPU) Async Engine, Inputs, Utils, Worker, Config"
-  key: async-engine-inputs-utils-worker-config-cpu
+- label: ":computer: (CPU) Params, Env, Tokenizers, Parser"
+  key: cpu-params-env-tokenizers-parser
   depends_on:
   - image-build-cpu
-  timeout_in_minutes: 65
-  source_file_dependencies:
+  timeout_in_minutes: 35
+  source_file_dependencies: &cpu-async-engine-deps
   - vllm/assets/
   - vllm/config/
   - vllm/engine/arg_utils.py
@@ -389,14 +472,41 @@ steps:
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
   - pytest -v -s test_sampling_params.py
-  - pytest -v -s -m 'cpu_test' multimodal
-  - pytest -v -s renderers
-  - pytest -v -s reasoning
-  - pytest -v -s tool_parsers
   - pytest -v -s tokenizers_
   - pytest -v -s parser
   - pytest -v -s transformers_utils
+
+- label: ":computer: (CPU) Multimodal + Config"
+  key: cpu-multimodal-config
+  depends_on:
+  - image-build-cpu
+  timeout_in_minutes: 35
+  source_file_dependencies: *cpu-async-engine-deps
+  device: cpu-small
+  commands:
+  - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s config
+
+- label: ":computer: (CPU) Reasoning + Renderers"
+  key: cpu-reasoning-renderers
+  depends_on:
+  - image-build-cpu
+  timeout_in_minutes: 35
+  source_file_dependencies: *cpu-async-engine-deps
+  device: cpu-small
+  commands:
+  - pytest -v -s reasoning
+  - pytest -v -s renderers
+
+- label: ":computer: (CPU) Tool Parsers"
+  key: cpu-tool-parsers
+  depends_on:
+  - image-build-cpu
+  timeout_in_minutes: 35
+  source_file_dependencies: *cpu-async-engine-deps
+  device: cpu-small
+  commands:
+  - pytest -v -s tool_parsers
 
 - label: ":nvidia: (A100) Batch Invariance"
   key: batch-invariance-a100

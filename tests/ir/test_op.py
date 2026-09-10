@@ -13,6 +13,8 @@ from torch.fx.experimental.proxy_tensor import make_fx
 import vllm.ir.op
 from vllm.ir.op import RESERVED_PROVIDERS, IrOp, IrOpImpl
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 class CustomError(Exception):
     pass
