@@ -99,20 +99,21 @@ steps:
     - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 4
 
-- label: ":nvidia: (H200 MIG 18GB) Multimodal Processor"
+- label: ":nvidia: (H200 MIG 18GB) Multimodal Processor Shard %N"
   key: multi-modal-processor
   timeout_in_minutes: 98
   device: h200_18gb
+  parallelism: 4
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal
   - tests/models/registry.py
   commands:
-    - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+    - pytest -v -s models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI355) Multimodal Processor"
+      label: ":amd: (MI355) Multimodal Processor Shard %N"
       dind: false
       device: mi355_1
       timeout_in_minutes: 115
@@ -145,21 +146,22 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/model_executor/model_loader/
 
-- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 1)"
+- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 1) Shard %N"
   device: h200_35gb
   key: multi-modal-models-extended-generation-1
   optional: true
+  parallelism: 5
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal/generation
   - tests/models/multimodal/test_mapping.py
   commands:
-    - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
-    - pytest -v -s models/multimodal/test_mapping.py
+    - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s models/multimodal/test_mapping.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI300) Multimodal Models (Extended Generation 1)"
+      label: ":amd: (MI300) Multimodal Models (Extended Generation 1) Shard %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 90
