@@ -109,13 +109,22 @@ def minimax_m3_query_token_positions(
     return query_req_id, query_abs_pos
 
 
-def minimax_m3_use_aiter_sparse_pa(num_kv_heads: int) -> bool:
-    """Whether to use the ROCm AITER page-16 sparse PA prototype."""
+def minimax_m3_use_aiter_sparse_pa(
+    num_kv_heads: int, *, emits_sparse_block_table: bool = False
+) -> bool:
+    """Whether to use the ROCm AITER page-16 sparse PA prototype.
+
+    More than one KV head per rank is only served when the layer's indexer
+    emits the attend's page table itself, since the Triton builders this path
+    otherwise falls back to address one head's cache. Whether an indexer does
+    that is a ROCm-side fact, so its caller passes it in.
+    """
     requested = _minimax_m3_aiter_sparse_pa_requested()
-    if requested and num_kv_heads != 1:
+    if requested and num_kv_heads != 1 and not emits_sparse_block_table:
         raise ValueError(
             "MiniMax M3 AITER sparse paged attention requires "
-            f"num_kv_heads == 1 per tensor-parallel rank, got {num_kv_heads}."
+            f"num_kv_heads == 1 per tensor-parallel rank, got {num_kv_heads}, "
+            "unless the indexer emits the attend's page table."
         )
     return requested
 
@@ -252,9 +261,9 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
         # Every sparse layer shares one slot mapping, so the AITER page-16
         # rebase is done here once per step instead of once per layer. Stable
         # buffer for the same reason as the context lengths above.
-        self.use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(
-            kv_cache_spec.num_kv_heads
-        )
+        # The request itself, not the gate: the buffer is the same whatever the
+        # head count, and a builder cannot see which indexer its layers picked.
+        self.use_aiter_sparse_pa = _minimax_m3_aiter_sparse_pa_requested()
         self.page16_slot_mapping_buffer: torch.Tensor | None = None
         if self.use_aiter_sparse_pa:
             self.page16_slot_mapping_buffer = torch.empty(
@@ -514,6 +523,7 @@ def select_main_backend_and_impl_cls(
     topk_blocks: int,
     kv_cache_dtype: str,
     num_kv_heads: int,
+    emits_sparse_block_table: bool = False,
 ) -> tuple[type[MiniMaxM3SparseBackend], type[MiniMaxM3SparseImpl]]:
     """Pick the main attention backend and implementation.
 
@@ -523,7 +533,9 @@ def select_main_backend_and_impl_cls(
     back to Triton. The MSA modules are imported lazily to avoid import errors
     on unsupported platforms.
     """
-    use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(num_kv_heads)
+    use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(
+        num_kv_heads, emits_sparse_block_table=emits_sparse_block_table
+    )
     use_msa = (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
@@ -541,10 +553,11 @@ def select_main_backend_and_impl_cls(
     )
     if use_aiter_sparse_pa:
         from vllm.models.minimax_m3.amd.sparse_attention_msa import (
+            MiniMaxM3SparseAiterPABackend,
             MiniMaxM3SparseAiterPAImpl,
         )
 
-        return MiniMaxM3SparseBackend, MiniMaxM3SparseAiterPAImpl
+        return MiniMaxM3SparseAiterPABackend, MiniMaxM3SparseAiterPAImpl
     if use_msa:
         from vllm.models.minimax_m3.nvidia.sparse_attention_msa import (
             MiniMaxM3SparseMSABackend,
@@ -560,10 +573,12 @@ def select_main_impl_cls(
     topk_blocks: int,
     kv_cache_dtype: str,
     num_kv_heads: int,
+    emits_sparse_block_table: bool = False,
 ) -> type[MiniMaxM3SparseImpl]:
     """Backward-compatible implementation-only selector."""
     return select_main_backend_and_impl_cls(
         topk_blocks=topk_blocks,
         kv_cache_dtype=kv_cache_dtype,
         num_kv_heads=num_kv_heads,
+        emits_sparse_block_table=emits_sparse_block_table,
     )[1]

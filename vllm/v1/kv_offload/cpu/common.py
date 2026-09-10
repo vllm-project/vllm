@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, fields
+import numpy as np
 
 from vllm.v1.kv_offload.base import BlockIDsLoadStoreSpec
 
@@ -45,6 +46,13 @@ CPU_TIER_INFO_LABELS: tuple[str, ...] = tuple(f.name for f in fields(CPUCacheTie
 
 
 class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
+    """Spec for loading/storing KV chunks to/from CPU memory.
+
+    The inherited block_ids field holds chunk indices into the
+    CPU cache (not GPU block IDs). The chunk_ids alias exposes
+    the same array under the name used by the tiering layer.
     """
-    Spec for loading/storing a KV block to CPU memory.
-    """
+
+    @property
+    def chunk_ids(self) -> np.ndarray:
+        return self.block_ids
