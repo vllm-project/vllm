@@ -195,28 +195,28 @@ combined with a hybrid (HMA) KV layout:
   that represents a pooled region can differ between P and D.
 
 `NixlPushConnector` handles this for PP-sharded producers by routing
-**by layer-name (member) identity** instead of by region index. Each
+**by layer name** instead of by region index. Each
 worker advertises which layer names back each of its NIXL regions in the
 handshake metadata (`NixlAgentMetadata.region_members`). A producer that
-needs member routing derives its member-major layout once, when it
+needs layer routing derives its transfer layer order once, when it
 registers its KV caches, and every transfer it issues uses that order.
 `add_remote_agent` then selects exactly the remote regions this stage
 owns and reorders them to match, so both sides stay paired regardless of
 how each remote rank happens to order its metadata.
 
 Addresses, block lengths, strides, and per-region capacities follow the same
-member order. Descriptor offsets use each member's region capacity, so P and
+layer order. Descriptor offsets use each layer's region capacity, so P and
 D need not allocate the same number of blocks. Physical allocations are still
-registered once, even when multiple members share them.
+registered once, even when multiple layers share them.
 
 Packed MLA caches interleave layer pages within each block. PP stages can
-pack different members at different offsets and block strides. A PP producer
-registers one logical transfer region per member, while memory registration
+pack different layers at different offsets and block strides. A PP producer
+registers one logical transfer region per layer, while memory registration
 still covers the shared allocation once. A `PP=1` peer keeps whole-row
-transfers and advertises each member's byte offset and page size through
+transfers and advertises each layer's byte offset and page size through
 `packed_member_layouts`. The producer folds those offsets into the remote
 region addresses; the ordinary descriptor builders then use each side's
-own `block_strides`. Aliased members remain distinct when their page sizes
+own `block_strides`. Aliased layers remain distinct when their page sizes
 differ. Pull-mode registration and transfers are unchanged.
 Packed push hashes the sorted attention-backend names, since PP can change
 their discovery order without changing the cache format. A different backend
@@ -224,14 +224,14 @@ set still fails the compatibility check.
 
 Invariants enforced when the remote regions are aligned:
 
-* every locally owned member must be advertised exactly once by the
-  remote; a missing member fails the handshake rather than silently
-  leaving that layer's KV stale, and remote-only members (owned by other
+* every locally owned layer must be advertised exactly once by the
+  remote; a missing layer fails the handshake rather than silently
+  leaving that layer's KV stale, and remote-only layers (owned by other
   PP stages) are ignored;
-* a remote that omits member metadata while the local layout requires
-  member routing fails the handshake instead of falling back to
+* a remote that omits layer metadata while the local layout requires
+  layer routing fails the handshake instead of falling back to
   region-index routing;
-* member order is a property of the local layout alone, so the same local
+* layer order is a property of the local layout alone, so the same local
   source descriptors serve every remote engine and TP rank; only the
   remote descriptor list is rebuilt per rank.
 

@@ -364,6 +364,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._recving_transfers = defaultdict(list)
         w._is_hma_required = False
         w.xfer_stats = NixlKVConnectorStats()
+        w._has_packed_cache = False
         w._reqs_to_process = set()
         w._reqs_to_send = {}
         w.consumer_notification_counts_by_req = defaultdict(int)
