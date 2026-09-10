@@ -525,10 +525,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         self._fused_compressor_weight: torch.Tensor | None
         self.register_buffer("_fused_compressor_weight", None, persistent=False)
         self._fused_compressor_split_sizes: tuple[int, int] | None = None
+
         if self.indexer is None:
+            # Only enable multi-stream overlap for CSA layer now.
             self.aux_stream_list = None
         else:
-            # ROCm uses only the outer overlap to avoid nested stream waits.
+            # Disable indexer inner overlap.
             self.indexer.aux_stream = None
 
     def _run_sequential_pipeline(
@@ -629,7 +631,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             self._run_sequential_pipeline(hidden_states, positions, o_padded)
             return
 
-        attn_metadata = get_forward_context().attn_metadata
         indexer = self.indexer
         compressor = self.compressor
         assert indexer is not None and compressor is not None
@@ -640,6 +641,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             q = self._wq_b_proj(qr_out, qr_scale_out).view(
                 -1, self.n_local_heads, self.head_dim
             )
+            attn_metadata = get_forward_context().attn_metadata
             q = self._fused_qnorm_rope_kv_insert(q, kv_out, positions, attn_metadata)
             return q, qr_out, qr_scale_out, kv_out
 
