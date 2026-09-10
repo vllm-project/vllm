@@ -559,7 +559,7 @@ def test_unified_attn_drops_lhbnc_with_kv_connector():
 
     config = VllmConfig(
         kv_transfer_config=KVTransferConfig(
-            kv_connector="SharedStorageConnector", kv_role="kv_both"
+            kv_connector="ExampleConnector", kv_role="kv_both"
         )
     )
     with set_current_vllm_config(config):
