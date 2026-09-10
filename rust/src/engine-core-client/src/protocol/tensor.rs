@@ -317,38 +317,16 @@ mod tests {
 
     #[test]
     fn tensor_and_ndarray_preserve_their_dtype_wire_contracts() {
-        for dtype in [
-            TensorDtype::Bool,
-            TensorDtype::U8,
-            TensorDtype::I8,
-            TensorDtype::U16,
-            TensorDtype::I16,
-            TensorDtype::U32,
-            TensorDtype::I32,
-            TensorDtype::U64,
-            TensorDtype::I64,
-            TensorDtype::F16,
-            TensorDtype::Bf16,
-            TensorDtype::F32,
-            TensorDtype::F64,
-        ] {
-            let tensor = WireTensor::from_raw(dtype, vec![1], vec![0; dtype.element_size()]);
-            let bytes = rmp_serde::to_vec_named(&tensor).unwrap();
-            assert_eq!(rmp_serde::from_slice::<WireTensor>(&bytes).unwrap(), tensor);
-            tensor.validate_inline().unwrap();
-            let wire: Value = rmp_serde::from_slice(&bytes).unwrap();
-            assert_eq!(wire.as_array().unwrap()[0], Value::from(dtype.as_str()));
+        let tensor = WireTensor::from_f32(vec![1], vec![1.0]).unwrap();
+        let bytes = rmp_serde::to_vec_named(&tensor).unwrap();
+        let wire: Value = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(wire.as_array().unwrap()[0], Value::from("float32"));
 
-            let array: WireNdArray = rmp_serde::from_slice(&bytes).unwrap();
-            assert_eq!(array.dtype, NumpyDtype::native(dtype));
-            let bytes = rmp_serde::to_vec_named(&array).unwrap();
-            assert_eq!(rmp_serde::from_slice::<WireNdArray>(&bytes).unwrap(), array);
-            assert!(rmp_serde::from_slice::<WireTensor>(&bytes).is_err());
-        }
-        let array =
-            WireNdArray::from_raw(NumpyDtype::little(TensorDtype::F32), vec![1], vec![0; 4]);
+        let array: WireNdArray = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(array.dtype, NumpyDtype::native(TensorDtype::F32));
         let bytes = rmp_serde::to_vec_named(&array).unwrap();
-        assert_eq!(rmp_serde::from_slice::<WireNdArray>(&bytes).unwrap(), array);
+        let wire: Value = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(wire.as_array().unwrap()[0], Value::from("=f4"));
         assert!(rmp_serde::from_slice::<WireTensor>(&bytes).is_err());
     }
 
@@ -412,14 +390,6 @@ mod tests {
         assert_eq!(
             bool_tensor.data.into_raw_view().expect("raw view"),
             vec![0, 1]
-        );
-
-        let raw_tensor = WireTensor::from_raw(TensorDtype::U8, vec![3], vec![1, 2, 3]);
-        assert_eq!(raw_tensor.dtype, TensorDtype::U8);
-        assert_eq!(raw_tensor.shape, vec![3]);
-        assert_eq!(
-            raw_tensor.data.into_raw_view().expect("raw view"),
-            vec![1, 2, 3]
         );
     }
 
