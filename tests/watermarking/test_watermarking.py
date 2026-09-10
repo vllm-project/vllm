@@ -34,7 +34,16 @@ def test_watermarker_contract(algorithm: str):
     assert torch.equal(first.token_ids, second.token_ids)
 
 
-def test_gumbel_config_warns_when_context_deduplication_is_disabled(monkeypatch):
+@pytest.mark.parametrize(
+    "config_overrides",
+    [
+        {"deduplicate_contexts": "none"},
+        {"deduplicate_contexts_max_history": 255},
+    ],
+)
+def test_gumbel_config_warns_when_context_deduplication_is_weak(
+    monkeypatch, config_overrides
+):
     messages: list[str] = []
     monkeypatch.setattr(
         "vllm.config.watermarking.logger.warning_once",
@@ -42,13 +51,17 @@ def test_gumbel_config_warns_when_context_deduplication_is_disabled(monkeypatch)
     )
 
     WatermarkConfig(key=42)
-    WatermarkConfig(key=42, deduplicate_contexts="none")
+    WatermarkConfig(key=42, deduplicate_contexts_max_history=256)
+    WatermarkConfig(key=42, deduplicate_contexts_max_history=None)
+    WatermarkConfig(key=42, **config_overrides)
 
     assert messages == [
         (
-            "Single-key Gumbel-max watermarking with deduplicate_contexts='none' "
-            "may increase the frequency of degenerate generations, including "
-            "repetition loops; use 'single_turn' or 'all' to mitigate this."
+            "Single-key Gumbel-max watermarking with context deduplication disabled "
+            "or limited to fewer than 256 positions may increase the frequency of "
+            "degenerate generations, including repetition loops. Use "
+            "deduplicate_contexts='single_turn' or 'all' with "
+            "deduplicate_contexts_max_history at least 256 or null to mitigate this."
         )
     ]
 

@@ -40,11 +40,20 @@ class WatermarkConfig:
     def validate_key(self) -> Self:
         if self.key > 2**64 - 1:
             raise ValueError("philox keys must fit in 64 bits")
-        if self.algorithm == "gumbel" and self.deduplicate_contexts == "none":
+        history_is_too_short = (
+            self.deduplicate_contexts_max_history is not None
+            and self.deduplicate_contexts_max_history < 256
+        )
+        if self.algorithm == "gumbel" and (
+            self.deduplicate_contexts == "none" or history_is_too_short
+        ):
             logger.warning_once(
-                "Single-key Gumbel-max watermarking with deduplicate_contexts='none' "
-                "may increase the frequency of degenerate generations, including "
-                "repetition loops; use 'single_turn' or 'all' to mitigate this.",
+                "Single-key Gumbel-max watermarking with context deduplication "
+                "disabled or limited to fewer than 256 positions may increase the "
+                "frequency of degenerate generations, including repetition loops. "
+                "Use deduplicate_contexts='single_turn' or 'all' with "
+                "deduplicate_contexts_max_history at least 256 or null to mitigate "
+                "this.",
                 scope="global",
             )
         return self
