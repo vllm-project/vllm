@@ -19,9 +19,12 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
     ok,
     pause,
     resume,
-    server,
+    reusable_server,
     start_stream,
 )
+
+# Parent cleanup runs once after the shared server has fully shut down.
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 @pytest.fixture(scope="module", params=[False, True], ids=["MRV1", "MRV2"])
@@ -37,7 +40,7 @@ def server_url(use_v2):
 
     with (
         patch.dict(os.environ, env_vars),
-        server(
+        reusable_server(
             extra_args=[
                 "--enable-prefix-caching",
                 "--enable-prompt-tokens-details",

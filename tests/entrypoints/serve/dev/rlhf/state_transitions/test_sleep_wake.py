@@ -19,13 +19,16 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
     completion_with_cache_details,
     golden_output,
     is_sleeping,
-    server,
+    reusable_server,
     sleep,
     sleep_metrics,
     wake,
 )
 
 PROMPT = "Paris is the capital of France. Berlin is the capital of Germany. " * 20
+
+# Parent cleanup runs once after the shared server has fully shut down.
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 @pytest.fixture(
@@ -35,7 +38,7 @@ PROMPT = "Paris is the capital of France. Berlin is the capital of Germany. " * 
 )
 def server_url(request):
     use_v2, eager = request.param
-    with server(
+    with reusable_server(
         enforce_eager=eager,
         timeout=600,
         env_dict={"VLLM_USE_V2_MODEL_RUNNER": str(int(use_v2))},
