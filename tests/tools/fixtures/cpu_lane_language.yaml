@@ -1,0 +1,17 @@
+# Synthetic CPU hardware lane YAML, replicating the shape of
+# .buildkite/hardware_tests/cpu.yaml: a recursive lane-capability-filtered
+# command embedded in a quoted bash wrapper, sharded for wall-clock.
+steps:
+- label: "CPU-Kernel Tests"
+  key: cpu-kernel-tests
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 20m "
+      pytest -x -v -s tests/kernels/attention/test_cpu_attn.py"
+- label: "CPU-Language Generation and Pooling Model Tests Shard %N"
+  key: cpu-language-generation-and-pooling-model-tests
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 25m "
+      pytest -x -v -s tests/models/language/generation tests/models/language/pooling -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
+  parallelism: 3

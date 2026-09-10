@@ -1,0 +1,26 @@
+# Synthetic post-flatten area YAML: one job per directory, whole-dir
+# pytest commands, no -k/-m partitions. The hybrid job keeps production
+# 2-way pytest-sharding (parallel instances of one job over the flat
+# directory, not a partition between sibling jobs).
+steps:
+- label: "Language Models (Hybrid) Shard %N"
+  key: language-models-tests-hybrid
+  parallelism: 2
+  commands:
+    - pytest -v -s models/language/generation/hybrid --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+- label: "Language Models (Core)"
+  key: language-models-tests-core
+  commands:
+    - pytest -v -s models/language/generation/core
+  mirror:
+    amd:
+      label: "Language Models (Core, AMD)"
+      commands:
+        - pytest -v -s models/language/generation/core
+- label: "Language Models (Pooling)"
+  key: language-models-tests-pooling
+  commands:
+    - pytest -v -s models/language/pooling
+  mirror:
+    amd:
+      label: "Language Models (Pooling, AMD)"
