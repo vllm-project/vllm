@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for v1 attention backends without GPUModelRunner dependency."""
 
+from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
 
@@ -32,7 +33,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import AttentionSpec, FullAttentionSpec, KVCacheLayout
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASH_ATTN,
@@ -270,7 +271,7 @@ def _clone_kv_cache_in_layout(
 
 def run_attention_backend(
     backend: AttentionBackendEnum | str,
-    kv_cache_spec: FullAttentionSpec,
+    kv_cache_spec: AttentionSpec,
     layer_names: list[str],
     vllm_config,
     device: torch.device,
@@ -284,6 +285,7 @@ def run_attention_backend(
     kv_cache_dtype: str = "auto",
     sinks: torch.Tensor | None = None,
     use_cuda_graph: bool = False,
+    common_prefix_len: int = 0,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
@@ -319,7 +321,7 @@ def run_attention_backend(
         ):
             builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
             attn_metadata = builder.build(
-                common_prefix_len=0,
+                common_prefix_len=common_prefix_len,
                 common_attn_metadata=common_attn_metadata,
             )
     else:
@@ -328,7 +330,7 @@ def run_attention_backend(
         if backend == AttentionBackendEnum.FLEX_ATTENTION:
             builder.direct_build = use_direct_block_mask
         attn_metadata = builder.build(
-            common_prefix_len=0,
+            common_prefix_len=common_prefix_len,
             common_attn_metadata=common_attn_metadata,
         )
 
@@ -413,6 +415,8 @@ def _test_backend_correctness(
     model_dtype: torch.dtype | None = None,
     max_num_seqs: int | None = None,
     max_num_batched_tokens: int | None = None,
+    fp8_prefill_query_only: bool = False,
+    common_prefix_len: int = 0,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -519,7 +523,8 @@ def _test_backend_correctness(
         v_full = torch.randn(s_len, num_kv_heads, head_size, dtype=dtype, device=device)
 
         if fp8_kv_cache:
-            q_ref = q.to(query_fp8_dtype).to(dtype)
+            quantize_q = not fp8_prefill_query_only or q_len > 1
+            q_ref = q.to(query_fp8_dtype).to(dtype) if quantize_q else q
             k_ref = k_full.to(kv_fp8_dtype).to(dtype)
             v_ref = v_full.to(kv_fp8_dtype).to(dtype)
         else:
@@ -635,6 +640,14 @@ def _test_backend_correctness(
     # with test infrastructures
     for backend_name in backend_to_test:
         backend_cls = _actual_backend(backend_name).get_class()
+        backend_kv_cache_spec = kv_cache_spec
+        if backend_name == AttentionBackendEnum.FLASHINFER:
+            if kv_cache_dtype in FP8_KV_CACHE_DTYPES:
+                backend_kv_cache_spec = replace(
+                    backend_kv_cache_spec,
+                    dtype=FP8_KV_CACHE_DTYPES[kv_cache_dtype],
+                )
+            backend_kv_cache_spec = backend_cls.customize_spec(backend_kv_cache_spec)
 
         if is_quantized_kv_cache(kv_cache_dtype) and (
             not backend_cls.supports_kv_cache_dtype(kv_cache_dtype)
@@ -668,13 +681,30 @@ def _test_backend_correctness(
                 packed_cache, backend_layout
             )
 
+        if (
+            backend_name == AttentionBackendEnum.FLASHINFER
+            and kv_cache_dtype in FP8_KV_CACHE_DTYPES
+            and backend_kv_cache_spec.num_head_slots == 2 * num_kv_heads
+        ):
+            typed_cache = kv_cache.view(FP8_KV_CACHE_DTYPES[kv_cache_dtype])
+            separate_cache = torch.cat(
+                (
+                    typed_cache[..., :head_size],
+                    typed_cache[..., head_size:],
+                ),
+                dim=1,
+            ).view(torch.uint8)
+            kv_cache_for_backend = _clone_kv_cache_in_layout(
+                separate_cache, backend_layout
+            )
+
         # FlashInfer reads the layout at plan time; set it to match
         # the physical order of the test cache.
         vllm_config.cache_config.kv_cache_layout = backend_layout.name
 
         backend_output = run_attention_backend(
             backend_name,
-            kv_cache_spec,
+            backend_kv_cache_spec,
             ["placeholder"],
             vllm_config,
             device,
@@ -688,6 +718,7 @@ def _test_backend_correctness(
             kv_cache_dtype=kv_cache_dtype,
             sinks=sinks,
             use_cuda_graph=use_cuda_graph,
+            common_prefix_len=common_prefix_len,
         )
 
         # Check shape and dtype consistency
@@ -847,6 +878,187 @@ def test_flashinfer_xqa_bmm1_scale_matches_decode_q_dtype():
 
     assert impl.get_xqa_bmm1_scale(MockLayer, torch.bfloat16) == 1.5
     assert impl.get_xqa_bmm1_scale(MockLayer, torch.float8_e4m3fn) == 3.0
+
+
+def _make_flashinfer_prims_builder(flashinfer_backend):
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.flashinfer_prefill_backend = "cute-dsl-prims"
+    builder.cache_dtype = "fp8"
+    builder.attention_config = SimpleNamespace(disable_flashinfer_q_quantization=False)
+    builder.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    builder.head_dim = 128
+    builder.num_qo_heads = 32
+    builder.num_kv_heads = 8
+    builder.use_dcp = False
+    builder.has_sinks = False
+    builder.window_left = -1
+    builder.logits_soft_cap = 0.0
+    return builder
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_prims_uses_compact_hnd_kv_planes(monkeypatch):
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+    from vllm.v1.kv_cache_interface import KVQuantMode
+
+    monkeypatch.setattr(
+        flashinfer_backend.envs,
+        "VLLM_FLASHINFER_PREFILL_BACKEND",
+        "cute-dsl-prims",
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "get_device_capability",
+        lambda: DeviceCapability(12, 0),
+    )
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.float8_e4m3fn,
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+    )
+
+    customized = flashinfer_backend.FlashInferBackend.customize_spec(spec)
+
+    assert customized.num_head_slots == 16
+    assert customized.state_content_bytes == 128
+    assert customized.page_size_bytes == spec.page_size_bytes
+    assert flashinfer_backend.FlashInferBackend.customize_spec(customized) is customized
+    assert flashinfer_backend.FlashInferBackend.supported_kv_cache_layouts() == (
+        KVCacheLayout.LBHNC,
+        KVCacheLayout.BLHNC,
+    )
+
+    monkeypatch.setattr(
+        flashinfer_backend.envs,
+        "VLLM_FLASHINFER_PREFILL_BACKEND",
+        "auto",
+    )
+    assert flashinfer_backend.FlashInferBackend.customize_spec(spec) is spec
+    assert flashinfer_backend.FlashInferBackend.supported_kv_cache_layouts() is None
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_prims_quantizes_prefill_q_only(monkeypatch):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability",
+        lambda capability: capability == 120,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability_family",
+        lambda capability: capability == 120,
+    )
+    monkeypatch.setattr(flashinfer_backend, "force_use_trtllm_attention", lambda: True)
+    builder = _make_flashinfer_prims_builder(flashinfer_backend)
+    builder.vllm_config = SimpleNamespace(attention_config=builder.attention_config)
+    builder.kv_cache_spec = SimpleNamespace(dtype=torch.float8_e4m3fn)
+
+    assert builder.get_q_data_type(is_prefill=True) == torch.float8_e4m3fn
+    assert builder.get_q_data_type(is_prefill=False) == torch.bfloat16
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+@pytest.mark.parametrize(
+    ("attribute", "value", "match"),
+    [
+        ("cache_dtype", "fp8_e5m2", "E4M3"),
+        (
+            "attention_config",
+            SimpleNamespace(disable_flashinfer_q_quantization=True),
+            "query quantization",
+        ),
+        ("head_dim", 512, "head size"),
+        ("use_dcp", True, "decode-context parallel"),
+        ("has_sinks", True, "attention sinks"),
+        ("window_left", 127, "sliding-window"),
+        ("logits_soft_cap", 30.0, "logits soft cap"),
+    ],
+)
+def test_flashinfer_prims_rejects_unsupported_configuration(
+    monkeypatch, attribute, value, match
+):
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "get_device_capability",
+        lambda: DeviceCapability(12, 0),
+    )
+    monkeypatch.setattr(flashinfer_backend.envs, "VLLM_BATCH_INVARIANT", False)
+    builder = _make_flashinfer_prims_builder(flashinfer_backend)
+    setattr(builder, attribute, value)
+
+    with pytest.raises((ValueError, NotImplementedError), match=match):
+        builder._validate_flashinfer_prefill_backend()
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+@pytest.mark.parametrize(
+    (
+        "batch_spec_name",
+        "tensor_parallel_size",
+        "use_cuda_graph",
+        "common_prefix_len",
+    ),
+    [
+        ("small_prefill", 1, False, 16),
+        ("mixed_small", 8, True, 0),
+    ],
+)
+def test_flashinfer_prims_prefill_correctness(
+    batch_spec_name, tensor_parallel_size, use_cuda_graph, common_prefix_len
+):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    if flashinfer_backend.envs.VLLM_FLASHINFER_PREFILL_BACKEND != "cute-dsl-prims":
+        pytest.skip(
+            "Run with VLLM_FLASHINFER_PREFILL_BACKEND=cute-dsl-prims and a "
+            "FlashInfer build containing the SM120 PRIMS backend."
+        )
+    if not (current_platform.is_cuda() and current_platform.is_device_capability(120)):
+        pytest.skip("FlashInfer cute-dsl-prims requires SM120.")
+
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
+    _test_backend_correctness(
+        BATCH_SPECS[batch_spec_name],
+        "meta-llama/Meta-Llama-3-8B",
+        [AttentionBackendEnum.FLASHINFER],
+        causal_mask_mod,
+        tensor_parallel_size=tensor_parallel_size,
+        kv_cache_dtype="fp8",
+        layout=KVCacheLayout.LBHNC,
+        use_cuda_graph=use_cuda_graph,
+        fp8_prefill_query_only=True,
+        common_prefix_len=common_prefix_len,
+    )
 
 
 @pytest.mark.skipif(
