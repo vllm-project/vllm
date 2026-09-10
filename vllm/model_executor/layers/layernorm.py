@@ -164,6 +164,34 @@ class GemmaRMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if (
+            x.dtype in (torch.float16, torch.bfloat16)
+            and x.numel() > 0
+            and self.weight.dtype in (torch.float16, torch.bfloat16, torch.float32)
+            and x.is_contiguous()
+            and self.weight.is_contiguous()
+            and (
+                residual is None
+                or (
+                    residual.dtype == x.dtype
+                    and residual.shape == x.shape
+                    and residual.is_contiguous()
+                )
+            )
+            and x.shape[-1] <= 8192
+        ):
+            from vllm.kernels.triton.gemma_rms_norm import gemma_rms_norm
+
+            return gemma_rms_norm(
+                x, self.weight, self.variance_epsilon, residual=residual
+            )
+        return self.forward_native(x, residual)
+
+    def forward_hip(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self.forward_native(x, residual)
 
     def forward_xpu(
