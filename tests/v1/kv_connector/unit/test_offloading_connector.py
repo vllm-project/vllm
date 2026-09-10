@@ -30,7 +30,11 @@ _ATTN_BACKENDS: list[str] = []
 if current_platform.is_cuda():
     _ATTN_BACKENDS = ["FLASH_ATTN", "FLASHINFER", "TRITON_ATTN"]
 elif current_platform.is_rocm():
+    from vllm._aiter_ops import is_aiter_found_and_supported
+
     _ATTN_BACKENDS = ["TRITON_ATTN"]
+    if is_aiter_found_and_supported():
+        _ATTN_BACKENDS.append("ROCM_AITER_UNIFIED_ATTN")
 elif current_platform.is_xpu():
     _ATTN_BACKENDS = ["FLASH_ATTN", "TRITON_ATTN"]
 
