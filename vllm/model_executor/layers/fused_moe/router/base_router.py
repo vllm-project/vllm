@@ -23,8 +23,8 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 if current_platform.is_cuda_alike():
     _EPLB_MAP_BLOCK_SIZE = 256
 
-    @triton.jit(do_not_specialize=["numel"])
-    def _eplb_map_and_record_kernel(
+    @triton.jit
+    def _eplb_map_and_record_i32_kernel(
         topk_ids_ptr,
         logical_replica_count_ptr,
         logical_to_physical_ptr,
@@ -126,7 +126,7 @@ if current_platform.is_cuda_alike():
         )
 
     @triton_kernel_dispatcher_with_warmup(
-        kernel=_eplb_map_and_record_kernel,
+        kernel=_eplb_map_and_record_i32_kernel,
         warmup_inputs=_eplb_map_and_record_warmup_inputs,
     )
     def _EPLB_MAP_AND_RECORD_KERNEL(

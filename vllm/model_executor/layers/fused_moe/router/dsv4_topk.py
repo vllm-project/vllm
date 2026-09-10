@@ -15,6 +15,8 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
+_TOPK = 6
+
 # Adapted from:
 # https://github.com/sgl-project/sglang/blob/main/python/sglang/jit_kernel/moe_fused_gate.py
 
@@ -36,87 +38,10 @@ def can_use_dsv4_topk(
         and correction_bias.dtype == torch.float32
         and correction_bias.shape == (gating_output.shape[1],)
         and correction_bias.is_contiguous()
-        and topk == _DSV4_TOP_K
+        and topk == _TOPK
         and renormalize
         and indices_dtype in (torch.int32, torch.uint32, torch.int64)
     )
-
-
-_DSV4_TOP_K = 6
-
-
-@triton.jit
-def _dsv4_topk_kernel(
-    gating_output_ptr,
-    correction_bias_ptr,
-    topk_weights_ptr,
-    topk_ids_ptr,
-    routed_scaling_factor,
-    input_ids_ptr,
-    bias_vl_ptr,
-    image_sentinel_lo,
-    NUM_EXPERTS: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    HAS_VL: tl.constexpr,
-    launch_pdl: tl.constexpr,
-):
-    row = tl.program_id(0)
-    expert_offsets = tl.arange(0, BLOCK_N)
-    expert_mask = expert_offsets < NUM_EXPERTS
-    bias = tl.load(
-        correction_bias_ptr + expert_offsets, mask=expert_mask, other=0.0
-    ).to(tl.float32)
-    if HAS_VL:
-        # Image tokens carry five consecutive in-vocab sentinel ids
-        # starting at image_sentinel_lo and use bias_vl for expert
-        # selection instead of the regular correction bias. Ids above the
-        # sentinel block are regular special tokens and must not match.
-        token_id = tl.load(input_ids_ptr + row).to(tl.int64)
-        bias_vl = tl.load(bias_vl_ptr + expert_offsets, mask=expert_mask, other=0.0).to(
-            tl.float32
-        )
-        is_image = (token_id >= image_sentinel_lo) & (token_id < image_sentinel_lo + 5)
-        bias = tl.where(is_image, bias_vl, bias)
-
-    if launch_pdl:
-        tl.extra.cuda.gdc_wait()
-
-    logits = tl.load(
-        gating_output_ptr + row * NUM_EXPERTS + expert_offsets,
-        mask=expert_mask,
-        other=0.0,
-    ).to(tl.float32)
-    weights = tl.sqrt(tl.where(logits > 20.0, logits, tl.log(1.0 + tl.exp(logits))))
-    current = tl.where(expert_mask, weights + bias, -float("inf"))
-    current = tl.where(current == current, current, -1e30)
-
-    topk_offsets = tl.arange(0, 8)
-    selected_weights = tl.zeros([8], dtype=tl.float32)
-    selected_ids = tl.zeros([8], dtype=tl.int32)
-    for slot in tl.static_range(6):
-        max_value = tl.max(current, axis=0)
-        candidate = tl.where(current == max_value, expert_offsets, NUM_EXPERTS)
-        expert_id = tl.min(candidate, axis=0).to(tl.int32)
-        selected_weight = tl.sum(
-            tl.where(expert_offsets == expert_id, weights, 0.0), axis=0
-        )
-        is_slot = topk_offsets == slot
-        selected_weights = tl.where(is_slot, selected_weight, selected_weights)
-        selected_ids = tl.where(is_slot, expert_id, selected_ids)
-        current = tl.where(expert_offsets == expert_id, -float("inf"), current)
-
-    weight_sum = tl.sum(selected_weights, axis=0)
-    selected_weights *= routed_scaling_factor / tl.where(
-        weight_sum > 0.0, weight_sum, 1.0
-    )
-    output_mask = topk_offsets < 6
-    output_offsets = row * 6 + topk_offsets
-
-    if launch_pdl:
-        tl.extra.cuda.gdc_launch_dependents()
-
-    tl.store(topk_weights_ptr + output_offsets, selected_weights, mask=output_mask)
-    tl.store(topk_ids_ptr + output_offsets, selected_ids, mask=output_mask)
 
 
 def _image_sentinel_base_id() -> int:
@@ -127,59 +52,139 @@ def _image_sentinel_base_id() -> int:
     return IMAGE_SENTINEL_BASE_ID
 
 
-def _dsv4_topk_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
-    hf_config = vllm_config.model_config.hf_config
-    num_experts = hf_config.n_routed_experts
-    has_vl: Any = WarmupChoices(
-        False,
-        getattr(vllm_config.model_config.hf_config, "vision_n_layers", 0) > 0,
-    )
-    launch_pdl: Any = WarmupChoices(False, True)
-    return dict(
-        gating_output=TritonWarmupTensor(torch.float32, shape=(1, num_experts)),
-        correction_bias=TritonWarmupTensor(torch.float32, shape=(num_experts,)),
-        topk_weights=TritonWarmupTensor(torch.float32, shape=(1, _DSV4_TOP_K)),
-        topk_ids=TritonWarmupTensor(
-            torch.int64
-            if vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
-            else torch.int32,
-            shape=(1, _DSV4_TOP_K),
-        ),
-        routed_scaling_factor=float(getattr(hf_config, "routed_scaling_factor", 1.0)),
-        input_ids=TritonWarmupTensor(torch.int64) if has_vl else None,
-        bias_vl=TritonWarmupTensor(torch.float32, shape=(num_experts,))
-        if has_vl
-        else None,
-        image_sentinel_lo=_image_sentinel_base_id() if has_vl else 0,
-        launch_pdl=launch_pdl,
-    )
+if current_platform.is_cuda():
 
+    @triton.jit
+    def _dsv4_topk_kernel(
+        gating_output_ptr,
+        correction_bias_ptr,
+        topk_weights_ptr,
+        topk_ids_ptr,
+        routed_scaling_factor,
+        input_ids_ptr,
+        bias_vl_ptr,
+        image_sentinel_lo,
+        NUM_EXPERTS: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        HAS_VL: tl.constexpr,
+        launch_pdl: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        expert_offsets = tl.arange(0, BLOCK_N)
+        expert_mask = expert_offsets < NUM_EXPERTS
+        bias = tl.load(
+            correction_bias_ptr + expert_offsets, mask=expert_mask, other=0.0
+        ).to(tl.float32)
+        if HAS_VL:
+            # Image tokens carry five consecutive in-vocab sentinel ids
+            # starting at image_sentinel_lo and use bias_vl for expert
+            # selection instead of the regular correction bias. Ids above the
+            # sentinel block are regular special tokens and must not match.
+            token_id = tl.load(input_ids_ptr + row).to(tl.int64)
+            bias_vl = tl.load(
+                bias_vl_ptr + expert_offsets, mask=expert_mask, other=0.0
+            ).to(tl.float32)
+            is_image = (token_id >= image_sentinel_lo) & (
+                token_id < image_sentinel_lo + 5
+            )
+            bias = tl.where(is_image, bias_vl, bias)
 
-@triton_kernel_dispatcher_with_warmup(
-    kernel=_dsv4_topk_kernel,
-    warmup_inputs=_dsv4_topk_warmup_inputs,
-)
-def _DSV4_TOPK_KERNEL(
-    gating_output: torch.Tensor,
-    correction_bias: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    routed_scaling_factor: float,
-    input_ids: torch.Tensor | None = None,
-    bias_vl: torch.Tensor | None = None,
-    image_sentinel_lo: int = 0,
-    launch_pdl: bool | None = None,
-) -> DispatchSpec:
-    num_tokens, num_experts = gating_output.shape
-    return (num_tokens,), dict(
-        NUM_EXPERTS=num_experts,
-        BLOCK_N=next_power_of_2(num_experts),
-        HAS_VL=bias_vl is not None and image_sentinel_lo > 0,
-        num_warps=1,
-        launch_pdl=(
-            current_platform.is_arch_support_pdl() if launch_pdl is None else launch_pdl
-        ),
+        if launch_pdl:
+            tl.extra.cuda.gdc_wait()
+
+        logits = tl.load(
+            gating_output_ptr + row * NUM_EXPERTS + expert_offsets,
+            mask=expert_mask,
+            other=0.0,
+        ).to(tl.float32)
+        weights = tl.sqrt(tl.where(logits > 20.0, logits, tl.log(1.0 + tl.exp(logits))))
+        current = tl.where(expert_mask, weights + bias, -float("inf"))
+        current = tl.where(current == current, current, -1e30)
+
+        topk_offsets = tl.arange(0, 8)
+        selected_weights = tl.zeros([8], dtype=tl.float32)
+        selected_ids = tl.zeros([8], dtype=tl.int32)
+        for slot in tl.static_range(6):
+            max_value = tl.max(current, axis=0)
+            candidate = tl.where(current == max_value, expert_offsets, NUM_EXPERTS)
+            expert_id = tl.min(candidate, axis=0).to(tl.int32)
+            selected_weight = tl.sum(
+                tl.where(expert_offsets == expert_id, weights, 0.0), axis=0
+            )
+            is_slot = topk_offsets == slot
+            selected_weights = tl.where(is_slot, selected_weight, selected_weights)
+            selected_ids = tl.where(is_slot, expert_id, selected_ids)
+            current = tl.where(expert_offsets == expert_id, -float("inf"), current)
+
+        weight_sum = tl.sum(selected_weights, axis=0)
+        selected_weights *= routed_scaling_factor / tl.where(
+            weight_sum > 0.0, weight_sum, 1.0
+        )
+        output_mask = topk_offsets < 6
+        output_offsets = row * 6 + topk_offsets
+
+        if launch_pdl:
+            tl.extra.cuda.gdc_launch_dependents()
+
+        tl.store(topk_weights_ptr + output_offsets, selected_weights, mask=output_mask)
+        tl.store(topk_ids_ptr + output_offsets, selected_ids, mask=output_mask)
+
+    def _dsv4_topk_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+        hf_config = vllm_config.model_config.hf_config
+        num_experts = hf_config.n_routed_experts
+        has_vl: Any = WarmupChoices(
+            False,
+            getattr(vllm_config.model_config.hf_config, "vision_n_layers", 0) > 0,
+        )
+        launch_pdl: Any = WarmupChoices(False, True)
+        return dict(
+            gating_output=TritonWarmupTensor(torch.float32, shape=(1, num_experts)),
+            correction_bias=TritonWarmupTensor(torch.float32, shape=(num_experts,)),
+            topk_weights=TritonWarmupTensor(torch.float32, shape=(1, _TOPK)),
+            topk_ids=TritonWarmupTensor(
+                torch.int64
+                if vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+                else torch.int32,
+                shape=(1, _TOPK),
+            ),
+            routed_scaling_factor=float(
+                getattr(hf_config, "routed_scaling_factor", 1.0)
+            ),
+            input_ids=TritonWarmupTensor(torch.int64) if has_vl else None,
+            bias_vl=TritonWarmupTensor(torch.float32, shape=(num_experts,))
+            if has_vl
+            else None,
+            image_sentinel_lo=_image_sentinel_base_id() if has_vl else 0,
+            launch_pdl=launch_pdl,
+        )
+
+    @triton_kernel_dispatcher_with_warmup(
+        kernel=_dsv4_topk_kernel,
+        warmup_inputs=_dsv4_topk_warmup_inputs,
     )
+    def _DSV4_TOPK_KERNEL(
+        gating_output: torch.Tensor,
+        correction_bias: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        routed_scaling_factor: float,
+        input_ids: torch.Tensor | None = None,
+        bias_vl: torch.Tensor | None = None,
+        image_sentinel_lo: int = 0,
+        launch_pdl: bool | None = None,
+    ) -> DispatchSpec:
+        num_tokens, num_experts = gating_output.shape
+        return (num_tokens,), dict(
+            NUM_EXPERTS=num_experts,
+            BLOCK_N=next_power_of_2(num_experts),
+            HAS_VL=bias_vl is not None and image_sentinel_lo > 0,
+            num_warps=1,
+            launch_pdl=(
+                current_platform.is_arch_support_pdl()
+                if launch_pdl is None
+                else launch_pdl
+            ),
+        )
 
 
 def dsv4_topk(
@@ -197,7 +202,7 @@ def dsv4_topk(
         assert bias_vl.dtype == torch.float32 and bias_vl.is_contiguous()
         assert bias_vl.shape == (num_experts,)
         assert input_ids.is_contiguous()
-    shape = (num_tokens, _DSV4_TOP_K)
+    shape = (num_tokens, _TOPK)
     topk_weights = gating_output.new_empty(shape, dtype=torch.float32)
     topk_ids = gating_output.new_empty(shape, dtype=indices_dtype)
     if num_tokens > 0:

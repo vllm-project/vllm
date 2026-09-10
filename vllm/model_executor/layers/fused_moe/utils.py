@@ -139,7 +139,7 @@ def is_model_fused_shared_expert_compatible(
 
 
 @triton.jit
-def _count_expert_num_tokens_kernel(
+def _count_expert_num_tokens(
     topk_ids_ptr,
     expert_num_tokens_ptr,
     num_experts,
@@ -191,7 +191,7 @@ def _count_expert_num_tokens_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_count_expert_num_tokens_kernel,
+    kernel=_count_expert_num_tokens,
     warmup_inputs=_count_expert_num_tokens_warmup_inputs,
 )
 def _COUNT_EXPERT_NUM_TOKENS_KERNEL(

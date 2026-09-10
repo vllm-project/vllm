@@ -311,7 +311,7 @@ def expert_triton_kernel(
 
 
 @triton.jit
-def _batched_triton_kernel(
+def batched_triton_kernel(
     a_ptr,  # [E, max_num_tokens, K]
     b_ptr,  # [E, K, N]
     c_ptr,  # [E, max_num_tokens, N]
@@ -523,7 +523,7 @@ def _batched_triton_kernel_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_batched_triton_kernel,
+    kernel=batched_triton_kernel,
     warmup_inputs=_batched_triton_kernel_warmup_inputs,
 )
 def _BATCHED_TRITON_KERNEL(

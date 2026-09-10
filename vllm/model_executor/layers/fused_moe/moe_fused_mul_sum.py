@@ -15,7 +15,7 @@ from vllm.triton_utils import tl, triton
 
 
 @triton.jit
-def _moe_fused_mul_sum_kernel(
+def moe_fused_mul_sum_kernel(
     inputs_ptr,
     topk_weights_ptr,
     outputs_ptr,
@@ -116,7 +116,7 @@ def _moe_fused_mul_sum_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_moe_fused_mul_sum_kernel,
+    kernel=moe_fused_mul_sum_kernel,
     warmup_inputs=_moe_fused_mul_sum_warmup_inputs,
 )
 def _MOE_FUSED_MUL_SUM_KERNEL(

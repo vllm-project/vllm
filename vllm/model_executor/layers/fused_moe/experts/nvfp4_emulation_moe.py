@@ -60,7 +60,7 @@ logger = init_logger(__name__)
 
 
 @triton.jit
-def _fused_moe_nvfp4_emulation_kernel(
+def fused_moe_nvfp4_emulation_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
@@ -340,7 +340,7 @@ def _fused_moe_nvfp4_emulation_kernel_warmup_inputs(vllm_config: Any) -> dict[st
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_fused_moe_nvfp4_emulation_kernel,
+    kernel=fused_moe_nvfp4_emulation_kernel,
     warmup_inputs=_fused_moe_nvfp4_emulation_kernel_warmup_inputs,
 )
 def _FUSED_MOE_NVFP4_EMULATION_KERNEL(

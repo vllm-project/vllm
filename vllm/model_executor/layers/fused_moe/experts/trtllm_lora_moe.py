@@ -50,7 +50,7 @@ from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
 @triton.jit
-def _trtllm_lora_unpermute_activation_kernel(
+def _unpermute_activation_kernel(
     act_ptr,  # act_permuted: (num_permuted, num_cols)
     idx_ptr,  # idx_map: (num_rows,), values in [0, num_permuted) or -1
     out_ptr,  # out: (num_rows, num_cols)
@@ -85,7 +85,7 @@ def _trtllm_lora_unpermute_activation_warmup_inputs(vllm_config: Any) -> dict[st
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_trtllm_lora_unpermute_activation_kernel,
+    kernel=_unpermute_activation_kernel,
     warmup_inputs=_trtllm_lora_unpermute_activation_warmup_inputs,
 )
 def _TRTLLM_LORA_UNPERMUTE_ACTIVATION_KERNEL(
@@ -105,7 +105,7 @@ def _TRTLLM_LORA_UNPERMUTE_ACTIVATION_KERNEL(
 
 
 @triton.jit
-def _trtllm_lora_finalize_kernel(
+def _finalize_lora_kernel(
     gemm2_ptr,  # (num_permuted, K) base FC2 output, permuted, unweighted
     weight_ptr,  # (num_tokens * top_k,) routing weights (expanded order)
     idx_ptr,  # (num_tokens * top_k,) expanded_idx -> permuted_idx or -1
@@ -136,16 +136,12 @@ def _trtllm_lora_finalize_kernel(
             )
             acc_base += w * base
         acc_delta += tl.load(
-            delta_ptr + token * stride_d0 + k * stride_d1 + col,
-            mask=mask,
-            other=0.0,
+            delta_ptr + token * stride_d0 + k * stride_d1 + col, mask=mask, other=0.0
         ).to(tl.float32)
 
     out = acc_base * scale + acc_delta
     tl.store(
-        out_ptr + token * stride_o0 + col,
-        out.to(out_ptr.dtype.element_ty),
-        mask=mask,
+        out_ptr + token * stride_o0 + col, out.to(out_ptr.dtype.element_ty), mask=mask
     )
 
 
@@ -165,7 +161,7 @@ def _trtllm_lora_finalize_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_trtllm_lora_finalize_kernel,
+    kernel=_finalize_lora_kernel,
     warmup_inputs=_trtllm_lora_finalize_warmup_inputs,
 )
 def _TRTLLM_LORA_FINALIZE_KERNEL(

@@ -141,7 +141,7 @@ def _deep_gemm_local_num_experts(vllm_config: Any) -> int:
 
 
 @triton.jit
-def _deepgemm_ep_scatter_start_kernel(
+def _fwd_kernel_ep_scatter_1(
     num_recv_tokens_per_expert,
     expert_start_loc,
     m_indices,
@@ -211,7 +211,7 @@ def _deepgemm_ep_scatter_start_kernel_warmup_inputs(vllm_config: Any) -> dict[st
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_deepgemm_ep_scatter_start_kernel,
+    kernel=_fwd_kernel_ep_scatter_1,
     warmup_inputs=_deepgemm_ep_scatter_start_kernel_warmup_inputs,
 )
 def _DEEPGEMM_EP_SCATTER_START_KERNEL(
@@ -222,6 +222,7 @@ def _DEEPGEMM_EP_SCATTER_START_KERNEL(
     align_m: int,
 ) -> DispatchSpec:
     num_experts = num_recv_tokens_per_expert.shape[0]
+    # BLOCK_E is the m_indices fill-loop tile (masked), independent of align_m.
     return (num_experts,), dict(
         num_experts=num_experts,
         num_warps=8,
@@ -232,7 +233,7 @@ def _DEEPGEMM_EP_SCATTER_START_KERNEL(
 
 
 @triton.jit
-def _deepgemm_ep_scatter_copy_kernel(
+def _fwd_kernel_ep_scatter_2(
     total_token_num,
     expert_start_loc,
     recv_x,
@@ -341,9 +342,7 @@ def _deepgemm_ep_scatter_copy_kernel(
                     )
                 else:
                     tl.store(
-                        output_tensor_scale_ptr + offset_in_s,
-                        to_copy_s,
-                        mask=mask_s,
+                        output_tensor_scale_ptr + offset_in_s, to_copy_s, mask=mask_s
                     )
 
 
@@ -385,7 +384,7 @@ def _deepgemm_ep_scatter_copy_kernel_warmup_inputs(vllm_config: Any) -> dict[str
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_deepgemm_ep_scatter_copy_kernel,
+    kernel=_fwd_kernel_ep_scatter_2,
     warmup_inputs=_deepgemm_ep_scatter_copy_kernel_warmup_inputs,
 )
 def _DEEPGEMM_EP_SCATTER_COPY_KERNEL(
@@ -402,6 +401,7 @@ def _DEEPGEMM_EP_SCATTER_COPY_KERNEL(
     pack_ue8m0: bool,
 ) -> DispatchSpec:
     hidden_size = recv_x.shape[1]
+    # pack_ue8m0: scatter packs 4 UE8M0 bytes per int32; else copies scales as-is.
     scale_hidden_size = hidden_size // block_size
     scale_packed_size = (scale_hidden_size + 3) // 4 if pack_ue8m0 else 1
     return (min(recv_topk.shape[0], 1024 * 8),), dict(
@@ -478,7 +478,7 @@ class DeepGemmEPScatter:
 
 
 @triton.jit
-def _deepgemm_ep_gather_kernel(
+def _fwd_kernel_ep_gather(
     total_token_num,
     input_tensor,
     input_tensor_stride0,
@@ -559,7 +559,7 @@ def _deepgemm_ep_gather_kernel_warmup_inputs(vllm_config: Any) -> dict[str, Any]
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_deepgemm_ep_gather_kernel,
+    kernel=_fwd_kernel_ep_gather,
     warmup_inputs=_deepgemm_ep_gather_kernel_warmup_inputs,
 )
 def _DEEPGEMM_EP_GATHER_KERNEL(

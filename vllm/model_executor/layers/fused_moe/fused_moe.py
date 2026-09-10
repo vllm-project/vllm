@@ -307,7 +307,7 @@ def fused_moe_kernel_gptq_awq(
 # NOTE(zyongye): we can remove all the wna16 kernel
 # once we drop off sm75 support
 @triton.jit
-def _fused_moe_triton_kernel(
+def fused_moe_kernel(
     # Pointers to matrices
     a_ptr,
     b_ptr,
@@ -361,6 +361,7 @@ def _fused_moe_triton_kernel(
     per_channel_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     SWAP_AB: tl.constexpr,
+    # Tensor-descriptor path for the A gather and B load in the K-loop.
     USE_TD: tl.constexpr = False,
 ):
     """
@@ -451,8 +452,10 @@ def _fused_moe_triton_kernel(
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
+    # TD gather and the SWAP_AB accumulator layout are mutually exclusive.
     tl.static_assert(not (USE_TD and SWAP_AB))
     if USE_TD:
+        # ``tt.descriptor_gather`` requires block_shape[0] == 1 and i32 idx.
         m_td = num_valid_tokens // top_k
         a_desc = tl.make_tensor_descriptor(
             base=a_ptr,
@@ -485,7 +488,6 @@ def _fused_moe_triton_kernel(
             + off_experts * stride_be
             + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
         )
-
     if use_int8_w8a16:
         b_scale_ptrs = (
             b_scale_ptr + off_experts * stride_bse + offs_bn[None, :] * stride_bsn
@@ -543,11 +545,7 @@ def _fused_moe_triton_kernel(
                 mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
                 other=0.0,
             )
-            b = tl.load(
-                b_ptrs,
-                mask=offs_k[:, None] < K - k * BLOCK_SIZE_K,
-                other=0.0,
-            )
+            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
         # We accumulate along the K dimension.
         if use_int8_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
@@ -721,7 +719,7 @@ def _fused_moe_triton_kernel_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_fused_moe_triton_kernel,
+    kernel=fused_moe_kernel,
     warmup_inputs=_fused_moe_triton_kernel_warmup_inputs,
 )
 def _FUSED_MOE_TRITON_KERNEL(
@@ -1022,6 +1020,10 @@ def invoke_fused_moe_triton_kernel(
     if block_shape is not None:
         BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
     if use_td and A.size(1) % BLOCK_SIZE_K != 0:
+        # TD gather/load feeding tl.dot with a non-block-aligned K
+        # miscompiles (~74% of output elements wrong) on real HW;
+        # this is a compiler-codegen issue, not a Python-maskable
+        # boundary gap. Fall back to the pointer-arith path.
         logger.warning_once(
             "Disabling VLLM_TRITON_USE_TD for this MoE launch: K=%d is not "
             "a multiple of BLOCK_SIZE_K=%d, which triggers a known "
@@ -1188,7 +1190,7 @@ def dispatch_fused_moe_kernel(
 
 
 @triton.jit
-def _compute_identity_kernel(
+def compute_identity_kernel(
     top_k: int,
     hidden_states_ptr: tl.tensor,
     expert_scales_ptr: tl.tensor,
@@ -1246,7 +1248,7 @@ def _compute_identity_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_compute_identity_kernel, warmup_inputs=_compute_identity_warmup_inputs
+    kernel=compute_identity_kernel, warmup_inputs=_compute_identity_warmup_inputs
 )
 def _COMPUTE_IDENTITY_KERNEL(
     *,

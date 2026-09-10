@@ -99,7 +99,10 @@ def _prepare_megamoe_inputs_kernel(
         packed_scale,
     )
 
-    # Shared-expert TMA consumes the same scales in an MN-major layout.
+    # DeepGEMM's SM100 shared-expert TMA loads require the activation scales
+    # in an MN-major layout whose row permutation depends on the MegaMoE
+    # scheduler's runtime BLOCK_M. Write that view while the packed UE8M0 scale
+    # is already resident, avoiding another kernel and temporary tensor.
     if shared_x_sf is not None:
         m_block_id = token_id // SHARED_BLOCK_M
         m_in_block = token_id % SHARED_BLOCK_M
