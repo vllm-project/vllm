@@ -350,6 +350,8 @@ class RequestOffloadState:
     req_context: ReqContext
     offloading_context: RequestOffloadingContext
     group_states: tuple[RequestGroupState, ...] = field(init=False)
+    # upper bound on tokens to load for this request; None means no cap
+    max_load_tokens: int | None = None
     # upper bound on tokens to offload for this request; None means no cap
     max_offload_tokens: int | None = None
     # number of hits in the GPU cache
@@ -371,6 +373,20 @@ class RequestOffloadState:
             RequestGroupState() for _ in self.config.kv_group_configs
         )
         params = self.req.kv_transfer_params
+
+        # NOTE: This field is experimental and subject to change in the future.
+        raw = params.get("max_load_tokens") if params else None
+        if type(raw) is int and raw >= 0:
+            self.max_load_tokens = raw
+            logger.debug(
+                "Request %s: max_load_tokens set to %d",
+                self.req.request_id,
+                raw,
+            )
+        elif raw is not None:
+            logger.warning(
+                "max_load_tokens must be a non-negative int, got %r; ignoring", raw
+            )
 
         # NOTE: This field is experimental and subject to change in the future.
         raw = params.get("max_offload_tokens") if params else None
@@ -748,6 +764,11 @@ class OffloadingConnectorScheduler:
         """
         num_computed_tokens = req_status.num_locally_computed_tokens
         max_hit_size_tokens: int = req_status.req.num_tokens
+        if req_status.max_load_tokens is not None:
+            max_hit_size_tokens = min(
+                max_hit_size_tokens,
+                num_computed_tokens + req_status.max_load_tokens,
+            )
         if self._sliding_window_groups:
             # the last prompt token has to be recomputed to get the logprobs
             # for sliding window attention, we must reduce by 1 to make sure
@@ -791,6 +812,10 @@ class OffloadingConnectorScheduler:
                 max_hit_size_tokens = min(
                     max_hit_size_tokens, len(offload_keys) * tokens_per_chunk
                 )
+                if req_status.max_load_tokens is not None:
+                    max_hit_size_tokens = round_down(
+                        max_hit_size_tokens, tokens_per_chunk
+                    )
                 if max_hit_size_tokens - num_computed_tokens < tokens_per_chunk:
                     # We can only load less than a chunk, so skip.
                     return 0
@@ -939,9 +964,13 @@ class OffloadingConnectorScheduler:
         complete_boundary = local_tokens + complete_hit
         tokens_per_hash = self.config.tokens_per_hash
         block_end = complete_boundary + self._partial_tail_block_size
-        max_boundary = round_down(
-            min(req_status.req.num_prompt_tokens - 1, block_end - 1), tokens_per_hash
-        )
+        max_boundary = min(req_status.req.num_prompt_tokens - 1, block_end - 1)
+        if req_status.max_load_tokens is not None:
+            max_boundary = min(
+                max_boundary,
+                local_tokens + req_status.max_load_tokens,
+            )
+        max_boundary = round_down(max_boundary, tokens_per_hash)
         if max_boundary <= complete_boundary:
             return complete_hit
 
@@ -1024,10 +1053,6 @@ class OffloadingConnectorScheduler:
 
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
-
-        if req_status.req_context.load_tier_filter.is_empty:
-            req_status.update_num_hit_chunks(num_computed_tokens)
-            return 0, False
 
         num_hit_tokens: int | None
         if request.skip_reading_prefix_cache:
