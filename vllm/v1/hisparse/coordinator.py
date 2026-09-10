@@ -42,7 +42,7 @@ class _PendingPublication:
     num_computed_tokens: int
     num_pages: int
     retention_interval: int | None
-    replay_boundary: int
+    replay_boundaries: Sequence[int]
 
 
 @dataclass
@@ -528,7 +528,7 @@ class HiSparseCoordinator:
         num_computed_tokens: int,
         retention_interval: int | None,
         *,
-        replay_boundary: int,
+        replay_boundaries: Sequence[int],
     ) -> None:
         """Run the per-step residency work; publish host hashes once durable."""
         self.plan_prefix_materialization(request.request_id, num_computed_tokens)
@@ -544,7 +544,7 @@ class HiSparseCoordinator:
                 request,
                 num_computed_tokens,
                 retention_interval=retention_interval,
-                replay_boundary=replay_boundary,
+                replay_boundaries=replay_boundaries,
             )
             self._record_copies(request_id, num_computed_tokens)
             state.publication = None
@@ -554,7 +554,7 @@ class HiSparseCoordinator:
             num_computed_tokens=num_computed_tokens,
             num_pages=num_pages,
             retention_interval=retention_interval,
-            replay_boundary=replay_boundary,
+            replay_boundaries=replay_boundaries,
         )
 
     def _publish_host_blocks_if_ready(self, request_id: str) -> None:
@@ -569,7 +569,7 @@ class HiSparseCoordinator:
             publication.request,
             publication.num_computed_tokens,
             retention_interval=publication.retention_interval,
-            replay_boundary=publication.replay_boundary,
+            replay_boundaries=publication.replay_boundaries,
         )
         self._record_copies(request_id, publication.num_computed_tokens)
         state.publication = None

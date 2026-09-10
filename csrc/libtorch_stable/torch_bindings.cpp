@@ -429,7 +429,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert("
       "Tensor q_in, Tensor kv, Tensor! k_cache, "
       "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
-      "int q_head_padded, float eps, int cache_block_size) -> Tensor");
+      "int q_head_padded, float eps, int cache_block_size, "
+      "bool apply_q_norm=True) -> Tensor");
 
   // FlashInfer V4 full-cache variants: write Q in place (bf16) or to a separate
   // FP8 tensor, and KV into a contiguous 512-wide token-strided cache.
@@ -437,13 +438,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert("
       "Tensor! q, Tensor kv, Tensor! k_cache, Tensor slot_mapping, "
       "Tensor position_ids, Tensor cos_sin_cache, float eps, "
-      "int cache_block_size) -> ()");
+      "int cache_block_size, bool apply_q_norm=True) -> ()");
   ops.def(
       "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert("
       "Tensor q, Tensor kv, Tensor! q_fp8, Tensor! k_cache, "
       "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
       "Tensor fp8_scale, Tensor q_fp8_scale_inv, float eps, "
-      "int cache_block_size) -> ()");
+      "int cache_block_size, bool apply_q_norm=True) -> ()");
 
   // Kimi-K3 MLA epilogues: optional RoPE followed by concat/cache insertion.
   ops.def(
@@ -534,6 +535,26 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor! state, Tensor output_gate, Tensor norm_weight, Tensor! out, "
       "float scale, float norm_eps=1e-5, "
       "str output_gate_activation='silu') -> ()");
+#endif
+
+#ifdef VLLM_ENABLE_FUSED_KDA_CHUNK
+  ops.def(
+      "fused_kda_prologue("
+      "Tensor q, Tensor k, Tensor v, Tensor raw_g, Tensor raw_beta, "
+      "Tensor A_log, Tensor dt_bias, Tensor! qg, Tensor! w, Tensor! u, "
+      "Tensor! kg_t, Tensor! aqk, Tensor! decay, Tensor cu_seqlens, "
+      "Tensor chunk_indices, Tensor? conv_weight, Tensor(e!)? conv_state, "
+      "Tensor? conv_state_indices, Tensor? conv_has_initial_state, "
+      "float scale, float lower_bound) -> ()");
+  ops.def(
+      "fused_kda_chunk("
+      "Tensor qg, Tensor w, Tensor u, Tensor kg_t, Tensor aqk, Tensor decay, "
+      "Tensor? initial_state, Tensor(a!)? final_state, Tensor! out, "
+      "Tensor cu_seqlens, Tensor chunk_offsets, float scale, "
+      "Tensor(b!)? group_state, int groups, "
+      "Tensor(c!)? checkpoint_state=None, Tensor? checkpoint_offsets=None, "
+      "Tensor? checkpoint_state_indices=None, Tensor(d!)? state_cache=None, "
+      "Tensor? state_indices=None, Tensor? has_initial_state=None) -> ()");
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
@@ -822,6 +843,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #ifdef VLLM_ENABLE_FUSED_GDN_DECODE
   ops.impl("fused_gdn_decode_post_conv_mtp",
            TORCH_BOX(&fused_gdn_decode_post_conv_mtp));
+#endif
+
+#ifdef VLLM_ENABLE_FUSED_KDA_CHUNK
+  ops.impl("fused_kda_prologue", TORCH_BOX(&fused_kda_prologue));
+  ops.impl("fused_kda_chunk", TORCH_BOX(&fused_kda_chunk));
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES

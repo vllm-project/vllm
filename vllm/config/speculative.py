@@ -620,16 +620,15 @@ class SpeculativeConfig:
         )
         factors.append(uses_aux_hidden_states)
 
-        if uses_aux_hidden_states and self.draft_model_config is not None:
+        if self.draft_model_config is not None:
             factors.append(self.draft_model_config.compute_hash())
-
             # The specific layers used also affect the computation graph.
             layer_ids = getattr(
                 self.draft_model_config.hf_config,
                 "eagle_aux_hidden_state_layer_ids",
                 None,
             )
-            if layer_ids is not None:
+            if layer_ids is not None and uses_aux_hidden_states:
                 # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
 
@@ -847,7 +846,18 @@ class SpeculativeConfig:
             )
 
         architectures = getattr(hf_config, "architectures", []) or []
-        if initial_architecture == "BailingMoeV3ForCausalLM":
+        if initial_architecture == "BailingMoeV3VLForConditionalGeneration":
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = copy.deepcopy(hf_config.text_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.quantization_config = copy.deepcopy(quantization_config)
+        if initial_architecture in (
+            "BailingMoeV3ForCausalLM",
+            "BailingMoeV3VLForConditionalGeneration",
+        ):
             hf_config.model_type = "bailing_hybrid_v3_mtp"
         elif (
             hf_config.model_type == "bailing_hybrid"

@@ -34,6 +34,7 @@ from vllm.config import (
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
+    WatermarkConfig,
     update_config,
 )
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -279,6 +280,7 @@ def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
 
 def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
     with pytest.raises(ValueError, match="requires the hybrid KV cache manager"):
         VllmConfig(
             attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
@@ -2634,6 +2636,67 @@ def test_draft_sample_method_gumbel_is_rejected():
             num_speculative_tokens=1,
             draft_sample_method="gumbel",
         )
+
+
+def _watermarked_vllm_config() -> VllmConfig:
+    config = object.__new__(VllmConfig)
+    config.watermark_config = WatermarkConfig(key=42)
+    config.attention_config = AttentionConfig()
+    config.speculative_config = None
+    return config
+
+
+def test_gumbel_watermark_rejects_speculative_decoding():
+    config = _watermarked_vllm_config()
+    config.speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+    )
+
+    with pytest.raises(ValueError, match="does not support speculative decoding"):
+        config._check_watermarking_unsupported()
+
+
+def test_gumbel_watermark_rejects_beam_search():
+    with pytest.raises(ValueError, match="Beam search is not supported"):
+        _watermarked_vllm_config()._check_watermarking_unsupported(beam_search=True)
+
+
+def test_gumbel_watermark_rejects_custom_sampler():
+    with pytest.raises(ValueError, match="custom samplers are not supported"):
+        _watermarked_vllm_config()._check_watermarking_unsupported(custom_sampler=True)
+
+
+def test_watermark_key_must_fit_in_64_bits():
+    with pytest.raises(ValueError, match="64 bits"):
+        WatermarkConfig(key=2**64)
+
+
+def test_unknown_watermark_prf_is_rejected():
+    with pytest.raises(ValidationError):
+        pydantic.TypeAdapter(WatermarkConfig).validate_python(
+            {"key": 42, "prf": "unsupported"}
+        )
+
+
+def test_watermark_key_is_excluded_from_serialization():
+    serialized = pydantic.TypeAdapter(WatermarkConfig).dump_python(
+        WatermarkConfig(key=42), mode="json"
+    )
+
+    assert "key" not in serialized
+
+
+def test_watermarking_forces_model_runner_v2(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+
+    with patch("vllm.config.vllm.logger.info_once") as info_once:
+        assert _watermarked_vllm_config().use_v2_model_runner
+
+    info_once.assert_called_once_with(
+        "Watermarking requires Model Runner V2 and overrides "
+        "VLLM_USE_V2_MODEL_RUNNER=0."
+    )
 
 
 @patch("vllm.config.speculative.ModelConfig")

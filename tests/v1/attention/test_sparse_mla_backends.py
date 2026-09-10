@@ -76,7 +76,9 @@ from vllm.v1.attention.backends.mla.index_group import (
     HiSparseMLAIndexGroup,
     SparseMLAIndexGroupBuilder,
 )
-from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadataBuilder,
+)
 from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
@@ -1508,7 +1510,7 @@ def test_sparse_backend_prefill_correctness(
 def test_split_indexer_prefill_chunks(
     seq_lens, query_lens, workspace_size, max_logits_bytes, expected
 ):
-    out = split_indexer_prefill_chunks(
+    out = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
         seq_lens,
         query_lens,
         workspace_size,
@@ -1522,7 +1524,9 @@ def test_split_indexer_prefill_chunks_single_request_overflow():
     seq_lens = torch.tensor([1000, 50])
     query_lens = torch.tensor([100, 5])
 
-    out = split_indexer_prefill_chunks(seq_lens, query_lens, 2000, 1000)
+    out = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
+        seq_lens, query_lens, 2000, 1000
+    )
     # max_logits_elems = 250, N=1000 -> max_q = 1 -> 100 query sub-chunks
     expected = [(slice(0, 1), slice(i, i + 1)) for i in range(100)]
     # req1: M=5, N=50 -> 250 elems fits budget
