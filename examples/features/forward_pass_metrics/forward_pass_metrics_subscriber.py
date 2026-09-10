@@ -19,7 +19,7 @@ import msgspec
 import zmq
 
 FPM_VERSION = 1
-FPM_TIMING_SCOPE = "execute_model_cuda"
+FPM_TIMING_SCOPE = "model_step_cuda"
 
 
 # Types copied from vllm.v1.metrics.forward_pass_metrics to demonstrate the

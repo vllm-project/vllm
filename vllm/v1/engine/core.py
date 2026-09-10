@@ -620,6 +620,10 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+        if self.forward_pass_metrics_emitter is not None:
+            self.forward_pass_metrics_emitter.before_update(
+                scheduler_output, model_output
+            )
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
@@ -731,6 +735,10 @@ class EngineCore:
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
+        if self.forward_pass_metrics_emitter is not None:
+            self.forward_pass_metrics_emitter.before_update(
+                scheduler_output, model_output
+            )
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )

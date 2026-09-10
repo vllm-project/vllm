@@ -1126,9 +1126,16 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        output = self.model_runner.sample_tokens(grammar_output)
         timer = self.model_runner.forward_pass_metrics_timer
-        return output if timer is None else timer.drain_into(output)
+        if timer is None:
+            return self.model_runner.sample_tokens(grammar_output)
+        try:
+            output = self.model_runner.sample_tokens(grammar_output)
+        except Exception:
+            timer.cancel()
+            raise
+        timer.finish()
+        return timer.drain_into(output)
 
     @torch.inference_mode()
     @with_gpu_sync_check
@@ -1207,7 +1214,10 @@ class Worker(WorkerBase):
                 except Exception:
                     timer.cancel()
                     raise
-                timer.finish()
+                # A None result defers sampling and speculative drafting to
+                # sample_tokens; keep this iteration's existing end event open.
+                if output is not None:
+                    timer.finish()
             if (
                 self.use_v2_model_runner
                 and self.model_runner.is_pooling_model

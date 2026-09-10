@@ -19,7 +19,7 @@ from vllm.v1.core.sched.output import (
 )
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.metrics.forward_pass_metrics import (
-    FPM_TIMING_SCOPE_EXECUTE_MODEL_CUDA,
+    FPM_TIMING_SCOPE_MODEL_STEP_CUDA,
     ForwardPassMetrics,
     ForwardPassMetricsEmitter,
     ForwardPassMetricsTimer,
@@ -37,13 +37,13 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 pytestmark = pytest.mark.skip_global_cleanup
 
-# Cross-repo golden payload mirrored by Dynamo's FPM contract test.
+# Golden wire payload for the model-step timing scope.
 _GOLDEN_FPM_V1 = {
     "version": 1,
     "worker_id": "worker-0",
     "dp_rank": 2,
     "counter_id": 3,
-    "timing_scope": "execute_model_cuda",
+    "timing_scope": "model_step_cuda",
     "wall_time": 0.004,
     "scheduled_requests": {
         "num_prefill_requests": 1,
@@ -243,6 +243,43 @@ def test_timer_cold_flush_waits_for_final_event():
     assert events[1].synchronize_calls == 1
 
 
+def test_sampling_finishes_existing_timing_after_draft_without_waiting():
+    from vllm.v1.worker.gpu_worker import Worker
+
+    events = []
+    timestamps = iter((10.0, 25.0))
+
+    def event_factory():
+        event = _FakeTimingEvent(timestamps)
+        events.append(event)
+        return event
+
+    timer = ForwardPassMetricsTimer(1, event_factory=event_factory)
+    scheduled = _make_scheduler_output("decode", computed_tokens=100)
+    scheduled.forward_pass_metrics_iteration_id = 3
+    timer.start(scheduled)
+    output = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+
+    def sample_and_draft(grammar):
+        # The output D2H may already be complete, while the draft is not.
+        assert events[1].timestamp == 0
+        assert timer.drain_into(output).forward_pass_timing_samples == ()
+        return output
+
+    worker = SimpleNamespace(
+        model_runner=SimpleNamespace(
+            forward_pass_metrics_timer=timer, sample_tokens=sample_and_draft
+        )
+    )
+    returned = Worker.sample_tokens(worker, None)
+    assert returned.forward_pass_timing_samples == ()
+    assert len(events) == 2
+    assert events[1].timestamp == 25
+    assert sum(event.synchronize_calls for event in events) == 0
+    events[1].complete = True
+    assert timer.drain_into(output).forward_pass_timing_samples == ((3, 0.015),)
+
+
 def test_timer_is_disabled_off_and_on_non_output_ranks():
     disabled = SimpleNamespace(
         observability_config=SimpleNamespace(forward_pass_metrics_port=0)
@@ -316,7 +353,7 @@ def test_emitter_joins_delayed_timing_with_original_snapshots():
 
     assert len(publisher.published) == 1
     metrics = publisher.published[0]
-    assert metrics.timing_scope == FPM_TIMING_SCOPE_EXECUTE_MODEL_CUDA
+    assert metrics.timing_scope == FPM_TIMING_SCOPE_MODEL_STEP_CUDA
     assert metrics.wall_time == 0.01
     assert metrics.scheduled_requests.num_prefill_requests == 1
     assert metrics.scheduled_requests.sum_prefill_kv_tokens == 2
@@ -362,6 +399,134 @@ def test_emitter_classifies_chunked_prefill_and_queued_decode_states():
     assert metrics.scheduled_requests.sum_prefill_kv_tokens == 4
     assert metrics.queued_requests.num_decode_requests == 2
     assert metrics.queued_requests.sum_decode_kv_tokens == 150
+
+
+def test_async_sd_rejections_correct_only_later_iteration_lengths():
+    scheduler = _FakeScheduler()
+    scheduler.requests = {
+        rid: SimpleNamespace(num_prompt_tokens=10, num_preemptions=0)
+        for rid in ("a", "b")
+    }
+    publisher = _FakeMetricsPublisher()
+    emitter = ForwardPassMetricsEmitter(
+        "worker", 0, publisher, correct_async_spec_lengths=True
+    )
+
+    def schedule(lengths):
+        out = SchedulerOutput.make_empty()
+        out.num_scheduled_tokens = {"a": 4, "b": 4}
+        out.total_num_scheduled_tokens = 8
+        out.scheduled_spec_decode_tokens = {"a": [-1] * 3, "b": [-1] * 3}
+        out.scheduled_cached_reqs = CachedRequestData(
+            req_ids=["a", "b"],
+            resumed_req_ids=set(),
+            new_token_ids=[[], []],
+            all_token_ids={},
+            new_block_ids=[None, None],
+            num_computed_tokens=lengths,
+            num_output_tokens=[1, 1],
+        )
+        emitter.begin_iteration(scheduler, out)
+        return out
+
+    first, second = schedule([100, 200]), schedule([104, 204])
+    result = ModelRunnerOutput(
+        req_ids=["a", "b"],
+        req_id_to_index={"a": 0, "b": 1},
+        sampled_token_ids=[[1], [2, 3, 4]],
+        forward_pass_timing_samples=((first.forward_pass_metrics_iteration_id, 0.01),),
+    )
+    emitter.before_update(first, result)
+    # Scheduler output processing can truncate tokens at a stop/max-length limit.
+    result.sampled_token_ids[1] = [2]
+    emitter.complete_iteration(scheduler, first, result)
+    assert publisher.published[0].scheduled_requests.sum_decode_kv_tokens == 300
+    third = schedule([105, 207])  # first settled; second still optimistic
+    result.sampled_token_ids = [[5], [6, 7, 8, 9]]
+    result.forward_pass_timing_samples = (
+        (second.forward_pass_metrics_iteration_id, 0.02),
+    )
+    emitter.before_update(second, result)
+    emitter.complete_iteration(scheduler, second, result)
+    metrics = publisher.published[1].scheduled_requests
+    assert metrics.sum_decode_kv_tokens == 304  # 101 + 203
+    assert metrics.var_decode_kv_tokens == 2601
+    result.forward_pass_timing_samples = (
+        (third.forward_pass_metrics_iteration_id, 0.03),
+    )
+    emitter.complete_iteration(scheduler, third, result)
+    assert publisher.published[2].scheduled_requests.sum_decode_kv_tokens == 309
+
+
+@pytest.mark.parametrize("preempted", [True, False])
+def test_async_sd_rejection_does_not_cross_request_generation(preempted):
+    scheduler = _FakeScheduler()
+    req = SimpleNamespace(num_prompt_tokens=10, num_preemptions=0)
+    scheduler.requests = {"decode": req}
+    publisher = _FakeMetricsPublisher()
+    emitter = ForwardPassMetricsEmitter(
+        "worker", 0, publisher, correct_async_spec_lengths=True
+    )
+    first = _make_scheduler_output("decode", computed_tokens=100)
+    first.scheduled_spec_decode_tokens = {"decode": [-1] * 3}
+    emitter.begin_iteration(scheduler, first)
+    if preempted:
+        req.num_preemptions += 1
+    else:
+        scheduler.requests["decode"] = SimpleNamespace(
+            num_prompt_tokens=10, num_preemptions=0
+        )
+    resumed = _make_scheduler_output("decode", computed_tokens=20)
+    emitter.begin_iteration(scheduler, resumed)
+    result = ModelRunnerOutput(
+        req_ids=["decode"],
+        req_id_to_index={"decode": 0},
+        sampled_token_ids=[[1]],
+        forward_pass_timing_samples=((first.forward_pass_metrics_iteration_id, 0.01),),
+    )
+    emitter.before_update(first, result)
+    emitter.complete_iteration(scheduler, first, result)
+    scheduler.requests.clear()  # removed requests must not break the frozen snapshot
+    result.forward_pass_timing_samples = (
+        (resumed.forward_pass_metrics_iteration_id, 0.02),
+    )
+    emitter.complete_iteration(scheduler, resumed, result)
+    assert publisher.published[-1].scheduled_requests.sum_decode_kv_tokens == 20
+
+
+@pytest.mark.parametrize("suppressed", [True, False])
+def test_async_sd_correction_survives_suppressed_or_dropped_sample(suppressed):
+    scheduler = _FakeScheduler()
+    scheduler.requests["decode"].num_preemptions = 0
+    publisher = _FakeMetricsPublisher()
+    emitter = ForwardPassMetricsEmitter(
+        "worker",
+        0,
+        publisher,
+        max_pending_iterations=1,
+        correct_async_spec_lengths=True,
+    )
+    first = _make_scheduler_output("decode", computed_tokens=100)
+    first.scheduled_spec_decode_tokens = {"decode": [-1] * 3}
+    scheduler.emit = not suppressed
+    emitter.begin_iteration(scheduler, first)
+    scheduler.emit = True
+    second = _make_scheduler_output("decode", computed_tokens=104)
+    emitter.begin_iteration(scheduler, second)
+    result = ModelRunnerOutput(
+        req_ids=["decode"],
+        req_id_to_index={"decode": 0},
+        sampled_token_ids=[[1]],
+    )
+    emitter.before_update(first, result)
+    emitter.complete_iteration(scheduler, first, result)
+    result.forward_pass_timing_samples = (
+        (second.forward_pass_metrics_iteration_id, 0.01),
+    )
+    emitter.before_update(second, result)
+    emitter.complete_iteration(scheduler, second, result)
+    assert publisher.published[-1].scheduled_requests.sum_decode_kv_tokens == 101
+    assert not emitter._spec_requests
 
 
 def test_emitter_suppresses_iterations_and_bounds_pending_state():

@@ -8,10 +8,10 @@ logic: CUDA event timing, scheduler-state aggregation, iteration association,
 and background ZMQ publication. The engine, scheduler, and model runners only
 need small lifecycle hooks.
 
-``wall_time`` is the CUDA-timeline interval between events recorded immediately
-before and after ``execute_model``. It includes GPU work and any GPU-idle gap
-while the host prepares/submits work inside that call. It excludes EngineCore
-scheduling, output sampling, and metrics serialization/publication.
+``wall_time`` spans model execution through sampling and speculative drafting
+on the recorded CUDA stream, including host-submission gaps. It excludes
+EngineCore scheduling and metrics serialization/publication, and does not
+measure independent work on other streams.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ logger = init_logger(__name__)
 
 FPM_VERSION = 1
 FPM_HEARTBEAT_INTERVAL_SECONDS = 1.0
-FPM_TIMING_SCOPE_EXECUTE_MODEL_CUDA = "execute_model_cuda"
+FPM_TIMING_SCOPE_MODEL_STEP_CUDA = "model_step_cuda"
 
 
 @dataclass(slots=True)
@@ -109,8 +109,8 @@ class ForwardPassMetrics(
     worker_id: str = ""
     dp_rank: int = 0
     counter_id: int = 0
-    timing_scope: str = FPM_TIMING_SCOPE_EXECUTE_MODEL_CUDA
-    # CUDA-timeline interval spanning execute_model, in seconds.
+    timing_scope: str = FPM_TIMING_SCOPE_MODEL_STEP_CUDA
+    # CUDA-timeline interval spanning execution, sampling and drafting, in seconds.
     wall_time: float = 0.0
     scheduled_requests: ScheduledRequestMetrics = ScheduledRequestMetrics()
     queued_requests: QueuedRequestMetrics = QueuedRequestMetrics()
@@ -409,6 +409,8 @@ class _PendingIteration:
     scheduled: ScheduledRequestMetrics
     queued: QueuedRequestMetrics | None = None
     duration_seconds: float | None = None
+    request_generations: dict[str, tuple[Any, int]] | None = None
+    decode_lengths: dict[str, int] | None = None
 
 
 class ForwardPassMetricsEmitter:
@@ -420,6 +422,7 @@ class ForwardPassMetricsEmitter:
         dp_rank: int,
         publisher: _MetricsPublisher,
         max_pending_iterations: int = 16,
+        correct_async_spec_lengths: bool = False,
     ) -> None:
         if max_pending_iterations <= 0:
             raise ValueError("max_pending_iterations must be positive")
@@ -428,6 +431,8 @@ class ForwardPassMetricsEmitter:
         self._publisher = publisher
         self._iteration_ids = count()
         self._max_pending_iterations = max_pending_iterations
+        self._correct_async_spec_lengths = correct_async_spec_lengths
+        self._spec_requests: dict[int, dict[str, tuple[Any, int]]] = {}
         self._pending: OrderedDict[int, _PendingIteration] = OrderedDict()
 
     @classmethod
@@ -464,6 +469,11 @@ class ForwardPassMetricsEmitter:
             dp_rank=dp_rank,
             publisher=publisher,
             max_pending_iterations=max(16, vllm_config.max_concurrent_batches * 4),
+            correct_async_spec_lengths=bool(
+                vllm_config.scheduler_config.async_scheduling
+                and vllm_config.speculative_config is not None
+                and not vllm_config.model_config.is_diffusion
+            ),
         )
 
     def begin_iteration(
@@ -471,6 +481,17 @@ class ForwardPassMetricsEmitter:
         scheduler: SchedulerInterface,
         scheduler_output: SchedulerOutput,
     ) -> None:
+        generations = None
+        if self._correct_async_spec_lengths:
+            requests, _, _ = scheduler.get_forward_pass_metrics_request_state()
+            generations = {
+                rid: (request, request.num_preemptions)
+                for rid in scheduler_output.num_scheduled_tokens
+                if (request := requests.get(rid)) is not None
+            }
+            # Even a suppressed/dropped iteration can reject tokens included
+            # in a later snapshot. Keep this until its CPU output is settled.
+            self._spec_requests[id(scheduler_output)] = generations
         if (
             scheduler_output.total_num_scheduled_tokens == 0
             or not scheduler.should_emit_forward_pass_metrics(scheduler_output)
@@ -488,6 +509,49 @@ class ForwardPassMetricsEmitter:
         self._pending[iteration_id] = _PendingIteration(
             scheduled=_extract_scheduled_metrics(scheduler, scheduler_output)
         )
+        if self._correct_async_spec_lengths:
+            pending = self._pending[iteration_id]
+            pending.request_generations = generations
+            cached = scheduler_output.scheduled_cached_reqs
+            pending.decode_lengths = {
+                rid: cached.num_computed_tokens[index]
+                for index, rid in enumerate(cached.req_ids)
+                if not cached.is_context_phase(rid)
+            }
+
+    def before_update(
+        self, scheduler_output: SchedulerOutput, model_output: ModelRunnerOutput
+    ) -> None:
+        """Correct later snapshots before the scheduler truncates sampled tokens."""
+        if not self._correct_async_spec_lengths:
+            return
+        iteration_id = scheduler_output.forward_pass_metrics_iteration_id
+        generations = self._spec_requests.pop(id(scheduler_output), None)
+        if generations is None:
+            return
+        sampled = model_output.sampled_token_ids
+        if not sampled:
+            return
+        for rid, drafts in scheduler_output.scheduled_spec_decode_tokens.items():
+            index = model_output.req_id_to_index.get(rid)
+            generation = generations.get(rid)
+            if index is None or generation is None or not sampled[index]:
+                continue
+            rejected = len(drafts) - max(len(sampled[index]) - 1, 0)
+            if rejected <= 0:
+                continue
+            for later_id, later in self._pending.items():
+                if (
+                    (iteration_id is None or later_id > iteration_id)
+                    and later.decode_lengths is not None
+                    and rid in later.decode_lengths
+                    and later.request_generations is not None
+                    and (later_generation := later.request_generations.get(rid))
+                    is not None
+                    and later_generation[0] is generation[0]
+                    and later_generation[1] == generation[1]
+                ):
+                    later.decode_lengths[rid] -= rejected
 
     def complete_iteration(
         self,
@@ -495,10 +559,23 @@ class ForwardPassMetricsEmitter:
         scheduler_output: SchedulerOutput,
         model_output: ModelRunnerOutput,
     ) -> None:
+        self._spec_requests.pop(id(scheduler_output), None)
         self.complete_timing_samples(model_output.forward_pass_timing_samples)
 
         iteration_id = scheduler_output.forward_pass_metrics_iteration_id
         if iteration_id is not None and (pending := self._pending.get(iteration_id)):
+            if pending.decode_lengths is not None:
+                lengths = WelfordAccumulator()
+                for length in pending.decode_lengths.values():
+                    lengths.add(length)
+                pending.scheduled = msgspec.structs.replace(
+                    pending.scheduled,
+                    num_decode_requests=lengths.count,
+                    sum_decode_kv_tokens=lengths.total,
+                    var_decode_kv_tokens=lengths.variance,
+                )
+                pending.decode_lengths = None
+                pending.request_generations = None
             pending.queued = _extract_queued_metrics(scheduler)
             self._emit_if_ready(iteration_id)
 
@@ -529,7 +606,7 @@ class ForwardPassMetricsEmitter:
             ForwardPassMetrics(
                 worker_id=self._worker_id,
                 dp_rank=self._dp_rank,
-                timing_scope=FPM_TIMING_SCOPE_EXECUTE_MODEL_CUDA,
+                timing_scope=FPM_TIMING_SCOPE_MODEL_STEP_CUDA,
                 wall_time=pending.duration_seconds,
                 scheduled_requests=pending.scheduled,
                 queued_requests=pending.queued,
