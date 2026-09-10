@@ -320,3 +320,5 @@ class EngineStatusType(enum.IntEnum):
     HEALTHY = 0
     DEAD = 1
     UNHEALTHY = 2
+    # Faulted; querying the workers' all2all mask before going UNHEALTHY.
+    DIAGNOSING = 3
