@@ -179,8 +179,8 @@ class EMABackpressureDetector(BackpressureDetector):
         high=0.005 s/MiB (~200 MB/s) catches severe congestion;
         low=0.001 s/MiB (~1 GB/s) requires meaningful recovery.
 
-      NETWORK (CephFS, object store, ``obj``/``p2p`` tiers, or any
-        tier with ``"locality": "REMOTE"``): CephFS sustains ~1.5 GB/s.
+      NETWORK (CephFS, object store, ``obj``tiers, or any tier
+        with ``"locality": "REMOTE"``): CephFS sustains ~1.5 GB/s.
         high=0.020 s/MiB (~50 MB/s); low=0.005 s/MiB (~200 MB/s).
 
     ``obj`` tiers get NETWORK defaults automatically. An
@@ -341,10 +341,11 @@ class EMABackpressureDetector(BackpressureDetector):
         )
 
     def should_store(self, num_blocks: int) -> bool:
+        under_pressure = self.is_under_pressure()
         if self.is_healthy():
             return True
         if (
-            not self._under_pressure
+            not under_pressure
             and self._pressure_cleared_at > 0
             and time.monotonic() - self._pressure_cleared_at < self._cooldown_s
         ):

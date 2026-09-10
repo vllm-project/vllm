@@ -329,7 +329,9 @@ class TestBackpressure:
 
         # Drive several fast completions to bring EMA below low water.
         block_id = 100
-        while bp.store_latency_ema >= _BP_LOW_WATER_S:
+        for _ in range(50):
+            if bp.store_latency_ema < _BP_LOW_WATER_S:
+                break
             keys = to_keys([block_id])
             block_id += 1
             self._store_blocks(keys)
@@ -340,6 +342,8 @@ class TestBackpressure:
             self.tier.submit_store(job_meta)
             self.tier.release_jobs()
             self._simulate_on_schedule_end()
+        else:
+            pytest.fail(f"EMA did not recover below low water: {bp.store_latency_ema}")
 
         assert bp.is_under_pressure() is False
 

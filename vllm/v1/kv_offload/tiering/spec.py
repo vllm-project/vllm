@@ -291,8 +291,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         # Backpressure defaults are merged in priority order (highest first):
         #   1. Per-tier ``backpressure`` dict in the tier config
-        #   2. Top-level ``backpressure`` in kv_connector_extra_config
-        #   3. VLLM_KV_BACKPRESSURE_CONFIG env var entry for the tier type
+        #   2. VLLM_KV_BACKPRESSURE_CONFIG env var entry for the tier type
+        #   3. Top-level ``backpressure`` in kv_connector_extra_config
         # Within each tier's resolved dict, tier-type-aware water marks
         # are filled in last so a bare ``"backpressure": {}`` picks up
         # sensible thresholds for the storage medium.
@@ -303,10 +303,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         for tier_cfg in self.secondary_tier_configs:
             tier_type = tier_cfg.get("type", "")
-            # Layer 3: env var defaults for this tier type
+            # Env var defaults for this tier type
             if tier_type in bp_env and "backpressure" not in tier_cfg:
                 tier_cfg["backpressure"] = bp_env[tier_type].copy()
-            # Layer 2: top-level config defaults
+            # Top-level config defaults
             if bp_defaults is not None:
                 tier_cfg.setdefault("backpressure", bp_defaults.copy())
 
