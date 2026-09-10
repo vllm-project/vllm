@@ -90,13 +90,7 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      - files~=^examples/.*deepseek.*\.py
-      - files~=^tests/.*deepseek.*\.py
-      - files~=^vllm/model_executor/models/.*deepseek.*\.py
-      - files~=^vllm/models/deepseek.*/
-      - files~=^vllm/tool_parsers/.*deepseek.*\.py
-      - files~=^vllm/reasoning/.*deepseek.*\.py
-      - files~=^vllm/transformers_utils/.*deepseek.*\.py
+      - files~=(?i)deepseek
       - title~=(?i)DeepSeek
   actions:
     label:
