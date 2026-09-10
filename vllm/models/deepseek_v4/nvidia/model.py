@@ -911,7 +911,13 @@ class DeepseekV4MoE(nn.Module):
                 )
 
                 _EPLB_MAP_AND_RECORD_KERNEL.register_warmup()
-            _DSV4_TOPK_KERNEL.register_warmup()
+            if (
+                config.n_routed_experts in (256, 384)
+                and config.num_experts_per_tok == 6
+                and config.norm_topk_prob
+                and config.scoring_func == "sqrtsoftplus"
+            ):
+                _DSV4_TOPK_KERNEL.register_warmup()
             if self.use_mega_moe:
                 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
                     _DEEPGEMM_EP_GATHER_KERNEL,
@@ -978,8 +984,8 @@ class DeepseekV4MoE(nn.Module):
                 _SWIGLU_LIMIT_PAD_AWARE_KERNEL.register_warmup()
 
                 from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (  # noqa: E501
-                    Nvfp4QuantizationEmulationTritonExperts,
                     _FUSED_MOE_NVFP4_EMULATION_KERNEL,
+                    Nvfp4QuantizationEmulationTritonExperts,
                 )
 
                 if isinstance(experts_cls, type) and issubclass(
