@@ -34,19 +34,30 @@ LEGACY_TARGET_TEST_SUITE_ENV = "TARGET_TEST_SUITE"
 
 GENERIC_DISTRIBUTED_TEST_SUITES = ("L4", "MI250", "MI300", "MI325", "MI355")
 ALL_DISTRIBUTED_TEST_SUITES = (*GENERIC_DISTRIBUTED_TEST_SUITES, "A100")
+LOGPROB_ATOL = 2e-2
+LOGPROB_RTOL = 2e-2
+GREEDY_DECISION_ATOL = 5e-2
 
 
-def _assert_input_logprobs_close(
-    reference_logprobs: list[torch.Tensor],
+def _get_prompt_embeddings(hf_model, hf_inputs: list[Any]) -> list[torch.Tensor]:
+    with torch.no_grad():
+        return hf_model.get_prompt_embeddings_from_inputs(hf_inputs)
+
+
+def _assert_logprobs_close(
+    reference_logprobs: list[tuple[torch.Tensor, torch.Tensor]],
     reference_prompt_token_ids: list[list[int]],
     vllm_outputs: list[RequestOutput],
 ) -> None:
     assert len(vllm_outputs) == len(reference_prompt_token_ids)
-    for request_idx, (reference_ids, reference_scores, output) in enumerate(
+    for request_idx, (reference_ids, reference, output) in enumerate(
         zip(reference_prompt_token_ids, reference_logprobs, vllm_outputs)
     ):
+        reference_scores, max_scores = reference
+        assert output.prompt_token_ids == reference_ids
         assert output.prompt_logprobs is not None
         assert len(output.prompt_logprobs) == len(reference_ids)
+        assert output.prompt_logprobs[0] is None
 
         target_ids = reference_ids[1:]
         vllm_scores = []
@@ -57,20 +68,50 @@ def _assert_input_logprobs_close(
                 f"Missing vLLM input logprob for request {request_idx}, "
                 f"prompt position {prompt_position}, target token {token_id}"
             )
-            assert len(token_logprobs) == 1
             assert token_id in token_logprobs
+            assert len(token_logprobs) == 1
             vllm_scores.append(token_logprobs[token_id].logprob)
 
-        target_ids_tensor = torch.tensor(target_ids, device=reference_scores.device)
-        expected_scores = reference_scores[
-            torch.arange(len(target_ids), device=reference_scores.device),
-            target_ids_tensor,
-        ]
         torch.testing.assert_close(
             torch.tensor(vllm_scores, device=reference_scores.device),
+            reference_scores[: len(target_ids)],
+            atol=LOGPROB_ATOL,
+            rtol=LOGPROB_RTOL,
+        )
+
+        generated_ids = output.outputs[0].token_ids
+        generated_logprobs = output.outputs[0].logprobs
+        assert generated_logprobs is not None
+        assert len(generated_logprobs) == len(generated_ids)
+        expected_scores = reference_scores[len(target_ids) :]
+        expected_max_scores = max_scores[len(target_ids) :]
+        assert len(expected_scores) == len(generated_ids)
+
+        vllm_scores = []
+        for generation_idx, (token_id, token_logprobs) in enumerate(
+            zip(generated_ids, generated_logprobs)
+        ):
+            assert token_logprobs is not None, (
+                f"Missing vLLM sample logprob for request {request_idx}, "
+                f"generation position {generation_idx}, token {token_id}"
+            )
+            assert token_id in token_logprobs
+            assert token_logprobs[token_id].rank == 1
+            assert len(token_logprobs) == 1
+            vllm_scores.append(token_logprobs[token_id].logprob)
+
+        vllm_sample_scores = torch.tensor(vllm_scores, device=reference_scores.device)
+        torch.testing.assert_close(
+            vllm_sample_scores,
             expected_scores,
-            atol=2e-2,
-            rtol=2e-2,
+            atol=LOGPROB_ATOL,
+            rtol=LOGPROB_RTOL,
+        )
+        assert torch.all(
+            vllm_sample_scores >= expected_max_scores - GREEDY_DECISION_ATOL
+        ), (
+            "vLLM's selected-token logprob is not close enough to Hugging "
+            "Face's greedy logprob"
         )
 
 
@@ -137,6 +178,7 @@ def test_vllm_gc_ed():
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("backend", ATTN_BACKEND)
+@pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("enforce_eager", [False])
 @pytest.mark.parametrize("async_scheduling", [True, False])
 @pytest.mark.parametrize("model_executor", ["uni", "mp"])
@@ -145,6 +187,7 @@ def test_models(
     hf_runner,
     model: str,
     backend: str,
+    max_tokens: int,
     enforce_eager: bool,
     async_scheduling: bool,
     model_executor: str,
@@ -160,30 +203,19 @@ def test_models(
     )
     example_prompts = [prompt]
 
-    with hf_runner(model) as hf_model:
-        hf_inputs = hf_model.get_inputs(example_prompts)
-        reference_prompt_token_ids = [
-            inputs["input_ids"][0].tolist() for inputs in hf_inputs
-        ]
-        vllm_prompts: list[list[int]] | list[dict[str, Any]]
-        if enable_prompt_embeds:
-            with torch.no_grad():
-                prompt_embeds = hf_model.get_prompt_embeddings_from_inputs(hf_inputs)
-            reference_logprobs = hf_model.get_prompt_logprobs(
-                prompt_embeds=prompt_embeds
-            )
+    vllm_prompts: list[str] | list[dict[str, Any]] = example_prompts
+    if enable_prompt_embeds:
+        with hf_runner(model) as hf_model:
+            hf_inputs = hf_model.get_inputs(example_prompts)
+            prompt_token_ids = [inputs["input_ids"][0].tolist() for inputs in hf_inputs]
+            prompt_embeds = _get_prompt_embeddings(hf_model, hf_inputs)
             vllm_prompts = [
                 {
                     "prompt_embeds": prompt_embed,
-                    "prompt_token_ids": prompt_token_ids,
+                    "prompt_token_ids": token_ids,
                 }
-                for prompt_embed, prompt_token_ids in zip(
-                    prompt_embeds, reference_prompt_token_ids
-                )
+                for prompt_embed, token_ids in zip(prompt_embeds, prompt_token_ids)
             ]
-        else:
-            reference_logprobs = hf_model.get_prompt_logprobs(hf_inputs)
-            vllm_prompts = reference_prompt_token_ids
 
     with VllmRunner(
         model,
@@ -198,13 +230,34 @@ def test_models(
         vllm_outputs = vllm_model.llm.generate(
             vllm_prompts,
             sampling_params=SamplingParams(
-                temperature=0.0, max_tokens=1, prompt_logprobs=0
+                temperature=0.0,
+                max_tokens=max_tokens,
+                logprobs=1,
+                prompt_logprobs=0,
             ),
         )
 
-    _assert_input_logprobs_close(
-        reference_logprobs, reference_prompt_token_ids, vllm_outputs
-    )
+    with hf_runner(model) as hf_model:
+        hf_inputs = hf_model.get_inputs(example_prompts)
+        reference_prompt_token_ids = [
+            inputs["input_ids"][0].tolist() for inputs in hf_inputs
+        ]
+        sequences = [
+            prompt_token_ids + output.outputs[0].token_ids
+            for prompt_token_ids, output in zip(
+                reference_prompt_token_ids, vllm_outputs
+            )
+        ]
+        reference_logprobs = hf_model.get_sequence_logprobs(
+            sequences,
+            prompt_embeds=(
+                _get_prompt_embeddings(hf_model, hf_inputs)
+                if enable_prompt_embeds
+                else None
+            ),
+        )
+
+    _assert_logprobs_close(reference_logprobs, reference_prompt_token_ids, vllm_outputs)
 
 
 @multi_gpu_test(num_gpus=2)
@@ -262,6 +315,7 @@ def test_models_distributed(
             monkeypatch_context.setenv(k, v)
 
         dtype = "half"
+        max_tokens = 5
 
         # NOTE: take care of the order. run vLLM first, and then run HF.
         # vLLM needs a fresh new process without cuda initialization.
@@ -281,55 +335,60 @@ def test_models_distributed(
             if enable_prompt_embeds:
                 with hf_runner(model, dtype=dtype) as hf_model:
                     hf_inputs = hf_model.get_inputs(example_prompts)
-                    reference_prompt_token_ids = [
+                    prompt_token_ids = [
                         inputs["input_ids"][0].tolist() for inputs in hf_inputs
                     ]
-                    with torch.no_grad():
-                        prompt_embeds = hf_model.get_prompt_embeddings_from_inputs(
-                            hf_inputs
-                        )
-                    reference_logprobs = hf_model.get_prompt_logprobs(
-                        prompt_embeds=prompt_embeds
-                    )
+                    prompt_embeds = _get_prompt_embeddings(hf_model, hf_inputs)
                     vllm_prompts = [
                         {
                             "prompt_embeds": prompt_embed,
                             "prompt_token_ids": prompt_token_ids,
                         }
                         for prompt_embed, prompt_token_ids in zip(
-                            prompt_embeds, reference_prompt_token_ids
+                            prompt_embeds, prompt_token_ids
                         )
                     ]
                     vllm_outputs = vllm_model.llm.generate(
                         vllm_prompts,
                         sampling_params=SamplingParams(
-                            temperature=0.0, max_tokens=1, prompt_logprobs=0
+                            temperature=0.0,
+                            max_tokens=max_tokens,
+                            logprobs=1,
+                            prompt_logprobs=0,
                         ),
                     )
             else:
                 vllm_outputs = vllm_model.llm.generate(
                     example_prompts,
                     sampling_params=SamplingParams(
-                        temperature=0.0, max_tokens=1, prompt_logprobs=0
+                        temperature=0.0,
+                        max_tokens=max_tokens,
+                        logprobs=1,
+                        prompt_logprobs=0,
                     ),
                 )
-                with hf_runner(model, dtype=dtype) as hf_model:
-                    reference_prompt_token_ids = [
-                        output.prompt_token_ids for output in vllm_outputs
-                    ]
-                    hf_inputs = [
-                        {
-                            "input_ids": torch.tensor(
-                                token_ids, dtype=torch.long
-                            ).unsqueeze(0)
-                        }
-                        for token_ids in reference_prompt_token_ids
-                    ]
-                    reference_logprobs = hf_model.get_prompt_logprobs(hf_inputs)
 
-    _assert_input_logprobs_close(
-        reference_logprobs, reference_prompt_token_ids, vllm_outputs
-    )
+        with hf_runner(model, dtype=dtype) as hf_model:
+            hf_inputs = hf_model.get_inputs(example_prompts)
+            reference_prompt_token_ids = [
+                inputs["input_ids"][0].tolist() for inputs in hf_inputs
+            ]
+            sequences = [
+                prompt_token_ids + output.outputs[0].token_ids
+                for prompt_token_ids, output in zip(
+                    reference_prompt_token_ids, vllm_outputs
+                )
+            ]
+            reference_logprobs = hf_model.get_sequence_logprobs(
+                sequences,
+                prompt_embeds=(
+                    _get_prompt_embeddings(hf_model, hf_inputs)
+                    if enable_prompt_embeds
+                    else None
+                ),
+            )
+
+    _assert_logprobs_close(reference_logprobs, reference_prompt_token_ids, vllm_outputs)
 
 
 def test_failed_model_execution(vllm_runner, monkeypatch) -> None:

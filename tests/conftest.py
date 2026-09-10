@@ -681,52 +681,66 @@ class HfRunner:
             embeddings.append(embedding)
         return embeddings
 
-    def get_prompt_logprobs(
+    def get_sequence_logprobs(
         self,
-        inputs: list[BatchFeature | BatchEncoding | dict[str, torch.Tensor]]
-        | None = None,
+        token_ids: list[list[int]],
         *,
         prompt_embeds: list[torch.Tensor] | None = None,
-    ) -> list[torch.Tensor]:
-        if (inputs is None) == (prompt_embeds is None):
-            raise ValueError("Specify exactly one of inputs and prompt_embeds")
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        """Return selected-token and maximum logprobs for each sequence.
+
+        When prompt embeddings are provided, they replace the leading token
+        embeddings; remaining token IDs are embedded by the model.
+        """
+        if prompt_embeds is not None and len(prompt_embeds) != len(token_ids):
+            raise ValueError("prompt_embeds and token_ids must have the same length")
 
         all_logprobs = []
         with torch.no_grad():
-            if inputs is not None:
-                outputs = [
-                    self.model(
-                        **self.wrap_device(model_input),
+            for sequence_idx, sequence_token_ids in enumerate(token_ids):
+                input_ids = torch.tensor(
+                    sequence_token_ids,
+                    dtype=torch.long,
+                    device=self.device,
+                ).unsqueeze(0)
+                if prompt_embeds is None:
+                    output = self.model(
+                        input_ids=input_ids,
                         use_cache=False,
                         return_dict=True,
                     )
-                    for model_input in inputs
-                ]
-            else:
-                assert prompt_embeds is not None
-                outputs = []
-                for prompt_embed in prompt_embeds:
-                    assert prompt_embed is not None
-                    attention_mask = torch.ones(
-                        (1, prompt_embed.shape[0]),
-                        dtype=torch.long,
-                        device=prompt_embed.device,
-                    )
-                    outputs.append(
-                        self.model(
-                            inputs_embeds=prompt_embed.unsqueeze(0),
-                            attention_mask=attention_mask,
-                            use_cache=False,
-                            return_dict=True,
+                else:
+                    prompt_embed = prompt_embeds[sequence_idx]
+                    prompt_len = prompt_embed.shape[0]
+                    if prompt_len > input_ids.shape[1]:
+                        raise ValueError(
+                            "prompt embeddings cannot be longer than token IDs"
                         )
+                    continuation_embeds = self.model.get_input_embeddings()(
+                        input_ids[:, prompt_len:]
+                    )
+                    inputs_embeds = torch.cat(
+                        (prompt_embed.unsqueeze(0), continuation_embeds), dim=1
+                    )
+                    attention_mask = torch.ones(
+                        input_ids.shape,
+                        dtype=torch.long,
+                        device=inputs_embeds.device,
+                    )
+                    output = self.model(
+                        inputs_embeds=inputs_embeds,
+                        attention_mask=attention_mask,
+                        use_cache=False,
+                        return_dict=True,
                     )
 
-            for output in outputs:
                 assert isinstance(output.logits, torch.Tensor)
+                logits = output.logits[:, :-1].to(torch.float32).squeeze(0)
+                normalizer = logits.logsumexp(dim=-1)
+                target_ids = input_ids[0, 1:]
+                target_logits = logits.gather(1, target_ids.unsqueeze(1)).squeeze(1)
                 all_logprobs.append(
-                    F.log_softmax(
-                        output.logits[:, :-1].to(torch.float32), dim=-1
-                    ).squeeze(0)
+                    (target_logits - normalizer, logits.max(dim=-1).values - normalizer)
                 )
 
         return all_logprobs
