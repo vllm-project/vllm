@@ -1145,6 +1145,7 @@ def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
     # model_config.model. A new weights_path must replace it, or the loader
     # silently re-streams the original checkpoint.
     loader = Mock()
+    loader.reload_weights_inplace.return_value = False
     loader.get_all_weights.return_value = iter(())
     monkeypatch.setattr(reload_inplace_module, "get_model_loader", lambda _: loader)
     monkeypatch.setattr(reload_inplace_module, "start_reload", Mock())
