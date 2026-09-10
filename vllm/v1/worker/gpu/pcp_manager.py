@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 import torch
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -154,20 +154,6 @@ class PCPManager:
                     "MRV2 PCP only supports DSpark or single-module MTP "
                     "speculative decoding."
                 )
-            if vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-                raise NotImplementedError(
-                    "MRV2 PCP with MTP does not support CUDA graphs yet. "
-                    "Set -cc.cudagraph_mode=NONE."
-                )
-        is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
-        if (
-            is_sparse_mla
-            and vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            raise NotImplementedError(
-                "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
-                "Set -cc.cudagraph_mode=NONE."
-            )
         if vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
             raise NotImplementedError("MRV2 PCP supports PIECEWISE CUDA graphs only.")
 
