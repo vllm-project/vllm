@@ -6,7 +6,6 @@ import functools
 import os
 import platform
 import sys
-from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -1307,25 +1306,6 @@ class Platform:
         Set some additional forward context for the current platform if needs.
         """
         return {}
-
-    @classmethod
-    def launch_multi_stream(
-        cls,
-        default_fn: Callable[[], Any],
-        aux_fns: list[Callable[[], Any] | None],
-        start_event: torch.cuda.Event,
-        done_events: list[torch.cuda.Event],
-        aux_streams: list[torch.cuda.Stream],
-        queue_aux_before_default: bool,
-    ) -> tuple[Any, list[Any]]:
-        """Launch stream work with the default CUDA event synchronization.
-
-        The CUDA platform provides the default event-based implementation.
-        ROCm overrides this hook because its overlap requires stream waits.
-        """
-        raise NotImplementedError(
-            "launch_multi_stream is not implemented for the current platform."
-        )
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:

@@ -7,8 +7,6 @@ from typing import Any
 
 import torch
 
-from vllm.platforms import current_platform
-
 
 class EventType(Enum):
     Main = 0
@@ -50,20 +48,18 @@ def maybe_execute_in_parallel(
         if BreakableCUDAGraphCapture.is_active():
             aux_stream = None
 
-    if aux_stream is None:
+    if aux_stream is not None:
+        event0.record()
+        result0 = fn0()
+        with torch.cuda.stream(aux_stream):
+            event0.wait()
+            result1 = fn1()
+            event1.record()
+        event1.wait()
+    else:
         result0 = fn0()
         result1 = fn1()
-        return result0, result1
-
-    result0, aux_results = current_platform.launch_multi_stream(
-        fn0,
-        [fn1],
-        event0,
-        [event1],
-        [aux_stream],
-        queue_aux_before_default=False,
-    )
-    return result0, aux_results[0]
+    return (result0, result1)
 
 
 def execute_in_parallel(
@@ -115,11 +111,22 @@ def execute_in_parallel(
         "aux_fns, aux_streams, and done_events must be the same length"
     )
 
-    return current_platform.launch_multi_stream(
-        default_fn,
-        aux_fns,
-        start_event,
-        done_events,
-        aux_streams,
-        queue_aux_before_default=True,
-    )
+    aux_results = [None] * len(aux_fns)
+    pending: list[torch.cuda.Event] = []
+
+    start_event.record()
+    for i, fn in enumerate(aux_fns):
+        if fn is None:
+            continue
+        with torch.cuda.stream(aux_streams[i]):
+            start_event.wait()
+            aux_results[i] = fn()
+            done_events[i].record()
+        pending.append(done_events[i])
+
+    default_result = default_fn()
+
+    for ev in pending:
+        ev.wait()
+
+    return default_result, aux_results

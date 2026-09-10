@@ -3,10 +3,9 @@
 
 import os
 import platform
-from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import regex as re
 import torch
@@ -1112,68 +1111,6 @@ class RocmPlatform(Platform):
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
-
-    @classmethod
-    def set_additional_forward_context(cls, *args, **kwargs) -> dict[str, Any]:
-        """Cache the current HIP stream once per forward pass.
-
-        Called once per ``set_forward_context()`` invocation (i.e. once per
-        forward) while the ambient current stream is that forward's logical
-        "main" stream: the worker compute stream at runtime, and the capture
-        stream inside graph capture. The multi-stream fork reads this
-        cached handle so every fork/join edge binds to the same stream
-        object, keeping the stream DAG statically reason-able and avoiding
-        per-call ``torch.cuda.current_stream()`` queries that widen the HIP
-        stream handle pool.
-        """
-        return {"main_stream": torch.cuda.current_stream()}
-
-    @classmethod
-    def launch_multi_stream(
-        cls,
-        default_fn: Callable[[], Any],
-        aux_fns: list[Callable[[], Any] | None],
-        start_event: torch.cuda.Event,
-        done_events: list[torch.cuda.Event],
-        aux_streams: list[torch.cuda.Stream],
-        queue_aux_before_default: bool,
-    ) -> tuple[Any, list[Any]]:
-        # ROCm uses stream waits because event waits can hang under this overlap.
-        from vllm.forward_context import (
-            get_forward_context,
-            is_forward_context_available,
-        )
-
-        _ = start_event, done_events
-        main_stream = None
-        if is_forward_context_available():
-            main_stream = get_forward_context().additional_kwargs.get("main_stream")
-        if main_stream is None:
-            main_stream = torch.cuda.current_stream()
-
-        aux_results: list[Any] = [None] * len(aux_fns)
-        launched_streams: list[torch.cuda.Stream] = []
-        for i, fn in enumerate(aux_fns):
-            if fn is not None:
-                aux_streams[i].wait_stream(main_stream)
-
-        def launch_aux() -> None:
-            for i, fn in enumerate(aux_fns):
-                if fn is None:
-                    continue
-                aux_stream = aux_streams[i]
-                with torch.cuda.stream(aux_stream):
-                    aux_results[i] = fn()
-                launched_streams.append(aux_stream)
-
-        if queue_aux_before_default:
-            launch_aux()
-        default_result = default_fn()
-        if not queue_aux_before_default:
-            launch_aux()
-        for aux_stream in launched_streams:
-            main_stream.wait_stream(aux_stream)
-        return default_result, aux_results
 
     @classmethod
     def get_default_ir_op_priority(
