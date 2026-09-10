@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     B12X_BACKENDS,
     Mxfp4MoeBackend,
+    _pack_deepgemm_mxfp4_scales,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     select_mxfp4_moe_backend,
@@ -53,7 +54,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         # repacks weights and scales.
         self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
         self.experts_cls: type[mk.FusedMoEExperts]
-        if moe.moe_backend == "b12x":
+        if moe.moe_backend == "b12x" or moe.moe_backend == "deep_gemm":
             self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(moe)
             assert experts_cls is not None
             self.experts_cls = experts_cls
@@ -197,6 +198,17 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_scale = torch.nn.Parameter(
                 torch.stack(swizzled_w2), requires_grad=False
             )
+        elif self.mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
+            # DeepGemmFP4Experts has no process_weights_after_loading of its
+            # own, so the DeepGEMM scale packing has to happen here.
+            w13_scale, w2_scale = _pack_deepgemm_mxfp4_scales(
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+            )
+            layer.w13_weight_scale = torch.nn.Parameter(w13_scale, requires_grad=False)
+            layer.w2_weight_scale = torch.nn.Parameter(w2_scale, requires_grad=False)
         elif self.mxfp4_backend in B12X_BACKENDS or current_platform.is_xpu():
             pass
         else:
