@@ -5,9 +5,13 @@ from dataclasses import dataclass, field
 from functools import partial
 
 import pytest
+from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
+from mistral_common.protocol.instruct.messages import UserMessage
+from mistral_common.protocol.instruct.request import ChatCompletionRequest
 
 from vllm.multimodal.video import sample_frames_from_video
 from vllm.platforms import current_platform
+from vllm.tokenizers.mistral import MistralTokenizer
 
 from ....conftest import IMAGE_ASSETS, VIDEO_ASSETS
 from ...utils import dummy_hf_overrides
@@ -28,6 +32,10 @@ class VitCudagraphTestConfig:
     needs_video_metadata: bool = False
     vllm_runner_kwargs: dict = field(default_factory=dict)
     compilation_config_overrides: dict = field(default_factory=dict)
+    # The Pixtral processor requires the image token grid to be inserted by
+    # the Mistral tokenizer's chat-completion encoding, so raw text prompts
+    # cannot be used and `image_prompt` is passed as the text chunk instead.
+    mistral_chat_prompt: bool = False
     marks: list = field(default_factory=list)
     skip: bool = False
 
@@ -87,17 +95,21 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "tokenizer_mode": "mistral",
             "config_format": "mistral",
         },
+        mistral_chat_prompt=True,
         marks=[pytest.mark.core_model],
     ),
     "mistral3": VitCudagraphTestConfig(
         model="mistralai/Mistral-Small-3.1-24B-Instruct-2503",
         modalities=["image"],
-        image_prompt="<s>[INST][IMG]What is in this image?[/INST]",
+        image_prompt="What is in this image?",
         compilation_config_overrides={
             "encoder_cudagraph_token_budgets": [4096],
         },
+        mistral_chat_prompt=True,
         vllm_runner_kwargs={
             "load_format": "dummy",
+            "tokenizer_mode": "mistral",
+            "config_format": "mistral",
             "hf_overrides": partial(
                 dummy_hf_overrides,
                 model_arch="Mistral3ForConditionalGeneration",
@@ -355,12 +367,6 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
     if "image" not in config.modalities:
         pytest.skip(f"{model_id} does not support the image modality.")
 
-    image_prompts = IMAGE_ASSETS.prompts(
-        {
-            "stop_sign": config.image_prompt,  # type: ignore[typeddict-item]
-            "cherry_blossom": config.image_prompt,  # type: ignore[typeddict-item]
-        }
-    )
     images = [[asset.pil_image] for asset in image_assets]
 
     with vllm_runner(
@@ -372,6 +378,31 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
         compilation_config=get_compilation_config(config),
         **config.vllm_runner_kwargs,
     ) as vllm_model:
+        if config.mistral_chat_prompt:
+            tokenizer = vllm_model.llm.get_tokenizer()
+            assert isinstance(tokenizer, MistralTokenizer)
+            image_prompts = [
+                tokenizer.mistral.encode_chat_completion(
+                    ChatCompletionRequest(
+                        messages=[
+                            UserMessage(
+                                content=[
+                                    ImageChunk(image=asset.pil_image),
+                                    TextChunk(text=config.image_prompt),
+                                ]
+                            )
+                        ]
+                    )
+                ).tokens
+                for asset in image_assets
+            ]
+        else:
+            image_prompts = IMAGE_ASSETS.prompts(
+                {
+                    "stop_sign": config.image_prompt,  # type: ignore[typeddict-item]
+                    "cherry_blossom": config.image_prompt,  # type: ignore[typeddict-item]
+                }
+            )
         outputs = vllm_model.generate_greedy(
             image_prompts, config.max_tokens, images=images
         )
