@@ -115,15 +115,6 @@ class XPUWorker(Worker):
 
             self.local_rank += dp_local_rank * replica_world_size
 
-            assert self.local_rank < visible_device_count, (
-                f"DP adjusted local rank {self.local_rank} is out of bounds. "
-            )
-            assert parallel_config.local_world_size <= visible_device_count, (
-                f"local_world_size ({parallel_config.local_world_size}) must "
-                f"be less than or equal to the number of visible devices "
-                f"({visible_device_count})."
-            )
-
         device = self.device_config.device
         if (
             isinstance(device, torch.device)
@@ -158,6 +149,11 @@ class XPUWorker(Worker):
                         " exceeds assigned_physical_gpu_ids count "
                         f"({len(assigned_physical_gpu_ids)})"
                     )
+            else:
+                assert self.local_rank < torch.accelerator.device_count(), (
+                    f"DP adjusted local rank {self.local_rank} is out of "
+                    f"bounds for {torch.accelerator.device_count()} devices."
+                )
 
             visible_device_index = (
                 current_platform.logical_device_id_to_visible_device_id(self.local_rank)
