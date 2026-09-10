@@ -39,7 +39,9 @@ hardware YAMLs (cpu.yaml) can be passed without flagging other areas.
 
 Entry point (wired into the docker-area CPU CI job; the language area YAML
 satisfies the guard, and an integration test in
-``tests/tools/test_area_test_coverage.py`` keeps it that way):
+``tests/tools/test_area_test_coverage.py`` keeps it that way).
+Run from the repository root — CI jobs cd into ``tests/``, so there use the
+pytest path form or set ``PYTHONPATH=/vllm-workspace``:
 
     python -m tools.check_area_test_coverage --tree tests/models/language \
         .buildkite/test_areas/models_language.yaml \
