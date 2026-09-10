@@ -69,7 +69,7 @@ docker pull ubuntu:25.04 || true
 
 # building the docker image
 echo "--- :docker: Building Docker image"
-BUILD_RETRY_PATTERN='dial tcp|i/o timeout|failed to authorize|TLS handshake timeout|connection reset|Could not resolve host|Temporary failure in name resolution|dns error: failed to lookup address information|client error \(Connect\)|error sending request for url|Failed to fetch:'
+BUILD_RETRY_PATTERN='dial tcp|i/o timeout|failed to authorize|TLS handshake timeout|connection reset|PROTOCOL_ERROR|Could not resolve host|Temporary failure in name resolution|dns error: failed to lookup address information|client error \(Connect\)|error sending request for url|Failed to fetch:'
 BUILD_MAX_ATTEMPTS=4          # 1 initial + 3 retries
 BUILD_RETRY_WAITS=(10 20 40)  # seconds to wait before retry 1/2/3
 build_log="$(mktemp)"
@@ -80,7 +80,7 @@ while true; do
             -f docker/Dockerfile.cpu . 2>&1 | tee "$build_log"; then
         break
     fi
-    if [ "$attempt" -ge "$BUILD_MAX_ATTEMPTS" ] || ! grep -qE "$BUILD_RETRY_PATTERN" "$build_log"; then
+    if [ "$attempt" -ge "$BUILD_MAX_ATTEMPTS" ] || ! grep -qiE "$BUILD_RETRY_PATTERN" "$build_log"; then
         rm -f "$build_log"
         exit 1
     fi
