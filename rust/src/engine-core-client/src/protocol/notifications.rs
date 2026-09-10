@@ -5,7 +5,19 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// The set of loaded LoRA adapters changed.
+/// One measured adapter transition on the worker. Mirrors `LoRALoadTiming`
+/// in vllm/v1/notifications.py.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoraLoadTiming {
+    pub adapter_name: String,
+    /// `load`: read from disk into the CPU cache. `activate`: moved from the
+    /// CPU cache into a GPU slot.
+    pub transition: String,
+    pub seconds: f64,
+}
+
+/// The set of loaded LoRA adapters changed, or an adapter transition
+/// completed.
 ///
 /// A full snapshot of the worker's adapter caches, so consumers replace their
 /// state rather than merge. Python encodes it with `omit_defaults=True`, so
@@ -22,6 +34,9 @@ pub struct LoraLoadEvent {
     /// Adapters pinned in the caches (sorted).
     #[serde(default)]
     pub pinned_adapters: Vec<String>,
+    /// Adapter transitions completed since the previous event, in order.
+    #[serde(default)]
+    pub loads: Vec<LoraLoadTiming>,
 }
 
 /// Open escape hatch for out-of-tree producers.
@@ -80,10 +95,41 @@ mod tests {
                     pinned_adapters: [
                         "alpha",
                     ],
+                    loads: [],
                 },
             )
         "#]]
         .assert_debug_eq(&event);
+    }
+
+    /// Python: `encode(LoRALoadEvent(gpu_adapters=["alpha"], cpu_adapters=["alpha"],
+    /// loads=[LoRALoadTiming("alpha", "load", 0.25), LoRALoadTiming("alpha", "activate", 0.5)]))`
+    const PYTHON_LORA_LOAD_EVENT_WITH_LOADS: &str = "84a474797065af6c6f72615f6c6f61645f6576656e74ac6770755f616461707465727391a5616c706861ac6370755f616461707465727391a5616c706861a56c6f6164739283ac616461707465725f6e616d65a5616c706861aa7472616e736974696f6ea46c6f6164a77365636f6e6473cb3fd000000000000083ac616461707465725f6e616d65a5616c706861aa7472616e736974696f6ea86163746976617465a77365636f6e6473cb3fe0000000000000";
+
+    #[test]
+    fn engine_event_decodes_python_lora_load_event_with_timings() {
+        let event: EngineNotification =
+            decode_msgpack(&hex_bytes(PYTHON_LORA_LOAD_EVENT_WITH_LOADS)).unwrap();
+        assert_eq!(
+            event,
+            EngineNotification::LoraLoadEvent(LoraLoadEvent {
+                gpu_adapters: vec!["alpha".to_string()],
+                cpu_adapters: vec!["alpha".to_string()],
+                pinned_adapters: vec![],
+                loads: vec![
+                    LoraLoadTiming {
+                        adapter_name: "alpha".to_string(),
+                        transition: "load".to_string(),
+                        seconds: 0.25,
+                    },
+                    LoraLoadTiming {
+                        adapter_name: "alpha".to_string(),
+                        transition: "activate".to_string(),
+                        seconds: 0.5,
+                    },
+                ],
+            })
+        );
     }
 
     #[test]
