@@ -992,6 +992,17 @@ class Glm5NextForConditionalGeneration(
     has_inner_state: ClassVar[Literal[True]] = True
     is_hybrid: ClassVar[Literal[True]] = True
 
+    # GLM-5.3-Flash stores the dense-MLP gate/up as separate tensors (like
+    # ``Glm4vMoeForConditionalGeneration``, ``glm4_moe`` and ``deepseek_v2``),
+    # so the fused ``gate_up_proj`` must expand to its real shard names for
+    # per-layer quant-scheme resolution. The identity ``gate_up_proj`` entry
+    # inherited from ``Glm4vForConditionalGeneration`` (pre-fused gate_up_proj)
+    # would otherwise route the module to ``global_quant_config`` and mismatch
+    # at load for mixed-precision Quark checkpoints.
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     # NOTE: weight-prefix mapping is inherited from Glm4vForConditionalGeneration
     # (``model.visual.`` -> ``visual.``, ``model.language_model.`` ->
     # ``language_model.model.``, ``lm_head.`` -> ``language_model.lm_head.``),
@@ -1215,7 +1226,9 @@ def _try_load_fp8_attn_proj(
         return False
     suffix, (key, target_base, shard_id, is_kva) = matched
     is_weight = name.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn
-    is_scale = "weight_scale_inv" in name
+    # Need to accept both the DeepSeek-native ``weight_scale_inv`` and the Quark
+    # ``weight_scale`` names before feeding the shared block dequant below.
+    is_scale = "weight_scale_inv" in name or name.endswith(".weight_scale")
     if not is_weight and not is_scale:
         return False
 
