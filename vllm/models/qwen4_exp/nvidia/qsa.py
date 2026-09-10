@@ -77,16 +77,15 @@ class _QTokenKvBlockSparseTSPreparedState:
     key: tuple[object, ...]
     workspace: torch.Tensor
     plan: object
-    qo_indptr: torch.Tensor | None
 
 
 class _QTokenKvBlockSparseTSWorkspaces:
-    """Share scratch across ordered layers without owning captured storage.
+    """Share scratch and immutable query routes across ordered layers.
 
     One instance belongs to a model's static forward context, including MTP.
     The PrimTS owner rejects DBO and microbatching. Graph geometries stay
     disjoint so their split-KV counter layouts cannot overwrite each other.
-    Weak entries release storage after its last layer drops its plans.
+    Weak entries do not outlive the plans or forward metadata owning storage.
     """
 
     def __init__(self) -> None:
@@ -103,6 +102,20 @@ class _QTokenKvBlockSparseTSWorkspaces:
             workspace = torch.empty(num_bytes, dtype=torch.uint8, device=device)
             self._buffers[key] = workspace
         return workspace
+
+    def get_qo_indptr(
+        self,
+        key: tuple[object, ...],
+        offsets_cpu: torch.Tensor,
+        device: torch.device,
+    ) -> torch.Tensor:
+        # Keep the address stable while FlashInfer plans still bind these routes.
+        key = ("qo_indptr", device, *key)
+        offsets = self._buffers.get(key)
+        if offsets is None:
+            offsets = offsets_cpu.to(device, non_blocking=True)
+            self._buffers[key] = offsets
+        return offsets
 
 
 def _supports_q_token_kv_block_sparse_ts_geometry(
@@ -355,11 +368,6 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
                 layer._q_token_kv_block_sparse_ts_eager_states.move_to_end(state_key)
                 return state
 
-        qo_indptr = (
-            None
-            if qo_indptr_cpu is None
-            else qo_indptr_cpu.to(query.device, non_blocking=True)
-        )
         required_bytes = q_token_kv_block_sparse_ts_combined_workspace_size(
             query,
             key_cache,
@@ -416,13 +424,11 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
             workspace,
             out,
             max_seq_len_kv=max_seq_len_kv,
-            qo_indptr=qo_indptr,
-            seq_len_q=group_size if qo_indptr is not None else None,
+            qo_indptr=qo_indptr_cpu,
+            seq_len_q=group_size if qo_indptr_cpu is not None else None,
             kv_block_size=sparse_block_size,
         )
-        state = _QTokenKvBlockSparseTSPreparedState(
-            state_key, workspace, plan, qo_indptr
-        )
+        state = _QTokenKvBlockSparseTSPreparedState(state_key, workspace, plan)
         if persistent:
             layer._q_token_kv_block_sparse_ts_graph_states[state_key] = state
         else:
@@ -454,6 +460,8 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
         persistent_plan: bool = False,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
+        qo_indptr_cache: dict[tuple[object, ...], tuple[torch.Tensor, torch.Tensor]]
+        | None = None,
     ) -> torch.Tensor:
         del key, value
         if output_scale is not None or output_block_scale is not None:
@@ -571,6 +579,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
                 use_fixed_layout = True
 
             route_qo_indptr_cpu: torch.Tensor | None = None
+            route_qo_indptr: torch.Tensor | None = None
             if use_fixed_layout:
                 if num_tokens % group_size:
                     raise RuntimeError(
@@ -588,11 +597,30 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
                 route_output = prims_output.view_as(route_query)
             else:
                 assert route_query_start_offsets is not None
-                route_qo_indptr_cpu = q_token_kv_block_sparse_ts_qo_indptr(
+                route_key = (
                     route_query_start_offsets,
                     num_tokens,
                     group_size,
+                    query.device,
                 )
+                routes = (
+                    None if qo_indptr_cache is None else qo_indptr_cache.get(route_key)
+                )
+                if routes is None:
+                    route_qo_indptr_cpu = q_token_kv_block_sparse_ts_qo_indptr(
+                        route_query_start_offsets,
+                        num_tokens,
+                        group_size,
+                    )
+                    routes = (
+                        route_qo_indptr_cpu,
+                        layer._q_token_kv_block_sparse_ts_workspaces.get_qo_indptr(
+                            route_key, route_qo_indptr_cpu, query.device
+                        ),
+                    )
+                    if qo_indptr_cache is not None:
+                        qo_indptr_cache[route_key] = routes
+                route_qo_indptr_cpu, route_qo_indptr = routes
                 route_query = query_for_attention
                 route_output = prims_output
 
@@ -639,7 +667,7 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
                 token_to_req,
                 logical_positions,
                 route_output,
-                qo_indptr=state.qo_indptr,
+                qo_indptr=route_qo_indptr,
                 sm_scale=bmm1_scale,
                 v_scale=bmm2_scale,
             )
@@ -1009,6 +1037,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             use_prefill_config=main_metadata.max_query_len > self._max_decode_query_len,
             logical_positions=selected_positions,
             query_start_offsets=side_metadata.query_start_offsets,
+            qo_indptr_cache=side_metadata.q_token_kv_block_sparse_qo_indptr,
             has_prefill=side_metadata.has_prefill,
             uniform_decode_query_len=side_metadata.uniform_decode_query_len,
             persistent_plan=(

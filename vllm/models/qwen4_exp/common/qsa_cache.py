@@ -12,7 +12,7 @@ shared by the generic cache-layout planner.
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cache
 from typing import ClassVar
 
@@ -654,6 +654,10 @@ class QSAForwardMetadata(AttentionMetadata):
     has_prefill: bool
     uniform_decode_query_len: int | None
     prepare_cudagraph_plan: bool
+    # Immutable CPU/device query routes shared by layers in this forward pass.
+    q_token_kv_block_sparse_qo_indptr: dict[
+        tuple[object, ...], tuple[torch.Tensor, torch.Tensor]
+    ] = field(default_factory=dict)
 
 
 class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
