@@ -192,14 +192,19 @@ class GenerateRequest(BaseModel):
             return self
         if not _has_serialized_mm_items(features.mm_metadata):
             return self
-        if _has_serialized_mm_items(features.kwargs_data):
-            return self
         if self.ec_transfer_params:
             return self
-        raise ValueError(
-            "features.mm_metadata without features.kwargs_data requires "
-            "ec_transfer_params so embeddings can be loaded by the EC connector"
-        )
+        kwargs_data = features.kwargs_data or {}
+        for modality, metadata_items in (features.mm_metadata or {}).items():
+            kwargs_items = kwargs_data.get(modality, [None] * len(metadata_items))
+            if any(
+                metadata is not None and kwargs is None
+                for metadata, kwargs in zip(metadata_items, kwargs_items, strict=True)
+            ):
+                raise ValueError(
+                    "metadata-only multimodal items require ec_transfer_params"
+                )
+        return self
 
     sampling_params: SamplingParams
     """The sampling parameters for the model."""
