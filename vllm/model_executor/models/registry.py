@@ -350,6 +350,10 @@ _MULTIMODAL_MODELS = {
         "AudioFlamingo3ForConditionalGeneration",
     ),
     "BagelForConditionalGeneration": ("bagel", "BagelForConditionalGeneration"),
+    "BailingMoeV3VLForConditionalGeneration": (
+        "bailing_moe_v3_vl",
+        "BailingMoeV3VLForConditionalGeneration",
+    ),
     "BeeForConditionalGeneration": ("bee", "BeeForConditionalGeneration"),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
     "Cohere2VisionForConditionalGeneration": (
