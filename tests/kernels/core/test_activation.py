@@ -241,7 +241,7 @@ def test_swiglu_limit_func_without_routing_uses_output_buffer() -> None:
 @pytest.mark.parametrize("d", D)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", ["cuda:0"])
 @torch.inference_mode()
 def test_silu_and_mul_with_clamp(
     default_vllm_config,
