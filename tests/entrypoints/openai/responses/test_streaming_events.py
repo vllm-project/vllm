@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from openai.types.responses import CustomTool, ResponseCustomToolCall
+from openai.types.responses import (
+    CustomTool,
+    ResponseCustomToolCall,
+    response_text_delta_event,
+)
 
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -142,7 +146,29 @@ class TestSimpleItemShapes:
         assert done[0].id.startswith("rs_")
         assert done[1].id.startswith("msg_")
         assert "summary" not in done[1].model_dump()
+        assert done[1].content[0].logprobs is None
         assert done[0].encrypted_content is None
+
+    def test_content_logprobs_carried_to_done_item(self):
+        top = response_text_delta_event.LogprobTopLogprob(token="hi", logprob=-0.5)
+        logprob = response_text_delta_event.Logprob(
+            token="hi", logprob=-0.5, top_logprobs=[top]
+        )
+        processor = SimpleStreamingEventProcessor()
+        events = processor.open(_StateType.CONTENT)
+        events += processor.emit_delta(
+            DeltaMessage(content="hi"), None, lambda _: [logprob]
+        )
+        events += processor.close_current()
+
+        delta = next(e for e in events if e.type == "response.output_text.delta")
+        assert delta.logprobs == [logprob]
+        part = events[-1].item.content[0]
+        assert [lp.token for lp in part.logprobs] == ["hi"]
+        assert part.logprobs[0].bytes == [104, 105]
+        assert part.logprobs[0].top_logprobs[0].bytes == [104, 105]
+        content_done = next(e for e in events if e.type == "response.content_part.done")
+        assert content_done.part == part
 
     def test_encrypted_reasoning_on_done_item(self):
         processor = SimpleStreamingEventProcessor(encrypt_reasoning=True)

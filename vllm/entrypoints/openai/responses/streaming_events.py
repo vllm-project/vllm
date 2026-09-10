@@ -59,6 +59,10 @@ from openai.types.responses import (
     response_text_delta_event,
 )
 from openai.types.responses.response_output_item import McpCall
+from openai.types.responses.response_output_text import Logprob as OutputTextLogprob
+from openai.types.responses.response_output_text import (
+    LogprobTopLogprob as OutputTextTopLogprob,
+)
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
@@ -833,7 +837,29 @@ class SimpleStreamingState:
     tool_call_is_custom: bool = False
     tool_call_payload: str = ""
     encrypt_reasoning: bool = False
+    accumulated_logprobs: list[OutputTextLogprob] = field(default_factory=list)
     current_state: _StateType = field(default_factory=lambda: _StateType.NONE)
+
+
+def _output_text_logprobs(
+    logprobs: list[response_text_delta_event.Logprob],
+) -> list[OutputTextLogprob]:
+    return [
+        OutputTextLogprob(
+            token=lp.token,
+            logprob=lp.logprob,
+            bytes=list(lp.token.encode("utf-8", errors="replace")),
+            top_logprobs=[
+                OutputTextTopLogprob(
+                    token=tl.token,
+                    logprob=tl.logprob,
+                    bytes=list(tl.token.encode("utf-8", errors="replace")),
+                )
+                for tl in lp.top_logprobs
+            ],
+        )
+        for lp in logprobs
+    ]
 
 
 def emit_simple_content_open(
@@ -843,6 +869,7 @@ def emit_simple_content_open(
     state.current_item_id = f"msg_{random_uuid()}"
     state.content_index = 0
     state.accumulated_text = ""
+    state.accumulated_logprobs = []
     return [
         ResponseOutputItemAddedEvent(
             type="response.output_item.added",
@@ -878,6 +905,8 @@ def emit_simple_content_delta(
     logprobs: list[response_text_delta_event.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
     state.accumulated_text += delta
+    if logprobs:
+        state.accumulated_logprobs.extend(_output_text_logprobs(logprobs))
     return [
         ResponseTextDeltaEvent(
             type="response.output_text.delta",
@@ -898,6 +927,7 @@ def emit_simple_content_done(
         type="output_text",
         text=state.accumulated_text,
         annotations=[],
+        logprobs=state.accumulated_logprobs or None,
     )
     events: list[StreamingResponsesResponse] = [
         ResponseTextDoneEvent(
