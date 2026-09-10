@@ -60,31 +60,40 @@ def _has_unclamped_window(layers) -> bool:
 
 
 class CompositeAttentionRouting(Protocol):
+    """Select a child backend and declare routing constraints for composition."""
+
     capture_variant: ClassVar[int]
+    """Child used during graph capture; replay must select the same child."""
 
     def __init__(self, layer_names: list[str], vllm_config: VllmConfig) -> None: ...
 
-    def select(self, metadata: CommonAttentionMetadata) -> int: ...
+    def select(self, metadata: CommonAttentionMetadata) -> int:
+        """Return 0 for the first child or 1 for the second child."""
+        ...
 
     @staticmethod
     def get_cudagraph_support(
         vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec
-    ) -> AttentionCGSupport: ...
+    ) -> AttentionCGSupport:
+        """Limit graph support to batches whose routing stays invariant."""
+        ...
 
     @staticmethod
-    def variant_uses_mm_prefix(variant: int) -> bool: ...
+    def variant_uses_mm_prefix(variant: int) -> bool:
+        """Whether this child must support the model's image-mask requirement."""
+        ...
 
 
-class MMPrefixAttentionRouting:
+class MMPrefixAttentionRouting(CompositeAttentionRouting):
     """Route image masks to variant zero and causal queries to variant one."""
 
-    def __init__(self, layer_names, vllm_config):
+    def __init__(self, layer_names: list[str], vllm_config: VllmConfig) -> None:
         layers = vllm_config.compilation_config.static_forward_context
         self.unclamped_window = _has_unclamped_window(
             layers[name] for name in layer_names
         )
 
-    def select(self, metadata):
+    def select(self, metadata: CommonAttentionMetadata) -> int:
         return int(
             not requires_mm_prefix(metadata, unclamped_window=self.unclamped_window)
         )
@@ -92,7 +101,9 @@ class MMPrefixAttentionRouting:
     capture_variant: ClassVar[int] = 1
 
     @staticmethod
-    def get_cudagraph_support(vllm_config, kv_cache_spec):
+    def get_cudagraph_support(
+        vllm_config: VllmConfig, kv_cache_spec: KVCacheSpec
+    ) -> AttentionCGSupport:
         if _has_unclamped_window(
             vllm_config.compilation_config.static_forward_context.values()
         ):
@@ -100,7 +111,7 @@ class MMPrefixAttentionRouting:
         return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     @staticmethod
-    def variant_uses_mm_prefix(variant):
+    def variant_uses_mm_prefix(variant: int) -> bool:
         return variant == 0
 
 
