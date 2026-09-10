@@ -1821,6 +1821,7 @@ class CkptCtx:
     """Per-checkpoint facts a QuantKey cannot carry."""
 
     group_size: int | None = None
+    scale_block_size: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -2153,6 +2154,23 @@ class KMxfp8Static(QuantKeyScheme):
 
     key = kMxfp8Static
 
+    @staticmethod
+    def get_scale_weight_loader(weight_loader: Callable, ctx: CkptCtx) -> Callable:
+        block_rows, block_cols = ctx.scale_block_size or (1, MXFP8_BLOCK_SIZE)
+        if block_rows < 1 or block_cols != MXFP8_BLOCK_SIZE:
+            raise NotImplementedError(
+                f"MXFP8 checkpoint scale block {ctx.scale_block_size} is unsupported"
+            )
+
+        def scaled_loader(param, loaded_weight, *args, **kwargs):
+            assert loaded_weight.dtype in (torch.uint8, torch.float8_e8m0fnu)
+            loaded_weight = loaded_weight.view(torch.uint8).repeat_interleave(
+                block_rows, dim=0
+            )
+            return weight_loader(param, loaded_weight, *args, **kwargs)
+
+        return scaled_loader if block_rows > 1 else weight_loader
+
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is not WEIGHT:
             self.reject(role)
@@ -2171,6 +2189,7 @@ class KMxfp8Static(QuantKeyScheme):
             input_dim=1,
             output_dim=0,
         )
+        scale_loader = self.get_scale_weight_loader(wl, ctx)
         self.register_params(
             layer,
             "weight_scale",
@@ -2180,10 +2199,11 @@ class KMxfp8Static(QuantKeyScheme):
             ),
             MXFP8_SCALE_DTYPE,
             ModelWeightParameter,
-            wl,
+            scale_loader,
             input_dim=1,
             output_dim=0,
         )
+        layer.weight_block_size = [1, MXFP8_BLOCK_SIZE]
 
     def process(self, layer, role) -> None:
         if role is not WEIGHT:
@@ -2193,6 +2213,8 @@ class KMxfp8Static(QuantKeyScheme):
         # on). On a weight reload process runs again after that swap, so skip
         # the fp8 asserts when the weight is already >=2-byte.
         if layer.weight.element_size() >= 2:
+            return
+        if getattr(layer, "is_bmm", False) and layer.weight.ndim == 3:
             return
         assert layer.weight.ndim == 2 and layer.weight.dtype == MXFP8_VALUE_DTYPE
         assert layer.weight_scale.ndim == 2
@@ -2255,7 +2277,9 @@ def select_linear_kernel(
         # after #50273); W4A4 → use_a16=False.
         return init_nvfp4_linear_kernel(use_a16=spec.activation is None)
     if w.scale.dtype == MXFP8_SCALE_DTYPE:
-        return init_mxfp8_linear_kernel()
+        return init_mxfp8_linear_kernel(
+            bmm_batch_size=getattr(layer, "bmm_batch_size", None)
+        )
     # fp8 family: init_fp8 routes block-vs-plain itself off the activation key,
     # and needs a real key -- weight-only fp8 is not a ModelOpt format.
     act = spec.activation
@@ -2482,6 +2506,8 @@ class ModelOptLinearMethod(LinearMethodBase):
                 persistent=False,
             )
             layer._nvfp4_group_size_for_gather = self.ctx.group_size
+        if self.spec.weight == kMxfp8Static and getattr(layer, "is_bmm", False):
+            self.kernel = init_mxfp8_linear_kernel(bmm_batch_size=layer.bmm_batch_size)
         self.kernel.process_weights_after_loading(layer)
 
     def apply(self, layer, x, bias=None):

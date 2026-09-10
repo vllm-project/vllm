@@ -78,7 +78,7 @@ def _hc_head_reduce_store_kernel(
     out_stride_h: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
+    token_idx = tl.program_id(0).to(tl.int64)
     block_idx = tl.program_id(1)
     offsets = block_idx * BLOCK_H + tl.arange(0, BLOCK_H)
     mask = offsets < hidden_size
@@ -103,6 +103,42 @@ def _hc_head_reduce_store_kernel(
         acc,
         mask=mask,
     )
+
+
+def hc_collapse_triton(x: Tensor, pre_mix: Tensor) -> Tensor:
+    """Collapse BF16 residual streams with FP32 pre-mix coefficients."""
+    assert x.ndim == 3 and x.dtype == torch.bfloat16
+    num_tokens, hc_mult, hidden_size = x.shape
+    assert pre_mix.shape == (num_tokens, hc_mult)
+    assert pre_mix.dtype == torch.float32
+    out = torch.empty(num_tokens, hidden_size, dtype=x.dtype, device=x.device)
+    if num_tokens == 0:
+        return out
+
+    block_h = 1024
+    _hc_head_reduce_store_kernel[(num_tokens, triton.cdiv(hidden_size, block_h))](
+        pre_mix,
+        x,
+        out,
+        hidden_size,
+        hc_mult,
+        pre_mix.stride(0),
+        pre_mix.stride(1),
+        x.stride(0),
+        x.stride(1),
+        x.stride(2),
+        out.stride(0),
+        out.stride(1),
+        BLOCK_H=block_h,
+        num_warps=4,
+        # Preserve the separate FP32 multiply and sum in the Torch reference.
+        enable_fp_fusion=False,
+    )
+    return out
+
+
+def _hc_collapse_triton_fake(x: Tensor, pre_mix: Tensor) -> Tensor:
+    return torch.empty(x.shape[0], x.shape[2], dtype=x.dtype, device=x.device)
 
 
 def hc_head_reduce_triton_kernel(
@@ -171,4 +207,12 @@ direct_register_custom_op(
     op_name="hc_head_triton",
     op_func=_hc_head_triton,
     mutates_args=["out"],
+)
+
+
+direct_register_custom_op(
+    op_name="hc_collapse_triton",
+    op_func=hc_collapse_triton,
+    mutates_args=[],
+    fake_impl=_hc_collapse_triton_fake,
 )
