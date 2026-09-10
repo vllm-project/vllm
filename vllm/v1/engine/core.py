@@ -102,6 +102,24 @@ HANDSHAKE_TIMEOUT_MINS = 5
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 
+def _merge_engine_core_outputs(
+    dst: dict[int, "EngineCoreOutputs"], src: dict[int, "EngineCoreOutputs"]
+) -> None:
+    for client_index, out in src.items():
+        cur = dst.get(client_index)
+        if cur is None:
+            dst[client_index] = out
+            continue
+        cur.outputs.extend(out.outputs)
+        if out.finished_requests:
+            if cur.finished_requests:
+                cur.finished_requests |= out.finished_requests
+            else:
+                cur.finished_requests = out.finished_requests
+        if out.scheduler_stats is not None:
+            cur.scheduler_stats = out.scheduler_stats
+
+
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
@@ -646,6 +664,35 @@ class EngineCore:
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
 
+    def _pop_and_process_batch(
+        self,
+        batch_queue: (
+            "deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]]"
+        ),
+    ) -> dict[int, EngineCoreOutputs]:
+        """Pop the oldest in-flight batch, wait for its result, and update
+        the scheduler from it."""
+        future, scheduler_output, exec_model_fut = batch_queue.pop()
+        with (
+            self.capture_iteration_details(scheduler_output) as iteration_details,
+            self.log_error_detail(scheduler_output),
+        ):
+            model_output = future.result()
+            if model_output is None:
+                # None from sample_tokens() implies that the original execute_model()
+                # call failed - raise that exception.
+                exec_model_fut.result()
+                raise RuntimeError("unexpected error")
+
+        # Before processing the model output, process any aborts that happened
+        # during the model execution.
+        self._process_aborts_queue()
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, model_output
+        )
+        self._attach_iteration_details(engine_core_outputs, iteration_details)
+        return engine_core_outputs
+
     def step_with_batch_queue(
         self,
     ) -> tuple[dict[int, EngineCoreOutputs] | None, bool]:
@@ -717,30 +764,28 @@ class EngineCore:
             return None, False
 
         # Block until the next result is available.
-        future, scheduler_output, exec_model_fut = batch_queue.pop()
-        with (
-            self.capture_iteration_details(scheduler_output) as iteration_details,
-            self.log_error_detail(scheduler_output),
-        ):
-            model_output = future.result()
-            if model_output is None:
-                # None from sample_tokens() implies that the original execute_model()
-                # call failed - raise that exception.
-                exec_model_fut.result()
-                raise RuntimeError("unexpected error")
-
-        # Before processing the model output, process any aborts that happened
-        # during the model execution.
-        self._process_aborts_queue()
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output
-        )
-        self._attach_iteration_details(engine_core_outputs, iteration_details)
+        engine_core_outputs = self._pop_and_process_batch(batch_queue)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
+            # PP + structured outputs: the single result processed above only
+            # advances each structured request's grammar FSM by ~one step.
+            # Fine when pp_size == 1 (the FSM lags by at most one in-flight
+            # token), but with pp_size > 1 the previous token can be several
+            # batches deep, so the FSM would still be stale and the bitmask
+            # wrong. Drain the queue until those requests are caught up (#45014).
+            while batch_queue and self.scheduler.has_structured_output_in_flight(
+                deferred_scheduler_output
+            ):
+                _merge_engine_core_outputs(
+                    engine_core_outputs,
+                    self._pop_and_process_batch(batch_queue),
+                )
+            assert not self.scheduler.has_structured_output_in_flight(
+                deferred_scheduler_output
+            )
             # When draft tokens are used with structured output, validate them
             # before computing the grammar bitmask for the deferred request.
             if self.check_for_draft_tokens:
