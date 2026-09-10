@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from contextlib import contextmanager
 from typing import Any, Literal
 
@@ -21,6 +22,7 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.v1.notifications import LoRALoadTiming
 
 logger = init_logger(__name__)
 
@@ -69,6 +71,7 @@ class WorkerLoRAManager:
                 text_config, "max_position_embeddings", None
             )
         self.device = device
+        self._load_timings: list[LoRALoadTiming] = []
         # Adapter int id -> adapter name; pruned to the registered set on
         # each get_loaded_names() call.
         self._adapter_names: dict[int, str] = {}
@@ -230,10 +233,36 @@ class WorkerLoRAManager:
             return False
         # One-time per adapter
         with gpu_sync_allowed():
-            loaded_adapter = self._load_adapter(adapter_request)
+            loaded_adapter = self._timed_load_adapter(adapter_request)
             loaded = self._adapter_manager.add_adapter(loaded_adapter)
-            self._adapter_manager.activate_adapter(loaded_adapter.id)
+            self._timed_activate_adapter(adapter_request)
         return loaded
+
+    def _timed_load_adapter(self, lora_request: Any) -> LoRAModel:
+        start = time.perf_counter()
+        lora = self._load_adapter(lora_request)
+        self._record_load_timing(lora_request, "load", start)
+        return lora
+
+    def _timed_activate_adapter(self, lora_request: Any) -> None:
+        start = time.perf_counter()
+        if self._adapter_manager.activate_adapter(lora_request.lora_int_id):
+            self._record_load_timing(lora_request, "activate", start)
+
+    def _record_load_timing(self, lora_request: Any, transition: str, start: float):
+        self._load_timings.append(
+            LoRALoadTiming(
+                adapter_name=lora_request.lora_name,
+                transition=transition,
+                seconds=time.perf_counter() - start,
+            )
+        )
+
+    def drain_load_timings(self) -> list[LoRALoadTiming]:
+        """Adapter transitions measured since the last drain, oldest first."""
+        timings = self._load_timings
+        self._load_timings = []
+        return timings
 
     def remove_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.remove_adapter(adapter_id)
@@ -330,7 +359,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                 # evicting any existing adapters.
                 # This may cause the # of loaded lora adapters to very temporarily
                 # exceed `--max-cpu-loras`.
-                lora = self._load_adapter(lora_request)
+                lora = self._timed_load_adapter(lora_request)
 
                 # Remove the existing adapter if it exists
                 # Use case for LoRA inplace
@@ -350,5 +379,5 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                     self._adapter_manager.get_adapter(lora_request.lora_int_id)
                     is not None
                 )
-            self._adapter_manager.activate_adapter(lora_request.lora_int_id)
+            self._timed_activate_adapter(lora_request)
         return loaded

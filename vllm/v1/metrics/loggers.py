@@ -1069,6 +1069,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         # api_server counts which uses prometheus mp.
         self.gauge_lora_info: Gauge | None = None
         self.gauge_lora_adapter_loaded: Gauge | None = None
+        self.histogram_lora_load_seconds: dict[int, Histogram] = {}
+        self.histogram_lora_activate_seconds: dict[int, Histogram] = {}
         self.gauge_lora_gpu_adapters: dict[int, PromMetric] = {}
         self.gauge_lora_cpu_adapters: dict[int, PromMetric] = {}
         # Label tuples emitted by the last load event, per engine, so series
@@ -1158,6 +1160,26 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 labelnames=labelnames + ["adapter_name", "level", "pinned"],
             )
 
+            histogram_lora_load_seconds = self._histogram_cls(
+                name="vllm:lora_adapter_load_seconds",
+                documentation=(
+                    "Histogram of LoRA adapter transition time in seconds. "
+                    "'transition' is 'load' for a read from disk into the "
+                    "CPU cache and 'activate' for a move from the CPU cache "
+                    "into a GPU slot."
+                ),
+                buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
+                labelnames=labelnames + ["transition"],
+            )
+            self.histogram_lora_load_seconds = {
+                idx: histogram_lora_load_seconds.labels(*labelvalues, "load")
+                for idx, labelvalues in per_engine_labelvalues.items()
+            }
+            self.histogram_lora_activate_seconds = {
+                idx: histogram_lora_load_seconds.labels(*labelvalues, "activate")
+                for idx, labelvalues in per_engine_labelvalues.items()
+            }
+
     def record_engine_notifications(
         self, engine_notifications: list[EngineNotification], engine_idx: int = 0
     ):
@@ -1168,6 +1190,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     def _record_lora_load_event(self, event: LoRALoadEvent, engine_idx: int):
         if self.gauge_lora_adapter_loaded is None:
             return
+        for timing in event.loads:
+            histograms = (
+                self.histogram_lora_load_seconds
+                if timing.transition == "load"
+                else self.histogram_lora_activate_seconds
+            )
+            histograms[engine_idx].observe(timing.seconds)
         self.gauge_lora_gpu_adapters[engine_idx].set(len(event.gpu_adapters))
         self.gauge_lora_cpu_adapters[engine_idx].set(len(event.cpu_adapters))
 

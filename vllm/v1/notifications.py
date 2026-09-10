@@ -43,16 +43,32 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+class LoRALoadTiming(
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):
+    """One measured adapter transition on the worker."""
+
+    adapter_name: str
+    transition: str
+    """`load`: read from disk into the CPU cache. `activate`: moved from the
+    CPU cache into a GPU slot."""
+    seconds: float
+
+
 class LoRALoadEvent(
     msgspec.Struct,
     tag="lora_load_event",
     omit_defaults=True,  # type: ignore[call-arg]
     gc=False,
 ):
-    """The set of loaded LoRA adapters changed.
+    """The set of loaded LoRA adapters changed, or an adapter transition
+    completed.
 
     A full snapshot of the worker's adapter caches, so consumers replace their
-    state rather than merge. Adapters are keyed by name.
+    state rather than merge. Adapters are keyed by name. `loads` carries the
+    transitions measured since the previous event.
     """
 
     gpu_adapters: list[str] = []
@@ -63,6 +79,9 @@ class LoRALoadEvent(
 
     pinned_adapters: list[str] = []
     """Adapters pinned in the caches (sorted)."""
+
+    loads: list[LoRALoadTiming] = []
+    """Adapter transitions completed since the previous event, in order."""
 
 
 class CustomNotification(

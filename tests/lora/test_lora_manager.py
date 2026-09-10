@@ -1234,3 +1234,59 @@ def test_model_runner_mixin_publishes_lora_load_events(
 
     runner.maybe_remove_all_loras(lora_config)
     assert take_worker_notifications() == [LoRALoadEvent()]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_lru_cache_worker_adapter_manager_load_timings(
+    dist_init, dummy_model, device, tmp_path
+):
+    """Every disk load and every CPU-to-GPU activation is timed once, a
+    warm re-add is not, and draining empties the buffer."""
+    lora_config = LoRAConfig(
+        max_lora_rank=8, max_cpu_loras=3, max_loras=2, lora_dtype=DEFAULT_DTYPE
+    )
+    dummy_lora_files = f"{tmp_path}/lora_adapter"
+    os.makedirs(dummy_lora_files, exist_ok=True)
+    create_peft_lora(
+        dummy_model,
+        save_dir=dummy_lora_files,
+        target_modules=["layer1.dense1", "dense2"],
+        lora_dtype=DEFAULT_DTYPE,
+    )
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config, lora_config=lora_config)
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
+    manager = LRUCacheWorkerLoRAManager(vllm_config, device, EMBEDDING_MODULES)
+    manager.create_lora_manager(dummy_model, vllm_config)
+
+    def request(i: int) -> LoRARequest:
+        return LoRARequest(f"adapter-{i}", i, dummy_lora_files)
+
+    def transitions() -> list[tuple[str, str]]:
+        timings = manager.drain_load_timings()
+        assert all(t.seconds >= 0 for t in timings)
+        return [(t.adapter_name, t.transition) for t in timings]
+
+    assert transitions() == []
+
+    manager.add_adapter(request(1))
+    assert transitions() == [("adapter-1", "load"), ("adapter-1", "activate")]
+
+    # Warm re-add: already in a GPU slot, nothing to time.
+    manager.add_adapter(request(1))
+    assert transitions() == []
+
+    manager.add_adapter(request(2))
+    manager.add_adapter(request(3))  # evicts adapter-1 from its GPU slot
+    assert transitions() == [
+        ("adapter-2", "load"),
+        ("adapter-2", "activate"),
+        ("adapter-3", "load"),
+        ("adapter-3", "activate"),
+    ]
+
+    # adapter-1 is still in the CPU cache: activation only.
+    manager.add_adapter(request(1))
+    assert transitions() == [("adapter-1", "activate")]
+    assert manager.drain_load_timings() == []

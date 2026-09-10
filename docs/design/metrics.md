@@ -409,6 +409,11 @@ idle engine with statically configured adapters:
   so a router can compare occupancy against capacity before the first
   request; the `max_lora` label on the deprecated gauge above only
   appears once an adapter has served.
+- `vllm:lora_adapter_load_seconds{transition="load"|"activate"}`: a
+  histogram of how long each adapter transition took on the worker,
+  `load` for disk into the CPU cache and `activate` for the CPU cache
+  into a GPU slot. A router can turn this into the expected cost of
+  sending a request to a server that has to load the adapter first.
 
 Note that `multiprocess_mode="livemostrecent"` is used - the most
 recent metric is used, but only from currently running processes.

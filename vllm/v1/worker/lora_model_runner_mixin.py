@@ -50,9 +50,11 @@ class LoRAModelRunnerMixin:
 
     def _publish_lora_load_event(self) -> None:
         """Publish a LoRALoadEvent if the loaded set changed since the last
-        publish. Unchanged costs three small set copies and a compare."""
+        publish or a transition was timed. Unchanged costs three small set
+        copies and a compare."""
         state = self.lora_manager.get_loaded_state()
-        if state == self._last_lora_loaded_state:
+        loads = self.lora_manager.drain_load_timings()
+        if state == self._last_lora_loaded_state and not loads:
             return
         self._last_lora_loaded_state = state
         gpu_adapters, cpu_adapters, pinned_adapters = (
@@ -63,6 +65,7 @@ class LoRAModelRunnerMixin:
                 gpu_adapters=gpu_adapters,
                 cpu_adapters=cpu_adapters,
                 pinned_adapters=pinned_adapters,
+                loads=loads,
             )
         )
 
