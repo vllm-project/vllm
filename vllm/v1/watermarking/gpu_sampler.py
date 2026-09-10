@@ -29,11 +29,13 @@ class GPUWatermarkSampler(Sampler):
         watermarker: Watermarker,
         *args,
         deduplicate_contexts: bool = True,
+        deduplicate_contexts_max_history: int | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.watermarker = watermarker
         self.deduplicate_contexts = deduplicate_contexts
+        self.deduplicate_contexts_max_history = deduplicate_contexts_max_history
         self.watermarking = UvaBackedTensor(
             self.sampling_states.max_num_reqs, dtype=torch.bool
         )
@@ -163,6 +165,7 @@ class GPUWatermarkSampler(Sampler):
             self.req_states.prompt_len.gpu,
             self.req_states.total_len.gpu,
             contexts,
+            self.deduplicate_contexts_max_history,
         )
 
     def _get_contexts(self, expanded_idx_mapping: torch.Tensor) -> torch.Tensor:

@@ -478,6 +478,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.sampler = GPUWatermarkSampler(
                     watermarker,
                     deduplicate_contexts=watermark_config.deduplicate_contexts,
+                    deduplicate_contexts_max_history=(
+                        watermark_config.deduplicate_contexts_max_history
+                    ),
                     **sampler_kwargs,
                 )
             custom = self.model_state.custom_sampler(self.sampler)
