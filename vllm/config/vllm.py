@@ -2613,6 +2613,8 @@ class VllmConfig:
 
     def _get_v2_model_runner_unsupported_features(self) -> list[str]:
         """Collect features not yet supported by the V2 model runner."""
+        from vllm.platforms import current_platform
+
         unsupported: list[str] = []
         model_config = self.model_config
         speculative_config = self.speculative_config
@@ -2680,6 +2682,16 @@ class VllmConfig:
 
         if self.cache_config.mamba_cache_mode == "all":
             unsupported.append("mamba cache mode 'all'")
+
+        # Two paths still reach Triton-only kernels on CPU: the hybrid model
+        # state and M-RoPE position setup. Each predicate is the one that selects
+        # the path it guards, in model_states/__init__.py and mm/rope.py
+        # respectively, so a gate cannot drift from its kernels.
+        if model_config is not None and current_platform.is_cpu():
+            if model_config.is_hybrid or model_config.is_attention_free:
+                unsupported.append("hybrid and Mamba models on CPU")
+            if model_config.uses_mrope:
+                unsupported.append("M-RoPE models on CPU")
 
         return unsupported
 
