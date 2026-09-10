@@ -297,3 +297,29 @@ def test_nemotron_fp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
         hf_overrides=HF_OVERRIDE_TEXT,
         extra_args=["--moe-backend=flashinfer_trtllm"],
     )
+
+
+def test_nemotron_online_nvfp4_per_token_moe_flashinfer_trtllm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # BF16 checkpoint quantized to NVFP4 at load time (online/nvfp4.py).
+    can_initialize(
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=[
+            "--quantization=nvfp4_per_token",
+            "--moe-backend=flashinfer_trtllm",
+        ],
+    )
+
+
+def test_nemotron_nvfp4_per_token_moe_flashinfer_trtllm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # ModelOpt NVFP4 checkpoint with the static activation scales replaced by
+    # per-token scales (modelopt.py, hf_config.nvfp4_per_token_activation).
+    can_initialize(
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+        hf_overrides={**HF_OVERRIDE_TEXT, "nvfp4_per_token_activation": True},
+        extra_args=["--moe-backend=flashinfer_trtllm"],
+    )
