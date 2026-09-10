@@ -1,0 +1,21 @@
+model_name: "Qwen/Qwen3.5-4B"
+# full GSM8K set is 1319 questions
+num_questions: 1319
+num_fewshot: 5
+max_concurrency: 256
+max_tokens: 1024
+use_chat_completions: true
+temperature: 0.7
+seed: 42
+
+# Calibrated by running non-watermaked 13 times
+# the threshold is the average accuracy, and the tolerance is set to 3 sigma (standard deviations)
+accuracy_threshold: 0.885
+tolerance: 0.015
+
+server_args: >-
+  --language-model-only
+  --max-model-len 8192
+  --gpu-memory-utilization 0.4
+  --default-chat-template-kwargs '{"enable_thinking": false}'
+  --watermark-config '{"key": 42, "context_width": 4}'
