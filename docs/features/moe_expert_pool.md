@@ -11,15 +11,21 @@ vllm serve <model> --moe-expert-pool-rows 258
 
 `--moe-expert-pool-rows N` (config field `OffloadConfig.moe_expert_pool_rows`,
 default `0` = off) sets how many expert rows per layer are resident at
-startup. The bank size is `N x number of MoE layers x row bytes`; rows can
-move between layers at run time.
+startup; the effective count is `min(N, E - 1)` for `E` experts per layer.
+The bank holds `layers x min(N, E - 1)` rows plus `top_k x decode tokens`
+staging rows, so its storage is `(layers x min(N, E - 1) + staging) x row
+bytes`; the planner's tables and scratch buffers are separate, small
+allocations. Rows can move between layers at run time.
 
 ## How it works
 
-- Loading: the NVFP4 expert tensors are allocated in pinned host memory
-  instead of the GPU. The loader still moves one layer at a time to the GPU
-  for the Marlin conversion and restores the converted tensors to pinned
-  memory, which becomes the pool's source.
+- Loading: the four per-expert tensors (gate/up and down weights and their
+  block scales) are allocated in pinned host memory instead of the GPU. The
+  loader still moves one layer at a time to the GPU for the Marlin
+  conversion and restores those tensors to pinned memory, which becomes the
+  pool's source. The small per-expert global scales stay on the device and
+  are copied into a pinned, contiguous host buffer when the pool is
+  installed.
 - Installation: after every layer has been processed, the pool allocates the
   bank, fills each layer's initial rows and binds a Marlin consumer to the
   bank. The placement is frozen (gate closed) during profiling and CUDA
@@ -42,13 +48,20 @@ move between layers at run time.
 - `N` must be at least `top_k` and every MoE layer must have the same expert
   count and top-k.
 - Prefill of long inputs reads the non-resident experts from host memory on
-  every chunk; expect prefill to be bounded by host-to-device bandwidth.
+  every chunk, which adds host-read transfer cost per chunk; the dominant
+  term of long-input prefill time has not been profiled.
 
 ## Example
 
-Qwen3.8-Flash-Next NVFP4 on a 48 GiB GPU budget with 258 rows per layer
-(about a 32 GiB bank): decode about 63 tok/s at 4096 context with
-`--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`, versus
-about 7 tok/s with `--offload-backend uva --cpu-offload-gb 40`. A
-reproducible client and the exact launch flags are in
-`benchmarks/expert_pool/`.
+Qwen3.8-Flash-Next NVFP4 with 258 rows per layer (about a 32 GiB bank),
+`--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`, 4096
+context, one request: decode about 63 tok/s (median of three fresh server
+launches). That number was measured on an RTX PRO 6000 Blackwell Max-Q
+limited to 48 GiB, on a combination of this feature with the deferred PLE
+rows change (01554/vllm#46 on top of #54129), which this model needs to
+load its PLE table within that budget; it is not a measurement of this
+branch alone. For reference, the existing `--offload-backend uva
+--cpu-offload-gb 40` path gave about 7 tok/s in a single run on a
+different base commit; see `benchmarks/expert_pool/README.md` for the exact
+heads and conditions rather than reading the two as a controlled
+comparison.
