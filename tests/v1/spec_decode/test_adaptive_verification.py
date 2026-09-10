@@ -45,7 +45,16 @@ def make_manager(
         (CUDAGraphMode.FULL_DECODE_ONLY, False, CUDAGraphMode.FULL_DECODE_ONLY),
         (CUDAGraphMode.FULL, True, CUDAGraphMode.FULL_AND_PIECEWISE),
         (CUDAGraphMode.FULL, False, CUDAGraphMode.FULL_DECODE_ONLY),
-        (CUDAGraphMode.FULL_AND_PIECEWISE, False, CUDAGraphMode.FULL_DECODE_ONLY),
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            True,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+        ),
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            False,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+        ),
     ],
 )
 def test_resolve_adaptive_cudagraph_mode(mode, piecewise_capture_available, expected):
