@@ -2194,7 +2194,7 @@ print(out[0].outputs[0].text)
 
 Expected: coherent text (matches the same prompt with `dsv4_fused_attention: False`). Uses all 4 local GB200s; skip to the recipes if they are busy.
 
-- [ ] **Step 2: gsm8k parity and bs1 TPOT**
+- [x] **Step 2: gsm8k parity and bs1 TPOT**
 
 ```bash
 vigil -c recipe/dsv41/sra_vigil_tp4_gsm8k_fused.yaml
@@ -2204,7 +2204,7 @@ vigil -c recipe/dsv41/sra_vigil_tp4_8k1k_32k1k_bs1_fused.yaml
 
 Expected: gsm8k within noise of the non-fused run; bs1 TPOT within noise of the 2026-09-10 baseline (no-spec ~6.6 ms) given the Task 5 threshold. Record all three in the spec under "Phase 2 results".
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add recipe/dsv41/sra_vigil_tp4_gsm8k_fused.yaml recipe/dsv41/sra_vigil_tp4_8k1k_32k1k_bs1_fused.yaml 20260910-v41-megakernel-vllm-integration-plan.md
