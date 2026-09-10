@@ -31,7 +31,7 @@ fn bench_serve_args_parse_without_managed_engine_repartition() {
 }
 
 #[test]
-fn render_args_build_supported_config() {
+fn render_args_build_config_without_tls() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
         "render",
@@ -57,12 +57,94 @@ fn render_args_build_supported_config() {
     assert_eq!(config.model, "Qwen/Qwen2.5-0.5B-Instruct");
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 8080);
-    assert_eq!(config.max_model_len, 32768);
+    assert_eq!(config.max_model_len, Some(32768));
     assert_eq!(config.served_model_name, ["qwen"]);
     assert_eq!(config.tool_call_parser, ParserSelection::Auto);
     assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
     assert_eq!(config.max_logprobs, Some(-1));
+    assert!(config.tls.is_none());
+}
+
+#[test]
+fn render_args_allow_omitted_max_model_len() {
+    let cli = Cli::try_parse_from(["vllm-rs", "render", "Qwen/Qwen2.5-0.5B-Instruct"]).unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let config = args.into_config();
+
+    assert_eq!(config.max_model_len, None);
+}
+
+#[test]
+fn render_args_build_config_with_tls() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "--max-model-len",
+        "32768",
+        "--ssl-certfile",
+        "/tmp/cert.pem",
+        "--ssl-keyfile",
+        "/tmp/key.pem",
+    ])
+    .unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let config = args.into_config();
+
+    let tls = config.tls.expect("TLS should be enabled");
+    assert_eq!(tls.cert_file.as_deref(), Some("/tmp/cert.pem"));
+    assert_eq!(tls.key_file.as_deref(), Some("/tmp/key.pem"));
+}
+
+#[test]
+fn render_args_reject_tls_without_certificate() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "--max-model-len",
+        "32768",
+        "--ssl-keyfile",
+        "/tmp/key.pem",
+    ])
+    .unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let error = args.into_config().validate().unwrap_err();
+
+    assert!(error.to_string().contains("--ssl-certfile is required"));
+}
+
+#[test]
+fn render_args_reject_client_cert_verification_without_ca() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "render",
+        "Qwen/Qwen2.5-0.5B-Instruct",
+        "--max-model-len",
+        "32768",
+        "--ssl-certfile",
+        "/tmp/cert.pem",
+        "--ssl-cert-reqs",
+        "2",
+    ])
+    .unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let error = args.into_config().validate().unwrap_err();
+
+    assert!(error.to_string().contains("--ssl-ca-certs is required"));
 }
 
 #[test]
@@ -127,11 +209,13 @@ fn serve_args_forward_python_flags_with_separator() {
                             ],
                         ),
                         allow_credentials: false,
-                        ssl_keyfile: None,
-                        ssl_certfile: None,
-                        ssl_ca_certs: None,
-                        ssl_cert_reqs: 0,
-                        ssl_ciphers: None,
+                        ssl: SslArgs {
+                            ssl_keyfile: None,
+                            ssl_certfile: None,
+                            ssl_ca_certs: None,
+                            ssl_cert_reqs: 0,
+                            ssl_ciphers: None,
+                        },
                         profiler_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
@@ -327,6 +411,21 @@ fn serve_args_resolve_auto_reasoning_parser_for_managed_engine() {
         ]
     "#]]
     .assert_debug_eq(&config.python_args);
+}
+
+#[test]
+fn serve_args_resolve_unified_reasoning_parser_for_managed_engine() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "moonshotai/Kimi-K3"]).unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    expect![[r#"
+        [
+            "--reasoning-parser",
+            "kimi_k3",
+        ]
+    "#]]
+    .assert_debug_eq(&args.to_managed_engine_config(5555).python_args);
 }
 
 #[test]
@@ -804,7 +903,7 @@ fn serve_args_reject_unknown_renderer_value() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, harmony, inkling, kimi_k3)
+        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, deepseek_v41, harmony, inkling, kimi_k3)
 
         For more information, try '--help'.
     "#]]
@@ -944,11 +1043,13 @@ fn frontend_args_accept_json() {
                             ],
                         ),
                         allow_credentials: false,
-                        ssl_keyfile: None,
-                        ssl_certfile: None,
-                        ssl_ca_certs: None,
-                        ssl_cert_reqs: 0,
-                        ssl_ciphers: None,
+                        ssl: SslArgs {
+                            ssl_keyfile: None,
+                            ssl_certfile: None,
+                            ssl_ca_certs: None,
+                            ssl_cert_reqs: 0,
+                            ssl_ciphers: None,
+                        },
                         profiler_config: None,
                     },
                 },
@@ -1539,11 +1640,13 @@ fn serve_args_accept_handshake_aliases() {
                             ],
                         ),
                         allow_credentials: false,
-                        ssl_keyfile: None,
-                        ssl_certfile: None,
-                        ssl_ca_certs: None,
-                        ssl_cert_reqs: 0,
-                        ssl_ciphers: None,
+                        ssl: SslArgs {
+                            ssl_keyfile: None,
+                            ssl_certfile: None,
+                            ssl_ca_certs: None,
+                            ssl_cert_reqs: 0,
+                            ssl_ciphers: None,
+                        },
                         profiler_config: None,
                     },
                     managed_engine: ManagedEngineArgs {

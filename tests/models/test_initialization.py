@@ -210,6 +210,12 @@ def test_can_initialize_large_subset(model_arch: str, monkeypatch: pytest.Monkey
     This test covers the complement of the tests covered in the "small subset"
     test.
     """
+    if model_arch in ("HYV4ForCausalLM", "HYV4MTPModel"):
+        from vllm.platforms import current_platform
+
+        if current_platform.is_rocm():
+            pytest.skip("HY V4 ROCm initialization requires #54405")
+
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
