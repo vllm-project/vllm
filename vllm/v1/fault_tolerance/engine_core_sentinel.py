@@ -166,14 +166,17 @@ class EngineCoreSentinel:
             self.status_type = EngineStatusType.DEAD
             mask = None
         else:
-            # Query while still HEALTHY so that incoming commands are
-            # rejected and cannot race this collective_rpc.
+            # Push DIAGNOSING first. Commands are rejected until UNHEALTHY.
+            self.status_type = EngineStatusType.DIAGNOSING
+            self._push_status()
             try:
                 mask = self._query_mask()
             except Exception:
                 logger.warning("[FT] Failed to query mask for status push")
                 mask = None
-            self.status_type = EngineStatusType.UNHEALTHY
+            # on_executor_failed may have set DEAD concurrently.
+            if self.status_type == EngineStatusType.DIAGNOSING:
+                self.status_type = EngineStatusType.UNHEALTHY
         self.fault_info = f"{type(exc).__name__}"
         logger.info(
             "[FT] Engine %d status -> %s:",
@@ -185,7 +188,7 @@ class EngineCoreSentinel:
 
     def on_executor_failed(self):
         """Notify the client about the executor failure"""
-        if self.status_type == EngineStatusType.UNHEALTHY:
+        if self.status_type != EngineStatusType.HEALTHY:
             self.status_type = EngineStatusType.DEAD
             self._push_status()
 
@@ -212,7 +215,9 @@ class EngineCoreSentinel:
         """
         ft_request = FaultToleranceRequest(instruction="query_mask", params={})
         results = self.engine.model_executor.collective_rpc(
-            "handle_ft_command", args=(ft_request,)
+            "handle_ft_command",
+            args=(ft_request,),
+            timeout=self.engine_recovery_timeout_sec,
         )
         return [max(bits) for bits in zip(*(r["mask"] for r in results))]
 
