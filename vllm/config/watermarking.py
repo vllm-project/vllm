@@ -31,6 +31,8 @@ class WatermarkConfig:
     """Number of prior output tokens used by the watermark PRF."""
     deduplicate_contexts: bool = True
     """Use ordinary sampling when a generated-token context repeats."""
+    deduplicate_contexts_max_history: int | None = Field(default=None, ge=1)
+    """Maximum prior output positions searched for repeated contexts."""
     prf: WatermarkPRFName = "philox"
     """Pseudorandom function used by the watermarking algorithm."""
 
@@ -38,10 +40,11 @@ class WatermarkConfig:
     def validate_key(self) -> Self:
         if self.key > 2**64 - 1:
             raise ValueError("philox keys must fit in 64 bits")
-        if self.algorithm == "gumbel":
+        if self.algorithm == "gumbel" and not self.deduplicate_contexts:
             logger.warning_once(
-                "Single-key Gumbel-max watermarking may increase the frequency of "
-                "degenerate generations, including repetition loops.",
+                "Single-key Gumbel-max watermarking with deduplicate_contexts=False "
+                "may increase the frequency of degenerate generations, including "
+                "repetition loops; keep deduplicate_contexts=True to mitigate this.",
                 scope="global",
             )
         return self

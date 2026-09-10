@@ -34,7 +34,7 @@ def test_watermarker_contract(algorithm: str):
     assert torch.equal(first.token_ids, second.token_ids)
 
 
-def test_gumbel_config_warns_about_degenerate_generations(monkeypatch):
+def test_gumbel_config_warns_when_context_deduplication_is_disabled(monkeypatch):
     messages: list[str] = []
     monkeypatch.setattr(
         "vllm.config.watermarking.logger.warning_once",
@@ -42,11 +42,13 @@ def test_gumbel_config_warns_about_degenerate_generations(monkeypatch):
     )
 
     WatermarkConfig(key=42)
+    WatermarkConfig(key=42, deduplicate_contexts=False)
 
     assert messages == [
         (
-            "Single-key Gumbel-max watermarking may increase the frequency of "
-            "degenerate generations, including repetition loops."
+            "Single-key Gumbel-max watermarking with deduplicate_contexts=False "
+            "may increase the frequency of degenerate generations, including "
+            "repetition loops; keep deduplicate_contexts=True to mitigate this."
         )
     ]
 
@@ -237,6 +239,49 @@ def test_repeated_context_mask_ignores_prompt_tokens():
     )
 
     assert torch.equal(repeated, torch.tensor([True, False, False]))
+
+
+def test_repeated_context_mask_respects_max_history():
+    all_token_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 1, 2, 3, 4]])
+    req_indices = torch.tensor([0])
+    prompt_lens = torch.tensor([0])
+    total_lens = torch.tensor([10])
+    contexts = torch.tensor([[1, 2, 3, 4]])
+
+    full_history = repeated_context_mask(
+        all_token_ids, req_indices, prompt_lens, total_lens, contexts
+    )
+    last_six = repeated_context_mask(
+        all_token_ids, req_indices, prompt_lens, total_lens, contexts, max_history=6
+    )
+    last_five = repeated_context_mask(
+        all_token_ids, req_indices, prompt_lens, total_lens, contexts, max_history=5
+    )
+
+    assert full_history.item()
+    assert last_six.item()
+    assert not last_five.item()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+@pytest.mark.parametrize("max_history", [5, 6])
+def test_repeated_context_mask_max_history_accelerator_parity(max_history: int):
+    inputs = (
+        torch.tensor([[1, 2, 3, 4, 5, 6, 1, 2, 3, 4]]),
+        torch.tensor([0]),
+        torch.tensor([0]),
+        torch.tensor([10]),
+        torch.tensor([[1, 2, 3, 4]]),
+    )
+
+    expected = repeated_context_mask(*inputs, max_history=max_history)
+    actual = repeated_context_mask(
+        *(value.cuda() for value in inputs), max_history=max_history
+    ).cpu()
+
+    assert torch.equal(actual, expected)
 
 
 def _repeated_context_inputs(

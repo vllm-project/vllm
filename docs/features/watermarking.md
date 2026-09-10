@@ -77,6 +77,9 @@ vllm serve MODEL \
   '{"algorithm":"gumbel","key":42,"deduplicate_contexts":false}'
 ```
 
+Set `deduplicate_contexts_max_history` to search only that many prior output
+positions. The default searches the full completion history.
+
 ### SynthID-Text
 
 [SynthID-Text](https://www.nature.com/articles/s41586-024-08025-4) is planned but

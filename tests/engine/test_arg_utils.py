@@ -64,6 +64,7 @@ def test_watermark_config_cli():
     assert config.key == 42
     assert config.context_width == 4
     assert config.deduplicate_contexts
+    assert config.deduplicate_contexts_max_history is None
     assert config.prf == "philox"
     assert not config.supports_speculative_decoding
 
@@ -72,13 +73,15 @@ def test_watermark_config_cli():
             "--model",
             "dummy",
             "--watermark-config",
-            '{"key":42,"deduplicate_contexts":false}',
+            '{"key":42,"deduplicate_contexts":false,'
+            '"deduplicate_contexts_max_history":32}',
         ]
     )
     config = EngineArgs.from_cli_args(args).create_watermark_config()
 
     assert config is not None
     assert not config.deduplicate_contexts
+    assert config.deduplicate_contexts_max_history == 32
 
 
 @pytest.mark.parametrize(

@@ -55,6 +55,7 @@ def _repeated_context_mask_kernel(
     context_stride,
     CONTEXT_WIDTH: tl.constexpr,
     CONTEXT_BLOCK: tl.constexpr,
+    MAX_HISTORY: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -73,7 +74,10 @@ def _repeated_context_mask_kernel(
         other=-1,
     )
     repeated = tl.full((), 0, tl.int32)
-    for block_start in tl.range(0, output_len, BLOCK):
+    history_start = 0
+    if MAX_HISTORY > 0:
+        history_start = tl.maximum(output_len - MAX_HISTORY, 0)
+    for block_start in tl.range(history_start, output_len, BLOCK):
         previous_output_pos = block_start + offsets
         matches = valid_req & (previous_output_pos < output_len)
         for offset in range(CONTEXT_WIDTH):
@@ -100,6 +104,7 @@ def _repeated_context_mask_cpu(
     prompt_lens: torch.Tensor,
     total_lens: torch.Tensor,
     contexts: torch.Tensor,
+    max_history: int | None = None,
 ) -> torch.Tensor:
     repeated = torch.zeros(len(req_indices), dtype=torch.bool)
     for row, req_idx_tensor in enumerate(req_indices):
@@ -111,8 +116,13 @@ def _repeated_context_mask_cpu(
         output_tokens = all_token_ids[req_idx, prompt_len:total_len].tolist()
         prefix = [-1] * contexts.shape[-1]
         current_context = tuple(contexts[row].tolist())
-        for token_id in output_tokens:
-            if tuple(prefix[-contexts.shape[-1] :]) == current_context:
+        history_start = (
+            max(0, len(output_tokens) - max_history) if max_history is not None else 0
+        )
+        for output_pos, token_id in enumerate(output_tokens):
+            if output_pos >= history_start and (
+                tuple(prefix[-contexts.shape[-1] :]) == current_context
+            ):
                 repeated[row] = True
                 break
             prefix.append(token_id)
@@ -125,6 +135,7 @@ def repeated_context_mask(
     prompt_lens: torch.Tensor,
     total_lens: torch.Tensor,
     contexts: torch.Tensor,
+    max_history: int | None = None,
 ) -> torch.Tensor:
     if all_token_ids.device.type == "cpu":
         return _repeated_context_mask_cpu(
@@ -133,6 +144,7 @@ def repeated_context_mask(
             prompt_lens,
             total_lens,
             contexts,
+            max_history,
         )
 
     if contexts.stride(-1) != 1:
@@ -149,6 +161,7 @@ def repeated_context_mask(
         contexts.stride(0),
         CONTEXT_WIDTH=contexts.shape[-1],
         CONTEXT_BLOCK=triton.next_power_of_2(contexts.shape[-1]),
+        MAX_HISTORY=0 if max_history is None else max_history,
         BLOCK=512,
     )
     return repeated
