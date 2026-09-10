@@ -19,6 +19,15 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks as _select_candidate_blocks,
 )
+from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+    sparse_mqa_logits_paged_decode as _sparse_mqa_logits_paged_decode,
+)
+from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+    sparse_mqa_logits_prefill_chunk as _sparse_mqa_logits_prefill_chunk,
+)
+from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+    sparse_mqa_logits_supported as _sparse_mqa_logits_supported,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -340,6 +349,19 @@ def sparse_attn_indexer(
         )
         assert candidate_block_size > 0
 
+    # Score only candidate blocks with DeepGEMM's sparse MQA logits kernels
+    # instead of computing dense logits and masking them down.
+    use_sparse_mqa = (
+        candidate_blocks is not None
+        and not candidate_write
+        and _sparse_mqa_logits_supported(candidate_block_size, use_fp4_cache)
+    )
+    if use_sparse_mqa:
+        logger.info_once(
+            "Sparse attention indexer: using DeepGEMM sparse MQA logits "
+            "over candidate blocks (VLLM_DSA_SPARSE_MQA_LOGITS=1)."
+        )
+
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         # Reserve workspace for indexer during profiling run
@@ -494,6 +516,25 @@ def sparse_attn_indexer(
             if chunk.local_total_seq_lens == 0:
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
                 topk_indices.fill_(-1)
+            elif use_sparse_mqa:
+                # Sparse MQA logits over the candidate blocks only, with the
+                # row top-k fused into the sparse space. The DCP merge below
+                # is a no-op: candidates require dcp_world_size == 1.
+                assert q_scale_slice is not None and candidate_blocks is not None
+                _sparse_mqa_logits_prefill_chunk(
+                    q_slice.view(torch.int8),
+                    q_scale_slice,
+                    k_quant.view(torch.int8),
+                    k_scale.view(torch.int32).squeeze(-1),
+                    weights[chunk.token_start : chunk.token_end],
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
+                    candidate_blocks[chunk.token_start : chunk.token_end],
+                    candidate_block_size,
+                    topk_tokens,
+                    topk_indices,
+                )
+                continue
             else:
                 # DeepGEMM scalar-type tags (zero-copy): MXFP4 values → int8
                 # (kPackedFP4), scales → int32 squeezed to 1-D kv_sf / 2-D q_sf.
@@ -628,116 +669,146 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
-        if current_platform.is_xpu():
-            if padded_q_scale is not None:
-                raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
-            seq_lens_xpu = (
-                seq_lens[:, -1].contiguous() if seq_lens.ndim == 2 else seq_lens
-            )
-            logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
+        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+        sparse_handled = False
+        if (
+            use_sparse_mqa
+            and candidate_blocks is not None
+            and decode_metadata.global_seq_lens is None
+            and padded_q_scale is not None
+        ):
+            # Sparse MQA logits over the candidate blocks only, with the row
+            # top-k fused into the sparse space. Falls back to the dense
+            # logits + mask path when the paged cache layout is unsupported.
+            sparse_handled = _sparse_mqa_logits_paged_decode(
                 padded_q_quant_cast,
-                kv_cache,
-                weights[:num_padded_tokens],
-                seq_lens_xpu,
-                decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len,
-            )
-        else:
-            logits = fp8_fp4_paged_mqa_logits(
-                (padded_q_quant_cast, padded_q_scale),
+                padded_q_scale,
                 kv_cache,
                 weights[:num_padded_tokens],
                 seq_lens,
                 decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len=max_model_len,
-                clean_logits=False,
-                indices=decode_metadata.indices,
+                decode_metadata.indices,
+                candidate_blocks[:num_padded_tokens],
+                candidate_block_size,
+                topk_tokens,
+                topk_indices,
             )
-        num_rows = logits.shape[0]
-        if candidate_blocks is not None:
-            # Two-level selection (v4.1) on the decode logits; columns are
-            # request-local compressed positions. seq_lens is (B, next_n)
-            # for native spec decode (per-row effective lens) and (B, 1)
-            # otherwise.
-            vis = seq_lens.reshape(-1)
-            row_repeat = next_n if vis.numel() != num_rows else 1
-            vis = vis[:num_rows]
-            decode_candidates = candidate_blocks[:num_rows]
-            if candidate_write:
-                _select_candidate_blocks(
-                    logits,
-                    None,
-                    vis,
-                    decode_candidates.shape[1],
-                    candidate_block_size,
-                    decode_candidates,
-                    row_repeat,
+        if sparse_handled:
+            logits = None
+        else:
+            if current_platform.is_xpu():
+                if padded_q_scale is not None:
+                    raise RuntimeError(
+                        "XPU fp8_paged_mqa_logits does not support FP4 Q"
+                    )
+                seq_lens_xpu = (
+                    seq_lens[:, -1].contiguous() if seq_lens.ndim == 2 else seq_lens
+                )
+                logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
+                    padded_q_quant_cast,
+                    kv_cache,
+                    weights[:num_padded_tokens],
+                    seq_lens_xpu,
+                    decode_metadata.block_table,
+                    decode_metadata.schedule_metadata,
+                    max_model_len,
                 )
             else:
-                _apply_candidate_mask(
-                    logits,
-                    None,
-                    vis,
-                    decode_candidates,
-                    candidate_block_size,
-                    row_repeat,
+                logits = fp8_fp4_paged_mqa_logits(
+                    (padded_q_quant_cast, padded_q_scale),
+                    kv_cache,
+                    weights[:num_padded_tokens],
+                    seq_lens,
+                    decode_metadata.block_table,
+                    decode_metadata.schedule_metadata,
+                    max_model_len=max_model_len,
+                    clean_logits=False,
+                    indices=decode_metadata.indices,
                 )
-        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+            num_rows = logits.shape[0]
+            if candidate_blocks is not None:
+                # Two-level selection (v4.1) on the decode logits; columns are
+                # request-local compressed positions. seq_lens is (B, next_n)
+                # for native spec decode (per-row effective lens) and (B, 1)
+                # otherwise.
+                vis = seq_lens.reshape(-1)
+                row_repeat = next_n if vis.numel() != num_rows else 1
+                vis = vis[:num_rows]
+                decode_candidates = candidate_blocks[:num_rows]
+                if candidate_write:
+                    _select_candidate_blocks(
+                        logits,
+                        None,
+                        vis,
+                        decode_candidates.shape[1],
+                        candidate_block_size,
+                        decode_candidates,
+                        row_repeat,
+                    )
+                else:
+                    _apply_candidate_mask(
+                        logits,
+                        None,
+                        vis,
+                        decode_candidates,
+                        candidate_block_size,
+                        row_repeat,
+                    )
 
-        use_cooperative_topk = (
-            current_platform.is_cuda()
-            and topk_tokens in (512, 1024, 2048)
-            and num_rows <= 64
-            and logits.stride(0) % 4 == 0  # TMA 16-byte alignment
-            and current_platform.has_device_capability(90)
-            and not current_platform.is_device_capability_family(120)
-        )
-        use_persistent_topk = current_platform.is_cuda() and topk_tokens in (
-            512,
-            1024,
-            2048,
-        )
-        if use_cooperative_topk:
-            workspace_manager = current_workspace_manager()
-            (topk_workspace,) = workspace_manager.get_simultaneous(
-                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            use_cooperative_topk = (
+                current_platform.is_cuda()
+                and topk_tokens in (512, 1024, 2048)
+                and num_rows <= 64
+                and logits.stride(0) % 4 == 0  # TMA 16-byte alignment
+                and current_platform.has_device_capability(90)
+                and not current_platform.is_device_capability_family(120)
             )
-            torch.ops._C.cooperative_topk(
-                logits,
-                seq_lens,
-                topk_indices,
-                topk_workspace,
-                topk_tokens,
-                attn_metadata_narrowed.max_seq_len,
+            use_persistent_topk = current_platform.is_cuda() and topk_tokens in (
+                512,
+                1024,
+                2048,
             )
-        elif use_persistent_topk:
-            workspace_manager = current_workspace_manager()
-            (topk_workspace,) = workspace_manager.get_simultaneous(
-                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
-            )
-            torch.ops._C.persistent_topk(
-                logits,
-                seq_lens,
-                topk_indices,
-                topk_workspace,
-                topk_tokens,
-                logits.shape[1],
-            )
-        else:
-            ops.top_k_per_row_decode(
-                logits,
-                next_n,
-                seq_lens,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
+            if use_cooperative_topk:
+                workspace_manager = current_workspace_manager()
+                (topk_workspace,) = workspace_manager.get_simultaneous(
+                    ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+                )
+                torch.ops._C.cooperative_topk(
+                    logits,
+                    seq_lens,
+                    topk_indices,
+                    topk_workspace,
+                    topk_tokens,
+                    attn_metadata_narrowed.max_seq_len,
+                )
+            elif use_persistent_topk:
+                workspace_manager = current_workspace_manager()
+                (topk_workspace,) = workspace_manager.get_simultaneous(
+                    ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+                )
+                torch.ops._C.persistent_topk(
+                    logits,
+                    seq_lens,
+                    topk_indices,
+                    topk_workspace,
+                    topk_tokens,
+                    logits.shape[1],
+                )
+            else:
+                ops.top_k_per_row_decode(
+                    logits,
+                    next_n,
+                    seq_lens,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
 
         if decode_metadata.global_seq_lens is not None:
+            # The sparse-MQA path is gated on global_seq_lens being None.
+            assert logits is not None
             _merge_dcp_topk_global(
                 logits,
                 topk_indices,
