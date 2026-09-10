@@ -253,6 +253,8 @@ class SamplingParams(
     """Controls the randomness of the sampling. Lower values make the model
     more deterministic, while higher values make the model more random. Zero
     means greedy sampling."""
+    watermarking: bool = True
+    """Whether to apply the engine's configured watermark to this request."""
     top_p: float = 1.0
     """Controls the cumulative probability of the top tokens to consider. Must
     be in (0, 1]. Set to 1 to consider all tokens."""
@@ -385,6 +387,7 @@ class SamplingParams(
         frequency_penalty: float | None = 0.0,
         repetition_penalty: float | None = 1.0,
         temperature: float | None = 1.0,
+        watermarking: bool = True,
         top_p: float | None = 1.0,
         top_k: int = 0,
         min_p: float = 0.0,
@@ -450,6 +453,7 @@ class SamplingParams(
             if repetition_penalty is None
             else repetition_penalty,
             temperature=1.0 if temperature is None else temperature,
+            watermarking=watermarking,
             top_p=1.0 if top_p is None else top_p,
             top_k=top_k,
             min_p=min_p,
@@ -544,6 +548,8 @@ class SamplingParams(
 
     def _verify_args(self) -> None:
         _verify_num_sequences(self.n, "n")
+        if self.extra_args:
+            self._verify_extra_args()
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise VLLMValidationError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
@@ -654,6 +660,26 @@ class SamplingParams(
                 f"bad_words cannot contain an empty string. "
                 f"Got bad_words={self.bad_words}"
             )
+
+    def _verify_extra_args(self) -> None:
+        # JSON accepts arbitrary integers, but the engine's MessagePack
+        # transport only supports signed/unsigned 64-bit integers.
+        pending: list[Any] = [self.extra_args]
+        visited: set[int] = set()
+        while pending:
+            value = pending.pop()
+            if isinstance(value, int) and not -(2**63) <= value < 2**64:
+                raise VLLMValidationError(
+                    "extra_args integers must be between -2**63 and 2**64 - 1.",
+                    parameter="extra_args",
+                )
+            if isinstance(value, (dict, list, tuple)) and id(value) not in visited:
+                visited.add(id(value))
+                if isinstance(value, dict):
+                    pending.extend(value.keys())
+                    pending.extend(value.values())
+                else:
+                    pending.extend(value)
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
@@ -1231,6 +1257,7 @@ class SamplingParams(
             f"frequency_penalty={self.frequency_penalty}, "
             f"repetition_penalty={self.repetition_penalty}, "
             f"temperature={self.temperature}, "
+            f"watermarking={self.watermarking}, "
             f"top_p={self.top_p}, "
             f"top_k={self.top_k}, "
             f"min_p={self.min_p}, "
