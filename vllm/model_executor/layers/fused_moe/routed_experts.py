@@ -894,6 +894,53 @@ class RoutedExperts(PluggableLayer):
 
         return False if return_success else None
 
+    def should_load_online_quantized_fused_shared_expert(
+        self,
+        global_expert_id: int,
+        shard_id: str,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+    ) -> bool:
+        """Whether to load a fused shared expert through online quantization.
+
+        Returns:
+            Whether the online shared-expert loader should handle this weight.
+        """
+        is_fused_shared_expert = (
+            self.expert_map_manager.num_fused_shared_experts > 0
+            and self.moe_config.num_logical_experts <= global_expert_id
+            and global_expert_id
+            < self.moe_config.num_logical_experts
+            + self.expert_map_manager.num_fused_shared_experts
+        )
+        if (
+            loaded_weight.dim() == 3
+            or not weight_name.endswith(".weight")
+            or not is_fused_shared_expert
+            or isinstance(self.quant_method, UnquantizedFusedMoEMethod)
+        ):
+            return False
+
+        online_quantization_config = (
+            self.quant_config.online_quantization_config
+            if self.quant_config is not None
+            else None
+        )
+        shared_expert_prefix = self.moe_config.shared_expert_prefix
+        if online_quantization_config is None or shared_expert_prefix is None:
+            return False
+
+        projection_name = "down_proj" if shard_id == "w2" else "gate_up_proj"
+        quant_method_metadata = online_quantization_config.resolve_quant_method_cls(
+            LinearBase, f"{shared_expert_prefix}.{projection_name}"
+        )
+        if quant_method_metadata is None:
+            return False
+
+        _, _, _, _, shared_expert_quant_method_cls = quant_method_metadata
+
+        return shared_expert_quant_method_cls not in (None, UnquantizedLinearMethod)
+
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
@@ -917,61 +964,33 @@ class RoutedExperts(PluggableLayer):
                         for fused_name in ("gate_up_proj", "w13")
                     )
                 )
-                is_fused_shared_expert_weight = (
-                    not is_fused
-                    and qual_name.endswith(".weight")
-                    and self.expert_map_manager.num_fused_shared_experts > 0
-                    and self.moe_config.num_logical_experts
-                    <= expert_id
-                    < self.moe_config.num_logical_experts
-                    + self.expert_map_manager.num_fused_shared_experts
-                )
-                online_quantization_config = (
-                    self.quant_config.online_quantization_config
-                    if self.quant_config is not None
-                    else None
-                )
 
-                # NOTE: `experts`, `shared_expert` are hard-coded here and this logic
-                # would break with models that do not exactly use these layer names.
-                shared_expert_projection_prefix = (
-                    f"{self.layer_name.removesuffix('.experts')}.shared_expert."
-                    f"{'down_proj' if shard_id == 'w2' else 'gate_up_proj'}"
-                )
-                shared_expert_uses_online_quantization = False
-                if online_quantization_config is not None:
-                    quant_method_metadata = (
-                        online_quantization_config.resolve_quant_method_cls(
-                            LinearBase, shared_expert_projection_prefix
-                        )
-                    )
-
-                    if quant_method_metadata is not None:
-                        _, _, _, _, shared_expert_quant_method_cls = (
-                            quant_method_metadata
-                        )
-
-                        shared_expert_uses_online_quantization = (
-                            shared_expert_quant_method_cls is not None
-                            and shared_expert_quant_method_cls
-                            is not UnquantizedLinearMethod
-                        )
-                if (
-                    is_fused_shared_expert_weight
-                    and not isinstance(self.quant_method, UnquantizedFusedMoEMethod)
-                    and shared_expert_uses_online_quantization
+                # Online quantization for shared expert with
+                # quant_method.shared_expert_online_loader.
+                if self.should_load_online_quantized_fused_shared_expert(
+                    global_expert_id=expert_id,
+                    shard_id=shard_id,
+                    loaded_weight=loaded_weight,
+                    weight_name=qual_name,
                 ):
                     shared_expert_online_loader = (
                         self.quant_method.shared_expert_online_loader
                     )
-                    yield from shared_expert_online_loader.load(
+                    loaded_params = shared_expert_online_loader.load(
                         self,
                         global_expert_id=expert_id,
                         shard_id=shard_id,
                         loaded_weight=loaded_weight,
                         weight_name=qual_name,
                     )
+
+                    # shared expert not loaded on this EP rank.
+                    if loaded_params is not None:
+                        yield from loaded_params
+
+                    # Do not fall through to the packed checkpoint loader.
                     break
+
                 weight_name = qual_name.replace(weight_name, param_name)
                 param_name = weight_name.removeprefix(f"{self.layer_name}.")
                 param = getattr(self, param_name, None)

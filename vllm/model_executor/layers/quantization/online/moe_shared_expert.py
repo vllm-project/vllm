@@ -24,7 +24,7 @@ class OnlineSharedExpertLoader(ABC):
         shard_id: str,
         loaded_weight: torch.Tensor,
         weight_name: str,
-    ) -> tuple[str, ...]:
+    ) -> tuple[str, str] | None:
         num_fused = layer.expert_map_manager.num_fused_shared_experts
         first_fused = layer.moe_config.num_logical_experts
 
@@ -53,7 +53,7 @@ class OnlineSharedExpertLoader(ABC):
         global_expert_id: int,
         shard_id: str,
         loaded_weight: torch.Tensor,
-    ) -> tuple[str, ...]:
+    ) -> tuple[str, str] | None:
         """Load a weight that has passed compatibility validation."""
 
 
@@ -70,7 +70,7 @@ class UnimplementedOnlineSharedExpertLoader(OnlineSharedExpertLoader):
         shard_id: str,
         loaded_weight: torch.Tensor,
         weight_name: str,
-    ) -> tuple[str, ...]:
+    ) -> tuple[str, str] | None:
         raise NotImplementedError(
             "Fusing a full-precision shared expert into "
             f"{self.method_name} requires an expert weight codec."
@@ -82,7 +82,7 @@ class UnimplementedOnlineSharedExpertLoader(OnlineSharedExpertLoader):
         global_expert_id: int,
         shard_id: str,
         loaded_weight: torch.Tensor,
-    ) -> tuple[str, ...]:
+    ) -> tuple[str, str] | None:
         raise AssertionError("Unimplemented expert weight codecs cannot load weights.")
 
 
@@ -102,11 +102,13 @@ class OnlineMxfp4SharedExpertLoader(OnlineSharedExpertLoader):
 
     @staticmethod
     def _tp_shard(
-        layer: "RoutedExperts", loaded_weight: torch.Tensor, shard_id: str
+        loaded_weight: torch.Tensor,
+        shard_id: str,
+        tp_size: int,
+        tp_rank: int,
     ) -> torch.Tensor:
         """Select this rank's full-precision projection shard."""
         shard_dim = 1 if shard_id == "w2" else 0
-        tp_size = layer.moe_config.moe_parallel_config.tp_size
         if tp_size == 1:
             return loaded_weight
         if loaded_weight.shape[shard_dim] % tp_size != 0:
@@ -115,9 +117,7 @@ class OnlineMxfp4SharedExpertLoader(OnlineSharedExpertLoader):
                 f"{tuple(loaded_weight.shape)} across {tp_size} ranks."
             )
         shard_size = loaded_weight.shape[shard_dim] // tp_size
-        return loaded_weight.narrow(
-            shard_dim, layer.moe_config.tp_rank * shard_size, shard_size
-        )
+        return loaded_weight.narrow(shard_dim, tp_rank * shard_size, shard_size)
 
     @torch.no_grad()
     def _load(
@@ -126,13 +126,13 @@ class OnlineMxfp4SharedExpertLoader(OnlineSharedExpertLoader):
         global_expert_id: int,
         shard_id: str,
         loaded_weight: torch.Tensor,
-    ) -> tuple[str, ...]:
+    ) -> tuple[str, str] | None:
         """Quantize one projection and store its packed weight and scales."""
         local_expert_id = layer._map_global_expert_id_to_local_expert_id(
             global_expert_id
         )
         if local_expert_id == -1:
-            return ()
+            return None
 
         stem = "w2" if shard_id == "w2" else "w13"
         weight_name = self._weight_parameter_name(layer, stem)
@@ -140,7 +140,12 @@ class OnlineMxfp4SharedExpertLoader(OnlineSharedExpertLoader):
         weight = getattr(layer, weight_name)[local_expert_id]
         scale = getattr(layer, scale_name)[local_expert_id]
 
-        loaded_weight = self._tp_shard(layer, loaded_weight, shard_id)
+        loaded_weight = self._tp_shard(
+            loaded_weight,
+            shard_id,
+            tp_size=layer.moe_config.moe_parallel_config.tp_size,
+            tp_rank=layer.moe_config.tp_rank,
+        )
         if shard_id == "w2":
             unpacked_shape = (weight.shape[0], weight.shape[1] * 2)
             weight_dst = weight

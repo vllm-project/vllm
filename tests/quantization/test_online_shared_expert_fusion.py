@@ -12,6 +12,9 @@ import torch
 from tests.quantization.utils import load_model_without_vllm_runner
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.quantization import resolve_quantization_config
+from vllm.model_executor.layers.quantization.online.moe_shared_expert import (
+    OnlineMxfp4SharedExpertLoader,
+)
 from vllm.model_executor.layers.quantization.quark.quark_moe import (
     QuarkOCP_MX_MoEMethod,
 )
@@ -154,6 +157,18 @@ def _write_minimal_moe_config(model_path: Path, architecture: str) -> None:
     (model_path / "config.json").write_text(json.dumps(config))
 
 
+def test_online_shared_expert_quantization_fusion_tp() -> None:
+    """TP shared-expert weights are sharded on each projection's TP dimension."""
+    loader = OnlineMxfp4SharedExpertLoader()
+    w13 = torch.arange(48).reshape(8, 6)
+    w2 = torch.arange(48).reshape(6, 8)
+
+    assert torch.equal(loader._tp_shard(w13, "w1", tp_size=2, tp_rank=0), w13[:4])
+    assert torch.equal(loader._tp_shard(w2, "w2", tp_size=2, tp_rank=0), w2[:, :4])
+    assert torch.equal(loader._tp_shard(w13, "w3", tp_size=2, tp_rank=1), w13[4:])
+    assert torch.equal(loader._tp_shard(w2, "w2", tp_size=2, tp_rank=1), w2[:, 4:])
+
+
 @pytest.mark.skipif(
     not current_platform.is_rocm(),
     reason="Fused shared-expert online quantization is a ROCm AITER feature.",
@@ -182,6 +197,10 @@ def test_online_quantization(
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "1")
     rocm_aiter_ops.refresh_env_variables()
     _write_minimal_moe_config(tmp_path, architecture)
+    expected_shared_expert_name = (
+        "shared_expert" if architecture == "Qwen3NextForCausalLM" else "shared_experts"
+    )
+    target_pattern = f"*{expected_shared_expert_name}*"
 
     logged_messages: list[str] = []
     logged_warnings: list[str] = []
@@ -205,7 +224,7 @@ def test_online_quantization(
         quantization="quark",
         model_config_kwargs={
             "quantization_config": resolve_quantization_config(
-                "quark", {"targets": {"*shared_expert*": "mxfp4"}}
+                "quark", {"targets": {target_pattern: "mxfp4"}}
             )
         },
         model_loader_cls=DummyModelLoader,
@@ -227,10 +246,14 @@ def test_online_quantization(
     shared_expert_name = (
         "shared_expert" if hasattr(moe, "shared_expert") else "shared_experts"
     )
+    assert shared_expert_name == expected_shared_expert_name
     assert getattr(moe, shared_expert_name) is None
 
     routed_experts = moe.experts.routed_experts
     assert isinstance(routed_experts.quant_method, QuarkOCP_MX_MoEMethod)
+    shared_expert_prefix = routed_experts.moe_config.shared_expert_prefix
+    assert shared_expert_prefix is not None
+    assert shared_expert_prefix.endswith(f"mlp.{shared_expert_name}")
     expert_map_manager = routed_experts.expert_map_manager
     assert expert_map_manager.num_fused_shared_experts == 1
     assert expert_map_manager.map_global_to_local(moe.n_routed_experts) == (
@@ -249,7 +272,7 @@ def test_online_quantization(
     assert logged_messages == [
         "Quantized 2 layers of types: "
         f"mlp.{shared_expert_name}.down_proj: 1 "
-        "(from targets: *shared_expert*, mxfp4); "
+        f"(from targets: {target_pattern}, mxfp4); "
         f"mlp.{shared_expert_name}.gate_up_proj: 1 "
-        "(from targets: *shared_expert*, mxfp4)"
+        f"(from targets: {target_pattern}, mxfp4)"
     ]

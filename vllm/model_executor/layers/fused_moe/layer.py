@@ -122,6 +122,7 @@ def FusedMoEFactory(
     is_fused_checkpoint_transposed: bool = False,
     n_shared_experts: int | None = None,
     fuse_shared_experts: bool = False,
+    shared_expert_prefix: str | None = None,
     router_logits_dtype: torch.dtype | None = None,
     gate: torch.nn.Module | None = None,
     shared_experts: torch.nn.Module | None = None,
@@ -191,6 +192,7 @@ def FusedMoEFactory(
         n_shared_experts: Number of shared experts to fuse into the routed
             grouped GEMM (ROCm; requires aiter FSE or the router-append path)
         fuse_shared_experts: Whether to enable shared-expert fusion.
+        shared_expert_prefix: Checkpoint prefix for the fused shared expert.
         router_logits_dtype: Data type for router logits buffers
         gate: Pre-configured gate module
         shared_experts: Pre-configured shared experts module
@@ -350,6 +352,7 @@ def FusedMoEFactory(
         max_num_tokens=max_num_batched_tokens,
         has_bias=has_bias,
         is_lora_enabled=vllm_config.lora_config is not None,
+        shared_expert_prefix=shared_expert_prefix,
         activation=moe_activation,
         device=vllm_config.device_config.device,
         routing_method=router.routing_method_type,  # Not ideal

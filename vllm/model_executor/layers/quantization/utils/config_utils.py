@@ -88,6 +88,9 @@ def is_shared_expert_quant_fse_compatible(
             RoutedExperts,
             UnquantizedFusedMoEMethod,
         )
+        from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+            FusedMoEMethodBase,
+        )
         from vllm.model_executor.layers.linear import (
             LinearBase,
             UnquantizedLinearMethod,
@@ -116,6 +119,18 @@ def is_shared_expert_quant_fse_compatible(
 
         if routed_method_cls in (None, UnquantizedFusedMoEMethod):
             return False, "routed-expert quantization target is unavailable"
+        assert routed_method_cls is not None
+        if not issubclass(routed_method_cls, FusedMoEMethodBase):
+            return False, "routed-expert quantization is not a fused-MoE method"
+        assert issubclass(routed_method_cls, FusedMoEMethodBase)
+        if (
+            routed_method_cls.shared_expert_online_loader
+            is FusedMoEMethodBase.shared_expert_online_loader
+        ):
+            return (
+                False,
+                "routed-expert quantization has no shared-expert online loader",
+            )
 
         for shared_expert_target in shared_expert_targets:
             if shared_expert_target is None:
