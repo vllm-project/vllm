@@ -533,20 +533,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             # Disable indexer inner overlap.
             self.indexer.aux_stream = None
 
-    def _run_sequential_pipeline(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        o_padded: torch.Tensor,
-    ) -> None:
-        """Disable ROCm streams when the current execution region cannot overlap."""
-        aux_streams = self.aux_stream_list
-        self.aux_stream_list = None
-        try:
-            super()._attn_pipeline(hidden_states, positions, o_padded)
-        finally:
-            self.aux_stream_list = aux_streams
-
     def _enable_csa_multi_stream(self) -> bool:
         """All CSA multi-stream gates: env var, streams, and capture region.
 
@@ -556,9 +542,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         this overlap on ROCm (event waits can hang), so multi-stream only
         runs where the fork/join becomes static graph edges: inside capture,
         or with non-dict metadata (full cudagraph or the profile run), which
-        has no eager breaks. CUDA needs no such gate: its events behave in
-        eager and capture regions alike, so its multi-stream calls need no
-        region restriction.
+        has no eager breaks.
         """
         attn_metadata = get_forward_context().attn_metadata
         return (
@@ -570,29 +554,70 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             )
         )
 
-    def _attn_pipeline(
+    def _run_sequential_pipeline(
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         o_padded: torch.Tensor,
     ) -> None:
-        """Move ROCm stream fan-out ahead of all CSA input projections."""
-        if not self._enable_csa_multi_stream():
-            self._run_sequential_pipeline(hidden_states, positions, o_padded)
-            return
+        """Disable ROCm streams when the current execution region cannot overlap."""
+        aux_streams = self.aux_stream_list
+        self.aux_stream_list = None
+        try:
+            qr_kv, kv_score, indexer_kv_score, indexer_weights = (
+                self._run_parallel_input_projections(hidden_states)
+            )
+            qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
+            self._prepare_and_attn_fn(
+                hidden_states,
+                qr,
+                kv,
+                qr_scale,
+                kv_score,
+                indexer_kv_score,
+                indexer_weights,
+                positions,
+                o_padded,
+            )
+        finally:
+            self.aux_stream_list = aux_streams
 
-        # The ROCm override consumes these sentinels inside the capture boundary.
-        self._prepare_and_attn_fn(
-            hidden_states,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            positions,
-            o_padded,
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # Pre-allocate attention output with FlashMLA-padded head count.
+        # The op writes into `o_padded`; we slice to n_local_heads after.
+        num_tokens = hidden_states.shape[0]
+        o_padded = torch.empty(
+            (num_tokens, self.padded_heads, self.head_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
         )
+
+        if self._enable_csa_multi_stream():
+            # The ROCm override consumes these sentinels inside the capture
+            # boundary, moving the stream fan-out ahead of the projections.
+            self._prepare_and_attn_fn(
+                hidden_states,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                positions,
+                o_padded,
+            )
+        else:
+            self._run_sequential_pipeline(hidden_states, positions, o_padded)
+
+        o = o_padded[:, : self.n_local_heads, :]
+
+        # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
+        return self._o_proj(o, positions)
 
     def _prepare_and_attn(
         self,
@@ -627,6 +652,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 self.aux_stream_list = saved_streams
             return
 
+        # Re-check: forward's gate ran inside a captured segment that
+        # _prepare_and_attn_eager (MRV1) then broke, making this region eager.
         if not self._enable_csa_multi_stream():
             self._run_sequential_pipeline(hidden_states, positions, o_padded)
             return

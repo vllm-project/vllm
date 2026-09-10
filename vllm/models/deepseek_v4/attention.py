@@ -472,22 +472,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             device=hidden_states.device,
         )
 
-        self._attn_pipeline(hidden_states, positions, o_padded)
-        o = o_padded[:, : self.n_local_heads, :]
-
-        # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
-        return self._o_proj(o, positions)
-
-    def _attn_pipeline(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        o_padded: torch.Tensor,
-    ) -> None:
-        """Run input preparation through attention.
-
-        ROCm overrides this boundary to start its streams before projections.
-        """
         qr_kv, kv_score, indexer_kv_score, indexer_weights = (
             self._run_parallel_input_projections(hidden_states)
         )
@@ -504,6 +488,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             positions,
             o_padded,
         )
+        o = o_padded[:, : self.n_local_heads, :]
+
+        # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
+        return self._o_proj(o, positions)
 
     def _split_qkv_and_norm(
         self, qr_kv: torch.Tensor
