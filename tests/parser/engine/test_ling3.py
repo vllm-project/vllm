@@ -3,6 +3,8 @@
 
 import json
 
+import pytest
+
 from tests.parser.engine.replay_harness import MockTokenizer, _test_request
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
@@ -57,19 +59,18 @@ def test_ling3_disable_thinking_keeps_reasoning_as_content():
     assert content == "<think>reason</think>answer"
 
 
-def test_ling3_enable_thinking_keeps_open_reasoning_as_content():
+@pytest.mark.parametrize("model_output", ["only reasoning", "<think>only reasoning"])
+def test_ling3_truncated_reasoning_stays_reasoning(model_output):
     parser_cls = ReasoningParserManager.get_reasoning_parser("ling3")
     parser = parser_cls(
         _tokenizer(),
         chat_template_kwargs={"enable_thinking": True},
     )
 
-    reasoning, content = parser.extract_reasoning(
-        "<think>only reasoning", _test_request()
-    )
+    reasoning, content = parser.extract_reasoning(model_output, _test_request())
 
-    assert reasoning is None
-    assert content == "only reasoning"
+    assert reasoning == "only reasoning"
+    assert content is None
 
 
 def test_ling3_tool_call_without_newline():
