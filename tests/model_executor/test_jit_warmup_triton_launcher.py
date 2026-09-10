@@ -147,7 +147,7 @@ def test_triton_kernel_decorator_returns_launcher(
         )
 
     @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
-    def launch(first: str, second: int, config: int) -> LaunchSpec:
+    def launch(first: str, second: int = 2, config: int = 7) -> LaunchSpec:
         return (2,), dict(aliased_ptr=first, CONST=config)
 
     def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
@@ -174,7 +174,7 @@ def test_triton_kernel_decorator_returns_launcher(
         }
     ]
     first = torch.empty_strided((2, 3), (5, 1))
-    launch(first, 2, 7)
+    launch(first)
     assert kernel.runtime_calls == [
         (
             (2,),
