@@ -131,8 +131,8 @@ def test_triton_kernel_decorator_returns_launcher(
 ) -> None:
     kernel = _FakeTritonKernel()
     kernel.arg_names = (
-        "first_ptr",
-        "first_stride0",
+        "FIRST_PTR",
+        "FIRST_STRIDE0",
         "aliased_ptr",
         "aliased_stride_0",
         "SECOND",
@@ -143,7 +143,6 @@ def test_triton_kernel_decorator_returns_launcher(
         return dict(
             first=TritonWarmupTensor(torch.float32, shape=(2, 3), strides=(5, 1)),
             second=WarmupChoices(1, 2),
-            config=7,
         )
 
     @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
@@ -155,16 +154,16 @@ def test_triton_kernel_decorator_returns_launcher(
 
     monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
 
-    keys = launch._owner.get_warmup_keys()
+    keys = launch.get_warmup_keys()
     assert [dict(key.inputs)["second"] for key in keys] == [1, 2]
-    launch._owner.compile(keys[0])
+    launch.compile(keys[0])
     assert kernel.warmup_calls == [
         {
             "grid": (1,),
-            "first_ptr": TritonWarmupTensor(
+            "FIRST_PTR": TritonWarmupTensor(
                 torch.float32, shape=(2, 3), strides=(5, 1)
             ),
-            "first_stride0": 5,
+            "FIRST_STRIDE0": 5,
             "aliased_ptr": TritonWarmupTensor(
                 torch.float32, shape=(2, 3), strides=(5, 1)
             ),
@@ -180,8 +179,8 @@ def test_triton_kernel_decorator_returns_launcher(
             (2,),
             (),
             {
-                "first_ptr": first,
-                "first_stride0": 5,
+                "FIRST_PTR": first,
+                "FIRST_STRIDE0": 5,
                 "aliased_ptr": first,
                 "aliased_stride_0": 5,
                 "SECOND": 2,
@@ -214,7 +213,7 @@ def test_triton_kernel_decorator_compacts_large_ranges(
 
     monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
 
-    keys = dispatch._owner.get_warmup_keys()
+    keys = dispatch.get_warmup_keys()
     assert len(dispatched) < 64
     assert len(keys) == 2
     assert {7 if dict(key.inputs)["second"] <= 17 else 8 for key in keys} == {7, 8}
@@ -244,7 +243,7 @@ def test_triton_kernel_dispatch_uses_cuda_fake_tensors(
         lambda kernel, kwargs: {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])},
     )
 
-    keys = dispatch._owner.get_warmup_keys()
+    keys = dispatch.get_warmup_keys()
     assert len(keys) == 1
     assert dict(keys[0].inputs)["first"].device.type == "cuda"
 
@@ -276,9 +275,9 @@ def test_triton_kernel_decorates_native_launchers(
         },
     )
 
-    keys = launcher.warmup_plan()
+    keys = launcher.get_warmup_keys()
     assert len(keys) == 2
-    launcher._owner.compile(keys[0])
+    launcher.compile(keys[0])
     assert kernel.warmup_calls == [
         {"grid": (1,), "first": "warmup", "second": 1, "CONST": 7}
     ]
@@ -402,8 +401,8 @@ def test_compute_slot_mapping_uses_named_launcher_inputs(monkeypatch) -> None:
     )
     launches: list[tuple[Any, ...]] = []
 
-    def launch(grid: Any, inputs: Any, **kwargs: Any) -> None:
-        launches.append((grid, inputs, kwargs))
+    def launch(grid: Any, names: Any, values: Any, **kwargs: Any) -> None:
+        launches.append((grid, dict(zip(names, values)), kwargs))
 
     monkeypatch.setattr(owner, "launch", launch)
     owner.compile(compile_key)
