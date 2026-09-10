@@ -661,13 +661,7 @@ def select_mxfp4_moe_backend(
 def select_w4a4_mxfp4_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """Select the backend for static W4A4 MXFP4 checkpoints.
-
-    Used by compressed-tensors W4A4 and AutoRound (INC) exports. Prefers
-    the native CUTLASS MXFP4 x MXFP4 kernel on capable devices, uses the
-    XPU path on XPU, and falls back to weight-only Marlin (W4A16)
-    elsewhere.
-    """
+    """Select a W4A4 MXFP4 backend with a W4A16 Marlin fallback."""
     if config.moe_backend != "auto":
         return select_mxfp4_moe_backend(config)
 
