@@ -366,3 +366,109 @@ def test_get_requests_random_mm_with_mm_processor_args(
         assert isinstance(req.prompt, list)
         assert req.prompt[0]["role"] == "user"
         assert any(item.get("type") == "image_url" for item in req.prompt[0]["content"])
+
+@pytest.mark.parametrize("backend", ["vllm", "vllm-chat"])
+@pytest.mark.parametrize("measure_energy", [False, True])
+def test_throughput_energy_excludes_loading_and_warmup(
+    monkeypatch, tmp_path, backend, measure_energy
+):
+    import json
+
+    import vllm
+    from vllm.benchmarks import throughput
+    from vllm.benchmarks.lib import energy
+    from vllm.outputs import CompletionOutput, RequestOutput
+
+    events = []
+    counters = iter([1000, 3000])
+
+    class FakeNvml:
+        NVMLError = RuntimeError
+
+        def nvmlInit(self):
+            events.append("energy-start")
+
+        def nvmlDeviceGetHandleByIndex(self, index):
+            assert index == 2
+            return index
+
+        def nvmlDeviceGetTotalEnergyConsumption(self, handle):
+            return next(counters)
+
+        def nvmlShutdown(self):
+            events.append("energy-stop")
+
+    class FakeLLM:
+        llm_engine = SimpleNamespace(model_config=SimpleNamespace(max_model_len=32))
+
+        @classmethod
+        def from_engine_args(cls, args):
+            events.append("load")
+            return cls()
+
+        def generate(self, *args, **kwargs):
+            events.append("generate")
+            return [
+                RequestOutput(
+                    request_id="request",
+                    prompt="prompt",
+                    prompt_token_ids=[1],
+                    prompt_logprobs=None,
+                    outputs=[CompletionOutput(0, "answer", [2, 3], None, None)],
+                    finished=True,
+                )
+            ]
+
+        chat = generate
+
+    monkeypatch.setitem(vllm.__dict__, "LLM", FakeLLM)
+    monkeypatch.setattr(energy, "import_pynvml", lambda: FakeNvml())
+    monkeypatch.setattr(
+        energy, "time", SimpleNamespace(perf_counter=iter([10.0, 12.0]).__next__)
+    )
+    monkeypatch.setattr(throughput, "get_tokenizer", lambda *a, **kw: object())
+    monkeypatch.setattr(throughput, "get_requests", lambda *a: [_sr(0)])
+    output = tmp_path / "results.json"
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    cli = [
+        "--backend",
+        backend,
+        "--model",
+        "test-model",
+        "--input-len",
+        "4",
+        "--output-len",
+        "2",
+        "--num-prompts",
+        "1",
+        "--num-warmups",
+        "1",
+        "--output-json",
+        str(output),
+    ]
+    if measure_energy:
+        cli += ["--energy-gpu-ids", "2"]
+    throughput.main(parser.parse_args(cli))
+
+    results = json.loads(output.read_text())
+    if measure_energy:
+        assert events == ["load", "generate", "energy-start", "generate", "energy-stop"]
+        assert results["energy_gpu_ids"] == [2]
+        assert results["gpu_energy_j"] == 2.0
+        assert results["gpu_avg_power_w"] == 1.0
+        assert results["gpu_energy_per_output_token_j"] == 1.0
+    else:
+        assert events == ["load", "generate", "generate"]
+        assert not any("energy" in key for key in results)
+
+
+@pytest.mark.parametrize("extra_args", [["--async-engine"], ["--backend", "hf"]])
+def test_throughput_energy_rejects_unsupported_backends(extra_args):
+    from vllm.benchmarks.throughput import validate_args
+
+    parser = FlexibleArgumentParser()
+    add_cli_args(parser)
+    args = parser.parse_args(["--energy-gpu-ids", "0", *extra_args])
+    with pytest.raises(ValueError, match="synchronous"):
+        validate_args(args)

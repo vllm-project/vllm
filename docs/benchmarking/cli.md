@@ -1476,3 +1476,35 @@ to account for the extra prompt which is the query. The token accounting to repo
 throughput numbers correctly is also adjusted.
 
 </details>
+
+## Offline GPU energy measurements
+
+For the synchronous `vllm` and `vllm-chat` throughput backends,
+`--energy-gpu-ids` enables optional NVML cumulative energy-counter readings:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 vllm bench throughput \
+  --model facebook/opt-125m --dataset-name random \
+  --input-len 128 --output-len 128 --num-prompts 100 \
+  --num-warmups 10 --energy-gpu-ids 2 --output-json results.json
+```
+
+The IDs are physical indices from `nvidia-smi`, not indices remapped by
+`CUDA_VISIBLE_DEVICES`. Select every local GPU used by the benchmark. Devices
+on other hosts are not measured. The readings cover the whole selected GPUs,
+including idle power and other processes; they exclude CPU and host energy.
+Use otherwise idle GPUs for comparisons.
+
+The measurement starts after model loading and warmup and covers request
+preparation, inference, and detokenization. Its duration is reported separately
+from the throughput timer. JSON output gains `energy_gpu_ids`, `gpu_energy_j`,
+`gpu_energy_duration_s`, `gpu_avg_power_w` (total energy divided by measurement
+duration), and `gpu_energy_per_output_token_j` (total energy divided by output
+tokens). Energy per token is `null` when no output tokens are returned.
+
+All selected GPUs must support NVML cumulative energy counters. If a counter
+is unavailable or resets during the run, the benchmark warns and omits energy
+metrics rather than returning a partial total. Short runs are sensitive to
+hardware counter resolution. Without this flag, NVML is not initialized and
+the result schema is unchanged. Async, HF, and MII backends are not supported
+by this option.
