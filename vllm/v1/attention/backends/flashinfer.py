@@ -2046,10 +2046,6 @@ class FlashInferImpl(AttentionImpl):
 
         # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]
-        if key is not None:
-            key = key[:num_actual_tokens]
-        if value is not None:
-            value = value[:num_actual_tokens]
         output_padded = output
         output = output[:num_actual_tokens]
 
@@ -2163,8 +2159,8 @@ class FlashInferImpl(AttentionImpl):
                         layer,
                         prefill_query,
                         kv_cache_tuple,
-                        key[num_decode_tokens:],
-                        value[num_decode_tokens:],
+                        key[num_decode_tokens:num_actual_tokens],
+                        value[num_decode_tokens:num_actual_tokens],
                         out=output[num_decode_tokens:],
                     )
                 else:
