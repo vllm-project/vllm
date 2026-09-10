@@ -3,7 +3,6 @@
 
 import asyncio
 import json
-import math
 import types
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
@@ -74,7 +73,7 @@ from vllm.renderers.embed_utils import (
 )
 from vllm.transformers_utils.processor import get_video_processor_cls_name
 from vllm.utils import random_uuid
-from vllm.utils.collection_utils import is_list_of
+from vllm.utils.collection_utils import is_list_of, is_list_of_numbers
 from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
@@ -147,11 +146,11 @@ class ChatCompletionContentPartAudioParam(TypedDict, total=False):
     """The type of the content part."""
 
 
-MultiModalEmbeds: TypeAlias = str | dict[str, str | list[int | float]]
+MultiModalEmbedsPayload: TypeAlias = str | dict[str, str | list[int | float]]
 
 
 class ChatCompletionContentPartImageEmbedsParam(TypedDict, total=False):
-    image_embeds: MultiModalEmbeds | None
+    image_embeds: MultiModalEmbedsPayload | None
     """
     The image embeddings. It can be either:
     - A single base64 string.
@@ -167,7 +166,7 @@ class ChatCompletionContentPartImageEmbedsParam(TypedDict, total=False):
 
 
 class ChatCompletionContentPartAudioEmbedsParam(TypedDict, total=False):
-    audio_embeds: MultiModalEmbeds | None
+    audio_embeds: MultiModalEmbedsPayload | None
     """
     The audio embeddings. It can be either:
     - A single base64 string representing a serialized torch tensor.
@@ -183,7 +182,7 @@ class ChatCompletionContentPartAudioEmbedsParam(TypedDict, total=False):
 
 
 class ChatCompletionContentPartVideoEmbedsParam(TypedDict, total=False):
-    video_embeds: MultiModalEmbeds | None
+    video_embeds: MultiModalEmbedsPayload | None
     """
     The video embeddings. It can be either:
     - A single base64 string representing a serialized torch tensor.
@@ -543,9 +542,7 @@ async def _load_embeds_dict(
 def _parse_metadata_array(key: str, value: list, metadata_fields: set[str]):
     if key not in metadata_fields:
         raise VLLMValidationError(f"JSON arrays are only supported for metadata: {key}")
-    if not all(
-        type(v) is int or (type(v) is float and math.isfinite(v)) for v in value
-    ):
+    if not is_list_of_numbers(value):
         raise VLLMValidationError(f"Metadata {key} must be a finite numeric array.")
     dtype = torch.float64 if any(isinstance(v, float) for v in value) else torch.int64
     try:
@@ -985,7 +982,7 @@ class BaseMultiModalContentParser(ABC):
     @abstractmethod
     def parse_image_embeds(
         self,
-        image_embeds: MultiModalEmbeds | None,
+        image_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
     ) -> None:
         raise NotImplementedError
@@ -1009,7 +1006,7 @@ class BaseMultiModalContentParser(ABC):
     @abstractmethod
     def parse_audio_embeds(
         self,
-        audio_embeds: MultiModalEmbeds | None,
+        audio_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
     ) -> None:
         raise NotImplementedError
@@ -1025,7 +1022,7 @@ class BaseMultiModalContentParser(ABC):
     @abstractmethod
     def parse_video_embeds(
         self,
-        video_embeds: MultiModalEmbeds | None,
+        video_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
     ) -> None:
         raise NotImplementedError
@@ -1082,7 +1079,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
     def parse_image_embeds(
         self,
-        image_embeds: MultiModalEmbeds | None,
+        image_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
@@ -1110,7 +1107,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
     def parse_audio_embeds(
         self,
-        audio_embeds: MultiModalEmbeds | None,
+        audio_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
@@ -1187,7 +1184,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
     def parse_video_embeds(
         self,
-        video_embeds: MultiModalEmbeds | None,
+        video_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
@@ -1281,7 +1278,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
     def parse_image_embeds(
         self,
-        image_embeds: MultiModalEmbeds | None,
+        image_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
@@ -1299,7 +1296,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
     async def _image_embeds_with_uuid_async(
         self,
-        image_embeds: MultiModalEmbeds | None,
+        image_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None,
     ):
         if isinstance(image_embeds, dict):
@@ -1314,7 +1311,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
     def parse_audio_embeds(
         self,
-        audio_embeds: MultiModalEmbeds | None,
+        audio_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
@@ -1332,7 +1329,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
     async def _audio_embeds_with_uuid_async(
         self,
-        audio_embeds: MultiModalEmbeds | None,
+        audio_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None,
     ):
         if isinstance(audio_embeds, dict):
@@ -1413,7 +1410,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
     def parse_video_embeds(
         self,
-        video_embeds: MultiModalEmbeds | None,
+        video_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None = None,
     ) -> None:
         mm_config = self.model_config.get_multimodal_config()
@@ -1431,7 +1428,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
     async def _video_embeds_with_uuid_async(
         self,
-        video_embeds: MultiModalEmbeds | None,
+        video_embeds: MultiModalEmbedsPayload | None,
         uuid: str | None,
     ):
         if isinstance(video_embeds, dict):
@@ -1638,7 +1635,9 @@ _AudioParser = TypeAdapter(ChatCompletionContentPartAudioParam).validate_python
 _VideoParser = TypeAdapter(ChatCompletionContentPartVideoParam).validate_python
 
 _ResponsesInputImageParser = TypeAdapter(ResponseInputImageParam).validate_python
-_ContentPart: TypeAlias = MultiModalEmbeds | dict[str, str] | InputAudio | PILImage
+_ContentPart: TypeAlias = (
+    MultiModalEmbedsPayload | dict[str, str] | InputAudio | PILImage
+)
 
 # Define a mapping from part types to their corresponding parsing functions.
 MM_PARSER_MAP: dict[
@@ -1928,15 +1927,21 @@ def _parse_chat_message_content_part(
         mm_parser.parse_image(str_content, uuid)
         modality = "image"
     elif part_type == "image_embeds":
-        content = cast(MultiModalEmbeds, content) if content is not None else None
+        content = (
+            cast(MultiModalEmbedsPayload, content) if content is not None else None
+        )
         mm_parser.parse_image_embeds(content, uuid)
         modality = "image"
     elif part_type == "audio_embeds":
-        content = cast(MultiModalEmbeds, content) if content is not None else None
+        content = (
+            cast(MultiModalEmbedsPayload, content) if content is not None else None
+        )
         mm_parser.parse_audio_embeds(content, uuid)
         modality = "audio"
     elif part_type == "video_embeds":
-        content = cast(MultiModalEmbeds, content) if content is not None else None
+        content = (
+            cast(MultiModalEmbedsPayload, content) if content is not None else None
+        )
         mm_parser.parse_video_embeds(content, uuid)
         modality = "video"
     elif part_type == "prompt_embeds":
