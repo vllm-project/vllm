@@ -68,6 +68,10 @@ from vllm.models.deepseek_v4_1.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferSM120Attention,
 )
 from vllm.models.deepseek_v4_1.nvidia.flashmla import DeepseekV4FlashMLAAttention
+from vllm.models.deepseek_v4_1.nvidia.flashmla_fused import (
+    DeepseekV4FlashMLAFusedAttention,
+    dsv4_fused_attention_enabled,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
@@ -142,10 +146,17 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
         AttentionBackendEnum.FLASHMLA_SPARSE_DSV4,
         AttentionBackendEnum.FLASHMLA_SPARSE_DSV41,
     ):
-        return DeepseekV4FlashMLAAttention
+        return _flashmla_attn_cls(vllm_config)
 
     if device_capability is not None and device_capability.major == 12:
         return DeepseekV4FlashInferSM120Attention
+    return _flashmla_attn_cls(vllm_config)
+
+
+def _flashmla_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
+    if dsv4_fused_attention_enabled(vllm_config):
+        logger.info_once("Using the FlashMLA fused sparse attention kernel.")
+        return DeepseekV4FlashMLAFusedAttention
     return DeepseekV4FlashMLAAttention
 
 
@@ -848,6 +859,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             num_experts=self.config.n_routed_experts,
         )
 
+    def finalize_attention_weights(self, loaded_params: set[str] | None) -> None:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
+            attn = getattr(layer, "attn", None)
+            if attn is not None:
+                attn.finalize_loaded_weights(loaded_params)
+
     def finalize_mega_moe_weights(self) -> None:
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             layer.ffn.finalize_mega_moe_weights()
@@ -1100,10 +1117,15 @@ class DeepseekV41LLMForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self.process_weights_after_loading()
+        self.process_weights_after_loading(loaded_params)
         return loaded_params
 
-    def process_weights_after_loading(self) -> None:
+    def process_weights_after_loading(
+        self, loaded_params: set[str] | None = None
+    ) -> None:
+        # Runs before the quant methods pack weights, so attention layers can
+        # still permute raw MXFP8 shards for the FlashMLA fused kernel.
+        self.model.finalize_attention_weights(loaded_params)
         self.model.finalize_mega_moe_weights()
         self.model.finalize_mhc_broadcast_weights()
 

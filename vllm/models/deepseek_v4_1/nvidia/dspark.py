@@ -511,7 +511,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         if self.model.confidence_head is not None and not loaded_confidence_head:
             self.model.confidence_head = None
-        self.process_weights_after_loading()
+        self.process_weights_after_loading(loaded_params)
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
@@ -519,7 +519,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         for layer in self.model.layers:
             layer.ffn.finalize_mega_moe_weights()
 
-    def process_weights_after_loading(self) -> None:
+    def process_weights_after_loading(
+        self, loaded_params: set[str] | None = None
+    ) -> None:
+        for layer in self.model.layers:
+            layer.attn.finalize_loaded_weights(loaded_params)
         self._finalize_moe()
 
     def _remap_dspark_name(self, name: str) -> str | None:
