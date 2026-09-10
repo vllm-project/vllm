@@ -21,8 +21,6 @@ from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
 from vllm.v1.hisparse.binding import HiSparseHostAllocator, bind_hisparse_kv_caches
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    HiSparseHotSpec,
-    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
@@ -202,10 +200,7 @@ def init_attn_backend(
         kv_cache_config.kv_cache_groups
     ):
         layer_names = kv_cache_group_spec.layer_names
-        if isinstance(
-            kv_cache_group_spec.kv_cache_spec,
-            (HiSparseHotSpec, HiSparseResidentSpec),
-        ):
+        if not kv_cache_group_spec.kv_cache_spec.has_layer_views:
             attn_groups.append([])
             continue
         if active_layer_names is not None:

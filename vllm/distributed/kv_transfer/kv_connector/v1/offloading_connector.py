@@ -41,7 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
 from vllm.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
@@ -97,10 +97,6 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker = OffloadingConnectorWorker(
                 spec, vllm_config, kv_cache_config
             )
-
-    def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
-        super().bind_kv_cache_manager(kv_cache_manager)
-        self._kv_cache_manager = kv_cache_manager
 
     def shutdown(self) -> None:
         if self.connector_worker is not None:

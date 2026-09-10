@@ -422,12 +422,7 @@ def allocate_kv_cache(
             kv_caches.update((name, buf) for name in tensor.layers)
             continue
 
-        num_blocks = (
-            kv_cache_config.hisparse_host_num_blocks
-            if tensor.host_resident
-            else kv_cache_config.num_blocks
-        )
-        assert num_blocks is not None
+        num_blocks = kv_cache_config.num_blocks_of(tensor)
         kernel_block_size = None
         if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[group_id]
@@ -472,7 +467,9 @@ def prepare_kernel_block_sizes(
             kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
         if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
             continue
-        if isinstance(kv_cache_spec, AttentionSpec):
+        if not kv_cache_spec.has_layer_views:
+            kernel_block_sizes.append(kv_cache_spec.block_size)
+        elif isinstance(kv_cache_spec, AttentionSpec):
             # This is an attention backend that supports virtual block splitting.
             kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
             group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
@@ -482,8 +479,6 @@ def prepare_kernel_block_sizes(
             kernel_block_sizes.append(selected_kernel_size)
         elif isinstance(kv_cache_spec, MambaSpec):
             # This is likely Mamba or other non-attention cache, no splitting.
-            kernel_block_sizes.append(kv_cache_spec.block_size)
-        elif not kv_cache_spec.has_layer_views:
             kernel_block_sizes.append(kv_cache_spec.block_size)
         else:
             raise NotImplementedError(

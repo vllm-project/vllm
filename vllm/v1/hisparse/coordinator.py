@@ -54,7 +54,7 @@ class _HiSparseRequestState:
     exists), clean (``valid_pages``: the host copy is complete) and unpinned
     (``unpinned_pages``: clean, and its allocation reference was released so
     the pool may reuse it). ``pinned_clean`` tracks clean pages still holding
-    their reference, including the active tail and pages awaiting a hot buffer.
+    their reference, which only happens before the request can read from host.
     """
 
     valid_pages: set[int] = field(default_factory=set)
@@ -82,9 +82,9 @@ class HiSparseCoordinator:
     """Own HiSparse host allocation, host publication, spills, and GPU residency.
 
     GPU-resident pages are a write-back cache of the host tier. Once a page's
-    host copy is durable and its owner has an allocated hot region, the page's
-    reference is released with ``BlockPool.unpin_blocks``. It stays in the
-    block table and keeps
+    host copy is durable and its owner can read from host (it has, or has
+    asked for, a hot region), the page's allocation reference is released with
+    ``BlockPool.unpin_blocks``: the block stays in the block table and keeps
     being read, but the pool counts it as free and may hand it out, at which
     point the owner's page is nulled and its block table republished.
     """
@@ -96,6 +96,7 @@ class HiSparseCoordinator:
         max_model_len: int,
     ) -> None:
         self.managers = managers
+        self.max_model_len = max_model_len
         groups = kv_cache_config.kv_cache_groups
 
         resident_managers: list[HiSparseResidentManager] = []
@@ -113,27 +114,25 @@ class HiSparseCoordinator:
             if isinstance(manager, HiSparseHotManager):
                 hot_managers.append(manager)
                 assert not group.host_resident
+            if isinstance(manager, (HiSparseHotManager, HiSparseResidentManager)):
+                manager.coordinator = self
         self.resident_managers = tuple(resident_managers)
         self.hot_managers = tuple(hot_managers)
         self.host_manager: HiSparseSourceManager | None = None
         self.host_group_id: int | None = None
         self.max_spill_pages = 0
-        if host_group_ids := kv_cache_config.host_group_ids:
-            (host_group_id,) = host_group_ids
-            self.host_group_id = host_group_id
-            host_manager = managers[host_group_id]
-            assert isinstance(host_manager, HiSparseSourceManager)
-            self.host_manager = host_manager
-            assert kv_cache_config.hisparse_host_num_blocks is not None
-            host_manager.bind_host_pool(kv_cache_config.hisparse_host_num_blocks)
-        for cache_manager in (
-            self.host_manager,
-            *self.hot_managers,
-            *self.resident_managers,
-        ):
-            if cache_manager is not None:
-                cache_manager.coordinator = self
-        self._retained_copies: dict[int, tuple[KVCacheBlock, KVCacheBlock]] = {}
+        for group_id, manager in enumerate(managers):
+            if isinstance(manager, HiSparseSourceManager):
+                if self.host_manager is not None:
+                    raise ValueError("Only one HiSparse host group is supported.")
+                num_host_blocks = kv_cache_config.hisparse_host_num_blocks
+                if num_host_blocks is None:
+                    raise ValueError("HiSparse host group needs host capacity.")
+                self.host_group_id = group_id
+                self.host_manager = manager
+                manager.coordinator = self
+                manager.bind_host_pool(num_host_blocks)
+        self.has_host_cache = self.host_manager is not None
         self.gpu_pool: BlockPool | None = None
         self.transition_watermark = 0
         if self.resident_managers:
@@ -158,6 +157,11 @@ class HiSparseCoordinator:
             hot_cost = sum(manager.blocks_per_request for manager in hot_managers)
             self.transition_watermark = max(hot_cost, kv_cache_config.num_blocks // 10)
 
+        # Host copies handed to the worker, by destination block id, until it
+        # reports having run them.
+        self._retained_copies: dict[int, tuple[KVCacheBlock, KVCacheBlock]] = {}
+        # request -> prefix length an external load is still filling in.
+        self._pending_imports: dict[str, int] = {}
         self.block_table_updates: set[str] = set()
         self.spills_to_send: list[SparseKVPageTransfer] = []
         self.pending_spills: dict[int, _PendingSpill] = {}
@@ -191,14 +195,6 @@ class HiSparseCoordinator:
         self._adopt_copies(request_id, state, host_blocks[:num_host_pages])
         state.copies_recorded_blocks = max(state.copies_recorded_blocks, num_host_pages)
 
-    # ------------------------------------------------------------------
-    # Host pool helpers
-    # ------------------------------------------------------------------
-
-    def get_host_block_pool(self) -> BlockPool | None:
-        manager = self.host_manager
-        return manager.block_pool if manager is not None else None
-
     def take_host_block_copies(self) -> tuple[KVCacheBlockCopy, ...]:
         """Drain host copy-on-write work, retaining both endpoints.
 
@@ -230,12 +226,9 @@ class HiSparseCoordinator:
         assert self.host_manager is not None
         self.host_manager.block_pool.free_blocks(reversed(blocks))
 
-    def evict_host_blocks(self, block_ids: set[int]) -> bool:
-        pool = self.get_host_block_pool()
-        if pool is None:
-            return False
-        pool.evict_blocks(block_ids)
-        return True
+    def get_host_block_pool(self) -> BlockPool | None:
+        manager = self.host_manager
+        return manager.block_pool if manager is not None else None
 
     # ------------------------------------------------------------------
     # GPU copies of published host pages
@@ -311,7 +304,8 @@ class HiSparseCoordinator:
     def _can_read_from_host(self, request_id: str) -> bool:
         """Whether resident pages may be dropped under the request."""
         return bool(self.hot_managers) and all(
-            manager.has_hot(request_id) for manager in self.hot_managers
+            manager.has_hot(request_id) or request_id in manager.hot_required
+            for manager in self.hot_managers
         )
 
     def _resident_page_blocks(
@@ -385,9 +379,8 @@ class HiSparseCoordinator:
 
         A request that can read from host releases every clean sealed page to
         the pool. One that cannot keeps its pages pinned until the shared pool
-        runs low, then asks for a hot region. Pages stay pinned until a later
-        allocation provides that region: another request in the same batch
-        could otherwise reuse them before this request can read from host.
+        runs low, then asks for a hot region and releases them; the region is
+        allocated on its next scheduling pass, before the block table is used.
         """
         if not self.resident_managers:
             return
@@ -398,7 +391,6 @@ class HiSparseCoordinator:
                 return
             for manager in self.hot_managers:
                 manager.require_hot(request_id)
-            return
         self._unpin_clean_pages(request_id, state)
 
     # ------------------------------------------------------------------
@@ -439,9 +431,9 @@ class HiSparseCoordinator:
         *,
         replay_boundaries: Sequence[int],
     ) -> None:
-        """Run the per-step residency work; publish host hashes once durable."""
+        """Publish host-source hashes only after their pages are durable."""
         manager = self.host_manager
-        if manager is None or not manager.enable_caching:
+        if manager is None:
             return
         num_pages = num_computed_tokens // manager.block_size
         request_id = request.request_id
@@ -480,6 +472,21 @@ class HiSparseCoordinator:
         )
         self._record_copies(request_id, publication.num_computed_tokens)
         state.publication = None
+
+    def record_pending_host_import(self, request_id: str, num_tokens: int) -> None:
+        """Note a prefix an external load is populating in host pages."""
+        self._pending_imports[request_id] = num_tokens
+
+    def complete_pending_host_import(self, request_id: str, num_tokens: int) -> None:
+        """Publish a recorded import once its whole prefix is accounted for.
+
+        A load that failed part-way leaves the request short of the recorded
+        prefix, so nothing is published and the pages stay dirty.
+        """
+        pending = self._pending_imports.get(request_id)
+        if pending is not None and num_tokens >= pending:
+            del self._pending_imports[request_id]
+            self.complete_host_import(request_id, pending)
 
     def complete_host_import(self, request_id: str, num_computed_tokens: int) -> None:
         """Publish externally populated host pages after connector completion."""
@@ -645,7 +652,7 @@ class HiSparseCoordinator:
         )
 
     def has_pending_work(self) -> bool:
-        return bool(self.spills_to_send or self.pending_spills or self._retained_copies)
+        return bool(self.spills_to_send or self.pending_spills)
 
     def update_spills(
         self,
@@ -704,6 +711,7 @@ class HiSparseCoordinator:
 
     def free(self, request_id: str) -> None:
         """Detach the request; its clean pages stay readable copies in the pool."""
+        self._pending_imports.pop(request_id, None)
         state = self.request_states.pop(request_id, None)
         if state is None:
             return
@@ -736,16 +744,15 @@ def get_hisparse_coordinator(
     Built on first call and memoised on the HiSparse managers it binds itself
     to. Must run before the first request is admitted.
     """
-    groups = kv_cache_manager.kv_cache_config.host_group_ids
-    if not groups:
+    managers = tuple(kv_cache_manager.coordinator.single_type_managers)
+    for manager in managers:
+        coordinator = getattr(manager, "coordinator", None)
+        if coordinator is not None:
+            assert isinstance(coordinator, HiSparseCoordinator)
+            return coordinator
+    coordinator = HiSparseCoordinator(
+        kv_cache_manager.kv_cache_config, managers, kv_cache_manager.max_model_len
+    )
+    if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")
-    (host_group_id,) = groups
-    managers = kv_cache_manager.coordinator.single_type_managers
-    host_manager = managers[host_group_id]
-    assert isinstance(host_manager, HiSparseSourceManager)
-    if host_manager.coordinator is None:
-        HiSparseCoordinator(
-            kv_cache_manager.kv_cache_config, managers, kv_cache_manager.max_model_len
-        )
-    assert host_manager.coordinator is not None
-    return host_manager.coordinator
+    return coordinator

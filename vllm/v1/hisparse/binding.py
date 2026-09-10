@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Worker-side wiring of HiSparse caches to attention layers."""
 
 from typing import TYPE_CHECKING, Any
 
@@ -154,14 +155,17 @@ def bind_hisparse_kv_caches(
                 or resident.cache.stride() != hot.cache.stride()
             ):
                 raise RuntimeError("HiSparse resident and hot layouts must match.")
-            source_tensor = kv_caches[layer_name]
+            source_cache = kv_caches[layer_name]
             cache_handle.runtime.bind_source_cache(
-                kv_caches[layer_name],
+                source_cache,
                 registered_host_pool=pinned_host_pools[
-                    source_tensor.untyped_storage().data_ptr()
+                    source_cache.untyped_storage().data_ptr()
                 ],
             )
             cache_handles.append(cache_handle)
+            # The hot slab is raw storage owned by the runtime, not a layer
+            # cache: nothing downstream binds or registers it.
+            del kv_caches[cache_name]
 
     if hot_backing is None or not cache_handles:
         raise RuntimeError("HiSparse found no hot-cache handles.")

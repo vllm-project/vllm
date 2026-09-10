@@ -23,10 +23,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.hisparse.types import SparseKVOffloadCommand, SparseKVRowMirror
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
@@ -90,10 +88,20 @@ class HiSparseConnectorScheduler:
         assert self.coordinator is None
         self.coordinator = coordinator
 
+    def has_pending_push_work(self) -> bool:
+        assert self.coordinator is not None
+        return self.coordinator.has_pending_work()
+
+    def has_pending_block_frees(self) -> bool:
+        assert self.coordinator is not None
+        return self.coordinator.has_pending_reclamation()
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> HiSparseConnectorMetadata:
         assert self.coordinator is not None
+        # HiSparse rebinds worker state every step, so the load must start
+        # before the forward rather than being deferred to post-forward.
         scheduler_output.has_sync_kv_loads = True
         scheduler_output.block_table_updates = (
             self.coordinator.take_block_table_updates() or None
@@ -160,16 +168,6 @@ class HiSparseConnectorScheduler:
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         assert self.coordinator is not None
-        for request_id in connector_output.finished_recving or ():
-            request = self.requests.get(request_id)
-            if (
-                request is not None
-                and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-                and request_id not in connector_output.failed_recving
-            ):
-                self.coordinator.complete_host_import(
-                    request_id, request.num_computed_tokens
-                )
         metadata = connector_output.kv_connector_worker_meta
         if metadata is None:
             return
@@ -218,8 +216,8 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
             raise ValueError(f"Unsupported KV connector role: {role}")
 
     def bind_kv_cache_manager(self, kv_cache_manager: KVCacheManager) -> None:
-        if self.role != KVConnectorRole.SCHEDULER:
-            raise ValueError("Only the scheduler connector accepts a coordinator")
+        from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
+
         assert self.connector_scheduler is not None
         self.connector_scheduler.bind_coordinator(
             get_hisparse_coordinator(kv_cache_manager)
@@ -231,13 +229,11 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
 
     def has_pending_push_work(self) -> bool:
         assert self.connector_scheduler is not None
-        assert self.connector_scheduler.coordinator is not None
-        return self.connector_scheduler.coordinator.has_pending_work()
+        return self.connector_scheduler.has_pending_push_work()
 
     def has_pending_block_frees(self) -> bool:
         assert self.connector_scheduler is not None
-        assert self.connector_scheduler.coordinator is not None
-        return self.connector_scheduler.coordinator.has_pending_reclamation()
+        return self.connector_scheduler.has_pending_block_frees()
 
     def finish_forward(self) -> None:
         assert self.connector_worker is not None

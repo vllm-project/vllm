@@ -225,6 +225,7 @@ class KVConnectorBase_V1(ABC):
         else:
             raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
         self._kv_cache_config = kv_cache_config
+        self._kv_cache_manager: KVCacheManager | None = None
         self._role = role
 
     @property
@@ -471,6 +472,7 @@ class KVConnectorBase_V1(ABC):
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
         """Bind the scheduler's cache manager after it has been constructed."""
+        self._kv_cache_manager = kv_cache_manager
         self.bind_gpu_block_pool(kv_cache_manager.block_pool)
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:

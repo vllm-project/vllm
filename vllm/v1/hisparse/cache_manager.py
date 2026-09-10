@@ -12,10 +12,7 @@ manager when the scheduler binds the KV cache manager to the connector.
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.distributed.kv_events import (
-    MEDIUM_CPU,
-    KVCacheEvent,
-)
+from vllm.distributed.kv_events import MEDIUM_CPU, KVCacheEvent
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
@@ -31,7 +28,11 @@ if TYPE_CHECKING:
 
 
 class _SharedEventQueueBlockPool(BlockPool):
-    """Publish host events through the device pool's current event queue."""
+    """A pool that publishes into another pool's live KV event queue.
+
+    The owner rebinds its queue on every drain, so this reads it through the
+    owner rather than holding a reference.
+    """
 
     def __init__(self, *args, event_owner: BlockPool, **kwargs) -> None:
         self._event_owner = event_owner
@@ -43,7 +44,8 @@ class _SharedEventQueueBlockPool(BlockPool):
 
     @kv_event_queue.setter
     def kv_event_queue(self, events: list[KVCacheEvent]) -> None:
-        # Initialization and drain assign an empty queue; only the owner resets it.
+        # ``BlockPool.__init__`` seeds an empty queue and ``take_events``
+        # swaps in a fresh one; both belong to the owner, which drains it.
         assert not events
 
 
@@ -100,40 +102,45 @@ class HiSparseSourceManager(FullAttentionManager):
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
-        assert self.coordinator is not None
-        required_tokens = (
-            total_computed_tokens if self.coordinator.resident_managers else num_tokens
-        )
-        return super().get_num_blocks_to_allocate(
-            request_id,
-            required_tokens,
-            new_computed_blocks,
-            total_computed_tokens,
-            num_local_computed_tokens,
-            required_tokens,
-        )
+        # Host blocks come from the private pool and are never a device cost.
+        return 0
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
-        assert self.coordinator is not None
-        if not self.coordinator.resident_managers:
+        req_blocks = self.req_to_blocks[request_id]
+        num_new_blocks = cdiv(num_tokens, self.block_size) - len(req_blocks)
+        num_free = self.block_pool.get_num_free_blocks()
+        if num_new_blocks <= num_free:
             return super().allocate_new_blocks(
                 request_id, num_tokens, num_tokens_main_model
             )
-        blocks = self.req_to_blocks[request_id]
-        num_required = cdiv(num_tokens, self.block_size)
-        # A partial hit needs a private copy before any new optional host pages.
-        num_free = self.block_pool.get_num_free_blocks() - int(
-            request_id in self._partial_hit_reqs
-        )
-        assert num_free >= 0
-        fit_tokens = min(num_tokens, (len(blocks) + num_free) * self.block_size)
-        new_blocks = super().allocate_new_blocks(
-            request_id, fit_tokens, min(num_tokens_main_model, fit_tokens)
-        )
-        blocks.extend([self._null_block] * max(0, num_required - len(blocks)))
+        # Host exhaustion: take what fits and leave the rest without a host
+        # page, so those GPU pages are never written back and stay pinned.
+        new_blocks: list[KVCacheBlock] = []
+        if num_free:
+            fit_tokens = (len(req_blocks) + num_free) * self.block_size
+            new_blocks = super().allocate_new_blocks(
+                request_id, fit_tokens, min(num_tokens_main_model, fit_tokens)
+            )
+        req_blocks.extend([self._null_block] * (num_new_blocks - len(new_blocks)))
         return new_blocks
+
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        # The connector writes these host pages directly; they only become
+        # readable once the request is committed at that prefix length.
+        assert self.coordinator is not None
+        self.coordinator.record_pending_host_import(
+            request_id, num_local_computed_tokens + num_external_computed_tokens
+        )
+        super().allocate_external_computed_blocks(
+            request_id, num_local_computed_tokens, num_external_computed_tokens
+        )
 
     def cache_blocks(
         self,
@@ -144,6 +151,7 @@ class HiSparseSourceManager(FullAttentionManager):
         replay_boundaries: Sequence[int],
     ) -> None:
         assert self.coordinator is not None
+        self.coordinator.complete_pending_host_import(request.request_id, num_tokens)
         self.coordinator.publish_when_ready(
             request,
             num_tokens,
@@ -382,9 +390,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         assert self.coordinator is not None
         self.coordinator.free(request_id)
-        blocks = super().pop_blocks_for_free(request_id)
-        self.block_pool.free_blocks(reversed(blocks))
-        return []
+        return super().pop_blocks_for_free(request_id)
 
     def adopt_resident_page(
         self, request_id: str, block_idx: int, block: KVCacheBlock

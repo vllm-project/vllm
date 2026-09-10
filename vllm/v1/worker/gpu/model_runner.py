@@ -993,11 +993,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             self.lora_config, self
                         ),
                     )
-                    self.kv_connector.reset_capture_state()
                     if self.speculator is not None:
                         with use_workspace_lane(self._draft_workspace_lane):
                             self.speculator.capture()
-                        self.kv_connector.reset_capture_state()
                     if self.adaptive_verification is not None:
                         with self.step_timing.collect() as timings:
                             for batch in self.adaptive_verification.batches_to_profile(
@@ -1005,7 +1003,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             ):
                                 self._dummy_run(**batch)
                         self.adaptive_verification.set_initial_cost_curves(timings)
-                        self.kv_connector.reset_capture_state()
+                    self.kv_connector.reset_capture_state()
 
             end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
@@ -1135,9 +1133,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         reqs = scheduler_output.scheduled_cached_reqs
         table_updates = scheduler_output.block_table_updates or {}
         for req_id, block_ids in table_updates.items():
-            req_index = self.req_states.req_id_to_index.get(req_id)
-            if req_index is not None:
-                self.block_tables.append_block_ids(req_index, block_ids, overwrite=True)
+            if (idx := self.req_states.req_id_to_index.get(req_id)) is not None:
+                self.block_tables.append_block_ids(idx, block_ids, overwrite=True)
         num_computed_tokens_np = self.req_states.num_computed_tokens_np
         for req_id, num_computed_tokens, req_new_block_ids in zip(
             reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
@@ -1838,6 +1835,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.step_timing.forward_start()
 
+        connector_kwargs = dict(
+            request_state_indices=input_batch.idx_mapping,
+            request_ids=input_batch.req_ids,
+            num_tokens=input_batch.num_tokens,
+        )
+
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.
@@ -1845,11 +1848,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
             self.kv_connector.pre_forward(
-                scheduler_output,
-                request_state_indices=input_batch.idx_mapping,
-                request_ids=input_batch.req_ids,
-                attn_metadata=attn_metadata,
-                num_tokens=input_batch.num_tokens,
+                scheduler_output, **connector_kwargs, attn_metadata=attn_metadata
             )
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
@@ -1874,13 +1873,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
             ):
-                self.kv_connector.pre_forward(
-                    scheduler_output,
-                    request_state_indices=input_batch.idx_mapping,
-                    request_ids=input_batch.req_ids,
-                    attn_metadata=attn_metadata,
-                    num_tokens=0 if dummy_run else input_batch.num_tokens,
-                )
+                self.kv_connector.pre_forward(scheduler_output, **connector_kwargs)
                 if ubatch_state is not None:
                     assert self.ubatch_runner is not None
                     model_output = self.ubatch_runner.run(
@@ -1898,8 +1891,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # Eager (NONE): call the raw model directly.
                     model_output = self.model(**model_inputs)
 
-        if not dummy_run:
-            self.kv_connector.finish_forward()
+        self.kv_connector.finish_forward()
 
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:

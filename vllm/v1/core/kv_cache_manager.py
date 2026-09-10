@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
@@ -619,10 +619,6 @@ class KVCacheManager:
             The request's blocks in allocation order.
         """
         return self.coordinator.pop_blocks_for_free(request.request_id)
-
-    def free_blocks(self, blocks: Iterable[KVCacheBlock]) -> None:
-        """Release blocks after their deferred-free fence has completed."""
-        self.coordinator.free_blocks(blocks)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from typing import NamedTuple
 
 from vllm.logger import init_logger
@@ -177,22 +177,7 @@ class KVCacheCoordinator(ABC):
         reserved_blocks: int,
         apply_admission_cap: bool = False,
     ) -> bool:
-        """Check that mandatory allocations fit in their pools."""
-        for i, manager in enumerate(self.single_type_managers):
-            if manager.block_pool is self.block_pool:
-                continue
-            required = manager.get_num_blocks_to_allocate(
-                request_id,
-                num_tokens,
-                new_computed_blocks[i],
-                total_computed_tokens,
-                num_local_computed_tokens,
-                num_tokens_main_model,
-                apply_admission_cap=apply_admission_cap,
-            )
-            if required > manager.block_pool.get_num_free_blocks():
-                return False
-
+        """Check device allocation demand, including reserved blocks."""
         required = self.get_num_blocks_to_allocate(
             request_id,
             num_tokens,
@@ -243,8 +228,6 @@ class KVCacheCoordinator(ABC):
         """
         num_blocks_to_allocate = 0
         for i, manager in enumerate(self.single_type_managers):
-            if manager.block_pool is not self.block_pool:
-                continue
             if isinstance(manager, CrossAttentionManager):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
@@ -396,26 +379,6 @@ class KVCacheCoordinator(ABC):
                 retention_interval=self.retention_interval,
                 replay_boundaries=boundaries,
             )
-
-    def free_blocks(self, blocks: Iterable[KVCacheBlock]) -> None:
-        """Return deferred blocks to their owning pool."""
-        remaining = list(blocks)
-        for pool in dict.fromkeys(
-            manager.block_pool for manager in self.single_type_managers
-        ):
-            if pool is self.block_pool:
-                continue
-            owned: list[KVCacheBlock] = []
-            other: list[KVCacheBlock] = []
-            for block in remaining:
-                belongs = (
-                    block.block_id < len(pool.blocks)
-                    and pool.blocks[block.block_id] is block
-                )
-                (owned if belongs else other).append(block)
-            pool.free_blocks(owned)
-            remaining = other
-        self.block_pool.free_blocks(remaining)
 
     def emit_cached_block_events(
         self, request: Request, computed_blocks: tuple[list[KVCacheBlock], ...]

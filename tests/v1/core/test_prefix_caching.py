@@ -382,7 +382,9 @@ def test_hisparse_indexer_offload_is_capped_by_missing_host_prefix():
     host_blocks, _, _, _ = manager.get_blocks(original.request_id).blocks
     evicted_host_id = host_blocks[0].block_id
     manager.free(original)
-    assert get_hisparse_coordinator(manager).evict_host_blocks({evicted_host_id})
+    get_hisparse_coordinator(manager).host_manager.block_pool.evict_blocks(
+        {evicted_host_id}
+    )
 
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
     _, num_local, _ = manager.get_computed_blocks(resumed)
@@ -467,7 +469,9 @@ def test_connector_completes_partial_prefix_without_importing_missing_host_kv(
     manager.free(resumed)
 
     # A surviving indexer offload must not make absent host KV look computed.
-    get_hisparse_coordinator(manager).evict_host_blocks({missing_host})
+    get_hisparse_coordinator(manager).host_manager.block_pool.evict_blocks(
+        {missing_host}
+    )
     retry = make_request("retry", tokens, HISPARSE_BLOCK_SIZE, sha256)
     _, local, _, _ = Scheduler._get_local_prefix_cache_hit(scheduler, retry)
     assert local == 0
@@ -619,7 +623,7 @@ def test_hisparse_deferred_free_retains_host_blocks_until_fence():
     blocks = manager.pop_blocks_for_free(request)
     assert host_pool.get_num_free_blocks() < host_free
     assert blocks and any(host_pool.blocks[b.block_id] is b for b in blocks)
-    manager.free_blocks(reversed(blocks))
+    manager.block_pool.free_blocks(reversed(blocks))
     assert host_pool.get_num_free_blocks() == host_free
     assert manager.block_pool.get_num_free_blocks() == device_free
 
@@ -936,7 +940,9 @@ def test_hisparse_events_report_host_and_device_placement():
     }
 
     host_block = manager.get_blocks(request.request_id).blocks[0][0]
-    get_hisparse_coordinator(manager).evict_host_blocks({host_block.block_id})
+    get_hisparse_coordinator(manager).host_manager.block_pool.evict_blocks(
+        {host_block.block_id}
+    )
     [removed] = manager.take_events()
     assert isinstance(removed, BlockRemoved)
     assert removed.medium == MEDIUM_CPU

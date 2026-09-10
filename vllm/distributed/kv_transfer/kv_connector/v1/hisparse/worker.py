@@ -21,9 +21,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.hisparse.layout import (
-    HISPARSE_HOT_SUFFIX,
-)
+from vllm.v1.hisparse.layout import HISPARSE_HOT_SUFFIX
 from vllm.v1.hisparse.runtime import HiSparseCacheHandle, release_pinned_state
 from vllm.v1.hisparse.types import SparseKVPageTransfer, SparseKVRowMirror
 from vllm.v1.kv_cache_interface import (
@@ -306,6 +304,7 @@ class HiSparseConnectorWorker:
             )
         self.hot_backing = hot_backing
         self._pending_invalid_block_ids: list[int] = []
+        # Destination block ids of host copies this worker has run.
         self._completed_host_copy_dst_ids: list[int] = []
         self._post_forward_transfers: list[SparseKVPageTransfer] = []
         self._enqueued_transfer_ids: list[int] = []
@@ -415,6 +414,11 @@ class HiSparseConnectorWorker:
                 handle.prepare_group_for_batch(metadata)
 
     def _stage_row_mirror_mapping(self, num_tokens: int) -> None:
+        """Snapshot the rows this forward will write, off the compute stream.
+
+        The resident slot mapping is a persistent view bound at registration
+        time, so the rows are already staged by the time the forward launches.
+        """
         state = self._slot_mapping_staging
         if state is None or not num_tokens:
             return
@@ -429,8 +433,6 @@ class HiSparseConnectorWorker:
                 "HiSparse row mapping exceeds staging capacity: "
                 f"{end} > {state.slots.shape[0]}."
             )
-        if start and state.source_index != source_index:
-            raise ValueError("HiSparse mirror phase mixed resident cache groups.")
         main_stream = current_stream()
         state.stream.wait_stream(main_stream)
         with torch.cuda.stream(state.stream):

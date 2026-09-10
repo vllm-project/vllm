@@ -1515,6 +1515,13 @@ class KVCacheConfig:
             if group.host_resident
         )
 
+    def num_blocks_of(self, tensor: KVCacheTensor) -> int:
+        """Number of blocks addressable by the pool backing ``tensor``."""
+        if not tensor.host_resident:
+            return self.num_blocks
+        assert self.hisparse_host_num_blocks is not None
+        return self.hisparse_host_num_blocks
+
     @property
     def has_mamba_layers(self) -> bool:
         return any(
