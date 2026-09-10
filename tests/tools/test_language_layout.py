@@ -5,17 +5,26 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-HYBRID_HELPER = REPO_ROOT / "tests/models/language/generation/_hybrid_models.py"
+GENERATION = REPO_ROOT / "tests/models/language/generation"
+HELPERS = [
+    GENERATION / "_common_models.py",
+    GENERATION / "_granite_models.py",
+    GENERATION / "_hybrid_models.py",
+]
 
 
-def test_hybrid_models_helper_is_never_collected():
-    """The shared hybrid test body must not be collected as a test itself.
+@pytest.mark.parametrize("helper", HELPERS, ids=lambda p: p.name)
+def test_shared_models_helper_is_never_collected(helper: Path):
+    """Shared test bodies must not be collected as tests themselves.
 
-    ``_hybrid_models.py`` holds the shared body of the split ``test_models``
-    slices under ``generation/hybrid/`` and ``generation/hybrid_granite/``.
-    Its leading underscore keeps it out of pytest's ``test_*.py`` collection;
-    even when the file is passed to pytest explicitly, it must yield zero
+    The ``_*_models.py`` modules hold the shared bodies of the split
+    ``test_models`` slices under ``generation/core/``, ``core_slow/``,
+    ``hybrid/``, ``hybrid_granite/`` and ``extended/``. Their leading
+    underscore keeps them out of pytest's ``test_*.py`` collection; even
+    when a helper is passed to pytest explicitly, it must yield zero
     collected items so no case is ever double-collected.
     """
     result = subprocess.run(
@@ -27,7 +36,7 @@ def test_hybrid_models_helper_is_never_collected():
             "-q",
             "-p",
             "no:cacheprovider",
-            str(HYBRID_HELPER),
+            str(helper),
         ],
         cwd=REPO_ROOT,
         capture_output=True,

@@ -112,9 +112,10 @@ SEPARATE_GROUPS = [
 ]
 
 EXCLUDE = [
-    # The hybrid shard directories (hybrid/01, ..., hybrid_granite/) are
-    # pytest packages whose numeric names mypy cannot map to modules.
+    # The shard directories (hybrid/01, ..., extended/01, ...) are pytest
+    # packages whose numeric names mypy cannot map to modules.
     r"tests/models/language/generation/hybrid",
+    r"tests/models/language/generation/extended",
     r"vllm/model_executor/models/[kK]",
     r"vllm/model_executor/models/[nN]",
     r"vllm/model_executor/models/[oO]",
