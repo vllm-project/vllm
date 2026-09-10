@@ -19,6 +19,11 @@ class SamplingMetadata:
 
     top_p: torch.Tensor | None
     top_k: torch.Tensor | None
+    # True iff at least one row in the batch has top_k == 1. Lets the sampler
+    # skip the unconditional argmax-on-all-rows it would otherwise need to do
+    # whenever top_k is set, since top_k=1 rows must take the greedy branch
+    # to match temperature=0 (vllm-project/vllm#5404).
+    has_top_k_one: bool
 
     generators: dict[int, torch.Generator]
 

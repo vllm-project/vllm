@@ -148,6 +148,7 @@ def _create_default_sampling_metadata(
         all_random=False,
         top_p=None,
         top_k=None,
+        has_top_k_one=False,
         generators={},
         max_num_logprobs=0,
         prompt_token_ids=_create_prompt_tokens_tensor(
