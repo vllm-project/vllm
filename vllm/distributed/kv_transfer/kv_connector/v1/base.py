@@ -173,6 +173,24 @@ class KVConnectorBase_V1(ABC):
     Base class for KV connectors.
     """
 
+    @classmethod
+    def preserves_dcp_kv_cache_interleave_size(
+        cls, extra_config: dict[str, Any]
+    ) -> bool:
+        """Whether vLLM must preserve the configured DCP cache interleave.
+
+        By default a KV connector is treated as a PD transport, whose external
+        transfer unit is one whole local vLLM cache block.  vLLM therefore
+        normalizes ``cp_kv_cache_interleave_size`` to that block size.  A
+        connector that transfers cache rows using its own per-slot geometry
+        may override this method so that its configured interleave reaches the
+        attention backend unchanged.
+
+        ``extra_config`` is supplied to allow a connector to make this
+        capability conditional without constructing a worker-side instance.
+        """
+        return False
+
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
         """Whether external hits can complete divergent local hybrid hits.

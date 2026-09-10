@@ -141,6 +141,24 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     """
 
     @classmethod
+    def preserves_dcp_kv_cache_interleave_size(
+        cls, extra_config: dict[str, Any]
+    ) -> bool:
+        """Preserve DCP interleave only when every child can use it."""
+        connectors_config = extra_config.get("connectors", [])
+        if not connectors_config:
+            return False
+        for conn_config in connectors_config:
+            temp_ktc = KVTransferConfig(**conn_config)
+            connector_cls = KVConnectorFactory.get_connector_class(temp_ktc)
+            child_extra_config = conn_config.get("kv_connector_extra_config", {})
+            if not connector_cls.preserves_dcp_kv_cache_interleave_size(
+                child_extra_config
+            ):
+                return False
+        return True
+
+    @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """
         MultiConnector requires PIECEWISE CUDA graph mode if any of its
