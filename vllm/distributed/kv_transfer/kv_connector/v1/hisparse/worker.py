@@ -460,25 +460,21 @@ class HiSparseConnectorWorker:
         host_block_copies: Sequence[KVCacheBlockCopy],
         previous_host_write_event: torch.Event,
     ) -> None:
+        if not host_block_copies:
+            return
         self._completed_host_copy_dst_ids.extend(
             copy.dst_block_id for copy in host_block_copies
         )
-        if self.shared_host_region is not None and host_block_copies:
-            if get_tensor_model_parallel_rank() == 0:
-                copy_kv_cache_blocks_inplace(
-                    self.host_caches,
-                    self.host_num_blocks,
-                    host_block_copies,
-                    previous_host_write_event,
-                )
-            get_tp_group().barrier()
-        else:
+        if self.shared_host_region is None or get_tensor_model_parallel_rank() == 0:
+            if self.host_caches:
+                previous_host_write_event.synchronize()
             copy_kv_cache_blocks_inplace(
                 self.host_caches,
                 self.host_num_blocks,
                 host_block_copies,
-                previous_host_write_event,
             )
+        if self.shared_host_region is not None:
+            get_tp_group().barrier()
 
     def invalidate_blocks(
         self, block_ids: list[int], request_state_indices: torch.Tensor

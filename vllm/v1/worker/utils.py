@@ -656,19 +656,14 @@ def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor],
     num_blocks: int,
     kv_cache_block_copies: Sequence[KVCacheBlockCopy],
-    host_write_event: torch.Event | None = None,
 ) -> None:
     if not kv_cache_block_copies:
         return
 
-    indices_np = np.array(
-        [(copy.src_block_id, copy.dst_block_id) for copy in kv_cache_block_copies],
-        dtype=np.int64,
-    )
+    indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
     indices: torch.Tensor | None = None
     seen: set[tuple[torch.device, int]] = set()
     copied_storages: set[tuple[torch.device, int]] = set()
-    host_writes_synchronized = False
     for cache in kv_caches:
         # Layers sharing KV (cross-layer sharing) alias the same view; copy it
         # once. data_ptr distinguishes per-layer views of a shared allocation.
@@ -677,13 +672,6 @@ def copy_kv_cache_blocks_inplace(
             continue
         seen.add(key)
 
-        if (
-            cache.device.type == "cpu"
-            and host_write_event is not None
-            and not host_writes_synchronized
-        ):
-            host_write_event.synchronize()
-            host_writes_synchronized = True
         if indices is None:
             indices = async_tensor_h2d(indices_np, device=cache.device)
         assert cache.device == indices.device

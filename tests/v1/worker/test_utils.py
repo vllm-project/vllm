@@ -148,13 +148,6 @@ def test_hisparse_submits_layer_mirror_at_replayed_attention_boundary(
 
 
 def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
-    waited_for_host_writes = False
-
-    def wait_for_host_writes():
-        nonlocal waited_for_host_writes
-        waited_for_host_writes = True
-
-    host_write_event = SimpleNamespace(synchronize=wait_for_host_writes)
     backing = torch.full((10, 2, 3), -1, dtype=torch.float32)
     cache = backing[1:9]
     cache[2:4] = 7
@@ -167,14 +160,43 @@ def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
             KVCacheBlockCopy(1, 0),
             KVCacheBlockCopy(3, 2),
         ],
-        host_write_event=host_write_event,
     )
 
     torch.testing.assert_close(cache[0:2], torch.full_like(cache[0:2], 7))
     torch.testing.assert_close(cache[4:6], torch.full_like(cache[4:6], 11))
-    assert waited_for_host_writes
     assert (backing[0] == -1).all()
     assert (backing[9] == -1).all()
+
+
+@pytest.mark.parametrize("shared,rank", [(False, 0), (True, 0), (True, 1)])
+@pytest.mark.parametrize("has_copies", [False, True])
+def test_hisparse_host_copy_waits_for_writes_on_writer_only(
+    monkeypatch, shared, rank, has_copies
+):
+    """Host CoW must read completed writes; shared non-writers only barrier."""
+    worker = _make_hisparse_worker()
+    cache = torch.zeros((2, 1, 1))
+    worker.host_caches = [cache]
+    worker.host_num_blocks = 2
+    worker.shared_host_region = object() if shared else None
+    event = MagicMock()
+    event.synchronize.side_effect = lambda: cache[0].fill_(7)
+    barrier = MagicMock()
+    monkeypatch.setattr(
+        hisparse_worker_module, "get_tensor_model_parallel_rank", lambda: rank
+    )
+    monkeypatch.setattr(
+        hisparse_worker_module, "get_tp_group", lambda: SimpleNamespace(barrier=barrier)
+    )
+    copies = [KVCacheBlockCopy(0, 1)] if has_copies else []
+
+    worker._copy_host_blocks(copies, event)
+
+    writes = has_copies and (not shared or rank == 0)
+    assert cache[1].item() == (7 if writes else 0)
+    assert event.synchronize.call_count == int(writes)
+    assert barrier.call_count == int(shared and has_copies)
+    assert worker._completed_host_copy_dst_ids == ([1] if has_copies else [])
 
 
 def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):

@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, ClassVar
 
-from vllm.distributed.kv_events import MEDIUM_CPU, KVCacheEvent
+from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -17,6 +17,7 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
     resolve_block_hashes,
 )
+from vllm.v1.hisparse.block_pool import SharedEventQueueBlockPool
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
@@ -2162,28 +2163,6 @@ class SinkFullAttentionManager(FullAttentionManager):
         assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
 
 
-class _SharedEventQueueBlockPool(BlockPool):
-    """A pool that publishes into another pool's live KV event queue.
-
-    The owner rebinds its queue on every drain, so this reads it through the
-    owner rather than holding a reference.
-    """
-
-    def __init__(self, *args, event_owner: BlockPool, **kwargs) -> None:
-        self._event_owner = event_owner
-        super().__init__(*args, **kwargs)
-
-    @property
-    def kv_event_queue(self) -> list[KVCacheEvent]:
-        return self._event_owner.kv_event_queue
-
-    @kv_event_queue.setter
-    def kv_event_queue(self, events: list[KVCacheEvent]) -> None:
-        # ``BlockPool.__init__`` seeds an empty queue and ``take_events``
-        # swaps in a fresh one; both belong to the owner, which drains it.
-        assert not events
-
-
 class HiSparseSourceManager(FullAttentionManager):
     """Host-tier manager with a private pool; publishes hashes once durable.
 
@@ -2206,7 +2185,7 @@ class HiSparseSourceManager(FullAttentionManager):
     def bind_host_pool(self, num_blocks: int) -> None:
         """Replace the device pool this group was built with by a host one."""
         device_pool = self.block_pool
-        self.block_pool = _SharedEventQueueBlockPool(
+        self.block_pool = SharedEventQueueBlockPool(
             num_gpu_blocks=num_blocks,
             enable_caching=self.enable_caching and self.kv_cache_spec.prefix_cacheable,
             hash_block_size=device_pool.hash_block_size,
