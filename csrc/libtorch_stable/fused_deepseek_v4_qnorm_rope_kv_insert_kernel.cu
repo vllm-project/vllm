@@ -3,7 +3,7 @@
  * SPDX-FileCopyrightText: Copyright contributors to the vLLM project
  *
  * Horizontally-fused DeepseekV4-MLA kernel:
- *   - Q side:  per-head RMSNorm (no weight) + GPT-J RoPE on last ROPE_DIM
+ *   - Q side:  optional per-head RMSNorm + GPT-J RoPE on last ROPE_DIM
  *   - KV side: GPT-J RoPE on last ROPE_DIM + UE8M0 FP8 quant on NoPE + paged
  *              cache insert
  *
@@ -167,7 +167,8 @@ __device__ __forceinline__ float warpSum(float val) {
 // q_out stride fold to compile-time constants.
 //
 // Slot layout (per token):
-//   slot < num_heads_q                          → live-Q   (RMSNorm + RoPE,
+//   slot < num_heads_q                          → live-Q   (optional RMSNorm +
+//                                                           RoPE,
 //                                                           read q_in →
 //                                                           write q_out)
 //   num_heads_q <= slot < kNumHeadsQPadded      → pad-Q    (zero-fill q_out;
@@ -175,7 +176,7 @@ __device__ __forceinline__ float warpSum(float val) {
 //   slot == kNumHeadsQPadded                    → KV       (RoPE + UE8M0 quant
 //                                                           + paged-cache
 //                                                           insert)
-template <typename scalar_t_in, int kNumHeadsQPadded>
+template <typename scalar_t_in, int kNumHeadsQPadded, bool APPLY_Q_NORM>
 __device__ __forceinline__ void processDeepseekV4Slot(
     uint4 v0, uint4 v1, int const tokenIdx, int const slotIdx,
     int const dim_base, int const laneId, int const num_heads_q,
@@ -224,19 +225,21 @@ __device__ __forceinline__ void processDeepseekV4Slot(
     }
   }
 
-  // ── Q branch: RMSNorm (no weight) ───────────────────────────────────
-  if (!isKV) {
-    float sumOfSquares = 0.0f;
+  // ── Q branch: optional RMSNorm (no weight) ──────────────────────────
+  if constexpr (APPLY_Q_NORM) {
+    if (!isKV) {
+      float sumOfSquares = 0.0f;
 #pragma unroll
-    for (int i = 0; i < kElemsPerLane; i++) {
-      sumOfSquares += elements[i] * elements[i];
-    }
-    sumOfSquares = warpSum<float>(sumOfSquares);
-    float const rms_rcp =
-        rsqrtf(sumOfSquares / static_cast<float>(kHeadDim) + eps);
+      for (int i = 0; i < kElemsPerLane; i++) {
+        sumOfSquares += elements[i] * elements[i];
+      }
+      sumOfSquares = warpSum<float>(sumOfSquares);
+      float const rms_rcp =
+          rsqrtf(sumOfSquares / static_cast<float>(kHeadDim) + eps);
 #pragma unroll
-    for (int i = 0; i < kElemsPerLane; i++) {
-      elements[i] = elements[i] * rms_rcp;
+      for (int i = 0; i < kElemsPerLane; i++) {
+        elements[i] = elements[i] * rms_rcp;
+      }
     }
   }
 
@@ -386,7 +389,7 @@ __device__ __forceinline__ void processDeepseekV4Slot(
 // warps_per_block) Block: blockDim.x = 256 threads (8 warps per block) Each
 // warp handles one (token, head_slot) pair.
 //   slot < num_heads_q                              → live-Q branch
-//                                                     (RMSNorm + RoPE,
+//                                                     (optional RMSNorm + RoPE,
 //                                                      read q_in → write q_out)
 //   num_heads_q <= slot < kNumHeadsQPadded          → pad-Q branch
 //                                                     (zero-fill q_out)
@@ -404,7 +407,7 @@ __device__ __forceinline__ void processDeepseekV4Slot(
 // attention uses them).  The KV branch only inserts the first
 // `num_tokens_insert` tokens (= slot_mapping length) into the paged cache.
 //
-template <typename scalar_t_in, int kNumHeadsQPadded>
+template <typename scalar_t_in, int kNumHeadsQPadded, bool APPLY_Q_NORM>
 __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel(
     scalar_t_in const* __restrict__ q_in,      // [N, num_heads_q,      512]
     scalar_t_in* __restrict__ q_out,           // [N, kNumHeadsQPadded, 512]
@@ -471,7 +474,7 @@ __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel(
       v1 = *reinterpret_cast<uint4 const*>(src_ptr + 8);
     }
 
-    processDeepseekV4Slot<scalar_t_in, kNumHeadsQPadded>(
+    processDeepseekV4Slot<scalar_t_in, kNumHeadsQPadded, APPLY_Q_NORM>(
         v0, v1, tokenIdx, slotIdx, dim_base, laneId, num_heads_q, eps, q_out,
         k_cache, slot_mapping, position_ids, cos_sin_cache, cache_block_size,
         kv_block_stride);
@@ -491,10 +494,10 @@ __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel(
 // Grid: 1D, gridDim.x = num_tokens_full
 // Block: blockDim.x = 256 threads (8 warps per block) Each
 // warp handles one token, iterating over each head.
-// Q branch (RMSNorm + RoPE, in place) head_slot == num_heads_q
+// Q branch (optional RMSNorm + RoPE, in place) head_slot == num_heads_q
 // KV branch (RoPE + UE8M0 quant + insert)
 //
-template <typename scalar_t_in, int kNumHeadsQPadded>
+template <typename scalar_t_in, int kNumHeadsQPadded, bool APPLY_Q_NORM>
 __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernelReducedGrid(
     scalar_t_in const* __restrict__ q_in, scalar_t_in* __restrict__ q_out,
     scalar_t_in const* __restrict__ kv_in, uint8_t* __restrict__ k_cache,
@@ -558,7 +561,7 @@ __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernelReducedGrid(
           load_slot(next_slot, v0_next, v1_next);
         }
 
-        processDeepseekV4Slot<scalar_t_in, kNumHeadsQPadded>(
+        processDeepseekV4Slot<scalar_t_in, kNumHeadsQPadded, APPLY_Q_NORM>(
             v0_curr, v1_curr, tokenIdx, curr_slot, dim_base, laneId,
             num_heads_q, eps, q_out, k_cache, slot_mapping, position_ids,
             cos_sin_cache, cache_block_size, kv_block_stride);
@@ -581,7 +584,7 @@ __global__ void fusedDeepseekV4QNormRopeKVRopeQuantInsertKernelReducedGrid(
 // ────────────────────────────────────────────────────────────────────────────
 // Launch wrapper
 // ────────────────────────────────────────────────────────────────────────────
-template <typename scalar_t_in, int kNumHeadsQPadded>
+template <typename scalar_t_in, int kNumHeadsQPadded, bool APPLY_Q_NORM>
 static void launchFusedDeepseekV4Templated(
     scalar_t_in const* q_in, scalar_t_in* q_out, scalar_t_in const* kv_in,
     uint8_t* k_cache, int64_t const* slot_mapping, int64_t const* position_ids,
@@ -622,19 +625,18 @@ static void launchFusedDeepseekV4Templated(
   config.numAttrs = (sm_version >= 90) ? 1 : 0;
 
   if (num_tokens_full < NUM_TOKEN_CUTOFF) {
-    cudaLaunchKernelEx(
-        &config,
-        fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel<scalar_t_in,
-                                                        kNumHeadsQPadded>,
-        q_in, q_out, kv_in, k_cache, slot_mapping, position_ids, cos_sin_cache,
-        eps, num_tokens_full, num_tokens_insert, num_heads_q, cache_block_size,
-        kv_block_stride);
+    cudaLaunchKernelEx(&config,
+                       fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel<
+                           scalar_t_in, kNumHeadsQPadded, APPLY_Q_NORM>,
+                       q_in, q_out, kv_in, k_cache, slot_mapping, position_ids,
+                       cos_sin_cache, eps, num_tokens_full, num_tokens_insert,
+                       num_heads_q, cache_block_size, kv_block_stride);
   } else {
     config.gridDim = dim3(num_tokens_full);
     cudaLaunchKernelEx(
         &config,
         fusedDeepseekV4QNormRopeKVRopeQuantInsertKernelReducedGrid<
-            scalar_t_in, kNumHeadsQPadded>,
+            scalar_t_in, kNumHeadsQPadded, APPLY_Q_NORM>,
         q_in, q_out, kv_in, k_cache, slot_mapping, position_ids, cos_sin_cache,
         eps, num_tokens_full, num_tokens_insert, num_heads_q, cache_block_size,
         kv_block_stride);
@@ -642,7 +644,8 @@ static void launchFusedDeepseekV4Templated(
 #else
   // ROCm: use standard kernel launch syntax (no PDL/stream serialization)
   // clang-format off
-  fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel<scalar_t_in, kNumHeadsQPadded>
+  fusedDeepseekV4QNormRopeKVRopeQuantInsertKernel<
+      scalar_t_in, kNumHeadsQPadded, APPLY_Q_NORM>
       <<<grid, kBlockSize, 0, stream>>>(
           q_in, q_out, kv_in, k_cache, slot_mapping, position_ids,
           cos_sin_cache, eps, num_tokens_full, num_tokens_insert, num_heads_q,
@@ -660,13 +663,20 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
     int const num_tokens_full, int const num_tokens_insert,
     int const num_heads_q, int const num_heads_q_padded,
     int const cache_block_size, int const kv_block_stride,
-    cudaStream_t stream) {
+    bool const apply_q_norm, cudaStream_t stream) {
 #define DISPATCH(N)                                                         \
   case N:                                                                   \
-    launchFusedDeepseekV4Templated<scalar_t_in, N>(                         \
-        q_in, q_out, kv_in, k_cache, slot_mapping, position_ids,            \
-        cos_sin_cache, eps, num_tokens_full, num_tokens_insert, num_heads_q, \
-        cache_block_size, kv_block_stride, stream);                         \
+    if (apply_q_norm) {                                                     \
+      launchFusedDeepseekV4Templated<scalar_t_in, N, true>(                 \
+          q_in, q_out, kv_in, k_cache, slot_mapping, position_ids,          \
+          cos_sin_cache, eps, num_tokens_full, num_tokens_insert,            \
+          num_heads_q, cache_block_size, kv_block_stride, stream);           \
+    } else {                                                                \
+      launchFusedDeepseekV4Templated<scalar_t_in, N, false>(                \
+          q_in, q_out, kv_in, k_cache, slot_mapping, position_ids,          \
+          cos_sin_cache, eps, num_tokens_full, num_tokens_insert,            \
+          num_heads_q, cache_block_size, kv_block_stride, stream);           \
+    }                                                                       \
     return;
 
   switch (num_heads_q_padded) {
@@ -700,7 +710,8 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
 // Grid: 1D, gridDim.x = ceil(num_tokens_full * (num_heads_q + 1) / warps).
 // Each warp handles one (token, slot): slot < num_heads_q → Q, slot ==
 // num_heads_q → KV.
-template <typename scalar_t_in, bool STORE_Q_FP8, bool STORE_KV_FP8>
+template <typename scalar_t_in, bool STORE_Q_FP8, bool STORE_KV_FP8,
+          bool APPLY_Q_NORM>
 __global__ void fusedDeepseekV4FullCacheKernel(
     scalar_t_in* __restrict__ q_inout,          // [N, H, 512], in place (bf16)
     uint8_t* __restrict__ q_fp8_out,            // [N, H, 512] fp8, optional
@@ -777,19 +788,21 @@ __global__ void fusedDeepseekV4FullCacheKernel(
       }
     }
 
-    // ── Q branch: RMSNorm (no weight) ─────────────────────────────────────
-    if (!isKV) {
-      float sumOfSquares = 0.0f;
+    // ── Q branch: optional RMSNorm (no weight) ────────────────────────────
+    if constexpr (APPLY_Q_NORM) {
+      if (!isKV) {
+        float sumOfSquares = 0.0f;
 #pragma unroll
-      for (int i = 0; i < kElemsPerLane; i++) {
-        sumOfSquares += elements[i] * elements[i];
-      }
-      sumOfSquares = warpSum<float>(sumOfSquares);
-      float const rms_rcp =
-          rsqrtf(sumOfSquares / static_cast<float>(kHeadDim) + eps);
+        for (int i = 0; i < kElemsPerLane; i++) {
+          sumOfSquares += elements[i] * elements[i];
+        }
+        sumOfSquares = warpSum<float>(sumOfSquares);
+        float const rms_rcp =
+            rsqrtf(sumOfSquares / static_cast<float>(kHeadDim) + eps);
 #pragma unroll
-      for (int i = 0; i < kElemsPerLane; i++) {
-        elements[i] = elements[i] * rms_rcp;
+        for (int i = 0; i < kElemsPerLane; i++) {
+          elements[i] = elements[i] * rms_rcp;
+        }
       }
     }
 
@@ -899,15 +912,19 @@ static void launchFullCacheKernel(
     float const* q_fp8_scale_inv, float const eps, int const num_tokens_full,
     int const num_tokens_insert, int const num_heads_q,
     int const cache_block_size, int64_t const kv_block_stride,
-    int64_t const kv_token_stride, char const* op_name, cudaStream_t stream) {
+    int64_t const kv_token_stride, bool const apply_q_norm,
+    char const* op_name, cudaStream_t stream) {
   constexpr int kBlockSize = 256;
   constexpr int kWarpsPerBlock = kBlockSize / 32;
   int64_t const total_warps =
       static_cast<int64_t>(num_tokens_full) * (num_heads_q + 1);
   int const grid =
       static_cast<int>((total_warps + kWarpsPerBlock - 1) / kWarpsPerBlock);
-  auto* kernel =
-      fusedDeepseekV4FullCacheKernel<scalar_t_in, STORE_Q_FP8, STORE_KV_FP8>;
+  auto* kernel = apply_q_norm
+                     ? fusedDeepseekV4FullCacheKernel<
+                           scalar_t_in, STORE_Q_FP8, STORE_KV_FP8, true>
+                     : fusedDeepseekV4FullCacheKernel<
+                           scalar_t_in, STORE_Q_FP8, STORE_KV_FP8, false>;
 #ifndef USE_ROCM
   static int const sm_version = getSMVersion();
   STD_TORCH_CHECK(sm_version >= 80, op_name,
@@ -950,7 +967,7 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::stable::Tensor const& position_ids,   // [N] int64
     torch::stable::Tensor const& cos_sin_cache,  // [max_pos, rope_dim] bf16
     int64_t q_head_padded,                       // padded Q head count for output
-    double eps, int64_t cache_block_size) {
+    double eps, int64_t cache_block_size, bool apply_q_norm) {
   STD_TORCH_CHECK(q_in.device().is_cuda() && q_in.is_contiguous(),
                   "q_in must be contiguous CUDA");
   STD_TORCH_CHECK(kv.device().is_cuda() && kv.is_contiguous(),
@@ -981,7 +998,7 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
                   "cos_sin_cache must be float32");
 
   // With DP padding, slot_mapping can be shorter than q/kv/positions.
-  // Q-norm+RoPE runs on all q.size(0) rows (downstream attention uses them);
+  // Q processing runs on all q.size(0) rows (downstream attention uses them);
   // KV quant+insert runs only on the first slot_mapping.size(0) rows.
   int const num_tokens_full = static_cast<int>(q_in.size(0));
   int const num_tokens_insert = static_cast<int>(slot_mapping.size(0));
@@ -1000,7 +1017,8 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
   const cudaStream_t stream = get_current_cuda_stream(q_in.get_device_index());
 
   // Allocate the padded q output.  The kernel writes every element (live
-  // region gets RMSNorm+RoPE; pad region gets zeros), so `empty` is safe.
+  // region gets optional RMSNorm+RoPE; pad region gets zeros), so `empty` is
+  // safe.
   auto q_out = torch::stable::new_empty(
       q_in, {q_in.size(0), q_head_padded, q_in.size(2)}, q_in.scalar_type());
 
@@ -1018,7 +1036,7 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
                 cos_sin_cache.const_data_ptr<float>(), static_cast<float>(eps),
                 num_tokens_full, num_tokens_insert, num_heads_q,
                 num_heads_q_padded, cache_block_size_i, kv_block_stride,
-                stream);
+                apply_q_norm, stream);
       });
   return q_out;
 }
@@ -1033,7 +1051,7 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
     torch::stable::Tensor const& slot_mapping,   // [num_tokens_insert] int64
     torch::stable::Tensor const& position_ids,   // [N] int64
     torch::stable::Tensor const& cos_sin_cache,  // [max_pos, 64] float32
-    double eps, int64_t cache_block_size) {
+    double eps, int64_t cache_block_size, bool apply_q_norm) {
   using torch::headeronly::ScalarType;
   STD_TORCH_CHECK(q.device().is_cuda() && q.is_contiguous(),
                   "q must be contiguous CUDA");
@@ -1091,7 +1109,7 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
             cos_sin_cache.const_data_ptr<float>(), nullptr, nullptr,
             static_cast<float>(eps), num_tokens_full, num_tokens_insert,
             num_heads_q, static_cast<int>(cache_block_size), kv_block_stride,
-            kv_token_stride,
+            kv_token_stride, apply_q_norm,
             "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert",
             stream);
       });
@@ -1107,7 +1125,7 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
     torch::stable::Tensor const& cos_sin_cache,    // [max_pos, 64] float32
     torch::stable::Tensor const& fp8_scale,        // scalar float32 (KV scale)
     torch::stable::Tensor const& q_fp8_scale_inv,  // scalar float32 (1 / Q scale)
-    double eps, int64_t cache_block_size) {
+    double eps, int64_t cache_block_size, bool apply_q_norm) {
   using torch::headeronly::ScalarType;
   STD_TORCH_CHECK(q.device().is_cuda() && q.is_contiguous(),
                   "q must be contiguous CUDA");
@@ -1181,7 +1199,7 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
             num_tokens_full, num_tokens_insert, num_heads_q,
             static_cast<int>(cache_block_size),
             // fp8 cache: 1 byte/element -> stride already in bytes.
-            k_cache.stride(0), k_cache.stride(1),
+            k_cache.stride(0), k_cache.stride(1), apply_q_norm,
             "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert",
             stream);
       });
