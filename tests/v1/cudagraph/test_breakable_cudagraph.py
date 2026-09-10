@@ -165,6 +165,44 @@ def test_nested_capture_raises(cuda_capture_stream):
         pass
 
 
+def test_eager_break_may_capture_its_own_graphs(cuda_capture_stream):
+    """An eager break runs between outer segments, so it may capture (and on
+    replay, replay) graphs of its own, e.g. for a differently shaped sub-batch."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+
+    x = torch.zeros(4, device="cuda")
+    y = torch.zeros(4, device="cuda")
+    outer = BreakableCUDAGraphCapture()
+    inner = BreakableCUDAGraphCapture()
+
+    def eager_step():
+        if inner.num_graphs == 0:
+            # Capture time: the outer capture is current but paused.
+            assert BreakableCUDAGraphCapture.current() is outer
+            with inner:
+                y.add_(x)
+            assert BreakableCUDAGraphCapture.current() is outer
+        else:
+            assert BreakableCUDAGraphCapture.current() is None
+            inner.replay()
+
+    with outer:
+        x.add_(1.0)
+        outer.add_eager(eager_step)
+        x.add_(1.0)
+    assert BreakableCUDAGraphCapture.current() is None
+    assert inner.num_graphs == 1
+
+    outer.replay()
+    torch.accelerator.synchronize()
+    assert x.tolist() == [2.0] * 4
+    assert y.tolist() == [1.0] * 4
+    outer.replay()
+    torch.accelerator.synchronize()
+    assert x.tolist() == [4.0] * 4
+    assert y.tolist() == [4.0] * 4
+
+
 def test_active_state_isolated_across_threads(cuda_capture_stream):
     """Verify the thread-local 'active capture' slot is per-thread.
 

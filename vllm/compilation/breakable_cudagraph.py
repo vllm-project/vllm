@@ -156,12 +156,22 @@ class BreakableCUDAGraphCapture:
         self._num_eager_breaks: int = 0
         self._current_graph: torch.cuda.CUDAGraph | None = None
         self._capturing: bool = False
+        self._outer: BreakableCUDAGraphCapture | None = None
+
+    @property
+    def capturing(self) -> bool:
+        """Whether a graph segment is being captured right now."""
+        return self._capturing
 
     # --- context manager protocol ----------------------------------------
 
     def __enter__(self) -> BreakableCUDAGraphCapture:
-        if getattr(BreakableCUDAGraphCapture._tls, "active", None) is not None:
+        outer = BreakableCUDAGraphCapture.current()
+        if outer is not None and outer._capturing:
             raise RuntimeError("Nested BreakableCUDAGraphCapture is not supported.")
+        # An eager break of an outer capture may capture graphs of its own
+        # (see add_eager); the outer capture becomes current again on exit.
+        self._outer = outer
         BreakableCUDAGraphCapture._tls.active = self
         self._begin_segment()
         return self
@@ -170,7 +180,8 @@ class BreakableCUDAGraphCapture:
         try:
             self._end_segment()
         finally:
-            BreakableCUDAGraphCapture._tls.active = None
+            BreakableCUDAGraphCapture._tls.active = self._outer
+            self._outer = None
 
     # --- segment management ----------------------------------------------
 
@@ -332,6 +343,10 @@ class BreakableCUDAGraphWrapper:
             return self.runnable(*args, **kwargs)
 
         assert batch_descriptor is not None
+        return self.run(batch_descriptor, *args, **kwargs)
+
+    def run(self, batch_descriptor: BatchDescriptor, *args: Any, **kwargs: Any) -> Any:
+        """Capture on the first call with ``batch_descriptor``, replay after."""
         entry = self.entries.get(batch_descriptor)
         if entry is None:
             entry = _BreakableEntry(batch_descriptor=batch_descriptor)

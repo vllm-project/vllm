@@ -5,6 +5,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from typing_extensions import Self
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -607,6 +608,7 @@ class DeepseekV32IndexerMetadata:
 
     decode: DeepSeekV32IndexerDecodeMetadata | None = None
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
+    builder: Any = None
 
 
 def compute_kpool_tail_slot_mapping(
@@ -764,6 +766,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self, *args, block_table_width: int, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self.block_table_width = block_table_width
         scheduler_config = self.vllm_config.scheduler_config
         parallel_config = self.vllm_config.parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
@@ -880,6 +883,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
         self.indexer_decode_block_table_buffer: torch.Tensor | None = None
         self._max_num_batched_tokens = scheduler_config.max_num_batched_tokens
+
+    def clone(self, **kwargs) -> Self:
+        return super().clone(block_table_width=self.block_table_width, **kwargs)
 
     def _dcp_localize_decode_seq_lens(
         self,
@@ -1505,6 +1511,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             num_prefill_tokens=num_prefill_tokens,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            builder=self,
         )
 
         return attn_metadata

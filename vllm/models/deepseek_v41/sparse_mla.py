@@ -139,6 +139,8 @@ class DeepseekV4FlashMLAMetadata(AttentionMetadata):
     req_id_per_token: torch.Tensor
     block_size: int
     topk_tokens: int
+    common: Any = None
+    builder: Any = None
 
 
 class DeepseekV4SparseMLAMetadataBuilder(
@@ -215,6 +217,8 @@ class DeepseekV4SparseMLAMetadataBuilder(
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            common=cm,
+            builder=self,
         )
 
 

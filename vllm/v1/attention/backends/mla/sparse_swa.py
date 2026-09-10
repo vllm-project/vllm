@@ -214,6 +214,10 @@ class DeepseekSparseSWAMetadata:
     prefill_max_model_len: int = 0
     prefill_max_num_batched_tokens: int = 0
 
+    # What this was built from, so a model can rebuild it for a token subset.
+    common: Any = None
+    builder: Any = None
+
     # Per-layer-type FlashMLA tile-scheduler metadata. One FlashMLASchedMeta
     # per present DeepseekV4 layer type, shared across all ~60 layers of that type
     # within a decode step. The first forward call of a given type triggers
@@ -764,6 +768,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             tile_sched_c128a=tile_sched[_LAYER_TYPE_C128A],
             tile_sched_c1a=tile_sched[_LAYER_TYPE_C1A],
             tile_sched_c2a=tile_sched[_LAYER_TYPE_C2A],
+            common=common_attn_metadata,
+            builder=self,
             **deepseek_v4_fields,  # type: ignore[arg-type]
         )
 
