@@ -533,8 +533,8 @@ def _compute_global_topk_indices_and_lens_kernel(
 # FlashMLA sparse prefill asserts `params.topk % B_TOPK == 0` (see
 # flashmla/csrc/sm100/prefill/sparse/fwd/head{64,128}/phase1.cuh). B_TOPK is
 # 64 for the h_q=64 kernel and 128 for h_q=128; pad to 128 to satisfy both.
-# The extra slots stay as -1 sentinels and `combined_lens` caps the valid
-# range via `topk_length`, so padding is a no-op at kernel level.
+# The kernel writes -1 sentinels into the extra slots and `combined_lens` caps
+# the valid range via `topk_length`, so padding is a no-op at kernel level.
 _SPARSE_PREFILL_TOPK_ALIGNMENT = 128
 
 
@@ -666,6 +666,7 @@ class CombineTopkSwaIndicesKernel(
     @triton.jit(
         do_not_specialize=[
             "combined_indices_stride",
+            "combined_topk",
             "topk_indices_stride",
             "M",
             "N",
@@ -674,6 +675,7 @@ class CombineTopkSwaIndicesKernel(
     def kernel(
         combined_indices_ptr,
         combined_indices_stride,
+        combined_topk,
         combined_lens_ptr,
         topk_indices_ptr,
         topk_indices_stride,
@@ -763,6 +765,16 @@ class CombineTopkSwaIndicesKernel(
 
             combined_len = topk_len + swa_len
             tl.store(combined_lens_ptr + token_idx, combined_len)
+            # Callers reuse `out` workspaces across chunks, so the slots past
+            # combined_len hold stale indices; consumers that read the full
+            # row (the FlashMLA fused prefill) must see -1 sentinels there.
+            for i in range(0, combined_topk, 256):
+                tail = i + tl.arange(0, 256)
+                tl.store(
+                    combined_indices_ptr + token_idx * combined_indices_stride + tail,
+                    tl.full((256,), -1, tl.int32),
+                    mask=(tail >= combined_len) & (tail < combined_topk),
+                )
 
     def dispatch(  # type: ignore[override]
         self,
@@ -821,6 +833,7 @@ class CombineTopkSwaIndicesKernel(
         warmup(
             int32_ptr,
             1,  # do not specialize combined_indices_stride
+            1,  # do not specialize combined_topk
             int32_ptr,
             input_variant.pointer("topk_indices", torch.int32),
             1,  # do not specialize topk_indices_stride
@@ -863,6 +876,7 @@ class CombineTopkSwaIndicesKernel(
         self.kernel[(num_reqs, _COMBINE_TOPK_SWA_NUM_WORKERS)](
             combined_indices,
             combined_indices.stride(0),
+            combined_indices.shape[1],
             combined_lens,
             topk_indices,
             topk_indices.stride(0),
