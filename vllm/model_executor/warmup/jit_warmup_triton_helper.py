@@ -303,28 +303,6 @@ class TritonCompileKey:
     inputs: TritonWarmupInputs = field(compare=False, hash=False, repr=False)
 
 
-@dataclass(frozen=True)
-class _TritonPrecompileKey:
-    jit_function_id: int
-    device: Hashable
-    specialization: Hashable
-    options: Hashable
-
-
-def _freeze_key(value: Any) -> Hashable:
-    if isinstance(value, Mapping):
-        return tuple((key, _freeze_key(item)) for key, item in value.items())
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_key(item) for item in value)
-    if isinstance(value, set | frozenset):
-        return frozenset(_freeze_key(item) for item in value)
-    try:
-        hash(value)
-    except TypeError:
-        return (type(value), id(value))
-    return cast(Hashable, value)
-
-
 def _jit_runtime_kwargs(kernel: Any, kwargs: Mapping[str, Any]) -> dict[str, Any]:
     from triton import knobs
 
@@ -332,91 +310,6 @@ def _jit_runtime_kwargs(kernel: Any, kwargs: Mapping[str, Any]) -> dict[str, Any
     result["debug"] = result.get("debug", kernel.debug) or knobs.runtime.debug
     result["instrumentation_mode"] = knobs.compilation.instrumentation_mode
     return result
-
-
-def _triton_precompile_keys(
-    kernel: Any, kwargs: Mapping[str, Any]
-) -> set[_TritonPrecompileKey]:
-    """Build a conservative binder-equivalent key without invoking the binder."""
-    from triton import knobs
-    from triton.runtime.autotuner import Autotuner, Heuristics
-    from triton.runtime.driver import driver
-    from triton.runtime.jit import JITFunction, native_specialize_impl
-
-    if isinstance(kernel, Heuristics):
-        heuristic_kwargs = dict(kwargs)
-        for name, heuristic in kernel.values.items():
-            heuristic_kwargs[name] = heuristic(heuristic_kwargs)
-        return _triton_precompile_keys(kernel.fn, heuristic_kwargs)
-
-    if isinstance(kernel, Autotuner):
-        previous_nargs = getattr(kernel, "nargs", None)
-        kernel.nargs = {}
-        try:
-            configs = kernel.prune_configs(dict(kwargs))
-        finally:
-            kernel.nargs = previous_nargs
-        keys: set[_TritonPrecompileKey] = set()
-        for config in configs:
-            conflicts = kwargs.keys() & config.kwargs.keys()
-            if conflicts:
-                names = ", ".join(sorted(conflicts))
-                raise ValueError(f"Conflicting autotune parameters: {names}")
-            keys.update(
-                _triton_precompile_keys(kernel.fn, dict(kwargs) | config.all_kwargs())
-            )
-        return keys
-
-    if not isinstance(kernel, JITFunction):
-        raise TypeError(f"Unsupported Triton kernel wrapper: {type(kernel).__name__}")
-
-    device = cast(Hashable, driver.active.get_current_device())
-    _, _, _, backend, _ = kernel.device_caches[device]
-    binder_kwargs = _jit_runtime_kwargs(kernel, kwargs)
-    param_names = {param.name for param in kernel.params}
-    specialization: list[Any] = []
-    for param in kernel.params:
-        if param.name in binder_kwargs:
-            value = binder_kwargs[param.name]
-        elif param.has_default:
-            value = param.default
-        else:
-            raise TypeError(f"Missing required Triton argument '{param.name}'")
-        if param.is_constexpr:
-            specialization.append(("constexpr", value))
-            continue
-        specialized = native_specialize_impl(
-            backend,
-            value,
-            param.is_const,
-            not param.do_not_specialize,
-            not param.do_not_specialize_on_alignment,
-        )
-        annotation_type = param.annotation_type
-        if annotation_type:
-            specialize = not param.do_not_specialize
-            if annotation_type == "u1" or annotation_type[:2] in {"fp", "bf"}:
-                specialize = False
-            specialized = (
-                (annotation_type,) + specialized[1:]
-                if specialize
-                else (annotation_type, None)
-            )
-        specialization.append(specialized)
-    if knobs.runtime.add_stages_inspection_hook is not None:
-        _, inspection_hash = knobs.runtime.add_stages_inspection_hook()
-        specialization.append(f'("custom_pipeline", {inspection_hash})')
-    options = {
-        name: value for name, value in binder_kwargs.items() if name not in param_names
-    }
-    return {
-        _TritonPrecompileKey(
-            id(kernel),
-            device,
-            _freeze_key(specialization),
-            _freeze_key(options),
-        )
-    }
 
 
 def _triton_compile_keys(kernel: Any, kwargs: Mapping[str, Any]) -> set[TritonJitKey]:
@@ -701,10 +594,7 @@ class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
         return (_materialize_warmup_case(case, real=real) for case in cases)
 
     def get_warmup_keys(self, *args: Any, **kwargs: Any) -> list[TritonCompileKey]:
-        candidates: dict[
-            frozenset[_TritonPrecompileKey],
-            tuple[dict[str, Any], TritonWarmupInputs],
-        ] = {}
+        keys: dict[TritonCompileKey, None] = {}
         for case in self._concrete_warmup_cases(*args, **kwargs):
             inputs = TritonWarmupInputs.from_mapping(case)
             input_values = inputs.as_dict()
@@ -721,11 +611,6 @@ class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
             prepared = {
                 name: _triton_metadata_arg(value) for name, value in prepared.items()
             }
-            precompile_keys = frozenset(_triton_precompile_keys(self.kernel, prepared))
-            candidates.setdefault(precompile_keys, (prepared, inputs))
-
-        keys: dict[TritonCompileKey, None] = {}
-        for prepared, inputs in candidates.values():
             jit_keys = frozenset(_triton_compile_keys(self.kernel, prepared))
             if jit_keys:
                 keys[self.CompileKey(jit_keys=jit_keys, inputs=inputs)] = None
@@ -835,23 +720,13 @@ class _DecoratedDirectTritonJitKernel(_AutomaticTritonJitKernel):
         return self._provider_cases(self._warmup_inputs_fn, *args, **kwargs)
 
     def get_warmup_keys(self, *args: Any, **kwargs: Any) -> list[TritonCompileKey]:
-        candidates: dict[
-            frozenset[_TritonPrecompileKey],
-            tuple[dict[str, Any], TritonWarmupInputs],
-        ] = {}
+        keys: dict[TritonCompileKey, None] = {}
         for case in self._concrete_warmup_cases(*args, **kwargs):
             launch_inputs = dict(case)
             grid = launch_inputs.pop("grid")
             if grid is None:
                 continue
             inputs = TritonWarmupInputs.from_mapping(case)
-            precompile_keys = frozenset(
-                _triton_precompile_keys(self.kernel, launch_inputs)
-            )
-            candidates.setdefault(precompile_keys, (launch_inputs, inputs))
-
-        keys: dict[TritonCompileKey, None] = {}
-        for launch_inputs, inputs in candidates.values():
             jit_keys = frozenset(_triton_compile_keys(self.kernel, launch_inputs))
             if jit_keys:
                 keys[self.CompileKey(jit_keys=jit_keys, inputs=inputs)] = None

@@ -19,7 +19,6 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     VllmTritonJitKernel,
     kernel_launcher,
     triton_kernel,
-    triton_scalar_specialization_rep,
     triton_warmup_inputs,
 )
 from vllm.triton_utils import tl, triton
@@ -143,17 +142,9 @@ def test_triton_kernel_decorator_returns_launcher(
     def launch(first: str, second: int, config: int) -> LaunchSpec:
         return (2,), dict(CONST=config)
 
-    def fake_precompile_keys(kernel: Any, kwargs: Any) -> set[Any]:
-        return {(id(kernel), kwargs["second"], kwargs["CONST"])}
-
     def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
         return {TritonJitKey(id(kernel), "fake", 0, kwargs["second"])}
 
-    monkeypatch.setattr(
-        jit_warmup_triton_helper,
-        "_triton_precompile_keys",
-        fake_precompile_keys,
-    )
     monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
 
     keys = launch._owner.get_warmup_keys()
@@ -182,17 +173,9 @@ def test_triton_kernel_decorator_compacts_large_ranges(
         dispatched.append(second)
         return (second,), dict(CONST=7 if second <= 17 else 8)
 
-    def fake_precompile_keys(kernel: Any, kwargs: Any) -> set[Any]:
-        return {(id(kernel), kwargs["CONST"])}
-
     def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
         return {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])}
 
-    monkeypatch.setattr(
-        jit_warmup_triton_helper,
-        "_triton_precompile_keys",
-        fake_precompile_keys,
-    )
     monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
 
     keys = dispatch._owner.get_warmup_keys()
@@ -219,11 +202,6 @@ def test_triton_kernel_dispatch_uses_cuda_fake_tensors(
         assert first[0].is_contiguous()
         return (first.shape[0],), dict(CONST=first[0].numel())
 
-    monkeypatch.setattr(
-        jit_warmup_triton_helper,
-        "_triton_precompile_keys",
-        lambda kernel, kwargs: {(id(kernel), kwargs["CONST"])},
-    )
     monkeypatch.setattr(
         jit_warmup_triton_helper,
         "_triton_compile_keys",
@@ -254,11 +232,6 @@ def test_triton_kernel_decorates_native_launchers(
 
     assert kernel.runtime_calls == [((3,), ("runtime", 4), {"CONST": 8})]
 
-    monkeypatch.setattr(
-        jit_warmup_triton_helper,
-        "_triton_precompile_keys",
-        lambda kernel, kwargs: {(id(kernel), kwargs["second"], kwargs["CONST"])},
-    )
     monkeypatch.setattr(
         jit_warmup_triton_helper,
         "_triton_compile_keys",
@@ -303,53 +276,6 @@ def test_triton_warmup_inputs_expands_explicit_pointer_dtypes() -> None:
             value=2,
             BLOCK=16,
         )
-
-
-def test_triton_range_is_deduplicated_before_binder(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    kernel = _FakeTritonKernel()
-
-    def warmup_inputs() -> dict[str, Any]:
-        return dict(first="warmup", second=WarmupIntRange(1, 8193), config=7)
-
-    @triton_kernel(kernel=kernel, warmup_inputs=warmup_inputs)
-    def dispatch(first: str, second: int, config: int) -> LaunchSpec:
-        return (2,), dict(CONST=config)
-
-    binder_calls: list[int] = []
-
-    def fake_precompile_keys(kernel: Any, kwargs: Any) -> set[Any]:
-        return {
-            (
-                id(kernel),
-                triton_scalar_specialization_rep(kwargs["second"]),
-                kwargs["CONST"],
-            )
-        }
-
-    def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
-        binder_calls.append(kwargs["second"])
-        return {
-            TritonJitKey(
-                id(kernel),
-                "fake",
-                0,
-                triton_scalar_specialization_rep(kwargs["second"]),
-            )
-        }
-
-    monkeypatch.setattr(
-        jit_warmup_triton_helper,
-        "_triton_precompile_keys",
-        fake_precompile_keys,
-    )
-    monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
-
-    keys = dispatch.warmup_plan()
-
-    assert binder_calls == [1, 2, 16]
-    assert len(keys) == 3
 
 
 def test_triton_key_derivation_applies_wrappers_and_runtime_options(
