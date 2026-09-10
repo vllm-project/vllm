@@ -5,13 +5,22 @@
 import pytest
 
 from vllm import LLM, SamplingParams
-from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.config import AttentionConfig, KVTransferConfig
+from vllm.platforms import current_platform
 
-pytestmark = pytest.mark.skipif(
-    not is_aiter_found_and_supported(),
-    reason="ROCM_AITER_UNIFIED_ATTN requires aiter on a supported ROCm device",
-)
+if not current_platform.is_rocm():
+    pytest.skip(
+        "ROCm unified attention KV connector test requires ROCm.",
+        allow_module_level=True,
+    )
+
+from vllm._aiter_ops import is_aiter_found_and_supported
+
+if not is_aiter_found_and_supported():
+    pytest.skip(
+        "ROCM_AITER_UNIFIED_ATTN requires a supported AITER installation.",
+        allow_module_level=True,
+    )
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 PROMPTS = [
