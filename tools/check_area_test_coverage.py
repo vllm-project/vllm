@@ -36,7 +36,9 @@ hardware YAMLs (cpu.yaml) can be passed without flagging other areas.
 
 Entry point (CI wiring and a real-YAML integration test land with the
 language area YAML PR that rewrites the area to the one-job-per-directory
-shape; until then the real language YAML fails this guard by design):
+shape; until then the real language YAML fails this guard by design).
+Run from the repository root — CI jobs cd into ``tests/``, so there use the
+pytest path form or set ``PYTHONPATH=/vllm-workspace``:
 
     python -m tools.check_area_test_coverage --tree tests/models/language \
         .buildkite/test_areas/models_language.yaml \
