@@ -1,0 +1,27 @@
+# Synthetic ticket-08-shape area YAML: one job per directory, whole-dir
+# pytest commands, no -k/-m partitions or shard flags on the NVIDIA lane.
+steps:
+- label: "Language Models (Hybrid 01)"
+  key: language-models-tests-hybrid-01
+  commands:
+    - pytest -v -s models/language/generation/hybrid/01
+- label: "Granite Language Model Compatibility"
+  key: language-models-tests-granite-l4-compatibility
+  commands:
+    - pytest -v -s models/language/generation/hybrid_granite
+- label: "Language Models (Core)"
+  key: language-models-tests-core
+  commands:
+    - pytest -v -s models/language/generation/core
+  mirror:
+    amd:
+      label: "Language Models (Core, AMD)"
+      commands:
+        - pytest -v -s models/language/generation/core
+- label: "Language Models (Pooling)"
+  key: language-models-tests-pooling
+  commands:
+    - pytest -v -s models/language/pooling
+  mirror:
+    amd:
+      label: "Language Models (Pooling, AMD)"
