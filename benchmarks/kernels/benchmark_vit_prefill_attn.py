@@ -106,6 +106,12 @@ def _bench_one(
         v = v4.view(B * S, H, D)
         o = torch.empty_like(q)
         seqlen = cu[1:] - cu[:-1]
+        head_stride_aligned_8 = (
+            q.stride(1) % 8 == 0
+            and k.stride(1) % 8 == 0
+            and v.stride(1) % 8 == 0
+            and o.stride(1) % 8 == 0
+        )
 
         extra_kwargs: dict = {}
         if args.we is not None:
@@ -142,6 +148,7 @@ def _bench_one(
                 num_warps=num_warps,
                 num_stages=args.ns,
                 Lk=D,
+                HEAD_STRIDE_ALIGNED_8=head_stride_aligned_8,
                 **extra_kwargs,
             )
 

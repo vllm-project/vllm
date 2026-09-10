@@ -238,6 +238,45 @@ def test_context_attention_sliding_window(
     torch.testing.assert_close(o, o_ref, rtol=2e-2, atol=2e-2)
 
 
+@pytest.mark.parametrize("D", [72, 128])
+def test_context_attention_non_contiguous_heads(D: int):
+    """A head stride the 16-byte alignment hint must not be applied to.
+
+    The hint is keyed off the runtime strides, not head_dim, so a view whose
+    head axis is not 8-element aligned has to fall back and stay correct.
+    """
+    torch.manual_seed(42)
+    B, S, H = 2, 256, 8
+    dtype = torch.bfloat16
+    total_tokens = B * S
+
+    seq_lens = torch.full((B,), S, dtype=torch.int32, device=DEVICE_TYPE)
+    b_start_loc = torch.zeros(B, dtype=torch.int32, device=DEVICE_TYPE)
+    b_start_loc[1:] = torch.cumsum(seq_lens[:-1], dim=0)
+
+    # Slicing a padded head axis keeps D contiguous but breaks the 8-element
+    # alignment of the head stride.
+    q, k, v, o = (
+        torch.randn(total_tokens, H, D + 4, dtype=dtype, device=DEVICE_TYPE)[..., :D]
+        for _ in range(4)
+    )
+    assert q.stride(1) % 8 != 0
+
+    context_attention_fwd(
+        q, k, v, o, b_start_loc, seq_lens, S, is_causal=True, sliding_window_q=None
+    )
+
+    o_ref = torch.zeros_like(o)
+    for i in range(B):
+        start = b_start_loc[i].item()
+        end = start + seq_lens[i].item()
+        o_ref[start:end] = ref_masked_attention(
+            q[start:end], k[start:end], v[start:end], is_causal=True
+        )
+
+    torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
+
+
 def test_split_head_dim_never_widens_the_dot():
     """Whatever the head dim, the split is never worse than one block.
 

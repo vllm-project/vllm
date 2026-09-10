@@ -67,6 +67,7 @@ def _fwd_kernel(
     SINKS_BIAS_KEY0: tl.constexpr,
     USE_SINKS: tl.constexpr,
     Lk: tl.constexpr,
+    HEAD_STRIDE_ALIGNED_8: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -83,13 +84,32 @@ def _fwd_kernel(
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+
+    # In the packed [seq, heads, dim] layout the head stride equals head_dim.
+    # When head_dim is a multiple of 8 but not 16 (e.g. 72), Triton's integer
+    # auto-specialization does not attach tt.divisibility=8 to stride_*h -- its
+    # threshold is 16 -- so the D-contiguous Q/K/V loads are treated as 2-byte
+    # aligned and lower to scalar loads instead of vectorized 16-byte ones.
+    # Hinting the head offset restores the alignment fact. The wrapper sets the
+    # flag from the actual runtime strides, so this stays sound for
+    # non-contiguous views.
+    off_h_q = cur_head * stride_qh
+    off_h_k = cur_kv_head * stride_kh
+    off_h_v = cur_kv_head * stride_vh
+    off_h_o = cur_head * stride_oh
+    if HEAD_STRIDE_ALIGNED_8:
+        off_h_q = tl.multiple_of(off_h_q, 8)
+        off_h_k = tl.multiple_of(off_h_k, 8)
+        off_h_v = tl.multiple_of(off_h_v, 8)
+        off_h_o = tl.multiple_of(off_h_o, 8)
+
     off_q = (
         (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs
-        + cur_head * stride_qh
+        + off_h_q
         + offs_d[None, :]
     )
-    off_k = offs_n[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None]
-    off_v = offs_n[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :]
+    off_k = offs_n[None, :] * stride_kbs + off_h_k + offs_d[:, None]
+    off_v = offs_n[:, None] * stride_vbs + off_h_v + offs_d[None, :]
 
     mask_d = offs_d < Lk
 
@@ -113,15 +133,11 @@ def _fwd_kernel(
         mask_dt = offs_dt < Lk
         off_qt = (
             (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs
-            + cur_head * stride_qh
+            + off_h_q
             + offs_dt[None, :]
         )
-        off_kt = (
-            offs_n[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_dt[:, None]
-        )
-        off_vt = (
-            offs_n[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_dt[None, :]
-        )
+        off_kt = offs_n[None, :] * stride_kbs + off_h_k + offs_dt[:, None]
+        off_vt = offs_n[:, None] * stride_vbs + off_h_v + offs_dt[None, :]
         qt = tl.load(
             Q + off_qt,
             mask=(offs_m[:, None] < cur_batch_seq_len) & (mask_dt[None, :]),
@@ -247,7 +263,7 @@ def _fwd_kernel(
     acc = acc / l_i[:, None]
     off_o = (
         (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs
-        + cur_head * stride_oh
+        + off_h_o
         + offs_d[None, :]
     )
     out_ptrs = Out + off_o
@@ -258,7 +274,7 @@ def _fwd_kernel(
         acc_t = acc_t / l_i[:, None]
         off_o_tail = (
             (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs
-            + cur_head * stride_oh
+            + off_h_o
             + offs_dt[None, :]
         )
         tl.store(
@@ -369,6 +385,15 @@ def context_attention_fwd(
 
     block_dmodel, block_dmodel_tail = _get_head_dim_blocks(Lk)
 
+    # Checked against the actual runtime strides rather than head_dim, so the
+    # hint stays sound for non-contiguous Q/K/V/O views. See _fwd_kernel.
+    head_stride_aligned_8 = (
+        q.stride(1) % 8 == 0
+        and k.stride(1) % 8 == 0
+        and v.stride(1) % 8 == 0
+        and o.stride(1) % 8 == 0
+    )
+
     _fwd_kernel[grid](
         q,
         k,
@@ -399,4 +424,5 @@ def context_attention_fwd(
         num_warps=num_warps,
         num_stages=1,
         Lk=Lk,
+        HEAD_STRIDE_ALIGNED_8=head_stride_aligned_8,
     )
