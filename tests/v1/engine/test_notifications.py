@@ -469,6 +469,7 @@ def test_lora_load_event_round_trips_through_msgpack():
         gpu_adapters=["alpha"],
         cpu_adapters=["alpha", "beta"],
         pinned_adapters=["alpha"],
+        ranks={"alpha": 8, "beta": 16},
         loads=[LoRALoadTiming("beta", "load", 0.25)],
     )
     encoded = msgspec.msgpack.encode(
@@ -482,6 +483,7 @@ def test_lora_load_event_round_trips_through_msgpack():
             "gpu_adapters": ["alpha"],
             "cpu_adapters": ["alpha", "beta"],
             "pinned_adapters": ["alpha"],
+            "ranks": {"alpha": 8, "beta": 16},
             "loads": [{"adapter_name": "beta", "transition": "load", "seconds": 0.25}],
         }
     ]
