@@ -553,9 +553,17 @@ def rms_norm_per_block_quant(
                 if input.dim() == 2
                 else (tma_aligned_m * sf_k, 1, tma_aligned_m)
             )
-            scales = torch.empty_strided(
-                shape, stride, device=input.device, dtype=torch.float32
-            )
+            # Initialise to 1.0 so TMA-alignment padding rows
+            # ([m, tma_aligned_m) in each column) hold a valid power-of-two
+            # scale.  DeepGEMM 2.6+ asserts (bits & 0x807fffff) == 0;
+            # uninitialized memory violates this (issue #49783).
+            if input.dim() == 2:
+                storage_size = sf_k * tma_aligned_m
+            else:
+                storage_size = input.shape[0] * sf_k * tma_aligned_m
+            scales = torch.ones(
+                storage_size, device=input.device, dtype=torch.float32
+            ).as_strided(shape, stride)
     else:
         scales = torch.empty(
             (input.numel() // input.shape[-1], input.shape[-1] // group_size[1]),
