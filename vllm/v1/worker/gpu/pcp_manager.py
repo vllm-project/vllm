@@ -528,18 +528,6 @@ class PCPManager:
         seq_lens_cpu_upper_bound_np = np.zeros(num_local_reqs, dtype=np.int32)
         seq_lens_cpu_upper_bound_np[:] = local_start_pos_np + local_num_scheduled_tokens
 
-        dcp_local_seq_lens = None
-        if self.dcp_world_size > 1:
-            prepare_dcp_local_seq_lens(
-                input_buffers.dcp_local_seq_lens,
-                seq_lens,
-                num_local_reqs,
-                self.dcp_world_size,
-                self.dcp_rank,
-                self.cp_interleave,
-            )
-            dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_local_reqs]
-
         self._local_batch = replace(
             input_batch,
             req_ids=local_req_ids,
@@ -560,7 +548,7 @@ class PCPManager:
             query_start_loc_np=local_query_start_loc_np[: num_local_reqs + 1],
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_cpu_upper_bound_np),
-            dcp_local_seq_lens=dcp_local_seq_lens,
+            dcp_local_seq_lens=None,
             num_computed_tokens_np=local_start_pos_np,
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
