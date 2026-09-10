@@ -116,7 +116,7 @@ def test_fused_engram_post_wkv_matches_reference(
     module.use_sequence_parallel = use_sequence_parallel
     module.embed_tokens = torch.nn.Identity()
     # `forward` reads rows staged by `prepare_embeddings`, so inject kv there.
-    module.embed_tokens.tp_size = 1
+    module.embed_tokens.tp_size = module.embed_tokens.dp_size = 1
     module.staged_rows = kv.unsqueeze(1)
     if use_sequence_parallel:
         padded = torch.nn.functional.pad(kv, (0, 0, 0, (-num_kv_tokens) % tp_size))
@@ -149,6 +149,51 @@ def _hash_state(use_slot_cache: bool) -> NgramHashState:
     state.swa_cache_module = torch.nn.Module()
     state.swa_cache_module.kv_cache = torch.empty(0)
     return state
+
+
+@pytest.mark.parametrize("num_tokens", [0, 7])
+def test_engram_dummy_hashes_leave_history_untouched(num_tokens):
+    """Dummy forwards have no valid table IDs and do not alter cached history."""
+    state = _hash_state(use_slot_cache=True)
+    state.multipliers = torch.empty(2, 4, dtype=torch.int64)
+    state.primes = torch.empty(2, 3, 8, dtype=torch.int64)
+    state._cache = torch.arange(16, dtype=torch.int32)
+    history = state._cache.clone()
+
+    hashes, keep = state.dummy_hashes(torch.arange(num_tokens))
+
+    assert hashes.shape == (num_tokens, 2, 24)
+    assert hashes.dtype == torch.int32
+    assert torch.all(hashes == engram_ops.DEAD_ID)
+    assert keep.shape == (num_tokens,) and keep.dtype == torch.bool
+    assert not keep.any()
+    torch.testing.assert_close(state._cache, history)
+
+
+def test_engram_staging_preserves_interleaved_microbatches(monkeypatch):
+    """A second microbatch must not overwrite rows awaiting a later layer."""
+    module = Engram.__new__(Engram)
+    torch.nn.Module.__init__(module)
+    module.embed_tokens = torch.nn.Identity()
+    module.embed_tokens.tp_size = module.embed_tokens.dp_size = 1
+    module.embed_tokens.lookup = lambda ids, out: out.copy_(ids.unsqueeze(-1))
+    module.use_sequence_parallel = False
+    module.staged_rows = torch.empty(3, 2, 1)
+    module._extra_staged_rows = [torch.empty_like(module.staged_rows)]
+    ids = [torch.full((3, 2), 11), torch.full((2, 2), 22)]
+
+    for ubatch_id in range(2):
+        monkeypatch.setattr(
+            engram_ops, "dbo_current_ubatch_id", lambda ubatch_id=ubatch_id: ubatch_id
+        )
+        module.prepare_embeddings(ids[ubatch_id])
+    for ubatch_id in range(2):
+        monkeypatch.setattr(
+            engram_ops, "dbo_current_ubatch_id", lambda ubatch_id=ubatch_id: ubatch_id
+        )
+        torch.testing.assert_close(
+            module.embed(ids[ubatch_id]), ids[ubatch_id].unsqueeze(-1).float()
+        )
 
 
 @pytest.mark.parametrize("num_blocks", [4, 100])
@@ -533,6 +578,7 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
     layer = ParallelEngramEmbedding.__new__(ParallelEngramEmbedding)
     torch.nn.Module.__init__(layer)
     layer.dim, layer.block_size, layer.tp_size = dim, block, 1
+    layer.dp_size = 1
     layer.n_hash_cols = layer.part_n_hash_cols = 24
     layer.head_start = 0
     layer.cpu_offload = cpu_offload
@@ -559,12 +605,25 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
     return layer
 
 
+@pytest.mark.parametrize(
+    "tp_size,dp_size,n_heads", [(1, 4, 5), (2, 2, 5), (4, 1, 6), (8, 1, 6)]
+)
+def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch):
+    """Reject empty owners before allocating weights or accessing CUDA."""
+    monkeypatch.setattr(
+        engram_ops, "get_tensor_model_parallel_world_size", lambda: tp_size
+    )
+    monkeypatch.setattr(engram_ops, "get_engram_dp_size", lambda: dp_size)
+    with pytest.raises(AssertionError, match="ranks without hash heads"):
+        ParallelEngramEmbedding(n_heads * 17, 64, (17,) * n_heads)
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
 def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeypatch):
     """Keep complete buckets and reconstruct head order, including TP padding."""
-    head_sizes = (17, 19, 23, 29, 31, 37)
+    head_sizes = (17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73)
     num_rows, dim = sum(head_sizes), 64
     torch.manual_seed(0)
     weight = torch.randn(num_rows + 7, dim).to(torch.float8_e4m3fn)
@@ -623,7 +682,7 @@ def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeyp
     module.staged_rows = torch.empty_like(shards[0])
     module.prepare_embeddings(ids)
     torch.testing.assert_close(module.embed(ids), expected, rtol=0, atol=0)
-    # Slicing before head reordering must preserve padded heads and empty owners.
+    # Slicing before head reordering must preserve padded heads and tokens.
     module.use_sequence_parallel = True
     chunk = (len(ids) + tp_size - 1) // tp_size
     padded = torch.nn.functional.pad(expected, (0, 0, 0, 0, 0, (-len(ids)) % tp_size))
