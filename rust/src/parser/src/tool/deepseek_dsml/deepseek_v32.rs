@@ -194,6 +194,31 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_v32_parse_complete_misspelled_closer_does_not_swallow_next_parameter() {
+        // `</｜DSML｜>` in place of the closer costs nothing but itself: the
+        // value stops at the sigil and the next parameter survives.
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools());
+        let output = parser
+            .parse_complete(
+                "<｜DSML｜function_calls>\n\
+                 <｜DSML｜invoke name=\"get_weather\">\n\
+                 <｜DSML｜parameter name=\"location\" string=\"true\">first</｜DSML｜>\n\
+                 <｜DSML｜parameter name=\"city\" string=\"true\">Tokyo</｜DSML｜parameter\n\
+                 <｜DSML｜parameter name=\"date\" string=\"true\">second</｜DSML｜parameter>\n\
+                 </｜DSML｜invoke>\n\
+                 </｜DSML｜function_calls>",
+            )
+            .unwrap();
+
+        assert_eq!(output.calls().len(), 1);
+        assert!(!output.calls()[0].arguments.contains("DSML"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "location": "first", "city": "Tokyo", "date": "second" })
+        );
+    }
+
+    #[test]
     fn deepseek_v32_parse_complete_preserves_raw_closing_tag_text_in_parameter_value() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
         let output = parser

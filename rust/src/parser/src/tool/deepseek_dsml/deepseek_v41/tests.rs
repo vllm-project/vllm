@@ -72,6 +72,28 @@ fn spaced_dsml_streaming_preserves_shared_schema_coercion() {
 }
 
 #[test]
+fn spaced_dsml_misspelled_closer_does_not_swallow_next_parameter() {
+    let wire = concat!(
+        "<｜DSML｜ calls>\n",
+        "<｜DSML｜ invoke name=\"lookup\">\n",
+        "<｜DSML｜ parameter name=\"query\" string=\"true\">first</｜DSML｜>\n",
+        "<｜DSML｜ parameter name=\"limit\" string=\"false\">2</｜DSML｜ parameter>\n",
+        "</｜DSML｜ invoke>\n",
+        "</｜DSML｜ calls>",
+    );
+    let mut parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
+
+    let output = collect_stream(parser.as_mut(), &[wire]);
+
+    assert_eq!(output.calls().len(), 1);
+    assert!(!output.calls()[0].arguments.contains("DSML"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output.calls()[0].arguments).unwrap(),
+        json!({ "query": "first", "limit": 2 })
+    );
+}
+
+#[test]
 fn v4_tags_remain_text_in_v41_dialect() {
     let mut parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
     let output = collect_stream(parser.as_mut(), &["before<｜DSML｜tool_calls>after"]);
