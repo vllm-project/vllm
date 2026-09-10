@@ -644,14 +644,14 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
             proc.temporal_patch_size,
         )
 
-    def _get_image_max_pixels(self) -> int:
-        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+    def _get_image_max_pixels(self, modality: str | None = "image") -> int:
+        mm_kwargs = self.ctx.get_merged_mm_kwargs({}, modality=modality)
         if (override := mm_kwargs.get("max_pixels")) is not None:
             return int(override)
         return self._processor_pixel_budget(self.get_hf_processor().image_processor)[1]
 
     def _get_video_max_pixels(self) -> int:
-        mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+        mm_kwargs = self.ctx.get_merged_mm_kwargs({}, modality="video")
         if (override := mm_kwargs.get("max_pixels")) is not None:
             return int(override)
         return self._processor_pixel_budget(self.get_hf_processor().video_processor)[1]

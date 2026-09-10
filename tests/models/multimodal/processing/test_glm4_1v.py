@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -289,3 +290,28 @@ def test_images_kwargs_max_pixels_does_not_leak_into_video_budget(model_id: str)
         stock["size_bound"],
         stock["video_frames"],
     )
+
+
+def test_glm4v_subclasses_keep_the_modality_parameter():
+    """Subclassed pixel-budget reads must accept the modality keyword.
+
+    ``Glm4vProcessingInfo.get_image_size_with_most_features`` is inherited
+    unchanged and calls ``self._get_image_max_pixels(modality=None)``, so an
+    override that drops the parameter raises ``TypeError`` while profiling.
+    """
+    from vllm.models.glm5next.nvidia.multimodal import Glm5NextProcessingInfo
+
+    scoped_to = []
+
+    class _Ctx:
+        def get_merged_mm_kwargs(self, kwargs, *, modality=None):
+            scoped_to.append(modality)
+            return {"max_pixels": _SCOPED_MAX_PIXELS}
+
+    for cls in (Glm4vProcessingInfo, Glm5NextProcessingInfo):
+        info = SimpleNamespace(ctx=_Ctx())
+        assert cls._get_image_max_pixels(info, modality=None) == _SCOPED_MAX_PIXELS
+        assert cls._get_image_max_pixels(info) == _SCOPED_MAX_PIXELS
+        assert cls._get_video_max_pixels(info) == _SCOPED_MAX_PIXELS
+
+    assert scoped_to == [None, "image", "video"] * 2
