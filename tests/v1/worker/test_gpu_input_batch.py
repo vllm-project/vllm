@@ -86,7 +86,7 @@ def _remove_requests(
 
 def _construct_expected_sampling_metadata(
     reqs: list[CachedRequestState],
-    req_ids_retained: set[int],
+    req_ids_retained: set[str],
     req_id_index_in_input_batch: dict[str, int],
     device: torch.device,
 ) -> SamplingMetadata:
@@ -104,7 +104,7 @@ def _construct_expected_sampling_metadata(
     top_p = [0.0 for _ in range(num_reqs)]
     temperature = [0.0 for _ in range(num_reqs)]
     min_tokens = {}
-    logit_bias = [None] * num_reqs
+    logit_bias: list[dict[int, float] | None] = [None] * num_reqs
     allowed_token_ids_mask = torch.zeros(
         num_reqs, VOCAB_SIZE, dtype=torch.bool, device=device
     )
@@ -112,6 +112,8 @@ def _construct_expected_sampling_metadata(
     for req in reqs:
         if req.req_id not in req_ids_retained:
             continue
+        assert req.prompt_token_ids is not None
+        assert req.sampling_params is not None
         index_in_input_batch = req_id_index_in_input_batch[req.req_id]
         output_token_ids[index_in_input_batch] = req.output_token_ids
         prompt_token_ids[index_in_input_batch] = req.prompt_token_ids

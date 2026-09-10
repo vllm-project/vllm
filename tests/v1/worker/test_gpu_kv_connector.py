@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock
 
 import pytest
 
 import vllm.v1.worker.gpu.kv_connector as kv_connector_module
-from vllm.config import KVTransferConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 
@@ -37,8 +38,8 @@ def _make_connector(
         kv_role="kv_consumer",
         kv_buffer_device="cpu",
     )
-    connector = ActiveKVConnector(  # type: ignore[arg-type]
-        SimpleNamespace(kv_transfer_config=kv_config), {}
+    connector = ActiveKVConnector(
+        cast(VllmConfig, SimpleNamespace(kv_transfer_config=kv_config)), {}
     )
     events.clear()
     return connector

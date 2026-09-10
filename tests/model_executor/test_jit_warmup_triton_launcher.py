@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
@@ -28,7 +28,7 @@ class _TestTritonKernel(VllmTritonJitKernel["_TestTritonKernel.CompileKey"]):
     class CompileKey:
         value: int
 
-    def dispatch(self, *, value: int) -> CompileKey:
+    def dispatch(self, *, value: int) -> CompileKey:  # type: ignore[override]
         return self.CompileKey(value=value)
 
     def get_warmup_keys(self) -> list[CompileKey]:
@@ -83,7 +83,7 @@ def test_triton_launcher_supports_cpu_function_wrappers() -> None:
             return self.func
 
     class TestCpuKernel(_TestTritonKernel):
-        kernel: Any = FuncWrapper()
+        kernel: ClassVar[Any] = FuncWrapper()
 
     owner = TestCpuKernel()
 

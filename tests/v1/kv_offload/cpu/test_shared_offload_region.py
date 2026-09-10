@@ -208,6 +208,7 @@ def _mp_barrier_construct_and_hold(
         barrier.wait(30)
         t = region.create_next_worker_view(PAGE_SIZE)
         t[:, :] = fill_value
+        assert region.fd is not None
         done_queue.put(
             {
                 "rank": rank,
@@ -402,6 +403,7 @@ def test_create_next_worker_view_multiprocess_slots(iid):
         result = done_queue.get(timeout=30)
         assert result["error"] is None, result["error"]
 
+        assert region.mmap_obj is not None
         raw = memoryview(region.mmap_obj)
         for chunk in range(num_chunks):
             row_start = chunk * num_workers * PAGE_SIZE
@@ -624,6 +626,7 @@ def test_multi_worker_race_exactly_one_creator(iid):
         )
 
         for r in regions:
+            assert r.mmap_obj is not None
             assert not r.mmap_obj.closed
             assert r.total_size_bytes == 4 * num_workers * PAGE_SIZE
     finally:
@@ -638,8 +641,10 @@ def test_multi_worker_race_shared_memory_visible(iid):
     regions, errors = _race_construct(iid, num_workers=num_workers)
     assert not errors
     try:
+        assert regions[0].mmap_obj is not None
         regions[0].mmap_obj[0:1] = b"\xab"
         for r in regions[1:]:
+            assert r.mmap_obj is not None
             assert memoryview(r.mmap_obj)[0:1] == b"\xab"
     finally:
         for r in regions:
@@ -717,6 +722,7 @@ def test_cleanup_creator_all_effects(iid):
     path = r.mmap_path
     fd = r.fd
     mmap_obj = r.mmap_obj
+    assert fd is not None and mmap_obj is not None
 
     r.cleanup()
 
@@ -734,6 +740,7 @@ def test_cleanup_non_creator_all_effects(iid):
     fd1 = r1.fd
     mmap_obj1 = r1.mmap_obj
     try:
+        assert fd1 is not None and mmap_obj1 is not None
         r1.cleanup()
 
         assert mmap_obj1.closed, "mmap should be closed after cleanup"
@@ -758,6 +765,7 @@ def test_cleanup_after_create_next_worker_view_releases_mmap(iid):
     released before mmap.close() can succeed."""
     r = _make_region(iid)
     mmap_obj = r.mmap_obj
+    assert mmap_obj is not None
 
     t = r.create_next_worker_view(PAGE_SIZE)
     del t
@@ -900,6 +908,7 @@ def test_backing_file_unlinked_after_barrier(iid):
         assert region._creator is False, "nothing left for cleanup() to unlink"
         t = region.create_next_worker_view(PAGE_SIZE)
         t[:, :] = 7
+        assert region.mmap_obj is not None
         assert memoryview(region.mmap_obj)[0] == 7, "mapping must stay valid"
         del t
     finally:

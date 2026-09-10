@@ -3,11 +3,13 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
 import torch
 
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.model_executor.models.exaone4_5_mtp import Exaone4_5_MTP
@@ -32,6 +34,9 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 
 class _TestSpeculator(AutoRegressiveSpeculator):
+    # Injected by the tests; consumed by load_draft_model below.
+    test_draft_model: torch.nn.Module
+
     def load_draft_model(self, target_model, target_attn_layer_names):
         return self.test_draft_model
 
@@ -94,10 +99,13 @@ def _make_speculator(
 
     speculator = object.__new__(_TestSpeculator)
     speculator.supports_mm_inputs = False
-    speculator.vllm_config = None
-    speculator.input_buffers = SimpleNamespace(
-        input_ids=torch.arange(4),
-        positions=torch.arange(4),
+    speculator.vllm_config = cast(Any, None)
+    speculator.input_buffers = cast(
+        Any,
+        SimpleNamespace(
+            input_ids=torch.arange(4),
+            positions=torch.arange(4),
+        ),
     )
     speculator.hidden_states = torch.zeros(4, 3)
     speculator.model = _DraftModel(output)
@@ -123,20 +131,23 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
         use_local_argmax_reduction=False,
         draft_sample_method="greedy",
     )
-    vllm_config = SimpleNamespace(
-        speculative_config=speculative_config,
-        scheduler_config=SimpleNamespace(
-            max_num_seqs=2,
-            max_num_batched_tokens=8,
-        ),
-        model_config=SimpleNamespace(
-            max_model_len=32,
-            dtype=torch.float32,
-            use_fp64_gumbel=False,
-        ),
-        parallel_config=SimpleNamespace(
-            data_parallel_size=1,
-            data_parallel_rank=0,
+    vllm_config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            speculative_config=speculative_config,
+            scheduler_config=SimpleNamespace(
+                max_num_seqs=2,
+                max_num_batched_tokens=8,
+            ),
+            model_config=SimpleNamespace(
+                max_model_len=32,
+                dtype=torch.float32,
+                use_fp64_gumbel=False,
+            ),
+            parallel_config=SimpleNamespace(
+                data_parallel_size=1,
+                data_parallel_rank=0,
+            ),
         ),
     )
 
@@ -148,7 +159,7 @@ def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected)
 def test_mm_support_configured_after_model_load(monkeypatch):
     target_model_config = object()
     draft_model_config = object()
-    vllm_config = SimpleNamespace(model_config=target_model_config)
+    vllm_config = cast(VllmConfig, SimpleNamespace(model_config=target_model_config))
     draft_model = _MultimodalDraftModel()
 
     def init_base(speculator, vllm_config, device):
@@ -194,7 +205,7 @@ def test_load_model_keeps_mm_support_for_capable_drafter(monkeypatch):
     speculator = object.__new__(_TestSpeculator)
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
-    speculator.vllm_config = SimpleNamespace(model_config=object())
+    speculator.vllm_config = cast(Any, SimpleNamespace(model_config=object()))
     speculator.max_num_tokens = 4
     speculator.hidden_size = 3
     speculator.dtype = torch.float32
@@ -218,7 +229,7 @@ def test_load_model_disables_mm_support_for_text_only_drafter(monkeypatch):
     speculator = object.__new__(_TestSpeculator)
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
-    speculator.vllm_config = SimpleNamespace(model_config=object())
+    speculator.vllm_config = cast(Any, SimpleNamespace(model_config=object()))
     draft_model = _TextOnlyDraftModel()
     speculator.test_draft_model = draft_model
     warning_messages = []
@@ -251,7 +262,7 @@ def test_multi_module_mm_support_configured_after_model_load(monkeypatch):
     speculator.supports_mm_inputs = False
     speculator.inputs_embeds = None
     speculator.cached_draft_input_embeds = None
-    speculator.vllm_config = SimpleNamespace(model_config=object())
+    speculator.vllm_config = cast(Any, SimpleNamespace(model_config=object()))
     speculator.max_num_tokens = 4
     speculator.max_num_reqs = 2
     speculator.num_speculative_steps = 3
@@ -350,15 +361,21 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     speculator = object.__new__(_TestSpeculator)
     speculator.num_speculative_steps = 4
     speculator.current_draft_step = torch.tensor(0)
-    speculator.input_buffers = SimpleNamespace(
-        positions=torch.arange(2),
-        query_start_loc=torch.arange(3),
+    speculator.input_buffers = cast(
+        Any,
+        SimpleNamespace(
+            positions=torch.arange(2),
+            query_start_loc=torch.arange(3),
+        ),
     )
     speculator.idx_mapping = torch.arange(2)
     generate_draft = Mock()
-    speculator._generate_draft = generate_draft
+    # Stub the bound method on a hand-built instance to count draft calls.
+    speculator._generate_draft = generate_draft  # type: ignore[method-assign]
     run_fullgraph = Mock()
-    speculator.decode_cudagraph_manager = SimpleNamespace(run_fullgraph=run_fullgraph)
+    speculator.decode_cudagraph_manager = cast(
+        Any, SimpleNamespace(run_fullgraph=run_fullgraph)
+    )
     batch_desc = BatchExecutionDescriptor(
         cg_mode=cg_mode,
         num_tokens=2,
@@ -384,7 +401,7 @@ def test_update_draft_decode_metadata_updates_fa3_scheduler_metadata(
     builder.aot_schedule = True
     builder.use_full_cuda_graph = True
     builder.scheduler_metadata = torch.zeros(8, dtype=torch.int32)
-    builder.cache_config = SimpleNamespace(cache_dtype="bfloat16")
+    builder.cache_config = cast(Any, SimpleNamespace(cache_dtype="bfloat16"))
     builder.kv_cache_dtype = torch.bfloat16
     builder.num_heads_q = 2
     builder.num_heads_kv = 1

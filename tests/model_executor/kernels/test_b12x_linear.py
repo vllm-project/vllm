@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib
 import types
 from dataclasses import dataclass
+from typing import cast
 
 import pytest
 import torch
@@ -23,6 +24,7 @@ from vllm.model_executor.kernels.linear import (
     B12xNvFp4LinearKernel,
     B12xTensorFP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
+    MxFp4LinearLayerConfig,
     Mxfp8LinearLayerConfig,
     init_fp8_linear_kernel,
     init_mxfp4_linear_kernel,
@@ -32,6 +34,7 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.kernels.linear.nvfp4.marlin import (
     MarlinNvFp4LinearKernel,
 )
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
@@ -267,7 +270,9 @@ def test_b12x_tensor_fp8_process_weights_packs_modelopt_layout(
     layer.weight.weight_loader = weight_loader
     layer.weight_scale.weight_loader = scale_loader
     kernel = object.__new__(B12xTensorFP8ScaledMMLinearKernel)
-    kernel.config = types.SimpleNamespace(weight_shape=(64, 128))
+    kernel.config = cast(
+        FP8ScaledMMLinearLayerConfig, types.SimpleNamespace(weight_shape=(64, 128))
+    )
     kernel.layer_param_names = (
         "weight",
         "weight_scale",
@@ -339,14 +344,16 @@ def test_b12x_tensor_fp8_apply_quantizes_and_uses_packed_weight(
     x_q = torch.empty((6, 128), dtype=torch.float8_e4m3fn)
     bias = torch.empty((48,), dtype=torch.bfloat16)
     kernel = object.__new__(B12xTensorFP8ScaledMMLinearKernel)
-    kernel.config = types.SimpleNamespace(out_dtype=torch.bfloat16)
+    kernel.config = cast(
+        FP8ScaledMMLinearLayerConfig, types.SimpleNamespace(out_dtype=torch.bfloat16)
+    )
     kernel.layer_param_names = (
         "weight",
         "weight_scale",
         "input_scale",
         "input_scale_ub",
     )
-    kernel.quant_fp8 = lambda source, scale, scale_ub: (x_q, scale)
+    kernel.quant_fp8 = cast(QuantFP8, lambda source, scale, scale_ub: (x_q, scale))
 
     output = kernel.apply_weights(layer, x, bias)
 
@@ -656,7 +663,9 @@ def test_b12x_block_fp8_apply_uses_b12x_recipe_api(monkeypatch) -> None:
     a_scale = torch.empty((6, 1), dtype=torch.float32)
     weight_scale = torch.empty((2, 1), dtype=torch.float32)
     kernel = object.__new__(B12xFp8BlockScaledMMKernel)
-    kernel.config = types.SimpleNamespace(out_dtype=torch.bfloat16)
+    kernel.config = cast(
+        FP8ScaledMMLinearLayerConfig, types.SimpleNamespace(out_dtype=torch.bfloat16)
+    )
 
     output = kernel.apply_block_scaled_mm(a, weight, a_scale, weight_scale)
 
@@ -671,7 +680,10 @@ def test_b12x_block_fp8_apply_uses_b12x_recipe_api(monkeypatch) -> None:
 
 
 def test_b12x_mxfp4_requires_dynamic_activations() -> None:
-    config = types.SimpleNamespace(activation_quant_key=kMxfp4Dynamic)
+    config = cast(
+        MxFp4LinearLayerConfig,
+        types.SimpleNamespace(activation_quant_key=kMxfp4Dynamic),
+    )
     can_implement, reason = B12xMxFp4LinearKernel.can_implement(config)
 
     assert can_implement
@@ -774,7 +786,8 @@ def test_b12x_mxfp4_apply_calls_native_blockscaled_gemm(monkeypatch) -> None:
 
 
 def test_b12x_nvfp4_can_implement_supported_config() -> None:
-    can_implement, reason = B12xNvFp4LinearKernel.can_implement(None)
+    # can_implement() discards the config for this kernel.
+    can_implement, reason = B12xNvFp4LinearKernel.can_implement(None)  # type: ignore[arg-type]
 
     assert can_implement
     assert reason is None

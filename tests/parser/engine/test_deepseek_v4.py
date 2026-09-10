@@ -11,6 +11,7 @@ from tests.parser.engine.replay_harness import (
     DUMMY_TOOLS,
     MockTokenizer,
     _test_request,
+    as_tokenizer,
     collect_output,
     replay_streaming,
 )
@@ -1086,7 +1087,7 @@ class TestDelegatingParserLargeDelta:
             vocab=dict(_DSV4_FULL_VOCAB),
             tokens=tokens,
         )
-        parser = _DeepSeekV4Delegating(tokenizer)
+        parser = _DeepSeekV4Delegating(as_tokenizer(tokenizer))
 
         deltas = replay_streaming(
             parser,
@@ -1164,7 +1165,7 @@ class TestDelegatingParserLargeDelta:
         # delta_text (detokenizer strips EOS).  This is the scenario
         # at large stream_interval.
         parser = _DeepSeekV4Delegating(
-            tokenizer,
+            as_tokenizer(tokenizer),
             chat_template_kwargs={"thinking": True},
         )
         deltas = [
@@ -1214,7 +1215,7 @@ class TestDelegatingParserLargeDelta:
 
         tokenizer = MockTokenizer(vocab=vocab, tokens=tokens)
         parser = _DeepSeekV4Delegating(
-            tokenizer,
+            as_tokenizer(tokenizer),
             chat_template_kwargs={"thinking": True},
         )
         deltas = replay_streaming(

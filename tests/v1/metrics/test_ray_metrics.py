@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -158,9 +159,12 @@ def test_ray_counter_inc_forwards_per_child_tags():
     )
     mock = _install_mock_metric(wrapper)
 
-    wrapper.labels("stop").inc()
-    wrapper.labels("repetition").inc(3)
-    wrapper.labels("stop").inc(0)  # zero increment must be a no-op.
+    # labels() is declared as returning the base RayPrometheusMetric, but it
+    # copies self, so each child is the same concrete wrapper type.
+    cast(RayCounterWrapper, wrapper.labels("stop")).inc()
+    cast(RayCounterWrapper, wrapper.labels("repetition")).inc(3)
+    # zero increment must be a no-op.
+    cast(RayCounterWrapper, wrapper.labels("stop")).inc(0)
 
     # The zero-increment call should not reach the underlying metric.
     assert mock.inc.call_count == 2
@@ -179,8 +183,8 @@ def test_ray_gauge_labels_returns_independent_children_and_forwards_tags():
     )
     mock = _install_mock_metric(wrapper)
 
-    a = wrapper.labels("a")
-    b = wrapper.labels("b")
+    a = cast(RayGaugeWrapper, wrapper.labels("a"))
+    b = cast(RayGaugeWrapper, wrapper.labels("b"))
     assert a is not b
 
     a.set(1)
@@ -200,8 +204,8 @@ def test_ray_histogram_labels_returns_independent_children_and_forwards_tags():
     )
     mock = _install_mock_metric(wrapper)
 
-    x = wrapper.labels("x")
-    y = wrapper.labels("y")
+    x = cast(RayHistogramWrapper, wrapper.labels("x"))
+    y = cast(RayHistogramWrapper, wrapper.labels("y"))
     assert x is not y
 
     x.observe(0.5)
