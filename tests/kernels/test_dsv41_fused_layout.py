@@ -86,6 +86,49 @@ def test_permute_helpers_accept_fp8_storage():
     permute_wo_a_(w2, s2)
 
 
+def test_fused_attention_finalize_permutes_only_loaded_layers():
+    from types import SimpleNamespace
+
+    from vllm.models.deepseek_v4_1.nvidia.flashmla_fused import (
+        DeepseekV4FlashMLAFusedAttention,
+    )
+
+    def fake_attn(prefix):
+        w_q = torch.randn(16 * 512, 64).to(torch.float8_e4m3fn)
+        s_q = torch.randint(0, 255, (16 * 512, 2), dtype=torch.uint8)
+        w_o = torch.randn(2 * 1024, 8 * 512).to(torch.float8_e4m3fn)
+        s_o = torch.randint(0, 255, (2 * 1024, 128), dtype=torch.uint8)
+        return SimpleNamespace(
+            prefix=prefix,
+            n_local_heads=16,
+            n_local_groups=2,
+            wq_b=SimpleNamespace(weight=w_q, weight_scale=s_q),
+            wo_a=SimpleNamespace(weight=w_o, weight_scale=s_o),
+        )
+
+    attn = fake_attn("model.layers.3.attn")
+    before = (attn.wq_b.weight.clone(), attn.wo_a.weight.clone())
+    finalize = DeepseekV4FlashMLAFusedAttention.finalize_loaded_weights
+    finalize(attn, {"model.layers.4.attn.wq_b.weight"})
+    assert torch.equal(attn.wq_b.weight.view(torch.uint8), before[0].view(torch.uint8))
+    finalize(
+        attn, {"model.layers.3.attn.wq_b.weight", "model.layers.3.attn.wo_a.weight"}
+    )
+    perm = q_fused_permutation(16, 512)
+    assert torch.equal(
+        attn.wq_b.weight.view(torch.uint8), before[0].view(torch.uint8)[perm]
+    )
+    assert torch.equal(
+        attn.wo_a.weight.view(torch.uint8),
+        before[1].view(torch.uint8)[:, o_fused_permutation(8, 512)],
+    )
+    # None means "everything was (re)loaded": permutes again (dummy weights).
+    finalize(attn, None)
+    assert torch.equal(
+        attn.wq_b.weight.view(torch.uint8), before[0].view(torch.uint8)[perm][perm]
+    )
+
+
 @pytest.mark.parametrize("num_tokens", [1, 5, 129])
 def test_inv_rope_quant_permuted_output_matches_standard(num_tokens):
     """The split-KV fallback's O quant must emit the fused kernel's layout."""

@@ -172,6 +172,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     # workspace allocated in _forward_prefill and is also read by the dummy-run
     # path to pre-reserve that workspace.
     PREFILL_CHUNK_SIZE: ClassVar[int] = 4
+    # True when wq_b rows / wo_a columns are permuted for the FlashMLA fused
+    # kernel (see finalize_loaded_weights); set by the platform subclass.
+    uses_fused_kernel_layouts: ClassVar[bool] = False
 
     @classmethod
     @abstractmethod
@@ -204,6 +207,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def _uses_fp8_ds_mla_layout(self) -> bool:
         """Return whether this instance stores fp8 KV in fp8_ds_mla layout."""
         return self.use_fp8_ds_mla_layout
+
+    def finalize_loaded_weights(self, loaded_params: set[str] | None) -> None:
+        """Per-layer post-load hook, run before quant-method weight packing.
+
+        ``loaded_params`` names the parameters this load touched (``None``:
+        all of them, e.g. dummy weights).
+        """
+        return None
 
     def __init__(
         self,
@@ -548,14 +559,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # Pre-allocate attention output with FlashMLA-padded head count.
-        # The op writes into `o_padded`; we slice to n_local_heads after.
-        num_tokens = hidden_states.shape[0]
-        o_padded = torch.empty(
-            (num_tokens, self.padded_heads, self.head_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
+        # The eager attention region writes into a caller-owned buffer
+        # (breakable_cudagraph needs in-place outputs); the platform subclass
+        # decides its shape and how it is projected afterwards.
+        attn_out = self._alloc_attn_out(hidden_states.shape[0], hidden_states)
 
         # Keep the attention input preparation in the captured graph. Only the
         # sparse indexer and MLA attention run in the eager break below.
@@ -572,12 +579,37 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             kv_score,
             indexer_weights,
             positions,
-            o_padded,
+            attn_out,
         )
-        o = o_padded[:, : self.n_local_heads, :]
+        return self._finish_o_proj(attn_out, positions)
 
-        # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
-        return self._o_proj(o, positions)
+    def _alloc_attn_out(
+        self, num_tokens: int, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
+        """Attention output buffer: ``[N, padded_heads, head_dim]`` bf16."""
+        return torch.empty(
+            (num_tokens, self.padded_heads, self.head_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+    def _finish_o_proj(
+        self, attn_out: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
+        """Inverse-RoPE + wo_a + wo_b on the real heads of ``attn_out``."""
+        return self._o_proj(attn_out[:, : self.n_local_heads, :], positions)
+
+    def _prepare_q_and_insert_kv(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        positions: torch.Tensor,
+        attn_metadata: (
+            dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
+        ),
+    ) -> torch.Tensor:
+        """Q RoPE/padding and SWA cache insert; returns the Q attention consumes."""
+        return self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
 
     @cached_property
     def _can_fuse_query_quant(self) -> bool:
@@ -631,7 +663,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         kv_score: torch.Tensor,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
-        o_padded: torch.Tensor,
+        attn_out: torch.Tensor,
     ) -> None:
         """Wide eager region: the whole of ``_prepare_and_attn`` runs eagerly.
 
@@ -646,7 +678,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             kv_score,
             indexer_weights,
             positions,
-            o_padded,
+            attn_out,
         )
 
     def _prepare_and_attn(
@@ -658,7 +690,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         kv_score: torch.Tensor,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
-        o_padded: torch.Tensor,
+        attn_out: torch.Tensor,
     ) -> None:
         """Attention input preparation followed by the sparse indexer and MLA.
 
@@ -677,7 +709,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             q = self._wq_b_proj(qr, qr_scale).view(
                 -1, self.n_local_heads, self.head_dim
             )
-            return self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+            return self._prepare_q_and_insert_kv(q, kv, positions, attn_metadata)
 
         index_q: torch.Tensor | None = None
         index_q_scale: torch.Tensor | None = None
@@ -730,7 +762,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             q,
             kv,
             positions,
-            o_padded,
+            attn_out,
         )
 
     def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
