@@ -645,12 +645,16 @@ class PCPManager:
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
         return gathered[self._hidden_restore_idx]
 
+    def get_draft_input_buffers(
+        self, input_buffers: InputBuffers
+    ) -> InputBatch | InputBuffers:
+        return self.draft_prefill_batch or input_buffers
+
     def prepare_draft_prefill(
         self,
         input_batch: InputBatch,
         input_ids: torch.Tensor,
     ) -> None:
-        self.draft_prefill_batch = None
         if input_batch is not self._global_batch or self._local_batch is None:
             return
         local_batch = self._local_batch

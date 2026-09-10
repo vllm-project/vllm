@@ -396,9 +396,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        pcp_manager = getattr(self, "pcp_manager", None)
-        prefill = getattr(pcp_manager, "draft_prefill_batch", None)
-        input_buffers = prefill if prefill is not None else self.input_buffers
+        input_buffers: InputBatch | InputBuffers = self.input_buffers
+        is_padding = None
+        if self.pcp_manager is not None:
+            input_buffers = self.pcp_manager.get_draft_input_buffers(self.input_buffers)
+            is_padding = input_buffers.is_padding[:num_tokens]
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
             attn_metadata,
@@ -408,7 +410,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_tokens_across_dp=num_tokens_across_dp,
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
-            is_padding=None if prefill is None else prefill.is_padding,
+            is_padding=is_padding,
         ):
             inputs_embeds = None
             if self.supports_mm_inputs:
