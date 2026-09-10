@@ -985,9 +985,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             self.lora_config, self
                         ),
                     )
-                    draft_over_pp = (
-                        self.speculative_config is not None and self.use_pp
-                    )
+                    draft_over_pp = self.speculative_config is not None and self.use_pp
                     if draft_over_pp:
                         get_world_group().barrier()
                     if self.speculator is not None:
