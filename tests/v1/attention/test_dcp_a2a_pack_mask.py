@@ -88,8 +88,8 @@ def test_fused_mask_matches_eager(
         out, lse.clone(), world_size, h_per_rank, head_dim, seq_lens, query_start_loc
     )
 
-    # Compare bit patterns, not values: for a 2-element LSE pack the high half
-    # of -inf bitcasts to a NaN payload, which never compares equal to itself.
+    # The packed LSE slots hold halves of an fp32, not meaningful floats, so
+    # compare the send buffers bitwise: -inf's high half is a NaN in fp16.
     assert torch.equal(actual.view(torch.int16), expected.view(torch.int16)), (
         "fused mask is not bit-exact with the eager mask"
     )
