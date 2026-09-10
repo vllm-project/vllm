@@ -703,7 +703,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
-                full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
+                cudagraph_mode=desc.cg_mode,
                 max_query_len=desc.max_query_len,
                 pcp_manager=pcp_manager,
             )
@@ -771,7 +771,7 @@ def prepare_inputs_to_capture(
     block_tables: BlockTables,
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
-    full_cudagraph: bool,
+    cudagraph_mode: CUDAGraphMode,
     max_query_len: int | None = None,
     pcp_manager: "PCPManager | None" = None,
 ) -> AttentionState:
@@ -821,14 +821,15 @@ def prepare_inputs_to_capture(
     # In summary: We always generate attention metadata for both FULL and PIECEWISE
     # CUDA graphs, setting for_capture=True for FULL graphs, and for_capture=False
     # for PIECEWISE graphs, to ensure correct execution and capture.
+    # The model state also sees the mode; the default treats PIECEWISE like NONE.
     attn_metadata = model_state.prepare_attn(
         input_batch,
-        CUDAGraphMode.NONE,
+        cudagraph_mode,
         input_block_tables,
         slot_mappings,
         attn_groups,
         kv_cache_config,
-        for_capture=full_cudagraph,
+        for_capture=cudagraph_mode == CUDAGraphMode.FULL,
     )
     return AttentionState(attn_metadata, slot_mappings_by_layer)
 

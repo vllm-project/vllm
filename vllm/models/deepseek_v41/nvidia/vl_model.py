@@ -297,6 +297,10 @@ class DeepseekV41ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
     def token_lookback_depth(self) -> int:
         return self.language_model.token_lookback_depth
 
+    @property
+    def decoder_replay_layers(self):
+        return self.language_model.decoder_replay_layers
+
     def forward(
         self,
         input_ids: torch.Tensor,

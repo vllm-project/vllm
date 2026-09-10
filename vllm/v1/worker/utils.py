@@ -268,13 +268,13 @@ class AttentionGroup:
         default_factory=lambda: []
     )
 
-    def create_metadata_builders(
+    def make_metadata_builder(
         self,
         vllm_config,
         device,
         kernel_block_size: int | None = None,
-        num_metadata_builders: int = 1,
-    ):
+    ) -> AttentionMetadataBuilder:
+        """A metadata builder for this group's layers, with buffers of its own."""
         if kernel_block_size is None:
             kv_cache_spec_builder = self.kv_cache_spec
         elif (
@@ -297,19 +297,28 @@ class AttentionGroup:
             builder_kwargs["block_table_width"] = get_block_table_width(
                 max_num_blocks, self.kv_cache_spec.block_size, kernel_block_size
             )
+        builder = builder_cls(
+            kv_cache_spec_builder,
+            self.layer_names,
+            vllm_config,
+            device,
+            **builder_kwargs,
+        )
+        if kernel_block_size is not None:
+            builder.set_kernel_block_size(kernel_block_size)
+        return builder
+
+    def create_metadata_builders(
+        self,
+        vllm_config,
+        device,
+        kernel_block_size: int | None = None,
+        num_metadata_builders: int = 1,
+    ):
         self.metadata_builders = [
-            builder_cls(
-                kv_cache_spec_builder,
-                self.layer_names,
-                vllm_config,
-                device,
-                **builder_kwargs,
-            )
+            self.make_metadata_builder(vllm_config, device, kernel_block_size)
             for _ in range(num_metadata_builders)
         ]
-        if kernel_block_size is not None:
-            for builder in self.metadata_builders:
-                builder.set_kernel_block_size(kernel_block_size)
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
