@@ -6,7 +6,7 @@ import hashlib
 import inspect
 import os
 import sys
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Mapping
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 from unittest.mock import patch
 
@@ -168,8 +168,8 @@ def support_torch_compile(
     - if it is a single integer (can be negative), the corresponding dimension
         of the argument will be marked as dynamic.
     - if it is `None`, ignored.
-    - if it is `IntermediateTensors`, all the tensors in the intermediate
-        tensors will be marked as dynamic.
+    - if it is `IntermediateTensors` or a mapping, all contained tensors will
+        be marked as dynamic.
     - otherwise, it will raise an error.
 
     NOTE: if an argument is `None`, it should always be passed as `None` during
@@ -475,6 +475,15 @@ def _support_torch_compile(
                     mark_dynamic(arg, dim_shape_pairs)
                 elif isinstance(arg, IntermediateTensors):
                     for tensor in arg.tensors.values():
+                        dim_shape_pairs = [
+                            (tensor.ndim + d if d < 0 else d, dim_to_shape_id.get(d))
+                            for d in dims
+                        ]
+                        mark_dynamic(tensor, dim_shape_pairs)
+                elif isinstance(arg, Mapping):
+                    for tensor in arg.values():
+                        if not isinstance(tensor, torch.Tensor):
+                            continue
                         dim_shape_pairs = [
                             (tensor.ndim + d if d < 0 else d, dim_to_shape_id.get(d))
                             for d in dims

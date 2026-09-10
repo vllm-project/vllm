@@ -185,6 +185,7 @@ class RequestState:
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
+        self.token_probe_probs: list[dict[str, float]] = []
 
         # Stream Interval
         self.stream_interval = stream_interval
@@ -428,11 +429,18 @@ class RequestState:
         if finished and self.routed_experts_chunks:
             routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
 
+        token_probe_probs = self.token_probe_probs or None
+        if delta:
+            token_probe_probs = None
+            if token_ids:
+                token_probe_probs = self.token_probe_probs[-len(token_ids) :]
+
         return CompletionOutput(
             index=self.request_index,
             text=text,
             token_ids=token_ids,
             routed_experts=routed_experts,
+            token_probe_probs=token_probe_probs,
             sampling_mask=sampling_mask,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
@@ -670,6 +678,10 @@ class OutputProcessor:
             if engine_core_output.routed_experts is not None:
                 req_state.routed_experts_chunks.append(
                     engine_core_output.routed_experts
+                )
+            if engine_core_output.new_token_probe_probs is not None:
+                req_state.token_probe_probs.extend(
+                    engine_core_output.new_token_probe_probs
                 )
 
             if req_state.is_prefilling:

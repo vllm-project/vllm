@@ -369,6 +369,10 @@ class ModelRunnerOutput:
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
 
+    # Per-forward token-probe probabilities in packed request order.
+    # Shape: [num_scheduled_tokens, num_labels].
+    token_probe_scores: np.ndarray | None = None
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,

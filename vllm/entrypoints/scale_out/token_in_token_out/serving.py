@@ -326,6 +326,7 @@ class ServingTokens(GenerateBaseServing):
                 token_ids=as_list(output.token_ids),
                 routed_experts=routed_experts_b64,
                 sampling_mask=sampling_mask,
+                token_probe_probs=output.token_probe_probs,
             )
 
             choices.append(choice_data)
@@ -440,7 +441,6 @@ class ServingTokens(GenerateBaseServing):
                         if output.routed_experts is not None
                         else None
                     )
-
                     chunk = GenerateStreamResponse(
                         request_id=request_id,
                         choices=[
@@ -450,6 +450,7 @@ class ServingTokens(GenerateBaseServing):
                                 finish_reason=finish_reason,
                                 token_ids=as_list(delta_token_ids),
                                 routed_experts=routed_experts_b64,
+                                token_probe_probs=output.token_probe_probs,
                             )
                         ],
                     )
