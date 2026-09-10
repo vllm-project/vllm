@@ -3,10 +3,12 @@
 
 import time
 from collections.abc import Mapping
-from typing import Any, Literal
+from dataclasses import replace
+from typing import Any, Literal, cast
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.config.cache import DEFAULT_MAMBA_CHECKPOINT_TOKEN
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
@@ -55,6 +57,33 @@ class InputProcessor:
         self.generation_config_fields = model_config.try_get_generation_config()
 
         self.renderer = renderer or renderer_from_config(vllm_config)
+        enable_checkpoint = getattr(self.cache_config, "enable_mamba_checkpoint", False)
+        checkpoint_token = (
+            getattr(
+                self.cache_config,
+                "mamba_checkpoint_token",
+                DEFAULT_MAMBA_CHECKPOINT_TOKEN,
+            )
+            if enable_checkpoint
+            else None
+        )
+        self.mamba_checkpoint_token_id: int | None = None
+        if checkpoint_token is not None:
+            tokenizer = self.tokenizer
+            if tokenizer is None:
+                raise VLLMValidationError(
+                    "mamba_checkpoint_token requires tokenizer initialization"
+                )
+            checkpoint_ids = tokenizer.encode(
+                checkpoint_token,
+                add_special_tokens=False,
+            )
+            if len(checkpoint_ids) != 1:
+                raise VLLMValidationError(
+                    f"mamba_checkpoint_token {checkpoint_token!r} must encode to "
+                    f"one token, got {checkpoint_ids!r}"
+                )
+            self.mamba_checkpoint_token_id = checkpoint_ids[0]
 
         self.supports_mm_inputs = mm_registry.supports_multimodal_inputs(model_config)
         self.mm_encoder_cache_size = 0
@@ -278,6 +307,103 @@ class InputProcessor:
         else:
             request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
 
+    def _extract_mamba_checkpoint(
+        self,
+        decoder_input: SingletonInput,
+    ) -> tuple[SingletonInput, int | None]:
+        checkpoint_token_id = self.mamba_checkpoint_token_id
+        if checkpoint_token_id is None:
+            return decoder_input, None
+
+        if decoder_input["type"] == "embeds":
+            prompt_token_ids = decoder_input.get("prompt_token_ids")
+            if prompt_token_ids and checkpoint_token_id in prompt_token_ids:
+                raise VLLMValidationError(
+                    "mamba_checkpoint_token is not supported with prompt_embeds"
+                )
+            return decoder_input, None
+
+        prompt_token_ids = decoder_input["prompt_token_ids"]
+        checkpoint_indices = [
+            i
+            for i, token_id in enumerate(prompt_token_ids)
+            if token_id == checkpoint_token_id
+        ]
+        if not checkpoint_indices:
+            return decoder_input, None
+        if len(checkpoint_indices) != 1:
+            raise VLLMValidationError(
+                f"mamba_checkpoint_token must occur exactly once, got "
+                f"{len(checkpoint_indices)} occurrences"
+            )
+
+        marker_pos = checkpoint_indices[0]
+        checkpoint_at_end = marker_pos == len(prompt_token_ids) - 1
+        if marker_pos == 0 or checkpoint_at_end:
+            raise VLLMValidationError(
+                "mamba_checkpoint_token must have tokens on both sides"
+            )
+
+        if decoder_input["type"] == "multimodal":
+            for modality, placeholders in decoder_input["mm_placeholders"].items():
+                for placeholder in placeholders:
+                    start = placeholder.offset
+                    end = start + placeholder.length
+                    if start <= marker_pos < end:
+                        raise VLLMValidationError(
+                            "mamba_checkpoint_token cannot be inside a "
+                            f"{modality} placeholder"
+                        )
+
+        # TODO 1: Allow custom padding token/character passed via engine args.
+        # TODO 2: Support opt-out of padding via args, rolling back to before
+        # multimodal image placeholders like prefix_match_unit.
+        hash_unit = self.cache_config.prefix_match_unit or self.cache_config.block_size
+        checkpoint_position = (marker_pos // hash_unit) * hash_unit
+        if checkpoint_position <= 0:
+            raise VLLMValidationError(
+                f"mamba_checkpoint_token position ({marker_pos}) is too small to form a "
+                f"valid prefix block aligned to {hash_unit}"
+            )
+
+        updated_input = cast(SingletonInput, dict(decoder_input))
+        updated_input["prompt_token_ids"] = (
+            prompt_token_ids[:marker_pos] + prompt_token_ids[marker_pos + 1 :]
+        )
+
+        if "assistant_tokens_mask" in decoder_input:
+            assistant_tokens_mask = decoder_input["assistant_tokens_mask"]
+            if assistant_tokens_mask is not None:
+                updated_input["assistant_tokens_mask"] = (
+                    assistant_tokens_mask[:marker_pos]
+                    + assistant_tokens_mask[marker_pos + 1 :]
+                )
+
+        if "prompt_token_offsets" in decoder_input:
+            prompt_token_offsets = decoder_input["prompt_token_offsets"]
+            if prompt_token_offsets is not None:
+                updated_input["prompt_token_offsets"] = (
+                    prompt_token_offsets[:marker_pos]
+                    + prompt_token_offsets[marker_pos + 1 :]
+                )
+
+        if decoder_input["type"] == "multimodal":
+            updated_placeholders = {}
+            for modality, placeholders in decoder_input["mm_placeholders"].items():
+                shifted_placeholders = []
+                for placeholder in placeholders:
+                    start = placeholder.offset
+                    if start > marker_pos:
+                        placeholder = replace(
+                            placeholder,
+                            offset=start - 1,
+                        )
+                    shifted_placeholders.append(placeholder)
+                updated_placeholders[modality] = shifted_placeholders
+            updated_input["mm_placeholders"] = updated_placeholders
+
+        return updated_input, checkpoint_position
+
     def process_inputs(
         self,
         request_id: str,
@@ -333,6 +459,48 @@ class InputProcessor:
                 [parsed_prompt],
                 tok_params,
             )
+
+        encoder_input, decoder_input = split_enc_dec_input(engine_input)
+        raw_mm_spans = None
+        if decoder_input["type"] == "multimodal":
+            raw_mm_spans = {
+                modality: [
+                    (placeholder.offset, placeholder.length)
+                    for placeholder in placeholders
+                ]
+                for modality, placeholders in decoder_input["mm_placeholders"].items()
+            }
+        decoder_input, checkpoint_position = self._extract_mamba_checkpoint(
+            decoder_input
+        )
+        if checkpoint_position is not None:
+            prompt_ids = decoder_input.get("prompt_token_ids")
+            mm_spans = None
+            if decoder_input["type"] == "multimodal":
+                mm_spans = {
+                    modality: [
+                        (placeholder.offset, placeholder.length)
+                        for placeholder in placeholders
+                    ]
+                    for modality, placeholders in decoder_input[
+                        "mm_placeholders"
+                    ].items()
+                }
+            logger.info(
+                "Mamba checkpoint parsed: request=%s position=%d prompt_tokens=%d "
+                "token_id=%d raw_mm_spans=%s final_mm_spans=%s",
+                request_id,
+                checkpoint_position,
+                len(prompt_ids) if prompt_ids is not None else -1,
+                self.mamba_checkpoint_token_id,
+                raw_mm_spans,
+                mm_spans,
+            )
+        if engine_input["type"] == "enc_dec":
+            engine_input = dict(engine_input)
+            engine_input["decoder_prompt"] = decoder_input
+        else:
+            engine_input = decoder_input
 
         current_platform.validate_request(engine_input, params)
 
@@ -431,6 +599,7 @@ class InputProcessor:
             trace_headers=trace_headers,
             resumable=resumable,
             session_id=session_id,
+            mamba_checkpoint_position=checkpoint_position,
         )
 
     def _validate_prompt_len(

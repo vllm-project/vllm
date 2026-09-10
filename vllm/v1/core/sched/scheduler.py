@@ -506,6 +506,15 @@ class Scheduler(SchedulerInterface):
             and junction <= request.num_prompt_tokens
             else block_floored
         )
+        checkpoint_boundary = getattr(request, "mamba_checkpoint_position", None) or 0
+        if checkpoint_boundary and checkpoint_boundary % self.hash_block_size != 0:
+            raise ValueError(
+                "mamba checkpoint position must be aligned to the prefix hash "
+                f"unit ({self.hash_block_size}), got {checkpoint_boundary}"
+            )
+        # TODO: Support checkpoint readiness across async batch queues.
+        # TODO: Support extracting an intermediate state without ending the chunk.
+        # The current checkpoint path assumes one in-flight scheduler batch.
         stops = (
             # Same invariant: a chunk starting mid-block stops at the boundary
             # rather than running past it.
@@ -519,6 +528,7 @@ class Scheduler(SchedulerInterface):
             tail_boundary
             if last_cache_position < tail_boundary < request.num_prompt_tokens
             else 0,
+            checkpoint_boundary if start < checkpoint_boundary < end else 0,
             # Marconi shared-prefix junction: cache its state so sibling
             # requests sharing the prefix can reuse it.
             junction_stop if start < junction < end else 0,
@@ -526,6 +536,32 @@ class Scheduler(SchedulerInterface):
         # Stop at the earliest mandatory position strictly inside the chunk.
         end = min((s for s in stops if start < s < end), default=end)
         return max(end - start, 0)
+
+    def _get_mamba_checkpoint_key(self, request: Request) -> tuple[object, int] | None:
+        checkpoint_position = request.mamba_checkpoint_position
+        if checkpoint_position is None:
+            return None
+        if checkpoint_position % self.hash_block_size != 0:
+            return None
+        hash_index = checkpoint_position // self.hash_block_size - 1
+        if not 0 <= hash_index < len(request.block_hashes):
+            return None
+        return request.block_hashes[hash_index], checkpoint_position
+
+    def _get_mamba_checkpoint_source_block_ids(
+        self, blocks: KVCacheBlocks, checkpoint_position: int
+    ) -> tuple[int, ...] | None:
+        source_block_ids = []
+        for group_blocks, group in zip(
+            blocks.blocks, self.kv_cache_config.kv_cache_groups, strict=True
+        ):
+            if not isinstance(group.kv_cache_spec, MambaSpec):
+                continue
+            block_index = (checkpoint_position - 1) // group.kv_cache_spec.block_size
+            if block_index >= len(group_blocks):
+                return None
+            source_block_ids.append(group_blocks[block_index].block_id)
+        return tuple(source_block_ids) or None
 
     def _get_local_prefix_cache_hit(
         self, request: Request
@@ -580,6 +616,8 @@ class Scheduler(SchedulerInterface):
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
+        mamba_prefix_producer_ids: dict[str, str] = {}
+        same_step_prefix_producers: dict[tuple[object, int], Request] = {}
         token_budget = self.max_num_scheduled_tokens
         spec = self.vllm_config.speculative_config
         draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
@@ -602,6 +640,9 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()
 
         self.kv_cache_manager.new_step_starts()
+        for request in self.running:
+            request.mamba_prefix_producer_id = None
+            request.mamba_checkpoint_source_block_ids = None
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
@@ -862,6 +903,37 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+                request.mamba_prefix_producer_id = None
+                request.mamba_checkpoint_source_block_ids = None
+                checkpoint_key = self._get_mamba_checkpoint_key(request)
+                same_step_producer = (
+                    same_step_prefix_producers.get(checkpoint_key)
+                    if checkpoint_key is not None
+                    else None
+                )
+
+                if (
+                    same_step_producer is None
+                    and not request.waiting_for_mamba_checkpoint
+                    and request.num_computed_tokens == 0
+                    and self.kv_cache_manager.has_unready_checkpoint(request)
+                ):
+                    request.waiting_for_mamba_checkpoint = True
+
+                if request.waiting_for_mamba_checkpoint:
+                    if (
+                        same_step_producer is None
+                        and self.kv_cache_manager.has_unready_checkpoint(request)
+                    ):
+                        logger.info(
+                            "Mamba checkpoint pending: request=%s position=%s",
+                            request_id,
+                            request.mamba_checkpoint_position,
+                        )
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
+                    request.waiting_for_mamba_checkpoint = False
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
@@ -910,12 +982,29 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     did_prefix_cache_lookup = True
-                    (
-                        new_computed_blocks,
-                        num_new_local_computed_tokens,
-                        request.shared_prefix_boundary,
-                        hit_diverged,
-                    ) = self._get_local_prefix_cache_hit(request)
+                    if same_step_producer is not None and self.connector is None:
+                        checkpoint_position = request.mamba_checkpoint_position
+                        assert checkpoint_position is not None
+                        new_computed_blocks = self.kv_cache_manager.get_prefix_blocks(
+                            same_step_producer.request_id,
+                            checkpoint_position,
+                        )
+                        num_new_local_computed_tokens = checkpoint_position
+                        request.shared_prefix_boundary = 0
+                        hit_diverged = False
+                        request.mamba_prefix_producer_id = same_step_producer.request_id
+                        request.mamba_checkpoint_source_block_ids = (
+                            self._get_mamba_checkpoint_source_block_ids(
+                                new_computed_blocks, checkpoint_position
+                            )
+                        )
+                    else:
+                        (
+                            new_computed_blocks,
+                            num_new_local_computed_tokens,
+                            request.shared_prefix_boundary,
+                            hit_diverged,
+                        ) = self._get_local_prefix_cache_hit(request)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -981,6 +1070,28 @@ class Scheduler(SchedulerInterface):
                     num_computed_tokens = (
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
+                    checkpoint_position = request.mamba_checkpoint_position
+                    if (
+                        checkpoint_position is not None
+                        and num_new_local_computed_tokens == checkpoint_position
+                        and num_external_computed_tokens == 0
+                    ):
+                        request.mamba_checkpoint_source_block_ids = (
+                            self._get_mamba_checkpoint_source_block_ids(
+                                new_computed_blocks, checkpoint_position
+                            )
+                        )
+                    if checkpoint_position is not None:
+                        logger.info(
+                            "Mamba checkpoint lookup: request=%s checkpoint=%d "
+                            "local_hit=%d external_hit=%d producer=%s source_blocks=%s",
+                            request_id,
+                            checkpoint_position,
+                            num_new_local_computed_tokens,
+                            num_external_computed_tokens,
+                            request.mamba_prefix_producer_id,
+                            request.mamba_checkpoint_source_block_ids,
+                        )
                     assert num_computed_tokens <= request.num_tokens
 
                     # Skip request with pending mm encoding prefetches
@@ -1256,6 +1367,18 @@ class Scheduler(SchedulerInterface):
                 input_budget -= num_new_tokens + draft_slots
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+                if (
+                    request.mamba_checkpoint_position is not None
+                    and num_computed_tokens == 0
+                    and num_new_tokens == request.mamba_checkpoint_position
+                ):
+                    producer_key = self._get_mamba_checkpoint_key(request)
+                    if producer_key is not None:
+                        same_step_prefix_producers.setdefault(producer_key, request)
+                if request.mamba_prefix_producer_id is not None:
+                    mamba_prefix_producer_ids[request_id] = (
+                        request.mamba_prefix_producer_id
+                    )
                 if pad_spec_decode:
                     assert num_new_tokens == 1 + self.num_spec_tokens
                     scheduled_spec_decode_tokens[request_id] = [
@@ -1417,6 +1540,7 @@ class Scheduler(SchedulerInterface):
             has_sync_kv_loads=has_sync_kv_loads,
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
+            mamba_prefix_producer_ids=mamba_prefix_producer_ids or None,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
@@ -1922,6 +2046,36 @@ class Scheduler(SchedulerInterface):
             for rid in model_runner_output.req_ids:
                 routing_offsets[rid] = offset
                 offset += num_scheduled_tokens[rid]
+
+        scheduled_starts = {
+            req_data.req_id: req_data.num_computed_tokens
+            for req_data in scheduler_output.scheduled_new_reqs
+        }
+        scheduled_starts.update(
+            zip(
+                scheduler_output.scheduled_cached_reqs.req_ids,
+                scheduler_output.scheduled_cached_reqs.num_computed_tokens,
+                strict=True,
+            )
+        )
+        for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
+            request = self.requests.get(req_id)
+            checkpoint_position = (
+                request.mamba_checkpoint_position if request is not None else None
+            )
+            if (
+                checkpoint_position is not None
+                and req_id not in (failed_kv_load_req_ids or ())
+                and scheduled_starts.get(req_id) is not None
+                and scheduled_starts[req_id] + num_tokens_scheduled
+                == checkpoint_position
+            ):
+                self.kv_cache_manager.mark_checkpoint_ready(req_id)
+                logger.info(
+                    "Mamba checkpoint ready: request=%s position=%d",
+                    req_id,
+                    checkpoint_position,
+                )
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
