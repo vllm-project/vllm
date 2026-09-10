@@ -169,6 +169,145 @@ fn decoded_text_append_preserves_zero_width_only_receiver() {
     );
 }
 
+#[test]
+fn decoded_text_drain_prefix_moves_anchors_before_boundary() {
+    let mut dt = decoded("ab.cd", &[1, 2, 3], &[visible(0), visible(1), visible(3)]);
+
+    let prefix = dt.drain_prefix(2);
+
+    assert_eq!(prefix, decoded("ab", &[1, 2], &[visible(0), visible(1)]));
+    assert_eq!(dt, decoded(".cd", &[3], &[visible(1)]));
+}
+
+#[test]
+fn decoded_text_drain_prefix_keeps_straddling_token_in_prefix() {
+    // One token decodes to "ab"; a split inside it keeps the token in the
+    // prefix, the span holding its first byte.
+    let mut dt = decoded("ab", &[1], &[visible(0)]);
+
+    let prefix = dt.drain_prefix(1);
+
+    assert_eq!(prefix, decoded("a", &[1], &[visible(0)]));
+    assert_eq!(dt, decoded("b", &[], &[]));
+}
+
+#[test]
+fn decoded_text_drain_prefix_visible_anchor_at_boundary_goes_to_suffix() {
+    let mut dt = decoded("ab", &[1, 2], &[visible(0), visible(1)]);
+
+    let prefix = dt.drain_prefix(1);
+
+    assert_eq!(prefix, decoded("a", &[1], &[visible(0)]));
+    assert_eq!(dt, decoded("b", &[2], &[visible(0)]));
+}
+
+#[test]
+fn decoded_text_drain_prefix_zero_width_at_boundary_goes_to_prefix() {
+    let mut dt = decoded("ab", &[1, 2], &[zero_width(1), visible(1)]);
+
+    let prefix = dt.drain_prefix(1);
+
+    assert_eq!(prefix, decoded("a", &[1], &[zero_width(1)]));
+    assert_eq!(dt, decoded("b", &[2], &[visible(0)]));
+}
+
+#[test]
+fn decoded_text_drain_prefix_shared_anchor_group_moves_together() {
+    // A byte-fallback group jointly decoding one character shares one anchor;
+    // the whole group stays on whichever side holds that first byte.
+    let mut dt = decoded(
+        "a你",
+        &[1, 2, 3, 4],
+        &[visible(0), visible(1), visible(1), visible(1)],
+    );
+
+    let prefix = dt.drain_prefix(1);
+
+    assert_eq!(prefix, decoded("a", &[1], &[visible(0)]));
+    assert_eq!(
+        dt,
+        decoded("你", &[2, 3, 4], &[visible(0), visible(0), visible(0)])
+    );
+
+    let prefix = dt.drain_prefix(3);
+
+    assert_eq!(
+        prefix,
+        decoded("你", &[2, 3, 4], &[visible(0), visible(0), visible(0)])
+    );
+    assert_eq!(dt, decoded("", &[], &[]));
+}
+
+#[test]
+fn decoded_text_drain_prefix_zero_drains_leading_zero_width() {
+    let mut dt = decoded("ab", &[1, 2], &[zero_width(0), visible(0)]);
+
+    let prefix = dt.drain_prefix(0);
+
+    assert_eq!(prefix, decoded("", &[1], &[zero_width(0)]));
+    assert_eq!(dt, decoded("ab", &[2], &[visible(0)]));
+}
+
+#[test]
+fn decoded_text_drain_prefix_full_length_takes_trailing_zero_width() {
+    let mut dt = decoded("ab", &[1, 2, 3], &[visible(0), visible(1), zero_width(2)]);
+
+    let prefix = dt.drain_prefix(2);
+
+    assert_eq!(
+        prefix,
+        decoded("ab", &[1, 2, 3], &[visible(0), visible(1), zero_width(2)])
+    );
+    assert_eq!(dt, decoded("", &[], &[]));
+}
+
+#[test]
+fn decoded_text_drain_prefix_preserves_order_across_anchor_kinds() {
+    let mut dt = decoded(
+        "ab",
+        &[1, 2, 3, 4],
+        &[visible(0), zero_width(1), visible(1), zero_width(2)],
+    );
+
+    let prefix = dt.drain_prefix(1);
+
+    assert_eq!(prefix, decoded("a", &[1, 2], &[visible(0), zero_width(1)]));
+    assert_eq!(dt, decoded("b", &[3, 4], &[visible(0), zero_width(1)]));
+}
+
+#[test]
+fn decoded_text_drain_prefix_then_append_reconstructs_original() {
+    // ASCII, a byte-fallback group, and mid and trailing zero-width tokens.
+    let original = decoded(
+        "a你b",
+        &[1, 2, 3, 4, 5, 6, 7],
+        &[
+            visible(0),
+            visible(1),
+            visible(1),
+            visible(1),
+            zero_width(4),
+            visible(4),
+            zero_width(5),
+        ],
+    );
+
+    for len in [0, 1, 4, 5] {
+        let mut rest = original.clone();
+        let mut prefix = rest.drain_prefix(len);
+        prefix.append(rest);
+        assert_eq!(prefix, original, "split at byte {len}");
+    }
+}
+
+#[test]
+#[should_panic(expected = "is_char_boundary")]
+fn decoded_text_drain_prefix_panics_off_char_boundary() {
+    let mut dt = decoded("a你", &[1, 2], &[visible(0), visible(1)]);
+
+    let _ = dt.drain_prefix(2);
+}
+
 struct AttributionCase<'a> {
     tokenizer: &'a dyn Tokenizer,
     prompt_token_ids: Vec<u32>,

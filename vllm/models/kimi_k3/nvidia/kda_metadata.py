@@ -20,6 +20,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
@@ -36,15 +37,16 @@ from vllm.v1.attention.backends.utils import (
     compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.kv_cache_interface import (
+    MambaSpec,
+    get_mamba_prefill_checkpoint_position,
+    is_mamba_prefill_checkpoint_valid,
+)
 
 if TYPE_CHECKING:
     from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
         KDARecoverSSMCommitContext,
     )
-
-
-FLASHKDA_CHUNK_SIZE = 16
 
 
 @cache
@@ -268,6 +270,8 @@ class KDACheckpointMetadata:
 
 @dataclass
 class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
+    flashinfer_prefill_query_start_loc: torch.Tensor | None = None
+    flashinfer_prefill_seq_order: torch.Tensor | None = None
     recoverssm_commit: KDARecoverSSMCommitMetadata | None = None
     recoverssm_context: "KDARecoverSSMCommitContext | None" = field(
         default=None, repr=False, compare=False
@@ -316,6 +320,11 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        additional_config = vllm_config.additional_config
+        self.use_flashinfer_prefill = (
+            isinstance(additional_config, dict)
+            and additional_config.get("kda_prefill_backend") == "flashinfer"
+        )
         self.use_recoverssm = vllm_config.cache_config.use_kda_recoverssm
         self.spec_state_slots = 1 if self.use_recoverssm else self.num_spec + 1
         self.recoverssm_num_accepted_tokens: torch.Tensor | None = None
@@ -582,11 +591,11 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             has_initial_state = None
 
         checkpoint = None
-        if (
-            num_prefills > 0
+        checkpoint_enabled = (
+            self.vllm_config.cache_config.mamba_cache_mode == "align"
             and self.kv_cache_spec.num_prefill_checkpoint_blocks > 0
-            and self.vllm_config.cache_config.mamba_cache_mode == "align"
-        ):
+        )
+        if num_prefills > 0 and checkpoint_enabled:
             # prepare checkpoint metadata
             assert m.seq_lens_cpu_upper_bound is not None
             request_rows = list(range(m.num_reqs))
@@ -597,21 +606,39 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             query_lens = [all_query_lens[row] for row in request_rows]
             seq_lens = m.seq_lens_cpu_upper_bound.tolist()
             block_size = self.kv_cache_spec.block_size
+            hash_block_size = (
+                self.vllm_config.cache_config.prefix_match_unit or block_size
+            )
+            speculative_config = self.vllm_config.speculative_config
+            drop_eagle_block = (
+                speculative_config is not None
+                and speculative_config.use_eagle_block_drop()
+            )
             checkpoint_splits = []
             checkpoint_cols = []
             for row, query_len in zip(request_rows, query_lens):
                 seq_len = seq_lens[row]
-                offset = seq_len // block_size * block_size - (seq_len - query_len)
-                # offset should be less than query_len
-                valid = (
-                    seq_len % block_size != 0
-                    and 0 < offset < query_len
-                    and offset % FLASHKDA_CHUNK_SIZE == 0
+                query_start = seq_len - query_len
+                checkpoint_position = get_mamba_prefill_checkpoint_position(
+                    seq_len,
+                    hash_block_size,
+                    drop_eagle_block=drop_eagle_block,
+                )
+                offset = checkpoint_position - query_start
+                valid = is_mamba_prefill_checkpoint_valid(
+                    query_start=query_start,
+                    query_end=seq_len,
+                    checkpoint_position=checkpoint_position,
+                    hash_block_size=hash_block_size,
+                    mamba_block_size=block_size,
+                    checkpoint_alignment=(
+                        self.kv_cache_spec.prefill_checkpoint_alignment
+                    ),
                 )
                 offset = offset if valid else 0
                 first_len = offset or query_len
                 checkpoint_splits.append((first_len, query_len - first_len))
-                checkpoint_cols.append(seq_len // block_size - 1 if valid else -1)
+                checkpoint_cols.append(cdiv(seq_len, block_size) - 2 if valid else -1)
             if any(tail for _, tail in checkpoint_splits):
                 checkpoint_offsets_tensor = async_tensor_h2d(
                     [first if tail else 0 for first, tail in checkpoint_splits],
@@ -701,6 +728,20 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 align=align,
             )
 
+        flashinfer_prefill_query_start_loc = None
+        flashinfer_prefill_seq_order = None
+        if self.use_flashinfer_prefill and num_prefills > 0:
+            assert non_spec_query_start_loc is not None
+            flashinfer_prefill_query_start_loc = non_spec_query_start_loc.to(
+                torch.int64
+            )
+            num_non_spec_requests = non_spec_query_start_loc.shape[0] - 1
+            num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
+            if num_non_spec_tokens > num_non_spec_requests:
+                flashinfer_prefill_seq_order = torch.argsort(
+                    flashinfer_prefill_query_start_loc.diff(), descending=True
+                ).to(torch.int32)
+
         return KimiK3KDAMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -718,6 +759,8 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
+            flashinfer_prefill_query_start_loc=flashinfer_prefill_query_start_loc,
+            flashinfer_prefill_seq_order=flashinfer_prefill_seq_order,
             recoverssm_commit=recoverssm_commit,
             recoverssm_context=(
                 self._get_recoverssm_context()
