@@ -81,6 +81,48 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
 
+  - label: ":docker: Build Zen CPU image"
+    key: image-build-zen-cpu
+    # Minimal confirmation build: run the zen image build on the generic x86
+    # premerge queue to verify it succeeds. Reuses the shared `-cpu` image as its
+    # base, so it must run after the CPU image build.
+    #
+    # Gated on the zen/cpu build inputs. Changes to setup.py,
+    # requirements/common.txt, CMakeLists.txt, csrc/, and cmake/ already run
+    # all jobs via run_all_patterns in .buildkite/ci_config.yaml.
+    depends_on:
+      - image-build-cpu
+    agents:
+      queue: small_cpu_queue_premerge
+    source_file_dependencies:
+      - ".buildkite/image_build/image_build.yaml"
+      - ".buildkite/image_build/image_build_zen_cpu.sh"
+      - "docker/Dockerfile.zen"
+      - "docker/Dockerfile.cpu"
+      - "requirements/cpu.txt"
+      - "requirements/build/cpu.txt"
+      - "requirements/build/rust.txt"
+      - "requirements/test/cpu.txt"
+      - "requirements/test/cuda.in"
+      - "requirements/lint.txt"
+      - "rust/"
+      - "rust-toolchain.toml"
+      - "build_rust.sh"
+      - "tools/build_rust.py"
+      - "use_existing_torch.py"
+      - "csrc/cpu/"
+      - "cmake/cpu_extension.cmake"
+    commands:
+    - .buildkite/image_build/image_build_zen_cpu.sh $REGISTRY $REPO $BUILDKITE_COMMIT
+    env:
+      DOCKER_BUILDKIT: "1"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 2
+        - exit_status: -10  # Agent was lost
+          limit: 2
+
   - label: ":docker: Build HPU image"
     soft_fail: true
     depends_on: []
