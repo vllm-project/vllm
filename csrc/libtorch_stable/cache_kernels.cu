@@ -1016,6 +1016,11 @@ void concat_and_cache_mla_grouped(
   const bool use_fp8 = kv_cache_dtype == "fp8" ||
                        kv_cache_dtype == "fp8_e4m3" ||
                        kv_cache_dtype == "fp8_e5m2";
+#ifdef USE_ROCM
+  STD_TORCH_CHECK(kv_cache_dtype != "fp8_e5m2",
+                  "concat_and_cache_mla_grouped does not support fp8_e5m2 "
+                  "KV cache on ROCm");
+#endif
   STD_TORCH_CHECK(
       use_fp8 || kv_cache_dtype == "auto" || kv_cache_dtype == "bfloat16",
       "concat_and_cache_mla_grouped only supports BF16 and plain "

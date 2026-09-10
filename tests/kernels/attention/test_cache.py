@@ -801,6 +801,9 @@ def test_concat_and_cache_mla_grouped(
     shared_slot_mapping: bool,
     kv_cache_dtype: str,
 ) -> None:
+    if kv_cache_dtype == "fp8_e5m2" and current_platform.is_rocm():
+        pytest.skip("fp8_e5m2 KV cache is not supported on ROCm/HIP")
+
     set_random_seed(0)
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
