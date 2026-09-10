@@ -11,9 +11,12 @@ fold kernel, which runs for every row and returns early for rows whose token
 does not complete a chunk.
 
 The buffers are addressed as ``buf[slot, pos]`` through explicit strides, so
-views into the paged Mamba KV cache work directly. Every kernel skips rows
-whose slot is negative and otherwise processes each row independently, so a
-launch over a padded batch computes the same bits for the real rows.
+views into the paged Mamba KV cache work directly. Each program handles one
+batch row: the row's token is this step's input, which the kernels store into
+the buffers themselves, and ``pos`` is its position inside the partial chunk.
+Every kernel skips rows whose slot is negative and otherwise processes each
+row independently, so a launch over a padded batch computes the same bits for
+the real rows.
 """
 
 import torch
@@ -37,7 +40,7 @@ def _workspace_chunk_cumsum_fwd_kernel(
     dt_out_ptr,
     dA_cumsum_ptr,
     slot_indices_ptr,
-    chunk_offsets_ptr,
+    positions_ptr,
     nheads: tl.constexpr,
     chunk_size: tl.constexpr,
     stride_dt_slot: tl.int64,
@@ -53,7 +56,6 @@ def _workspace_chunk_cumsum_fwd_kernel(
     stride_dA_cs_head: tl.int64,
     stride_dA_cs_chunk: tl.int64,
     stride_dA_cs_csize: tl.constexpr,
-    HAS_CURRENT_DT: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr,
     BLOCK_SIZE_CHUNK: tl.constexpr,
 ):
@@ -61,9 +63,9 @@ def _workspace_chunk_cumsum_fwd_kernel(
     pid_h = tl.program_id(axis=1)
 
     slot = tl.load(slot_indices_ptr + row)
-    chunk_offset = tl.load(chunk_offsets_ptr + row)
+    pos = tl.load(positions_ptr + row)
     valid_row = slot >= 0
-    chunk_size_limit = chunk_offset + 1
+    chunk_size_limit = pos + 1
 
     offs_h = pid_h * BLOCK_SIZE_H + tl.arange(0, BLOCK_SIZE_H)
     offs_c = tl.arange(0, BLOCK_SIZE_CHUNK)
@@ -90,21 +92,18 @@ def _workspace_chunk_cumsum_fwd_kernel(
     active = (
         valid_row & (offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size_limit)
     )
-    page_mask = active
-    if HAS_CURRENT_DT:
-        page_mask &= offs_c[None, :] != chunk_offset
-    dt = tl.load(dt_ptrs, mask=page_mask, other=0.0).to(tl.float32)
-    if HAS_CURRENT_DT:
-        current_dt = tl.load(
-            current_dt_ptr
-            + row * stride_current_dt_row
-            + offs_h * stride_current_dt_head,
-            mask=valid_row & (offs_h < nheads),
-            other=0.0,
-        )
-        current_mask = active & (offs_c[None, :] == chunk_offset)
-        dt = tl.where(current_mask, current_dt[:, None].to(tl.float32), dt)
-        tl.store(dt_ptrs, current_dt[:, None], mask=current_mask)
+    # This step's token comes from current_dt and is stored into the buffer.
+    current_mask = active & (offs_c[None, :] == pos)
+    dt = tl.load(dt_ptrs, mask=active & (offs_c[None, :] != pos), other=0.0).to(
+        tl.float32
+    )
+    current_dt = tl.load(
+        current_dt_ptr + row * stride_current_dt_row + offs_h * stride_current_dt_head,
+        mask=valid_row & (offs_h < nheads),
+        other=0.0,
+    )
+    dt = tl.where(current_mask, current_dt[:, None].to(tl.float32), dt)
+    tl.store(dt_ptrs, current_dt[:, None], mask=current_mask)
     dt_bias = tl.load(
         dt_bias_ptr + offs_h * stride_dt_bias_head,
         mask=offs_h < nheads,
@@ -126,23 +125,25 @@ def _workspace_chunk_cumsum_fwd(
     A,
     chunk_size,
     slot_indices,
-    chunk_offsets,
+    positions,
     dt_bias,
     *,
-    current_dt=None,
+    current_dt,
     dt_out,
     dA_cumsum,
 ):
+    """dt after bias and softplus, and its per-head prefix sums scaled by A,
+    over each row's partial chunk: buffered positions before ``pos`` plus this
+    step's ``current_dt``, which is also written into the buffer."""
     _, dt_chunk_size, nheads = dt.shape
     assert dt_chunk_size == chunk_size
     assert A.shape == (nheads,)
     num_rows = slot_indices.shape[0]
-    assert chunk_offsets.shape[0] == num_rows
+    assert positions.shape[0] == num_rows
     assert dt_bias.shape == (nheads,)
-    if current_dt is not None:
-        assert current_dt.shape == (num_rows, nheads)
-        assert current_dt.dtype == dt.dtype
-        assert current_dt.device == dt.device
+    assert current_dt.shape == (num_rows, nheads)
+    assert current_dt.dtype == dt.dtype
+    assert current_dt.device == dt.device
     assert dt_out.ndim == 3
     assert dt_out.shape[0] == nheads
     assert dt_out.shape[1] >= num_rows
@@ -160,22 +161,20 @@ def _workspace_chunk_cumsum_fwd(
     with torch.accelerator.device_index(dt.device.index):
         _workspace_chunk_cumsum_fwd_kernel[grid_chunk_cs](
             dt_ptr=dt,
-            current_dt_ptr=current_dt if current_dt is not None else dt,
+            current_dt_ptr=current_dt,
             A_ptr=A,
             dt_bias_ptr=dt_bias,
             dt_out_ptr=dt_out,
             dA_cumsum_ptr=dA_cumsum,
             slot_indices_ptr=slot_indices,
-            chunk_offsets_ptr=chunk_offsets,
+            positions_ptr=positions,
             nheads=nheads,
             chunk_size=chunk_size,
             stride_dt_slot=dt.stride(0),
             stride_dt_token=dt.stride(1),
             stride_dt_head=dt.stride(2),
-            stride_current_dt_row=current_dt.stride(0) if current_dt is not None else 0,
-            stride_current_dt_head=current_dt.stride(1)
-            if current_dt is not None
-            else 0,
+            stride_current_dt_row=current_dt.stride(0),
+            stride_current_dt_head=current_dt.stride(1),
             stride_A_head=A.stride(0),
             stride_dt_bias_head=dt_bias.stride(0),
             stride_dt_out_head=dt_out.stride(0),
@@ -184,7 +183,6 @@ def _workspace_chunk_cumsum_fwd(
             stride_dA_cs_head=dA_cumsum.stride(0),
             stride_dA_cs_chunk=dA_cumsum.stride(1),
             stride_dA_cs_csize=dA_cumsum.stride(2),
-            HAS_CURRENT_DT=current_dt is not None,
             BLOCK_SIZE_H=block_h,
             BLOCK_SIZE_CHUNK=triton.next_power_of_2(chunk_size),
         )
@@ -198,9 +196,7 @@ def _bmm_chunk_workspace_range_fwd_kernel(
     current_b_ptr,
     out_ptr,
     slot_indices_ptr,
-    replay_offsets_ptr,
-    emit_row_indices_ptr,
-    emit_chunk_positions_ptr,
+    positions_ptr,
     chunk_size: tl.constexpr,
     K: tl.constexpr,
     stride_emit_a_row: tl.int64,
@@ -217,34 +213,25 @@ def _bmm_chunk_workspace_range_fwd_kernel(
     stride_out_head: tl.int64,
     stride_outn: tl.constexpr,
     dot_dtype: tl.constexpr,
-    HAS_CURRENT_B: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
 ):
-    emit_idx = tl.program_id(axis=0).to(tl.int64)
+    row = tl.program_id(axis=0).to(tl.int64)
     pid_h = tl.program_id(axis=1)
     pid_n = tl.program_id(axis=2)
 
-    row_idx = tl.load(emit_row_indices_ptr + emit_idx)
-    slot = tl.load(slot_indices_ptr + row_idx)
-    replay_offset = tl.load(replay_offsets_ptr + row_idx)
-    emit_pos = tl.load(emit_chunk_positions_ptr + emit_idx)
-    valid_emit = (
-        (slot >= 0)
-        & (emit_pos >= 0)
-        & (emit_pos <= replay_offset)
-        & (replay_offset < chunk_size)
-    )
-    chunk_size_limit = replay_offset + 1
-    current_emit = valid_emit & (emit_pos == replay_offset)
+    slot = tl.load(slot_indices_ptr + row)
+    pos = tl.load(positions_ptr + row)
+    valid = (slot >= 0) & (pos >= 0) & (pos < chunk_size)
+    chunk_size_limit = pos + 1
 
     offs_m = tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = (
         emit_a_ptr
-        + emit_idx * stride_emit_a_row
+        + row * stride_emit_a_row
         + pid_h * stride_emit_a_head
         + offs_m[:, None] * 0
         + offs_k[None, :] * stride_emit_ak
@@ -260,84 +247,60 @@ def _bmm_chunk_workspace_range_fwd_kernel(
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         a_mask = (
-            valid_emit
-            & (offs_m[:, None] == 0)
-            & (offs_k[None, :] < K - k * BLOCK_SIZE_K)
+            valid & (offs_m[:, None] == 0) & (offs_k[None, :] < K - k * BLOCK_SIZE_K)
         )
         b_mask = (
-            valid_emit
+            valid
             & (offs_k[:, None] < K - k * BLOCK_SIZE_K)
             & (offs_n[None, :] < chunk_size_limit)
+            & (offs_n[None, :] != pos)
         )
-        if HAS_CURRENT_B:
-            b_mask &= offs_n[None, :] != replay_offset
-        a = tl.load(
-            a_ptrs,
-            mask=a_mask,
+        a = tl.load(a_ptrs, mask=a_mask, other=0.0).to(dot_dtype)
+        b = tl.load(b_ptrs, mask=b_mask, other=0.0).to(dot_dtype)
+        # This step's B comes from current_b and is stored into the buffer.
+        current_b = tl.load(
+            current_b_ptr
+            + row * stride_current_b_row
+            + pid_h * stride_current_b_head
+            + (k * BLOCK_SIZE_K + offs_k) * stride_current_bk,
+            mask=valid & (offs_k < K - k * BLOCK_SIZE_K),
             other=0.0,
         ).to(dot_dtype)
-        b = tl.load(
-            b_ptrs,
-            mask=b_mask,
-            other=0.0,
-        ).to(dot_dtype)
-        if HAS_CURRENT_B:
-            current_b = tl.load(
-                current_b_ptr
-                + row_idx * stride_current_b_row
-                + pid_h * stride_current_b_head
-                + (k * BLOCK_SIZE_K + offs_k) * stride_current_bk,
-                mask=current_emit & (offs_k < K - k * BLOCK_SIZE_K),
-                other=0.0,
-            ).to(dot_dtype)
-            b = tl.where(
-                current_emit & (offs_n[None, :] == replay_offset),
-                current_b[:, None],
-                b,
-            )
-            persist_mask = current_emit & (pid_n == 0) & (offs_k < K - k * BLOCK_SIZE_K)
-            tl.store(
-                b_ptr
-                + slot * stride_b_slot
-                + replay_offset * stride_b_token
-                + pid_h * stride_b_head
-                + (k * BLOCK_SIZE_K + offs_k) * stride_bk,
-                current_b,
-                mask=persist_mask,
-            )
+        b = tl.where(valid & (offs_n[None, :] == pos), current_b[:, None], b)
+        persist_mask = valid & (pid_n == 0) & (offs_k < K - k * BLOCK_SIZE_K)
+        tl.store(
+            b_ptr
+            + slot * stride_b_slot
+            + pos * stride_b_token
+            + pid_h * stride_b_head
+            + (k * BLOCK_SIZE_K + offs_k) * stride_bk,
+            current_b,
+            mask=persist_mask,
+        )
         acc += tl.dot(a, b)
         a_ptrs += BLOCK_SIZE_K * stride_emit_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
-    out_ptr += emit_idx * stride_out_emit + pid_h * stride_out_head
+    out_ptr += row * stride_out_emit + pid_h * stride_out_head
     out = tl.sum(acc, axis=0).to(out_ptr.dtype.element_ty)
-    tl.store(
-        out_ptr + offs_n * stride_outn, out, mask=valid_emit & (offs_n < chunk_size)
-    )
+    tl.store(out_ptr + offs_n * stride_outn, out, mask=valid & (offs_n < chunk_size))
 
 
 def _bmm_chunk_workspace_range_fwd(
-    emit_a,
-    b,
-    chunk_size,
-    slot_indices,
-    replay_offsets,
-    emit_row_indices,
-    emit_chunk_positions,
-    out,
-    current_b=None,
+    emit_a, b, chunk_size, slot_indices, positions, out, current_b
 ):
+    """For each row, the dot products of this step's C with the B of every
+    buffered position up to ``pos``, over dstate; ``current_b`` is this step's
+    B, which is also written into the buffer."""
     _, b_chunk_size, ngroups, k = b.shape
-    num_emit_tokens = emit_a.shape[0]
+    num_rows = emit_a.shape[0]
     assert b_chunk_size == chunk_size
-    assert emit_a.shape == (num_emit_tokens, ngroups, k)
-    assert slot_indices.shape[0] == replay_offsets.shape[0]
-    assert emit_row_indices.shape[0] == num_emit_tokens
-    assert emit_chunk_positions.shape[0] == num_emit_tokens
-    if current_b is not None:
-        assert current_b.shape == (replay_offsets.shape[0], ngroups, k)
-        assert current_b.dtype == b.dtype
-        assert current_b.device == b.device
+    assert emit_a.shape == (num_rows, ngroups, k)
+    assert slot_indices.shape[0] == num_rows
+    assert positions.shape[0] == num_rows
+    assert current_b.shape == (num_rows, ngroups, k)
+    assert current_b.dtype == b.dtype
+    assert current_b.device == b.device
     if emit_a.stride(-1) != 1 and emit_a.stride(0) != 1:
         emit_a = emit_a.contiguous()
     if b.stride(-1) != 1 and b.stride(0) != 1:
@@ -352,27 +315,21 @@ def _bmm_chunk_workspace_range_fwd(
             else tl.float32
         )
     )
-    assert out.shape == (num_emit_tokens, ngroups, chunk_size)
+    assert out.shape == (num_rows, ngroups, chunk_size)
     assert out.device == emit_a.device
     assert out.dtype == torch.float32
-    if num_emit_tokens == 0:
+    if num_rows == 0:
         return out
 
-    grid = (
-        num_emit_tokens,
-        ngroups,
-        triton.cdiv(chunk_size, 64),
-    )
+    grid = (num_rows, ngroups, triton.cdiv(chunk_size, 64))
     with torch.accelerator.device_index(emit_a.device.index):
         _bmm_chunk_workspace_range_fwd_kernel[grid](
             emit_a_ptr=emit_a,
             b_ptr=b,
-            current_b_ptr=current_b if current_b is not None else b,
+            current_b_ptr=current_b,
             out_ptr=out,
             slot_indices_ptr=slot_indices,
-            replay_offsets_ptr=replay_offsets,
-            emit_row_indices_ptr=emit_row_indices,
-            emit_chunk_positions_ptr=emit_chunk_positions,
+            positions_ptr=positions,
             chunk_size=chunk_size,
             K=k,
             stride_emit_a_row=emit_a.stride(0),
@@ -382,14 +339,13 @@ def _bmm_chunk_workspace_range_fwd(
             stride_b_token=b.stride(1),
             stride_b_head=b.stride(2),
             stride_bk=b.stride(3),
-            stride_current_b_row=current_b.stride(0) if current_b is not None else 0,
-            stride_current_b_head=current_b.stride(1) if current_b is not None else 0,
-            stride_current_bk=current_b.stride(2) if current_b is not None else 0,
+            stride_current_b_row=current_b.stride(0),
+            stride_current_b_head=current_b.stride(1),
+            stride_current_bk=current_b.stride(2),
             stride_out_emit=out.stride(0),
             stride_out_head=out.stride(1),
             stride_outn=out.stride(2),
             dot_dtype=dot_dtype,
-            HAS_CURRENT_B=current_b is not None,
             # The row's dot products reduce over dstate in the same K blocks
             # as the pinned prefill bmm kernel; M and N tile the single output
             # row and the chunk positions and do not enter the reduction.
@@ -414,12 +370,7 @@ def _chunk_scan_workspace_range_fwd_kernel(
     initstates_ptr,
     D_ptr,
     slot_indices_ptr,
-    initial_state_indices_ptr,
-    replay_offsets_ptr,
-    emit_row_indices_ptr,
-    emit_chunk_positions_ptr,
-    emit_token_indices_ptr,
-    num_output_tokens: tl.constexpr,
+    positions_ptr,
     chunk_size: tl.constexpr,
     hdim: tl.constexpr,
     dstate: tl.constexpr,
@@ -453,41 +404,26 @@ def _chunk_scan_workspace_range_fwd_kernel(
     stride_D_head: tl.constexpr,
     HAS_D: tl.constexpr,
     D_HAS_HDIM: tl.constexpr,
-    HAS_CURRENT_X: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
 ):
-    emit_idx = tl.program_id(axis=0).to(tl.int64)
+    row = tl.program_id(axis=0).to(tl.int64)
     pid_h = tl.program_id(axis=1)
     pid_n = tl.program_id(axis=2)
 
-    row_idx = tl.load(emit_row_indices_ptr + emit_idx)
-    slot = tl.load(slot_indices_ptr + row_idx)
-    initial_state_index = tl.load(initial_state_indices_ptr + row_idx)
-    replay_offset = tl.load(replay_offsets_ptr + row_idx)
-    emit_pos = tl.load(emit_chunk_positions_ptr + emit_idx)
-    out_token = tl.load(emit_token_indices_ptr + emit_idx)
-    valid_emit = (
-        (slot >= 0)
-        & (initial_state_index >= 0)
-        & (emit_pos >= 0)
-        & (emit_pos <= replay_offset)
-        & (replay_offset < chunk_size)
-        & (out_token >= 0)
-        & (out_token < num_output_tokens)
-    )
-    current_emit = valid_emit & (emit_pos == replay_offset)
-    chunk_size_limit = emit_pos + 1
+    slot = tl.load(slot_indices_ptr + row)
+    pos = tl.load(positions_ptr + row)
+    valid_emit = (slot >= 0) & (pos >= 0) & (pos < chunk_size)
+    chunk_size_limit = pos + 1
     group = pid_h // nheads_ngroups_ratio
-    pid_m = emit_pos // BLOCK_SIZE_M
+    pid_m = pos // BLOCK_SIZE_M
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    emit_row_mask = valid_emit & (offs_m == emit_pos)
-    dt_row = row_idx
-    dA_cumsum_ptr += pid_h * stride_dA_cs_head + dt_row * stride_dA_cs_chunk
+    emit_row_mask = valid_emit & (offs_m == pos)
+    dA_cumsum_ptr += pid_h * stride_dA_cs_head + row * stride_dA_cs_chunk
     dA_cs_m = tl.load(
         dA_cumsum_ptr + offs_m * stride_dA_cs_csize,
         mask=emit_row_mask,
@@ -501,7 +437,7 @@ def _chunk_scan_workspace_range_fwd_kernel(
     )
     C_ptrs = (
         C_ptr
-        + emit_idx * stride_C_emit
+        + row * stride_C_emit
         + offs_m[:, None] * 0
         + group * stride_C_head
         + offs_k_dstate[None, :] * stride_C_dstate
@@ -515,7 +451,7 @@ def _chunk_scan_workspace_range_fwd_kernel(
         )
         prev_states_ptrs = (
             initstates_ptr
-            + initial_state_index * stride_init_states_slot
+            + slot * stride_init_states_slot
             + pid_h * stride_init_states_head
             + offs_n[None, :] * stride_init_states_hdim
             + offs_k_dstate[:, None] * stride_init_states_dstate
@@ -529,7 +465,7 @@ def _chunk_scan_workspace_range_fwd_kernel(
     else:
         prev_states_ptrs = (
             initstates_ptr
-            + initial_state_index * stride_init_states_slot
+            + slot * stride_init_states_slot
             + pid_h * stride_init_states_head
             + offs_n[None, :] * stride_init_states_hdim
             + offs_k_dstate[:, None] * stride_init_states_dstate
@@ -555,7 +491,7 @@ def _chunk_scan_workspace_range_fwd_kernel(
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     cb_ptrs = (
         cb_emit_ptr
-        + emit_idx * stride_cb_emit
+        + row * stride_cb_emit
         + group * stride_cb_head
         + offs_k * stride_cb_csize_k
     )
@@ -569,23 +505,23 @@ def _chunk_scan_workspace_range_fwd_kernel(
     dt_ptrs = (
         dt_ptr
         + pid_h * stride_dt_head
-        + dt_row * stride_dt_chunk
+        + row * stride_dt_chunk
         + offs_k * stride_dt_csize
     )
     dA_cumsum_ptrs = dA_cumsum_ptr + offs_k * stride_dA_cs_csize
-    if HAS_CURRENT_X:
-        current_x = tl.load(
-            current_x_ptr
-            + row_idx * stride_current_x_row
-            + pid_h * stride_current_x_head
-            + offs_n * stride_current_x_hdim,
-            mask=current_emit & (offs_n < hdim),
-            other=0.0,
-        )
+    # This step's x comes from current_x and is stored into the buffer.
+    current_x = tl.load(
+        current_x_ptr
+        + row * stride_current_x_row
+        + pid_h * stride_current_x_head
+        + offs_n * stride_current_x_hdim,
+        mask=valid_emit & (offs_n < hdim),
+        other=0.0,
+    )
     for k in range(0, chunk_size_limit, BLOCK_SIZE_K):
         token_mask = valid_emit & (offs_k < chunk_size_limit - k)
         cb_emit = tl.load(cb_ptrs, mask=token_mask, other=0.0).to(tl.float32)
-        cb = tl.where(offs_m[:, None] == emit_pos, cb_emit[None, :], 0.0)
+        cb = tl.where(offs_m[:, None] == pos, cb_emit[None, :], 0.0)
         dA_cs_k = tl.load(dA_cumsum_ptrs, mask=token_mask, other=0.0).to(tl.float32)
         cb *= fast_exp(tl.minimum(dA_cs_m[:, None] - dA_cs_k[None, :], 0.0))
         dt_k = tl.load(dt_ptrs, mask=token_mask, other=0.0).to(tl.float32)
@@ -597,20 +533,10 @@ def _chunk_scan_workspace_range_fwd_kernel(
             valid_emit
             & (offs_k[:, None] < chunk_size_limit - k)
             & (offs_n[None, :] < hdim)
+            & ((k + offs_k[:, None]) != pos)
         )
-        if HAS_CURRENT_X:
-            x_mask &= (k + offs_k[:, None]) != replay_offset
-        x = tl.load(
-            x_ptrs,
-            mask=x_mask,
-            other=0.0,
-        )
-        if HAS_CURRENT_X:
-            x = tl.where(
-                current_emit & ((k + offs_k[:, None]) == replay_offset),
-                current_x[None, :],
-                x,
-            )
+        x = tl.load(x_ptrs, mask=x_mask, other=0.0)
+        x = tl.where(valid_emit & ((k + offs_k[:, None]) == pos), current_x[None, :], x)
         acc += tl.dot(cb, x)
         cb_ptrs += BLOCK_SIZE_K * stride_cb_csize_k
         x_ptrs += BLOCK_SIZE_K * stride_x_token
@@ -626,9 +552,9 @@ def _chunk_scan_workspace_range_fwd_kernel(
             ).to(tl.float32)
         else:
             D = tl.load(D_ptr + pid_h * stride_D_head).to(tl.float32)
-        residual_mask = row_load_mask[:, None] & (offs_n[None, :] < hdim)
-        if HAS_CURRENT_X:
-            residual_mask &= offs_m[:, None] != replay_offset
+        residual_mask = (
+            row_load_mask[:, None] & (offs_n[None, :] < hdim) & (offs_m[:, None] != pos)
+        )
         x_residual = tl.load(
             x_ptr
             + slot * stride_x_slot
@@ -638,34 +564,29 @@ def _chunk_scan_workspace_range_fwd_kernel(
             mask=residual_mask,
             other=0.0,
         ).to(tl.float32)
-        if HAS_CURRENT_X:
-            x_residual = tl.where(
-                current_emit & (offs_m[:, None] == replay_offset),
-                current_x[None, :].to(tl.float32),
-                x_residual,
-            )
+        x_residual = tl.where(
+            valid_emit & (offs_m[:, None] == pos),
+            current_x[None, :].to(tl.float32),
+            x_residual,
+        )
         acc += x_residual * D
 
-    if HAS_CURRENT_X:
-        current_x_dst = (
-            x_ptr
-            + slot * stride_x_slot
-            + replay_offset * stride_x_token
-            + pid_h * stride_x_head
-            + offs_n * stride_x_hdim
-        )
-        tl.store(
-            current_x_dst,
-            current_x,
-            mask=current_emit & (offs_n < hdim),
-        )
+    tl.store(
+        x_ptr
+        + slot * stride_x_slot
+        + pos * stride_x_token
+        + pid_h * stride_x_head
+        + offs_n * stride_x_hdim,
+        current_x,
+        mask=valid_emit & (offs_n < hdim),
+    )
 
-    out_ptr += out_token * stride_out_row + pid_h * stride_out_head
+    out_ptr += row * stride_out_row + pid_h * stride_out_head
     out_ptrs = out_ptr + offs_m[:, None] * 0 + offs_n[None, :] * stride_out_hdim
     tl.store(
         out_ptrs,
         acc,
-        mask=valid_emit & (offs_m[:, None] == emit_pos) & (offs_n[None, :] < hdim),
+        mask=valid_emit & (offs_m[:, None] == pos) & (offs_n[None, :] < hdim),
     )
 
 
@@ -676,45 +597,39 @@ def _chunk_scan_workspace_range_fwd(
     dA_cumsum,
     C,
     initial_states,
-    initial_state_indices,
     slot_indices,
-    replay_offsets,
-    emit_row_indices,
-    emit_chunk_positions,
-    emit_token_indices,
+    positions,
     out,
     D=None,
-    current_x=None,
+    *,
+    current_x,
 ):
+    """The output row of this step's token for every row: the contribution of
+    the boundary state in ``initial_states[slot]`` plus the causal sum over the
+    buffered positions up to ``pos``, plus the D residual. ``current_x`` is this
+    step's x, which is also written into the buffer."""
     num_slots, chunk_size, nheads, headdim = x.shape
-    num_emit_tokens, ngroups, dstate = C.shape
+    num_rows, ngroups, dstate = C.shape
     assert nheads % ngroups == 0
-    assert C.shape == (num_emit_tokens, ngroups, dstate)
-    assert cb_emit.shape == (num_emit_tokens, ngroups, chunk_size)
-    num_rows = replay_offsets.shape[0]
+    assert cb_emit.shape == (num_rows, ngroups, chunk_size)
     assert dt.ndim == 3
     assert dt.shape[0] == nheads
     assert dt.shape[1] >= num_rows
     assert dt.shape[2] == chunk_size
     assert dA_cumsum.shape == dt.shape
     assert initial_states.shape[1:] == (nheads, headdim, dstate)
-    assert initial_state_indices.shape[0] == replay_offsets.shape[0]
-    assert slot_indices.shape[0] == replay_offsets.shape[0]
-    assert emit_row_indices.shape[0] == num_emit_tokens
-    assert emit_chunk_positions.shape[0] == num_emit_tokens
-    assert emit_token_indices.shape[0] == num_emit_tokens
-    assert out.shape[1:] == (nheads, headdim)
+    assert slot_indices.shape[0] == num_rows
+    assert positions.shape[0] == num_rows
+    assert out.shape == (num_rows, nheads, headdim)
     if D is not None:
         assert D.shape == (nheads, headdim) or D.shape == (nheads,)
-    has_current_x = current_x is not None
-    if has_current_x:
-        assert current_x.shape == (num_rows, nheads, headdim)
-        assert current_x.dtype == x.dtype
-    if num_emit_tokens == 0:
+    assert current_x.shape == (num_rows, nheads, headdim)
+    assert current_x.dtype == x.dtype
+    if num_rows == 0:
         return
 
     grid = lambda META: (
-        num_emit_tokens,
+        num_rows,
         nheads,
         triton.cdiv(headdim, META["BLOCK_SIZE_N"]),
     )
@@ -722,7 +637,7 @@ def _chunk_scan_workspace_range_fwd(
         _chunk_scan_workspace_range_fwd_kernel[grid](
             cb_emit_ptr=cb_emit,
             x_ptr=x,
-            current_x_ptr=current_x if has_current_x else x,
+            current_x_ptr=current_x,
             out_ptr=out,
             dt_ptr=dt,
             dA_cumsum_ptr=dA_cumsum,
@@ -730,12 +645,7 @@ def _chunk_scan_workspace_range_fwd(
             initstates_ptr=initial_states,
             D_ptr=D,
             slot_indices_ptr=slot_indices,
-            initial_state_indices_ptr=initial_state_indices,
-            replay_offsets_ptr=replay_offsets,
-            emit_row_indices_ptr=emit_row_indices,
-            emit_chunk_positions_ptr=emit_chunk_positions,
-            emit_token_indices_ptr=emit_token_indices,
-            num_output_tokens=out.shape[0],
+            positions_ptr=positions,
             chunk_size=chunk_size,
             hdim=headdim,
             dstate=dstate,
@@ -747,9 +657,9 @@ def _chunk_scan_workspace_range_fwd(
             stride_x_token=x.stride(1),
             stride_x_head=x.stride(2),
             stride_x_hdim=x.stride(3),
-            stride_current_x_row=current_x.stride(0) if has_current_x else 0,
-            stride_current_x_head=current_x.stride(1) if has_current_x else 0,
-            stride_current_x_hdim=current_x.stride(2) if has_current_x else 0,
+            stride_current_x_row=current_x.stride(0),
+            stride_current_x_head=current_x.stride(1),
+            stride_current_x_hdim=current_x.stride(2),
             stride_out_row=out.stride(0),
             stride_out_head=out.stride(1),
             stride_out_hdim=out.stride(2),
@@ -769,7 +679,6 @@ def _chunk_scan_workspace_range_fwd(
             stride_D_head=D.stride(0) if D is not None else 0,
             HAS_D=D is not None,
             D_HAS_HDIM=D.dim() == 2 if D is not None else True,
-            HAS_CURRENT_X=has_current_x,
             BLOCK_SIZE_DSTATE=max(triton.next_power_of_2(dstate), 16),
             # Same tiles as the pinned prefill chunk-scan kernel so the dot
             # products accumulate in the same order (smaller M tiles change

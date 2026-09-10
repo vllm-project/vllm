@@ -13,9 +13,7 @@ completes. Every emitted row and every boundary state must equal the reference.
 import pytest
 import torch
 
-from vllm.model_executor.layers.mamba.ops.ssd_combined import (
-    mamba_chunk_scan_combined_varlen,
-)
+from tests.kernels.mamba.utils import carve_paged_states, single_shot_scan
 from vllm.model_executor.layers.mamba.ops.ssd_emit import (
     _bmm_chunk_workspace_range_fwd,
     _chunk_scan_workspace_range_fwd,
@@ -32,42 +30,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _reference(x, dt, A, B, C, D, dt_bias, chunk_size):
-    """Single-shot scan: output rows and the fp32 state after every chunk."""
-    seqlen = x.shape[0]
-    cu_chunk = list(range(0, seqlen, chunk_size)) + [seqlen]
-    n_chunks = len(cu_chunk) - 1
-    i32 = lambda v: torch.tensor(v, dtype=torch.int32, device=x.device)  # noqa: E731
-    out = torch.empty_like(x)
-    states = mamba_chunk_scan_combined_varlen(
-        x,
-        dt,
-        A,
-        B,
-        C,
-        chunk_size=chunk_size,
-        cu_seqlens=i32([0, seqlen]),
-        cu_chunk_seqlens=i32(cu_chunk),
-        last_chunk_indices=i32([n_chunks - 1]),
-        seq_idx=i32([0] * n_chunks),
-        out=out,
-        D=D,
-        z=None,
-        dt_bias=dt_bias,
-        initial_states=None,
-        return_intermediate_states=True,
-        dt_softplus=True,
-        dt_limit=(0.0, float("inf")),
-        state_dtype=torch.float32,
-    )
-    return out, states  # states[c] = state after chunk c
-
-
-def _paged(num_slots, shape, dtype, device, pad_bytes=4096):
-    """One buffer per slot carved out of a padded page, as the KV cache does."""
-    nbytes = int(torch.empty(shape, dtype=dtype).numel() * dtype.itemsize)
-    pages = torch.zeros(num_slots, nbytes + pad_bytes, dtype=torch.uint8, device=device)
-    return pages[:, :nbytes].view(dtype).view(-1, *shape)
+def _paged(num_slots, shape, dtype, device):
+    return carve_paged_states(num_slots, [shape], [dtype], device)[0]
 
 
 @pytest.mark.parametrize("chunk_size", [64])
@@ -91,7 +55,7 @@ def test_emit_matches_single_shot_prefill_at_every_position(chunk_size, seed):
     dt = (0.5 * torch.randn(seqlen, nheads, device=device)).to(dtype)
     B = torch.randn(seqlen, ngroups, dstate, device=device).to(dtype)
     C = torch.randn(seqlen, ngroups, dstate, device=device).to(dtype)
-    ref_out, ref_states = _reference(x, dt, A, B, C, D, dt_bias, chunk_size)
+    ref_out, ref_states = single_shot_scan(x, dt, A, B, C, D, dt_bias, chunk_size)
 
     # sequence lives in slot 1 (slot 0 is the null block)
     num_slots, slot = 3, 1
@@ -104,7 +68,6 @@ def test_emit_matches_single_shot_prefill_at_every_position(chunk_size, seed):
     dt_out = torch.empty(nheads, 1, chunk_size, dtype=torch.float32, device=device)
     dA_cumsum = torch.empty_like(dt_out)
     cb_emit = torch.empty(1, ngroups, chunk_size, dtype=torch.float32, device=device)
-    row = torch.tensor([0], dtype=torch.int32, device=device)
     slots = torch.tensor([slot], dtype=torch.int32, device=device)
 
     for pos in range(seqlen):
@@ -132,10 +95,8 @@ def test_emit_matches_single_shot_prefill_at_every_position(chunk_size, seed):
             chunk_size,
             slots,
             offsets,
-            row,
-            offsets,
-            out=cb_emit,
-            current_b=B[pos : pos + 1],
+            cb_emit,
+            B[pos : pos + 1],
         )
         _chunk_scan_workspace_range_fwd(
             cb_emit,
@@ -145,11 +106,7 @@ def test_emit_matches_single_shot_prefill_at_every_position(chunk_size, seed):
             C[pos : pos + 1],
             ssm_state,
             slots,
-            slots,
             offsets,
-            row,
-            offsets,
-            row,
             out,
             D=D,
             current_x=x[pos : pos + 1],
@@ -186,7 +143,7 @@ def test_fold_matches_single_shot_chunk_states(chunk_size):
     dt = (0.3 * torch.randn(seqlen, nheads, device=device)).to(dtype)
     B = torch.randn(seqlen, ngroups, dstate, device=device).to(dtype)
     C = torch.randn(seqlen, ngroups, dstate, device=device).to(dtype)
-    _, ref_states = _reference(x, dt, A, B, C, D, dt_bias, chunk_size)
+    _, ref_states = single_shot_scan(x, dt, A, B, C, D, dt_bias, chunk_size)
     dA_chunk = (torch.nn.functional.softplus(dt.float() + dt_bias) * A).view(
         n_chunks, chunk_size, nheads
     )
@@ -214,6 +171,14 @@ def test_fold_matches_single_shot_chunk_states(chunk_size):
             buf_B[slot] = B[lo : lo + chunk_size]
         untouched = torch.randn_like(ssm_state[2])
         ssm_state[2] = untouched
+        # each row's own dt is the buffered value at its position
+        current_dt = torch.stack(
+            [
+                buf_dt[1, chunk_size - 1],
+                buf_dt[2, chunk_size - 2],
+                buf_dt[2, chunk_size - 1],
+            ]
+        )
         _workspace_chunk_cumsum_fwd(
             buf_dt,
             A,
@@ -221,6 +186,7 @@ def test_fold_matches_single_shot_chunk_states(chunk_size):
             slots,
             offsets,
             dt_bias,
+            current_dt=current_dt,
             dt_out=dt_out,
             dA_cumsum=dA_cumsum,
         )
@@ -270,7 +236,7 @@ def test_emit_decode_schedule_matches_single_shot_prefill(chunk_size, seed):
     Bs = [torch.randn(L, ngroups, dstate, device=device).to(dtype) for L in total_lens]
     Cs = [torch.randn(L, ngroups, dstate, device=device).to(dtype) for L in total_lens]
     refs = [
-        _reference(xs[i], dts[i], A, Bs[i], Cs[i], D, dt_bias, chunk_size)[0]
+        single_shot_scan(xs[i], dts[i], A, Bs[i], Cs[i], D, dt_bias, chunk_size)[0]
         for i in range(n)
     ]
 
