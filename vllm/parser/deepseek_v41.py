@@ -8,6 +8,8 @@ from dataclasses import replace
 import regex as re
 
 from vllm.parser.deepseek_v4 import (
+    _PARAM_END,
+    _PARAM_VALUE,
     DeepSeekV4Parser,
     _dsml_arg_converter,
     deepseek_v4_config,
@@ -23,13 +25,12 @@ DSML_PARAM_CLOSE = "</｜DSML｜ parameter>"
 
 _PARAM_RE = re.compile(
     r'<｜DSML｜ parameter\s+name="([^"]+)"\s+string="(true|false)">'
-    r"(.*?)"
-    r"(?:</｜DSML｜ parameter>|(?=<｜DSML｜ parameter\s+name=))",
+    rf"{_PARAM_VALUE}{_PARAM_END}",
     re.DOTALL,
 )
 _PARTIAL_PARAM_RE = re.compile(
     r'<｜DSML｜ parameter\s+name="([^"]+)"\s+string="(true|false)">'
-    r"(.*)$",
+    rf"{_PARAM_VALUE}",
     re.DOTALL,
 )
 

@@ -131,6 +131,20 @@ def test_reasoning_adapter_controls_and_usage(
     assert not parser.is_reasoning_end([51, 100, 50])
 
 
+def test_python_misspelled_closer_does_not_swallow_next_parameter():
+    converter = deepseek_v41_config().arg_converter
+    raw = (
+        '<｜DSML｜ parameter name="alpha" string="true">first</｜DSML｜>\n'
+        '<｜DSML｜ parameter name="beta" string="true">second</｜DSML｜ parameter>\n'
+        '<｜DSML｜ parameter name="gamma" string="true">par'
+    )
+    assert json.loads(converter(raw, True)) == {
+        "alpha": "first",
+        "beta": "second",
+        "gamma": "par",
+    }
+
+
 def test_python_argument_conversion_and_partial_values():
     converter = deepseek_v41_config().arg_converter
     raw = (
