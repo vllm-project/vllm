@@ -5,7 +5,7 @@ import time
 import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
