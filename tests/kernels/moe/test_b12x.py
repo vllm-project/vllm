@@ -516,7 +516,8 @@ def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
         lambda layer: pytest.fail("b12x must not use Marlin packing"),
     )
     moe_config = SimpleNamespace(
-        w13_num_shards=2, moe_backend="b12x", activation=MoEActivation.SILU)
+        w13_num_shards=2, moe_backend="b12x", activation=MoEActivation.SILU
+    )
     method = ct_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod(moe_config)
     processed_layers: list[torch.nn.Module] = []
     fake_experts = SimpleNamespace(
