@@ -51,6 +51,7 @@ from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, replace
+from .watermarking import WatermarkConfig
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
@@ -381,6 +382,8 @@ class VllmConfig:
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
+    watermark_config: WatermarkConfig | None = None
+    """Text watermarking configuration."""
     diffusion_config: DiffusionConfig | None = None
     """Diffusion LLM (dLLM) configuration."""
 
@@ -662,6 +665,14 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
+        if getattr(self, "watermark_config", None) is not None:
+            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
+                logger.info_once(
+                    "Watermarking requires Model Runner V2 and overrides "
+                    "VLLM_USE_V2_MODEL_RUNNER=0."
+                )
+            return True
+
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
@@ -1091,6 +1102,30 @@ class VllmConfig:
         if not self.use_v2_model_runner:
             raise ValueError("trace replay requires Model Runner V2")
 
+    def _check_watermarking_unsupported(
+        self,
+        *,
+        beam_search: bool = False,
+        custom_sampler: bool = False,
+    ) -> None:
+        watermark_config = getattr(self, "watermark_config", None)
+        if watermark_config is None:
+            return
+        if (
+            self.speculative_config is not None
+            and not watermark_config.supports_speculative_decoding
+        ):
+            raise ValueError(
+                f"The {watermark_config.algorithm} watermarking algorithm "
+                "does not support speculative decoding."
+            )
+        if beam_search:
+            raise ValueError("Beam search is not supported with watermarking.")
+        if custom_sampler:
+            raise ValueError(
+                "Model-specific custom samplers are not supported with watermarking."
+            )
+
     def _resolve_and_verify_engram_config(self) -> None:
         """Resolve legacy offload settings and validate model and parallel configs."""
         if self.engram_config is None:
@@ -1124,6 +1159,7 @@ class VllmConfig:
         self.try_verify_and_update_config()
         self._resolve_and_verify_engram_config()
 
+        self._check_watermarking_unsupported()
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()
@@ -2637,10 +2673,6 @@ class VllmConfig:
             model_config.logits_processors or has_logitsproc_plugins
         ):
             unsupported.append("custom logits processors")
-
-        if self.cache_config.kv_sharing_fast_prefill:
-            # Will be added by https://github.com/vllm-project/vllm/pull/35045
-            unsupported.append("KV sharing fast prefill")
 
         if self.cache_config.mamba_cache_mode == "all":
             unsupported.append("mamba cache mode 'all'")
