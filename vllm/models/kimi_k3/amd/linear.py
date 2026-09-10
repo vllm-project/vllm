@@ -74,7 +74,28 @@ from vllm.utils.math_utils import cdiv
 logger = init_logger(__name__)
 
 _KIMI_K3_MERGED_FRONT_TOKEN_COUNTS = frozenset(
-    (7, 14, 512, 1024, 1536, 2048, 4096, 8192)
+    (
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        512,
+        1024,
+        1536,
+        2048,
+    )
 )
 _KIMI_K3_MERGED_FRONT_MAX_TOKENS = max(_KIMI_K3_MERGED_FRONT_TOKEN_COUNTS)
 
