@@ -259,6 +259,14 @@ repos:
     language: python
     types: [python]
     additional_dependencies: [regex]
+  # Static analog of the runtime sync check landing in #53491: flag
+  # `non_blocking=True` CPU<->CUDA copies whose CPU side is an unpinned
+  # `torch.from_numpy(...)` / `torch.tensor(...)` construction.
+  - id: check-gpu-sync-patterns
+    name: "Flag non_blocking CPU->GPU copies from unpinned tensors"
+    entry: python tools/pre_commit/check_gpu_sync_patterns.py
+    language: python
+    types: [python]
   - id: validate-config
     name: Validate configuration has default values and that each field has a docstring
     entry: python tools/pre_commit/validate_config.py
