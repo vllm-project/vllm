@@ -108,6 +108,7 @@ def _run_rank(
     padded_rows=0,
     index_kpool=1,
     metadata_includes_padding=False,
+    pcp_size=1,
 ):
     """Drive the real ``sparse_attn_indexer`` prefill path for one TP rank.
 
@@ -148,6 +149,7 @@ def _run_rank(
     set_(sparse_indexer.current_platform, "fp8_dtype", lambda: torch.float16)
     set_(sparse_indexer.current_platform, "is_xpu", lambda: False)
     set_(sparse_indexer, "get_tensor_model_parallel_rank", lambda: rank)
+    set_(sparse_indexer, "get_pcp_group", lambda: SimpleNamespace(world_size=pcp_size))
     set_(
         sparse_indexer,
         "get_tp_group",
@@ -253,7 +255,7 @@ def _run_rank(
         _NUM_KV,
         buffer,
         True,  # skip_k_cache_insert
-        False,  # use_pcp
+        pcp_size > 1,
         "",  # dense_mha_metadata_layer_name
     )
     return buffer, len(gathers)
@@ -355,8 +357,9 @@ def test_kpool_sharded_prefill_exchanges_expanded_tail_and_excludes_padding(
 
 @pytest.mark.parametrize("index_kpool", [1, 4])
 @pytest.mark.parametrize("metadata_includes_padding", [False, True])
+@pytest.mark.parametrize("pcp_size", [1, 2])
 def test_sharded_prefill_preserves_padding_and_kpool_tail(
-    monkeypatch, index_kpool, metadata_includes_padding
+    monkeypatch, index_kpool, metadata_includes_padding, pcp_size
 ):
     """Gather only scored rows, including incomplete pools and excluding padding.
 
@@ -371,6 +374,7 @@ def test_sharded_prefill_preserves_padding_and_kpool_tail(
         padded_rows=13,
         index_kpool=index_kpool,
         metadata_includes_padding=metadata_includes_padding,
+        pcp_size=pcp_size,
     )
 
     def no_exchange(*args, **kwargs):
@@ -627,7 +631,7 @@ def _sharding_config(cudagraph_mode=CUDAGraphMode.PIECEWISE):
         ({}, {}, True),
         ({"tp_size": 1}, {}, False),
         ({"dcp_world_size": 2}, {}, False),
-        ({"use_pcp": True}, {}, False),
+        ({"use_pcp": True}, {}, True),
         ({}, {"VLLM_DISABLE_PYNCCL": True}, False),
         ({}, {"VLLM_USE_NCCL_SYMM_MEM": True}, False),
         ({}, {"VLLM_BATCH_INVARIANT": True}, False),

@@ -291,7 +291,6 @@ def tp_prefill_row_sharding_supported(
     return (
         current_platform.is_cuda()
         and dcp_world_size == 1
-        and not use_pcp
         and tp_size > 1
         and not envs.VLLM_DISABLE_PYNCCL
         and not envs.VLLM_USE_NCCL_SYMM_MEM

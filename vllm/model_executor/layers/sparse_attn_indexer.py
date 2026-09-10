@@ -457,7 +457,8 @@ def sparse_attn_indexer(
         shard_sizes = prefill_metadata.row_shard_sizes
         shard_start = shard_stop = 0
         if shard_sizes is not None:
-            assert dcp_world_size == 1 and not use_pcp
+            # TP ranks in one PCP lane share the same local query rows.
+            assert dcp_world_size == 1
             assert forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL
             tp_rank = get_tensor_model_parallel_rank()
             shard_start = num_decode_tokens + sum(shard_sizes[:tp_rank])
