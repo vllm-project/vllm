@@ -426,7 +426,7 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
         n_local_heads=1,
         head_dim=512,
         _wq_b_proj=lambda qr, scale: qr.clone(),
-        _fused_qnorm_rope_kv_insert=lambda q, kv, pos, meta: q,
+        _prepare_q_and_insert_kv=lambda q, kv, pos, meta: q,
         _sparse_indexer_and_attn=observe,
     )
 

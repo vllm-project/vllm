@@ -49,6 +49,9 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
+from vllm.models.deepseek_v4_1.common.ops.fused_compress_quant_cache import (
+    rope_quant_insert,
+)
 
 from .model import (
     DeepseekV4DecoderLayer,
@@ -245,27 +248,17 @@ def _insert_context_kv(
     block_size = attn.swa_cache_layer.block_size
     cos_sin_cache = attn.rotary_emb.cos_sin_cache
     cache_dtype = swa_cache.dtype
+    if cache_dtype == torch.uint8:
+        # Packed FlashMLA layouts (V4 584 B or V4.1 fp8 528 B), KV only.
+        rope_quant_insert(kv, positions, cos_sin_cache, swa_cache, slot_mapping, 1)
+        return
     n_ctx = kv.shape[0]
     dummy_q = torch.zeros(
         (n_ctx, attn.n_local_heads, attn.head_dim),
         dtype=kv.dtype,
         device=kv.device,
     )
-    if cache_dtype == torch.uint8:
-        # fp8_ds_mla UE8M0 paged layout
-        swa_2d = swa_cache.view(swa_cache.shape[0], -1)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-            dummy_q,
-            kv,
-            swa_2d,
-            slot_mapping,
-            positions,
-            cos_sin_cache,
-            attn.padded_heads,
-            attn.eps,
-            block_size,
-        )
-    elif cache_dtype == torch.bfloat16:
+    if cache_dtype == torch.bfloat16:
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
             dummy_q,
@@ -511,7 +504,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         if self.model.confidence_head is not None and not loaded_confidence_head:
             self.model.confidence_head = None
-        self.process_weights_after_loading()
+        self.process_weights_after_loading(loaded_params)
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
@@ -519,7 +512,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         for layer in self.model.layers:
             layer.ffn.finalize_mega_moe_weights()
 
-    def process_weights_after_loading(self) -> None:
+    def process_weights_after_loading(
+        self, loaded_params: set[str] | None = None
+    ) -> None:
+        for layer in self.model.layers:
+            layer.attn.finalize_loaded_weights(loaded_params)
         self._finalize_moe()
 
     def _remap_dspark_name(self, name: str) -> str | None:

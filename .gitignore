@@ -11,6 +11,7 @@ vllm/third_party/triton_kernels/*
 
 # FlashMLA interface copied from source
 vllm/third_party/flashmla/flash_mla_interface.py
+vllm/third_party/flashmla/fused_norm_rope_attn_rope_cast.py
 
 # DeepGEMM vendored package built from source
 vllm/third_party/deep_gemm/

@@ -79,6 +79,8 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         cache_config: CacheConfig,
         backend_cls: "type[AttentionBackend] | None" = None,
         block_size: int = 64,
+        state_content_bytes: int | None = None,
+        alignment: int | None = None,
     ):
         super().__init__()
         self.backend_cls = backend_cls or DeepseekSparseSWABackend
@@ -88,6 +90,10 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         self.prefix = prefix
         self.cache_config = cache_config
         self.dtype = dtype
+        # Packed FlashMLA formats pass their bytes per token and page alignment
+        # explicitly; None keeps the fp8_ds_mla / plain-row defaults below.
+        self._state_content_bytes = state_content_bytes
+        self._alignment = alignment
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -108,6 +114,14 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         # fp8_ds_mla's UE8M0 paged layout needs 576B alignment; contiguous
         # bf16/fp8 cache uses the natural element-size page.
         uses_fp8_ds_mla_layout = self.cache_config.cache_dtype == "fp8_ds_mla"
+        state_content_bytes = self._state_content_bytes
+        alignment = self._alignment
+        if state_content_bytes is None and alignment is None:
+            # DeepseekV4 fp8_ds_mla: 584B per token (448B NoPE + 128B RoPE +
+            # 8B scales); 576B for FlashMLA packing, 512B for FlashInfer
+            # sparse (#44577).
+            state_content_bytes = 584 if uses_fp8_ds_mla_layout else None
+            alignment = 576 if uses_fp8_ds_mla_layout else 512
         return SlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
@@ -115,10 +129,8 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             dtype=self.dtype,
             sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
-            # DeepseekV4 fp8_ds_mla: 584B per token (448B NoPE + 128B RoPE + 8B scales)
-            state_content_bytes=584 if uses_fp8_ds_mla_layout else None,
-            # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
-            alignment=576 if uses_fp8_ds_mla_layout else 512,
+            state_content_bytes=state_content_bytes,
+            alignment=alignment,
             model_version="deepseek_v4",
             kv_quant_mode=get_kv_quant_mode(self.cache_config.cache_dtype),
         )
@@ -168,6 +180,8 @@ class DeepseekSparseSWAMetadata:
 
     is_valid_token: torch.Tensor | None = None  # [num_tokens]
     token_to_req_indices: torch.Tensor | None = None  # [num_tokens]
+    # int32 copy of the batch positions for the FlashMLA fused kernels.
+    positions_int32: torch.Tensor | None = None  # [num_tokens]
     decode_swa_indices: torch.Tensor | None = None  # [num_decode_tokens, width]
     decode_swa_lens: torch.Tensor | None = None  # [num_decode_tokens]
     # window_size (causal) or noncausal_index_width (DSpark non-causal).
@@ -474,6 +488,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
+        self.positions_int32 = torch.zeros(
+            max_tokens, dtype=torch.int32, device=self.device
+        )
         # Allocated unconditionally — consumer picks paged-direct vs dequant
         # at call time.
         self.prefill_swa_indices = torch.zeros(
@@ -685,6 +702,13 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # resulting plan for the rest of the step.
         tile_sched = self.build_tile_scheduler(num_decode_tokens)
 
+        positions = common_attn_metadata.positions
+        positions_int32 = None
+        if positions is not None:
+            num_position_tokens = positions.shape[0]
+            self.positions_int32[:num_position_tokens].copy_(positions)
+            positions_int32 = self.positions_int32[:num_position_tokens]
+
         return DeepseekSparseSWAMetadata(
             seq_lens=seq_lens,
             query_start_loc=query_start_loc,
@@ -693,6 +717,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             slot_mapping=slot_mapping,
             is_valid_token=is_valid_token,
             token_to_req_indices=token_to_req_indices,
+            positions_int32=positions_int32,
             decode_swa_indices=decode_swa_indices[:num_decode_tokens],
             decode_swa_lens=self.decode_swa_lens[:num_decode_tokens],
             decode_swa_width=decode_swa_width,
