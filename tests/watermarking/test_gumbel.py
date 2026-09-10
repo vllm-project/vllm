@@ -7,6 +7,11 @@ import torch
 from vllm.platforms import current_platform
 from vllm.v1.watermarking import GumbelWatermarkDetector, GumbelWatermarker
 from vllm.v1.watermarking.gumbel import _gamma_survival_integer_shape
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.sample.watermark import (
+    mixed_philox_gumbel_sample,
+    philox_gumbel_sample,
+)
 
 
 def test_gamma_survival_integer_shape():
@@ -80,5 +85,57 @@ def test_fused_watermarker_handles_noncontiguous_inputs():
         logits.contiguous(), contexts.contiguous(), lambda values: None
     ).token_ids
     actual = watermarker.sample(logits, contexts, lambda values: None).token_ids
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+@pytest.mark.parametrize("use_fp64", [False, True])
+def test_mixed_philox_gumbel_sample_matches_separate_samplers(use_fp64: bool):
+    torch.manual_seed(0)
+    logits = torch.randn(8, 8193, device="cuda")
+    context_storage = torch.randint(0, 248320, (8, 8), dtype=torch.int64, device="cuda")
+    contexts = context_storage[:, ::2]
+    repeated_mask = torch.tensor(
+        [False, False, False, True, False, False, True, False], device="cuda"
+    )
+    watermarking = torch.tensor(
+        [True, False, True, True, False, True, True, False], device="cuda"
+    )
+    req_indices = torch.tensor([3, 1, 7, 0, 4, 2, 6, 5], device="cuda")
+    temperatures = torch.ones(8, dtype=torch.float32, device="cuda")
+    temperatures[2] = 0
+    seeds = torch.arange(8, dtype=torch.int64, device="cuda") + 1000
+    positions = torch.arange(8, dtype=torch.int64, device="cuda") + 100
+    watermark_mask = (
+        watermarking[req_indices] & (temperatures[req_indices] != 0) & ~repeated_mask
+    )
+
+    watermarked = philox_gumbel_sample(logits, contexts, 42)
+    ordinary = gumbel_sample(
+        logits,
+        req_indices,
+        temperatures,
+        seeds,
+        positions,
+        apply_temperature=False,
+        is_drafting=False,
+        use_fp64=use_fp64,
+    )
+    expected = torch.where(watermark_mask, watermarked, ordinary)
+    actual = mixed_philox_gumbel_sample(
+        logits,
+        contexts,
+        42,
+        repeated_mask,
+        watermarking,
+        req_indices,
+        temperatures,
+        seeds,
+        positions,
+        use_fp64=use_fp64,
+    )
 
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
