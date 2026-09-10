@@ -1690,11 +1690,19 @@ class VllmConfig:
                     f"only; got dtype={self.model_config.dtype}. Use a "
                     "different --all2all-backend or --dtype bfloat16."
                 )
+            if self.parallel_config.enable_eplb:
+                raise ValueError(
+                    "The moonep all2all backend does not support EPLB yet: "
+                    "EPLB rearranges expert parameters in a layout MoonEP's "
+                    "replicated [E+B] weights do not follow. Disable "
+                    "--enable-eplb or use a different --all2all-backend."
+                )
             # Enforced here rather than in set_splitting_ops_for_v1 so it
-            # holds for every compilation mode: MoonEP dispatch/combine are
-            # eager-only and must not be captured.
+            # holds for every compilation mode, and keyed on use_all2all so
+            # PCP/SP-only topologies are covered too: MoonEP dispatch/combine
+            # are eager-only and must not be captured.
             if (
-                self.parallel_config.data_parallel_size > 1
+                self.parallel_config.use_all2all
                 and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             ):
                 logger.info(

@@ -57,6 +57,7 @@ class TestConfig:
     n: int
     num_experts: int
     router_skew: float
+    apply_router_weight_on_input: bool = False
 
 
 @dataclasses.dataclass
@@ -192,10 +193,14 @@ def moonep_moe_impl(
             test_tensors.topk,
             num_experts=config.num_experts,
             expert_map=None,
-            apply_router_weight_on_input=False,
+            apply_router_weight_on_input=config.apply_router_weight_on_input,
             quant_config=_no_quant_config(),
         )
         assert route_weights_nvs is not None
+        if config.apply_router_weight_on_input:
+            # prepare() already applied the weights to the inputs; the
+            # runner must not apply them again.
+            route_weights_nvs = torch.ones_like(route_weights_nvs)
         if config.router_skew >= 8 and config.m >= 100:
             # Heavy skew must actually engage the redundant-expert planner.
             assert (pf.plan.experts_to_copy >= 0).any(), (
@@ -280,7 +285,7 @@ def moonep_modular_kernel_impl(
             activation=MoEActivation.SILU,
             global_num_experts=config.num_experts,
             expert_map=None,
-            apply_router_weight_on_input=False,
+            apply_router_weight_on_input=config.apply_router_weight_on_input,
         )
         torch.accelerator.synchronize()
         return out
@@ -314,6 +319,7 @@ def _moonep_moe(
             w2,
             test_tensors.topk_weights,
             test_tensors.topk,
+            apply_router_weights_on_input=config.apply_router_weight_on_input,
         )
         impl = moonep_modular_kernel_impl if use_modular_kernel else moonep_moe_impl
         moonep_combined = impl(pg, pgi, test_tensors, w1, w2, num_prefetch_slots)
@@ -375,6 +381,32 @@ def test_moonep_bf16_moe(
             num_prefetch_slots,
             use_modular_kernel,
         )
+    except Exception as exc:
+        if "MulticastNotAvailableError" in str(exc):
+            pytest.skip("NVSwitch multicast not available")
+        raise
+
+
+@pytest.mark.parametrize("use_modular_kernel", [False, True])
+@multi_gpu_test(num_gpus=2)
+@requires_moonep
+def test_moonep_input_weighted_moe(use_modular_kernel: bool):
+    """Llama-4-style routing applies route weights to the expert inputs."""
+    set_random_seed(7)
+    config = TestConfig(
+        topk=1,
+        m=100,
+        k=1024,
+        n=512,
+        num_experts=32,
+        router_skew=1.0,
+        apply_router_weight_on_input=True,
+    )
+    (_, w1, _, _), (_, w2, _, _) = make_test_weights(
+        config.num_experts, config.n, config.k
+    )
+    try:
+        parallel_launch(2, _moonep_moe, config, w1, w2, 4, use_modular_kernel)
     except Exception as exc:
         if "MulticastNotAvailableError" in str(exc):
             pytest.skip("NVSwitch multicast not available")

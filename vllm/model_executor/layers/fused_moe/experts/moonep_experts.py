@@ -71,6 +71,15 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
         assert quant_config.quant_dtype is None, (
             "MoonEPExperts supports unquantized BF16 only"
         )
+        if (
+            quant_config.gemm1_alpha is not None
+            or quant_config.gemm1_beta is not None
+            or quant_config.gemm1_clamp_limit is not None
+        ):
+            raise NotImplementedError(
+                "MoonEPExperts implements plain silu(gate) * up only; SwiGLU "
+                "variants with alpha/beta/clamp parameters are not supported"
+            )
         self._weight_layout = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -106,7 +115,12 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return moe_parallel_config.use_moonep_kernels
+        # EPLB rearranges the named expert parameters as local_num_experts
+        # rows, which does not understand the replicated [E+B] layout.
+        return (
+            moe_parallel_config.use_moonep_kernels
+            and not moe_parallel_config.enable_eplb
+        )
 
     @staticmethod
     def _supports_quant_scheme(
@@ -175,7 +189,6 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
     ) -> None:
         # expert_map is ignored: MoonEP dispatches on global expert ids and
         # the weights are addressed by global [E+B] row, on every rank.
-        assert not apply_router_weight_on_input
         assert activation == MoEActivation.SILU
         assert self._weight_layout is not None, (
             "process_weights_after_loading() not called"
@@ -198,6 +211,9 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
         )
         act = torch.nn.functional.silu(gate)
         act.mul_(up)
-        act.mul_(route_weights_nvs.to(act.dtype).unsqueeze(-1))
+        if not apply_router_weight_on_input:
+            # Input-weighted routing (top-1, e.g. Llama 4) was already
+            # applied to the activations by prepare(), before dispatch.
+            act.mul_(route_weights_nvs.to(act.dtype).unsqueeze(-1))
         # Padding rows past the last segment come out zero-filled.
         output.copy_(moonep_grouped_gemm(act, w2, cu_seqlens))
