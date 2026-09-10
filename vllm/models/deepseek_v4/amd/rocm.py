@@ -686,7 +686,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 indexer.compressor.fused_wkv_wgate.weight.T,
                 out_dtype=torch.float32,
             )
-            indexer.forward_compressor(score, positions, self.indexer_rotary_emb)
+            indexer.compressor(score, positions, self.indexer_rotary_emb)
 
         (q, qr_out, qr_scale_out, kv_out), _ = execute_in_parallel(
             default_chain,

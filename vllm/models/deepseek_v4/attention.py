@@ -292,8 +292,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
             # aux_stream_list[2] is free here (outer GEMMs joined) for the inner
-            # overlap of wq_b+fused_indexer_q_rope_quant vs compressor. The ROCm
-            # subclass disables this nested overlap.
+            # overlap of wq_b+fused_indexer_q_rope_quant vs compressor.
             indexer_aux_stream = (
                 aux_stream_list[2] if aux_stream_list is not None else None
             )
@@ -472,6 +471,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             device=hidden_states.device,
         )
 
+        # Keep the attention input preparation in the captured graph. Only the
+        # sparse indexer and MLA attention run in the eager break below.
         qr_kv, kv_score, indexer_kv_score, indexer_weights = (
             self._run_parallel_input_projections(hidden_states)
         )
@@ -575,7 +576,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         # Keep Q projection and KV insertion on the default stream. The indexer
         # and MLA compressor use aux streams 0 and 1; aux 2 is internal to the
-        # indexer. Platform subclasses can replace this scheduling boundary.
+        # indexer.
         if indexer is not None:
             assert compressor is not None
             q, (indexer_inputs, _) = execute_in_parallel(
@@ -662,7 +663,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # fused_wqa_wkv (heaviest) on default; the three lighter input GEMMs
         # on aux streams 0..2 when their owning module exists. ln_events[0]
         # is the fan-out start event; ln_events[1..3] are per-aux done events.
-        # Without aux streams, execute_in_parallel runs these projections serially.
         aux_fns: list[Callable[[], Any] | None] = [None, None, None]
 
         if self.compressor is not None:
@@ -1005,7 +1005,6 @@ class DeepseekV4Indexer(nn.Module):
             compress_ratio=self.compress_ratio,
         )
 
-        # Platform subclasses can disable this nested overlap.
         self.aux_stream = aux_stream
         self.ln_events: list[torch.cuda.Event] = [
             torch.cuda.Event(),
@@ -1038,6 +1037,8 @@ class DeepseekV4Indexer(nn.Module):
         rotary_emb: nn.Module,
         qr_scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        compressor = self.compressor
+
         attn_metadata = get_forward_context().attn_metadata
         if isinstance(attn_metadata, dict):
             indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
@@ -1047,7 +1048,7 @@ class DeepseekV4Indexer(nn.Module):
             ):
                 # candidates num smaller than topk, every candidate is selected
                 # but we still need to build k cache
-                self.forward_compressor(compressed_kv_score, positions, rotary_emb)
+                compressor(compressed_kv_score, positions, rotary_emb)
                 return self.forward_q(
                     qr, indexer_weights, positions, rotary_emb, qr_scale
                 )
@@ -1058,21 +1059,12 @@ class DeepseekV4Indexer(nn.Module):
             lambda: self.forward_q(
                 qr, indexer_weights, positions, rotary_emb, qr_scale
             ),
-            lambda: self.forward_compressor(compressed_kv_score, positions, rotary_emb),
+            lambda: compressor(compressed_kv_score, positions, rotary_emb),
             self.ln_events[0],
             self.ln_events[1],
             self.aux_stream,
         )
         return query_result
-
-    def forward_compressor(
-        self,
-        compressed_kv_score: torch.Tensor,
-        positions: torch.Tensor,
-        rotary_emb: nn.Module,
-    ) -> None:
-        """Write indexer K cache independently for the ROCm auxiliary stream."""
-        self.compressor(compressed_kv_score, positions, rotary_emb)
 
     def forward_q(
         self,
