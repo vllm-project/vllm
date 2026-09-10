@@ -188,13 +188,13 @@ class MooncakeStoreConfig:
             if config.get(name)
         ]
         if unsupported_ssd_fields:
-            logger.warning(
-                "MooncakeStoreConnector ignores %s in its JSON config; "
-                "these fields do not enable local SSD offload in vLLM workers. "
+            raise ValueError(
+                "MooncakeStoreConnector does not support "
+                f"{', '.join(unsupported_ssd_fields)} in its JSON config. "
+                "These settings do not enable local SSD offload in vLLM workers. "
                 "For SSD offload, use mode='standalone-store' with "
                 "enable_offload=true and configure SSD storage on an external "
-                "mooncake_client.",
-                ", ".join(unsupported_ssd_fields),
+                "mooncake_client."
             )
         return MooncakeStoreConfig(
             metadata_server=config.get("metadata_server", ""),
