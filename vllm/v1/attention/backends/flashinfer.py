@@ -68,10 +68,12 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backends.composite import (
     MMPrefixAttentionRouting,
     create_composite_attention_backend,
+)
+from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     get_flashinfer_layout_string,
     get_num_attention_heads_from_layers,

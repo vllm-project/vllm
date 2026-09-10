@@ -64,7 +64,8 @@ Triton when a batch's current queries require bidirectional image attention,
 and FlashInfer for causal text prefills and decode. Historical image tokens
 alone do not select Triton.
 
-This is an instantiation of `create_composite_attention_backend` with Triton,
+This instantiates `create_composite_attention_backend` from
+`vllm/v1/attention/backends/composite.py` with Triton,
 FlashInfer, and `MMPrefixAttentionRouting`. The reusable factory owns child
 implementations, metadata dispatch, compatible cache requirements, and workspace
 sharing. The routing policy selects the child and defines graph-capture safety.

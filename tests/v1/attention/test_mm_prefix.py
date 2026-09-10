@@ -661,7 +661,7 @@ def test_composite_routes_queries_that_need_image_masking(
     """Historical images and single-query steps must use the causal graph path."""
     from types import SimpleNamespace
 
-    from vllm.v1.attention.backends.utils import requires_mm_prefix
+    from vllm.v1.attention.backends.composite import requires_mm_prefix
 
     common = SimpleNamespace(
         max_query_len=query_len,
@@ -688,6 +688,10 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
     from vllm.model_executor.layers.attention import Attention
     from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
+    from vllm.v1.attention.backends.composite import (
+        MMPrefixAttentionRouting,
+        create_composite_attention_backend,
+    )
     from vllm.v1.attention.backends.flashinfer import (
         TRITON_FLASHINFER as TritonFlashInferBackend,
     )
@@ -698,10 +702,6 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
     from vllm.v1.attention.backends.triton_attn import (
         TritonAttentionBackend,
         TritonAttentionMetadata,
-    )
-    from vllm.v1.attention.backends.utils import (
-        MMPrefixAttentionRouting,
-        create_composite_attention_backend,
     )
     from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 
