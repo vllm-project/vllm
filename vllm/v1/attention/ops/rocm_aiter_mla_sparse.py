@@ -1195,6 +1195,12 @@ def rocm_aiter_sparse_attn_indexer(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
 ) -> torch.Tensor:
+    if candidate_blocks is not None:
+        raise NotImplementedError(
+            "The ROCm AITER sparse attention indexer does not implement "
+            "candidate-block selection (DeepSeek-V4.1)."
+        )
+
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
     attn_metadata = forward_context.attn_metadata
