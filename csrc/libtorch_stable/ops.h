@@ -264,14 +264,14 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
     torch::stable::Tensor const& position_ids,
     torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
-    double eps, int64_t cache_block_size);
+    double eps, int64_t cache_block_size, bool apply_q_norm);
 
 void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
     torch::stable::Tensor& q, torch::stable::Tensor const& kv,
     torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
     torch::stable::Tensor const& position_ids,
     torch::stable::Tensor const& cos_sin_cache, double eps,
-    int64_t cache_block_size);
+    int64_t cache_block_size, bool apply_q_norm);
 
 void fused_kimi_k3_mla_key_concat_kv_cache_insert(
     torch::stable::Tensor& q, torch::stable::Tensor const& k_nope,
@@ -346,7 +346,7 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
     torch::stable::Tensor const& cos_sin_cache,
     torch::stable::Tensor const& fp8_scale,
     torch::stable::Tensor const& q_fp8_scale_inv, double eps,
-    int64_t cache_block_size);
+    int64_t cache_block_size, bool apply_q_norm);
 
 #ifndef USE_ROCM
 std::tuple<torch::stable::Tensor, torch::stable::Tensor>
@@ -404,6 +404,39 @@ void fused_gdn_decode_post_conv_mtp(
     torch::stable::Tensor const& norm_weight, torch::stable::Tensor& out,
     double scale, double norm_eps, const std::string& output_gate_activation);
 
+#endif
+
+#ifdef VLLM_ENABLE_FUSED_KDA_CHUNK
+void fused_kda_prologue(
+    torch::stable::Tensor const& q, torch::stable::Tensor const& k,
+    torch::stable::Tensor const& v, torch::stable::Tensor const& raw_g,
+    torch::stable::Tensor const& raw_beta, torch::stable::Tensor const& a_log,
+    torch::stable::Tensor const& dt_bias, torch::stable::Tensor& qg,
+    torch::stable::Tensor& w, torch::stable::Tensor& u,
+    torch::stable::Tensor& kg_t, torch::stable::Tensor& aqk,
+    torch::stable::Tensor& decay, torch::stable::Tensor const& cu_seqlens,
+    torch::stable::Tensor const& chunk_indices,
+    std::optional<torch::stable::Tensor> conv_weight,
+    std::optional<torch::stable::Tensor> conv_state,
+    std::optional<torch::stable::Tensor> conv_state_indices,
+    std::optional<torch::stable::Tensor> conv_has_initial_state, double scale,
+    double lower_bound);
+
+void fused_kda_chunk(
+    torch::stable::Tensor const& qg, torch::stable::Tensor const& w,
+    torch::stable::Tensor const& u, torch::stable::Tensor const& kg_t,
+    torch::stable::Tensor const& aqk, torch::stable::Tensor const& decay,
+    std::optional<torch::stable::Tensor> initial_state,
+    std::optional<torch::stable::Tensor> final_state,
+    torch::stable::Tensor& out, torch::stable::Tensor const& cu_seqlens,
+    torch::stable::Tensor const& chunk_offsets, double scale,
+    std::optional<torch::stable::Tensor> group_state, int64_t groups,
+    std::optional<torch::stable::Tensor> checkpoint_state,
+    std::optional<torch::stable::Tensor> checkpoint_offsets,
+    std::optional<torch::stable::Tensor> checkpoint_state_indices,
+    std::optional<torch::stable::Tensor> state_cache,
+    std::optional<torch::stable::Tensor> state_indices,
+    std::optional<torch::stable::Tensor> has_initial_state);
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
