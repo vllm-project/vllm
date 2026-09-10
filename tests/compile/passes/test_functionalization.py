@@ -288,7 +288,7 @@ def test_defunctionalize_preserves_control_dependencies(use_return_value):
     module = torch.fx.GraphModule(torch.nn.Module(), graph)
     preserve_node_ordering(graph, {output: OrderedSet([independent, functionalized])})
     module.recompile()
-    x = torch.arange(4, dtype=torch.float32, device="cpu")
+    x = torch.arange(4, dtype=torch.float32, device=current_platform.device_type)
     expected = module(x.clone(), x.clone())
 
     func_pass = FixFunctionalizationPass(VllmConfig())
