@@ -19,7 +19,7 @@ from typing import ClassVar
 import torch
 from torch import nn
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, CUDAGraphMode, VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
@@ -571,6 +571,62 @@ build_qsa_metadata = (
     build_qsa_metadata_triton if HAS_TRITON else _build_qsa_metadata_torch
 )
 
+Q_TOKEN_KV_BLOCK_SPARSE_TS_GROUP_SIZES = (1, 2, 4, 5)
+
+
+def _uniform_qsa_decode_query_len(
+    query_start_offsets: tuple[int, ...] | None,
+    *,
+    num_query_tokens: int,
+    max_query_len: int,
+    has_prefill: bool,
+) -> int | None:
+    """Return the proven fixed decode width, or ``None`` if not provable.
+
+    ``num_query_tokens`` may include CUDA-graph token padding and the request
+    offsets may include zero-length padded request rows. Positive request
+    lengths must all agree. Wider groups must equal ``max_query_len``; Q1 is
+    also legal when a varlen graph advertises a larger runtime upper bound.
+    Total divisibility alone is insufficient: request lengths 1 and 3 would
+    otherwise be grouped into one unsafe G=4 route.
+    """
+
+    if (
+        has_prefill
+        or query_start_offsets is None
+        or len(query_start_offsets) < 2
+        or max_query_len <= 0
+        or num_query_tokens <= 0
+        or query_start_offsets[0] != 0
+        or query_start_offsets[-1] > num_query_tokens
+    ):
+        return None
+
+    query_lens = tuple(
+        end - begin
+        for begin, end in zip(
+            query_start_offsets,
+            query_start_offsets[1:],
+            strict=False,
+        )
+    )
+    positive_lens = tuple(length for length in query_lens if length > 0)
+    uniform_query_len = positive_lens[0] if positive_lens else 0
+    if (
+        not positive_lens
+        or any(length < 0 for length in query_lens)
+        or any(length != uniform_query_len for length in positive_lens)
+        # Varlen piecewise graphs are profiled with one dummy token per
+        # request while max_query_len remains the runtime upper bound. Q1 is
+        # request-independent and therefore safe in that special case. Wider
+        # fixed groups still require the exact promised runtime width.
+        or (uniform_query_len != 1 and uniform_query_len != max_query_len)
+        or num_query_tokens % uniform_query_len
+        or query_start_offsets[-1] != uniform_query_len * len(positive_lens)
+    ):
+        return None
+    return uniform_query_len
+
 
 @dataclass
 class QSAForwardMetadata(AttentionMetadata):
@@ -580,6 +636,7 @@ class QSAForwardMetadata(AttentionMetadata):
     slot_mapping: torch.Tensor
     seq_lens: torch.Tensor
     query_start_loc: torch.Tensor
+    query_start_offsets: tuple[int, ...] | None
     token_to_req: torch.Tensor
     logical_positions: torch.Tensor
     visible_blocks: torch.Tensor
@@ -594,6 +651,9 @@ class QSAForwardMetadata(AttentionMetadata):
     max_seq_len: int
     storage_block_size: int
     compress_ratio: int
+    has_prefill: bool
+    uniform_decode_query_len: int | None
+    prepare_cudagraph_plan: bool
 
 
 class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
@@ -620,6 +680,19 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
             self.compress_ratio = compress_ratio
         else:
             self.compress_ratio = 1
+        decode_group_size = vllm_config.uniform_decode_query_len
+        self.decode_group_size = (
+            int(decode_group_size)
+            if decode_group_size in Q_TOKEN_KV_BLOCK_SPARSE_TS_GROUP_SIZES
+            else 1
+        )
+        compilation_config = vllm_config.compilation_config
+        capture_sizes = compilation_config.cudagraph_capture_sizes or []
+        self.full_decode_graph_token_counts = (
+            frozenset(int(size) for size in capture_sizes)
+            if compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            else frozenset()
+        )
         self.storage_block_size = kv_cache_spec.num_states
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_to_req_buffer = torch.empty(
@@ -654,7 +727,7 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> QSAForwardMetadata:
-        del common_prefix_len, fast_build
+        del common_prefix_len
         num_tokens = common_attn_metadata.num_actual_tokens
         decode_threshold = self.reorder_batch_threshold
         assert decode_threshold is not None
@@ -702,11 +775,42 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
                 request_capacity=request_capacity,
             )
         )
+        is_prefilling = getattr(common_attn_metadata, "is_prefilling", None)
+        has_prefill = is_prefilling is None or bool(is_prefilling.any().item())
+        query_start_offsets = (
+            None
+            if fast_build
+            else tuple(
+                int(offset)
+                for offset in common_attn_metadata.query_start_loc_cpu[
+                    : common_attn_metadata.num_reqs + 1
+                ].tolist()
+            )
+        )
+        uniform_decode_query_len = _uniform_qsa_decode_query_len(
+            query_start_offsets,
+            num_query_tokens=num_tokens,
+            max_query_len=getattr(common_attn_metadata, "max_query_len", 0),
+            has_prefill=has_prefill,
+        )
+        decode_group_size = getattr(self, "decode_group_size", 1)
+        uses_fixed_decode = not has_prefill and (
+            query_start_offsets is None
+            or decode_group_size == 1
+            or uniform_decode_query_len == 1
+            or uniform_decode_query_len == decode_group_size
+        )
+        prepare_cudagraph_plan = uses_fixed_decode and num_tokens in getattr(
+            self, "full_decode_graph_token_counts", frozenset()
+        )
         return QSAForwardMetadata(
             block_table=common_attn_metadata.block_table_tensor,
             slot_mapping=slot_mapping,
             seq_lens=common_attn_metadata.seq_lens,
             query_start_loc=common_attn_metadata.query_start_loc,
+            # Fast drafting metadata has no authoritative CPU request
+            # boundaries. Keep that path on the request-independent Q1 route.
+            query_start_offsets=query_start_offsets,
             token_to_req=token_to_req,
             logical_positions=logical_positions,
             visible_blocks=visible_blocks,
@@ -721,7 +825,30 @@ class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
             max_seq_len=common_attn_metadata.max_seq_len,
             storage_block_size=self.storage_block_size,
             compress_ratio=self.compress_ratio,
+            has_prefill=has_prefill,
+            uniform_decode_query_len=uniform_decode_query_len,
+            prepare_cudagraph_plan=prepare_cudagraph_plan,
         )
+
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> QSAForwardMetadata:
+        """Mark metadata whose warmup and replay belong to a FULL graph.
+
+        vLLM's standalone MTP graph manager deliberately invokes both its
+        warmup and the body recorded by ``torch.cuda.graph`` with forward
+        context mode ``NONE``.  The metadata builder is the only component
+        that still receives the explicit FULL-capture signal in that path.
+        Carry it to the QSA owner so preparation happens during warmup and
+        capture only reuses graph-stable storage.
+        """
+
+        metadata = self.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+        )
+        metadata.prepare_cudagraph_plan = True
+        return metadata
 
 
 class QSAStateBackend(AttentionBackend):
@@ -837,6 +964,11 @@ class QSAKeyStateCache(_QSAStateCache):
             self.rope_position_cache = position_tail.view(torch.int64)
         else:
             self.rope_position_cache = None
+
+    def unbind_kv_cache(self) -> None:
+        self.key_cache = None
+        self.rope_position_cache = None
+        super().unbind_kv_cache()
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # Hold the open group's committed keys plus every row a speculative
