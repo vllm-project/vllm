@@ -273,6 +273,30 @@ def test_tiering_spec_create_worker_folds_device_index_for_sharded_layout(monkey
     assert region_calls[0]["rank"] == 1
 
 
+def test_tiering_spec_aborts_region_when_worker_creation_fails(monkeypatch):
+    import vllm.v1.kv_offload.tiering.spec as tiering_spec_module
+
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec",
+        worker_kv_bytes_per_block=4096,
+        world_size=2,
+    )
+    assert isinstance(spec, TieringOffloadingSpec)
+
+    region = MagicMock()
+    monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", lambda **_: region)
+    monkeypatch.setattr(
+        tiering_spec_module,
+        "CPUOffloadingWorker",
+        MagicMock(side_effect=RuntimeError("worker setup failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="worker setup failed"):
+        spec.create_worker(MagicMock())
+
+    region.cleanup.assert_called_once_with(force_unlink=True)
+
+
 @pytest.mark.parametrize("world_size", [2, 4, 8])
 def test_cpu_spec_replicated_sizing_on_shared_region(monkeypatch, world_size: int):
     # On shared-region (CUDA-alike) platforms the default spec now honors

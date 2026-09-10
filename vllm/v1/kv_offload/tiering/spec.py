@@ -70,7 +70,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec, _all_workers_barrier
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
@@ -398,6 +398,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             rank=rank,
             kv_bytes_per_chunk=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
+            # All workers must have mapped the file before a failed worker
+            # aborts startup and removes its name.  On success the scheduler
+            # remains the final opener and unlink owner.
+            barrier=_all_workers_barrier,
             unlink_owner=False,
         )
         try:
@@ -411,7 +415,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 canonical_layout=self.config.canonical_layout,
             )
         except Exception:
-            worker_mmap.cleanup()
+            # The constructor barrier above guarantees that every worker has
+            # finished opening/mapping before this abort cleanup runs.  Thus
+            # removing the name cannot make a peer create a second inode.
+            worker_mmap.cleanup(force_unlink=True)
             raise
 
     def _validate_canonical_refs(self, kv_caches: CanonicalKVCaches) -> None:
