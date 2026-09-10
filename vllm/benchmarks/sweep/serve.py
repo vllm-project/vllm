@@ -220,12 +220,25 @@ def run_comb(
     link_vars: list[tuple[str, str]],
     base_path: Path,
     num_runs: int,
+    warmup_num_prompts: int,
     dry_run: bool,
 ):
     if not _comb_is_valid(serve_comb, bench_comb, link_vars):
         return None
 
     comb_data = list[dict[str, object]]()
+
+    if warmup_num_prompts > 0:
+        warmup_overrides = bench_comb | {"num_prompts": warmup_num_prompts}
+        run_benchmark(
+            server,
+            bench_cmd,
+            serve_overrides=serve_comb,
+            bench_overrides=warmup_overrides,
+            run_number=-1,
+            output_path=base_path / "warmup.json",
+            dry_run=dry_run,
+        )
 
     for run_number in range(num_runs):
         run_data = run_benchmark(
@@ -262,6 +275,7 @@ def run_combs(
     link_vars: list[tuple[str, str]],
     experiment_dir: Path,
     num_runs: int,
+    warmup_num_prompts: int,
     dry_run: bool,
 ):
     all_data = list[dict[str, object]]()
@@ -287,6 +301,7 @@ def run_combs(
                     link_vars=link_vars,
                     base_path=base_path,
                     num_runs=num_runs,
+                    warmup_num_prompts=warmup_num_prompts,
                     dry_run=dry_run,
                 )
 
@@ -315,6 +330,7 @@ class SweepServeArgs:
     output_dir: Path
     experiment_name: str
     num_runs: int
+    warmup_num_prompts: int
     dry_run: bool
     resume: bool
 
@@ -351,6 +367,9 @@ class SweepServeArgs:
         num_runs = args.num_runs
         if num_runs < 1:
             raise ValueError("`num_runs` should be at least 1.")
+        warmup_num_prompts = args.warmup_num_prompts
+        if warmup_num_prompts < 0:
+            raise ValueError("`warmup_num_prompts` should be at least 0.")
 
         return cls(
             serve_cmd=serve_cmd,
@@ -363,6 +382,7 @@ class SweepServeArgs:
             output_dir=Path(args.output_dir),
             experiment_name=experiment_name,
             num_runs=num_runs,
+            warmup_num_prompts=warmup_num_prompts,
             dry_run=args.dry_run,
             resume=args.resume,
             server_ready_timeout=args.server_ready_timeout,
@@ -454,6 +474,16 @@ class SweepServeArgs:
             help="Number of runs per parameter combination.",
         )
         parser.add_argument(
+            "--warmup-num-prompts",
+            type=int,
+            default=0,
+            help=(
+                "Number of prompts in one unmeasured warmup run before each "
+                "parameter combination. The warmup is saved as warmup.json but "
+                "excluded from summary statistics."
+            ),
+        )
+        parser.add_argument(
             "--dry-run",
             action="store_true",
             help="If set, prints the commands to run, "
@@ -523,6 +553,7 @@ def run_main(args: SweepServeArgs):
             bench_params=args.bench_params,
             experiment_dir=experiment_dir,
             num_runs=args.num_runs,
+            warmup_num_prompts=args.warmup_num_prompts,
             dry_run=args.dry_run,
         )
 

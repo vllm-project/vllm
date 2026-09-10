@@ -4,7 +4,23 @@ Sweep tuning is optional. The converter always creates one initial `config.yml`
 first. Users can deploy it immediately or benchmark nearby scheduler settings
 and generate one measured recommendation.
 
-## Generate
+## Choose a Workflow
+
+| Goal | Option | Stages |
+| --- | --- | --- |
+| Keep the initial TP/DP layout and tune scheduling | `--generate-sweep` | Scheduler sweep |
+| Compare NUMA-aware TP/DP layouts before tuning scheduling | `--generate-parallel-layout-sweep` | Parallel-layout sweep, then scheduler sweep |
+
+Both workflows keep one fixed workload shape and require `--input-tokens`,
+`--output-tokens`, and `--concurrency`. TTFT and TPOT objectives are optional
+but recommended for deployment tuning.
+
+## Scheduler-Only Sweep
+
+Use this workflow when the recipe or runtime policy already provides the TP/DP
+layout to retain.
+
+### Generate
 
 ```bash
 python3 tools/recipes/recipe_json_to_vllm_config.py \
@@ -67,7 +83,12 @@ measurements, while the 1000-prompt cap bounds sweep runtime. Workload
 concurrency is fixed during the scheduler sweep, so every scheduler candidate
 uses the same number of prompts.
 
-## Run and Recommend
+Before each measured parameter combination, the generated script runs one
+unmeasured warmup containing one full concurrency window. The warmup is saved as
+`warmup.json` for auditing but is excluded from `summary.json`, `summary.csv`,
+and recommendation calculations.
+
+### Run and Recommend
 
 ```bash
 sweep/run_sweep.sh --dry-run
@@ -112,6 +133,83 @@ Deploy:
 source env.sh
 vllm serve --config sweep/recommended-config.yml
 ```
+
+## Staged Parallel-Layout and Scheduler Sweep
+
+Use this workflow when TP/DP placement should be measured before scheduler
+tuning. Hardware detection is required because candidates are derived from the
+effective NUMA topology visible to the process or container.
+
+### Generate
+
+```bash
+python3 tools/recipes/recipe_json_to_vllm_config.py \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --hardware xeon6 \
+  --detect-hardware \
+  --input-tokens 128 \
+  --output-tokens 128 \
+  --concurrency 32 \
+  --ttft-sla-ms 3000 \
+  --tpot-sla-ms 100 \
+  --generate-parallel-layout-sweep
+```
+
+### Stage 1: Select TP/DP
+
+Primary candidates use all effective NUMA nodes:
+
+```text
+tensor-parallel-size * data-parallel-size = effective NUMA nodes
+```
+
+TP is restricted to `1`, `2`, `4`, and `8`. The sweep also includes the largest
+supported TP size that does not exceed the effective NUMA-node count, even when
+that candidate leaves some NUMA nodes idle.
+
+| Effective NUMA nodes | Generated layouts |
+| ---: | --- |
+| 2 | `TP=2, DP=1`; `TP=1, DP=2` |
+| 4 | `TP=4, DP=1`; `TP=2, DP=2`; `TP=1, DP=4` |
+| 6 | `TP=4, DP=1` (4 of 6 nodes); `TP=2, DP=3`; `TP=1, DP=6` |
+| 8 | `TP=8, DP=1`; `TP=4, DP=2`; `TP=2, DP=4`; `TP=1, DP=8` |
+
+Each candidate receives a per-replica scheduler baseline:
+
+```text
+max-num-seqs = ceil(global concurrency / data-parallel-size)
+```
+
+Run and select the layout:
+
+```bash
+sweep/run_parallel_layout_sweep.sh --dry-run
+sweep/run_parallel_layout_sweep.sh
+sweep/recommend_parallel_layout.py
+```
+
+Each server layout receives one unmeasured warmup before the normal measured
+runs. The recommender writes:
+
+```text
+sweep/parallel-layout-config.yml
+sweep/parallel-layout-recommendation.json
+```
+
+### Stage 2: Tune the Selected Layout
+
+The scheduler stage keeps the selected TP/DP layout and tunes
+`max-num-seqs`/`max-num-batched-tokens`, including the vLLM-default reference
+candidates retained by `recipe_improve`:
+
+```bash
+sweep/run_sweep.sh --dry-run
+sweep/run_sweep.sh
+sweep/recommend.py
+```
+
+Do not start Stage 2 before Stage 1 has produced
+`parallel-layout-config.yml`.
 
 ## vLLM CPU Docker Shell
 
