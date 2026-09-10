@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Shared, non-collected helper for the common model test slices.
+
+This module holds the body of the original ``test_common.py::test_models``
+plus the constants it relies on. The leading underscore keeps it out of
+pytest's ``test_*.py`` collection; ``tests/tools/test_language_layout.py``
+proves it is never collected on its own.
+"""
 
 import pytest
 import torch
@@ -8,7 +15,6 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 
-from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
@@ -31,87 +37,7 @@ AITER_MODEL_LIST = [
 ]
 
 
-# @maybe_test_rocm_aiter
-@pytest.mark.parametrize(
-    "model",
-    [
-        pytest.param(
-            "bigscience/bloom-560m",  # bloom - testing alibi slopes
-            marks=[
-                pytest.mark.core_model,
-                pytest.mark.slow_test,
-                pytest.mark.cpu_model,
-            ],
-        ),
-        pytest.param(
-            "openai-community/gpt2",  # gpt2
-            marks=[pytest.mark.core_model],
-        ),
-        pytest.param("Milos/slovak-gpt-j-405M"),  # gptj
-        pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
-        pytest.param("EleutherAI/pythia-70m"),  # gpt_neox
-        pytest.param(
-            "google/gemma-1.1-2b-it",  # gemma
-            marks=[
-                pytest.mark.core_model,
-                pytest.mark.cpu_model,
-                pytest.mark.slow_test,
-            ],
-        ),
-        pytest.param(
-            "google/gemma-2-2b-it",  # test hybrid attention
-            marks=[pytest.mark.cpu_model],
-        ),
-        pytest.param(
-            "zai-org/chatglm3-6b",  # chatglm (text-only)
-        ),
-        pytest.param(
-            "meta-llama/Llama-3.2-1B-Instruct",  # llama
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        ),
-        pytest.param(
-            "openbmb/MiniCPM4.1-8B",  # minicpm
-            marks=[pytest.mark.core_model, large_gpu_mark(min_gb=48)],
-        ),
-        pytest.param(
-            "facebook/opt-125m",  # opt
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        ),
-        pytest.param(
-            "microsoft/phi-2",  # phi
-            marks=[pytest.mark.core_model, pytest.mark.slow_test],
-        ),
-        pytest.param(
-            "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
-            marks=[
-                pytest.mark.core_model,
-                pytest.mark.cpu_model,
-                pytest.mark.slow_test,
-            ],
-        ),
-        pytest.param(
-            "Qwen/Qwen3-8B",  # qwen (text-only)
-        ),
-        pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
-        pytest.param("bigcode/starcoder2-3b"),  # starcoder2
-        pytest.param(
-            "TitanML/tiny-mixtral",  # mixtral
-            marks=[pytest.mark.core_model],
-        ),
-        pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
-        pytest.param(
-            "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",  # hyperclovax
-            marks=[large_gpu_mark(min_gb=32)],
-        ),
-    ],
-)
-@pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
-)
-@pytest.mark.parametrize("use_prompt_embeds", [True, False])
-def test_models(
+def _test_models(
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -237,5 +163,5 @@ def test_models(
         # has deallocated the memory before running the next
         # unit tests. On ROCm, when using AITER
         # the memory might not be deallocated completely
-        # before running the next test case
+        # before running the next test
         torch.accelerator.synchronize()
