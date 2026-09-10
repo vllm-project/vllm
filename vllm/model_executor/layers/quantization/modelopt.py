@@ -2478,6 +2478,30 @@ class ModelOptLinearMethod(LinearMethodBase):
             self.akey.process(layer, ACT)
         maybe_fuse_global_scales(layer)
         self.fmt.post_process(layer)
+        layer.is_w4a16_nvfp4 = (
+            self.spec.weight == kNvfp4Static and self.spec.activation is None
+        )
+        if getattr(layer, "_retain_weight_for_gather", False):
+            if not layer.is_w4a16_nvfp4:
+                raise NotImplementedError(
+                    "Gathered projection is only supported for ModelOpt W4A16 "
+                    "NVFP4 weights."
+                )
+            assert self.ctx.group_size is not None
+            layer.register_buffer(
+                "_nvfp4_weight_for_gather", layer.weight.detach(), persistent=False
+            )
+            layer.register_buffer(
+                "_nvfp4_weight_scale_for_gather",
+                layer.weight_scale.detach(),
+                persistent=False,
+            )
+            layer.register_buffer(
+                "_nvfp4_weight_global_scale_for_gather",
+                layer.weight_global_scale.detach(),
+                persistent=False,
+            )
+            layer._nvfp4_group_size_for_gather = self.ctx.group_size
         self.kernel.process_weights_after_loading(layer)
 
     def apply(self, layer, x, bias=None):
