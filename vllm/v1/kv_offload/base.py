@@ -78,10 +78,6 @@ class TierFilter:
 
     ALL: ClassVar["TierFilter"]
 
-    @property
-    def is_empty(self) -> bool:
-        return not self.matchers
-
     def allows(self, medium: Medium | None, locality: Locality | None) -> bool:
         if self is TierFilter.ALL:
             return True

@@ -430,10 +430,11 @@ def test_lookup_cap_stops_at_authoritative_prefix_boundary():
     assert scheduler._req_status["req"].partial_tail_boundary == 20
 
 
-def test_empty_kv_load_tiers_skips_partial_tail_lookup():
+@pytest.mark.skip_global_cleanup
+def test_max_load_tokens_zero_skips_partial_tail_lookup():
     scheduler = _make_partial_tail_scheduler()
     request = _make_partial_tail_request(
-        scheduler, kv_transfer_params={"kv_load_tiers": []}
+        scheduler, kv_transfer_params={"max_load_tokens": 0}
     )
     scheduler.manager.lookup.return_value = LookupResult.HIT
 
@@ -442,6 +443,42 @@ def test_empty_kv_load_tiers_skips_partial_tail_lookup():
     assert all(
         state.num_hit_chunks == 1 for state in scheduler._req_status["req"].group_states
     )
+
+
+@pytest.mark.skip_global_cleanup
+def test_max_load_tokens_caps_tokens_beyond_gpu_prefix():
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(
+        scheduler, kv_transfer_params={"max_load_tokens": 8}
+    )
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+
+    assert scheduler.get_num_new_matched_tokens(request, 16) == (8, True)
+    assert scheduler._req_status["req"].partial_tail_boundary == 24
+
+
+@pytest.mark.skip_global_cleanup
+def test_max_load_tokens_rounds_down_without_partial_tail():
+    scheduler = _make_partial_tail_scheduler()
+    scheduler.config = scheduler.config._replace(supports_partial_tail=False)
+    request = _make_partial_tail_request(
+        scheduler, kv_transfer_params={"max_load_tokens": 20}
+    )
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (16, True)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("value", ["8", 8.5, -1, True])
+def test_invalid_max_load_tokens_is_ignored(value):
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_partial_tail_request(
+        scheduler, kv_transfer_params={"max_load_tokens": value}
+    )
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (28, True)
 
 
 def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():
@@ -2906,10 +2943,9 @@ def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
-def test_empty_kv_load_tiers_disables_external_load(
-    request_runner, async_scheduling: bool
-):
-    """An empty load-tier list recomputes while preserving the store path."""
+@pytest.mark.skip_global_cleanup
+def test_max_load_tokens_limits_external_load(request_runner, async_scheduling: bool):
+    """The load cap limits external reads without changing the store path."""
     block_size = 4
     blocks_per_chunk = 3
     tokens_per_chunk = block_size * blocks_per_chunk
@@ -2934,7 +2970,7 @@ def test_empty_kv_load_tiers_disables_external_load(
     runner.manager.lookup.reset_mock()
     runner.new_request(
         token_ids=[0] * tokens_per_chunk,
-        kv_transfer_params={"kv_load_tiers": []},
+        kv_transfer_params={"max_load_tokens": 0},
     )
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
