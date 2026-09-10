@@ -55,6 +55,37 @@ else()
       GIT_PROGRESS TRUE
     )
   endif()
+
+  # LiteTopK reuses a caller-owned logits slab for its seed MQA GEMM.  Keep
+  # this patch local until the corresponding DeepGEMM API is available in an
+  # upstream revision that vLLM can pin.  Apply it here (rather than relying on
+  # a developer checkout) so bundled wheels have a reproducible ABI.
+  find_package(Git REQUIRED)
+  set(_deepgemm_mqa_out_patch
+    "${CMAKE_CURRENT_LIST_DIR}/../patches/deepgemm_mqa_logits_out.patch")
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" apply --reverse --check
+      "${_deepgemm_mqa_out_patch}"
+    WORKING_DIRECTORY "${deepgemm_SOURCE_DIR}"
+    RESULT_VARIABLE _deepgemm_mqa_out_already_applied
+    OUTPUT_QUIET ERROR_QUIET)
+  if(NOT _deepgemm_mqa_out_already_applied EQUAL 0)
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" apply --check
+        "${_deepgemm_mqa_out_patch}"
+      WORKING_DIRECTORY "${deepgemm_SOURCE_DIR}"
+      RESULT_VARIABLE _deepgemm_mqa_out_check
+      ERROR_VARIABLE _deepgemm_mqa_out_error)
+    if(NOT _deepgemm_mqa_out_check EQUAL 0)
+      message(FATAL_ERROR
+        "DeepGEMM MQA out= patch does not apply to ${deepgemm_SOURCE_DIR}: "
+        "${_deepgemm_mqa_out_error}")
+    endif()
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" apply "${_deepgemm_mqa_out_patch}"
+      WORKING_DIRECTORY "${deepgemm_SOURCE_DIR}"
+      COMMAND_ERROR_IS_FATAL ANY)
+  endif()
   message(STATUS "DeepGEMM is available at ${deepgemm_SOURCE_DIR}")
 endif()
 

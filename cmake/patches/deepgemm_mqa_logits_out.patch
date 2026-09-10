@@ -1,0 +1,47 @@
+diff --git a/csrc/apis/attention.hpp b/csrc/apis/attention.hpp
+index 7e1003a..5ce09d3 100644
+--- a/csrc/apis/attention.hpp
++++ b/csrc/apis/attention.hpp
+@@ -80,7 +80,8 @@ static torch::Tensor fp8_fp4_mqa_logits(const std::tuple<torch::Tensor, std::opt
+                                         const torch::Tensor& cu_seq_len_k_end,
+                                         const bool& clean_logits,
+                                         const int& max_seqlen_k,
+-                                        const at::ScalarType& logits_dtype) {
++                                        const at::ScalarType& logits_dtype,
++                                        const std::optional<torch::Tensor>& out = std::nullopt) {
+     const auto [q_fp, q_sf] = q;
+     const auto [kv_fp, kv_sf] = kv;
+     const bool is_fp4 = q_sf.has_value();
+@@ -168,9 +169,21 @@ static torch::Tensor fp8_fp4_mqa_logits(const std::tuple<torch::Tensor, std::opt
+     const int stride_logits_alignment = 1024 / static_cast<int>(c10::elementSize(logits_dtype));
+     if (max_seqlen_k == 0) {
+         stride_logits = align(seq_len_kv + block_kv, stride_logits_alignment);
+-        logits = torch::empty({aligned_seq_len, stride_logits}, q_fp.options().dtype(logits_dtype));
++        if (out.has_value()) {
++            DG_HOST_ASSERT(out->is_cuda() and out->is_contiguous());
++            DG_HOST_ASSERT(out->device() == q_fp.device());
++            DG_HOST_ASSERT(out->scalar_type() == logits_dtype);
++            const int64_t padded_numel =
++                static_cast<int64_t>(aligned_seq_len) * stride_logits;
++            DG_HOST_ASSERT(out->numel() >= padded_numel);
++            logits = out->view(-1).narrow(0, 0, padded_numel)
++                         .view({aligned_seq_len, stride_logits});
++        } else {
++            logits = torch::empty({aligned_seq_len, stride_logits}, q_fp.options().dtype(logits_dtype));
++        }
+         logits = logits.index({torch::indexing::Slice(0, seq_len), torch::indexing::Slice(0, seq_len_kv)});
+     } else {
++        DG_HOST_ASSERT(not out.has_value());
+         stride_logits = align(align(max_seqlen_k, block_kv), stride_logits_alignment);
+         logits = torch::empty({aligned_seq_len, stride_logits}, q_fp.options().dtype(logits_dtype));
+         logits = logits.index({torch::indexing::Slice(0, seq_len), torch::indexing::Slice(0, max_seqlen_k)});
+@@ -442,7 +455,8 @@ static void register_apis(pybind11::module_& m) {
+           py::arg("cu_seq_len_k_start"), py::arg("cu_seq_len_k_end"),
+           py::arg("clean_logits") = true,
+           py::arg("max_seqlen_k") = 0,
+-          py::arg("logits_dtype") = torch::kFloat32);
++          py::arg("logits_dtype") = torch::kFloat32,
++          py::arg("out") = std::nullopt);
+     m.def("get_paged_mqa_logits_metadata", &get_paged_mqa_logits_metadata,
+           py::arg("context_lens"), py::arg("block_kv"), py::arg("num_sms"),
+           py::arg("indices") = std::nullopt);

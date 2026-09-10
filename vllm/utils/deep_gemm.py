@@ -8,6 +8,7 @@ Users of vLLM should always import **only** these wrappers.
 import contextlib
 import functools
 import importlib
+import inspect
 import os
 from collections.abc import Callable
 from enum import Enum
@@ -172,21 +173,48 @@ _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl: (
 ) = None
 
 
+def _callable_accepts_keyword(fn: Callable[..., Any], keyword: str) -> bool:
+    """Best-effort ABI check for Python and pybind callables."""
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        # pybind functions do not always expose ``__signature__``, but their
+        # generated first doc paragraph contains the argument list.
+        doc_signature = (getattr(fn, "__doc__", None) or "").split("\n\n", 1)[0]
+        return f"{keyword}:" in doc_signature or f"{keyword} =" in doc_signature
+    return keyword in signature.parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+
+def _module_supports_mqa_logits_out(module: Any) -> bool:
+    fn = getattr(module, "fp8_fp4_mqa_logits", None)
+    return fn is not None and _callable_accepts_keyword(fn, "out")
+
+
 @functools.cache
-def _import_deep_gemm():
+def _import_deep_gemm(*, require_mqa_logits_out: bool = False):
     """Import the deep_gemm module.
 
     Prefers an externally installed ``deep_gemm`` package (so users can
     pin a specific version), then falls back to the vendored copy bundled
     in the vLLM wheel.
 
+    When ``require_mqa_logits_out`` is true, an incompatible external package
+    is skipped so the patched vendored backend can be selected instead.
     Returns ``None`` when neither source is usable.
     """
     # 1. Try the external (pip-installed) package first.
     try:
         module = importlib.import_module("deep_gemm")
-        logger.debug_once("Imported deep_gemm module from site-packages")
-        return module
+        if not require_mqa_logits_out or _module_supports_mqa_logits_out(module):
+            logger.debug_once("Imported deep_gemm module from site-packages")
+            return module
+        logger.warning_once(
+            "Installed deep_gemm lacks fp8_fp4_mqa_logits(out=); "
+            "trying the vendored backend for LiteTopK"
+        )
     except ImportError:
         logger.info_once(
             "deep_gemm not found in site-packages, "
@@ -196,8 +224,15 @@ def _import_deep_gemm():
     # 2. Fall back to the vendored copy bundled in the vLLM wheel.
     try:
         module = importlib.import_module("vllm.third_party.deep_gemm")
-        logger.debug_once("Imported deep_gemm module from vllm.third_party.deep_gemm")
-        return module
+        if not require_mqa_logits_out or _module_supports_mqa_logits_out(module):
+            logger.debug_once(
+                "Imported deep_gemm module from vllm.third_party.deep_gemm"
+            )
+            return module
+        logger.warning_once(
+            "Vendored deep_gemm lacks fp8_fp4_mqa_logits(out=); "
+            "LiteTopK fused prefill is unavailable"
+        )
     except ImportError:
         logger.info_once("Vendored deep_gemm not found either")
     except Exception as e:
@@ -222,6 +257,17 @@ def _apply_pdl(mod, enable: bool = True) -> None:
         )
     except Exception as e:  # noqa: BLE001
         logger.warning_once("Failed to set DeepGEMM PDL on %s: %s", mod_name, e)
+
+
+@functools.cache
+def _get_fp8_fp4_mqa_logits_out_impl() -> Callable[..., Any] | None:
+    """Resolve an MQA backend that explicitly supports caller-owned output."""
+    deep_gemm = _import_deep_gemm(require_mqa_logits_out=True)
+    if deep_gemm is None:
+        return None
+    if current_platform.is_arch_support_pdl():
+        _apply_pdl(deep_gemm, True)
+    return getattr(deep_gemm, "fp8_fp4_mqa_logits", None)
 
 
 def _lazy_init() -> None:
@@ -519,6 +565,8 @@ def fp8_fp4_mqa_logits(
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
     clean_logits: bool,
+    *,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute MQA logits for a single sequence without KV paging.
 
@@ -540,21 +588,95 @@ def fp8_fp4_mqa_logits(
         cu_seqlen_ke: End indices (exclusive) for valid K per query
             position, shape [M], dtype int32.
         clean_logits: Whether to clean the unfilled logits into `-inf`.
+        out: Optional caller-owned flat or padded output slab. The selected
+            DeepGEMM backend must explicitly support this keyword and return a
+            tensor aliasing the same storage.
 
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
     """
-    _lazy_init()
-    if _fp8_fp4_mqa_logits_impl is None:
+    if out is None:
+        _lazy_init()
+        impl = _fp8_fp4_mqa_logits_impl
+    else:
+        impl = _get_fp8_fp4_mqa_logits_out_impl()
+    if impl is None:
         return _missing()
-    return _fp8_fp4_mqa_logits_impl(
-        q,
-        kv,
-        weights,
-        cu_seqlen_ks,
-        cu_seqlen_ke,
-        clean_logits=clean_logits,
-    )
+
+    kwargs: dict[str, Any] = {"clean_logits": clean_logits}
+    if out is not None:
+        kwargs["out"] = out
+    result = impl(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, **kwargs)
+    if out is not None and (
+        not isinstance(result, torch.Tensor) or result.data_ptr() != out.data_ptr()
+    ):
+        raise RuntimeError(
+            "DeepGEMM fp8_fp4_mqa_logits(out=) did not return an alias of "
+            "the caller-owned output slab"
+        )
+    return result
+
+
+@functools.cache
+def _probe_fp8_fp4_mqa_logits_out(device_index: int) -> bool:
+    """Execute the exact out= ABI once before LiteTopK plans unsplit work."""
+    if _get_fp8_fp4_mqa_logits_out_impl() is None:
+        return False
+
+    device = torch.device("cuda", device_index)
+    try:
+        query_len, num_heads, head_dim, kv_len = 4, 32, 128, 256
+        q = torch.zeros(
+            query_len,
+            num_heads,
+            head_dim,
+            dtype=torch.float8_e4m3fn,
+            device=device,
+        )
+        kv = torch.zeros(kv_len, head_dim, dtype=torch.float8_e4m3fn, device=device)
+        kv_scale = torch.ones(kv_len, dtype=torch.float32, device=device)
+        weights = torch.ones(query_len, num_heads, dtype=torch.float32, device=device)
+        ks = torch.zeros(query_len, dtype=torch.int32, device=device)
+        ke = torch.full((query_len,), kv_len, dtype=torch.int32, device=device)
+        # e21 aligns each fp32 row to 1024 bytes and adds one 256-token block.
+        # This deliberately generous slab also remains valid if that padding
+        # policy grows in a later compatible DeepGEMM revision.
+        slab = torch.full((8192,), float("nan"), dtype=torch.float32, device=device)
+        result = fp8_fp4_mqa_logits(
+            (q, None),
+            (kv, kv_scale),
+            weights,
+            ks,
+            ke,
+            clean_logits=False,
+            out=slab,
+        )
+        torch.accelerator.synchronize(device)
+        valid = (
+            result.shape == (query_len, kv_len)
+            and result.dtype == torch.float32
+            and result.device == device
+            and result.data_ptr() == slab.data_ptr()
+            and bool(torch.isfinite(result).all().item())
+        )
+        if not valid:
+            raise RuntimeError("DeepGEMM out= probe returned invalid output")
+        logger.info_once("DeepGEMM fp8_fp4_mqa_logits(out=) probe passed on %s", device)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning_once(
+            "DeepGEMM fp8_fp4_mqa_logits(out=) probe failed on %s: %s",
+            device,
+            e,
+        )
+        return False
+
+
+def is_fp8_fp4_mqa_logits_out_supported() -> bool:
+    """Whether the current CUDA device passed the real caller-output probe."""
+    if not torch.accelerator.is_available():
+        return False
+    return _probe_fp8_fp4_mqa_logits_out(torch.accelerator.current_device_index())
 
 
 def native_next_n_supported(next_n: int) -> bool:
