@@ -22,12 +22,22 @@ def prepare_lens(cu_seqlens: torch.Tensor) -> torch.Tensor:
 
 @tensor_cache
 def prepare_chunk_indices(cu_seqlens: torch.Tensor, chunk_size: int) -> torch.Tensor:
-    # This will be fixed by https://github.com/vllm-project/vllm/pull/51540.
+    # Inferring seq_id from local-index wraparound (eq(0).cumsum) is wrong when
+    # a sequence has zero chunks: the next sequence's first chunk is attributed
+    # to the empty slot. Assign seq_id from the sequence index instead.
+    # https://github.com/vllm-project/vllm/pull/51540
     with gpu_sync_allowed():
         chunk_counts = triton.cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()
-    indices = torch.cat([torch.arange(n) for n in chunk_counts])
-    chunk_indices = torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1)
-    return chunk_indices.to(
+    if not any(chunk_counts):
+        return torch.empty(0, 2, device=cu_seqlens.device, dtype=cu_seqlens.dtype)
+    seq_ids = torch.repeat_interleave(
+        torch.arange(len(chunk_counts), dtype=torch.long),
+        torch.as_tensor(chunk_counts, dtype=torch.long),
+    )
+    loc_ids = torch.cat(
+        [torch.arange(n, dtype=torch.long) for n in chunk_counts if n]
+    )
+    return torch.stack([seq_ids, loc_ids], 1).to(
         device=cu_seqlens.device, dtype=cu_seqlens.dtype, non_blocking=True
     )
 
