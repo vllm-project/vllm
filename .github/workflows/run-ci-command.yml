@@ -21,11 +21,17 @@ jobs:
       (github.event.comment.body == '/ci run' ||
       github.event.comment.body == '/ci run all' ||
       github.event.comment.body == '/ci run nightly' ||
+      github.event.comment.body == '/ci run --allow-stale' ||
+      github.event.comment.body == '/ci run all --allow-stale' ||
+      github.event.comment.body == '/ci run nightly --allow-stale' ||
       github.event.comment.body == '/ci retry' ||
       github.event.comment.body == '/ci cancel' ||
       github.event.comment.body == '/amd-ci run' ||
       github.event.comment.body == '/amd-ci run all' ||
       github.event.comment.body == '/amd-ci run nightly' ||
+      github.event.comment.body == '/amd-ci run --allow-stale' ||
+      github.event.comment.body == '/amd-ci run all --allow-stale' ||
+      github.event.comment.body == '/amd-ci run nightly --allow-stale' ||
       github.event.comment.body == '/amd-ci retry' ||
       github.event.comment.body == '/amd-ci cancel')
     runs-on: [self-hosted, linux, x64, vllm-runners]

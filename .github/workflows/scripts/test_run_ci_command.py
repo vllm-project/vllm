@@ -99,10 +99,10 @@ class FakeGitHub:
         self.pulls_for_commit = pulls_for_commit or []
         self.prs = prs or {self.pr["number"]: self.pr}
         self.behind = behind
-        self.lag_queries: list[str] = []
+        self.lag_queries: list[tuple[str, str]] = []
 
-    def get_commits_behind_main(self, head_sha: str) -> int:
-        self.lag_queries.append(head_sha)
+    def get_commits_behind_base(self, base_ref: str, head_sha: str) -> int:
+        self.lag_queries.append((base_ref, head_sha))
         return self.behind
 
     def get_pr(self, number: int) -> dict[str, Any]:
@@ -331,6 +331,11 @@ class RunCiCommandTest(unittest.TestCase):
         for command in commands:
             with self.subTest(command=command):
                 self.assertEqual(parse_command(command), command)
+                override = f"{command} --allow-stale"
+                if " run" in command:
+                    self.assertEqual(parse_command(override), override)
+                else:
+                    self.assertIsNone(parse_command(override))
 
         self.assertIsNone(parse_command("/ci run please"))
         self.assertIsNone(parse_command("/ci run all please"))
@@ -340,6 +345,8 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertIsNone(parse_command("/amd-ci retry "))
         self.assertIsNone(parse_command("/AMD-CI run"))
         self.assertIsNone(parse_command("/amdci run"))
+        self.assertIsNone(parse_command("/ci run --allow-stale all"))
+        self.assertIsNone(parse_command("/amd-ci run --allow-stale please"))
 
     def test_commands_select_only_their_configured_pipeline(self) -> None:
         cases = (
@@ -539,17 +546,22 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertTrue(github.comments[0].startswith("✅ "))
         self.assertIn("Buildkite CI #123", github.comments[0])
 
-    def test_run_variants_require_current_main_without_changing_commit(self) -> None:
+    def test_run_variants_require_current_base_without_changing_commit(self) -> None:
         for command in RUN_CI_COMMAND_ENV:
+            if command.endswith(" --allow-stale"):
+                continue
             for behind in (0, 1, 5):
                 with self.subTest(command=command, behind=behind):
                     github = FakeGitHub(
-                        behind=behind, pr=make_pr(base={"ref": "release"})
+                        behind=behind, pr=make_pr(base={"ref": "release/1.0"})
                     )
                     buildkite = FakeBuildkite([[], []])
                     run(make_event(command), github, buildkite)
 
-                    self.assertEqual(github.lag_queries, [github.pr["head"]["sha"]])
+                    self.assertEqual(
+                        github.lag_queries,
+                        [("release/1.0", github.pr["head"]["sha"])],
+                    )
                     if behind == 0:
                         self.assertEqual(
                             buildkite.created_builds[0]["commit"],
@@ -563,56 +575,155 @@ class RunCiCommandTest(unittest.TestCase):
                         self.assertEqual(buildkite.created_builds, [])
                         self.assertTrue(github.comments[0].startswith("❌ "))
                         self.assertIn(str(behind), github.comments[0])
+                        self.assertIn("upstream `release/1.0`", github.comments[0])
+                        self.assertIn("every commit", github.comments[0])
                         self.assertIn(
                             "No new CI build was started.", github.comments[0]
                         )
                         self.assertIn(command, github.comments[0])
 
-    def test_main_lag_query_validates_github_count(self) -> None:
-        for count in (0, 5, None, -1, True, "5"):
-            with self.subTest(count=count):
-                transport = FakeTransport({} if count is None else {"behind_by": count})
-                github = GitHubClient("token", "vllm-project/vllm", transport)
-                if type(count) is int and count >= 0:
-                    self.assertEqual(github.get_commits_behind_main("head-sha"), count)
-                else:
-                    with self.assertRaises(ApiError):
-                        github.get_commits_behind_main("head-sha")
-                self.assertEqual(
-                    transport.calls[0]["url"],
-                    "https://api.github.com/repos/vllm-project/vllm/compare/main...head-sha?per_page=1",
-                )
-                self.assertEqual(transport.calls[0]["method"], "GET")
+    def test_allow_stale_preserves_author_permissions_and_run_configuration(
+        self,
+    ) -> None:
+        cases = (
+            (COMMAND_RUN_CI, "ci", {}),
+            (COMMAND_RUN_CI_ALL, "ci", {"RUN_ALL": "1"}),
+            (COMMAND_RUN_CI_NIGHTLY, "ci", {"RUN_ALL": "1", "NIGHTLY": "1"}),
+            (COMMAND_RUN_AMD_CI, "amd-ci", {}),
+            (COMMAND_RUN_AMD_CI_ALL, "amd-ci", {"RUN_ALL": "1"}),
+            (
+                COMMAND_RUN_AMD_CI_NIGHTLY,
+                "amd-ci",
+                {"RUN_ALL": "1", "NIGHTLY": "1"},
+            ),
+        )
+        for original_command, pipeline, expected_env in cases:
+            command = f"{original_command} --allow-stale"
+            for ready, behind in ((False, 100), (True, 0), (True, 100)):
+                with self.subTest(command=command, ready=ready, behind=behind):
+                    github = FakeGitHub(
+                        permission="read",
+                        behind=behind,
+                        pr=make_pr(
+                            base={"ref": "feature/stack"},
+                            labels=[{"name": "ready"}] if ready else [],
+                        ),
+                    )
+                    buildkite = FakeBuildkite([[], []])
 
-    def test_unknown_lag_or_changed_pr_prevents_build_creation(self) -> None:
-        for fault in ("api", "head", "closed", "base"):
-            with self.subTest(fault=fault):
-                github = FakeGitHub()
-                buildkite = FakeBuildkite([[], []])
+                    run(make_event(command, "author"), github, buildkite)
 
-                def check(
-                    sha: str, fault: str = fault, github: FakeGitHub = github
-                ) -> int:
-                    if fault == "api":
-                        raise ApiError(503, "Unavailable")
-                    changed = make_pr()
-                    if fault == "head":
-                        changed["head"]["sha"] = "another-head"
-                    elif fault == "closed":
-                        changed["state"] = "closed"
+                    self.assertEqual(pipeline_for_command(command), pipeline)
+                    if not ready:
+                        self.assertEqual(buildkite.created_builds, [])
+                        self.assertEqual(buildkite.list_calls, [])
+                        self.assertEqual(github.lag_queries, [])
+                        self.assertTrue(github.comments[0].startswith("❌ "))
+                        continue
+                    self.assertEqual(len(buildkite.created_builds), 1)
+                    payload = buildkite.created_builds[0]
+                    self.assertEqual(payload["commit"], github.pr["head"]["sha"])
+                    self.assertEqual(
+                        payload["pull_request_base_branch"], "feature/stack"
+                    )
+                    self.assertEqual(payload["message"], f"PR #42 {command} by @author")
+                    self.assertEqual(
+                        payload["env"],
+                        {
+                            "VLLM_CI_GITHUB_COMMENT_ID": "99",
+                            "VLLM_CI_TRIGGERED_BY": "author",
+                            **expected_env,
+                        },
+                    )
+                    self.assertEqual(
+                        github.lag_queries,
+                        [("feature/stack", github.pr["head"]["sha"])],
+                    )
+                    self.assertIn(
+                        "Buildkite AMD CI #123"
+                        if pipeline == "amd-ci"
+                        else "Buildkite CI #123",
+                        github.comments[0],
+                    )
+                    if behind:
+                        self.assertIn("100 commits behind", github.comments[0])
+                        self.assertIn("upstream `feature/stack`", github.comments[0])
+                        self.assertIn("Before merging", github.comments[0])
+                        self.assertIn("latest PR commit", github.comments[0])
+                        self.assertIn(original_command, github.comments[0])
+
+    def test_base_lag_query_qualifies_branch_refs_and_validates_count(self) -> None:
+        for base_ref, encoded_ref in (
+            ("main", "main"),
+            ("release/1.0", "release%2F1.0"),
+            ("feature/stack", "feature%2Fstack"),
+        ):
+            for count in (0, 5, None, -1, True, "5"):
+                with self.subTest(base_ref=base_ref, count=count):
+                    transport = FakeTransport(
+                        {} if count is None else {"behind_by": count}
+                    )
+                    github = GitHubClient("token", "vllm-project/vllm", transport)
+                    if type(count) is int and count >= 0:
+                        self.assertEqual(
+                            github.get_commits_behind_base(base_ref, "head-sha"), count
+                        )
                     else:
-                        changed["base"]["ref"] = "another-base"
-                    github.prs[42] = changed
-                    return 0
+                        with self.assertRaises(ApiError):
+                            github.get_commits_behind_base(base_ref, "head-sha")
+                    self.assertEqual(
+                        transport.calls[0]["url"],
+                        "https://api.github.com/repos/vllm-project/vllm/compare/"
+                        f"refs%2Fheads%2F{encoded_ref}...head-sha?per_page=1",
+                    )
+                    self.assertEqual(transport.calls[0]["method"], "GET")
 
-                with patch.object(github, "get_commits_behind_main", side_effect=check):
-                    run(make_event(COMMAND_RUN_CI), github, buildkite)
-                self.assertEqual(buildkite.created_builds, [])
-                self.assertTrue(github.comments[0].startswith("❌ "))
-                self.assertNotIn("Triggered", github.comments[0])
+    def test_unknown_lag_or_changed_pr_prevents_runs_and_retries(self) -> None:
+        for command in (
+            COMMAND_RUN_CI,
+            COMMAND_RUN_AMD_CI,
+            f"{COMMAND_RUN_CI} --allow-stale",
+            f"{COMMAND_RUN_AMD_CI} --allow-stale",
+            COMMAND_RETRY_FAILED,
+            COMMAND_RETRY_AMD_FAILED,
+        ):
+            for fault in ("api", "head", "closed", "base"):
+                with self.subTest(command=command, fault=fault):
+                    github = FakeGitHub()
+                    buildkite = FakeBuildkite(
+                        [[{"number": 123, "pull_request": {"id": 42}}]]
+                        if " retry" in command
+                        else [[], []]
+                    )
 
-    def test_filtered_retry_also_requires_current_main(self) -> None:
-        github = FakeGitHub(behind=1)
+                    def check(
+                        base_ref: str,
+                        sha: str,
+                        fault: str = fault,
+                        github: FakeGitHub = github,
+                    ) -> int:
+                        if fault == "api":
+                            raise ApiError(503, "Unavailable")
+                        changed = make_pr()
+                        if fault == "head":
+                            changed["head"]["sha"] = "another-head"
+                        elif fault == "closed":
+                            changed["state"] = "closed"
+                        else:
+                            changed["base"]["ref"] = "another-base"
+                        github.prs[42] = changed
+                        return 0
+
+                    with patch.object(
+                        github, "get_commits_behind_base", side_effect=check
+                    ):
+                        run(make_event(command), github, buildkite)
+                    self.assertEqual(buildkite.created_builds, [])
+                    self.assertEqual(buildkite.retry_calls, [])
+                    self.assertTrue(github.comments[0].startswith("❌ "))
+                    self.assertNotIn("Triggered", github.comments[0])
+
+    def test_retries_allow_at_most_50_commits_behind_base(self) -> None:
         source = {
             "number": 122,
             "commit": "earlier-head",
@@ -621,15 +732,45 @@ class RunCiCommandTest(unittest.TestCase):
             "finished_at": "2026-07-28T02:00:00Z",
             "web_url": "https://buildkite.example/builds/122",
         }
-        buildkite = FakeBuildkite(
-            [[], [source]], [[{"type": "script", "step_key": "cpu-tests"}]]
-        )
-        run(make_event(COMMAND_RETRY_FAILED), github, buildkite)
+        for command, new_head in (
+            (COMMAND_RETRY_FAILED, False),
+            (COMMAND_RETRY_AMD_FAILED, False),
+            (COMMAND_RETRY_FAILED, True),
+        ):
+            for behind in (0, 50, 51, 100):
+                with self.subTest(command=command, new_head=new_head, behind=behind):
+                    github = FakeGitHub(
+                        behind=behind, pr=make_pr(base={"ref": "release/1.0"})
+                    )
+                    buildkite = FakeBuildkite(
+                        [[], [source]] if new_head else [[source]],
+                        [[{"type": "script", "step_key": "cpu-tests"}]],
+                    )
+                    run(make_event(command), github, buildkite)
 
-        self.assertEqual(github.lag_queries, [github.pr["head"]["sha"]])
-        self.assertEqual(buildkite.created_builds, [])
-        self.assertEqual(buildkite.retry_calls, [])
-        self.assertIn("1 commit behind upstream `main`", github.comments[0])
+                    self.assertEqual(
+                        github.lag_queries,
+                        [("release/1.0", github.pr["head"]["sha"])],
+                    )
+                    if behind <= 50:
+                        if new_head:
+                            self.assertEqual(len(buildkite.created_builds), 1)
+                            self.assertEqual(
+                                buildkite.created_builds[0]["commit"],
+                                github.pr["head"]["sha"],
+                            )
+                        else:
+                            self.assertEqual(
+                                buildkite.retry_calls, [(122, RETRY_STATES)]
+                            )
+                    else:
+                        self.assertEqual(buildkite.created_builds, [])
+                        self.assertEqual(buildkite.retry_calls, [])
+                        self.assertIn(
+                            f"{behind} commits behind upstream `release/1.0`",
+                            github.comments[0],
+                        )
+                        self.assertIn("50", github.comments[0])
 
     def test_amd_run_ignores_blocked_builds(self) -> None:
         for metadata in ({}, {"github-comment-id": "98"}):
@@ -969,7 +1110,7 @@ class RunCiCommandTest(unittest.TestCase):
         run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
 
         self.assertEqual(buildkite.retry_calls, [(123, RETRY_STATES)])
-        self.assertEqual(github.lag_queries, [])
+        self.assertEqual(github.lag_queries, [("main", "0123456789abcdef")])
         self.assertIn("Queued 3 failed job", github.comments[0])
 
     def test_amd_ci_retry_retries_only_the_current_head_build(self) -> None:
@@ -994,7 +1135,7 @@ class RunCiCommandTest(unittest.TestCase):
         run(make_event(COMMAND_RETRY_AMD_FAILED, "author"), github, buildkite)
 
         self.assertEqual(buildkite.retry_calls, [(321, RETRY_STATES)])
-        self.assertEqual(github.lag_queries, [])
+        self.assertEqual(github.lag_queries, [("main", "0123456789abcdef")])
         self.assertIn("Buildkite AMD CI #321", github.comments[0])
 
     def test_amd_ci_retry_requires_a_build_for_the_current_head(self) -> None:
@@ -1057,7 +1198,7 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertEqual(len(buildkite.created_builds), 1)
         payload = buildkite.created_builds[0]
         self.assertEqual(payload["commit"], "0123456789abcdef")
-        self.assertEqual(github.lag_queries, ["0123456789abcdef"])
+        self.assertEqual(github.lag_queries, [("main", "0123456789abcdef")])
         self.assertEqual(payload["message"], "PR #42 /ci retry by @author")
         self.assertEqual(
             json.loads(payload["env"]["VLLM_CI_ONLY_STEP_KEYS"]),

@@ -23,6 +23,7 @@ COMMAND_RUN_AMD_CI_ALL = "/amd-ci run all"
 COMMAND_RUN_AMD_CI_NIGHTLY = "/amd-ci run nightly"
 COMMAND_RETRY_AMD_FAILED = "/amd-ci retry"
 COMMAND_CANCEL_AMD_CI = "/amd-ci cancel"
+ALLOW_STALE_SUFFIX = " --allow-stale"
 RUN_CI_COMMAND_ENV = {
     COMMAND_RUN_CI: {},
     COMMAND_RUN_CI_ALL: {"RUN_ALL": "1"},
@@ -31,20 +32,25 @@ RUN_CI_COMMAND_ENV = {
     COMMAND_RUN_AMD_CI_ALL: {"RUN_ALL": "1"},
     COMMAND_RUN_AMD_CI_NIGHTLY: {"RUN_ALL": "1", "NIGHTLY": "1"},
 }
+ALLOW_STALE_COMMANDS = frozenset(
+    f"{command}{ALLOW_STALE_SUFFIX}" for command in RUN_CI_COMMAND_ENV
+)
+RUN_CI_COMMAND_ENV.update(
+    {
+        command: RUN_CI_COMMAND_ENV[command.removesuffix(ALLOW_STALE_SUFFIX)]
+        for command in ALLOW_STALE_COMMANDS
+    }
+)
 UPSTREAM_CI_COMMANDS = frozenset(
     {
-        COMMAND_RUN_CI,
-        COMMAND_RUN_CI_ALL,
-        COMMAND_RUN_CI_NIGHTLY,
+        *(command for command in RUN_CI_COMMAND_ENV if command.startswith("/ci ")),
         COMMAND_RETRY_FAILED,
         COMMAND_CANCEL_CI,
     }
 )
 AMD_CI_COMMANDS = frozenset(
     {
-        COMMAND_RUN_AMD_CI,
-        COMMAND_RUN_AMD_CI_ALL,
-        COMMAND_RUN_AMD_CI_NIGHTLY,
+        *(command for command in RUN_CI_COMMAND_ENV if command.startswith("/amd-ci ")),
         COMMAND_RETRY_AMD_FAILED,
         COMMAND_CANCEL_AMD_CI,
     }
@@ -53,7 +59,7 @@ RETRY_COMMANDS = frozenset({COMMAND_RETRY_FAILED, COMMAND_RETRY_AMD_FAILED})
 CANCEL_COMMANDS = frozenset({COMMAND_CANCEL_CI, COMMAND_CANCEL_AMD_CI})
 ALL_CI_COMMANDS = UPSTREAM_CI_COMMANDS | AMD_CI_COMMANDS
 CI_AUTHORIZED_COMMENT_MARKER = "<!-- vllm-ci-authorized -->"
-MAX_COMMITS_BEHIND_MAIN = 0
+MAX_RETRY_COMMITS_BEHIND_BASE = 50
 READY_LABELS = {"ready", "ready-run-all-tests"}
 TRUSTED_PERMISSIONS = {"admin", "maintain", "write"}
 ACTIVE_BUILD_STATES = {
@@ -242,10 +248,11 @@ class GitHubClient:
     def get_pr(self, number: int) -> dict[str, Any]:
         return self._request(self._repo_path(f"/pulls/{number}"))
 
-    def get_commits_behind_main(self, head_sha: str) -> int:
+    def get_commits_behind_base(self, base_ref: str, head_sha: str) -> int:
+        base_ref = urllib.parse.quote(f"refs/heads/{base_ref}", safe="")
         head_sha = urllib.parse.quote(head_sha, safe="")
         response = self._request(
-            self._repo_path(f"/compare/main...{head_sha}?per_page=1")
+            self._repo_path(f"/compare/{base_ref}...{head_sha}?per_page=1")
         )
         behind = response.get("behind_by") if isinstance(response, dict) else None
         if type(behind) is not int or behind < 0:
@@ -765,8 +772,12 @@ def notify_authorized(
         (
             f"✅ @{author}, CI is now available for this PR.\n\n"
             "- `/ci run` starts upstream CI; `/amd-ci run` starts AMD CI only.\n"
-            "- New builds require the PR to include current upstream `main`. "
-            "Update your branch if CI is blocked.\n"
+            "- Your branch must contain every commit currently on its upstream "
+            "target branch. Merge or rebase onto the latest target branch, then "
+            "rerun the command. Append `--allow-stale` to a run command to test "
+            "an outdated branch at your own risk.\n"
+            f"- Retries allow at most {MAX_RETRY_COMMITS_BEHIND_BASE} commits "
+            "behind the upstream target branch.\n"
             "- `/ci retry` retries failed jobs in the CI build for the current "
             "PR head. If the current head has no CI build, it starts a new CI "
             "build for the current head containing only jobs that failed in "
@@ -814,18 +825,24 @@ def resolve_workflow_run_pr(
     return find_matching_pr(github.list_pulls_for_commit(head_sha))
 
 
-def require_fresh_pr(
+def prepare_pr_for_ci(
     github: GitHubClient,
     pr: Mapping[str, Any],
     command: str,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str]:
+    base_ref = pr["base"]["ref"]
+    no_action = (
+        "No CI build was started or retried."
+        if command in RETRY_COMMANDS
+        else "No new CI build was started."
+    )
     try:
-        behind = github.get_commits_behind_main(pr["head"]["sha"])
+        behind = github.get_commits_behind_base(base_ref, pr["head"]["sha"])
         current_pr = github.get_pr(pr["number"])
     except ApiError as error:
         raise CiPreparationError(
-            "Could not check the PR against upstream `main`. "
-            f"No new CI build was started. Comment `{command}` again. {error}"
+            f"Could not check the PR against upstream `{base_ref}`. "
+            f"{no_action} Comment `{command}` again. {error}"
         ) from error
     if (
         current_pr["state"] != "open"
@@ -833,18 +850,44 @@ def require_fresh_pr(
         or current_pr["base"]["ref"] != pr["base"]["ref"]
     ):
         raise CiPreparationError(
-            "The PR changed while checking its branch. No new CI build was started. "
+            f"The PR changed while checking its branch. {no_action} "
             f"Comment `{command}` again."
         )
-    if behind > MAX_COMMITS_BEHIND_MAIN:
-        commits = "commit" if behind == 1 else "commits"
-        raise CiPreparationError(
-            f"This PR is {behind} {commits} behind upstream `main`. "
-            "New builds require the branch to be up to date. "
-            "No new CI build was started. "
-            f"Update your branch from upstream `main`, then comment `{command}` again."
+    commits = "commit" if behind == 1 else "commits"
+    lag = f"This PR is {behind} {commits} behind upstream `{base_ref}`."
+    if command in ALLOW_STALE_COMMANDS:
+        warning = ""
+        if behind:
+            run_command = command.removesuffix(ALLOW_STALE_SUFFIX)
+            warning = (
+                f"⚠️ {lag} Running CI at your own risk because "
+                "`--allow-stale` was requested; outdated CI configuration may "
+                "cause failures. Before merging, merge or rebase onto the latest "
+                f"`{base_ref}`, then rerun `{run_command}` on the latest PR commit."
+            )
+            print(warning)
+        return current_pr, warning
+
+    max_behind = MAX_RETRY_COMMITS_BEHIND_BASE if command in RETRY_COMMANDS else 0
+    if behind > max_behind:
+        requirement = (
+            f"Retries allow at most {max_behind} commits behind the target branch."
+            if command in RETRY_COMMANDS
+            else f"Your branch must contain every commit currently on upstream "
+            f"`{base_ref}`."
         )
-    return current_pr
+        override_hint = (
+            " To test this branch at your own risk, "
+            f"use `{command}{ALLOW_STALE_SUFFIX}`."
+            if command in RUN_CI_COMMAND_ENV
+            else ""
+        )
+        raise CiPreparationError(
+            f"{lag} {requirement} {no_action} "
+            f"Merge or rebase onto the latest `{base_ref}`, then rerun `{command}`."
+            f"{override_hint}"
+        )
+    return current_pr, ""
 
 
 def handle_run_ci(
@@ -881,7 +924,7 @@ def handle_run_ci(
             f"{ci_name} is already running for this commit: {active_build['web_url']}"
         )
 
-    current_pr = require_fresh_pr(github, pr, command)
+    current_pr, warning = prepare_pr_for_ci(github, pr, command)
 
     build = buildkite.create_build(
         create_build_payload(
@@ -894,6 +937,7 @@ def handle_run_ci(
     return (
         f"Triggered [Buildkite {ci_name} #{build['number']}]({build['web_url']}) "
         f"for commit `{current_pr['head']['sha'][:12]}`."
+        + (f"\n\n{warning}" if warning else "")
     )
 
 
@@ -918,6 +962,7 @@ def handle_retry_failed(
                 f"{ci_name} was already requested by this comment: {build['web_url']}"
             )
 
+        prepare_pr_for_ci(github, pr, command)
         retried = buildkite.retry_failed_jobs(build["number"], RETRY_STATES)
         if retried["retried_jobs_count"] == 0:
             return (
@@ -986,7 +1031,7 @@ def handle_retry_failed(
             f"({source_build['web_url']})."
         )
 
-    current_pr = require_fresh_pr(github, pr, retry_command)
+    current_pr, _ = prepare_pr_for_ci(github, pr, retry_command)
 
     retry_build = buildkite.create_build(
         create_retry_build_payload(

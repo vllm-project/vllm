@@ -316,16 +316,37 @@ review process:
   or the corresponding `/amd-ci` variants. New commits do not start upstream
   CI automatically.
 - Before creating a Buildkite build, `/ci run` and `/amd-ci run`, including
-  `all` and `nightly`, check the requested PR commit against upstream `main`
-  (`origin/main`). The PR must include `main` as it exists at that check:
-  **zero commits behind**.
+  `all` and `nightly`, check the requested PR commit against its target branch
+  in the upstream repository. Your branch must contain every commit currently
+  on that branch: **zero commits behind**. This also applies to PRs targeting
+  release branches or another PR's branch.
 - If the PR is behind, the bot reports the count without creating a new build.
-  Manually merge or rebase upstream `main` into your branch and rerun the command.
-  If `main` advances while you prepare the branch, update it and try again.
-  The workflow does not modify your branch.
-- The same check applies when `/ci retry` creates a new build. Retrying jobs in
-  an existing build and cancelling builds do not run this check. Direct
-  Buildkite launches are outside this workflow. No additional token is needed.
+  Merge or rebase onto the latest target branch, then rerun the command. If the
+  target branch advances in the meantime, update your branch and try again.
+- To run CI on an outdated branch at your own risk, append `--allow-stale` to
+  any run command, for example `/ci run --allow-stale` or
+  `/amd-ci run all --allow-stale`. The same authorization requirements apply.
+  The bot reports the lag and warns that outdated CI configuration may cause
+  failures. Before merging, merge or rebase onto the latest target branch and
+  rerun CI without `--allow-stale` on the latest PR commit.
+- `/ci retry` and `/amd-ci retry` allow **at most 50 commits behind** the target
+  branch. This limit applies both to retries of jobs in an existing build and
+  to new builds that retry selected failed jobs. At 51 or more commits behind,
+  update your branch and rerun CI. Retry commands do not accept `--allow-stale`.
+  Cancelling builds does not check branch freshness.
+- These commands do not modify your branch or enforce merge requirements.
+  Direct Buildkite launches are outside this workflow. No additional token is
+  needed.
+
+Maintainers must configure required Buildkite status checks on the latest PR
+commit and enable GitHub's
+[Require branches to be up to date before merging](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches#require-status-checks-before-merging)
+protection on the relevant target branches to enforce the merge policy. Select
+statuses that confirm the required tests completed, using Buildkite as their
+expected source. An aggregate status that reports "passed and blocked" does not
+by itself guarantee those tests ran; verify the pipeline's required and optional
+blocked steps before choosing statuses or changing blocked-build reporting.
+The CI command workflow does not configure these repository or pipeline settings.
 
 ### Pull Request Limits and Escalation
 
