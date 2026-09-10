@@ -99,6 +99,9 @@ class DraftModelSpeculator(BaseSpeculator):
         self.scheduler_config = vllm_config.scheduler_config
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
+        if self.method == "draft_model":
+            # Standalone prefill consumes the target's new token as well.
+            self.max_num_tokens += self.max_num_reqs
         self.max_model_len = vllm_config.model_config.max_model_len
         self.draft_max_seq_len = self.max_model_len
         # We need to get the hidden size from the draft model config because
@@ -112,7 +115,7 @@ class DraftModelSpeculator(BaseSpeculator):
         # that hook rather than hc_mult alone -- HY V4 runs iHC in its backbone
         # (hc_mult=4) but its MTP head consumes the collapsed states, so
         # widening it feeds propose() a 4x-too-wide buffer.
-        if _target_feeds_hc_residual(vllm_config):
+        if self.method != "draft_model" and _target_feeds_hc_residual(vllm_config):
             hc_mult = getattr(self.draft_model_config.hf_config, "hc_mult", 1)
             self.hidden_size = self.hidden_size * hc_mult
         self.vocab_size = self.draft_model_config.get_vocab_size()
@@ -240,6 +243,7 @@ class DraftModelSpeculator(BaseSpeculator):
             self.attn_vllm_config,
             self.device,
             active_layer_names=self.draft_attn_layer_names,
+            kernel_block_sizes=block_tables.kernel_block_sizes,
         )
         self.block_tables = block_tables
         # The target model runner's buffers and attention groups. Draft
@@ -261,6 +265,7 @@ class DraftModelSpeculator(BaseSpeculator):
         query_start_loc_np: np.ndarray | None = None,
         dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
+        num_actual_tokens = num_tokens_padded
         if query_start_loc_np is not None:
             # Non-uniform query layout (e.g. multi-module MTP's mixed
             # prefill/decode queries); num_query_per_req is ignored.
@@ -269,6 +274,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 query_start_loc_np[: num_reqs + 1]
             )
             query_start_loc_cpu[num_reqs:] = query_start_loc_cpu[num_reqs]
+            num_actual_tokens = int(query_start_loc_np[num_reqs])
             max_query_len = int(
                 (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).max()
             )
@@ -308,7 +314,7 @@ class DraftModelSpeculator(BaseSpeculator):
         attn_metadata = build_attn_metadata(
             attn_groups=self.attn_groups,
             num_reqs=num_reqs_padded,
-            num_tokens=num_tokens_padded,
+            num_tokens=num_actual_tokens,
             query_start_loc_gpu=self.input_buffers.query_start_loc[
                 : num_reqs_padded + 1
             ],

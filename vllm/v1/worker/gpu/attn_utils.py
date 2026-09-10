@@ -80,6 +80,7 @@ def init_attn_backend(
     vllm_config: VllmConfig,
     device: torch.device,
     active_layer_names: set[str] | None = None,
+    kernel_block_sizes: list[int] | None = None,
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
@@ -126,9 +127,10 @@ def init_attn_backend(
 
         attn_groups.append([group_map[key] for key in group_order])
 
-    # Phase 2: pick a kernel block size per kv cache group that is supported
-    # by all backends within that group.
-    kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
+    # Phase 2: reuse the allocated cache's sizes, or select sizes supported
+    # by all backends within each group.
+    if kernel_block_sizes is None:
+        kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
 
     # Phase 3: create metadata builders and determine cudagraph support.
     attn_backend_workspace: torch.Tensor | None = None

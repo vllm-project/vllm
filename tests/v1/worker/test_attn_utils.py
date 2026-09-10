@@ -7,11 +7,14 @@ while keeping per-block content compact, so padding bytes at the end of each pag
 never addressed by the logical view.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
-from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.config import ParallelConfig
+from vllm.v1.attention.backend import AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -25,7 +28,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.attn_utils import (
     get_attn_cg_support,
     get_query_lens_mismatch_unsupported_backend,
+    init_attn_backend,
 )
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import (
     AttentionGroup,
     allocate_kv_cache,
@@ -51,6 +56,81 @@ class _DraftBackend:
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         return False
+
+
+def test_draft_metadata_preserves_allocated_kernel_block_size(monkeypatch):
+    """Filtering layers must not change the page unit of an allocated KV cache."""
+
+    class Builder(_FakeMetadataBuilder):
+        requires_block_table_width = False
+
+        def __init__(self, spec, *_args):
+            super().__init__(AttentionCGSupport.ALWAYS)
+            self.block_size_at_init = spec.block_size
+
+        def set_kernel_block_size(self, size):
+            self.kernel_block_size = size
+
+    class TargetBackend:
+        @classmethod
+        def full_cls_name(cls):
+            return (__name__, cls.__name__)
+
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return [16, 32, 64]
+
+        @staticmethod
+        def get_builder_cls():
+            return Builder
+
+    class DraftBackend(TargetBackend):
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return [MultipleOf(16)]
+
+    layers = {
+        "target_only": SimpleNamespace(
+            get_attn_backend=lambda: TargetBackend, kv_sharing_target_layer_name=None
+        ),
+        "target": SimpleNamespace(
+            get_attn_backend=lambda: TargetBackend, kv_sharing_target_layer_name=None
+        ),
+        "draft": SimpleNamespace(
+            get_attn_backend=lambda: DraftBackend, kv_sharing_target_layer_name=None
+        ),
+    }
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.attn_utils.get_layers_from_vllm_config",
+        lambda config, layer_type, names=None: (
+            layers if names is None else {name: layers[name] for name in names}
+        ),
+    )
+    spec = FullAttentionSpec(
+        block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+    )
+    kv_config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["target_only"], spec.copy_with_new_block_size(32)),
+            KVCacheGroupSpec(["target", "draft"], spec),
+        ],
+    )
+    config = SimpleNamespace(parallel_config=ParallelConfig())
+    device = torch.device("cpu")
+    _, _, sizes = init_attn_backend(kv_config, config, device)
+    assert sizes == [32, 64]
+    block_tables = SimpleNamespace(kernel_block_sizes=sizes)
+
+    speculator = SimpleNamespace(
+        device=device, attn_vllm_config=config, draft_attn_layer_names={"draft"}
+    )
+    DraftModelSpeculator.set_attn(speculator, None, kv_config, block_tables, None, [])
+    draft_group = speculator.attn_groups[1][0]
+    assert draft_group.kv_cache_group_id == 1
+    builder = draft_group.get_metadata_builder()
+    assert builder.block_size_at_init == builder.kernel_block_size == sizes[1]
 
 
 def test_attention_checks_preserve_global_and_target_scoped_support():

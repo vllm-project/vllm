@@ -27,6 +27,11 @@ logger = init_logger(__name__)
 
 
 class AutoRegressiveSpeculator(DraftModelSpeculator):
+    reuse_target_attn_metadata = True
+    pass_hidden_states_to_model = True
+    prefill_sample_position_offset = 1
+    prefill_seq_len_offset = 0
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
@@ -70,6 +75,55 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
     def on_multi_step_decode_begin(self, num_reqs: int) -> None: ...
 
     def on_multi_step_decode_end(self, num_reqs: int) -> None: ...
+
+    def prepare_inputs(
+        self,
+        input_batch: InputBatch,
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        last_sampled: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        dummy_run: bool = False,
+    ) -> InputBatch:
+        if aux_hidden_states:
+            assert self.method == "eagle3"
+            hidden_states = self.model.combine_hidden_states(
+                torch.cat(aux_hidden_states, dim=-1)
+            )
+        else:
+            hidden_states = last_hidden_states
+        self.hidden_states[: input_batch.num_tokens_after_padding].copy_(hidden_states)
+        prepare_prefill_inputs(
+            self.last_token_indices,
+            self.current_draft_step,
+            self.input_buffers,
+            input_batch,
+            num_sampled,
+            num_rejected,
+            last_sampled,
+            next_prefill_tokens,
+            self.max_num_reqs,
+        )
+        return input_batch
+
+    def prepare_attn(
+        self,
+        input_batch: InputBatch,
+        batch_desc: BatchExecutionDescriptor,
+    ) -> tuple[dict[str, Any] | None, dict[str, torch.Tensor]]:
+        raise NotImplementedError
+
+    def compute_decode_slot_mappings(
+        self, num_reqs: int, num_tokens: int
+    ) -> torch.Tensor:
+        return self.block_tables.compute_slot_mappings(
+            self.idx_mapping[:num_reqs],
+            self.input_buffers.query_start_loc[: num_reqs + 1],
+            self.input_buffers.positions[:num_reqs],
+            num_tokens,
+        )
 
     @property
     def advance_draft_positions(self) -> bool:
@@ -124,13 +178,18 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 ", ".join(unsupported_backends),
             )
 
+    def get_prefill_cudagraph_mode(
+        self, cudagraph_mode: CUDAGraphMode
+    ) -> CUDAGraphMode:
+        return cudagraph_mode
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # Initialize cudagraph manager for draft prefill (draft position 0).
         self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
             self.vllm_config,
             self.device,
-            cudagraph_mode,
-            self.num_speculative_steps + 1,
+            self.get_prefill_cudagraph_mode(cudagraph_mode),
+            self.num_speculative_steps + 1 + self.prefill_seq_len_offset,
         )
 
         # PIECEWISE cudagraphs are not supported for draft decodes.
@@ -170,9 +229,13 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self.prefill_cudagraph_manager.capture(
             self._prefill,
             self.model_state,
-            self.target_input_buffers,
+            self.target_input_buffers
+            if self.reuse_target_attn_metadata
+            else self.input_buffers,
             self.block_tables,
-            self.target_attn_groups,
+            self.target_attn_groups
+            if self.reuse_target_attn_metadata
+            else self.attn_groups,
             self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
@@ -204,7 +267,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
     def propose(
         self,
         input_batch: InputBatch,
-        attn_metadata: dict[str, Any],
+        attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor],
         # [num_tokens, hidden_size]
         last_hidden_states: torch.Tensor,
@@ -228,29 +291,25 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
     ) -> torch.Tensor:
-        num_tokens = input_batch.num_tokens
-        num_tokens_padded = input_batch.num_tokens_after_padding
+        prefill_input_batch = self.prepare_inputs(
+            input_batch,
+            last_hidden_states,
+            aux_hidden_states,
+            num_sampled,
+            num_rejected,
+            last_sampled,
+            next_prefill_tokens,
+            dummy_run=dummy_run,
+        )
+        num_tokens = prefill_input_batch.num_tokens
+        num_tokens_padded = prefill_input_batch.num_tokens_after_padding
         num_reqs = input_batch.num_reqs
-        max_query_len = input_batch.num_scheduled_tokens.max()
+        max_query_len = prefill_input_batch.num_scheduled_tokens.max()
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
         self.draft_max_seq_len = min(
-            max_seq_len + self.num_speculative_steps, self.max_model_len
+            max_seq_len + self.num_speculative_steps + self.prefill_seq_len_offset,
+            self.max_model_len,
         )
-
-        # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
-        # number of rejected tokens, we maintain the size of input_ids and
-        # hidden_states the same as the target model's. This means, we pad each
-        # request's query length to include any rejected positions. By doing so,
-        # we can also reuse the attention metadata (e.g., query_start_loc,
-        # seq_lens) of the target model.
-        if aux_hidden_states:
-            assert self.method == "eagle3"
-            hidden_states = self.model.combine_hidden_states(
-                torch.cat(aux_hidden_states, dim=-1)
-            )
-        else:
-            hidden_states = last_hidden_states
-        self.hidden_states[:num_tokens_padded].copy_(hidden_states)
 
         self._copy_request_inputs(
             num_reqs,
@@ -259,21 +318,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             seeds,
         )
 
-        # Get the input ids and last token indices for the speculator.
-        prepare_prefill_inputs(
-            self.last_token_indices,
-            self.current_draft_step,
-            self.input_buffers,
-            input_batch,
-            num_sampled,
-            num_rejected,
-            last_sampled,
-            next_prefill_tokens,
-            self.max_num_reqs,
-        )
-
-        # When all requests are decoding (no true prefills), each has
-        # num_speculative_steps + 1 tokens, enabling FULL graph replay.
+        # Uniform decode-only batches can replay a FULL prefill graph.
         uniform_token_count = get_uniform_decode_token_count(
             num_reqs,
             # Use the actual number of tokens without padding added by
@@ -300,15 +345,19 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         self._prepare_eplb_forward(num_tokens)
 
+        if not self.reuse_target_attn_metadata and not (
+            dummy_run and skip_attn_for_dummy_run
+        ):
+            attn_metadata, slot_mappings = self.prepare_attn(
+                prefill_input_batch, prefill_batch_desc
+            )
+
         self.on_prefill_begin(num_reqs)
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Replay the full graph for draft prefill.
             assert self.prefill_cudagraph_manager is not None
             self.prefill_cudagraph_manager.run_fullgraph(prefill_batch_desc)
         else:
-            # The target model's attention metadata and slot mappings
-            # can directly be used for draft prefill, because of the
-            # identical batch shape and KV cache layout.
             self._prefill(
                 num_reqs,
                 prefill_batch_desc.num_tokens,
@@ -334,6 +383,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.max_model_len,
             self.max_num_reqs,
             advance_draft_positions=self.advance_draft_positions,
+            seq_len_offset=self.prefill_seq_len_offset,
         )
 
         decode_batch_sync, num_batch_tokens = (
@@ -371,7 +421,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dummy_run and skip_attn_for_dummy_run,
             decode_batch_desc,
             num_tokens_across_dp,
-            input_batch.seq_lens_cpu_upper_bound,
+            prefill_input_batch.seq_lens_cpu_upper_bound,
         )
         self.on_multi_step_decode_end(num_reqs)
 
@@ -415,9 +465,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             model_inputs = dict(
                 input_ids=self.input_buffers.input_ids[:num_tokens],
                 positions=self.input_buffers.positions[:num_tokens],
-                hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
+            if self.pass_hidden_states_to_model:
+                model_inputs["hidden_states"] = self.hidden_states[:num_tokens]
             if cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
                 # Draft prefill with PIECEWISE cudagraph (compiled PW or breakable),
                 # chosen inside run_pw_graph.
@@ -449,10 +500,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
     ) -> None:
         last_token_indices = self.last_token_indices[:num_reqs]
         positions = self.input_buffers.positions[last_token_indices]
-        # The output hidden state at position P (= positions) and the token id
-        # at P+1 are used to draft the token at P+2. Sampling keys a draw by the
-        # position before the sampled token, so the net adjustment is +1.
-        sample_src_positions = positions + 1
+        # EAGLE/MTP pair hidden state P with token P+1; standalone models
+        # consume token P at its own position.
+        sample_src_positions = positions + self.prefill_sample_position_offset
         idx_mapping = self.idx_mapping[:num_reqs]
 
         last_hidden_states, hidden_states = self._run_model(
@@ -489,20 +539,14 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
     ) -> None:
-        positions = self.input_buffers.positions[:num_reqs]
-        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
-        idx_mapping = self.idx_mapping[:num_reqs]
-
         attn_metadata = None
         slot_mappings_by_layer = None
         for step in range(1, self.num_speculative_steps):
             # Rebuild every step when positions advance, or just once
             # on the first step when positions are constant (Gemma4 MTP).
             if not skip_attn and (self.advance_draft_positions or step == 1):
-                slot_mappings = self.block_tables.compute_slot_mappings(
-                    idx_mapping,
-                    query_start_loc,
-                    positions,
+                slot_mappings = self.compute_decode_slot_mappings(
+                    num_reqs,
                     batch_desc.num_tokens,
                 )
                 slot_mappings_by_layer = build_slot_mappings_by_layer(
@@ -540,17 +584,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor,
     ) -> None:
-        positions = self.input_buffers.positions[:num_reqs]
-        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
-        idx_mapping = self.idx_mapping[:num_reqs]
-
         attn_metadata = None
         slot_mappings_by_layer = None
         if not skip_attn:
-            slot_mappings = self.block_tables.compute_slot_mappings(
-                idx_mapping,
-                query_start_loc,
-                positions,
+            slot_mappings = self.compute_decode_slot_mappings(
+                num_reqs,
                 batch_desc.num_tokens,
             )
             if batch_desc.cg_mode != CUDAGraphMode.FULL:
@@ -589,9 +627,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
-        idx_mapping = self.idx_mapping[:num_reqs]
-        positions = self.input_buffers.positions[:num_reqs]
-        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         attn_groups = (
             [group for groups in self.attn_groups for group in groups]
             if attn_metadata is not None
@@ -613,10 +648,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 and attn_metadata is not None
                 and self.advance_draft_positions
             ):
-                self.block_tables.compute_slot_mappings(
-                    idx_mapping,
-                    query_start_loc,
-                    positions,
+                self.compute_decode_slot_mappings(
+                    num_reqs,
                     num_tokens_padded,
                 )
                 for attn_group in attn_groups:
@@ -809,6 +842,7 @@ def _prepare_decode_inputs_kernel(
     max_num_reqs,
     BLOCK_SIZE: tl.constexpr,
     ADVANCE_DRAFT_POSITIONS: tl.constexpr,
+    SEQ_LEN_OFFSET: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     num_reqs = tl.num_programs(0) - 1
@@ -837,7 +871,7 @@ def _prepare_decode_inputs_kernel(
 
     target_seq_len = tl.load(target_seq_lens_ptr + req_idx)
     num_rejected = tl.load(num_rejected_ptr + req_idx)
-    seq_len = target_seq_len - num_rejected
+    seq_len = target_seq_len - num_rejected + SEQ_LEN_OFFSET
     if ADVANCE_DRAFT_POSITIONS:
         # Compute position and seq_lens.
         # NOTE(woosuk): To prevent out-of-range access, we clamp these values
@@ -858,6 +892,7 @@ def prepare_decode_inputs(
     max_model_len: int,
     max_num_reqs: int,
     advance_draft_positions: bool = True,
+    seq_len_offset: int = 0,
 ):
     num_reqs = draft_tokens.shape[0]
     _prepare_decode_inputs_kernel[(num_reqs + 1,)](
@@ -874,6 +909,7 @@ def prepare_decode_inputs(
         max_num_reqs,
         BLOCK_SIZE=1024,
         ADVANCE_DRAFT_POSITIONS=advance_draft_positions,
+        SEQ_LEN_OFFSET=seq_len_offset,
     )
 
 
