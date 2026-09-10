@@ -367,12 +367,26 @@ MAX_SWEEP_RETRIES="${{VLLM_RECIPE_SWEEP_RETRIES:-2}}"
   ${{CONTINUE_ON_ERROR_ARG}} \
   "$@" || {{
     if [[ "${{SWEEP_RETRY_COUNT}}" -ge "${{MAX_SWEEP_RETRIES}}" ]]; then
-      echo "Sweep failed after ${{MAX_SWEEP_RETRIES}} automatic resume retries." >&2
+      echo "Sweep failed after ${{MAX_SWEEP_RETRIES}} automatic retries." >&2
       exit 1
     fi
+
     NEXT_RETRY=$((SWEEP_RETRY_COUNT + 1))
-    echo "Sweep command failed; retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} with --resume"
-    VLLM_RECIPE_SWEEP_RETRY_COUNT="${{NEXT_RETRY}}" exec "$0" --resume "$@"
+    RETRY_ARGS=()
+    for arg in "$@"; do
+      [[ "$arg" == "--resume" ]] && continue
+      RETRY_ARGS+=("$arg")
+    done
+
+    EXPERIMENT_DIR="${{SCRIPT_DIR}}/results/{experiment_name}"
+    if [[ -d "${{EXPERIMENT_DIR}}" ]]; then
+      echo "Sweep command failed; retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} with --resume"
+      RETRY_ARGS=(--resume "${{RETRY_ARGS[@]}}")
+    else
+      echo "Sweep command failed before resumable state was created; retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} from the start"
+    fi
+
+    VLLM_RECIPE_SWEEP_RETRY_COUNT="${{NEXT_RETRY}}" exec "$0" "${{RETRY_ARGS[@]}}"
   }}
 """
     path.write_text(script, encoding="utf-8")
@@ -753,12 +767,26 @@ vllm bench sweep serve_workload \
   ${{CONTINUE_ON_ERROR_ARG}} \
   "$@" || {{
     if [[ "${{SWEEP_RETRY_COUNT}}" -ge "${{MAX_SWEEP_RETRIES}}" ]]; then
-      echo "Sweep failed after ${{MAX_SWEEP_RETRIES}} automatic resume retries." >&2
+      echo "Sweep failed after ${{MAX_SWEEP_RETRIES}} automatic retries." >&2
       exit 1
     fi
+
     NEXT_RETRY=$((SWEEP_RETRY_COUNT + 1))
-    echo "Sweep command failed; retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} with --resume"
-    VLLM_RECIPE_SWEEP_RETRY_COUNT="${{NEXT_RETRY}}" exec "$0" --resume "$@"
+    RETRY_ARGS=()
+    for arg in "$@"; do
+      [[ "$arg" == "--resume" ]] && continue
+      RETRY_ARGS+=("$arg")
+    done
+
+    EXPERIMENT_DIR="${{SCRIPT_DIR}}/results/concurrency-tuning"
+    if [[ -d "${{EXPERIMENT_DIR}}" ]]; then
+      echo "Sweep command failed; retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} with --resume"
+      RETRY_ARGS=(--resume "${{RETRY_ARGS[@]}}")
+    else
+      echo "Sweep command failed before resumable state was created; retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} from the start"
+    fi
+
+    VLLM_RECIPE_SWEEP_RETRY_COUNT="${{NEXT_RETRY}}" exec "$0" "${{RETRY_ARGS[@]}}"
   }}
 """
     path.write_text(script, encoding="utf-8")
