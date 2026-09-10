@@ -11,7 +11,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 num_tokens_range = [2**i for i in range(0, 8, 2)]
 num_experts_range = [16, 32, 64, 128, 256, 512]
-topk_range = [3, 4]
+topk_range = [3, 4, 8, 10]
 configs = list(itertools.product(num_tokens_range, num_experts_range, topk_range))
 
 
@@ -39,9 +39,9 @@ def get_benchmark(scoring_func):
             x_names=["num_tokens", "num_experts", "topk"],
             x_vals=[list(_) for _ in configs],
             line_arg="provider",
-            line_vals=["torch", "vllm"],
-            line_names=["Torch", "vLLM"],
-            styles=[("blue", "-"), ("red", "-")],
+            line_vals=["torch", "vllm", "aiter_gating"],
+            line_names=["Torch", "vLLM", "AITER topk_gating"],
+            styles=[("blue", "-"), ("red", "-"), ("green", "-")],
             ylabel="us",
             plot_name=f"fused-topk-perf-{scoring_func}",
             args={},
@@ -67,6 +67,32 @@ def get_benchmark(scoring_func):
                     topk=topk,
                     renormalize=renormalize,
                     scoring_func=scoring_func,
+                ),
+                quantiles=quantiles,
+            )
+        elif provider == "aiter_gating":
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if (
+                scoring_func != "softmax"
+                or not rocm_aiter_ops.is_fused_moe_enabled()
+                or not rocm_aiter_ops.topk_gating_available()
+            ):
+                return float("nan"), float("nan"), float("nan")
+            topk_weights = torch.empty(
+                (num_tokens, topk), dtype=torch.float32, device="cuda"
+            )
+            topk_ids = torch.empty((num_tokens, topk), dtype=torch.int32, device="cuda")
+            token_expert_indices = torch.empty(
+                (num_tokens, topk), dtype=torch.int32, device="cuda"
+            )
+            ms, min_ms, max_ms = triton.testing.do_bench(
+                lambda: rocm_aiter_ops.topk_gating(
+                    topk_weights,
+                    topk_ids,
+                    token_expert_indices,
+                    gating_output,
+                    renormalize,
                 ),
                 quantiles=quantiles,
             )
