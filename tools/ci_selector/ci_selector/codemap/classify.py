@@ -551,12 +551,35 @@ def _classify_added_init(state: RepoState, path: str, ctx: DiffContext) -> Claim
     )
 
 
+def _cycle_colocated_tests(state: RepoState, module: str) -> set[str] | None:
+    """The co-located tests standing in for one cycle member's reverse closure.
+
+    Inside the import cycle reach is not a routing signal: every member reaches
+    every other, so a closure cannot discriminate between them. These are the
+    answer the `.py` cycle arm already gives for that.
+
+    None means "no answer here" and the caller keeps the closure, which is
+    every way of not knowing: rule off, module outside the cycle, no co-located
+    tests, or tests no auto-run step collects. That last one is the closure's
+    own question, so it is left to the closure.
+    """
+    if colocation.mode() == "off":
+        return None
+    if module not in state.full.import_cycle().reach_blind:
+        return None
+    implicated, _ = colocation.implicated_tests(state, module)
+    if not implicated & state.invoked:
+        return None
+    return set(implicated)
+
+
 def _classify_package_data(state: RepoState, path: str) -> Claim | None:
     """A non-Python asset under vllm/ the graph cannot reach. Routed to the
     reverse closure of its owning package, meaning the nearest parent directory
     with Python in it, where the loader lives, plus a device-family floor read
     off the filename. Stops before the bare vllm root, which would be a
-    run-all in disguise."""
+    run-all in disguise. An owning module inside the import cycle routes by
+    its co-located tests instead, since reach cannot discriminate in there."""
     if not path.startswith("vllm/") or path.endswith(".py"):
         return None
     index = state.full.index
@@ -571,13 +594,22 @@ def _classify_package_data(state: RepoState, path: str) -> Claim | None:
     if not owning:
         return None
     test_files: set[str] = set()
-    script_files: set[str] = set()
+    swapped = 0
     for f in owning:
-        closure = graph.reverse_closure({f})
-        test_files |= _boot_gated_tests(state, f, closure)
-        script_files |= {
-            c for c in closure if c.startswith(("examples/", "benchmarks/"))
-        }
+        colocated = _cycle_colocated_tests(state, f)
+        if colocated is None:
+            test_files |= _boot_gated_tests(state, f, graph.reverse_closure({f}))
+            continue
+        test_files |= colocated
+        swapped += 1
+    # Scripts come off the package's whole reach either way: a member reaches
+    # the same ones whether its tests come from reach or co-location, and the
+    # closure of the union is the union of the closures.
+    script_files = {
+        c
+        for c in graph.reverse_closure(set(owning))
+        if c.startswith(("examples/", "benchmarks/"))
+    }
     filename = path.rsplit("/", 1)[-1]
     family = hardware.family_of_filename(filename, path)
     device_scope = hardware.device_name_of_filename(filename, path)
@@ -604,6 +636,16 @@ def _classify_package_data(state: RepoState, path: str) -> Claim | None:
         f"{path}: non-Python asset owned by {d}/; routed to the owning "
         "modules' reverse-closure tests"
     )
+    if swapped:
+        detail += (
+            f"; {swapped} of {len(owning)} owning modules are inside the "
+            "import cycle and routed by co-located tests instead"
+        )
+        if swapped < len(owning):
+            detail += (
+                f"; the other {len(owning) - swapped} keep their closures, "
+                "which bound the answer"
+            )
     if family:
         detail += f"; {family} device family from filename adds {len(fam_steps)} steps"
     if device_scope:

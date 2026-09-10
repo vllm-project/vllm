@@ -1904,6 +1904,144 @@ def test_declared_deps_never_fires_inside_graph_roots(state):
     assert claim.rule == "package-data" and not claim.run_all
 
 
+# ---- R5b: the import-cycle guard on package data ---------------------------
+
+_H20_TABLE = (
+    "vllm/model_executor/layers/fused_moe/configs/"
+    "E=128,N=384,device_name=NVIDIA_H20.json"
+)
+_MOE_PKG = "vllm/model_executor/layers/fused_moe"
+
+
+def test_package_data_inside_the_cycle_routes_by_colocation(state, monkeypatch):
+    """An owning module in the import cycle has a reverse closure of every test
+    in the repo, so it routes nothing. Co-located tests answer instead, and
+    turning the rule off must bring the useless wider answer back."""
+    from ci_selector.codemap import colocation
+    from ci_selector.codemap.classify import _classify
+
+    swapped = _classify(state, _H20_TABLE, None)
+    assert swapped.rule == "package-data"
+    assert "routed by co-located tests instead" in swapped.detail
+    monkeypatch.setattr(colocation, "mode", lambda: "off")
+    kept = _classify(state, _H20_TABLE, None)
+    assert "co-located tests instead" not in kept.detail
+    assert swapped.test_files < kept.test_files
+
+
+def test_a_tuning_table_no_longer_implicates_every_test_in_the_repo(state):
+    """#54668 stated exactly: the table's owning modules are in the cycle, so
+    its reverse closure was set-equal to the whole suite. A route returning
+    every test in the repo is not a route, and no number of device tables can
+    make it one."""
+    from ci_selector.codemap.classify import _classify
+
+    claim = _classify(state, _H20_TABLE, None)
+    every_test = set(state.test_index().files)
+    assert every_test, "no test index to compare against"
+    assert not every_test <= claim.test_files
+    assert claim.test_files & every_test, "routed to no test at all"
+
+
+def test_the_cycle_swap_keeps_the_closure_of_the_package_s_outside_half(state):
+    """The swap is decided per owning module, not per package. A package
+    straddling the cycle keeps the real reach of the half outside it, which is
+    reach the cycle never collapsed and colocation has no right to drop."""
+    from ci_selector.codemap.classify import _boot_gated_tests, _classify
+
+    blind = state.full.import_cycle().reach_blind
+    owning = [
+        f for f in state.full.index.file_to_module if f.rsplit("/", 1)[0] == _MOE_PKG
+    ]
+    outside = [f for f in owning if f not in blind]
+    assert outside and len(outside) < len(owning), (
+        f"{_MOE_PKG} no longer straddles the cycle ({len(outside)}/{len(owning)} "
+        "outside); this test needs a package that still does"
+    )
+
+    def closure_tests(module):
+        closure = state.full.graph.reverse_closure({module})
+        return _boot_gated_tests(state, module, closure)
+
+    claim = _classify(state, _H20_TABLE, None)
+    inside = [f for f in owning if f in blind]
+    assert not any(closure_tests(m) <= claim.test_files for m in inside), (
+        "every in-cycle module's full closure survived, so nothing was swapped "
+        "and the outside-half assertion below would hold vacuously"
+    )
+    for module in outside:
+        assert closure_tests(module) <= claim.test_files, module
+
+
+def test_one_declining_owner_re_absorbs_the_whole_package_s_saving(state):
+    """The union is only as narrow as its widest owner that did NOT swap, so a
+    package can route entirely by co-location and still land on the closure.
+    Pinned because the detail string must not read as a narrowing when this
+    happens, and because a future fix here must be a deliberate one."""
+    from ci_selector.codemap import colocation
+    from ci_selector.codemap.classify import _classify
+
+    path = "vllm/utils/numa_wrapper.sh"
+    swapped = _classify(state, path, None)
+    assert "routed by co-located tests instead" in swapped.detail
+    assert "keep their closures" in swapped.detail
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(colocation, "mode", lambda: "off")
+        kept = _classify(state, path, None)
+    assert swapped.test_files == kept.test_files
+
+
+def test_the_cycle_swap_keeps_the_scripts_the_closure_reached(state):
+    """The swap replaces a module's tests, not the examples and benchmarks its
+    closure reached: those run the asset directly and no co-located test file
+    stands in for them. Skipping the union drops ~230 scripts per asset."""
+    from ci_selector.codemap.classify import _classify
+
+    claim = _classify(state, _H20_TABLE, None)
+    assert "routed by co-located tests instead" in claim.detail
+    scripts = {
+        f for f in claim.test_files if f.startswith(("examples/", "benchmarks/"))
+    }
+    assert len(scripts) > 100, len(scripts)
+
+
+def test_the_cycle_swap_declines_rather_than_route_to_tests_nothing_runs(state):
+    """Direction guard on all three ways of not knowing. Declining keeps the
+    closure, which over-selects; routing to co-located tests no auto-run step
+    collects would select nothing and lose whatever the closure covered."""
+    import dataclasses
+
+    from ci_selector.codemap import colocation
+    from ci_selector.codemap.classify import _cycle_colocated_tests
+
+    module = f"{_MOE_PKG}/fused_moe.py"
+    assert module in state.full.import_cycle().reach_blind
+    assert _cycle_colocated_tests(state, module)
+
+    # Must be a file that would pass the tests-exist gate, or it exits through
+    # that gate and the cycle gate below it is never reached.
+    blind = state.full.import_cycle().reach_blind
+    outsider = next(
+        (
+            f
+            for f in state.full.index.file_to_module
+            if f not in blind
+            and colocation.implicated_tests(state, f)[0] & state.invoked
+        ),
+        None,
+    )
+    assert outsider, "no out-of-cycle module with collected co-located tests at HEAD"
+    assert _cycle_colocated_tests(state, outsider) is None
+
+    uncollected = dataclasses.replace(state, invoked=set())
+    assert _cycle_colocated_tests(uncollected, module) is None
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(colocation, "mode", lambda: "off")
+        assert _cycle_colocated_tests(state, module) is None
+
+
 @pytest.mark.drift
 def test_release_pipeline_files_still_exist(vllm_repo):
     """The release pipeline sits in no job_dir, so it is named by hand rather
