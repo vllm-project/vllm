@@ -774,6 +774,50 @@ def rejection_greedy_sample_kernel(
         )
 
 
+def _rejection_greedy_sample_warmup_inputs(
+    *, synthetic_mode: bool
+) -> dict[str, object]:
+    all_greedy = WarmupChoices(False, True)
+    int32 = TritonWarmupTensor(torch.int32)
+    return dict(
+        output_token_ids=int32,
+        cu_num_draft_tokens=int32,
+        draft_token_ids=int32,
+        target_argmax=TritonWarmupTensor(torch.int64),
+        bonus_token_ids=TritonWarmupTensor(torch.int64),
+        is_greedy=None if all_greedy else TritonWarmupTensor(torch.bool),
+        max_spec_len=5,
+        uniform_probs=(
+            None
+            if all_greedy and not synthetic_mode
+            else TritonWarmupTensor(torch.float64)
+        ),
+        synthetic_conditional_rates=(
+            TritonWarmupTensor(torch.float32) if synthetic_mode else None
+        ),
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=rejection_greedy_sample_kernel,
+    warmup_inputs=_rejection_greedy_sample_warmup_inputs,
+)
+def _rejection_greedy_sample(
+    output_token_ids: torch.Tensor,
+    cu_num_draft_tokens: torch.Tensor,
+    draft_token_ids: torch.Tensor,
+    target_argmax: torch.Tensor,
+    bonus_token_ids: torch.Tensor,
+    is_greedy: torch.Tensor | None,
+    max_spec_len: int,
+    uniform_probs: torch.Tensor | None,
+    synthetic_conditional_rates: torch.Tensor | None,
+) -> DispatchSpec:
+    return (output_token_ids.shape[0],), dict(
+        SYNTHETIC_MODE=synthetic_conditional_rates is not None,
+    )
+
+
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
 @triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_random_sample_kernel(
@@ -850,6 +894,57 @@ def rejection_random_sample_kernel(
         )
 
 
+def _rejection_random_sample_warmup_inputs(
+    *, synthetic_mode: bool
+) -> dict[str, object]:
+    vocab_size: Any = WarmupChoices(2, 16)
+    no_draft_probs = WarmupChoices(False, True)
+    int32 = TritonWarmupTensor(torch.int32)
+    probabilities = TritonWarmupTensor(
+        torch.float32,
+        shape=(1, vocab_size),
+    )
+    return dict(
+        output_token_ids=int32,
+        cu_num_draft_tokens=int32,
+        draft_token_ids=int32,
+        draft_probs=None if no_draft_probs else probabilities,
+        target_probs=probabilities,
+        bonus_token_ids=TritonWarmupTensor(torch.int64),
+        recovered_token_ids=int32,
+        uniform_probs=TritonWarmupTensor(torch.float64),
+        is_greedy=TritonWarmupTensor(torch.bool),
+        max_spec_len=5,
+        synthetic_conditional_rates=(
+            TritonWarmupTensor(torch.float32) if synthetic_mode else None
+        ),
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=rejection_random_sample_kernel,
+    warmup_inputs=_rejection_random_sample_warmup_inputs,
+)
+def _rejection_random_sample(
+    output_token_ids: torch.Tensor,
+    cu_num_draft_tokens: torch.Tensor,
+    draft_token_ids: torch.Tensor,
+    draft_probs: torch.Tensor | None,
+    target_probs: torch.Tensor,
+    bonus_token_ids: torch.Tensor,
+    recovered_token_ids: torch.Tensor,
+    uniform_probs: torch.Tensor,
+    is_greedy: torch.Tensor,
+    max_spec_len: int,
+    synthetic_conditional_rates: torch.Tensor | None,
+) -> DispatchSpec:
+    return (output_token_ids.shape[0],), dict(
+        vocab_size=target_probs.shape[1],
+        NO_DRAFT_PROBS=draft_probs is None,
+        SYNTHETIC_MODE=synthetic_conditional_rates is not None,
+    )
+
+
 # NOTE(woosuk): Avoid specialization to prevent unnecessary recompilation.
 @triton.jit(do_not_specialize=["replace_from", "replace_to"])
 def expand_kernel(
@@ -872,6 +967,31 @@ def expand_kernel(
     src_val = tl.where(src_val == replace_from, replace_to, src_val)
     offset = tl.arange(0, MAX_NUM_TOKENS)
     tl.store(output_ptr + start_idx + offset, src_val, mask=offset < num_tokens)
+
+
+def _expand_warmup_inputs() -> dict[str, object]:
+    dtype = WarmupChoices(torch.float32, torch.int32, torch.int64)
+    data = TritonWarmupTensor(dtype)
+    return dict(
+        output=data,
+        input=data,
+        cu_num_tokens=TritonWarmupTensor(torch.int32),
+        replace_from=0,
+        replace_to=0,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=expand_kernel, warmup_inputs=_expand_warmup_inputs
+)
+def _expand(
+    output: torch.Tensor,
+    input: torch.Tensor,
+    cu_num_tokens: torch.Tensor,
+    replace_from: int,
+    replace_to: int,
+) -> DispatchSpec:
+    return (input.shape[0],), dict(MAX_NUM_TOKENS=MAX_SPEC_LEN)
 
 
 @triton.jit
@@ -956,126 +1076,6 @@ def sample_recovered_tokens_kernel(
 
     recovered_id = tl.minimum(recovered_id, vocab_size - 1)
     tl.store(output_token_ids_ptr + token_idx, recovered_id)
-
-
-def _rejection_greedy_sample_warmup_inputs(
-    *, synthetic_mode: bool
-) -> dict[str, object]:
-    all_greedy = WarmupChoices(False, True)
-    int32 = TritonWarmupTensor(torch.int32)
-    return dict(
-        output_token_ids=int32,
-        cu_num_draft_tokens=int32,
-        draft_token_ids=int32,
-        target_argmax=TritonWarmupTensor(torch.int64),
-        bonus_token_ids=TritonWarmupTensor(torch.int64),
-        is_greedy=None if all_greedy else TritonWarmupTensor(torch.bool),
-        max_spec_len=5,
-        uniform_probs=(
-            None
-            if all_greedy and not synthetic_mode
-            else TritonWarmupTensor(torch.float64)
-        ),
-        synthetic_conditional_rates=(
-            TritonWarmupTensor(torch.float32) if synthetic_mode else None
-        ),
-    )
-
-
-@triton_kernel_dispatcher_with_warmup(
-    kernel=rejection_greedy_sample_kernel,
-    warmup_inputs=_rejection_greedy_sample_warmup_inputs,
-)
-def _rejection_greedy_sample(
-    output_token_ids: torch.Tensor,
-    cu_num_draft_tokens: torch.Tensor,
-    draft_token_ids: torch.Tensor,
-    target_argmax: torch.Tensor,
-    bonus_token_ids: torch.Tensor,
-    is_greedy: torch.Tensor | None,
-    max_spec_len: int,
-    uniform_probs: torch.Tensor | None,
-    synthetic_conditional_rates: torch.Tensor | None,
-) -> DispatchSpec:
-    return (output_token_ids.shape[0],), dict(
-        SYNTHETIC_MODE=synthetic_conditional_rates is not None,
-    )
-
-
-def _rejection_random_sample_warmup_inputs(
-    *, synthetic_mode: bool
-) -> dict[str, object]:
-    vocab_size: Any = WarmupChoices(2, 16)
-    no_draft_probs = WarmupChoices(False, True)
-    int32 = TritonWarmupTensor(torch.int32)
-    probabilities = TritonWarmupTensor(
-        torch.float32,
-        shape=(1, vocab_size),
-    )
-    return dict(
-        output_token_ids=int32,
-        cu_num_draft_tokens=int32,
-        draft_token_ids=int32,
-        draft_probs=None if no_draft_probs else probabilities,
-        target_probs=probabilities,
-        bonus_token_ids=TritonWarmupTensor(torch.int64),
-        recovered_token_ids=int32,
-        uniform_probs=TritonWarmupTensor(torch.float64),
-        is_greedy=TritonWarmupTensor(torch.bool),
-        max_spec_len=5,
-        synthetic_conditional_rates=(
-            TritonWarmupTensor(torch.float32) if synthetic_mode else None
-        ),
-    )
-
-
-@triton_kernel_dispatcher_with_warmup(
-    kernel=rejection_random_sample_kernel,
-    warmup_inputs=_rejection_random_sample_warmup_inputs,
-)
-def _rejection_random_sample(
-    output_token_ids: torch.Tensor,
-    cu_num_draft_tokens: torch.Tensor,
-    draft_token_ids: torch.Tensor,
-    draft_probs: torch.Tensor | None,
-    target_probs: torch.Tensor,
-    bonus_token_ids: torch.Tensor,
-    recovered_token_ids: torch.Tensor,
-    uniform_probs: torch.Tensor,
-    is_greedy: torch.Tensor,
-    max_spec_len: int,
-    synthetic_conditional_rates: torch.Tensor | None,
-) -> DispatchSpec:
-    return (output_token_ids.shape[0],), dict(
-        vocab_size=target_probs.shape[1],
-        NO_DRAFT_PROBS=draft_probs is None,
-        SYNTHETIC_MODE=synthetic_conditional_rates is not None,
-    )
-
-
-def _expand_warmup_inputs() -> dict[str, object]:
-    dtype = WarmupChoices(torch.float32, torch.int32, torch.int64)
-    data = TritonWarmupTensor(dtype)
-    return dict(
-        output=data,
-        input=data,
-        cu_num_tokens=TritonWarmupTensor(torch.int32),
-        replace_from=0,
-        replace_to=0,
-    )
-
-
-@triton_kernel_dispatcher_with_warmup(
-    kernel=expand_kernel, warmup_inputs=_expand_warmup_inputs
-)
-def _expand(
-    output: torch.Tensor,
-    input: torch.Tensor,
-    cu_num_tokens: torch.Tensor,
-    replace_from: int,
-    replace_to: int,
-) -> DispatchSpec:
-    return (input.shape[0],), dict(MAX_NUM_TOKENS=MAX_SPEC_LEN)
 
 
 def _sample_recovered_tokens_warmup_inputs(

@@ -5,7 +5,7 @@ import inspect
 from abc import abstractmethod
 from collections.abc import Callable, Hashable, Iterable, Mapping
 from dataclasses import dataclass, field
-from functools import cached_property, wraps
+from functools import cache, cached_property, update_wrapper, wraps
 from typing import Any, Generic, ParamSpec, TypeVar, cast, overload
 
 from vllm.model_executor.warmup.jit_warmup import (
@@ -26,6 +26,51 @@ LaunchSpec = (
     | tuple[tuple[int, ...] | None, dict[str, Any], Any]
 )
 DispatchSpec = LaunchSpec
+_MISSING = object()
+
+
+@dataclass(frozen=True)
+class _LaunchBindingPlan:
+    input_targets: tuple[tuple[str, str], ...]
+    stride_targets: tuple[tuple[str, str, str, int], ...]
+
+
+@cache
+def _launch_binding_plan(
+    arg_names: tuple[str, ...], input_names: tuple[str, ...]
+) -> _LaunchBindingPlan:
+    arg_name_set = set(arg_names)
+
+    def kernel_arg(input_name: str) -> str | None:
+        pointer_name = f"{input_name}_ptr"
+        return next(
+            (
+                candidate
+                for candidate in (
+                    input_name,
+                    pointer_name,
+                    input_name.upper(),
+                    pointer_name.upper(),
+                )
+                if candidate in arg_name_set
+            ),
+            None,
+        )
+
+    input_targets = tuple(
+        (name, target)
+        for name in input_names
+        if (target := kernel_arg(name)) is not None
+    )
+    stride_targets = []
+    for target in arg_names:
+        name, separator, dim = target.rpartition("_stride")
+        if not separator:
+            name, separator, dim = target.rpartition("_STRIDE")
+        dim = dim.removeprefix("_")
+        if separator and (not dim or dim.isdigit()):
+            stride_targets.append((target, name, f"{name}_ptr", int(dim or 0)))
+    return _LaunchBindingPlan(input_targets, tuple(stride_targets))
 
 
 def triton_warmup_inputs(
@@ -168,59 +213,34 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
 
     @cached_property
     def _kernel_arg_names(self) -> tuple[str, ...]:
-        return self._kernel_arg_names_for(self.kernel)
-
-    @staticmethod
-    def _kernel_arg_names_for(kernel: Any) -> tuple[str, ...]:
-        arg_names = getattr(kernel, "arg_names", None)
+        arg_names = getattr(self.kernel, "arg_names", None)
         if arg_names is not None:
             return tuple(arg_names)
-        wrapped = getattr(kernel, "func", None)
+        wrapped = getattr(self.kernel, "func", None)
         if wrapped is not None:
             return tuple(inspect.signature(wrapped).parameters)
-        raise TypeError(f"Cannot inspect kernel parameters for {type(kernel).__name__}")
+        raise TypeError(
+            f"Cannot inspect kernel parameters for {type(self.kernel).__name__}"
+        )
 
     def _prepare_launch_kwargs(
         self,
-        kernel: Any,
         inputs: Mapping[str, Any],
         launch_kwargs: Mapping[str, Any],
     ) -> tuple[dict[str, Any], Any, int]:
-        kwargs = dict(launch_kwargs)
+        plan = _launch_binding_plan(self._kernel_arg_names, tuple(inputs))
+        kwargs = {target: inputs[source] for source, target in plan.input_targets}
+        kwargs.update(launch_kwargs)
         runtime_launcher = kwargs.pop("_runtime_launcher", None)
         runtime_launcher_arg_count = kwargs.pop("_runtime_launcher_arg_count", 0)
-        arg_names = self._kernel_arg_names_for(kernel)
-        arg_name_set = set(arg_names)
-        unmatched_inputs = []
-        for name, value in inputs.items():
-            if name in arg_name_set:
-                target = name
-            elif (target := f"{name}_ptr") not in arg_name_set:
-                unmatched_inputs.append((name, value))
-                continue
-            if target not in kwargs:
-                kwargs[target] = value
-        for name, value in unmatched_inputs:
-            for target in (name.upper(), f"{name}_ptr".upper()):
-                if target in arg_name_set:
-                    if target not in kwargs:
-                        kwargs[target] = value
-                    break
-        missing = object()
-        for target in arg_names:
+        for target, name, pointer_name, dim in plan.stride_targets:
             if target in kwargs:
                 continue
-            name, separator, dim = target.rpartition("_stride")
-            if not separator:
-                name, separator, dim = target.rpartition("_STRIDE")
-            dim = dim.removeprefix("_")
-            if not separator or (dim and not dim.isdigit()):
-                continue
-            value = kwargs.get(name, missing)
-            if value is missing:
-                value = kwargs.get(f"{name}_ptr", missing)
-            if value is not missing:
-                kwargs[target] = value.stride(int(dim or 0))
+            value = kwargs.get(name, _MISSING)
+            if value is _MISSING:
+                value = kwargs.get(pointer_name, _MISSING)
+            if value is not _MISSING:
+                kwargs[target] = value.stride(dim)
         return kwargs, runtime_launcher, runtime_launcher_arg_count
 
     def launch(
@@ -228,18 +248,15 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         grid: tuple[int, ...] | None,
         inputs: Mapping[str, Any],
         /,
-        *,
-        kernel: Any = None,
         **kwargs: Any,
     ) -> Any:
-        kernel = kernel if kernel is not None else self.kernel
         kwargs, runtime_launcher, runtime_launcher_arg_count = (
-            self._prepare_launch_kwargs(kernel, inputs, kwargs)
+            self._prepare_launch_kwargs(inputs, kwargs)
         )
         if self._warming:
-            if self._run_autotune and _is_autotuned(kernel):
+            if self._run_autotune and _is_autotuned(self.kernel):
                 assert grid is not None
-                return kernel[grid](**kwargs)
+                return self.kernel[grid](**kwargs)
             kwargs = {
                 name: _triton_metadata_arg(value) for name, value in kwargs.items()
             }
@@ -249,18 +266,18 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
                 and hasattr(self._warming_compile_key, "launch_pdl")
             ):
                 kwargs["launch_pdl"] = self._warming_compile_key.launch_pdl
-            warmup = getattr(kernel, "warmup", None)
+            warmup = getattr(self.kernel, "warmup", None)
             assert warmup is not None
             return warmup(grid=(1,), **kwargs)
         if grid is None:
             return None
         if runtime_launcher is not None:
-            arg_names = self._kernel_arg_names_for(kernel)
             regular_args = [
-                kwargs.pop(name) for name in arg_names[:runtime_launcher_arg_count]
+                kwargs.pop(name)
+                for name in self._kernel_arg_names[:runtime_launcher_arg_count]
             ]
-            return runtime_launcher(kernel, grid, *regular_args, **kwargs)
-        return kernel[grid](**kwargs)
+            return runtime_launcher(self.kernel, grid, *regular_args, **kwargs)
+        return self.kernel[grid](**kwargs)
 
 
 def kernel_launcher(
@@ -557,18 +574,25 @@ class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
         self.kernel = kernel
         self._warmup_inputs_fn = warmup_inputs
         self._dispatch_fn = dispatch
+        self._dispatch_arg_names: tuple[str, ...] = ()
+        self._dispatch_defaults: dict[str, Any] = {}
+        if dispatch is not None:
+            parameters = tuple(inspect.signature(dispatch).parameters.values())
+            if any(
+                parameter.kind
+                in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+                for parameter in parameters
+            ):
+                raise TypeError("Triton dispatchers require explicit parameters")
+            self._dispatch_arg_names = tuple(parameter.name for parameter in parameters)
+            self._dispatch_defaults = {
+                parameter.name: parameter.default
+                for parameter in parameters
+                if parameter.default is not inspect.Parameter.empty
+            }
         functions = (warmup_inputs,) if dispatch is None else (warmup_inputs, dispatch)
         self._range_boundaries = _dispatch_integer_constants(*functions)
         super().__init__()
-
-    @cached_property
-    def _dispatch_signature(self) -> inspect.Signature:
-        assert self._dispatch_fn is not None
-        return inspect.signature(self._dispatch_fn)
-
-    @cached_property
-    def _dispatch_arg_names(self) -> tuple[str, ...]:
-        return tuple(self._dispatch_signature.parameters)
 
     def _dispatch_inputs(self, inputs: Mapping[str, Any]) -> dict[str, Any]:
         try:
@@ -585,13 +609,11 @@ class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
             )
             inputs.pop("grid")
             return self.launch(grid, {}, **inputs)
-        bound = self._dispatch_signature.bind(*args, **kwargs)
-        bound.apply_defaults()
-        inputs = dict(bound.arguments)
-        spec = self._dispatch_fn(**self._dispatch_inputs(inputs))
+        spec = self._dispatch_fn(*args, **kwargs)
+        inputs = self._dispatch_defaults.copy()
+        inputs.update(zip(self._dispatch_arg_names, args))
+        inputs.update(kwargs)
         grid, launch_kwargs = spec[:2]
-        if "_kernel" in launch_kwargs:
-            raise ValueError("A Triton dispatcher cannot override its kernel")
         result = self.launch(grid, inputs, **launch_kwargs)
         return spec[2] if len(spec) == 3 else result
 
@@ -617,7 +639,7 @@ class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
                     continue
                 grid, launch_kwargs = spec[:2]
                 prepared, _, _ = self._prepare_launch_kwargs(
-                    self.kernel, input_values, launch_kwargs
+                    input_values, launch_kwargs
                 )
             if grid is None:
                 continue
@@ -639,11 +661,7 @@ class TritonKernelDispatcher(Generic[P]):
         dispatch: Callable[P, DispatchSpec],
     ) -> None:
         self._owner = owner
-        self.__wrapped__ = dispatch
-        self.__name__ = getattr(dispatch, "__name__", type(dispatch).__name__)
-        self.__qualname__ = getattr(dispatch, "__qualname__", self.__name__)
-        self.__doc__ = getattr(dispatch, "__doc__", None)
-        self.__module__ = getattr(dispatch, "__module__", __name__)
+        update_wrapper(self, dispatch, updated=())
 
     def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Any:
         return self._owner(*args, **kwargs)

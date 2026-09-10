@@ -80,6 +80,50 @@ def _selector_walk_kernel(
         previous = index
 
 
+def _selector_walk_warmup_inputs(*, speculator: "DFlash2Speculator"):
+    top_k = speculator.selector_top_k
+    int64 = TritonWarmupTensor(torch.int64)
+    return dict(
+        scores=TritonWarmupTensor(torch.float32),
+        candidate=int64,
+        sample_pos=int64,
+        req_state=TritonWarmupTensor(torch.int32),
+        temperature=TritonWarmupTensor(torch.float32),
+        seeds=int64,
+        tokens=int64,
+        realized_scores=TritonWarmupTensor(torch.float32),
+        num_steps=speculator.num_speculative_steps,
+        num_reqs=1,
+        top_k=top_k,
+        BLOCK_K=triton.next_power_of_2(top_k),
+        SAMPLE_PROBABILISTIC=speculator.draft_logits is not None,
+        USE_FP64=speculator.use_fp64_gumbel,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_selector_walk_kernel, warmup_inputs=_selector_walk_warmup_inputs
+)
+def _selector_walk(
+    scores: torch.Tensor,
+    candidate: torch.Tensor,
+    sample_pos: torch.Tensor,
+    req_state: torch.Tensor,
+    temperature: torch.Tensor,
+    seeds: torch.Tensor,
+    tokens: torch.Tensor,
+    realized_scores: torch.Tensor,
+    *,
+    num_steps: int,
+    num_reqs: int,
+    top_k: int,
+    BLOCK_K: int,
+    SAMPLE_PROBABILISTIC: bool,
+    USE_FP64: bool,
+) -> DispatchSpec:
+    return (num_reqs,), dict(num_warps=1)
+
+
 @triton.jit
 def _cache_draft_logits_kernel(
     draft_logits_ptr,
@@ -111,6 +155,46 @@ def _cache_draft_logits_kernel(
     scores = tl.load(scores_ptr + candidate_base + offsets, mask=mask)
     tl.store(logits_base + token_ids, scores, mask=mask)
     tl.store(cached_candidate_ptr + cache_base + offsets, token_ids, mask=mask)
+
+
+def _cache_draft_logits_warmup_inputs(*, speculator: "DFlash2Speculator"):
+    draft_logits = speculator.draft_logits
+    assert draft_logits is not None
+    top_k = speculator.selector_top_k
+    return dict(
+        draft_logits=TritonWarmupTensor(
+            torch.float32,
+            shape=(1, 1, 1),
+            strides=(draft_logits.stride(0), draft_logits.stride(1), 1),
+        ),
+        cached_candidate=TritonWarmupTensor(torch.int64),
+        candidate=TritonWarmupTensor(torch.int64),
+        scores=TritonWarmupTensor(torch.float32),
+        req_state=TritonWarmupTensor(torch.int32),
+        num_sample=1,
+        num_steps=speculator.num_speculative_steps,
+        top_k=top_k,
+        BLOCK_K=triton.next_power_of_2(top_k),
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_cache_draft_logits_kernel,
+    warmup_inputs=_cache_draft_logits_warmup_inputs,
+)
+def _cache_draft_logits(
+    draft_logits: torch.Tensor,
+    cached_candidate: torch.Tensor,
+    candidate: torch.Tensor,
+    scores: torch.Tensor,
+    req_state: torch.Tensor,
+    *,
+    num_sample: int,
+    num_steps: int,
+    top_k: int,
+    BLOCK_K: int,
+) -> DispatchSpec:
+    return (num_sample,), dict(num_warps=1)
 
 
 class DFlash2Speculator(DFlashSpeculator):
@@ -221,87 +305,3 @@ class DFlash2Speculator(DFlashSpeculator):
         self._sample_path(candidate_ids, scores, num_reqs)
         if self.draft_logits is not None:
             self._cache_draft_logits(candidate_ids, num_sample)
-
-
-def _selector_walk_warmup_inputs(*, speculator: DFlash2Speculator):
-    top_k = speculator.selector_top_k
-    int64 = TritonWarmupTensor(torch.int64)
-    return dict(
-        scores=TritonWarmupTensor(torch.float32),
-        candidate=int64,
-        sample_pos=int64,
-        req_state=TritonWarmupTensor(torch.int32),
-        temperature=TritonWarmupTensor(torch.float32),
-        seeds=int64,
-        tokens=int64,
-        realized_scores=TritonWarmupTensor(torch.float32),
-        num_steps=speculator.num_speculative_steps,
-        num_reqs=1,
-        top_k=top_k,
-        BLOCK_K=triton.next_power_of_2(top_k),
-        SAMPLE_PROBABILISTIC=speculator.draft_logits is not None,
-        USE_FP64=speculator.use_fp64_gumbel,
-    )
-
-
-@triton_kernel_dispatcher_with_warmup(
-    kernel=_selector_walk_kernel, warmup_inputs=_selector_walk_warmup_inputs
-)
-def _selector_walk(
-    scores: torch.Tensor,
-    candidate: torch.Tensor,
-    sample_pos: torch.Tensor,
-    req_state: torch.Tensor,
-    temperature: torch.Tensor,
-    seeds: torch.Tensor,
-    tokens: torch.Tensor,
-    realized_scores: torch.Tensor,
-    *,
-    num_steps: int,
-    num_reqs: int,
-    top_k: int,
-    BLOCK_K: int,
-    SAMPLE_PROBABILISTIC: bool,
-    USE_FP64: bool,
-) -> DispatchSpec:
-    return (num_reqs,), dict(num_warps=1)
-
-
-def _cache_draft_logits_warmup_inputs(*, speculator: DFlash2Speculator):
-    draft_logits = speculator.draft_logits
-    assert draft_logits is not None
-    top_k = speculator.selector_top_k
-    return dict(
-        draft_logits=TritonWarmupTensor(
-            torch.float32,
-            shape=(1, 1, 1),
-            strides=(draft_logits.stride(0), draft_logits.stride(1), 1),
-        ),
-        cached_candidate=TritonWarmupTensor(torch.int64),
-        candidate=TritonWarmupTensor(torch.int64),
-        scores=TritonWarmupTensor(torch.float32),
-        req_state=TritonWarmupTensor(torch.int32),
-        num_sample=1,
-        num_steps=speculator.num_speculative_steps,
-        top_k=top_k,
-        BLOCK_K=triton.next_power_of_2(top_k),
-    )
-
-
-@triton_kernel_dispatcher_with_warmup(
-    kernel=_cache_draft_logits_kernel,
-    warmup_inputs=_cache_draft_logits_warmup_inputs,
-)
-def _cache_draft_logits(
-    draft_logits: torch.Tensor,
-    cached_candidate: torch.Tensor,
-    candidate: torch.Tensor,
-    scores: torch.Tensor,
-    req_state: torch.Tensor,
-    *,
-    num_sample: int,
-    num_steps: int,
-    top_k: int,
-    BLOCK_K: int,
-) -> DispatchSpec:
-    return (num_sample,), dict(num_warps=1)

@@ -789,6 +789,59 @@ def _prepare_prefill_inputs_kernel(
             tl.store(last_token_indices_ptr + block, 0, mask=mask)
 
 
+def _prepare_prefill_inputs_warmup_inputs(
+    *, speculator: AutoRegressiveSpeculator
+) -> dict[str, Any]:
+    return dict(
+        last_token_indices=TritonWarmupTensor(torch.int64),
+        current_draft_step=TritonWarmupTensor(torch.int64),
+        draft_input_ids=TritonWarmupTensor(torch.int32),
+        draft_positions=TritonWarmupTensor(torch.int64),
+        draft_query_start_loc=TritonWarmupTensor(torch.int32),
+        draft_seq_lens=TritonWarmupTensor(torch.int32),
+        target_input_ids=TritonWarmupTensor(torch.int32),
+        target_positions=TritonWarmupTensor(torch.int64),
+        idx_mapping=TritonWarmupTensor(torch.int64),
+        last_sampled=TritonWarmupTensor(torch.int64),
+        next_prefill_tokens=TritonWarmupTensor(torch.int32),
+        num_sampled=TritonWarmupTensor(torch.int32),
+        num_rejected=TritonWarmupTensor(torch.int32),
+        query_start_loc=TritonWarmupTensor(torch.int32),
+        seq_lens=TritonWarmupTensor(torch.int32),
+        max_num_reqs=speculator.max_num_reqs,
+        num_reqs=1,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_prepare_prefill_inputs_kernel,
+    warmup_inputs=_prepare_prefill_inputs_warmup_inputs,
+)
+def _prepare_prefill_inputs(
+    last_token_indices: torch.Tensor,
+    current_draft_step: torch.Tensor,
+    draft_input_ids: torch.Tensor,
+    draft_positions: torch.Tensor,
+    draft_query_start_loc: torch.Tensor,
+    draft_seq_lens: torch.Tensor,
+    target_input_ids: torch.Tensor,
+    target_positions: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    last_sampled: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    num_sampled: torch.Tensor,
+    num_rejected: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    max_num_reqs: int,
+    num_reqs: int,
+) -> DispatchSpec:
+    return (num_reqs,), dict(
+        draft_current_step_ptr=current_draft_step,
+        BLOCK_SIZE=1024,
+    )
+
+
 def prepare_prefill_inputs(
     # [num_reqs]
     last_token_indices: torch.Tensor,
@@ -881,6 +934,50 @@ def _prepare_decode_inputs_kernel(
         tl.store(positions_ptr + req_idx, position)
         seq_len = tl.minimum(seq_len + 1, max_model_len)
     tl.store(seq_lens_ptr + req_idx, seq_len)
+
+
+def _prepare_decode_inputs_warmup_inputs(
+    *, speculator: AutoRegressiveSpeculator
+) -> dict[str, Any]:
+    return dict(
+        draft_tokens=TritonWarmupTensor(
+            torch.int32, strides=(speculator.num_speculative_steps,)
+        ),
+        target_seq_lens=TritonWarmupTensor(torch.int32),
+        num_rejected=TritonWarmupTensor(torch.int32),
+        input_ids=TritonWarmupTensor(torch.int32),
+        positions=TritonWarmupTensor(torch.int64),
+        sample_src_positions=TritonWarmupTensor(torch.int64),
+        query_start_loc=TritonWarmupTensor(torch.int32),
+        seq_lens=TritonWarmupTensor(torch.int32),
+        max_model_len=speculator.max_model_len,
+        max_num_reqs=speculator.max_num_reqs,
+        num_reqs=1,
+        advance_draft_positions=speculator.advance_draft_positions,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_prepare_decode_inputs_kernel,
+    warmup_inputs=_prepare_decode_inputs_warmup_inputs,
+)
+def _prepare_decode_inputs(
+    draft_tokens: torch.Tensor,
+    target_seq_lens: torch.Tensor,
+    num_rejected: torch.Tensor,
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    sample_src_positions: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    max_model_len: int,
+    max_num_reqs: int,
+    num_reqs: int,
+    advance_draft_positions: bool,
+) -> DispatchSpec:
+    return (num_reqs + 1,), dict(
+        BLOCK_SIZE=1024,
+    )
 
 
 def prepare_decode_inputs(
@@ -982,133 +1079,6 @@ def _update_draft_inputs_kernel(
         tl.store(seq_lens_ptr + req_idx, seq_len)
 
 
-def update_draft_inputs(
-    draft_tokens: torch.Tensor,
-    current_draft_step: torch.Tensor,
-    hidden_states: torch.Tensor,
-    output_draft_tokens: torch.Tensor,
-    next_input_hidden_states: torch.Tensor,
-    input_buffers: InputBuffers,
-    sample_src_positions: torch.Tensor,
-    num_reqs: int,
-    max_model_len: int,
-    num_speculative_steps: int,
-    advance_draft_positions: bool = True,
-):
-    _update_draft_inputs(
-        output_draft_tokens,
-        next_input_hidden_states,
-        input_buffers.input_ids,
-        input_buffers.positions,
-        sample_src_positions,
-        input_buffers.seq_lens,
-        draft_tokens,
-        current_draft_step,
-        hidden_states,
-        max_model_len,
-        num_speculative_steps,
-        num_reqs=num_reqs,
-        advance_draft_positions=advance_draft_positions,
-    )
-
-
-def _prepare_prefill_inputs_warmup_inputs(
-    *, speculator: AutoRegressiveSpeculator
-) -> dict[str, Any]:
-    return dict(
-        last_token_indices=TritonWarmupTensor(torch.int64),
-        current_draft_step=TritonWarmupTensor(torch.int64),
-        draft_input_ids=TritonWarmupTensor(torch.int32),
-        draft_positions=TritonWarmupTensor(torch.int64),
-        draft_query_start_loc=TritonWarmupTensor(torch.int32),
-        draft_seq_lens=TritonWarmupTensor(torch.int32),
-        target_input_ids=TritonWarmupTensor(torch.int32),
-        target_positions=TritonWarmupTensor(torch.int64),
-        idx_mapping=TritonWarmupTensor(torch.int64),
-        last_sampled=TritonWarmupTensor(torch.int64),
-        next_prefill_tokens=TritonWarmupTensor(torch.int32),
-        num_sampled=TritonWarmupTensor(torch.int32),
-        num_rejected=TritonWarmupTensor(torch.int32),
-        query_start_loc=TritonWarmupTensor(torch.int32),
-        seq_lens=TritonWarmupTensor(torch.int32),
-        max_num_reqs=speculator.max_num_reqs,
-        num_reqs=1,
-    )
-
-
-@triton_kernel_dispatcher_with_warmup(
-    kernel=_prepare_prefill_inputs_kernel,
-    warmup_inputs=_prepare_prefill_inputs_warmup_inputs,
-)
-def _prepare_prefill_inputs(
-    last_token_indices: torch.Tensor,
-    current_draft_step: torch.Tensor,
-    draft_input_ids: torch.Tensor,
-    draft_positions: torch.Tensor,
-    draft_query_start_loc: torch.Tensor,
-    draft_seq_lens: torch.Tensor,
-    target_input_ids: torch.Tensor,
-    target_positions: torch.Tensor,
-    idx_mapping: torch.Tensor,
-    last_sampled: torch.Tensor,
-    next_prefill_tokens: torch.Tensor,
-    num_sampled: torch.Tensor,
-    num_rejected: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    seq_lens: torch.Tensor,
-    max_num_reqs: int,
-    num_reqs: int,
-) -> DispatchSpec:
-    return (num_reqs,), dict(
-        draft_current_step_ptr=current_draft_step,
-        BLOCK_SIZE=1024,
-    )
-
-
-def _prepare_decode_inputs_warmup_inputs(
-    *, speculator: AutoRegressiveSpeculator
-) -> dict[str, Any]:
-    return dict(
-        draft_tokens=TritonWarmupTensor(
-            torch.int32, strides=(speculator.num_speculative_steps,)
-        ),
-        target_seq_lens=TritonWarmupTensor(torch.int32),
-        num_rejected=TritonWarmupTensor(torch.int32),
-        input_ids=TritonWarmupTensor(torch.int32),
-        positions=TritonWarmupTensor(torch.int64),
-        sample_src_positions=TritonWarmupTensor(torch.int64),
-        query_start_loc=TritonWarmupTensor(torch.int32),
-        seq_lens=TritonWarmupTensor(torch.int32),
-        max_model_len=speculator.max_model_len,
-        max_num_reqs=speculator.max_num_reqs,
-        num_reqs=1,
-        advance_draft_positions=speculator.advance_draft_positions,
-    )
-
-
-@triton_kernel_dispatcher_with_warmup(
-    kernel=_prepare_decode_inputs_kernel,
-    warmup_inputs=_prepare_decode_inputs_warmup_inputs,
-)
-def _prepare_decode_inputs(
-    draft_tokens: torch.Tensor,
-    target_seq_lens: torch.Tensor,
-    num_rejected: torch.Tensor,
-    input_ids: torch.Tensor,
-    positions: torch.Tensor,
-    sample_src_positions: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    seq_lens: torch.Tensor,
-    max_model_len: int,
-    max_num_reqs: int,
-    num_reqs: int,
-    advance_draft_positions: bool,
-) -> DispatchSpec:
-    return (num_reqs + 1,), dict(
-        BLOCK_SIZE=1024,
-    )
-
-
 def _update_draft_inputs_warmup_inputs(
     *, speculator: AutoRegressiveSpeculator
 ) -> dict[str, Any]:
@@ -1160,4 +1130,34 @@ def _update_draft_inputs(
     return (num_reqs,), dict(
         hidden_size=hidden_size,
         BLOCK_SIZE=1024,
+    )
+
+
+def update_draft_inputs(
+    draft_tokens: torch.Tensor,
+    current_draft_step: torch.Tensor,
+    hidden_states: torch.Tensor,
+    output_draft_tokens: torch.Tensor,
+    next_input_hidden_states: torch.Tensor,
+    input_buffers: InputBuffers,
+    sample_src_positions: torch.Tensor,
+    num_reqs: int,
+    max_model_len: int,
+    num_speculative_steps: int,
+    advance_draft_positions: bool = True,
+):
+    _update_draft_inputs(
+        output_draft_tokens,
+        next_input_hidden_states,
+        input_buffers.input_ids,
+        input_buffers.positions,
+        sample_src_positions,
+        input_buffers.seq_lens,
+        draft_tokens,
+        current_draft_step,
+        hidden_states,
+        max_model_len,
+        num_speculative_steps,
+        num_reqs=num_reqs,
+        advance_draft_positions=advance_draft_positions,
     )
