@@ -156,6 +156,7 @@ def test_mm_support_configured_after_model_load(monkeypatch):
         speculator.device = device
         speculator.max_num_tokens = 4
         speculator.max_num_reqs = 2
+        speculator.num_speculative_steps = 1
         speculator.hidden_size = 3
         speculator.dtype = torch.float32
         speculator.draft_model_config = draft_model_config

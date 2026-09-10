@@ -11,11 +11,8 @@ from vllm.model_executor.warmup import jit_warmup_triton_helper
 from vllm.model_executor.warmup.jit_warmup import (
     WarmupChoices,
     WarmupIntRange,
-    _when,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    DeclarativeTritonJitKernel,
-    DirectTritonJitKernel,
     LaunchSpec,
     TritonJitKey,
     TritonWarmupTensor,
@@ -130,76 +127,6 @@ def test_triton_launcher_supports_cpu_function_wrappers() -> None:
     assert calls == [("runtime", 2, 7)]
 
 
-def test_declarative_triton_kernel_traces_ranges_and_retains_inputs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class TestDeclarativeKernel(DeclarativeTritonJitKernel):
-        kernel = _FakeTritonKernel()
-        static_calls = 0
-
-        def static_offset(self) -> int:
-            self.static_calls += 1
-            return 0
-
-        def warmup_cases(self) -> dict[str, Any]:
-            offset = self.static_offset()
-            tokens = WarmupIntRange(1, 34)
-            enabled = WarmupChoices(False, True)
-            _when(tokens <= 32)
-            config = ((7 if tokens <= 16 else 8) if enabled else 0) + offset
-            return dict(
-                first="warmup",
-                second=tokens,
-                runtime_launcher=None,
-                config=config,
-                enabled=enabled,
-                inline_choice=WarmupChoices("first", "second"),
-            )
-
-        def launch_spec(
-            self,
-            first: str,
-            second: int,
-            runtime_launcher: Any,
-            config: int,
-        ) -> LaunchSpec:
-            return (2,), dict(
-                CONST=config,
-                _runtime_launcher=runtime_launcher,
-                _runtime_launcher_arg_count=2,
-            )
-
-    owner = TestDeclarativeKernel()
-
-    def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
-        return {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])}
-
-    def fake_precompile_keys(kernel: Any, kwargs: Any) -> set[Any]:
-        return {(id(kernel), kwargs["CONST"])}
-
-    monkeypatch.setattr(
-        jit_warmup_triton_helper,
-        "_triton_precompile_keys",
-        fake_precompile_keys,
-    )
-    monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
-    owner.kernel.warmup_calls.clear()
-    keys = owner.get_warmup_keys()
-
-    assert [
-        (key.inputs.as_dict()["second"], key.inputs.as_dict()["enabled"])
-        for key in keys
-    ] == [(1, False), (1, True), (17, True)]
-    assert owner.static_calls == 1
-    assert {key.inputs.as_dict()["inline_choice"] for key in keys} == {"first"}
-    assert owner.kernel.warmup_calls == []
-
-    owner.compile(keys[0])
-    assert owner.kernel.warmup_calls == [
-        {"grid": (1,), "first": "warmup", "second": 1, "CONST": 0}
-    ]
-
-
 def test_triton_kernel_decorator_returns_launcher(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -236,6 +163,8 @@ def test_triton_kernel_decorator_returns_launcher(
         {"grid": (1,), "first": "warmup", "second": 1, "CONST": 7}
     ]
     assert launch.__name__ == "launch"
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        launch("runtime", 1, 7, stale_constexpr=True)
 
 
 def test_triton_kernel_decorator_compacts_large_ranges(
@@ -304,49 +233,6 @@ def test_triton_kernel_dispatch_uses_cuda_fake_tensors(
     keys = dispatch._owner.get_warmup_keys()
     assert len(keys) == 1
     assert keys[0].inputs.as_dict()["first"].device.type == "cuda"
-
-
-def test_direct_triton_kernel_preserves_native_call_shape(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class TestDirectKernel(DirectTritonJitKernel):
-        kernel = _FakeTritonKernel()
-
-        def warmup_cases(self) -> dict[str, Any]:
-            value = WarmupIntRange(1, 3)
-            return triton_warmup_inputs(
-                self.kernel,
-                "warmup",
-                value,
-                grid=(2,),
-                CONST=7,
-            )
-
-    owner = TestDirectKernel()
-
-    def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
-        return {
-            TritonJitKey(id(kernel), "fake", 0, (kwargs["second"], kwargs["CONST"]))
-        }
-
-    def fake_precompile_keys(kernel: Any, kwargs: Any) -> set[Any]:
-        return {(id(kernel), kwargs["second"], kwargs["CONST"])}
-
-    monkeypatch.setattr(
-        jit_warmup_triton_helper,
-        "_triton_precompile_keys",
-        fake_precompile_keys,
-    )
-    monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
-    owner.kernel.warmup_calls.clear()
-    keys = owner.get_warmup_keys()
-
-    assert len(keys) == 2
-    assert owner.kernel.warmup_calls == []
-    owner.compile(keys[0])
-    assert owner.kernel.warmup_calls == [
-        {"grid": (1,), "first": "warmup", "second": 1, "CONST": 7}
-    ]
 
 
 def test_triton_kernel_decorates_native_launchers(
@@ -422,26 +308,14 @@ def test_triton_warmup_inputs_expands_explicit_pointer_dtypes() -> None:
 def test_triton_range_is_deduplicated_before_binder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class TestRangeKernel(DeclarativeTritonJitKernel):
-        kernel = _FakeTritonKernel()
+    kernel = _FakeTritonKernel()
 
-        def warmup_cases(self) -> dict[str, Any]:
-            value = WarmupIntRange(1, 8193)
-            return dict(
-                first="warmup",
-                second=value,
-                runtime_launcher=None,
-                config=7,
-            )
+    def warmup_inputs() -> dict[str, Any]:
+        return dict(first="warmup", second=WarmupIntRange(1, 8193), config=7)
 
-        def launch_spec(
-            self,
-            first: str,
-            second: int,
-            runtime_launcher: Any,
-            config: int,
-        ) -> LaunchSpec:
-            return (2,), dict(CONST=config)
+    @triton_kernel(kernel=kernel, warmup_inputs=warmup_inputs)
+    def dispatch(first: str, second: int, config: int) -> LaunchSpec:
+        return (2,), dict(CONST=config)
 
     binder_calls: list[int] = []
 
@@ -472,7 +346,7 @@ def test_triton_range_is_deduplicated_before_binder(
     )
     monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
 
-    keys = TestRangeKernel().get_warmup_keys()
+    keys = dispatch.warmup_plan()
 
     assert binder_calls == [1, 2, 16]
     assert len(keys) == 3
