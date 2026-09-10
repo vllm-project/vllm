@@ -30,9 +30,6 @@ pub(super) fn salt_multimodal_identifiers_for_lora(
     features: Option<MmFeatures>,
     lora_name: &str,
 ) -> Option<MmFeatures> {
-    if lora_name.is_empty() {
-        return features;
-    }
     features.map(|features| {
         features
             .into_iter()
@@ -44,7 +41,7 @@ pub(super) fn salt_multimodal_identifiers_for_lora(
     })
 }
 
-fn multimodal_cache_identifier(lora_name: &str, identifier: &str) -> String {
+pub(super) fn multimodal_cache_identifier(lora_name: &str, identifier: &str) -> String {
     let mut hasher = Sha256::new();
     for component in [lora_name.as_bytes(), identifier.as_bytes()] {
         hasher.update((component.len() as u64).to_be_bytes());

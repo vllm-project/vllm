@@ -57,7 +57,10 @@ use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::control::kv_event_source;
 use super::convert::json_to_proto_struct;
-use super::inference::{prepare_multimodal_cache_inputs, salt_multimodal_identifiers_for_lora};
+use super::inference::{
+    multimodal_cache_identifier, prepare_multimodal_cache_inputs,
+    salt_multimodal_identifiers_for_lora,
+};
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
 use super::{ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, pb};
@@ -110,9 +113,19 @@ fn lora_isolates_multimodal_encoder_cache_identifiers() {
         .expect("features should remain present");
     let adapter_a_identifier = adapter_a[0].identifier.clone();
 
-    assert_eq!(base[0].identifier, "content-hash");
+    assert_ne!(base[0].identifier, "content-hash");
     assert_ne!(adapter_a_identifier, adapter_b[0].identifier);
     assert_ne!(adapter_a_identifier, base[0].identifier);
+
+    let adversarial_base = salt_multimodal_identifiers_for_lora(
+        Some(vec![MmFeatureSpec {
+            identifier: adapter_a_identifier.clone(),
+            ..feature.clone()
+        }]),
+        "",
+    )
+    .expect("features should remain present");
+    assert_ne!(adversarial_base[0].identifier, adapter_a_identifier);
 
     let mut request = TextRequest::for_test();
     request.mm_features = Some(vec![feature]);
@@ -877,7 +890,10 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
 
                 for (feature, source_identifier) in features.iter().zip(["image-1", "image-2"]) {
                     assert_eq!(feature.modality.as_str(), "image");
-                    assert_eq!(feature.identifier, source_identifier);
+                    assert_eq!(
+                        feature.identifier,
+                        multimodal_cache_identifier("", source_identifier)
+                    );
                     assert!(feature.mm_position.length > 1);
                     assert_eq!(
                         feature
@@ -929,6 +945,8 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
     )
     .await;
     let mut client = InferenceClient::new(channel);
+    let image_1_identifier = multimodal_cache_identifier("", "image-1");
+    let image_2_identifier = multimodal_cache_identifier("", "image-2");
 
     client
         .generate(pb::GenerateRequest {
@@ -950,7 +968,10 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 .collect(),
             kv: Some(pb::KvCacheParameters {
                 kv_transfer_params: Some(decode_kv_proto_struct()),
-                ec_transfer_params: Some(ec_proto_struct(&["image-2", "image-1"])),
+                ec_transfer_params: Some(ec_proto_struct(&[
+                    image_2_identifier.as_str(),
+                    image_1_identifier.as_str(),
+                ])),
                 ..Default::default()
             }),
             stopping: Some(pb::StoppingCriteria {
@@ -997,8 +1018,8 @@ async fn unary_generate_forwards_preprocessed_multimodal_features() {
                 let feature = &features[0];
                 assert_eq!(feature.modality, MmModality::Image);
                 assert_ne!(feature.identifier, "image-hash-a");
-                assert_eq!(feature.identifier.len(), 72);
-                assert!(feature.identifier.starts_with("grpc-mm:"));
+                assert_eq!(feature.identifier.len(), 64);
+                assert!(feature.identifier.bytes().all(|byte| byte.is_ascii_hexdigit()));
                 assert_eq!(feature.mm_hash.as_deref(), Some("image-hash-a"));
                 assert_eq!(feature.mm_position.offset, 1);
                 assert_eq!(feature.mm_position.length, 2);
