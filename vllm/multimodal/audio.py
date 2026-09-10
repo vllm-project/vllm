@@ -11,6 +11,7 @@ import numpy.typing as npt
 import torch
 
 from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.torch_utils import set_default_torch_num_threads
 
 try:
     import av as av
@@ -321,8 +322,13 @@ def resample_audio_torchaudio(
     # The kernel is float32; cast the input to match (same coercion as the
     # PyAV path).
     tensor = torch.as_tensor(audio, dtype=torch.float32)
-    resampler = _get_torchaudio_resampler(orig_sr_int, target_sr_int)
-    return resampler(tensor).numpy()
+    # Resampling runs in the API/server parent process. Keep it from
+    # touching OpenMP or oneDNN thread state: both poison subsequently
+    # forked engine-core processes, which then segfault on their first
+    # parallel CPU op.
+    with set_default_torch_num_threads(1), torch.backends.mkldnn.flags(enabled=False):
+        resampler = _get_torchaudio_resampler(orig_sr_int, target_sr_int)
+        return resampler(tensor).numpy()
 
 
 class AudioResampler:
