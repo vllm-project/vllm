@@ -13,25 +13,16 @@ TIMEOUT_VAL=$1
 TEST_COMMAND=$2
 
 # Disk hygiene knobs. Reclaim space only once the Docker root filesystem crosses
-# DISK_USAGE_THRESHOLD percent, and cap the shared BuildKit cache at
-# BUILDKIT_CACHE_MAX so subsequent builds keep reusing the hottest layers.
+# DISK_USAGE_THRESHOLD percent, and only prune images/cache unused for at least
+# CACHE_MAX_AGE so recently-built layers survive for reuse.
 DISK_USAGE_THRESHOLD=${DISK_USAGE_THRESHOLD:-80}
-BUILDKIT_CACHE_MAX=${BUILDKIT_CACHE_MAX:-200GB}
+CACHE_MAX_AGE=${CACHE_MAX_AGE:-24h}
 
-# buildx v0.29 renamed `docker builder prune`'s cache-size-cap flag from
-# --keep-storage to --max-used-space; detect which one this host's CLI
-# actually supports instead of hardcoding a version cutoff.
-if docker builder prune --help 2>&1 | grep -q -- '--max-used-space'; then
-    CACHE_MAX_FLAG=--max-used-space
-else
-    CACHE_MAX_FLAG=--keep-storage
-fi
-
-# Reclaim disk only when the host is under pressure. We trim (not purge) the
-# shared BuildKit cache so cross-job/cross-agent reuse stays intact, and only
-# touch dangling images; other agents' uniquely tagged images are left alone.
-# Cache mounts (exec.cachemount: uv/cargo/apt) are included in the prune --
-# excluding them let them grow unbounded since nothing else ever reclaims them.
+# Reclaim disk only when the host is under pressure, aging out anything unused
+# for less than CACHE_MAX_AGE so hot layers survive -- same `--filter
+# until=<N>h` pattern the TPU CI scripts already rely on. `docker buildx
+# prune --max-used-space` is a no-op on this host's `docker` driver (BuildKit
+# embedded in dockerd never enforces the size cap), so we don't use it.
 prune_if_disk_pressure() {
     local docker_root disk_usage
     docker_root=$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)
@@ -41,8 +32,7 @@ prune_if_disk_pressure() {
     disk_usage=$(df "$docker_root" 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%')
     if [ "${disk_usage:-0}" -gt "$DISK_USAGE_THRESHOLD" ]; then
         echo "--- :broom: Disk usage ${disk_usage}% exceeds ${DISK_USAGE_THRESHOLD}%, reclaiming space"
-        docker image prune -f || true
-        docker builder prune -f "${CACHE_MAX_FLAG}=${BUILDKIT_CACHE_MAX}" || true
+        docker system prune --force --all --filter "until=${CACHE_MAX_AGE}" || true
     else
         echo "Disk usage ${disk_usage:-unknown}% within ${DISK_USAGE_THRESHOLD}% threshold; skipping prune"
     fi
