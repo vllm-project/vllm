@@ -223,7 +223,7 @@ class FileSystemTierManager(SecondaryTierManager):
             batch_store_block,
             [self.file_mapper.get_file_name(key) for key in keys],
             self._primary_kv_view,
-            [int(bid) * self._block_size for bid in job_metadata.block_ids],
+            [int(cid) * self._block_size for cid in job_metadata.chunk_ids],
             self._block_size,
             self._use_o_direct,
         )
@@ -237,7 +237,7 @@ class FileSystemTierManager(SecondaryTierManager):
         keys = list(job_metadata.keys)
         self._load_job_keys[job_id] = keys
         paths = [self.file_mapper.get_file_name(key) for key in keys]
-        offsets = [int(bid) * self._block_size for bid in job_metadata.block_ids]
+        offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
 
         def load_task() -> None:
             try:
