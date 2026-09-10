@@ -159,14 +159,9 @@ class NixlBaseConnectorWorker:
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
 
-    # Member-major routing is supported only by NixlPushConnector for HMA KV
+    # Layer-name routing is supported only by NixlPushConnector for HMA KV
     # caches under PP.
-    _supports_member_identity = False
-    # Local member-major layout, set by ``_set_region_members`` only when this
-    # worker must route by layer name. Empty means region-index routing.
-    _member_names: tuple[str, ...] = ()
-    _member_local_regions: tuple[int, ...] = ()
-    _member_group_ids: tuple[int, ...] = ()
+    _supports_pp_hma = False
 
     def _compute_desc_ids(
         self,
@@ -195,23 +190,28 @@ class NixlBaseConnectorWorker:
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
-        num_regions = len(self._member_group_ids) or self.num_regions
+        use_layer_name_routing = bool(self._transfer_layer_group_ids)
+        num_desc_regions = (
+            len(self._transfer_layer_group_ids)
+            if use_layer_name_routing
+            else self.num_regions
+        )
         if region_num_blocks is None:
-            region_num_blocks = [num_blocks] * num_regions
+            region_num_blocks = [num_blocks] * num_desc_regions
         elif block_size_ratio is not None:
             region_num_blocks = [
                 int(count * block_size_ratio) for count in region_num_blocks
             ]
-        assert len(region_num_blocks) == num_regions
+        assert len(region_num_blocks) == num_desc_regions
         region_offsets = np.cumsum([0, *region_num_blocks[:-1]])
         num_fa_descs = sum(region_num_blocks)
 
-        if self._member_group_ids:
-            # Member-major descriptors, using each member's KV-cache group.
+        if use_layer_name_routing:
+            # Descriptors in layer order, using each layer's KV-cache group.
             return np.concatenate(
                 [
                     np.asarray(block_ids[g], dtype=np.int32) + region_offsets[k]
-                    for k, g in enumerate(self._member_group_ids)
+                    for k, g in enumerate(self._transfer_layer_group_ids)
                 ]
             )
 
@@ -401,49 +401,51 @@ class NixlBaseConnectorWorker:
         """
         return region_idx < len(self._region_is_mla) and self._region_is_mla[region_idx]
 
-    def _set_region_members(self, region_members: list[list[str]]) -> None:
-        members = [member for region in region_members for member in region]
-        assert len(members) == len(set(members)), (
+    def _set_region_layers(self, region_layers: list[list[str]]) -> None:
+        layer_names = [layer_name for region in region_layers for layer_name in region]
+        assert len(layer_names) == len(set(layer_names)), (
             "A KV cache layer spans multiple NIXL regions"
         )
-        self.region_members: list[list[str]] = region_members
-        if not self._requires_member_identity():
+        self.region_members: list[list[str]] = region_layers
+        if not self._requires_layer_name_routing():
             return
-        group_by_member = self.kv_cache_config.transfer_group_index_by_layer
-        ungrouped = [m for m in members if m not in group_by_member]
+        group_by_layer = self.kv_cache_config.transfer_group_index_by_layer
+        ungrouped = [name for name in layer_names if name not in group_by_layer]
         assert not ungrouped, f"KV cache layers outside any local group: {ungrouped}"
-        self._member_names = tuple(members)
-        self._member_local_regions = tuple(
+        self._transfer_layer_names = tuple(layer_names)
+        self._transfer_layer_region_indices = tuple(
             region_idx
-            for region_idx, region in enumerate(region_members)
+            for region_idx, region in enumerate(region_layers)
             for _ in region
         )
-        self._member_group_ids = tuple(group_by_member[member] for member in members)
+        self._transfer_layer_group_ids = tuple(
+            group_by_layer[name] for name in layer_names
+        )
 
-    def _requires_member_identity(self) -> bool:
+    def _requires_layer_name_routing(self) -> bool:
         """Whether PP push must match HMA layers by name, not region index."""
         return (
-            self._supports_member_identity
+            self._supports_pp_hma
             and self.pp_size > 1
             and self._is_hma_required
             and not self._has_mamba
         )
 
-    def _align_remote_regions_by_member(
+    def _align_remote_regions_by_layer(
         self, nixl_agent_meta: NixlAgentMetadata
     ) -> None:
-        """Select remote regions for this PP stage in local member order."""
-        remote_members = nixl_agent_meta.region_members
+        """Select remote regions for this PP stage in local layer order."""
+        remote_region_layers = nixl_agent_meta.region_members
         # Region-index routing here would silently transfer stale KV.
-        assert remote_members, "Remote advertised no region_members"
+        assert remote_region_layers, "Remote advertised no region_members"
         assert (
             len(nixl_agent_meta.kv_caches_base_addr)
             == len(nixl_agent_meta.block_lens)
             == len(nixl_agent_meta.block_strides)
-            == len(remote_members)
+            == len(remote_region_layers)
         ), "Remote region metadata lengths disagree"
         assert all(
-            values is None or len(values) == len(remote_members)
+            values is None or len(values) == len(remote_region_layers)
             for values in (
                 nixl_agent_meta.region_num_blocks,
                 nixl_agent_meta.region_group_ids,
@@ -452,18 +454,24 @@ class NixlBaseConnectorWorker:
             )
         ), "Remote region metadata lengths disagree"
 
-        remote_region_by_member: dict[str, int] = {}
-        for region_idx, members in enumerate(remote_members):
-            for member in members:
-                assert member not in remote_region_by_member, (
-                    f"Remote advertised layer {member!r} in multiple regions"
+        remote_region_by_layer: dict[str, int] = {}
+        for region_idx, layer_names in enumerate(remote_region_layers):
+            for layer_name in layer_names:
+                assert layer_name not in remote_region_by_layer, (
+                    f"Remote advertised layer {layer_name!r} in multiple regions"
                 )
-                remote_region_by_member[member] = region_idx
+                remote_region_by_layer[layer_name] = region_idx
 
-        missing = [m for m in self._member_names if m not in remote_region_by_member]
+        missing = [
+            name
+            for name in self._transfer_layer_names
+            if name not in remote_region_by_layer
+        ]
         assert not missing, f"Remote is missing locally owned layers: {missing}"
 
-        remote_regions = [remote_region_by_member[m] for m in self._member_names]
+        remote_regions = [
+            remote_region_by_layer[name] for name in self._transfer_layer_names
+        ]
         nixl_agent_meta.kv_caches_base_addr = [
             nixl_agent_meta.kv_caches_base_addr[i] for i in remote_regions
         ]
@@ -486,9 +494,9 @@ class NixlBaseConnectorWorker:
                 nixl_agent_meta.region_mem_types[i] for i in remote_regions
             ]
         if nixl_agent_meta.region_names is not None:
-            nixl_agent_meta.region_names = list(self._member_names)
-        # One member per region keeps a second alignment pass a no-op.
-        nixl_agent_meta.region_members = [[m] for m in self._member_names]
+            nixl_agent_meta.region_names = list(self._transfer_layer_names)
+        # One layer per region keeps a second alignment pass a no-op.
+        nixl_agent_meta.region_members = [[name] for name in self._transfer_layer_names]
 
     def __init__(
         self,
@@ -719,18 +727,14 @@ class NixlBaseConnectorWorker:
         # transfers into the matching sub-range of a PP=1 remote's regions.
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self._remote_region_offset = 0
-        if (
-            self.pp_size > 1
-            and self._is_hma_required
-            and not self._supports_member_identity
-        ):
+        if self.pp_size > 1 and self._is_hma_required and not self._supports_pp_hma:
             raise NotImplementedError(
                 "NixlConnector (pull) does not support pipeline_parallel_size "
                 "> 1 with hybrid KV cache layouts (HMA); use NixlPushConnector "
                 "for PP + HMA."
             )
-        # PP push routes HMA (hybrid) attention layouts by pooled-member
-        # identity; Mamba/SSM hybrids are not yet supported under PP.
+        # PP push routes HMA (hybrid) attention layouts by layer name;
+        # Mamba/SSM hybrids are not yet supported under PP.
         if self.pp_size > 1 and self._has_mamba:
             raise NotImplementedError(
                 "NixlPushConnector does not support pipeline_parallel_size > 1 "
@@ -865,8 +869,13 @@ class NixlBaseConnectorWorker:
         # within a block (BLHNC/BHLNC), where stride > block_len.
         self.block_stride_per_layer = list[int]()
 
-        # Member metadata is populated for HMA layouts.
+        # Region layer membership is populated for HMA layouts.
         self.region_members = []
+        # Local layer order, set by ``_set_region_layers`` only when
+        # routing by layer name. Empty means region-index routing.
+        self._transfer_layer_names = tuple[str, ...]()
+        self._transfer_layer_region_indices = tuple[int, ...]()
+        self._transfer_layer_group_ids = tuple[int, ...]()
         # Per-engine TP mappings. Generated during handshake.
         self.tp_mappings: dict[EngineId, TPMapping] = {}
 
@@ -1396,12 +1405,10 @@ class NixlBaseConnectorWorker:
             ):
                 compressed_region_owners.setdefault(cache.data_ptr(), cache)
 
-        track_region_members = (
-            self._supports_member_identity
-            and self._is_hma_required
-            and not self._has_mamba
+        track_region_layers = (
+            self._supports_pp_hma and self._is_hma_required and not self._has_mamba
         )
-        region_members: list[list[str]] = []
+        region_layers: list[list[str]] = []
 
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers instead
@@ -1579,11 +1586,11 @@ class NixlBaseConnectorWorker:
                     region_mem_types.append(mem_type)
                     self._region_is_mla.append(is_mla_region)
 
-                if track_region_members:
-                    if region_index == len(region_members):
-                        region_members.append([layer_name])
+                if track_region_layers:
+                    if region_index == len(region_layers):
+                        region_layers.append([layer_name])
                     else:
-                        region_members[region_index].append(layer_name)
+                        region_layers[region_index].append(layer_name)
 
                 if isinstance(layer_spec, MambaSpec):
                     if layer_spec.tp_replicated:
@@ -1641,7 +1648,7 @@ class NixlBaseConnectorWorker:
         if self._has_mamba:
             self.region_num_blocks = [self.num_blocks] * self.num_regions
 
-        self._set_region_members(region_members)
+        self._set_region_layers(region_layers)
 
         if self.pp_size > 1 and not self._is_hma_required:
             start_layer, end_layer = self.model_config.get_layers_start_end_indices(
@@ -1654,8 +1661,8 @@ class NixlBaseConnectorWorker:
 
         # Total local FA descriptors (boundary between FA and mamba descs).
         xfer_region_num_blocks = (
-            [self.region_num_blocks[i] for i in self._member_local_regions]
-            if self._member_local_regions
+            [self.region_num_blocks[i] for i in self._transfer_layer_region_indices]
+            if self._transfer_layer_region_indices
             else self.region_num_blocks
         )
         self.num_descs = sum(xfer_region_num_blocks)
@@ -1888,7 +1895,9 @@ class NixlBaseConnectorWorker:
         assert self.transfer_topo is not None
         assert base_addresses, "Local KV cache base addresses must not be empty."
         device_id = self.device_id
-        region_indices = self._member_local_regions or range(len(base_addresses))
+        region_indices = self._transfer_layer_region_indices or range(
+            len(base_addresses)
+        )
         parts: list[np.ndarray] = []
         for i in region_indices:
             base_addr = base_addresses[i]
@@ -1932,9 +1941,11 @@ class NixlBaseConnectorWorker:
         device_id = nixl_agent_meta.device_id
         block_strides = nixl_agent_meta.block_strides
         parts: list[np.ndarray] = []
-        member_order = bool(self._member_local_regions)
+        use_layer_name_routing = bool(self._transfer_layer_region_indices)
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
-            local_region = self._member_local_regions[i] if member_order else i
+            local_region = (
+                self._transfer_layer_region_indices[i] if use_layer_name_routing else i
+            )
             replicated = self._is_region_replicated(local_region)
             # Read our whole local region size from remote..
             local_block_len = self.block_len_per_layer[local_region]
@@ -2099,7 +2110,7 @@ class NixlBaseConnectorWorker:
         transfer_topo = self.transfer_topo
         # Number of physical regions registered locally (one per layer/tensor).
         num_local_regions = len(self.block_len_per_layer)
-        if self._member_local_regions:
+        if self._transfer_layer_region_indices:
             if self.block_size != nixl_agent_meta.block_size:
                 raise NotImplementedError(
                     "Attention-HMA push requires identical P/D block sizes."
@@ -2109,7 +2120,7 @@ class NixlBaseConnectorWorker:
                     "Attention-HMA push does not support decode TP greater than "
                     "prefill TP yet"
                 )
-            self._align_remote_regions_by_member(nixl_agent_meta)
+            self._align_remote_regions_by_layer(nixl_agent_meta)
         elif (
             self.pp_size > 1
             and len(nixl_agent_meta.kv_caches_base_addr) > num_local_regions
@@ -2430,7 +2441,7 @@ class NixlBaseConnectorWorker:
         # the per-rank KV head ratio rather than the raw tp_ratio, because GQA
         # replication caps per-rank heads at 1 when tp > total_kv_heads
         # (issue #45330). Mamba uses the ssm_sizes counterpart, so skip here.
-        local_regions = self._member_local_regions or range(
+        local_regions = self._transfer_layer_region_indices or range(
             len(self.block_len_per_layer)
         )
         if self._has_mamba and self.use_mla:
@@ -2450,7 +2461,7 @@ class NixlBaseConnectorWorker:
             )
         elif not self._has_mamba:
             assert len(local_regions) == len(nixl_agent_meta.block_lens), (
-                "Number of KV layers/members must match between prefill and decode"
+                "Number of KV layers must match between prefill and decode"
             )
             model_replicated = self.use_mla or self.transfer_topo.is_kv_replicated(
                 remote_engine_id
@@ -2508,7 +2519,9 @@ class NixlBaseConnectorWorker:
             assert len(nixl_agent_meta.region_group_ids) == num_remote_regions
         if nixl_agent_meta.region_names is not None:
             expected_names = (
-                list(self._member_names) if self._member_names else self.region_names
+                list(self._transfer_layer_names)
+                if self._transfer_layer_names
+                else self.region_names
             )
             assert nixl_agent_meta.region_names == expected_names, (
                 "NIXL transfer regions must name the same model caches in the "
@@ -2705,6 +2718,8 @@ class NixlBaseConnectorWorker:
         assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
+        # Receives reported failed in earlier polls have no metadata left.
+        done_recving.intersection_update(self._recving_metadata)
 
         # Drain queue of requests where handshake or transfer setup failed.
         failed_recv_reqs = set[ReqId]()
@@ -2743,6 +2758,7 @@ class NixlBaseConnectorWorker:
                 )
                 continue
 
+            self._send_pending_recv_notifs(req_id)
             assert meta.remote is not None
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
@@ -2863,14 +2879,11 @@ class NixlBaseConnectorWorker:
                     new_expiry,
                 )
 
-    def _pop_done_transfers(
-        self, transfers: dict[str, list[int]], *, is_send: bool = False
-    ) -> set[str]:
+    def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
         """
         Pop completed xfers by checking for DONE state.
         Args:
             transfers: dict of req_id -> list[running_xfer]
-            is_send: Whether these are outgoing WRITEs rather than incoming READs.
         Returns:
             set of req_ids that have all done xfers
         """
@@ -2907,14 +2920,7 @@ class NixlBaseConnectorWorker:
 
             if not in_progress:
                 # Only report request as completed when all transfers are done.
-                # A receive failed in an earlier poll was already reported via
-                # _failed_recv_reqs and its metadata popped by get_finished();
-                # don't report it again, just drop the remaining handles.
-                # Outgoing WRITEs have no receive-side metadata.
-                if is_send or req_id in self._recving_metadata:
-                    done_req_ids.add(req_id)
-                    if not is_send:
-                        self._send_pending_recv_notifs(req_id)
+                done_req_ids.add(req_id)
                 del transfers[req_id]
             else:
                 transfers[req_id] = in_progress

@@ -80,7 +80,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     # Distinguishes push from pull in the NIXL compatibility hash.
     _TRANSFER_MODE: str = "push"
 
-    _supports_member_identity = True
+    _supports_pp_hma = True
 
     def __init__(
         self,
@@ -790,9 +790,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
         # writer thread also appends to it, so guard the pop.
         with self._sending_transfers_lock:
-            done_pushing = self._pop_done_transfers(
-                self._sending_transfers, is_send=True
-            )
+            done_pushing = self._pop_done_transfers(self._sending_transfers)
         for req_id in done_pushing:
             self._reqs_to_send.pop(req_id, None)
             self._reqs_to_process.discard(req_id)

@@ -113,6 +113,7 @@ def test_local_descriptors_follow_each_region_pool_capacity():
     worker.block_len_per_layer = [16, 16]
     worker.block_stride_per_layer = [16, 16]
     worker.region_num_blocks = [2, 3]
+    worker._transfer_layer_region_indices = ()
 
     descriptors = worker._build_fa_local([100, 1000], block_size_ratio=1)
 
@@ -203,6 +204,9 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     worker._mixed_mem_types = False
     worker.region_names = []
     worker.region_num_blocks = []
+    worker._transfer_layer_names = ()
+    worker._transfer_layer_region_indices = ()
+    worker._transfer_layer_group_ids = ()
     worker._region_is_mla = []
     worker.block_len_per_layer = []
     worker.block_stride_per_layer = []
@@ -246,10 +250,13 @@ def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     expected_addrs = [
         backing.data_ptr() + block * block_stride for block in range(num_blocks)
     ]
-    num_members = 2 if push_pp else 1
-    assert worker.src_blocks_data[:, 0].tolist() == expected_addrs * num_members
-    assert worker.num_descs == num_blocks * num_members
-    assert worker.dst_region_num_blocks[worker.engine_id] == [num_blocks] * num_members
+    num_desc_regions = 2 if push_pp else 1
+    assert worker.src_blocks_data[:, 0].tolist() == expected_addrs * num_desc_regions
+    assert worker.num_descs == num_blocks * num_desc_regions
+    assert (
+        worker.dst_region_num_blocks[worker.engine_id]
+        == [num_blocks] * num_desc_regions
+    )
 
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes,
