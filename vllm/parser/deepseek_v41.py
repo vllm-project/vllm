@@ -37,7 +37,7 @@ _PARTIAL_PARAM_RE = re.compile(
 @functools.cache
 def deepseek_v41_config(thinking: bool = False) -> ParserEngineConfig:
     config = deepseek_v4_config(thinking=thinking)
-    terminals = config.terminals | {
+    terminal_overrides = {
         "TOOL_START": DSML_TOOL_START,
         "TOOL_END": DSML_TOOL_END,
         "INVOKE_PREFIX": DSML_INVOKE_PREFIX,
@@ -48,8 +48,11 @@ def deepseek_v41_config(thinking: bool = False) -> ParserEngineConfig:
     return replace(
         config,
         name="deepseek_v41",
-        terminals=terminals,
-        token_id_terminals={key: terminals[key] for key in config.token_id_terminals},
+        terminals={**config.terminals, **terminal_overrides},
+        token_id_terminals={
+            key: terminal_overrides.get(key, value)
+            for key, value in config.token_id_terminals.items()
+        },
         arg_converter=functools.partial(
             _dsml_arg_converter,
             param_re=_PARAM_RE,
