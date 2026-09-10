@@ -257,7 +257,7 @@ class KVCacheSpec:
 
     @property
     def has_layer_views(self) -> bool:
-        """Whether each layer's cache is a ``[B, H, N, C]`` view of its tensor.
+        """Whether generic allocation creates per-layer cache views.
 
         Specs without a per-layer shape keep the raw backing tensor and lay it
         out themselves. They also have no attention module of their own, so
@@ -470,9 +470,6 @@ class HiSparseResidentSpec(KVCacheSpec):
         return cdiv(vllm_config.model_config.max_model_len, self.block_size) * (
             self.page_size
         )
-
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        return cdiv(max_len, self.block_size)
 
     @property
     def has_layer_views(self) -> bool:
@@ -1213,7 +1210,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
 
     @property
     def block_table_token_alignment(self) -> int | None:
-        return next(iter(self.kv_cache_specs.values())).block_table_token_alignment
+        return self.first_spec.block_table_token_alignment
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_num_pages = max(
