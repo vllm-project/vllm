@@ -347,9 +347,6 @@ def test_transfer(
     for tensor in cpu_tensors:
         tensor.random_()
 
-    # re-resolve after randomization (pointers are stable, data changed)
-    device_ptrs = resolve_device_pointers(gpu_spec, kv_caches)
-
     # clone tensors before transfer
     orig_gpu_tensors = [x.clone() for x in gpu_tensors]
     orig_cpu_tensors = [x.clone() for x in cpu_tensors]
@@ -572,9 +569,6 @@ def test_transfer_multi_group(
         tensor.random_()
     for tensor in cpu_tensors:
         tensor.random_()
-
-    # re-resolve after randomization
-    device_ptrs = resolve_device_pointers(gpu_spec, canonical_kv_caches)
 
     orig_gpu_tensors = [x.clone() for x in gpu_tensors]
     orig_cpu_tensors = [x.clone() for x in cpu_tensors]

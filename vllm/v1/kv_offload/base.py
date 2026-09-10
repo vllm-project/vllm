@@ -5,13 +5,15 @@ Core abstractions for KV cache offloading in vLLM v1.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
 
 import numpy as np
 import torch
+
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
@@ -550,7 +552,39 @@ class DevicePointers:
     group_block_counts: tuple[int, ...]  # device blocks per group
     group_data_ref_counts: tuple[int, ...]  # data_refs per group
     block_indices: tuple[int, ...]  # logical block offset per group
-    device_spec: "GPULoadStoreSpec | None" = None  # original spec (debugging)
+
+    def iter_groups(self, blocks_per_chunk: int) -> "Iterator[DevicePointerGroupInfo]":
+        """Iterate non-empty groups with pre-computed chunk/skip metadata."""
+        dev_ptr_offset = 0
+        for group_idx, (group_size, n_data_refs, block_idx) in enumerate(
+            zip(
+                self.group_block_counts,
+                self.group_data_ref_counts,
+                self.block_indices,
+            )
+        ):
+            if group_size == 0:
+                continue
+            skip = block_idx % blocks_per_chunk
+            n_chunks = cdiv(group_size + skip, blocks_per_chunk)
+            yield DevicePointerGroupInfo(
+                group_idx=group_idx,
+                group_size=group_size,
+                n_data_refs=n_data_refs,
+                skip=skip,
+                n_chunks=n_chunks,
+                dev_ptr_offset=dev_ptr_offset,
+            )
+            dev_ptr_offset += group_size * n_data_refs
+
+
+class DevicePointerGroupInfo(NamedTuple):
+    group_idx: int
+    group_size: int
+    n_data_refs: int
+    skip: int
+    n_chunks: int
+    dev_ptr_offset: int
 
 
 def resolve_device_pointers(
@@ -558,17 +592,8 @@ def resolve_device_pointers(
     kv_caches: CanonicalKVCaches,
 ) -> DevicePointers:
     """Convert logical block IDs to device memory pointers.
-
-    Called once at the OffloadingConnectorWorker boundary.
     GPU blocks_per_chunk is always 1, so resolution is a direct
     vectorized lookup: base_ptr + block_id * row_stride.
-
-    See also compute_sub_block_ptrs in cpu/gpu_worker.py which does
-    the analogous resolution for CPU tensors, including sub-block
-    expansion for blocks_per_chunk > 1. Both functions could share
-    the inner pointer computation, but the sub block expansion in
-    compute_sub_block_ptrs make them different with the common part
-    being just being the base_ptr+block_id*stride calculation.
     """
     block_ids = device_spec.block_ids
     group_sizes = device_spec.group_sizes
@@ -610,7 +635,6 @@ def resolve_device_pointers(
         group_block_counts=tuple(group_sizes),
         group_data_ref_counts=tuple(len(refs) for refs in group_data_refs),
         block_indices=tuple(block_indices),
-        device_spec=device_spec,
     )
 
 

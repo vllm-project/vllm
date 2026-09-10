@@ -14,7 +14,6 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
-from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
@@ -343,25 +342,17 @@ class SingleDirectionOffloadingHandler:
 
             ptr_start = dev_ptr_offset + d * group_size
             gpu_ptrs = device_ptrs.ptrs[ptr_start : ptr_start + group_size]
-            if self.gpu_to_cpu:
-                all_src[op_idx:end_idx] = gpu_ptrs
-                compute_sub_block_ptrs(
-                    cpu_block_ids,
-                    self.blocks_per_chunk,
-                    all_dst[op_idx:end_idx],
-                    self.cpu_tensors[t_idx],
-                    skip_count=cpu_skip_count,
-                )
-            else:
-                all_dst[op_idx:end_idx] = gpu_ptrs
-                compute_sub_block_ptrs(
-                    cpu_block_ids,
-                    self.blocks_per_chunk,
-                    all_src[op_idx:end_idx],
-                    self.cpu_tensors[t_idx],
-                    skip_count=cpu_skip_count,
-                )
-
+            gpu_out, cpu_out = (
+                (all_src, all_dst) if self.gpu_to_cpu else (all_dst, all_src)
+            )
+            gpu_out[op_idx:end_idx] = gpu_ptrs
+            compute_sub_block_ptrs(
+                cpu_block_ids,
+                self.blocks_per_chunk,
+                cpu_out[op_idx:end_idx],
+                self.cpu_tensors[t_idx],
+                skip_count=cpu_skip_count,
+            )
             all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
             num_bytes += group_size * data_ref.page_size_bytes
             op_idx = end_idx
@@ -494,12 +485,7 @@ class SingleDirectionOffloadingHandler:
         assert cpu_blocks.ndim == 1
         num_cpu_blocks = len(cpu_blocks)
 
-        group_sizes = device_ptrs.group_block_counts
-        block_indices = device_ptrs.block_indices
-        assert len(group_sizes) == len(self.layer_refs_per_group)
-        assert len(block_indices) == len(self.layer_refs_per_group)
-
-        num_copy_ops = self._estimate_max_copy_ops(group_sizes)
+        num_copy_ops = self._estimate_max_copy_ops(device_ptrs.group_block_counts)
 
         # reuse a pooled buffer set, growing it if this transfer needs more room
         batch_src, batch_dst, batch_sizes = (
@@ -518,29 +504,19 @@ class SingleDirectionOffloadingHandler:
         all_sizes = sizes.numpy()
 
         cpu_offset = 0
-        dev_ptr_offset = 0
         op_idx = 0
         num_transfer_bytes = 0
-        for g_idx, (group_size, block_idx) in enumerate(
-            zip(group_sizes, block_indices)
-        ):
-            n_data_refs = len(self.layer_refs_per_group[g_idx])
-            if group_size == 0:
-                continue
-
-            cpu_skip = block_idx % self.blocks_per_chunk
-            cpu_logical_count = group_size + cpu_skip
-            cpu_blocks_count = cdiv(cpu_logical_count, self.blocks_per_chunk)
-            cpu_end_offset = cpu_offset + cpu_blocks_count
+        for g in device_ptrs.iter_groups(self.blocks_per_chunk):
+            cpu_end_offset = cpu_offset + g.n_chunks
             assert cpu_end_offset <= num_cpu_blocks
 
             op_idx, group_bytes = self._fill_group_ops(
-                g_idx,
+                g.group_idx,
                 device_ptrs=device_ptrs,
-                dev_ptr_offset=dev_ptr_offset,
+                dev_ptr_offset=g.dev_ptr_offset,
                 cpu_block_ids=cpu_blocks[cpu_offset:cpu_end_offset],
-                group_size=group_size,
-                cpu_skip_count=cpu_skip,
+                group_size=g.group_size,
+                cpu_skip_count=g.skip,
                 all_src=all_src,
                 all_dst=all_dst,
                 all_sizes=all_sizes,
@@ -548,10 +524,8 @@ class SingleDirectionOffloadingHandler:
             )
             num_transfer_bytes += group_bytes
             cpu_offset = cpu_end_offset
-            dev_ptr_offset += group_size * n_data_refs
 
         assert cpu_offset == num_cpu_blocks
-        assert dev_ptr_offset == len(device_ptrs.ptrs)
         # Writer rotation may skip non-writer blocks, leaving op_idx below
         # the sized upper bound
         assert op_idx <= num_copy_ops
