@@ -33,11 +33,11 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang_kernels import (
     compute_num_split,
     mhc_pre_big_fuse_with_norm_tilelang,
 )
-from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, WarmupIntRange
 from vllm.model_executor.warmup.jit_warmup_tilelang_helper import (
     TileLangWarmupTensor,
@@ -317,6 +317,7 @@ class MhcPreKernel(VllmJitKernel["MhcPreKernel.CompileKey"]):
         n_splits: int
         use_norm_weight: bool
         use_deep_gemm: bool
+        constants: MhcKernelConstants
         is_broadcast: bool = False
 
     def dispatch(  # type: ignore[override]
@@ -328,6 +329,7 @@ class MhcPreKernel(VllmJitKernel["MhcPreKernel.CompileKey"]):
         use_norm_weight: bool,
         use_deep_gemm: bool,
         is_broadcast: bool,
+        constants: MhcKernelConstants,
     ) -> CompileKey:
         d = _compute_mhc_dispatch(
             num_tokens,
@@ -342,6 +344,7 @@ class MhcPreKernel(VllmJitKernel["MhcPreKernel.CompileKey"]):
             n_splits=d.n_splits,
             use_norm_weight=use_norm_weight,
             use_deep_gemm=use_deep_gemm,
+            constants=constants,
             is_broadcast=is_broadcast,
         )
 
@@ -359,7 +362,6 @@ class MhcPreKernel(VllmJitKernel["MhcPreKernel.CompileKey"]):
         if max_tokens <= 0:
             return []
         use_deep_gemm = _is_deep_gemm_supported()
-        self._constants = constants
         keys = self._trace_dispatch(self.dispatch)(
             num_tokens=WarmupIntRange(1, max_tokens + 1),
             hidden_size=hidden_size,
@@ -367,6 +369,7 @@ class MhcPreKernel(VllmJitKernel["MhcPreKernel.CompileKey"]):
             use_norm_weight=use_norm_weight,
             use_deep_gemm=use_deep_gemm,
             is_broadcast=is_broadcast_values,
+            constants=constants,
         )
         logger.info(
             "MhcPreKernel: total=%d "
@@ -392,7 +395,7 @@ class MhcPreKernel(VllmJitKernel["MhcPreKernel.CompileKey"]):
         n_splits = compile_key.n_splits
         hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
         num_tokens = 1  # dynamic dim; smallest valid value
-        c = self._constants
+        c = compile_key.constants
 
         gemm_out_mul = _fake(torch.float32, n_splits, num_tokens, hc_mult3)
         gemm_out_sqrsum = _fake(torch.float32, n_splits, num_tokens)
@@ -510,6 +513,7 @@ class MhcFusedPostPreKernel(VllmJitKernel["MhcFusedPostPreKernel.CompileKey"]):
         use_small_fma: bool
         use_norm_weight: bool
         use_deep_gemm: bool
+        constants: MhcKernelConstants
 
     def dispatch(  # type: ignore[override]
         self,
@@ -519,6 +523,7 @@ class MhcFusedPostPreKernel(VllmJitKernel["MhcFusedPostPreKernel.CompileKey"]):
         hc_mult: int,
         use_norm_weight: bool,
         use_deep_gemm: bool,
+        constants: MhcKernelConstants,
     ) -> CompileKey:
         d = _compute_mhc_dispatch(
             num_tokens, hidden_size, hc_mult, use_deep_gemm, is_fused=True
@@ -531,6 +536,7 @@ class MhcFusedPostPreKernel(VllmJitKernel["MhcFusedPostPreKernel.CompileKey"]):
             use_small_fma=d.use_small_fma,
             use_norm_weight=use_norm_weight,
             use_deep_gemm=use_deep_gemm,
+            constants=constants,
         )
 
     def get_warmup_keys(
@@ -546,13 +552,13 @@ class MhcFusedPostPreKernel(VllmJitKernel["MhcFusedPostPreKernel.CompileKey"]):
         if max_tokens <= 0:
             return []
         use_deep_gemm = _is_deep_gemm_supported()
-        self._constants = constants
         keys = self._trace_dispatch(self.dispatch)(
             num_tokens=WarmupIntRange(1, max_tokens + 1),
             hidden_size=hidden_size,
             hc_mult=hc_mult,
             use_norm_weight=use_norm_weight,
             use_deep_gemm=use_deep_gemm,
+            constants=constants,
         )
         logger.info(
             "MhcFusedPostPreKernel: total=%d (use_norm_weight=%s, "
@@ -577,7 +583,7 @@ class MhcFusedPostPreKernel(VllmJitKernel["MhcFusedPostPreKernel.CompileKey"]):
         tile_n = compile_key.tile_n
         hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
         num_tokens = 1  # dynamic dim; smallest valid value
-        c = self._constants
+        c = compile_key.constants
 
         if compile_key.use_small_fma:
             comb_mix = _fake(torch.float32, num_tokens, hc_mult, hc_mult)
@@ -684,6 +690,7 @@ class HcHeadFusedKernel(VllmJitKernel["HcHeadFusedKernel.CompileKey"]):
     class CompileKey:
         hidden_size: int
         hc_mult: int
+        constants: MhcKernelConstants
 
     def dispatch(  # type: ignore[override]
         self,
@@ -692,12 +699,14 @@ class HcHeadFusedKernel(VllmJitKernel["HcHeadFusedKernel.CompileKey"]):
         hidden_size: int,
         hc_mult: int,
         use_norm_weight: bool,
+        constants: MhcKernelConstants,
     ) -> CompileKey:
         # num_tokens is intentionally absent: it's a dynamic dim and does
         # not trigger re-compilation.
         return self.CompileKey(
             hidden_size=hidden_size,
             hc_mult=hc_mult,
+            constants=constants,
         )
 
     def get_warmup_keys(
@@ -712,13 +721,13 @@ class HcHeadFusedKernel(VllmJitKernel["HcHeadFusedKernel.CompileKey"]):
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         if max_tokens <= 0:
             return []
-        self._constants = constants
         # WarmupIntRange collapses to 1 key since dispatch ignores num_tokens.
         keys = self._trace_dispatch(self.dispatch)(
             num_tokens=WarmupIntRange(1, max_tokens + 1),
             hidden_size=hidden_size,
             hc_mult=hc_mult,
             use_norm_weight=use_norm_weight,
+            constants=constants,
         )
         logger.info(
             "HcHeadFusedKernel: total=%d (use_norm_weight=%s, constants=%s)",
@@ -736,7 +745,7 @@ class HcHeadFusedKernel(VllmJitKernel["HcHeadFusedKernel.CompileKey"]):
         hidden_size = compile_key.hidden_size
         hc_mult = compile_key.hc_mult
         num_tokens = 1  # dynamic dim; smallest valid value
-        c = self._constants
+        c = compile_key.constants
 
         hs = _fake(torch.bfloat16, num_tokens, hc_mult, hidden_size)
         fn = _fake(torch.float32, hc_mult, hc_mult * hidden_size)

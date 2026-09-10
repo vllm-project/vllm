@@ -17,6 +17,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
+from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
+    deepseek_v4_mhc_custom_op_warmup,
+)
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     write_flashinfer_autotune_cache,
@@ -189,6 +192,14 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     compilation_config = worker.vllm_config.compilation_config
     cudagraph_capture_sizes = list(compilation_config.cudagraph_capture_sizes or [])
+
+    # Keep the existing AMD CustomOp warmup path. NVIDIA mHC TileLang kernels
+    # register with JitWarmupRegistry while their model is constructed.
+    deepseek_v4_mhc_custom_op_warmup(
+        worker.get_model(),
+        max_tokens=worker.scheduler_config.max_num_batched_tokens,
+        cudagraph_capture_sizes=cudagraph_capture_sizes,
+    )
 
     # Run next so input-prep kernels JIT against pristine runner state.
     if enable_jit_warmup:

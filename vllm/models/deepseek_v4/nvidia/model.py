@@ -70,6 +70,9 @@ from vllm.model_executor.models.utils import (
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
+    register_deepseek_v4_mhc_warmup,
+)
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -1401,6 +1404,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
         else:
             self._mtp_hidden_buffer = None
+
+        register_deepseek_v4_mhc_warmup(
+            self,
+            vllm_config=vllm_config,
+            include_broadcast=get_pp_group().is_first_rank,
+            include_head=get_pp_group().is_last_rank,
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

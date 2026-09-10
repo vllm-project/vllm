@@ -43,6 +43,9 @@ from vllm.model_executor.models.qwen3_dspark import (
     DSparkMarkovHead,
 )
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
+    register_deepseek_v4_mhc_warmup,
+)
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -143,6 +146,13 @@ class DSparkDeepseekV4Model(nn.Module):
                 config.hidden_size + config.dspark_markov_rank,
                 prefix=maybe_prefix(prefix, "confidence_head"),
             )
+
+        register_deepseek_v4_mhc_warmup(
+            self,
+            vllm_config=vllm_config,
+            include_broadcast=False,
+            include_head=True,
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

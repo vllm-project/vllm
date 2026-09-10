@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Warm up DeepSeek V4 mHC TileLang kernels before serving requests.
+"""Register DeepSeek V4 mHC TileLang kernels for startup warmup.
 
-Caller-side entry point. The per-kernel dispatch / compile-key enumeration /
-compile logic lives next to the kernel definitions in
+The per-kernel dispatch / compile-key enumeration / compile logic lives next
+to the kernel definitions in
 ``vllm/model_executor/kernels/mhc/warmup.py`` (kernel-owned warmup contract
 per RFC #47456 / PR #47451).
 """
 
 from __future__ import annotations
 
+import time
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.warmup import (
     HC_HEAD_FUSED_KERNEL,
     MHC_FUSED_POST_PRE_KERNEL,
@@ -24,6 +27,50 @@ from vllm.tracing import instrument
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+logger = init_logger(__name__)
+
+_AUTO_WARMUP_MAX_TOKENS = 16_384
+_DEFAULT_TOKEN_SIZE_CANDIDATES = (
+    1,
+    2,
+    4,
+    8,
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048,
+    4096,
+    8192,
+    16_384,
+)
+
+
+def _normalize_token_sizes(
+    token_sizes: Iterable[int],
+    *,
+    max_tokens: int,
+) -> list[int]:
+    return sorted({size for size in token_sizes if 1 <= size <= max_tokens})
+
+
+def _select_custom_op_warmup_token_sizes(
+    *,
+    max_tokens: int,
+    cudagraph_capture_sizes: list[int],
+) -> list[int]:
+    if max_tokens <= 0:
+        return []
+
+    max_auto_tokens = min(max_tokens, _AUTO_WARMUP_MAX_TOKENS)
+    candidates = list(_DEFAULT_TOKEN_SIZE_CANDIDATES)
+    candidates.extend(cudagraph_capture_sizes)
+    candidates.append(max_auto_tokens)
+    return _normalize_token_sizes(candidates, max_tokens=max_auto_tokens)
 
 
 def _find_first_mhc_layer(model: torch.nn.Module) -> torch.nn.Module | None:
@@ -45,16 +92,123 @@ def _find_first_mhc_layer(model: torch.nn.Module) -> torch.nn.Module | None:
     return None
 
 
-def _find_deepseek_v4_model(model: torch.nn.Module) -> torch.nn.Module | None:
+def _find_mhc_head_module(model: torch.nn.Module) -> torch.nn.Module | None:
     for module in model.modules():
-        if module.__class__.__name__ != "DeepseekV4Model":
-            continue
         if all(
             hasattr(module, attr)
             for attr in ("hc_head_fn", "hc_head_scale", "hc_head_base")
         ):
             return module
     return None
+
+
+def _warmup_custom_op_mhc_layer(
+    layer: torch.nn.Module,
+    token_sizes: list[int],
+) -> None:
+    max_tokens = max(token_sizes)
+    hidden_size = int(layer.hidden_size)
+    hc_mult = int(layer.hc_mult)
+    device = layer.hc_attn_fn.device
+    residual = torch.zeros(
+        max_tokens,
+        hc_mult,
+        hidden_size,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+
+    for size in token_sizes:
+        residual_slice = residual[:size]
+        for fn, scale, base in (
+            (layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base),
+            (layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base),
+        ):
+            layer_input, post_mix, comb_mix = layer.hc_pre(
+                residual_slice,
+                fn,
+                scale,
+                base,
+            )
+            layer.hc_post(layer_input, residual_slice, post_mix, comb_mix)
+
+
+def _warmup_custom_op_hc_head(
+    model: torch.nn.Module,
+    token_sizes: list[int],
+) -> None:
+    hc_head_op = getattr(model, "hc_head_op", None)
+    if hc_head_op is None:
+        return
+
+    max_tokens = max(token_sizes)
+    hidden_size = int(model.config.hidden_size)
+    hc_mult = int(model.hc_mult)
+    device = model.hc_head_fn.device
+    hidden_states = torch.zeros(
+        max_tokens,
+        hc_mult,
+        hidden_size,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+
+    for size in token_sizes:
+        hc_head_op(
+            hidden_states[:size],
+            model.hc_head_fn,
+            model.hc_head_scale,
+            model.hc_head_base,
+            model.rms_norm_eps,
+            model.hc_eps,
+        )
+
+
+@instrument(span_name="DeepSeek V4 mHC CustomOp warmup")
+def deepseek_v4_mhc_custom_op_warmup(
+    model: torch.nn.Module,
+    *,
+    max_tokens: int,
+    cudagraph_capture_sizes: list[int] | None = None,
+) -> None:
+    """Preserve the existing AMD CustomOp warmup path.
+
+    NVIDIA decoder layers do not expose ``hc_pre`` / ``hc_post`` and are
+    handled by :func:`register_deepseek_v4_mhc_warmup` instead.
+    """
+    config = getattr(model, "config", None)
+    model_type = getattr(config, "model_type", None) if config is not None else None
+    if model_type is not None and model_type != "deepseek_v4":
+        return
+
+    layer = _find_first_mhc_layer(model)
+    if layer is None or not all(hasattr(layer, attr) for attr in ("hc_pre", "hc_post")):
+        return
+    if layer.hc_attn_fn.device.type != "cuda":
+        return
+
+    token_sizes = _select_custom_op_warmup_token_sizes(
+        max_tokens=max_tokens,
+        cudagraph_capture_sizes=cudagraph_capture_sizes or [],
+    )
+    if not token_sizes:
+        return
+
+    started = time.perf_counter()
+    logger.info(
+        "Warming up DeepSeek V4 mHC CustomOps for token sizes: %s",
+        token_sizes,
+    )
+    with torch.inference_mode():
+        _warmup_custom_op_mhc_layer(layer, token_sizes)
+        head = _find_mhc_head_module(model)
+        if head is not None:
+            _warmup_custom_op_hc_head(head, token_sizes)
+        torch.accelerator.synchronize()
+    logger.info(
+        "DeepSeek V4 mHC CustomOp warmup finished in %.2f seconds.",
+        time.perf_counter() - started,
+    )
 
 
 def _build_kernel_constants(layer: torch.nn.Module) -> MhcKernelConstants:
@@ -82,19 +236,22 @@ def _build_kernel_constants(layer: torch.nn.Module) -> MhcKernelConstants:
     )
 
 
-@instrument(span_name="mHC warmup")
-def deepseek_v4_mhc_warmup(
+def register_deepseek_v4_mhc_warmup(
     model: torch.nn.Module,
     *,
     vllm_config: VllmConfig,
+    include_broadcast: bool,
+    include_head: bool,
 ) -> None:
-    """Pre-compile every mHC TileLang specialization the runtime may invoke.
+    """Register every mHC TileLang specialization this pipeline rank may use.
 
-    No-op for non-DeepSeek-V4 models and non-CUDA devices. Each wrapper's
-    ``warmup()`` expands ``WarmupIntRange(1, max_tokens+1)`` to the actual
-    compile-key set (deduplicated by the AST tracer) and calls ``.compile()``
-    on the underlying TileLang kernels (compile-only, no launch).
+    This is called while the model runner's :class:`JitWarmupRegistry` is
+    active. The registry later expands ``WarmupIntRange`` to the actual
+    compile-key set and compiles each key once.
     """
+    if not vllm_config.kernel_config.enable_jit_warmup:
+        return
+
     config = getattr(model, "config", None)
     model_type = getattr(config, "model_type", None) if config is not None else None
     if model_type is not None and model_type != "deepseek_v4":
@@ -109,20 +266,16 @@ def deepseek_v4_mhc_warmup(
 
     hidden_size = int(layer.hidden_size)
     hc_mult = int(layer.hc_mult)
-    # NVIDIA fuses RMSNorm into the TileLang kernels (norm_weight path);
-    # AMD/XPU apply RMSNorm separately (norm_weight=None path).
-    use_norm_weight = not hasattr(layer, "mhc_pre")
-    # Broadcast (2D-residual first-layer) path exists only when the model
-    # has hc_attn_fn_broadcast — NVIDIA sets it in _configure_fused_norm,
-    # AMD/XPU do not.  This is independent of use_norm_weight: it reflects
-    # whether the runtime code has a broadcast branch, not whether norm
-    # is fused.
-    has_broadcast = getattr(layer, "hc_attn_fn_broadcast", None) is not None
-    is_broadcast_values = [False, True] if has_broadcast else [False]
+    # NVIDIA always fuses RMSNorm. AMD may fuse it when TileLang is selected;
+    # its layer records the effective choice in ``fuse_mhc_rmsnorm``.
+    use_norm_weight = bool(
+        getattr(layer, "fuse_mhc_rmsnorm", not hasattr(layer, "mhc_pre"))
+    )
+    is_broadcast_values = [False, True] if include_broadcast else [False]
 
     constants = _build_kernel_constants(layer)
 
-    MHC_PRE_KERNEL.warmup(
+    MHC_PRE_KERNEL.register_warmup(
         vllm_config,
         hidden_size=hidden_size,
         hc_mult=hc_mult,
@@ -130,7 +283,7 @@ def deepseek_v4_mhc_warmup(
         is_broadcast_values=is_broadcast_values,
         constants=constants,
     )
-    MHC_FUSED_POST_PRE_KERNEL.warmup(
+    MHC_FUSED_POST_PRE_KERNEL.register_warmup(
         vllm_config,
         hidden_size=hidden_size,
         hc_mult=hc_mult,
@@ -138,13 +291,11 @@ def deepseek_v4_mhc_warmup(
         constants=constants,
     )
 
-    if _find_deepseek_v4_model(model) is not None:
-        HC_HEAD_FUSED_KERNEL.warmup(
+    if include_head and _find_mhc_head_module(model) is not None:
+        HC_HEAD_FUSED_KERNEL.register_warmup(
             vllm_config,
             hidden_size=hidden_size,
             hc_mult=hc_mult,
             use_norm_weight=use_norm_weight,
             constants=constants,
         )
-
-    torch.accelerator.synchronize()

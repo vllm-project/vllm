@@ -20,6 +20,7 @@ from typing import cast
 from unittest import mock
 
 import pytest
+import torch
 
 from vllm.config import VllmConfig
 from vllm.model_executor.kernels.mhc.warmup import (
@@ -30,6 +31,10 @@ from vllm.model_executor.kernels.mhc.warmup import (
     MhcFusedPostPreKernel,
     MhcKernelConstants,
     MhcPreKernel,
+)
+from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
+    deepseek_v4_mhc_custom_op_warmup,
+    register_deepseek_v4_mhc_warmup,
 )
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 
@@ -142,6 +147,7 @@ def test_mhc_pre_kernel_compile_key_fields() -> None:
         "n_splits",
         "use_norm_weight",
         "use_deep_gemm",
+        "constants",
         "is_broadcast",
     }
 
@@ -156,12 +162,13 @@ def test_mhc_fused_post_pre_kernel_compile_key_fields() -> None:
         "use_small_fma",
         "use_norm_weight",
         "use_deep_gemm",
+        "constants",
     }
 
 
 def test_hc_head_fused_kernel_compile_key_fields() -> None:
     fields = {f.name for f in dataclasses.fields(HcHeadFusedKernel.CompileKey)}
-    assert fields == {"hidden_size", "hc_mult"}
+    assert fields == {"hidden_size", "hc_mult", "constants"}
 
 
 # -----------------------------------------------------------------------------
@@ -179,6 +186,35 @@ def test_mhc_kernel_constants_fields() -> None:
         "hc_sinkhorn_eps",
         "norm_eps",
     }
+
+
+def test_model_constants_are_part_of_compile_key(
+    _patch_deep_gemm: object,
+) -> None:
+    cfg = _vllm_config(max_tokens=1)
+    changed_constants = replace(_DEFAULT_CONSTANTS, norm_eps=1e-5)
+
+    first = MHC_PRE_KERNEL.get_warmup_keys(
+        cast(VllmConfig, cfg),
+        hidden_size=4096,
+        hc_mult=4,
+        use_norm_weight=True,
+        is_broadcast_values=[False],
+        constants=_DEFAULT_CONSTANTS,
+    )
+    second = MHC_PRE_KERNEL.get_warmup_keys(
+        cast(VllmConfig, cfg),
+        hidden_size=4096,
+        hc_mult=4,
+        use_norm_weight=True,
+        is_broadcast_values=[False],
+        constants=changed_constants,
+    )
+
+    assert len(first) == len(second) == 1
+    assert first[0] != second[0]
+    assert first[0].constants == _DEFAULT_CONSTANTS
+    assert second[0].constants == changed_constants
 
 
 # -----------------------------------------------------------------------------
@@ -275,6 +311,7 @@ def test_hc_head_fused_kernel_dedupes_to_single_key(
     assert keys[0] == HcHeadFusedKernel.CompileKey(
         hidden_size=7168,
         hc_mult=4,
+        constants=_DEFAULT_CONSTANTS,
     )
 
 
@@ -295,6 +332,7 @@ def test_hc_head_fused_kernel_dedupes_to_single_key(
                 use_deep_gemm=True,
                 num_tokens=128,
                 is_broadcast=False,
+                constants=_DEFAULT_CONSTANTS,
             ),
         ),
         (
@@ -305,6 +343,7 @@ def test_hc_head_fused_kernel_dedupes_to_single_key(
                 use_norm_weight=True,
                 use_deep_gemm=True,
                 num_tokens=8,
+                constants=_DEFAULT_CONSTANTS,
             ),
         ),
         (
@@ -314,6 +353,7 @@ def test_hc_head_fused_kernel_dedupes_to_single_key(
                 hc_mult=4,
                 use_norm_weight=True,
                 num_tokens=4,
+                constants=_DEFAULT_CONSTANTS,
             ),
         ),
     ],
@@ -354,6 +394,7 @@ def test_dispatch_matches_get_warmup_keys_expansion(
             hc_mult=4,
             use_norm_weight=True,
             use_deep_gemm=True,
+            constants=_DEFAULT_CONSTANTS,
         )
         assert k in key_set, f"token={t} produced key {k} not in warmup set"
 
@@ -363,13 +404,13 @@ def test_mhc_pre_compile_warms_prenorm_only_for_fallback(
     use_deep_gemm: bool,
 ) -> None:
     wrapper = MhcPreKernel()
-    wrapper._constants = _DEFAULT_CONSTANTS
     key = MhcPreKernel.CompileKey(
         hidden_size=7168,
         hc_mult=4,
         n_splits=1,
         use_norm_weight=True,
         use_deep_gemm=use_deep_gemm,
+        constants=_DEFAULT_CONSTANTS,
         is_broadcast=False,
     )
 
@@ -386,3 +427,165 @@ def test_mhc_pre_compile_warms_prenorm_only_for_fallback(
         compile_prenorm.assert_not_called()
     else:
         compile_prenorm.assert_called_once_with(7168, 4)
+
+
+def test_register_mhc_warmup_uses_selected_rank_paths() -> None:
+    layer = SimpleNamespace(
+        hidden_size=7168,
+        hc_mult=4,
+        hc_attn_fn=SimpleNamespace(device=SimpleNamespace(type="cuda")),
+        hc_post_alpha=2.0,
+        hc_sinkhorn_iters=20,
+        rms_norm_eps=1e-6,
+        hc_eps=1e-6,
+        attn_norm=SimpleNamespace(variance_epsilon=1e-6),
+    )
+    model = SimpleNamespace(config=SimpleNamespace(model_type="deepseek_v4"))
+    config = SimpleNamespace(
+        kernel_config=SimpleNamespace(enable_jit_warmup=True),
+    )
+
+    with (
+        mock.patch(
+            "vllm.model_executor.warmup.deepseek_v4_mhc_warmup._find_first_mhc_layer",
+            return_value=layer,
+        ),
+        mock.patch(
+            "vllm.model_executor.warmup.deepseek_v4_mhc_warmup._find_mhc_head_module",
+            return_value=model,
+        ),
+        mock.patch.object(MHC_PRE_KERNEL, "register_warmup") as pre_register,
+        mock.patch.object(
+            MHC_FUSED_POST_PRE_KERNEL, "register_warmup"
+        ) as fused_register,
+        mock.patch.object(HC_HEAD_FUSED_KERNEL, "register_warmup") as head_register,
+    ):
+        register_deepseek_v4_mhc_warmup(
+            cast(torch.nn.Module, model),
+            vllm_config=cast(VllmConfig, config),
+            include_broadcast=True,
+            include_head=True,
+        )
+
+    expected = dict(
+        hidden_size=7168,
+        hc_mult=4,
+        use_norm_weight=True,
+        constants=_DEFAULT_CONSTANTS,
+    )
+    pre_register.assert_called_once_with(
+        config,
+        is_broadcast_values=[False, True],
+        **expected,
+    )
+    fused_register.assert_called_once_with(config, **expected)
+    head_register.assert_called_once_with(config, **expected)
+
+
+def test_register_mhc_warmup_preserves_amd_norm_selection() -> None:
+    layer = SimpleNamespace(
+        hidden_size=4096,
+        hc_mult=4,
+        hc_attn_fn=SimpleNamespace(device=SimpleNamespace(type="cuda")),
+        hc_post_alpha=2.0,
+        hc_sinkhorn_iters=20,
+        rms_norm_eps=1e-6,
+        hc_eps=1e-6,
+        attn_norm=SimpleNamespace(variance_epsilon=1e-6),
+        mhc_pre=object(),
+        fuse_mhc_rmsnorm=True,
+    )
+    model = SimpleNamespace(config=SimpleNamespace(model_type="deepseek_v4"))
+    config = SimpleNamespace(
+        kernel_config=SimpleNamespace(enable_jit_warmup=True),
+    )
+
+    with (
+        mock.patch(
+            "vllm.model_executor.warmup.deepseek_v4_mhc_warmup._find_first_mhc_layer",
+            return_value=layer,
+        ),
+        mock.patch.object(MHC_PRE_KERNEL, "register_warmup") as pre_register,
+        mock.patch.object(
+            MHC_FUSED_POST_PRE_KERNEL, "register_warmup"
+        ) as fused_register,
+        mock.patch.object(HC_HEAD_FUSED_KERNEL, "register_warmup") as head_register,
+    ):
+        register_deepseek_v4_mhc_warmup(
+            cast(torch.nn.Module, model),
+            vllm_config=cast(VllmConfig, config),
+            include_broadcast=False,
+            include_head=False,
+        )
+
+    assert pre_register.call_args.kwargs["use_norm_weight"] is True
+    assert pre_register.call_args.kwargs["is_broadcast_values"] == [False]
+    assert fused_register.call_args.kwargs["use_norm_weight"] is True
+    head_register.assert_not_called()
+
+
+def test_custom_op_warmup_skips_nvidia_layer() -> None:
+    layer = SimpleNamespace(
+        hc_attn_fn=SimpleNamespace(device=SimpleNamespace(type="cuda")),
+    )
+    model = SimpleNamespace(config=SimpleNamespace(model_type="deepseek_v4"))
+
+    with (
+        mock.patch(
+            "vllm.model_executor.warmup.deepseek_v4_mhc_warmup._find_first_mhc_layer",
+            return_value=layer,
+        ),
+        mock.patch(
+            "vllm.model_executor.warmup.deepseek_v4_mhc_warmup."
+            "_select_custom_op_warmup_token_sizes"
+        ) as select_sizes,
+    ):
+        deepseek_v4_mhc_custom_op_warmup(
+            cast(torch.nn.Module, model),
+            max_tokens=1024,
+        )
+
+    select_sizes.assert_not_called()
+
+
+def test_custom_op_warmup_preserves_existing_amd_path() -> None:
+    layer = SimpleNamespace(
+        hc_pre=object(),
+        hc_post=object(),
+        hc_attn_fn=SimpleNamespace(device=SimpleNamespace(type="cuda")),
+    )
+    head = SimpleNamespace()
+    model = SimpleNamespace(config=SimpleNamespace(model_type="deepseek_v4"))
+
+    with (
+        mock.patch(
+            "vllm.model_executor.warmup.deepseek_v4_mhc_warmup._find_first_mhc_layer",
+            return_value=layer,
+        ),
+        mock.patch(
+            "vllm.model_executor.warmup.deepseek_v4_mhc_warmup._find_mhc_head_module",
+            return_value=head,
+        ),
+        mock.patch(
+            "vllm.model_executor.warmup.deepseek_v4_mhc_warmup."
+            "_select_custom_op_warmup_token_sizes",
+            return_value=[1, 16],
+        ),
+        mock.patch(
+            "vllm.model_executor.warmup.deepseek_v4_mhc_warmup."
+            "_warmup_custom_op_mhc_layer"
+        ) as warm_layer,
+        mock.patch(
+            "vllm.model_executor.warmup.deepseek_v4_mhc_warmup."
+            "_warmup_custom_op_hc_head"
+        ) as warm_head,
+        mock.patch.object(torch.accelerator, "synchronize") as synchronize,
+    ):
+        deepseek_v4_mhc_custom_op_warmup(
+            cast(torch.nn.Module, model),
+            max_tokens=1024,
+        )
+
+    warm_layer.assert_called_once_with(layer, [1, 16])
+    warm_head.assert_called_once_with(head, [1, 16])
+    synchronize.assert_called_once_with()
