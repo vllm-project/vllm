@@ -2846,7 +2846,7 @@ class VllmConfig:
             "NixlConnector"
         ):
             return
-        if not self.parallel_config._cp_kv_cache_interleave_size_auto:
+        if not self.parallel_config._allow_auto_resolve_cp_interleave_size:
             return
 
         # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid
