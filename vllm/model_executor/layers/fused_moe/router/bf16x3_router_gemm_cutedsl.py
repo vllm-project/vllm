@@ -26,6 +26,7 @@ from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import _tcgen05, simple_tma_copy
 from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
     WarmupIntRange,
     kernel_launcher,
 )
@@ -34,10 +35,9 @@ from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     VllmCuTeDSLJitKernel,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    LaunchSpec,
+    DispatchSpec,
     TritonWarmupTensor,
-    VllmTritonJitKernel,
-    triton_scalar_specialization_rep,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -452,162 +452,98 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
         )
 
 
-class BF16x3SplitKReduceKernel(
-    VllmTritonJitKernel["BF16x3SplitKReduceKernel.CompileKey"]
+@triton.jit
+def _splitk_reduce_kernel(
+    partials,
+    out,
+    N,
+    M: tl.constexpr,
+    split_stride,
+    k_splits,
+    BN: tl.constexpr,
+    BM: tl.constexpr,
+    BS: tl.constexpr,
+    USE_PDL: tl.constexpr,
 ):
-    @dataclass(frozen=True)
-    class CompileKey:
-        m: int
-        n: int
-        split_stride: int
-        k_splits: int
-        bn: int
-        bm: int
-        bs: int
-        launch_pdl: bool
+    pid_n = tl.program_id(0)
+    pid_m = tl.program_id(1)
+    offs_n = pid_n * BN + tl.arange(0, BN)
+    offs_m = pid_m * BM + tl.arange(0, BM)
+    offs_s = tl.arange(0, BS)
 
-    @staticmethod
-    @triton.jit
-    def kernel(
-        partials,
-        out,
-        N,
-        M: tl.constexpr,
-        split_stride,
-        k_splits,
-        BN: tl.constexpr,
-        BM: tl.constexpr,
-        BS: tl.constexpr,
-        launch_pdl: tl.constexpr,
-    ):
-        pid_n = tl.program_id(0)
-        pid_m = tl.program_id(1)
-        offs_n = pid_n * BN + tl.arange(0, BN)
-        offs_m = pid_m * BM + tl.arange(0, BM)
-        offs_s = tl.arange(0, BS)
+    if USE_PDL:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
 
-        if launch_pdl:
-            tl.extra.cuda.gdc_wait()
-            tl.extra.cuda.gdc_launch_dependents()
+    vals = tl.load(
+        partials
+        + offs_s[:, None, None] * split_stride
+        + offs_n[None, :, None] * M
+        + offs_m[None, None, :],
+        mask=(
+            (offs_s[:, None, None] < k_splits)
+            & (offs_n[None, :, None] < N)
+            & (offs_m[None, None, :] < M)
+        ),
+        other=0.0,
+    )
+    acc = tl.sum(vals, axis=0)
+    tl.store(
+        out + offs_n[:, None] * M + offs_m[None, :],
+        acc,
+        mask=(offs_n[:, None] < N) & (offs_m[None, :] < M),
+    )
 
-        vals = tl.load(
-            partials
-            + offs_s[:, None, None] * split_stride
-            + offs_n[None, :, None] * M
-            + offs_m[None, None, :],
-            mask=(
-                (offs_s[:, None, None] < k_splits)
-                & (offs_n[None, :, None] < N)
-                & (offs_m[None, None, :] < M)
-            ),
-            other=0.0,
-        )
-        acc = tl.sum(vals, axis=0)
-        tl.store(
-            out + offs_n[:, None] * M + offs_m[None, :],
-            acc,
-            mask=(offs_n[:, None] < N) & (offs_m[None, :] < M),
-        )
 
-    def dispatch(  # type: ignore[override]
-        self,
-        *,
-        N: int,
-        M: int,
-        split_k: int,
-        launch_pdl: bool,
-    ) -> CompileKey:
-        BS = 2 ** (split_k - 1).bit_length()
-        raw_BN = 32 // BS
-        BN = 1 if BS >= 8 else 16 if raw_BN > 16 else raw_BN
-        BM = 32 if BS >= 64 else 256 if BS >= 8 else 32
-        # Keep the representative in the same BS bucket and Triton scalar class.
-        k_splits = (
-            1
-            if split_k == 1
-            else ((BS // 2 // 16) + 1) * 16
-            if split_k % 16 == 0
-            else BS // 2 + 1
-        )
-        return self.CompileKey(
-            m=M,
-            n=triton_scalar_specialization_rep(N),
-            split_stride=triton_scalar_specialization_rep(N * M),
-            k_splits=k_splits,
-            bn=BN,
-            bm=BM,
-            bs=BS,
-            launch_pdl=launch_pdl,
-        )
+def _bf16x3_splitk_reduce_warmup_inputs(
+    *,
+    M: int,
+    K: int,
+    max_tokens: int,
+) -> dict[str, Any]:
+    N: Any = WarmupIntRange(1, min(max_tokens, 16) + 1)
+    split_k: Any = WarmupIntRange(1, math_utils.cdiv(K, 64) + 1)
+    launch_pdl: Any = WarmupChoices(False, True)
+    return dict(
+        partials=TritonWarmupTensor(
+            torch.float32,
+            shape=(split_k, N, M),
+            strides=(N * M, M, 1),
+        ),
+        out=TritonWarmupTensor(torch.float32, shape=(N, M)),
+        launch_pdl=launch_pdl,
+    )
 
-    def get_warmup_keys(
-        self,
-        *,
-        M: int,
-        K: int,
-        max_tokens: int,
-    ) -> list[CompileKey]:
-        max_split_k = math_utils.cdiv(K, 64)
-        max_tokens = min(max_tokens, 16)
-        if M <= 0 or max_split_k <= 0 or max_tokens <= 0:
-            return []
-        return self._trace_dispatch(self.dispatch)(
-            N=WarmupIntRange(1, max_tokens + 1),
-            M=M,
-            split_k=WarmupIntRange(1, max_split_k + 1),
-            launch_pdl=current_platform.is_arch_support_pdl(),
-        )
 
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        return dict(
-            partials=TritonWarmupTensor(
-                torch.float32,
-                shape=(compile_key.k_splits, compile_key.n, compile_key.m),
-                strides=(
-                    compile_key.split_stride,
-                    compile_key.m,
-                    1,
-                ),
-            ),
-            out=TritonWarmupTensor(
-                torch.float32,
-                shape=(compile_key.n, compile_key.m),
-            ),
-            launch_pdl=compile_key.launch_pdl,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        partials: torch.Tensor,
-        out: torch.Tensor,
-        launch_pdl: bool | None = None,
-    ) -> LaunchSpec:
-        split_k, N, M = partials.shape
-        if launch_pdl is None:
-            launch_pdl = current_platform.is_arch_support_pdl()
-        compile_key = self.dispatch(
-            N=N,
-            M=M,
-            split_k=split_k,
-            launch_pdl=launch_pdl,
-        )
-        grid = (
-            triton.cdiv(N, compile_key.bn),
-            triton.cdiv(M, compile_key.bm),
-        )
-        return grid, dict(
-            N=N,
-            M=M,
-            split_stride=partials.stride(0),
-            k_splits=split_k,
-            BN=compile_key.bn,
-            BM=compile_key.bm,
-            BS=compile_key.bs,
-            num_warps=4,
-            launch_pdl=compile_key.launch_pdl,
-        )
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_splitk_reduce_kernel,
+    warmup_inputs=_bf16x3_splitk_reduce_warmup_inputs,
+)
+def _BF16X3_SPLITK_REDUCE_KERNEL(
+    partials: torch.Tensor,
+    out: torch.Tensor,
+    launch_pdl: bool | None = None,
+) -> DispatchSpec:
+    split_k, N, M = partials.shape
+    if launch_pdl is None:
+        launch_pdl = current_platform.is_arch_support_pdl()
+    BS = 2 ** (split_k - 1).bit_length()
+    raw_BN = 32 // BS
+    BN = 1 if BS >= 8 else min(raw_BN, 16)
+    BM = 32 if BS >= 64 else 256 if BS >= 8 else 32
+    return (triton.cdiv(N, BN), triton.cdiv(M, BM)), dict(
+        partials=partials,
+        out=out,
+        N=N,
+        M=M,
+        split_stride=partials.stride(0),
+        k_splits=split_k,
+        BN=BN,
+        BM=BM,
+        BS=BS,
+        num_warps=4,
+        USE_PDL=launch_pdl,
+    )
 
 
 _BF16X3_ROUTER_GEMM_KERNEL = BF16x3RouterGemmKernel()
-_BF16X3_SPLITK_REDUCE_KERNEL = BF16x3SplitKReduceKernel()
