@@ -68,10 +68,9 @@ def v41_moe_config(dist_init):
     )
 
 
-@pytest.mark.parametrize(
-    "vision,layer_id,num_experts,top_k", [(False, 0, 8, 2), (True, 2, 4, 3)]
-)
-def test_deepseek_v41_mega_gate_correctness(
+@pytest.mark.parametrize("vision", [False, True])
+@pytest.mark.parametrize("layer_id,num_experts,top_k", [(0, 8, 2), (2, 4, 3)])
+def test_deepseek_v41_moe_routes_without_hash_table(
     v41_moe_config, monkeypatch, vision, layer_id, num_experts, top_k
 ):
     """Main and draft layers select experts by score and preserve image routing."""
