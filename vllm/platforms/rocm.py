@@ -682,9 +682,24 @@ class RocmPlatform(Platform):
             f"{config_str}. Reasons: {reasons_str}."
         )
         if len(valid_backends_priorities) == 0:
+            # If a backend rejected the requested kv-cache dtype, list the
+            # dtypes it does accept so the limitation is discoverable.
+            supported = sorted(
+                {
+                    dt
+                    for backend, reasons in invalid_reasons.items()
+                    if any("kv_cache_dtype" in r for r in reasons)
+                    for dt in backend.get_class().supported_kv_cache_dtypes
+                }
+            )
+            hint = (
+                f" Supported kv_cache_dtype values: {', '.join(supported)}."
+                if supported
+                else ""
+            )
             raise ValueError(
                 f"No valid attention backend found for {cls.device_name} "
-                f"with {config_str}. Reasons: {reasons_str}."
+                f"with {config_str}. Reasons: {reasons_str}.{hint}"
             )
 
         # We have found some valid backends. Select the one with the
@@ -899,6 +914,12 @@ class RocmPlatform(Platform):
 
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
+
+        if (
+            parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.data_parallel_size > 1
+        ):
+            raise ValueError("PCP does not support data parallelism on ROCm yet.")
 
         if (
             compilation_config.cudagraph_mode.has_full_cudagraphs()
