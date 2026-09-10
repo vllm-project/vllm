@@ -35,6 +35,10 @@ pub enum Error {
     #[error("{kind} parsing is disabled by frontend configuration")]
     ParserDisabled { kind: &'static str },
     #[error(
+        "unified parsing requires the tool and reasoning selections to resolve to the same parser; resolved tool={tool}, reasoning={reasoning}"
+    )]
+    IncompatibleParserSelections { tool: String, reasoning: String },
+    #[error(
         "{kind} parser `{name}` is not registered{}",
         available_parser_hint(.available_names)
     )]

@@ -183,6 +183,8 @@ def test_ipc_cache_cold_start_and_warm_restart(vllm_runner, case: ModelCase):
     warm runs disable the disk fallback, so they only pass if the weights
     really came from the daemon.
     """
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     if case is K3_CASE and not current_platform.is_device_capability_family(100):
         pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
 

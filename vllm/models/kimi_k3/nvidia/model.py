@@ -3,7 +3,7 @@
 """Kimi-K3 multimodal model implementation for vLLM."""
 
 import math
-from collections.abc import Iterable
+from collections.abc import Hashable, Iterable
 from typing import Any, cast
 
 import torch
@@ -1972,6 +1972,7 @@ class KimiK3ForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
