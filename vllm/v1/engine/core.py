@@ -45,10 +45,10 @@ from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+from vllm.v1.core.kv_cache_config_builder import build_kv_cache_configs
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
-    get_kv_cache_configs,
     get_request_block_hasher,
     init_none_hash,
     resolve_kv_cache_block_sizes,
@@ -316,7 +316,7 @@ class EngineCore:
         # Track max_model_len before KV cache config to detect auto-fit changes
         max_model_len_before = vllm_config.model_config.max_model_len
 
-        kv_cache_configs = get_kv_cache_configs(
+        kv_cache_configs = build_kv_cache_configs(
             vllm_config, kv_cache_specs, available_gpu_memory
         )
         for kv_cache_config in kv_cache_configs:
