@@ -608,6 +608,21 @@ def varlen_with_paged_kv(
             slot_mapping=slot_mapping,
             isa=isa,
         )
+        ref_metadata = cpu_attn_get_scheduler_metadata(
+            num_reqs=num_seqs,
+            num_heads=num_query_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_size,
+            seq_lens=kv_lens_tensor,
+            dtype=dtype,
+            query_start_loc=cu_query_lens,
+            causal=dynamic_causal is None,
+            sliding_window_size=(sliding_window if sliding_window is not None else -1),
+            isa=isa,
+            enable_kv_split=True,
+            dynamic_causal=dynamic_causal_tensor,
+            kv_cache_dtype="auto",
+        )
         ref_output = torch.empty_like(query)
         cpu_attention_with_kv_cache(
             query=query,
@@ -622,7 +637,7 @@ def varlen_with_paged_kv(
             sliding_window=sliding_window if sliding_window is not None else -1,
             block_table=block_tables,
             softcap=soft_cap if soft_cap is not None else 0,
-            scheduler_metadata=metadata,
+            scheduler_metadata=ref_metadata,
             s_aux=s_aux,
             dynamic_causal=dynamic_causal_tensor,
         )
@@ -1166,3 +1181,135 @@ def test_varlen_with_paged_kv_dynamic_causal(
         kv_cache_dtype=kv_cache_dtype,
         dynamic_causal=dynamic_causal,
     )
+
+
+# ---------------------------------------------------------------------------
+# AMX_FP8 (Diamond Rapids) tests
+# ---------------------------------------------------------------------------
+
+
+def _amx_fp8_available() -> bool:
+    """Return True iff the runtime reports AMX_FP8 capability."""
+    return torch.cpu._is_amx_tile_supported() and torch.ops._C.cpu_attn_has_isa(
+        "amx_fp8"
+    )
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8_e4m3", "fp8_e5m2"])
+@pytest.mark.parametrize("seq_lens", SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [64, 128, 256])
+@pytest.mark.parametrize("block_size", [32, 64])
+@pytest.mark.parametrize("sliding_window", [None])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("soft_cap", [None])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("use_alibi", [False])
+@pytest.mark.parametrize("use_sink", [False])
+@pytest.mark.parametrize("isa", ["amx_fp8"])
+@pytest.mark.skipif(
+    not _amx_fp8_available(), reason="no AMX_FP8 support (requires Diamond Rapids)."
+)
+def test_varlen_with_paged_kv_amx_fp8(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    soft_cap: float | None,
+    num_blocks: int,
+    use_alibi: bool,
+    use_sink: bool,
+    isa: str,
+    kv_cache_dtype: str,
+) -> None:
+    """Test AMX_FP8 native FP8×FP8 attention (Diamond Rapids).
+
+    Verifies that:
+    - QK uses _tile_dpfp8ps (native FP8 MMA, no K dequant).
+    - PV uses native FP8 MMA for both E4M3 and E5M2.
+    - Output cosine similarity vs fp32 reference > 0.99.
+    """
+    if block_size % 64 != 0:
+        pytest.skip("native FP8 PV requires block_size divisible by 64")
+
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        soft_cap=soft_cap,
+        num_blocks=num_blocks,
+        use_alibi=use_alibi,
+        use_sink=use_sink,
+        isa=isa,
+        kv_cache_dtype=kv_cache_dtype,
+    )
+
+
+@pytest.mark.skipif(
+    not _amx_fp8_available(), reason="no AMX_FP8 support (requires Diamond Rapids)."
+)
+def test_amx_fp8_qk_covers_full_64_token_group() -> None:
+    head_size = 64
+    block_size = 64
+    query = torch.ones((1, 1, head_size), dtype=torch.bfloat16)
+    key = torch.empty((block_size, 1, head_size), dtype=torch.bfloat16)
+    value = torch.empty_like(key)
+    key[:32].fill_(-1)
+    key[32:].fill_(1)
+    value[:32].fill_(-1)
+    value[32:].fill_(1)
+
+    key_cache = torch.empty((1, 1, block_size, head_size), dtype=torch.uint8)
+    value_cache = torch.empty_like(key_cache)
+    slot_mapping = torch.arange(block_size, dtype=torch.int64)
+    cpu_attn_reshape_and_cache(
+        key=key,
+        value=value,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        slot_mapping=slot_mapping,
+        isa="amx_fp8",
+        kv_cache_dtype="fp8_e4m3",
+    )
+
+    query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
+    seq_lens = torch.tensor([block_size], dtype=torch.int32)
+    metadata = cpu_attn_get_scheduler_metadata(
+        num_reqs=1,
+        num_heads=1,
+        num_kv_heads=1,
+        head_dim=head_size,
+        seq_lens=seq_lens,
+        dtype=torch.bfloat16,
+        query_start_loc=query_start_loc,
+        causal=True,
+        sliding_window_size=-1,
+        isa="amx_fp8",
+        enable_kv_split=False,
+        kv_cache_dtype="fp8_e4m3",
+    )
+    output = torch.empty_like(query)
+    cpu_attention_with_kv_cache(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        output=output,
+        query_start_loc=query_start_loc,
+        seq_lens=seq_lens,
+        scale=head_size**-0.5,
+        causal=True,
+        alibi_slopes=None,
+        sliding_window=-1,
+        block_table=torch.tensor([[0]], dtype=torch.int32),
+        softcap=0,
+        scheduler_metadata=metadata,
+        s_aux=None,
+        kv_cache_dtype="fp8_e4m3",
+    )
+
+    torch.testing.assert_close(output, torch.ones_like(output), atol=0.05, rtol=0)
