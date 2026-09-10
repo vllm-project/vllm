@@ -714,17 +714,8 @@ def test_disk_mode_block_removed_relabeled_storage() -> None:
         assert ev.medium == MEDIUM_STORAGE
 
 
-def test_mamba_dcp_metadata_guard() -> None:
-    """Mamba+DCP: token_ids guard emits [] when capture and emission sizes differ.
-
-    The metadata capture at _prepare_eager_store_specs uses
-    g_block_size = spec.block_size * cp_world_size = 32 * 2 = 64 to slice
-    tokens. The event emission uses block_size = spec.block_size * 1 = 32
-    for Mamba (SSM state is not CP-sharded). The guard in
-    _process_store_completion detects len(token_ids) != block_size and emits
-    token_ids=[] instead of misleading data. When #49962 fixes the capture
-    path, the guard stops triggering and correct token_ids flow through.
-    """
+def test_mamba_dcp_metadata_uses_resolved_group_size() -> None:
+    """Mamba+DCP captures event metadata with the unscaled group size."""
     vbs = BLOCK_SIZE * 2
     kv_cfg = _make_mixed_kv_cache_config(
         num_blocks=16, with_mamba=True, mamba_block_size=32
@@ -739,8 +730,8 @@ def test_mamba_dcp_metadata_guard() -> None:
     sched = fix.scheduler
     gpu_pool = fix.gpu_block_pool
 
-    # Mamba g_block_size = 32 * 2 = 64, so 2 Mamba blocks need 128 computed
-    # tokens to be "ready"; FA g_block_size = 16 * 2 = 32 needs only 64.
+    # Both resolved group sizes are 32: FA is DCP-sharded from 16, while Mamba
+    # remains replicated at its configured size.
     req = _make_cp_request(num_blocks=4, virtual_block_size=vbs)
     fa_blocks = _allocate_cp_gpu_blocks(gpu_pool, req, 2, vbs, group_id=0)
     mamba_blocks = _allocate_cp_gpu_blocks(gpu_pool, req, 2, vbs, group_id=1)
@@ -776,15 +767,24 @@ def test_mamba_dcp_metadata_guard() -> None:
             f"FA token_ids should be {vbs}, got {len(ev.token_ids)}"
         )
 
-    # Mamba group: capture size (64) != emission size (32) → guard emits [].
+    # Mamba capture and emission both use the resolved, unscaled size.
     mamba_events = by_group[1]
     assert len(mamba_events) == 2
-    for ev in mamba_events:
+    for idx, ev in enumerate(mamba_events):
         assert ev.block_size == 32
-        assert ev.token_ids == [], (
-            f"Mamba token_ids should be [] (guard), got {ev.token_ids}"
+        assert ev.token_ids == req.prompt_token_ids[idx * 32 : (idx + 1) * 32]
+        expected_hash = maybe_convert_block_hash(
+            get_block_hash(make_block_hash_with_group_id(req.block_hashes[idx], 1))
         )
-        assert ev.parent_block_hash is None, (
-            "Mamba parent_block_hash should be None (guard)"
+        assert ev.block_hashes == [expected_hash]
+        expected_parent = (
+            None
+            if idx == 0
+            else maybe_convert_block_hash(
+                get_block_hash(
+                    make_block_hash_with_group_id(req.block_hashes[idx - 1], 1)
+                )
+            )
         )
-        assert ev.extra_keys is None, "Mamba extra_keys should be None (guard)"
+        assert ev.parent_block_hash == expected_parent
+        assert ev.extra_keys is None
