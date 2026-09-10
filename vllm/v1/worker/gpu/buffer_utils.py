@@ -51,6 +51,11 @@ class UvaBuffer:
 
 
 class UvaBufferPool:
+    """Preallocate each slot at size, growing its first dimension as needed.
+
+    Callers must retire a slot's GPU readers before reuse, including growth.
+    """
+
     def __init__(
         self,
         size: int | Sequence[int],
@@ -72,9 +77,13 @@ class UvaBufferPool:
         # Round robin to the next buffer.
         self._curr = (self._curr + 1) % self.max_concurrency
         buf = self._uva_bufs[self._curr]
+        n = len(x)
+        if n > buf.cpu.shape[0]:
+            capacity = 1 << (n - 1).bit_length()
+            buf = UvaBuffer((capacity, *buf.cpu.shape[1:]), self.dtype)
+            self._uva_bufs[self._curr] = buf
         # CPU-to-CPU copy
         dst = buf.cpu if isinstance(x, torch.Tensor) else buf.np
-        n = len(x)
         dst[:n] = x
         return buf.uva[:n]
 
@@ -151,6 +160,7 @@ class StagedWriteTensor:
         self.write_indices = new_buffer(self.num_rows, dtype=torch.int32)
         self.write_starts = new_buffer(self.num_rows, dtype=torch.int32)
         self.write_cu_lens = new_buffer(self.num_rows, dtype=torch.int32)
+        self.write_contents = new_buffer(1, dtype=dtype) if uva_instead_of_gpu else None
 
     def stage_write(
         self, index: int, start: int, x: Iterable[int] | Iterable[float]
@@ -180,10 +190,14 @@ class StagedWriteTensor:
         starts_uva = self.write_starts.copy_to_uva(self._staged_write_starts)
         cu_lens_uva = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
 
-        # Special handling for write_contents
-        write_contents = async_tensor_h2d(
-            self._staged_write_contents, device=self.device, dtype=self.dtype
-        )
+        if self.write_contents is None:
+            write_contents = async_tensor_h2d(
+                self._staged_write_contents, device=self.device, dtype=self.dtype
+            )
+        else:
+            write_contents = self.write_contents.copy_to_uva(
+                self._staged_write_contents
+            )
 
         # Write diffs to the GPU buffer
         _apply_write_kernel[(n,)](
