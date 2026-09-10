@@ -9,6 +9,7 @@ from vllm._aiter_ops import (
     rocm_aiter_ops,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     _upcast_e8m0_to_fp32,
 )
@@ -456,4 +457,106 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
         return gemm_a8w8_blockscale_op(
             A, B, As, Bs, list(self.weight_group_shape), output_dtype=out_dtype
+        )
+
+
+class AiterPreshuffledBlockScaleFp8ScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    """Block-scaled FP8 GEMM using AITER's B-preshuffled weight layout."""
+
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
+        super().__init__(config)
+        act_scale_descriptor = config.activation_quant_key.scale
+        # AITER bpreshuffle indexes x_scale as kb * M + row (K-major).
+        # ROCm group_fp8_quant currently ignores this flag, so
+        # apply_block_scaled_mm also converts at runtime.
+        self.quant_fp8 = QuantFP8(
+            static=act_scale_descriptor.static,
+            group_shape=act_scale_descriptor.group_shape,
+            num_token_padding=self.get_output_padding(),
+            use_ue8m0=False,
+            column_major_scales=True,
+        )
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_rocm():
+            return False, "requires ROCm."
+        if not rocm_aiter_ops.is_linear_enabled():
+            return (
+                False,
+                "requires setting `VLLM_ROCM_USE_AITER=1` "
+                "and `VLLM_ROCM_USE_AITER_LINEAR=1`.",
+            )
+        try:
+            import aiter  # noqa: F401
+        except Exception:
+            return False, "requires aiter library to be installed."
+        return True, None
+
+    @classmethod
+    def can_implement(
+        cls, config: FP8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
+        can_implement_base, reason = super().can_implement(config)
+        if not can_implement_base:
+            return can_implement_base, reason
+
+        act_quant_desc = config.activation_quant_key.scale
+        if act_quant_desc.group_shape != GroupShape(1, 128):
+            return (
+                False,
+                "Supports only dynamic per token group activation "
+                "quantization with group_shape=(1,128).",
+            )
+
+        if config.weight_shape is None:
+            return False, "weight_shape is required."
+        n, k = config.weight_shape
+
+        weight_group_shape = config.weight_quant_key.scale.group_shape
+        if weight_group_shape != GroupShape(128, 128):
+            return (
+                False,
+                f"requires weight_group_shape (128,128), "
+                f"got {weight_group_shape}.",
+            )
+
+        if not rocm_aiter_ops.is_blockscale_bpreshuffle_tuned(n, k):
+            return False, f"requires a tuned configuration for N={n}, K={k}."
+
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        params = self._get_layer_params(layer)
+        replace_parameter(
+            layer,
+            params.WEIGHT,
+            torch.nn.Parameter(
+                rocm_aiter_ops.shuffle_weight(params.weight.data).data,
+                requires_grad=False,
+            ),
+        )
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        if As.dtype != Bs.dtype:
+            if As.dtype == torch.float8_e8m0fnu:
+                As = _upcast_e8m0_to_fp32(As).contiguous()
+            else:
+                As = As.to(torch.float32)
+            Bs = Bs.to(torch.float32)
+
+        if As.dim() == 2 and As.size(-1) > 1 and As.stride(0) != 1:
+            As = As.t().contiguous().t()
+
+        return rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+            A, B, As, Bs, output_dtype=self.config.out_dtype
         )
