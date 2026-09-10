@@ -327,10 +327,6 @@ RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
 
 FROM base AS final
 
-# torch 2.12 implicitly attaches rocprofiler-sdk; its queue interposition hangs at HSA
-# teardown, so disable it. TODO: drop once ROCm's stock rocprofiler carries the fix.
-ENV ROCPROFILER_QUEUE_INTERPOSITION=0
-
 COPY --from=build_rocm_runtime /staging/lib/ ${SDK_DEV}/lib/
 # Hard link the patched library onto every stock file name, in both SDK trees, so that the
 # SONAME lookup and the hard coded paths all resolve to it. Hard links rather than symlinks
