@@ -207,6 +207,80 @@ class TestStreamingScheduler(unittest.TestCase):
         # 2 + len([1, 2, 3])
         assert session.mm_features[1].mm_position.offset == 5
 
+    def test_single_turn_realtime_model_starts_each_chunk_clean(self):
+        """A model that opts out of context carry-over must start each chunk
+        from the new prompt alone (vllm-project/vllm#51374, #51376).
+
+        The generic policy appends the previous chunk's output tokens to the next
+        chunk's prompt. For a model whose realtime prompt is a complete single
+        turn, that turns its own transcripts into conversation history and later
+        segments reproduce earlier ones.
+        """
+        scheduler = create_scheduler()
+        scheduler._realtime_context_policy = False
+
+        old_mm = MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="audio",
+            identifier="segment-1",
+            mm_position=PlaceholderRange(offset=1, length=1),
+        )
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[1, 2, 3],
+            mm_features=[old_mm],
+        )
+        # Segment 1 ran and produced two output tokens.
+        session._all_token_ids.extend([10, 11])
+        session.num_computed_tokens = 5
+
+        new_mm = MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="audio",
+            identifier="segment-2",
+            mm_position=PlaceholderRange(offset=1, length=1),
+        )
+        new_request = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[4, 5, 6],
+            mm_features=[new_mm],
+        )
+        update = StreamingUpdate.from_request(new_request)
+        scheduler._update_request_as_session(session, update)
+
+        # The new chunk's prompt is the whole prompt; segment 1's output is gone.
+        assert session.prompt_token_ids == [4, 5, 6]
+        assert list(session._all_token_ids) == [4, 5, 6]
+        assert 10 not in session._all_token_ids
+        assert 11 not in session._all_token_ids
+        assert session.num_prompt_tokens == 3
+        # Text state and KV state move together.
+        assert session.num_computed_tokens == 0
+        assert session.num_output_placeholders == 0
+        assert len(session._output_token_ids) == 0
+        # Only the new segment's audio is attached, at its own offset.
+        assert len(session.mm_features) == 1
+        assert session.mm_features[0].identifier == "segment-2"
+        assert session.mm_features[0].mm_position.offset == 1
+        assert session.status == RequestStatus.WAITING
+
+    def test_context_carrying_realtime_model_is_unchanged(self):
+        """The default policy must keep appending the previous chunk's output,
+        which is what multi-turn realtime models (e.g. Voxtral) rely on."""
+        scheduler = create_scheduler()
+        scheduler._realtime_context_policy = True
+
+        session = DummyRequest(request_id="session", prompt_token_ids=[1, 2, 3])
+        session._all_token_ids.extend([10, 11])
+        session.num_computed_tokens = 5
+
+        new_request = DummyRequest(request_id="session", prompt_token_ids=[4, 5, 6])
+        update = StreamingUpdate.from_request(new_request)
+        scheduler._update_request_as_session(session, update)
+
+        assert session.prompt_token_ids == [1, 2, 3, 10, 11, 4, 5, 6]
+        assert session.num_computed_tokens == 5
+
     def test_process_streaming_requests_with_finish_session(self):
         """Test that a non-resumable request signals stream completion.
 
