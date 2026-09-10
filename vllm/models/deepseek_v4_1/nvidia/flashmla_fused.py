@@ -73,6 +73,21 @@ def dsv4_fused_attention_enabled(vllm_config: VllmConfig) -> bool:
     return ok
 
 
+def _weight_was_loaded(prefix: str, loaded_params: set[str] | None, leaf: str) -> bool:
+    """Whether the layer at ``prefix`` had its ``leaf`` parameter loaded.
+
+    ``loaded_params`` may be relative to an enclosing module (AutoWeightsLoader
+    hands each child its own namespace), so match on the ``layers.<id>`` tail of
+    the prefix rather than the full name.
+    """
+    if loaded_params is None:
+        return True
+    idx = prefix.rfind("layers.")
+    anchor = prefix[idx:] if idx >= 0 else prefix
+    target = f"{anchor}.{leaf}"
+    return any(n == target or n.endswith("." + target) for n in loaded_params)
+
+
 class DeepseekV4FlashMLAFusedAttention(DeepseekV4FlashMLAAttention):
     uses_fused_kernel_layouts: ClassVar[bool] = True
 
@@ -88,20 +103,24 @@ class DeepseekV4FlashMLAFusedAttention(DeepseekV4FlashMLAAttention):
         self.fused_decode_min_tokens = (
             vllm_config.attention_config.dsv4_fused_decode_min_tokens
         )
+        self._permuted_wq_b = False
+        self._permuted_wo_a = False
 
     # ---- weights -------------------------------------------------------
 
     def finalize_loaded_weights(self, loaded_params: set[str] | None) -> None:
-        if loaded_params is None or f"{self.prefix}.wq_b.weight" in loaded_params:
+        if _weight_was_loaded(self.prefix, loaded_params, "wq_b.weight"):
             permute_wq_b_(
                 self.wq_b.weight.data, self.wq_b.weight_scale.data, self.n_local_heads
             )
-        if loaded_params is None or f"{self.prefix}.wo_a.weight" in loaded_params:
+            self._permuted_wq_b = True
+        if _weight_was_loaded(self.prefix, loaded_params, "wo_a.weight"):
             permute_wo_a_(
                 self.wo_a.weight.data,
                 self.wo_a.weight_scale.data,
                 self.n_local_heads // self.n_local_groups,
             )
+            self._permuted_wo_a = True
 
     # ---- forward plumbing ----------------------------------------------
 
@@ -165,6 +184,12 @@ class DeepseekV4FlashMLAFusedAttention(DeepseekV4FlashMLAAttention):
         positions: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
+        if not (self._permuted_wq_b and self._permuted_wo_a):
+            raise RuntimeError(
+                f"{self.prefix}: wq_b / wo_a were not permuted for the FlashMLA "
+                "fused kernel (finalize_loaded_weights did not see this layer's "
+                "weights); refusing to run with mismatched layouts."
+            )
         attn_metadata = get_forward_context().attn_metadata
         if attn_metadata is None:
             # Warmup dummy run: reserve the prefill workspace, compile the Q
