@@ -53,6 +53,12 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch, hisparse) -> No
             assert scope.active
             assert kwargs["kv_caches"] is kv_caches
             assert kwargs["pinned_host_pools"] is host_allocator.registered_pools
+            return [
+                SimpleNamespace(
+                    view=SimpleNamespace(cache=torch.empty(1, 1, 1), block_size=1),
+                    runtime=SimpleNamespace(),
+                )
+            ]
 
         monkeypatch.setattr(
             hisparse_binding, "HiSparseHostAllocator", lambda config: host_allocator

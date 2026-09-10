@@ -45,12 +45,15 @@ def init_hisparse_kv_cache(
         kernel_block_sizes,
         host_allocator=host_allocator,
     )
-    bind_hisparse_kv_caches(
+    cache_handles = bind_hisparse_kv_caches(
         forward_context=forward_context,
         kv_cache_config=kv_cache_config,
         kv_caches=kv_caches,
         block_tables=block_tables,
         pinned_host_pools=host_allocator.registered_pools,
+    )
+    _init_runtime_buffers(
+        cache_handles,
         max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
         max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
     )
@@ -118,9 +121,8 @@ def bind_hisparse_kv_caches(
     kv_caches: dict[str, torch.Tensor],
     block_tables: "BlockTables",
     pinned_host_pools: dict[int, torch.Tensor],
-    max_num_reqs: int,
-    max_num_batched_tokens: int,
-) -> None:
+) -> list[HiSparseCacheHandle]:
+    """Bind existing cache storage and block tables; return the bound handles."""
     tensor_configs = {
         name: tensor_config
         for tensor_config in kv_cache_config.kv_cache_tensors
@@ -200,16 +202,29 @@ def bind_hisparse_kv_caches(
 
     if hot_backing is None or not cache_handles:
         raise RuntimeError("HiSparse found no hot-cache handles.")
+    (source_group_id,) = kv_cache_config.host_group_ids
+    for cache_handle in cache_handles:
+        cache_handle.source_block_table = block_tables.input_block_tables[
+            source_group_id
+        ]
+        cache_handle.mirror_slot_mapping = block_tables.slot_mappings[source_group_id]
+    return cache_handles
+
+
+def _init_runtime_buffers(
+    cache_handles: list[HiSparseCacheHandle],
+    *,
+    max_num_reqs: int,
+    max_num_batched_tokens: int,
+) -> None:
+    """Allocate shared request indices and per-layer mirror staging buffers."""
+    resident = cache_handles[0].view
+    assert resident is not None
     request_state_indices = torch.full(
-        (max_num_reqs,), -1, dtype=torch.int32, device=hot_backing.device
+        (max_num_reqs,), -1, dtype=torch.int32, device=resident.cache.device
     )
     for cache_handle in cache_handles:
         cache_handle.runtime.request_state_indices = request_state_indices
-    (source_group_id,) = kv_cache_config.host_group_ids
-    source_block_table = block_tables.input_block_tables[source_group_id]
-    source_slot_mapping = block_tables.slot_mappings[source_group_id]
-    resident = cache_handles[0].view
-    assert resident is not None
     staging_blocks = (
         max_num_batched_tokens + resident.block_size - 1
     ) // resident.block_size
@@ -221,13 +236,11 @@ def bind_hisparse_kv_caches(
             resident.cache.shape[-1],
         ),
         dtype=resident.cache.dtype,
-        device=hot_backing.device,
+        device=resident.cache.device,
     )
     mirror_staging_slots = torch.arange(
-        max_num_batched_tokens, dtype=torch.int64, device=hot_backing.device
+        max_num_batched_tokens, dtype=torch.int64, device=resident.cache.device
     )
     for layer_index, cache_handle in enumerate(cache_handles):
-        cache_handle.source_block_table = source_block_table
-        cache_handle.mirror_slot_mapping = source_slot_mapping
         cache_handle.mirror_staging_cache = mirror_staging_caches[layer_index]
         cache_handle.mirror_staging_slots = mirror_staging_slots
