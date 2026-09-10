@@ -2691,6 +2691,8 @@ def test_spec_model_architecture_infers_method(architecture, method):
     [
         ("Qwen3DSparkModel", "dspark"),
         ("DeepSeekMTPModel", "mtp"),
+        ("DeepSeekMTPModel", "deepseek_mtp"),
+        ("MiMoMTPModel", "mimo_mtp"),
     ],
 )
 def test_explicit_method_matching_draft_architecture_is_preserved(architecture, method):
@@ -2720,7 +2722,8 @@ def test_explicit_method_matching_draft_architecture_is_preserved(architecture, 
     ("architecture", "configured_method", "registered_method"),
     [
         ("MuseGlimmerAssistantModel", "draft_model", "dflash"),
-        ("DeepSeekMTPModel", "deepseek_mtp", "mtp"),
+        ("MuseGlimmerAssistantModel", "deepseek_mtp", "dflash"),
+        ("DeepSeekMTPModel", "dflash", "mtp"),
     ],
 )
 def test_explicit_method_conflicting_with_draft_architecture_is_rejected(

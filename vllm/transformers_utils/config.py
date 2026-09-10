@@ -8,7 +8,7 @@ from dataclasses import asdict
 from functools import cache, partial, wraps
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, get_args
 
 import huggingface_hub
 import torch
@@ -904,7 +904,13 @@ def _maybe_resolve_spec_model_config(
     method = _infer_speculative_method(architectures)
     configured_method = resolved.get("method")
     if configured_method is not None:
-        if method is not None and configured_method != method:
+        from vllm.config.speculative import MTPModelTypes
+
+        # Preserve the alias for SpeculativeConfig's deprecation warning.
+        canonical_method = (
+            "mtp" if configured_method in get_args(MTPModelTypes) else configured_method
+        )
+        if method is not None and canonical_method != method:
             raise ValueError(
                 f"Configured speculative method {configured_method!r} conflicts "
                 f"with method {method!r} inferred from registered draft "
