@@ -26,7 +26,7 @@
 # limitations under the License.
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
 
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -1856,6 +1856,7 @@ class Qwen2_5_VLForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,

@@ -17,7 +17,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Hashable, Iterable, Mapping
 from itertools import tee
 from typing import Annotated, Any, Literal
 
@@ -924,6 +924,7 @@ class Llama4ForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
