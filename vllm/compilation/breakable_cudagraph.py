@@ -254,6 +254,12 @@ class BreakableCUDAGraphWrapper:
         * If runtime mode mismatch / NONE, run eagerly.
         * Otherwise, lazily capture per ``batch_descriptor`` and replay
           on subsequent invocations with the same descriptor.
+
+    When ``runtime_mode`` is given, only that runtime mode is
+    captured/replayed; other non-NONE modes fall through to the
+    underlying runnable. This allows nesting under a
+    ``CUDAGraphWrapper`` (e.g. FULL) so that breakable cudagraphs only
+    replace the piecewise path.
     """
 
     _all_instances: ClassVar[weakref.WeakSet[BreakableCUDAGraphWrapper]] = (
@@ -269,15 +275,17 @@ class BreakableCUDAGraphWrapper:
         self,
         runnable: Callable[..., Any],
         vllm_config: VllmConfig,
+        runtime_mode: CUDAGraphMode | None = None,
     ) -> None:
-        # Unlike the original CUDAGraphWrapper which strictly matches a
-        # single runtime_mode, this wrapper captures whatever the
-        # dispatcher emits (any non-NONE runtime_mode) -- breakable's
-        # capture is identical for prefill and decode, so there's nothing
-        # to dispatch on at the runtime_mode level. Entries are keyed by
-        # BatchDescriptor which already encodes batch shape / uniformity.
+        # With runtime_mode=None (the default), this wrapper captures
+        # whatever the dispatcher emits (any non-NONE runtime_mode) --
+        # breakable's capture is identical for prefill and decode, so
+        # there's nothing to dispatch on at the runtime_mode level.
+        # Entries are keyed by BatchDescriptor which already encodes
+        # batch shape / uniformity.
         self.runnable = runnable
         self.vllm_config = vllm_config
+        self.runtime_mode = runtime_mode
         self.compilation_config = vllm_config.compilation_config
         self.graph_pool = current_platform.get_global_graph_pool()
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
@@ -296,7 +304,10 @@ class BreakableCUDAGraphWrapper:
         raise AttributeError(key)
 
     def unwrap(self) -> Callable[..., Any]:
-        return self.runnable
+        runnable = self.runnable
+        # Recurse through nested wrappers (e.g. a CUDAGraphWrapper
+        # layered on top) to reach the original runnable.
+        return runnable.unwrap() if hasattr(runnable, "unwrap") else runnable
 
     @property
     def cudagraph_wrapper(self) -> BreakableCUDAGraphWrapper:
@@ -317,9 +328,15 @@ class BreakableCUDAGraphWrapper:
 
         # Capture whenever the dispatcher says "some cudagraph mode" --
         # breakable produces the same artifact regardless of PIECEWISE
-        # vs FULL, so we match either. Entries are keyed by batch
-        # descriptor, which already encodes prefill/decode distinctions.
-        if cudagraph_runtime_mode == CUDAGraphMode.NONE:
+        # vs FULL, so by default (runtime_mode=None) we match either.
+        # Entries are keyed by batch descriptor, which already encodes
+        # prefill/decode distinctions. A configured runtime_mode restricts
+        # capture to that mode so other modes can be handled by an outer
+        # wrapper (e.g. CUDAGraphWrapper for FULL).
+        if cudagraph_runtime_mode == CUDAGraphMode.NONE or (
+            self.runtime_mode is not None
+            and cudagraph_runtime_mode != self.runtime_mode
+        ):
             return self.runnable(*args, **kwargs)
 
         assert batch_descriptor is not None

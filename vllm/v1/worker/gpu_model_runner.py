@@ -5431,16 +5431,24 @@ class GPUModelRunner(
         assert cudagraph_mode is not None
         if (
             is_breakable_cudagraph_enabled()
-            and cudagraph_mode != CUDAGraphMode.NONE
+            and cudagraph_mode.has_piecewise_cudagraphs()
             and not self.parallel_config.use_ubatching
         ):
-            self.model = BreakableCUDAGraphWrapper(self.model, self.vllm_config)
+            # Breakable cudagraphs replace only the PIECEWISE path; FULL
+            # cudagraphs (wrapped below) are unaffected.
+            self.model = BreakableCUDAGraphWrapper(
+                self.model, self.vllm_config, runtime_mode=CUDAGraphMode.PIECEWISE
+            )
             drafter = getattr(self, "drafter", None)
             if drafter is not None and hasattr(drafter, "model"):
+                # Drafters only ever dispatch PIECEWISE or NONE.
                 drafter.model = BreakableCUDAGraphWrapper(
-                    drafter.model, self.vllm_config
+                    drafter.model,
+                    self.vllm_config,
+                    runtime_mode=CUDAGraphMode.PIECEWISE,
                 )
-        elif (
+
+        if (
             cudagraph_mode.has_full_cudagraphs()
             and not self.parallel_config.use_ubatching
         ):
