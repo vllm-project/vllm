@@ -241,6 +241,17 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             counter_nixl_num_failed_transfers, self.per_engine_labelvalues
         )
 
+        counter_nixl_num_failed_notifications = self._counter_cls(
+            name="vllm:nixl_num_failed_notifications",
+            documentation="Number of failed NIXL KV Cache notifications. "
+            "Retained for compatibility; these failures are also included in "
+            "vllm:nixl_num_failed_transfers.",
+            labelnames=labelnames,
+        )
+        self.counter_nixl_num_failed_notifications = create_metric_per_engine(
+            counter_nixl_num_failed_notifications, self.per_engine_labelvalues
+        )
+
         counter_nixl_num_kv_expired_reqs = self._counter_cls(
             name="vllm:nixl_num_kv_expired_reqs",
             documentation="Number of requests that had their KV expire. "
@@ -271,6 +282,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
         for counter_obj, counter_item_keys in zip(
             [
                 self.counter_nixl_num_failed_transfers,
+                self.counter_nixl_num_failed_notifications,
                 self.counter_nixl_num_kv_expired_reqs,
             ],
             [
@@ -283,6 +295,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
                     "num_failed_handshakes",
                     "num_failed_notifications",
                 ),
+                ("num_failed_notifications",),
                 ("num_kv_expired_reqs",),
             ],
         ):

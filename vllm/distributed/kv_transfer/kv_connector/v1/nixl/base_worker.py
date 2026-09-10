@@ -1149,6 +1149,7 @@ class NixlBaseConnectorWorker:
                             error=e,
                             remote_engine_id=eid,
                         )
+                        # Count once per handshake, regardless of waiting requests.
                         self.xfer_stats.record_failed_handshake()
 
             fut.add_done_callback(done_callback)
@@ -1184,7 +1185,7 @@ class NixlBaseConnectorWorker:
                     error=e,
                     meta=meta,
                 )
-                self._handle_failed_transfer(req_id, None, failure="handshake")
+                self._handle_failed_transfer(req_id, None, failure=None)
 
         fut.add_done_callback(request_ready)
 
