@@ -538,9 +538,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         is_available_online=True,
         max_transformers_version="5.3",
         transformers_version_reason={
-            "vllm": (
-                "vllm upgraded transformers above v5.4 where "
-                "validate_rope() no longer accepts ignore_keys param"
+            "hf": (
+                "Transformers v5.4 removed the ignore_keys param from "
+                "validate_rope(); vLLM patches validate_rope() and is unaffected"
             )
         },
     ),
@@ -809,6 +809,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"command-a-plus": "CohereLabs/command-a-plus-05-2026-bf16"},
         min_transformers_version="5.9.0",
     ),
+    "CohereCompassForConditionalGeneration": _HfExamplesInfo(
+        "CohereLabs/North-Micro-Vision-Instruct",
+        min_transformers_version="5.16.0",
+    ),
     "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Cosmos3-Nano",
         extras={"super": "nvidia/Cosmos3-Super"},
@@ -876,12 +880,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
     ),
     "FunASRForConditionalGeneration": _HfExamplesInfo(
-        "allendou/Fun-ASR-Nano-2512-vllm",
+        "FunAudioLLM/Fun-ASR-Nano-2512-vllm",
         trust_remote_code=True,
-        max_transformers_version="5.1",
+        max_transformers_version="5.15",
         transformers_version_reason={
-            "vllm": "Incompatible with transformers v5.2+ "
-            "(dict object has no attribute '__name__').",
+            "vllm": "The official Fun-ASR-Nano vLLM package is validated "
+            "through transformers v5.15.0; newer versions require separate "
+            "validation.",
         },
     ),
     "FunAudioChatForConditionalGeneration": _HfExamplesInfo(

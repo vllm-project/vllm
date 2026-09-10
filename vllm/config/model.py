@@ -38,11 +38,11 @@ from vllm.transformers_utils.config import (
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
     is_rope_parameters_nested,
+    mrope_num_dims,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_tokenizer_config,
     uses_mrope,
-    uses_xdrope_dim,
 )
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
@@ -1850,12 +1850,8 @@ class ModelConfig:
         return uses_mrope(self.hf_config)
 
     @property
-    def uses_xdrope_dim(self) -> int:
-        return uses_xdrope_dim(self.hf_config)
-
-    @property
-    def uses_xdrope(self) -> bool:
-        return self.uses_xdrope_dim > 0
+    def mrope_num_dims(self) -> int:
+        return mrope_num_dims(self.hf_config)
 
     @property
     def is_multimodal_model(self) -> bool:
@@ -2449,6 +2445,13 @@ def _get_and_verify_max_len(
     rope_parameters = getattr(hf_config, "rope_parameters", None)
     if rope_parameters and not is_rope_parameters_nested(rope_parameters):
         rope_parameters = {"": rope_parameters}
+    if rope_parameters is not None:
+        # Layers without RoPE do not contribute to context length scaling.
+        rope_parameters = {
+            layer_type: rp
+            for layer_type, rp in rope_parameters.items()
+            if rp is not None
+        }
 
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
     # scaling, so we skip applying the scaling factor again.
