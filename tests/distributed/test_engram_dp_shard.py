@@ -12,13 +12,11 @@ With shared host storage, DP replicas instead map the same TP slice and
 prefetch only their own tokens without DP gathers.
 """
 
-import inspect
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.multiprocessing as mp
-from torch import nn
 
 from vllm.config import (
     EngramConfig,
@@ -27,6 +25,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.config.parallel import ParallelConfig
+from vllm.config.scheduler import SchedulerConfig
 from vllm.distributed import cleanup_dist_env_and_memory, parallel_state
 from vllm.distributed.parallel_state import (
     get_engram_dp_group,
@@ -38,6 +37,7 @@ from vllm.forward_context import set_forward_context
 from vllm.models.deepseek_v4_1.common import engram as engram_ops
 from vllm.models.deepseek_v4_1.common.engram import (
     Engram,
+    EngramLayout,
     ParallelEngramEmbedding,
     engram_head_shard_rank,
     gather_engram_hashes,
@@ -99,7 +99,6 @@ def _worker(
 ) -> None:
     monkeypatch = pytest.MonkeyPatch()
     with monkeypatch.context() as m:
-        # Any DeepSeek V4.1 config would do; only the answer matters here.
         m.setattr("vllm.config.engram.model_has_engram_layers", lambda config: True)
         torch.accelerator.set_device_index(torch.device(f"cuda:{rank}"))
         update_environment_variables(
@@ -112,15 +111,33 @@ def _worker(
             }
         )
         dp_rank, tp_rank = divmod(rank, tp_size)
+        head_sizes = HEAD_SIZES[:n_heads]
+        rows = sum(head_sizes)
+        config = SimpleNamespace(
+            hidden_size=DIM,
+            hc_mult=2,
+            rms_norm_eps=1e-6,
+            engram_layer_ids=[0],
+            engram_num_embeddings=[rows],
+            engram_max_ngram_size=2,
+            engram_n_heads=n_heads,
+            engram_head_dim=DIM,
+            engram_compressed_vocab_size=32,
+            engram_pad_token_id=0,
+            engram_vocab_size=HEAD_SIZES[0],
+        )
         vllm_config = VllmConfig(
             parallel_config=ParallelConfig(
                 tensor_parallel_size=tp_size,
                 data_parallel_size=dp_size,
                 data_parallel_rank=dp_rank,
             ),
-        )
-        vllm_config.engram_config = EngramConfig(
-            enable_engram_shared_memory=shared_memory
+            scheduler_config=SchedulerConfig(
+                max_model_len=8,
+                is_encoder_decoder=False,
+                max_num_batched_tokens=8,
+                max_num_seqs=8,
+            ),
         )
         init_distributed_environment()
         with set_current_vllm_config(vllm_config):
@@ -134,18 +151,31 @@ def _worker(
             # Head shards run TP-major, so the DP gather brings in neighbours.
             assert engram_head_shard_rank() == tp_rank * dp_size + dp_rank
 
-            head_sizes = HEAD_SIZES[:n_heads]
-            rows = sum(head_sizes)
             weight, scale_inv = _full_table(rows)
-            with torch.device("cuda"):
-                layer = ParallelEngramEmbedding(
-                    rows,
-                    DIM,
-                    head_sizes,
-                    block_size=BLOCK,
+            layout = EngramLayout(config)
+            # Stub configuration inputs, not Engram's initialization or execution.
+            component_config = SimpleNamespace(
+                engram_config=EngramConfig(
                     cpu_offload=cpu_offload,
-                    shared_memory=shared_memory,
+                    enable_engram_shared_memory=shared_memory,
+                ),
+                parallel_config=ParallelConfig(ubatch_size=2 if shared_memory else 1),
+                scheduler_config=vllm_config.scheduler_config,
+                load_config=vllm_config.load_config,
+            )
+            with m.context() as init_patch, torch.device("cuda"):
+                init_patch.setattr(
+                    engram_ops, "get_current_vllm_config", lambda: component_config
                 )
+                engram = Engram(
+                    config,
+                    quant_config=None,
+                    layout=layout,
+                    layer_hash_index=0,
+                    use_sequence_parallel=sequence_parallel,
+                    prefix="model.layers.0.engram",
+                )
+            layer = engram.embed_tokens
             # Only the leader has valid checkpoint payload in shared mode.
             loader_weight = weight if not shared_memory or dp_rank == 0 else None
             loader_scale = scale_inv if not shared_memory or dp_rank == 0 else None
@@ -161,19 +191,7 @@ def _worker(
 
                 m.setattr(get_engram_dp_group(), "all_gather", unexpected_collective)
 
-            engram = Engram.__new__(Engram)
-            nn.Module.__init__(engram)
-            engram.embed_tokens = layer
-            engram._prefetch_streams = (torch.cuda.Stream(),) if cpu_offload else ()
-            engram.use_sequence_parallel = sequence_parallel
             token_counts = _token_counts(dp_size)
-            engram.staged_rows = torch.empty(
-                max(max(counts) for counts in token_counts) * layer.dp_size,
-                layer.part_n_hash_cols,
-                DIM,
-                dtype=torch.bfloat16,
-                device="cuda",
-            )
 
         # Production forward runs after the construction-time config has exited.
         assert get_current_vllm_config_or_none() is None
@@ -211,18 +229,9 @@ def _worker(
 
 
 def _check_shared_prefetch_replay(engram, head_sizes, weight, scale_inv, patch):
-    from vllm import envs
-    from vllm.compilation.breakable_cudagraph import (
-        BreakableCUDAGraphCapture,
-        eager_break_during_capture,
-    )
+    """Check buffer isolation with controlled IDs, not the full DBO scheduler."""
+    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
-    patch.setattr(envs, "VLLM_USE_BREAKABLE_CUDAGRAPH", True)
-    for name in ("_start_prefetch", "_finish_prefetch"):
-        fn = eager_break_during_capture(inspect.unwrap(getattr(Engram, name)))
-        setattr(engram, name, fn.__get__(engram, Engram))
-    engram._prefetch_streams = (torch.cuda.Stream(), torch.cuda.Stream())
-    engram._extra_staged_rows = [torch.empty_like(engram.staged_rows)]
     ids = [_make_ids(head_sizes, 8, seed=seed) for seed in (501, 502)]
     tp_rank = engram_ops.get_tensor_model_parallel_rank()
     tp_size = engram.embed_tokens.tp_size
@@ -232,12 +241,10 @@ def _check_shared_prefetch_replay(engram, head_sizes, weight, scale_inv, patch):
         for _ in ids
     ]
 
-    def step(cap=None):
+    def step():
         for ubatch in (0, 1):
             patch.setattr(engram_ops, "dbo_current_ubatch_id", lambda i=ubatch: i)
             engram.prepare_embeddings(ids[ubatch].clone())
-        if cap is not None:
-            cap.add_eager(lambda: None)
         for ubatch in (1, 0):
             patch.setattr(engram_ops, "dbo_current_ubatch_id", lambda i=ubatch: i)
             outputs[ubatch].copy_(engram.embed(ids[ubatch]))
@@ -249,8 +256,9 @@ def _check_shared_prefetch_replay(engram, head_sizes, weight, scale_inv, patch):
     torch.cuda.current_stream().wait_stream(warmup)
     graph = BreakableCUDAGraphCapture()
     with torch.cuda.stream(warmup), graph:
-        step(graph)
+        step()
     torch.cuda.current_stream().wait_stream(warmup)
+    assert graph.num_eager_breaks == 4  # Two prefetch starts and two waits.
     for iteration in range(3):
         for ubatch in (0, 1):
             ids[ubatch].copy_(
@@ -307,11 +315,17 @@ def test_engram_table_shared_across_dp_replicas(
     [(1, 4, False), (2, 2, False), (2, 2, True)],
 )
 def test_engram_shared_host_memory_prefetch(
-    tp_size: int, dp_size: int, sequence_parallel: bool, n_heads: int
+    tp_size: int,
+    dp_size: int,
+    sequence_parallel: bool,
+    n_heads: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """All DP readers prefetch leader-loaded pages without exchanging tokens/rows."""
     if torch.accelerator.device_count() < WORLD_SIZE:
         pytest.skip(f"Need {WORLD_SIZE} GPUs to run the test.")
+    # Spawned workers must import Engram with its production decorators enabled.
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
     mp.spawn(
         _worker,
         args=(
