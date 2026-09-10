@@ -22,6 +22,7 @@ from vllm.config import (
     CacheConfig,
     CompilationConfig,
     DeviceConfig,
+    EngramConfig,
     KernelConfig,
     KVTransferConfig,
     ModelConfig,
@@ -31,6 +32,7 @@ from vllm.config import (
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
+    WatermarkConfig,
     update_config,
 )
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -998,6 +1000,159 @@ def test_all2all_backend_has_portable_default():
     assert ParallelConfig().all2all_backend == "allgather_reducescatter"
 
 
+@pytest.mark.parametrize(
+    "dp_size, across_dp, expected",
+    [(1, False, 4), (1, True, 4), (2, False, 4), (2, True, 8)],
+)
+def test_engram_tensor_parallel_size(dp_size: int, across_dp: bool, expected: int):
+    parallel = ParallelConfig(
+        tensor_parallel_size=4,
+        data_parallel_size=dp_size,
+        distributed_executor_backend="mp",
+    )
+    config = EngramConfig(embedding_across_dp=across_dp)
+    assert config.get_parallel_size(parallel) == expected
+
+
+def test_engram_rejects_elastic_cross_dp():
+    parallel = ParallelConfig(
+        tensor_parallel_size=4,
+        data_parallel_size=2,
+        distributed_executor_backend="mp",
+    )
+    parallel.enable_elastic_ep = True
+    with pytest.raises(ValueError, match="embedding_across_dp.*elastic EP"):
+        EngramConfig(embedding_across_dp=True).verify_parallel_config(parallel)
+
+
+@pytest.mark.parametrize("legacy", [None, "0", "1"])
+def test_engram_cpu_offload_environment_fallback(monkeypatch, legacy):
+    """Explicit settings must override the legacy environment fallback."""
+    monkeypatch.delenv("VLLM_PLE_CPU_OFFLOAD", raising=False)
+    if legacy is not None:
+        monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", legacy)
+    assert EngramConfig().cpu_offload == (legacy == "1")
+    assert EngramConfig(cpu_offload=False).cpu_offload is False
+    assert EngramConfig(cpu_offload=True).cpu_offload is True
+
+
+@pytest.mark.parametrize(
+    "architecture, ple_layers, cuda, supported",
+    [
+        ("Qwen4ExpForCausalLM", [1], True, True),
+        ("Qwen4ExpForConditionalGeneration", [1], True, True),
+        ("Qwen4ExpForCausalLM", [], True, False),
+        ("Qwen4ExpForCausalLM", None, True, False),
+        ("Qwen4ExpForCausalLM", [1], False, False),
+        ("LlamaForCausalLM", [1], True, False),
+        ("Qwen4ExpMTP", [], True, False),
+        (None, None, True, False),
+    ],
+)
+def test_engram_model_support(monkeypatch, architecture, ple_layers, cuda, supported):
+    """A similarly named HF field must not enable unsupported implementations."""
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: cuda)
+    model = (
+        cast(
+            ModelConfig,
+            SimpleNamespace(
+                architecture=architecture,
+                hf_text_config=SimpleNamespace(ple_layer_ids=ple_layers),
+            ),
+        )
+        if architecture is not None
+        else None
+    )
+    config = EngramConfig(cpu_offload=False, embedding_across_dp=False)
+    if supported:
+        config.verify_model_config(model)
+    else:
+        with pytest.raises(ValueError, match="requires a model with supported Engram"):
+            config.verify_model_config(model)
+
+
+def test_engram_config_defaults_to_none(monkeypatch):
+    monkeypatch.delenv("VLLM_PLE_CPU_OFFLOAD", raising=False)
+    config = VllmConfig()
+    assert config.engram_config is None
+    assert config.compute_hash()
+
+
+@pytest.mark.parametrize("legacy", ["0", "1"])
+def test_engram_none_resolves_legacy_offload(monkeypatch, legacy):
+    """Legacy enablement materializes a config before model validation."""
+    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", legacy)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            model_config=SimpleNamespace(
+                architecture="Qwen4ExpForCausalLM",
+                hf_text_config=SimpleNamespace(ple_layer_ids=[1]),
+            ),
+            speculative_config=None,
+            engram_config=None,
+            parallel_config=ParallelConfig(),
+        ),
+    )
+    VllmConfig._resolve_and_verify_engram_config(config)
+    if legacy == "1":
+        assert config.engram_config is not None
+        assert config.engram_config.cpu_offload is True
+    else:
+        assert config.engram_config is None
+
+
+@pytest.mark.parametrize("legacy", ["0", "1"])
+def test_engram_explicit_config_requires_supported_model(monkeypatch, legacy):
+    """Explicit all-false settings still opt into model validation."""
+    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", legacy)
+    with pytest.raises(ValueError, match="requires a model with supported Engram"):
+        VllmConfig(engram_config=EngramConfig(cpu_offload=False))
+
+
+def test_engram_legacy_offload_requires_supported_model(monkeypatch):
+    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", "1")
+    with pytest.raises(ValueError, match="requires a model with supported Engram"):
+        VllmConfig()
+
+
+@pytest.mark.parametrize("target_has_ple", [False, True])
+def test_engram_draft_config_validates_target(monkeypatch, target_has_ple):
+    """MTP may inherit cross-DP sharding without having its own PLE layers."""
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    target = SimpleNamespace(
+        architecture="Qwen4ExpForCausalLM",
+        hf_text_config=SimpleNamespace(ple_layer_ids=[1] if target_has_ple else []),
+    )
+    draft = SimpleNamespace(architecture="Qwen4ExpMTP")
+    config = cast(
+        VllmConfig,
+        SimpleNamespace(
+            model_config=draft,
+            speculative_config=SimpleNamespace(
+                draft_model_config=draft, target_model_config=target
+            ),
+            engram_config=EngramConfig(embedding_across_dp=True),
+            parallel_config=ParallelConfig(),
+        ),
+    )
+    if target_has_ple:
+        VllmConfig._resolve_and_verify_engram_config(config)
+    else:
+        with pytest.raises(ValueError, match="requires a model with supported Engram"):
+            VllmConfig._resolve_and_verify_engram_config(config)
+
+
+def test_engram_hash_tracks_storage_and_sharding():
+    configs = [
+        EngramConfig(cpu_offload=offload, embedding_across_dp=across_dp)
+        for offload in (False, True)
+        for across_dp in (False, True)
+    ]
+    assert len({config.compute_hash() for config in configs}) == 4
+
+
 @pytest.mark.parametrize("port", [1, 29550, 65535])
 def test_data_parallel_rpc_port_accepts_valid_ports(port: int):
     assert ParallelConfig(data_parallel_rpc_port=port).data_parallel_rpc_port == port
@@ -1616,6 +1771,49 @@ def test_get_and_verify_max_len(
     else:
         actual_max_len = model_config.get_and_verify_max_len(max_model_len)
         assert actual_max_len == expected_max_len
+
+
+@pytest.mark.parametrize("max_model_len", [None, 1024])
+@pytest.mark.parametrize(
+    ("rope_parameters", "expected_max_len"),
+    [
+        ({"rope_type": "default"}, 4096),
+        ({"rope_type": "linear", "factor": 2.0}, 8192),
+        ({"rope_type": "longrope"}, 2048),
+    ],
+)
+def test_get_and_verify_max_len_with_nope_layers(
+    max_model_len, rope_parameters, expected_max_len
+):
+    """NoPE layers do not prevent deriving or scaling the context length."""
+    from transformers import PretrainedConfig
+
+    from vllm.config.model import _get_and_verify_max_len
+    from vllm.transformers_utils.model_arch_config_convertor import (
+        ModelArchConfigConvertorBase,
+    )
+
+    hf_config = PretrainedConfig(
+        max_position_embeddings=4096,
+        original_max_position_embeddings=2048,
+    )
+    hf_config.rope_parameters = {
+        "full_attention": None,
+        "sliding_attention": rope_parameters,
+    }
+    model_arch_config = ModelArchConfigConvertorBase(hf_config, hf_config).convert()
+
+    actual_max_len = _get_and_verify_max_len(
+        hf_config=hf_config,
+        model_arch_config=model_arch_config,
+        tokenizer_config=None,
+        max_model_len=max_model_len,
+        disable_sliding_window=False,
+        sliding_window=None,
+    )
+
+    assert actual_max_len == (max_model_len or expected_max_len)
+    assert hf_config.rope_parameters["full_attention"] is None
 
 
 class MockConfig:
@@ -2460,6 +2658,66 @@ def test_draft_sample_method_gumbel_is_rejected():
             num_speculative_tokens=1,
             draft_sample_method="gumbel",
         )
+
+
+def _watermarked_vllm_config() -> VllmConfig:
+    config = object.__new__(VllmConfig)
+    config.watermark_config = WatermarkConfig(key=42)
+    config.speculative_config = None
+    return config
+
+
+def test_gumbel_watermark_rejects_speculative_decoding():
+    config = _watermarked_vllm_config()
+    config.speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+    )
+
+    with pytest.raises(ValueError, match="does not support speculative decoding"):
+        config._check_watermarking_unsupported()
+
+
+def test_gumbel_watermark_rejects_beam_search():
+    with pytest.raises(ValueError, match="Beam search is not supported"):
+        _watermarked_vllm_config()._check_watermarking_unsupported(beam_search=True)
+
+
+def test_gumbel_watermark_rejects_custom_sampler():
+    with pytest.raises(ValueError, match="custom samplers are not supported"):
+        _watermarked_vllm_config()._check_watermarking_unsupported(custom_sampler=True)
+
+
+def test_watermark_key_must_fit_in_64_bits():
+    with pytest.raises(ValueError, match="64 bits"):
+        WatermarkConfig(key=2**64)
+
+
+def test_unknown_watermark_prf_is_rejected():
+    with pytest.raises(ValidationError):
+        pydantic.TypeAdapter(WatermarkConfig).validate_python(
+            {"key": 42, "prf": "unsupported"}
+        )
+
+
+def test_watermark_key_is_excluded_from_serialization():
+    serialized = pydantic.TypeAdapter(WatermarkConfig).dump_python(
+        WatermarkConfig(key=42), mode="json"
+    )
+
+    assert "key" not in serialized
+
+
+def test_watermarking_forces_model_runner_v2(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+
+    with patch("vllm.config.vllm.logger.info_once") as info_once:
+        assert _watermarked_vllm_config().use_v2_model_runner
+
+    info_once.assert_called_once_with(
+        "Watermarking requires Model Runner V2 and overrides "
+        "VLLM_USE_V2_MODEL_RUNNER=0."
+    )
 
 
 @patch("vllm.config.speculative.ModelConfig")

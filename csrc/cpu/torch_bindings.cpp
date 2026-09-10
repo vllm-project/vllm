@@ -226,7 +226,6 @@ void placeholder_op() { TORCH_CHECK(false, "Unimplemented"); }
 void cpu_gemm_wna16(const torch::Tensor& input, const torch::Tensor& q_weight,
                     torch::Tensor& output, const torch::Tensor& scales,
                     const std::optional<torch::Tensor>& zeros,
-                    const std::optional<torch::Tensor>& g_idx,
                     const std::optional<torch::Tensor>& bias,
                     const int64_t pack_factor, const std::string& isa_hint);
 
@@ -671,7 +670,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #if defined(__AVX512F__) || defined(__riscv_v) || defined(__s390x__)
   ops.def(
       "cpu_gemm_wna16(Tensor input, Tensor q_weight, Tensor(a2!) output, "
-      "Tensor scales, Tensor? zeros, Tensor? g_idx, Tensor? bias, SymInt "
+      "Tensor scales, Tensor? zeros, Tensor? bias, SymInt "
       "pack_factor, str isa_hint) -> ()");
   ops.impl("cpu_gemm_wna16", torch::kCPU, &cpu_gemm_wna16);
 #endif
