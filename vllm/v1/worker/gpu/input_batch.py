@@ -11,6 +11,7 @@ from vllm.utils import random_uuid
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.attn_utils import FastPrefillBatchMetadata
     from vllm.v1.worker.gpu.block_table import BlockTables
 
 
@@ -108,6 +109,10 @@ class InputBatch:
     # a query length this batch's own split does not reach, so attention metadata
     # stays valid for every replay the graph serves.
     max_query_len: int | None = None
+
+    # Arms the KV-sharing fast prefill path for this step. Absent for dummy
+    # (cudagraph capture) batches, which run the KV-sharing layers in full.
+    fast_prefill: "FastPrefillBatchMetadata | None" = None
 
     @classmethod
     def make_dummy(

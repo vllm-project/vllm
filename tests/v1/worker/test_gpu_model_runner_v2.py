@@ -84,7 +84,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     monkeypatch.setattr(
         model_runner_module,
         "init_attn_backend",
-        lambda *args: ([], attn_cg_support, [8, 262144]),
+        lambda *args, **kwargs: ([], attn_cg_support, [8, 262144]),
     )
     monkeypatch.setattr(
         model_runner_module,
