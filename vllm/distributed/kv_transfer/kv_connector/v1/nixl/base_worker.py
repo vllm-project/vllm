@@ -159,10 +159,9 @@ class NixlBaseConnectorWorker:
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
 
-    # Layer-name routing is supported only by NixlPushConnector for HMA KV
-    # caches under PP.
+    # Layer-name routing is supported only by NixlPushConnector for HMA or
+    # packed KV caches under PP.
     _supports_pp_hma = False
-    _has_packed_cache: bool = False
 
     def _compute_desc_ids(
         self,
@@ -892,7 +891,8 @@ class NixlBaseConnectorWorker:
         # within a block (BLHNC/BHLNC), where stride > block_len.
         self.block_stride_per_layer = list[int]()
 
-        # Region layer membership is populated for HMA layouts.
+        self._has_packed_cache = False
+        # Region layer membership is populated for HMA and packed layouts.
         self.region_members = []
         # Local layer order, set by ``_set_region_layers`` only when
         # routing by layer name. Empty means region-index routing.
@@ -1342,6 +1342,8 @@ class NixlBaseConnectorWorker:
         """Register the KV Cache data in nixl."""
 
         self._has_packed_cache = KVCacheLayout[self.kv_cache_layout].is_block_outermost
+        use_layer_name_routing = self._requires_layer_name_routing()
+        route_packed_layers = self._has_packed_cache and use_layer_name_routing
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.world_size,
@@ -1409,13 +1411,9 @@ class NixlBaseConnectorWorker:
         # CSA-linear needs separate logical regions for attention and state
         # aliases even though every view shares one block-major allocation.
         packed_storage = packed_storage and not self._is_csa_linear
-        if (
-            self._requires_layer_name_routing()
-            and self._has_packed_cache
-            and any(
-                not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
-                for spec in self._layer_specs.values()
-            )
+        if route_packed_layers and any(
+            not isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            for spec in self._layer_specs.values()
         ):
             raise NotImplementedError("PP push with packed KV caches requires MLA")
 
@@ -1587,7 +1585,7 @@ class NixlBaseConnectorWorker:
                         assert (
                             offset >= 0 and offset + physical_page_size <= block_stride
                         )
-                        if self._requires_layer_name_routing():
+                        if use_layer_name_routing:
                             # A PP producer transfers only its own layer pages.
                             region_specs = [
                                 (
@@ -1632,9 +1630,7 @@ class NixlBaseConnectorWorker:
                     ]
 
             for base_addr, block_len, block_stride in region_specs:
-                if base_addr in seen_base_addresses and not (
-                    self._has_packed_cache and self._requires_layer_name_routing()
-                ):
+                if base_addr in seen_base_addresses and not route_packed_layers:
                     region_index = seen_base_addresses.index(base_addr)
                     assert region_mem_types[region_index] == mem_type
                     self._region_is_mla[region_index] |= is_mla_region
@@ -1715,7 +1711,7 @@ class NixlBaseConnectorWorker:
 
         self._set_region_layers(region_layers)
 
-        if self.pp_size > 1 and not self._requires_layer_name_routing():
+        if self.pp_size > 1 and not use_layer_name_routing:
             start_layer, end_layer = self.model_config.get_layers_start_end_indices(
                 self.vllm_config.parallel_config
             )
