@@ -516,6 +516,10 @@ fn positions_to_proto(
 // KV transfer params conversion (serde_json::Value ↔ prost_types::Struct)
 // ========================================================================================
 
+/// Largest safe integer in `f64` (2^53 - 1). Struct numbers within this bound
+/// retain integer types for consumers such as NIXL's parallelism metadata.
+const MAX_SAFE_INTEGER_F64: f64 = ((1u64 << 53) - 1) as f64;
+
 fn proto_struct_to_json(s: &prost_types::Struct) -> serde_json::Value {
     serde_json::Value::Object(
         s.fields.iter().map(|(k, v)| (k.clone(), proto_value_to_json(v))).collect(),
@@ -527,6 +531,9 @@ fn proto_value_to_json(v: &prost_types::Value) -> serde_json::Value {
     match v.kind.as_ref() {
         None | Some(Kind::NullValue(_)) => serde_json::Value::Null,
         Some(Kind::BoolValue(b)) => serde_json::Value::Bool(*b),
+        Some(Kind::NumberValue(n)) if n.fract() == 0.0 && n.abs() <= MAX_SAFE_INTEGER_F64 => {
+            serde_json::Value::Number(serde_json::Number::from(*n as i64))
+        }
         Some(Kind::NumberValue(n)) => serde_json::json!(*n),
         Some(Kind::StringValue(s)) => serde_json::Value::String(s.clone()),
         Some(Kind::ListValue(list)) => {
@@ -681,6 +688,29 @@ mod tests {
         assert_eq!(text.sampling_params.skip_reading_prefix_cache, None);
         // Prompt conversion still succeeds and reaches the expected variant.
         assert!(matches!(text.prompt, Prompt::Text(s) if s == "hi"));
+    }
+
+    #[test]
+    fn kv_handoff_preserves_integer_sizes_and_fractional_expiry() {
+        // NIXL consumes sizes and block IDs as integers, but its lease expiry is fractional.
+        let metadata = serde_json::json!({
+            "pp_size": 1,
+            "dcp_size": 1,
+            "remote_block_ids": [[0, 25, 9_007_199_254_740_991_i64]],
+            "remote_blocks_expiry_time": 1_789_062_400.25,
+            "sentinel": -1,
+            "outside_safe_integer_range": 9.0e18,
+        });
+        let req = pb::GenerateRequest {
+            kv: Some(pb::KvCacheParameters {
+                kv_transfer_params: super::json_to_proto_struct(&metadata),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        let args = text.sampling_params.vllm_xargs.expect("handoff metadata");
+        assert_eq!(args["kv_transfer_params"], metadata);
     }
 
     fn finished(reason: FinishReason) -> Finished {
