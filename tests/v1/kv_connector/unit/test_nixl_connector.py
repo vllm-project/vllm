@@ -584,7 +584,7 @@ class TestNixlHandshake:
     def test_pcp_producer_uses_canonical_replica(
         self, default_vllm_config, dist_init, pcp_rank
     ):
-        """Only PCP rank zero publishes and reports sending completion."""
+        """Only PCP rank zero publishes, but every rank reports completion."""
         from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
         vllm_config = create_vllm_config(kv_role="kv_producer")
@@ -622,13 +622,18 @@ class TestNixlHandshake:
 
         payload = MagicMock(spec=NixlHandshakePayload)
         worker.xfer_handshake_metadata = payload
-        worker.get_finished = MagicMock(return_value=({"sent"}, set()))
+        worker.transfer_topo = MagicMock()
+        worker._get_new_notifs = MagicMock(
+            side_effect=lambda: {"sent"} if pcp_rank == 0 else set()
+        )
 
         expected_payload = payload if pcp_rank == 0 else None
         assert connector.get_handshake_metadata() is expected_payload
         done_sending, done_recving = connector.get_finished(set())
-        assert done_sending == ({"sent"} if pcp_rank == 0 else set())
+        assert done_sending == ({"sent"} if pcp_rank == 0 else {req_id})
         assert done_recving == set()
+        if pcp_rank > 0:
+            assert connector.get_finished(set()) == (set(), set())
 
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",

@@ -169,7 +169,18 @@ def test_deepseek_v4_mega_moe_weight_loader_uses_ep_expert_ownership():
     assert torch.count_nonzero(experts.w13_weight[1]) == 0
 
 
-def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(monkeypatch):
+@pytest.mark.parametrize(
+    "hidden_size,intermediate_size,block_size,fused",
+    [
+        pytest.param(128, 512, 128, True, id="aligned-block128"),
+        pytest.param(5120, 2304, 32, False, id="deepseek-v41-flash"),
+    ],
+)
+def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(
+    monkeypatch, hidden_size, intermediate_size, block_size, fused
+):
+    """V4.1-Flash's routed padding must preserve the serial shared-expert fallback."""
+
     class FakeDeepGemm:
         transformed_dims: list[tuple[int, int]] = []
         scale_inputs: list[tuple[int, ...]] = []
@@ -216,8 +227,8 @@ def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(monkeypatch
         num_local_experts=1,
         experts_start_idx=0,
         top_k=1,
-        hidden_size=128,
-        intermediate_size=128,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
         num_shared_experts=1,
     )
     experts._check_runtime_supported = lambda: None
@@ -232,24 +243,49 @@ def test_deepseek_v4_mega_moe_finalizes_native_shared_expert_weights(monkeypatch
 
     shared_experts = SimpleNamespace(
         gate_up_proj=SimpleNamespace(
-            weight=fp8_parameter(256, 128),
-            weight_block_size=(128, 128),
-            weight_scale_inv=scale_parameter(2, 1, dtype=torch.float8_e8m0fnu),
+            weight=fp8_parameter(2 * intermediate_size, hidden_size),
+            weight_block_size=(block_size, block_size),
+            weight_scale_inv=scale_parameter(
+                2 * intermediate_size // block_size,
+                hidden_size // block_size,
+                dtype=torch.float8_e8m0fnu,
+            ),
         ),
         down_proj=SimpleNamespace(
-            weight=fp8_parameter(128, 128),
-            weight_block_size=(128, 128),
-            weight_scale_inv=scale_parameter(1, 1, dtype=torch.float8_e8m0fnu),
+            weight=fp8_parameter(hidden_size, intermediate_size),
+            weight_block_size=(block_size, block_size),
+            weight_scale_inv=scale_parameter(
+                hidden_size // block_size,
+                intermediate_size // block_size,
+                dtype=torch.float8_e8m0fnu,
+            ),
         ),
     )
     monkeypatch.setattr("vllm.utils.deep_gemm._import_deep_gemm", lambda: FakeDeepGemm)
 
     original_gate_up_ptr = shared_experts.gate_up_proj.weight.data_ptr()
+    original_down_ptr = shared_experts.down_proj.weight.data_ptr()
     experts.finalize_weights(shared_experts)
 
+    assert FakeDeepGemm.scale_inputs[-2:] == [
+        (1, 2 * intermediate_size, hidden_size // 32),
+        (1, hidden_size, intermediate_size // 32),
+    ]
+    assert experts.has_fused_shared_experts is fused
+    if not fused:
+        assert experts.intermediate_size == 2560
+        assert FakeDeepGemm.transformed_dims == [(3, 3)]
+        assert experts.num_shared_experts == 0
+        assert shared_experts.gate_up_proj.weight.data_ptr() == original_gate_up_ptr
+        assert shared_experts.down_proj.weight.data_ptr() == original_down_ptr
+        assert shared_experts.gate_up_proj.weight.shape == (
+            2 * intermediate_size,
+            hidden_size,
+        )
+        assert shared_experts.down_proj.weight.shape == (hidden_size, intermediate_size)
+        return
+
     assert FakeDeepGemm.transformed_dims == [(3, 3), (2, 2)]
-    assert FakeDeepGemm.scale_inputs[-2:] == [(1, 256, 4), (1, 128, 4)]
-    assert experts.has_fused_shared_experts
     assert shared_experts.gate_up_proj.weight.data_ptr() != original_gate_up_ptr
     assert (
         experts._transformed_shared_l1_weights[0].data_ptr()

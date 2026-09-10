@@ -259,11 +259,11 @@ class Glm5NextMoE(nn.Module):
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        # The router is always external (self.gate); main's MoERunner expects
-        # pre-computed router_logits, so compute them here unconditionally.
-        router_logits, _ = self.gate(hidden_states)
+        # MoERunner holds the gate (passed to FusedMoEFactory) and computes
+        # the router logits itself, so nothing is precomputed here (matches
+        # DeepseekV2MoE; `router_logits` is a placeholder).
         final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
+            hidden_states=hidden_states, router_logits=hidden_states
         )
 
         if self.is_sequence_parallel and not already_sequence_parallel:

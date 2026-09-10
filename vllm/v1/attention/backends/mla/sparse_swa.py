@@ -46,18 +46,26 @@ from vllm.v1.kv_cache_interface import (
 _LAYER_TYPE_SWAONLY = "swaonly"
 _LAYER_TYPE_C4A = "c4a"
 _LAYER_TYPE_C128A = "c128a"
+# v4.1 ratio-1 / ratio-2 indexer layers: same indexer-path shape as C4A, but
+# their compressed page block is block_size // ratio, so each gets its own plan.
+# v4.1 builders classify layer types themselves (ratio 0 is SWA-only there); see
+# deepseek_v4_1/sparse_mla.py.
+_LAYER_TYPE_C1A = "c1a"
+_LAYER_TYPE_C2A = "c2a"
 
 
 def _layer_type_for(compress_ratio: int) -> str:
     if compress_ratio <= 1:
         return _LAYER_TYPE_SWAONLY
+    if compress_ratio == 2:
+        return _LAYER_TYPE_C2A
     if compress_ratio == 4:
         return _LAYER_TYPE_C4A
     if compress_ratio == 128:
         return _LAYER_TYPE_C128A
     raise ValueError(
         f"Unsupported DeepseekV4 compress_ratio={compress_ratio}; "
-        "expected 1, 4, or 128."
+        "expected 1, 2, 4, or 128."
     )
 
 
@@ -70,6 +78,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         prefix: str,
         cache_config: CacheConfig,
         backend_cls: "type[AttentionBackend] | None" = None,
+        block_size: int = 64,
     ):
         super().__init__()
         self.backend_cls = backend_cls or DeepseekSparseSWABackend
@@ -84,12 +93,9 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        # Block size is constrained by tensor sharing between SWA and C4A KV blocks.
-        # Since both block types share the same physical tensor, they must use the
-        # same page size. The C4A KV block shape [256//4, head_dim] = [64, head_dim]
-        # determines the SWA block size of 64 tokens per block.
-        # TODO(yifan): make SWA block size automatically determined and configurable.
-        self.block_size = 64
+        # Any multiple of 32; the sparse decode kernels take the page size at
+        # runtime.
+        self.block_size = block_size
         # uint8: fp8_ds_mla UE8M0 paged layout. bfloat16 / float8_e4m3fn:
         # contiguous full-cache layout.
         assert self.dtype in (torch.uint8, torch.bfloat16, torch.float8_e4m3fn)
@@ -130,7 +136,7 @@ class DeepseekSparseSWABackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [MultipleOf(64)]
+        return [MultipleOf(32)]
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
@@ -148,6 +154,12 @@ class DeepseekSparseSWABackend(AttentionBackend):
             )
 
             return DeepseekV4ROCMAiterSparseSWAMetadataBuilder
+        if current_platform.is_cpu():
+            from vllm.models.deepseek_v4.cpu.cpu_mla import (
+                DeepseekV4CPUSparseSWAMetadataBuilder,
+            )
+
+            return DeepseekV4CPUSparseSWAMetadataBuilder
         return DeepseekSparseSWAMetadataBuilder
 
 
@@ -207,12 +219,17 @@ class DeepseekSparseSWAMetadata:
     tile_sched_swaonly: "FlashMLASchedMeta | None" = None
     tile_sched_c4a: "FlashMLASchedMeta | None" = None
     tile_sched_c128a: "FlashMLASchedMeta | None" = None
+    tile_sched_c1a: "FlashMLASchedMeta | None" = None
+    tile_sched_c2a: "FlashMLASchedMeta | None" = None
     flashinfer_sparse_index_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = field(
         default_factory=dict
     )
 
     def get_prefill_chunk_plan(
-        self, compress_ratio: int, prefill_chunk_size: int
+        self,
+        compress_ratio: int,
+        prefill_chunk_size: int,
+        has_compressed: bool | None = None,
     ) -> list[tuple[int, int, int, int]]:
         if self.num_prefills == 0:
             return []
@@ -220,17 +237,20 @@ class DeepseekSparseSWAMetadata:
         assert self.prefill_seq_lens_cpu is not None
         assert self.prefill_query_lens_cpu is not None
 
+        # Whether the layer gathers a compressed-KV region into the prefill
+        # workspace. v4.0 callers keep the legacy default (ratio <= 1 means
+        # SWA-only); v4.1 passes has_compressed explicitly because its
+        # compress_ratio==1 layers DO have a full-length compressed cache.
+        if has_compressed is None:
+            has_compressed = compress_ratio > 1
+
         # query_len <= max_num_batched_tokens and
         # gather_len = query_len + min(prefix_len, window_size - 1), so the
         # worst-case gathered width is bounded by
         # max_num_batched_tokens + window_size - 1. The compressed prefix pool
         # is bounded by ceil(max_model_len / compress_ratio).
         max_workspace_area = prefill_chunk_size * (
-            (
-                0
-                if compress_ratio <= 1
-                else cdiv(self.prefill_max_model_len, compress_ratio)
-            )
+            (cdiv(self.prefill_max_model_len, compress_ratio) if has_compressed else 0)
             + self.prefill_window_size
             + self.prefill_max_num_batched_tokens
         )
@@ -239,13 +259,13 @@ class DeepseekSparseSWAMetadata:
             prefix_lens_cpu, min=0, max=self.prefill_window_size - 1
         )
         compressed_lens_cpu = (
-            torch.zeros_like(self.prefill_seq_lens_cpu)
-            if compress_ratio <= 1
-            else torch.div(
+            torch.div(
                 self.prefill_seq_lens_cpu,
                 compress_ratio,
                 rounding_mode="floor",
             )
+            if has_compressed
+            else torch.zeros_like(self.prefill_seq_lens_cpu)
         )
 
         chunk_plan: list[tuple[int, int, int, int]] = []
@@ -709,6 +729,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             tile_sched_swaonly=tile_sched[_LAYER_TYPE_SWAONLY],
             tile_sched_c4a=tile_sched[_LAYER_TYPE_C4A],
             tile_sched_c128a=tile_sched[_LAYER_TYPE_C128A],
+            tile_sched_c1a=tile_sched[_LAYER_TYPE_C1A],
+            tile_sched_c2a=tile_sched[_LAYER_TYPE_C2A],
             **deepseek_v4_fields,  # type: ignore[arg-type]
         )
 
@@ -789,6 +811,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         metadata.tile_sched_swaonly = tile_sched[_LAYER_TYPE_SWAONLY]
         metadata.tile_sched_c4a = tile_sched[_LAYER_TYPE_C4A]
         metadata.tile_sched_c128a = tile_sched[_LAYER_TYPE_C128A]
+        metadata.tile_sched_c1a = tile_sched[_LAYER_TYPE_C1A]
+        metadata.tile_sched_c2a = tile_sched[_LAYER_TYPE_C2A]
         metadata.flashinfer_sparse_index_cache.clear()
 
     def build_tile_scheduler(
@@ -809,6 +833,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             _LAYER_TYPE_SWAONLY: None,
             _LAYER_TYPE_C4A: None,
             _LAYER_TYPE_C128A: None,
+            _LAYER_TYPE_C1A: None,
+            _LAYER_TYPE_C2A: None,
         }
         if (
             num_decode_tokens == 0

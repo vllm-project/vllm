@@ -391,7 +391,11 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if isinstance(q, tuple):
-            q = torch.cat(q, dim=-1)
+            ql_nope, q_pe = q
+            if q_pe.shape[-1] == 0 and ql_nope.is_contiguous():
+                q = ql_nope
+            else:
+                q = torch.cat(q, dim=-1)
 
         num_actual_toks = q.shape[0]
 

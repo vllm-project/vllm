@@ -1694,6 +1694,58 @@ def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
     with pytest.raises(ValueError, match="num_kv_heads == 1"):
         sparse_attn_mod.minimax_m3_use_aiter_sparse_pa(2)
 
+    # An indexer that emits the attend's page table addresses every head, so
+    # the pairing the check guards against does not arise.
+    assert sparse_attn_mod.minimax_m3_use_aiter_sparse_pa(
+        2, emits_sparse_block_table=True
+    )
+    # The AITER path carries its own backend: its builder is what rebases the
+    # block table the indexer's top-k resolves through, so selecting the impl
+    # without it would leave that field unset.
+    backend, impl_cls = sparse_attn_mod.select_main_backend_and_impl_cls(
+        topk_blocks=TOPK,
+        kv_cache_dtype="fp8_e4m3",
+        num_kv_heads=2,
+        emits_sparse_block_table=True,
+    )
+    assert impl_cls.__name__ == "MiniMaxM3SparseAiterPAImpl"
+    assert backend.__name__ == "MiniMaxM3SparseAiterPABackend"
+    assert backend.get_builder_cls().__name__ == "MiniMaxM3SparseAiterPAMetadataBuilder"
+
+
+def test_aiter_indexer_requires_the_aiter_attend(monkeypatch):
+    """The top-k emits the attend's page table, so it needs that attend.
+
+    Selected without it, the indexer would reach its top-k with no table to
+    resolve through; falling back instead surfaces the fp8 index cache as the
+    configuration error it is.
+    """
+    import vllm.models.minimax_m3.amd.indexer_aiter as indexer_aiter_mod
+
+    monkeypatch.setattr(indexer_aiter_mod.current_platform, "is_rocm", lambda: True)
+    kwargs = dict(
+        topk_blocks=TOPK,
+        sparse_block_size=BLOCK_SIZE,
+        num_index_heads=1,
+        index_head_dim=HEAD_DIM,
+        indexer_kv_dtype="fp8_e4m3",
+        max_model_len=8192,
+    )
+
+    monkeypatch.setattr(
+        indexer_aiter_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: False
+    )
+    reason = indexer_aiter_mod.aiter_indexer_unsupported_reason(**kwargs)
+    assert reason is not None and "AITER sparse PA attend" in reason
+
+    # With the attend asked for, the gate moves on to the kernel-contract
+    # checks rather than stopping here.
+    monkeypatch.setattr(
+        indexer_aiter_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
+    )
+    reason = indexer_aiter_mod.aiter_indexer_unsupported_reason(**kwargs)
+    assert reason is None or "AITER sparse PA attend" not in reason
+
 
 def test_indexer_cache_squeezes_to_contiguous_3d():
     """The indexer side cache is standardized 4D with H=1: under both layouts

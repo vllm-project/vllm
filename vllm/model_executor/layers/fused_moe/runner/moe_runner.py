@@ -317,10 +317,17 @@ class MoERunner(MoERunnerInterface):
         return self.routed_experts.load_weights(weights)
 
     def _select_forward(self) -> Callable:
-        if current_platform.is_tpu() or current_platform.is_cpu():
+        if current_platform.is_tpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
-            # Note: CPU doesn't require wrapped _forward_impl.
+            return _moe_forward if self._shared_experts is None else _moe_forward_shared
+
+        if current_platform.is_cpu():
+            # CPU never touches the workspace manager (Monolithic experts
+            # skip it entirely; Modular experts' _allocate_buffers bypasses
+            # it too, see modular_kernel.py) -- the ContextVar-based lane
+            # lookup was the only part of this call graph Dynamo can't
+            # trace, so CPU can always call the fused-MoE op directly.
             return _moe_forward if self._shared_experts is None else _moe_forward_shared
 
         return (

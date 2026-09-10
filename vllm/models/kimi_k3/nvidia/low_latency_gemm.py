@@ -711,6 +711,8 @@ def _run_plan(
         return shape_dynamic_skinny_gemm(x, weight, config, None)
     if not hasattr(torch.ops._C, "dsv3_fused_a_gemm"):
         return None
+    if x.shape[0] != 1 and not _is_packed_row_major(x):
+        return None
     output = torch.empty((x.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device)
     ops.dsv3_fused_a_gemm(output, x, weight.t(), enable_pdl=True)
     return output

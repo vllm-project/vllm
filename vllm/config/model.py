@@ -152,6 +152,7 @@ class ModelConfig:
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
+    - "deepseek_v41" will use the DeepSeek V4.1 prompt encoder.
     - "kimi_k3" will always use the "hf" tokenizer but render chat prompts
       with Kimi K3's Python XTML encoding instead of a Jinja template.
     - "cohere" uses the standard HF tokenizer but renders the chat template
@@ -705,6 +706,8 @@ class ModelConfig:
                 "DeepseekV4ForConditionalGeneration",
             ):
                 self.tokenizer_mode = "deepseek_v4"
+            elif arch == "DeepseekV41ForCausalLM":
+                self.tokenizer_mode = "deepseek_v41"
             elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
                 self.tokenizer_mode = "inkling"
 

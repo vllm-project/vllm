@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 
+from .bailing_mrope import BailingMRotaryEmbedding
 from .base import RotaryEmbedding
 from .deepseek_scaling_rope import (
     DeepseekScalingRotaryEmbedding,
@@ -96,6 +97,16 @@ def get_rope(
             is_neox_style,
             dtype,
             **extra_kwargs,
+        )
+    elif scaling_type == "bailing_mrope":
+        rotary_emb = BailingMRotaryEmbedding(
+            head_size,
+            rotary_dim,
+            max_position,
+            base,
+            is_neox_style,
+            dtype,
+            mrope_section=rope_parameters["mrope_section"],
         )
     elif scaling_type == "default":
         if "mrope_section" in rope_parameters:

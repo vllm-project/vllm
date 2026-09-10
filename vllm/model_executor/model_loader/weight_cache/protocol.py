@@ -26,6 +26,7 @@ import torch
 
 import vllm.version
 from vllm.config import ModelConfig
+from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
 SOCKET_NAME_TEMPLATE = "vllm_weight_cache_gpu{gpu_id}.sock"
@@ -52,6 +53,32 @@ class CacheConfigMismatchError(Exception):
 
 class UnsupportedQuantForIPCError(Exception):
     """Raised when a quantization method is not verified for IPC weight sharing."""
+
+
+class UnsupportedPlatformForIPCError(Exception):
+    """Raised when the current platform cannot share CUDA IPC handles."""
+
+
+def check_ipc_platform_support(*, where: str) -> None:
+    """Hard-error unless the current platform can share CUDA IPC handles.
+
+    Only CUDA/ROCm tensors get a real IPC handle from ``TensorEntry``; other
+    platforms (e.g. XPU) would silently ship every tensor by value instead.
+
+    Args:
+        where: Short tag ("daemon"/"engine") used in the error message.
+
+    Raises:
+        UnsupportedPlatformForIPCError: If the current platform is not
+            CUDA/ROCm.
+    """
+    if current_platform.is_cuda_alike():
+        return
+    raise UnsupportedPlatformForIPCError(
+        f"[weight_cache:{where}] platform {current_platform.device_name!r} "
+        "does not support CUDA IPC weight sharing; only CUDA and ROCm are "
+        "supported. Use the default --load-format for this platform."
+    )
 
 
 # The daemon exports tensor data only, so sharing is correct just for methods
@@ -90,6 +117,13 @@ def _fp8_round_trips_via_ipc(quant_config: Any) -> bool:
 IPC_QUANT_ALLOWLIST: dict[str | None, Any] = {
     None: lambda _quant_config: True,  # unquantized
     "fp8": _fp8_round_trips_via_ipc,
+    "modelopt_fp4": lambda _quant_config: True,
+    # Kimi-K3 routed experts (mxfp4-pack): the MegaMoE experts keep their packed
+    # weights and scales as plain parameters and defer the DeepGEMM transform to
+    # forward(), so the exported tensors are complete. Any other mxfp4 method
+    # that repacks or drops parameters still fails closed at the engine's
+    # supports_pre_processed_weights guard.
+    "mxfp4": lambda _quant_config: True,
 }
 
 

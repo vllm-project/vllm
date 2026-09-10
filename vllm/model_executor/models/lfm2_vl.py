@@ -4,7 +4,7 @@
 import itertools
 import math
 import typing
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
 import torch
@@ -1146,6 +1146,7 @@ class Lfm2VLForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
