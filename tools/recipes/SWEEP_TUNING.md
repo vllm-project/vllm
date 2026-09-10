@@ -1,224 +1,94 @@
 # Sweep Tuning
 
-Sweep tuning is optional. The converter always creates one initial `config.yml`
-first. Users can deploy it immediately or benchmark nearby scheduler settings
-and generate one measured recommendation.
+Sweep tuning is optional. The converter always creates an initial `config.yml`
+that can be deployed directly. For benchmark-backed tuning, the recommended
+workflow is **Tune All**, which measures the serving stack in dependency order:
 
-## Choose a Workflow
+```text
+TP/DP -> concurrency -> scheduler
+```
 
-| Goal | Option | Stages |
+The examples below assume tuning is run inside the target vLLM CPU container so
+hardware detection sees the same CPU, NUMA, memory, and cgroup limits as the
+deployment.
+
+## 1. Start the vLLM CPU Docker Shell
+
+From the vLLM source tree:
+
+```bash
+mkdir -p recipe-output
+
+docker run --rm -it \
+  --entrypoint bash \
+  --security-opt seccomp=unconfined \
+  --cap-add SYS_NICE \
+  --shm-size=4g \
+  -p 8000:8000 \
+  -v "$PWD/tools/recipes:/recipes:ro" \
+  -v "$PWD/recipe-output:/output" \
+  -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+  -w /output \
+  vllm/vllm-openai-cpu:latest-x86_64
+```
+
+`/recipes` is mounted read-only from the source tree and `/output` is writable.
+Run the converter, generated sweep scripts, and hardware detection inside this
+container.
+
+For additional container details, see
+[RUNTIME_TUNING.md](RUNTIME_TUNING.md#vllm-cpu-docker-shell).
+
+## 2. Recommended: Tune All
+
+Use `--generate-full-sweep` by default when you want benchmark-backed runtime
+tuning. It measures TP/DP first, then the highest useful concurrency, then
+scheduler parameters using the selected layout and concurrency.
+
+```mermaid
+flowchart TD
+    I[["Input<br/>Recipe + detected hardware<br/>fixed input/output workload shape"]]
+
+    A1("1. Tune TP/DP<br/>tensor-parallel-size + data-parallel-size")
+    O1[/"parallel-layout-config.yml<br/>selected TP/DP"/]
+
+    A2("2. Tune concurrency<br/>max_concurrency")
+    O2[/"concurrency-recommendation.json<br/>recommended max_concurrency"/]
+
+    A3("3. Tune scheduler<br/>max-num-seqs + max-num-batched-tokens")
+    O3[/"recommended-config.yml<br/>final vLLM server config"/]
+
+    I --> A1
+    A1 --> O1
+    O1 --> A2
+    A2 --> O2
+    O2 --> A3
+    A3 --> O3
+```
+
+### Workflow options
+
+The table is ordered by the tuning sequence. **Tune All** is the recommended
+default; the other modes are useful when only one part of the serving stack
+needs to be re-measured.
+
+| Goal | Option | Tuning sequence |
 | --- | --- | --- |
-| Keep the initial TP/DP layout and tune scheduling | `--generate-sweep` | Scheduler sweep |
-| Compare NUMA-aware TP/DP layouts before tuning scheduling | `--generate-parallel-layout-sweep` | Parallel-layout sweep, then scheduler sweep |
+| **Tune all (recommended)** | `--generate-full-sweep` | **1. TP/DP -> 2. concurrency -> 3. scheduler** |
+| Tune TP/DP only | `--generate-parallel-layout-sweep` | 1. TP/DP |
+| Tune concurrency only | `--generate-concurrency-sweep` | 2. concurrency |
+| Tune scheduler only | `--generate-scheduler-sweep` (`--generate-sweep` alias) | 3. scheduler |
 
-Both workflows keep one fixed workload shape and require `--input-tokens`,
-`--output-tokens`, and `--concurrency`. TTFT and TPOT objectives are optional
-but recommended for deployment tuning.
+All workflows keep one fixed input/output workload shape and require
+`--input-tokens`, `--output-tokens`, and `--concurrency`.
 
-## Scheduler-Only Sweep
+For **Tune All**, the supplied `--concurrency` is the representative load used
+for the initial TP/DP comparison and to size the benchmark request set. The
+concurrency stage then measures the final SLA-feasible `max_concurrency`.
 
-Use this workflow when the recipe or runtime policy already provides the TP/DP
-layout to retain.
+### Generate the Tune All package
 
-### Generate
-
-```bash
-python3 tools/recipes/recipe_json_to_vllm_config.py \
-  --model meta-llama/Llama-3.1-8B-Instruct \
-  --hardware xeon6 \
-  --detect-hardware \
-  --input-tokens 128 \
-  --output-tokens 128 \
-  --concurrency 32 \
-  --ttft-sla-ms 3000 \
-  --tpot-sla-ms 100 \
-  --generate-sweep
-```
-
-The optional package is:
-
-```text
-sweep/
-├── sweep_config.yml
-├── serve_params.json
-├── bench_params.json
-├── run_sweep.sh
-├── recommend.py
-└── SWEEP.md
-```
-
-The sweep varies only `max-num-seqs` and `max-num-batched-tokens`. It keeps the
-eight-point directed tuned design: a batch-budget curve at the initial sequence
-count plus lower/higher batch interactions at three-quarters and one-half of
-that count. It also adds three default-reference candidates:
-
-| Reference candidate | `max-num-seqs` | `max-num-batched-tokens` |
-| --- | --- | --- |
-| `vllm_default_max_num_seqs` | vLLM default | initial generated value |
-| `vllm_default_max_num_batched_tokens` | initial generated value | vLLM default |
-| `vllm_defaults` | vLLM default | vLLM default |
-
-The default references are intentionally **not** hard-coded to values such as
-128 or 2048. The generated `sweep_config.yml` copies the initial `config.yml`
-but removes `max-num-seqs` and `max-num-batched-tokens`. Tuned candidates add
-explicit CLI values, while default-reference candidates omit one or both CLI
-arguments so `vllm serve` resolves its normal runtime defaults.
-
-This keeps the comparison platform-, parallel-world-size-, model-, and
-usage-context-aware, and avoids passing the literal string `None` through the
-generic sweep CLI. If a default-reference candidate wins,
-`recommended-config.yml` omits that scheduler key so the deployed server
-continues to use the vLLM runtime default.
-
-The serving benchmark scales request count with workload concurrency, following
-vLLM's `PROMPTS_PER_CONCURRENCY` model:
-
-```text
-num_prompts = min(1000, max(100, concurrency * 10))
-```
-
-This targets about ten concurrency turnovers when neither bound applies. The
-100-prompt floor avoids very small samples for P99 latency and 99% compliance
-measurements, while the 1000-prompt cap bounds sweep runtime. Workload
-concurrency is fixed during the scheduler sweep, so every scheduler candidate
-uses the same number of prompts.
-
-Before each measured parameter combination, the generated script runs one
-unmeasured warmup containing one full concurrency window. The warmup is saved as
-`warmup.json` for auditing but is excluded from `summary.json`, `summary.csv`,
-and recommendation calculations.
-
-### Run and Recommend
-
-```bash
-sweep/run_sweep.sh --dry-run
-sweep/run_sweep.sh
-sweep/recommend.py
-```
-
-Resume an interrupted sweep with:
-
-```bash
-sweep/run_sweep.sh --resume
-```
-
-`recommend.py` writes:
-
-```text
-sweep/recommended-config.yml
-sweep/recommendation.json
-```
-
-With TTFT/TPOT objectives, the benchmark uses vLLM `--goodput`. The recommender
-calculates duration-weighted combined compliance across repeated runs and
-requires both median P99 latency objectives and the minimum compliance ratio
-(default `0.99`). Among eligible configurations it selects the highest mean
-output-token throughput. Use `recommend.py --minimum-compliance VALUE` to
-change the compliance requirement.
-
-If no configuration is eligible, `recommend.py` records the highest-goodput
-configuration as `best_effort` in `recommendation.json`, does not write a
-deployable `recommended-config.yml`, and exits with status 2. Without latency
-objectives it selects highest mean output-token throughput. Failed benchmark
-configurations are excluded in either mode.
-
-When an eligible configuration exists, `recommended-config.yml` changes only
-the two swept scheduler parameters. `recommendation.json` records mean, median,
-and worst-run P99 values, combined compliance, and the measured evidence for
-every candidate.
-
-Deploy:
-
-```bash
-source env.sh
-vllm serve --config sweep/recommended-config.yml
-```
-
-## Staged Parallel-Layout and Scheduler Sweep
-
-Use this workflow when TP/DP placement should be measured before scheduler
-tuning. Hardware detection is required because candidates are derived from the
-effective NUMA topology visible to the process or container.
-
-### Generate
-
-```bash
-python3 tools/recipes/recipe_json_to_vllm_config.py \
-  --model meta-llama/Llama-3.1-8B-Instruct \
-  --hardware xeon6 \
-  --detect-hardware \
-  --input-tokens 128 \
-  --output-tokens 128 \
-  --concurrency 32 \
-  --ttft-sla-ms 3000 \
-  --tpot-sla-ms 100 \
-  --generate-parallel-layout-sweep
-```
-
-### Stage 1: Select TP/DP
-
-Primary candidates use all effective NUMA nodes:
-
-```text
-tensor-parallel-size * data-parallel-size = effective NUMA nodes
-```
-
-TP is restricted to `1`, `2`, `4`, and `8`. The sweep also includes the largest
-supported TP size that does not exceed the effective NUMA-node count, even when
-that candidate leaves some NUMA nodes idle.
-
-| Effective NUMA nodes | Generated layouts |
-| ---: | --- |
-| 2 | `TP=2, DP=1`; `TP=1, DP=2` |
-| 4 | `TP=4, DP=1`; `TP=2, DP=2`; `TP=1, DP=4` |
-| 6 | `TP=4, DP=1` (4 of 6 nodes); `TP=2, DP=3`; `TP=1, DP=6` |
-| 8 | `TP=8, DP=1`; `TP=4, DP=2`; `TP=2, DP=4`; `TP=1, DP=8` |
-
-Each candidate receives a per-replica scheduler baseline:
-
-```text
-max-num-seqs = ceil(global concurrency / data-parallel-size)
-```
-
-Run and select the layout:
-
-```bash
-sweep/run_parallel_layout_sweep.sh --dry-run
-sweep/run_parallel_layout_sweep.sh
-sweep/recommend_parallel_layout.py
-```
-
-Each server layout receives one unmeasured warmup before the normal measured
-runs. The recommender writes:
-
-```text
-sweep/parallel-layout-config.yml
-sweep/parallel-layout-recommendation.json
-```
-
-### Stage 2: Tune the Selected Layout
-
-The scheduler stage keeps the selected TP/DP layout and tunes
-`max-num-seqs`/`max-num-batched-tokens`, including the vLLM-default reference
-candidates retained by `recipe_improve`:
-
-```bash
-sweep/run_sweep.sh --dry-run
-sweep/run_sweep.sh
-sweep/recommend.py
-```
-
-Do not start Stage 2 before Stage 1 has produced
-`parallel-layout-config.yml`.
-
-## vLLM CPU Docker Shell
-
-Use the common CPU container setup in
-[RUNTIME_TUNING.md](RUNTIME_TUNING.md#vllm-cpu-docker-shell). It ensures
-hardware detection runs against the same effective CPU, NUMA, memory, and
-cgroup limits used by the deployment.
-
-Inside that container, generate the initial suggestion plus sweep package:
+Inside the container:
 
 ```bash
 python3 /recipes/recipe_json_to_vllm_config.py \
@@ -232,33 +102,300 @@ python3 /recipes/recipe_json_to_vllm_config.py \
   --tpot-sla-ms 100 \
   --config-out /output/config.yml \
   --env-out /output/env.sh \
-  --generate-sweep \
+  --generate-full-sweep \
   --sweep-out-dir /output/sweep
 ```
 
-The initial configuration can be deployed directly:
+The initial configuration remains directly deployable:
 
 ```bash
 source /output/env.sh
 vllm serve --config /output/config.yml
 ```
 
-Stop that manually started server before running the sweep, because
-`run_sweep.sh` starts and stops its own vLLM servers.
+Stop a manually started server before running the sweep because the generated
+sweep scripts start and stop their own vLLM servers.
+
+Run all tuning stages:
 
 ```bash
-/output/sweep/run_sweep.sh --dry-run
-/output/sweep/run_sweep.sh
-/output/sweep/recommend.py
+/output/sweep/run_full_sweep.sh
 ```
 
-Inspect:
+The end-to-end flow produces intermediate recommendations for TP/DP and
+concurrency and finishes with:
+
+```text
+/output/sweep/recommended-config.yml
+/output/sweep/recommendation.json
+```
+
+Inspect the final recommendation:
 
 ```bash
 cat /output/sweep/recommendation.json
 ```
 
-Deploy the measured result:
+## 3. Tune All Stage Details
+
+### Stage 1: Tune TP/DP
+
+The parallel-layout stage measures NUMA-aware combinations of:
+
+- `tensor-parallel-size`
+- `data-parallel-size`
+
+Primary candidates use all effective NUMA nodes:
+
+```text
+tensor-parallel-size * data-parallel-size = effective NUMA nodes
+```
+
+TP is restricted to the supported values `1`, `2`, `4`, and `8`. The sweep also
+includes the largest supported TP size that does not exceed the effective
+NUMA-node count, even if that layout leaves some NUMA nodes idle.
+
+| Effective NUMA nodes | Generated layouts |
+| ---: | --- |
+| 2 | `TP=2, DP=1`; `TP=1, DP=2` |
+| 4 | `TP=4, DP=1`; `TP=2, DP=2`; `TP=1, DP=4` |
+| 6 | `TP=4, DP=1` (4 of 6 nodes); `TP=2, DP=3`; `TP=1, DP=6` |
+| 8 | `TP=8, DP=1`; `TP=4, DP=2`; `TP=2, DP=4`; `TP=1, DP=8` |
+
+Each candidate starts with a per-replica scheduler baseline:
+
+```text
+max-num-seqs = ceil(global concurrency / data-parallel-size)
+```
+
+The stage writes:
+
+```text
+sweep/parallel-layout-config.yml
+sweep/parallel-layout-recommendation.json
+```
+
+The selected TP/DP layout becomes the fixed server layout for Stage 2.
+
+### Stage 2: Tune Concurrency
+
+The concurrency stage keeps the selected TP/DP layout fixed and uses vLLM
+Workload Explorer:
+
+```text
+vllm bench sweep serve_workload --workload-var max_concurrency
+```
+
+This stage explores client load rather than changing vLLM server configuration.
+With TTFT/TPOT objectives, `recommend_concurrency.py` selects the highest
+SLA-feasible `max_concurrency` that satisfies the P99 latency and combined
+compliance policy.
+
+The stage writes:
+
+```text
+sweep/concurrency-recommendation.json
+```
+
+`max_concurrency` is benchmark/deployment metadata. It is **not** written as a
+`vllm serve` configuration parameter.
+
+### Stage 3: Tune Scheduler
+
+Before the scheduler sweep, `prepare_scheduler.py` recalculates the scheduler
+baseline from:
+
+```text
+selected TP/DP
+        +
+selected max_concurrency
+        +
+fixed input/output token shape
+```
+
+The scheduler stage then tunes:
+
+- `max-num-seqs`
+- `max-num-batched-tokens`
+
+The per-replica sequence baseline is recalculated as:
+
+```text
+max-num-seqs = ceil(selected max_concurrency / selected data-parallel-size)
+```
+
+The directed scheduler sweep keeps the existing batch-budget curve around that
+baseline and also measures three vLLM-default reference candidates:
+
+| Reference candidate | `max-num-seqs` | `max-num-batched-tokens` |
+| --- | --- | --- |
+| `vllm_default_max_num_seqs` | vLLM default | generated value |
+| `vllm_default_max_num_batched_tokens` | generated value | vLLM default |
+| `vllm_defaults` | vLLM default | vLLM default |
+
+The default references do not hard-code values such as 128 or 2048. The sweep
+omits the selected scheduler argument and lets the installed vLLM resolve its
+normal platform-, world-size-, model-, and usage-context-aware default.
+
+If a default-reference candidate wins, the corresponding scheduler key is
+omitted from `recommended-config.yml`.
+
+## 4. Benchmark Size, Warmup, and Failure Handling
+
+Measured request count scales with concurrency using:
+
+```text
+num_prompts = min(1000, max(100, concurrency * 10))
+```
+
+This targets about ten concurrency turnovers when neither bound applies. The
+100-prompt floor avoids very small samples for P99/compliance measurements, and
+the 1000-prompt cap bounds sweep runtime.
+
+Before a measured parameter combination, generated scripts use one unmeasured
+warmup containing one full concurrency window. Warmup output is retained as
+`warmup.json` for auditing but is excluded from recommendation statistics.
+
+Generated scripts also handle sweep-run failures without discarding completed
+work:
+
+- If the installed vLLM CLI supports `--continue-on-error`, the generated script
+  enables it.
+- If the installed vLLM does not expose that option, the script omits it and
+  automatically retries an interrupted sweep with `--resume`.
+- The default is two automatic resume retries. Override it with
+  `VLLM_RECIPE_SWEEP_RETRIES`.
+
+For example:
+
+```bash
+export VLLM_RECIPE_SWEEP_RETRIES=3
+/output/sweep/run_full_sweep.sh
+```
+
+## 5. Targeted Tuning Workflows
+
+Use these modes when a full re-tune is unnecessary.
+
+### Tune TP/DP Only
+
+Use this when only the parallel layout needs to be measured. This mode stops
+after selecting `tensor-parallel-size` and `data-parallel-size`:
+
+```bash
+python3 /recipes/recipe_json_to_vllm_config.py \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --hardware xeon6 \
+  --detect-hardware \
+  --input-tokens 128 \
+  --output-tokens 128 \
+  --concurrency 32 \
+  --ttft-sla-ms 3000 \
+  --tpot-sla-ms 100 \
+  --config-out /output/config.yml \
+  --env-out /output/env.sh \
+  --generate-parallel-layout-sweep \
+  --sweep-out-dir /output/sweep
+```
+
+Run:
+
+```bash
+/output/sweep/run_parallel_layout_sweep.sh
+/output/sweep/recommend_parallel_layout.py
+```
+
+The result is `/output/sweep/parallel-layout-config.yml`. Use Tune All when
+concurrency and scheduler tuning should follow the selected layout.
+
+### Tune Concurrency Only
+
+Use this when TP/DP and scheduler configuration are already fixed and only
+concurrent serving capacity needs to be measured:
+
+```bash
+python3 /recipes/recipe_json_to_vllm_config.py \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --hardware xeon6 \
+  --detect-hardware \
+  --input-tokens 128 \
+  --output-tokens 128 \
+  --concurrency 32 \
+  --ttft-sla-ms 3000 \
+  --tpot-sla-ms 100 \
+  --config-out /output/config.yml \
+  --env-out /output/env.sh \
+  --generate-concurrency-sweep \
+  --sweep-out-dir /output/sweep
+```
+
+Run:
+
+```bash
+/output/sweep/run_concurrency_sweep.sh
+/output/sweep/recommend_concurrency.py
+```
+
+### Tune Scheduler Only
+
+Use this when TP/DP and target concurrency are already known:
+
+```bash
+python3 /recipes/recipe_json_to_vllm_config.py \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --hardware xeon6 \
+  --detect-hardware \
+  --input-tokens 128 \
+  --output-tokens 128 \
+  --concurrency 32 \
+  --ttft-sla-ms 3000 \
+  --tpot-sla-ms 100 \
+  --config-out /output/config.yml \
+  --env-out /output/env.sh \
+  --generate-scheduler-sweep \
+  --sweep-out-dir /output/sweep
+```
+
+`--generate-sweep` remains a backward-compatible alias for
+`--generate-scheduler-sweep`.
+
+Run:
+
+```bash
+/output/sweep/run_sweep.sh
+/output/sweep/recommend.py
+```
+
+## 6. Recommendation Policy
+
+With TTFT/TPOT objectives, benchmark commands use vLLM `--goodput`.
+
+For TP/DP and scheduler selection, the recommender:
+
+1. Excludes invalid configurations and failed benchmark measurements.
+2. Calculates duration-weighted combined compliance across successful runs.
+3. Requires median P99 TTFT/TPOT objectives and the minimum combined compliance
+   ratio, which defaults to `0.99`.
+4. Among eligible configurations, selects the highest mean output-token
+   throughput.
+
+For concurrency selection, the policy instead selects the **highest
+SLA-feasible `max_concurrency`**, with throughput/compliance metrics used to
+break ties.
+
+Change the compliance threshold with:
+
+```bash
+/output/sweep/recommend.py --minimum-compliance VALUE
+```
+
+If no configuration is SLA-feasible, the recommendation JSON records a
+best-effort candidate. A deployable final configuration is produced only when
+the required recommendation stages succeed.
+
+## 7. Deploy the Tuned Configuration
+
+After Tune All completes:
 
 ```bash
 source /output/env.sh

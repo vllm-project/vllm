@@ -222,40 +222,81 @@ def run_comb(
     num_runs: int,
     warmup_num_prompts: int,
     dry_run: bool,
+    continue_on_error: bool = False,
 ):
     if not _comb_is_valid(serve_comb, bench_comb, link_vars):
         return None
 
     comb_data = list[dict[str, object]]()
 
+    def run_one(
+        *,
+        bench_overrides: ParameterSweepItem,
+        run_number: int,
+        output_path: Path,
+    ):
+        try:
+            return run_benchmark(
+                server,
+                bench_cmd,
+                serve_overrides=serve_comb,
+                bench_overrides=bench_overrides,
+                run_number=run_number,
+                output_path=output_path,
+                dry_run=dry_run,
+            )
+        except Exception as exc:
+            if not continue_on_error:
+                raise
+            failure_path = output_path.with_name(output_path.stem + ".failure.json")
+            failure_path.parent.mkdir(parents=True, exist_ok=True)
+            failure_path.write_text(
+                json.dumps(
+                    {
+                        "run_number": run_number,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "serve_overrides": dict(serve_comb),
+                        "bench_overrides": dict(bench_overrides),
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            print(
+                "[FAILED BENCHMARK] "
+                f"run={run_number}: {type(exc).__name__}: {exc}"
+            )
+            print(f"Failure details: {failure_path}")
+            if server is not None:
+                with contextlib.suppress(Exception):
+                    server.after_bench()
+            return None
+
     if warmup_num_prompts > 0:
         warmup_overrides = bench_comb | {"num_prompts": warmup_num_prompts}
-        run_benchmark(
-            server,
-            bench_cmd,
-            serve_overrides=serve_comb,
+        run_one(
             bench_overrides=warmup_overrides,
             run_number=-1,
             output_path=base_path / "warmup.json",
-            dry_run=dry_run,
         )
 
     for run_number in range(num_runs):
-        run_data = run_benchmark(
-            server,
-            bench_cmd,
-            serve_overrides=serve_comb,
+        run_data = run_one(
             bench_overrides=bench_comb,
             run_number=run_number,
             output_path=_get_comb_run_path(base_path, run_number),
-            dry_run=dry_run,
         )
-
         if run_data is not None:
             comb_data.append(run_data)
 
     if dry_run:
         return None
+
+    if not comb_data:
+        print("[NO SUCCESSFUL MEASURED RUNS] leaving combination retryable")
+        return []
 
     with _get_comb_run_path(base_path, run_number=None).open("w") as f:
         json.dump(comb_data, f, indent=4)
@@ -277,36 +318,67 @@ def run_combs(
     num_runs: int,
     warmup_num_prompts: int,
     dry_run: bool,
+    continue_on_error: bool = False,
 ):
     all_data = list[dict[str, object]]()
     for serve_comb in serve_params:
-        with server_ctx(
-            serve_cmd,
-            after_bench_cmd,
-            show_stdout=show_stdout,
-            serve_comb=serve_comb,
-            bench_params=bench_params,
-            experiment_dir=experiment_dir,
-            dry_run=dry_run,
-            server_ready_timeout=server_ready_timeout,
-        ) as server:
-            for bench_comb in bench_params:
-                base_path = _get_comb_base_path(experiment_dir, serve_comb, bench_comb)
+        try:
+            with server_ctx(
+                serve_cmd,
+                after_bench_cmd,
+                show_stdout=show_stdout,
+                serve_comb=serve_comb,
+                bench_params=bench_params,
+                experiment_dir=experiment_dir,
+                dry_run=dry_run,
+                server_ready_timeout=server_ready_timeout,
+            ) as server:
+                for bench_comb in bench_params:
+                    base_path = _get_comb_base_path(
+                        experiment_dir, serve_comb, bench_comb
+                    )
 
-                comb_data = run_comb(
-                    server,
-                    bench_cmd,
-                    serve_comb=serve_comb,
-                    bench_comb=bench_comb,
-                    link_vars=link_vars,
-                    base_path=base_path,
-                    num_runs=num_runs,
-                    warmup_num_prompts=warmup_num_prompts,
-                    dry_run=dry_run,
+                    comb_data = run_comb(
+                        server,
+                        bench_cmd,
+                        serve_comb=serve_comb,
+                        bench_comb=bench_comb,
+                        link_vars=link_vars,
+                        base_path=base_path,
+                        num_runs=num_runs,
+                        warmup_num_prompts=warmup_num_prompts,
+                        dry_run=dry_run,
+                        continue_on_error=continue_on_error,
+                    )
+
+                    if comb_data is not None:
+                        all_data.extend(comb_data)
+        except Exception as exc:
+            if not continue_on_error:
+                raise
+            failure_name = sanitize_filename(
+                f"SERVE-{serve_comb.name or 'default'}-failure.json"
+            )
+            failure_path = experiment_dir / failure_name
+            failure_path.parent.mkdir(parents=True, exist_ok=True)
+            failure_path.write_text(
+                json.dumps(
+                    {
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "serve_overrides": dict(serve_comb),
+                    },
+                    indent=2,
                 )
-
-                if comb_data is not None:
-                    all_data.extend(comb_data)
+                + "\n",
+                encoding="utf-8",
+            )
+            print(
+                "[FAILED SERVER COMBINATION] "
+                f"{serve_comb.name or '(default)'}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            print(f"Failure details: {failure_path}")
 
     if dry_run:
         return None
@@ -331,6 +403,7 @@ class SweepServeArgs:
     experiment_name: str
     num_runs: int
     warmup_num_prompts: int
+    continue_on_error: bool
     dry_run: bool
     resume: bool
 
@@ -383,6 +456,7 @@ class SweepServeArgs:
             experiment_name=experiment_name,
             num_runs=num_runs,
             warmup_num_prompts=warmup_num_prompts,
+            continue_on_error=args.continue_on_error,
             dry_run=args.dry_run,
             resume=args.resume,
             server_ready_timeout=args.server_ready_timeout,
@@ -484,6 +558,14 @@ class SweepServeArgs:
             ),
         )
         parser.add_argument(
+            "--continue-on-error",
+            action="store_true",
+            help=(
+                "Record and skip a failed warmup or benchmark run instead of "
+                "terminating the entire sweep."
+            ),
+        )
+        parser.add_argument(
             "--dry-run",
             action="store_true",
             help="If set, prints the commands to run, "
@@ -555,6 +637,7 @@ def run_main(args: SweepServeArgs):
             num_runs=args.num_runs,
             warmup_num_prompts=args.warmup_num_prompts,
             dry_run=args.dry_run,
+            continue_on_error=args.continue_on_error,
         )
 
 

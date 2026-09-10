@@ -197,18 +197,37 @@ def parse_args() -> argparse.Namespace:
     sweep.add_argument(
         "--generate-sweep",
         action="store_true",
+        help="Backward-compatible alias for --generate-scheduler-sweep.",
+    )
+    sweep.add_argument(
+        "--generate-scheduler-sweep",
+        action="store_true",
         help=(
-            "Generate an optional vllm bench sweep package around the single "
-            "initial runtime suggestion."
+            "Generate the max-num-seqs/max-num-batched-tokens scheduler sweep."
         ),
     )
     sweep.add_argument(
         "--generate-parallel-layout-sweep",
         action="store_true",
         help=(
-            "Generate a staged NUMA-aware TP/DP sweep followed by the existing "
-            "max-num-seqs/max-num-batched-tokens sweep. Requires "
+            "Generate a standalone NUMA-aware TP/DP sweep. Requires "
             "--detect-hardware."
+        ),
+    )
+    sweep.add_argument(
+        "--generate-concurrency-sweep",
+        action="store_true",
+        help=(
+            "Generate a max_concurrency workload sweep using "
+            "vllm bench sweep serve_workload."
+        ),
+    )
+    sweep.add_argument(
+        "--generate-full-sweep",
+        action="store_true",
+        help=(
+            "Generate the end-to-end TP/DP -> max_concurrency -> scheduler "
+            "tuning pipeline. Requires --detect-hardware."
         ),
     )
     sweep.add_argument(
@@ -803,10 +822,20 @@ def main() -> int:
     args = parse_args()
 
     try:
-        if args.generate_sweep and args.generate_parallel_layout_sweep:
+        sweep_modes = {
+            "--generate-sweep": args.generate_sweep,
+            "--generate-scheduler-sweep": args.generate_scheduler_sweep,
+            "--generate-parallel-layout-sweep": args.generate_parallel_layout_sweep,
+            "--generate-concurrency-sweep": args.generate_concurrency_sweep,
+            "--generate-full-sweep": args.generate_full_sweep,
+        }
+        selected_sweep_modes = [
+            name for name, enabled in sweep_modes.items() if enabled
+        ]
+        if len(selected_sweep_modes) > 1:
             raise ValueError(
-                "Choose either --generate-sweep or "
-                "--generate-parallel-layout-sweep, not both."
+                "Choose exactly one sweep-generation mode: "
+                + ", ".join(selected_sweep_modes)
             )
         source = args.source
         if source is None:
@@ -828,8 +857,7 @@ def main() -> int:
 
         tuning_requested = (
             args.detect_hardware
-            or args.generate_sweep
-            or args.generate_parallel_layout_sweep
+            or bool(selected_sweep_modes)
             or any(
                 value is not None
                 for value in (
@@ -865,13 +893,14 @@ def main() -> int:
                 target_qps=args.target_qps,
             )
 
-            if args.generate_sweep or args.generate_parallel_layout_sweep:
-                from sweep_generation import (
-                    validate_sweep_workload,
-                    write_sweep_files,
-                )
+            if selected_sweep_modes:
+                from sweep_generation import validate_sweep_workload
 
                 validate_sweep_workload(workload)
+
+            if args.generate_sweep or args.generate_scheduler_sweep:
+                from sweep_generation import write_sweep_files
+
                 sweep_writer = write_sweep_files
 
             recipe_hardware = recipe.get("hardware")
@@ -894,7 +923,21 @@ def main() -> int:
         write_env(args.env_out, source, recipe)
 
         sweep_files: list[Path] = []
-        if args.generate_parallel_layout_sweep:
+        if args.generate_full_sweep:
+            if not args.detect_hardware or hardware is None:
+                raise ValueError("--generate-full-sweep requires --detect-hardware.")
+            assert workload is not None
+            from sweep_generation import write_full_sweep_files
+
+            sweep_files = write_full_sweep_files(
+                args.sweep_out_dir,
+                config_path=args.config_out,
+                env_path=args.env_out,
+                config=config,
+                workload=workload,
+                numa_node_count=hardware.numa_node_count,
+            )
+        elif args.generate_parallel_layout_sweep:
             if not args.detect_hardware or hardware is None:
                 raise ValueError(
                     "--generate-parallel-layout-sweep requires --detect-hardware."
@@ -910,7 +953,18 @@ def main() -> int:
                 workload=workload,
                 numa_node_count=hardware.numa_node_count,
             )
-        elif args.generate_sweep:
+        elif args.generate_concurrency_sweep:
+            assert workload is not None
+            from sweep_generation import write_concurrency_sweep_files
+
+            sweep_files = write_concurrency_sweep_files(
+                args.sweep_out_dir,
+                config_path=args.config_out,
+                env_path=args.env_out,
+                config=config,
+                workload=workload,
+            )
+        elif args.generate_sweep or args.generate_scheduler_sweep:
             assert workload is not None
             assert sweep_writer is not None
             sweep_files = sweep_writer(
@@ -944,19 +998,29 @@ def main() -> int:
         sweep_dir = Path(args.sweep_out_dir)
         run_parallel = sweep_dir / "run_parallel_layout_sweep.sh"
         recommend_parallel = sweep_dir / "recommend_parallel_layout.py"
+        run_concurrency = sweep_dir / "run_concurrency_sweep.sh"
+        recommend_concurrency = sweep_dir / "recommend_concurrency.py"
         run_sweep = sweep_dir / "run_sweep.sh"
         recommend = sweep_dir / "recommend.py"
+        run_full = sweep_dir / "run_full_sweep.sh"
         print()
         print("Optional performance sweep:")
-        if args.generate_parallel_layout_sweep:
+        if args.generate_full_sweep:
+            print(f"  {shlex.quote(str(run_full))}")
+        elif args.generate_concurrency_sweep:
+            print(f"  {shlex.quote(str(run_concurrency))} --dry-run")
+            print(f"  {shlex.quote(str(run_concurrency))}")
+            print(f"  {shlex.quote(str(recommend_concurrency))}")
+        elif args.generate_parallel_layout_sweep:
             print(f"  {shlex.quote(str(run_parallel))} --dry-run")
             print(f"  {shlex.quote(str(run_parallel))}")
             print(f"  {shlex.quote(str(recommend_parallel))}")
-        print(f"  {shlex.quote(str(run_sweep))} --dry-run")
-        print(f"  {shlex.quote(str(run_sweep))}")
-        print()
-        print("After the sweep:")
-        print(f"  {shlex.quote(str(recommend))}")
+        else:
+            print(f"  {shlex.quote(str(run_sweep))} --dry-run")
+            print(f"  {shlex.quote(str(run_sweep))}")
+            print()
+            print("After the sweep:")
+            print(f"  {shlex.quote(str(recommend))}")
     return 0
 
 
