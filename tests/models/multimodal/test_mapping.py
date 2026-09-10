@@ -184,6 +184,36 @@ def test_cosmos3_edge_checkpoint_weights_mapper():
     )
 
 
+@pytest.mark.cpu_test
+def test_bailing_vl_mapper_handles_module_and_parameter_names():
+    from vllm.model_executor.models.bailing_moe_v3_vl import (
+        BailingMoeV3VLForConditionalGeneration,
+    )
+
+    mapper = BailingMoeV3VLForConditionalGeneration.hf_to_vllm_mapper
+    names = {
+        "model.visual": "visual",
+        "model.visual.blocks.0.attn.qkv.weight": "visual.blocks.0.attn.qkv.weight",
+        "model.linear_proj": "linear_proj",
+        "linear_proj.0": "linear_proj.linear_fc1",
+        "model.linear_proj.0.weight": "linear_proj.linear_fc1.weight",
+        "linear_proj.2": "linear_proj.linear_fc2",
+        "linear_proj.2.weight_scale": "linear_proj.linear_fc2.weight_scale",
+        "model.linear_proj.2.bias": "linear_proj.linear_fc2.bias",
+        "linear_proj.linear_fc1.weight": "linear_proj.linear_fc1.weight",
+        "model.linear_proj.linear_fc2.weight": "linear_proj.linear_fc2.weight",
+        "model.layers.0.attention.q_proj.weight": (
+            "language_model.model.layers.0.self_attn.q_proj.weight"
+        ),
+        "model.layers.0.mlp.experts.3.up_proj.weight": (
+            "language_model.model.layers.0.mlp.experts.3.up_proj.weight"
+        ),
+        "lm_head": "language_model.lm_head",
+        "lm_head.weight": "language_model.lm_head.weight",
+    }
+    assert mapper.apply_list(list(names)) == list(names.values())
+
+
 def create_repo_dummy_weights(repo: str) -> Iterable[tuple[str, torch.Tensor]]:
     """Create weights from safetensors checkpoint metadata"""
     metadata = try_get_safetensors_metadata(repo)
