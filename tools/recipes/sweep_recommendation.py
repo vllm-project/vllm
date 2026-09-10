@@ -24,6 +24,7 @@ DEFAULT_ENV_PATH: str | None = None
 DEFAULT_TTFT_SLA_MS: float | None = None
 DEFAULT_TPOT_SLA_MS: float | None = None
 DEFAULT_MINIMUM_COMPLIANCE: float = 0.99
+DEFAULT_THROUGHPUT_EQUIVALENCE_PERCENT: float = 1.0
 DEFAULT_RESULTS_DIR = "results/runtime-tuning"
 DEFAULT_OUTPUT_CONFIG = "recommended-config.yml"
 DEFAULT_OUTPUT_JSON = "recommendation.json"
@@ -87,6 +88,45 @@ def _scheduler_preference_key(value: object) -> tuple[int, int]:
     if isinstance(value, int) and not isinstance(value, bool):
         return (0, -value)
     return (0, 0)
+
+
+def _has_fixed_parallel_layout(candidates: list[dict[str, Any]]) -> bool:
+    """Return whether candidates belong to one scheduler-only comparison."""
+    layouts = {
+        (candidate["tensor_parallel_size"], candidate["data_parallel_size"])
+        for candidate in candidates
+    }
+    return len(layouts) == 1
+
+
+def _select_near_equivalent_scheduler_candidate(
+    candidates: list[dict[str, Any]],
+    *,
+    throughput_equivalence_percent: float,
+) -> dict[str, Any]:
+    """Prefer fewer scheduler overrides among near-equal configurations."""
+    best_throughput = max(
+        candidate["mean_output_throughput"] for candidate in candidates
+    )
+    throughput_floor = best_throughput * (
+        1.0 - throughput_equivalence_percent / 100.0
+    )
+    near_equivalent = [
+        candidate
+        for candidate in candidates
+        if candidate["mean_output_throughput"] >= throughput_floor
+    ]
+    return max(
+        near_equivalent,
+        key=lambda candidate: (
+            len(candidate["vllm_default_parameters"]),
+            candidate["combined_compliance_ratio"] or 0.0,
+            candidate["mean_request_goodput"] or 0.0,
+            candidate["mean_output_throughput"],
+            _scheduler_preference_key(candidate["max_num_batched_tokens"]),
+            _scheduler_preference_key(candidate["max_num_seqs"]),
+        ),
+    )
 
 
 def _resolve(script_dir: Path, value: str | None) -> Path | None:
@@ -251,6 +291,9 @@ def _select_candidate(
     candidates: list[dict[str, Any]],
     *,
     use_goodput: bool,
+    throughput_equivalence_percent: float = (
+        DEFAULT_THROUGHPUT_EQUIVALENCE_PERCENT
+    ),
 ) -> tuple[dict[str, Any] | None, dict[str, Any], str]:
     valid = [candidate for candidate in candidates if candidate["valid"]]
     if not valid:
@@ -279,34 +322,50 @@ def _select_candidate(
                 "the supplied TTFT/TPOT objectives."
             )
         eligible = [candidate for candidate in valid if candidate["sla_eligible"]]
-        winner = (
-            max(
+        if eligible and _has_fixed_parallel_layout(valid):
+            winner = _select_near_equivalent_scheduler_candidate(
                 eligible,
+                throughput_equivalence_percent=throughput_equivalence_percent,
+            )
+        else:
+            winner = (
+                max(
+                    eligible,
+                    key=lambda candidate: (
+                        candidate["mean_output_throughput"],
+                        candidate["combined_compliance_ratio"],
+                        candidate["mean_request_goodput"],
+                        -candidate["data_parallel_size"],
+                        -candidate["tensor_parallel_size"],
+                        _scheduler_preference_key(
+                            candidate["max_num_batched_tokens"]
+                        ),
+                        _scheduler_preference_key(candidate["max_num_seqs"]),
+                    ),
+                )
+                if eligible
+                else None
+            )
+    else:
+        objective = "highest_mean_output_throughput"
+        if _has_fixed_parallel_layout(valid):
+            winner = _select_near_equivalent_scheduler_candidate(
+                valid,
+                throughput_equivalence_percent=throughput_equivalence_percent,
+            )
+        else:
+            winner = max(
+                valid,
                 key=lambda candidate: (
                     candidate["mean_output_throughput"],
-                    candidate["combined_compliance_ratio"],
-                    candidate["mean_request_goodput"],
                     -candidate["data_parallel_size"],
                     -candidate["tensor_parallel_size"],
-                    _scheduler_preference_key(candidate["max_num_batched_tokens"]),
+                    _scheduler_preference_key(
+                        candidate["max_num_batched_tokens"]
+                    ),
                     _scheduler_preference_key(candidate["max_num_seqs"]),
                 ),
             )
-            if eligible
-            else None
-        )
-    else:
-        objective = "highest_mean_output_throughput"
-        winner = max(
-            valid,
-            key=lambda candidate: (
-                candidate["mean_output_throughput"],
-                -candidate["data_parallel_size"],
-                -candidate["tensor_parallel_size"],
-                _scheduler_preference_key(candidate["max_num_batched_tokens"]),
-                _scheduler_preference_key(candidate["max_num_seqs"]),
-            ),
-        )
         best_effort = winner
 
     return winner, best_effort, objective
@@ -409,6 +468,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--throughput-equivalence-percent",
+        type=float,
+        default=DEFAULT_THROUGHPUT_EQUIVALENCE_PERCENT,
+        help=(
+            "For a scheduler-only comparison, prefer fewer explicit scheduler "
+            "overrides when throughput is within this percentage of the best "
+            "eligible result (default: 1.0)."
+        ),
+    )
+    parser.add_argument(
         "--output-config",
         default=DEFAULT_OUTPUT_CONFIG,
         help="Recommended config output path.",
@@ -425,6 +494,10 @@ def main() -> int:
     args = parse_args()
     if not 0.0 < args.minimum_compliance <= 1.0:
         raise ValueError("--minimum-compliance must be greater than 0 and at most 1.")
+    if not 0.0 <= args.throughput_equivalence_percent < 100.0:
+        raise ValueError(
+            "--throughput-equivalence-percent must be at least 0 and less than 100."
+        )
     script_dir = Path(__file__).resolve().parent
 
     config_path = _resolve(script_dir, args.config)
@@ -460,7 +533,9 @@ def main() -> int:
         minimum_compliance=args.minimum_compliance,
     )
     winner, best_effort, objective = _select_candidate(
-        candidates, use_goodput=use_goodput
+        candidates,
+        use_goodput=use_goodput,
+        throughput_equivalence_percent=args.throughput_equivalence_percent,
     )
 
     if winner is not None:
@@ -510,6 +585,7 @@ def main() -> int:
         ),
         "selection_objective": objective,
         "minimum_compliance_ratio": args.minimum_compliance,
+        "throughput_equivalence_percent": args.throughput_equivalence_percent,
         "slo": {
             "ttft_ms": args.ttft_sla_ms,
             "tpot_ms": args.tpot_sla_ms,

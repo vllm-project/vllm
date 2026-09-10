@@ -66,10 +66,10 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
 
 `--output-tokens` is used to estimate steady-state request turnover for
 `max-num-batched-tokens`. When both `--target-qps` and `--tpot-sla-ms` are
-available, they are also used to estimate prompt arrival pressure per scheduler
-step. `--ttft-sla-ms` is collected but is not yet converted directly into a
-batch-size formula because the relationship between TTFT and scheduler budget is
-model- and hardware-dependent.
+available, they are also used to estimate per-replica prompt arrival pressure
+per scheduler step. `--ttft-sla-ms` is collected but is not yet converted
+directly into a batch-size formula because the relationship between TTFT and
+scheduler budget is model- and hardware-dependent.
 
 ## Deployment-Time Parameters
 
@@ -81,7 +81,7 @@ on a validation environment that differs from the user's target deployment.
 | --- | --- | --- | --- |
 | `tensor-parallel-size` | The effective CPU/NUMA topology available to a container or pod can differ from the system used to validate the recipe. | Hardware topology | Use the largest power-of-two TP value that does not exceed the effective NUMA-node count. |
 | `gpu-memory-utilization` | Available memory can differ by machine size, container limits, and other memory use. The vLLM option name is also used by the CPU backend. | Hardware memory + recipe baseline | Calculate a conservative fraction from the most constrained NUMA node. |
-| `max-num-seqs` | The useful scheduler concurrency depends on the number of requests expected to be active at the same time. | Workload concurrency | Set `max-num-seqs` to `--concurrency` when supplied. |
+| `max-num-seqs` | The useful scheduler concurrency depends on the number of requests expected to be active on each DP replica. | Workload concurrency + DP | Set `max-num-seqs` to `ceil(--concurrency / data-parallel-size)` when concurrency is supplied. |
 | `max-num-batched-tokens` | Each scheduler iteration must share its token budget between active decodes and incoming prefills. | Input/output token shape, concurrency, and optional QPS/TPOT | Calculate decode budget + expected prefill demand, with vLLM scheduler constraints as floors. |
 | `data-parallel-size` | The required replica count depends on the requested throughput and the capacity of one replica. | Capacity target | Keep the recipe value today because per-replica SLA capacity is not known. |
 
@@ -95,7 +95,12 @@ value. See [SWEEP_TUNING.md](SWEEP_TUNING.md).
 This serving-default comparison is distinct from the `SchedulerConfig` fallback
 constants used inside the initial tuning heuristics below.
 
-## How Each Runtime Parameter Is Calculated
+## How Initial Runtime Tuning Seeds Are Calculated
+
+The formulas below produce directly deployable starting values. They are not
+claimed to be universal performance optima. The Tune All workflow benchmarks
+TP/DP first, then concurrency, and finally scheduler settings before writing a
+final recommendation. See [SWEEP_TUNING.md](SWEEP_TUNING.md).
 
 ### `tensor-parallel-size`
 
@@ -128,14 +133,19 @@ candidate = min(recipe value or 0.80, safe_fraction)
 
 ### `max-num-seqs`
 
-When `--concurrency` is supplied, it directly represents the requested maximum
-number of simultaneously active requests:
+When `--concurrency` is supplied, it represents global client concurrency. Each
+DP replica needs capacity for its expected share of those requests:
 
 ```text
-max-num-seqs = concurrency
+per_replica_concurrency = ceil(concurrency / data_parallel_size)
+max-num-seqs = per_replica_concurrency
 ```
 
-If concurrency is not supplied, the converter does not override this parameter.
+For DP=1 this reduces to `max-num-seqs = concurrency`. If concurrency is not
+supplied, the converter does not override this parameter. Benchmark results show
+that setting `max-num-seqs` below per-replica concurrency can create request
+queueing and severe TTFT degradation; scheduler sweeps therefore do not use
+below-concurrency candidates.
 
 ### `max-num-batched-tokens`
 
@@ -146,7 +156,7 @@ First, the policy determines the active sequence count:
 
 ```text
 active_sequences =
-    --concurrency
+    ceil(--concurrency / data_parallel_size)
     or recipe max-num-seqs
     or vLLM default max_num_seqs (128)
 ```
@@ -162,10 +172,12 @@ The policy then estimates how many new prompts need prefill work per scheduler
 step:
 
 ```text
+per_replica_qps = target_qps / data_parallel_size
+
 prefills_per_step = max(
     1,
     active_sequences / output_tokens,
-    target_qps * tpot_sla_ms / 1000
+    per_replica_qps * tpot_sla_ms / 1000
 )
 
 prefills_per_step = min(active_sequences, prefills_per_step)
@@ -182,7 +194,7 @@ max-num-batched-tokens = max(
 )
 ```
 
-For example, with 128 input tokens, 128 output tokens, and concurrency 32:
+For example, with 128 input tokens, 128 output tokens, concurrency 32, and DP=1:
 
 ```text
 decode_budget      = 32
@@ -190,6 +202,11 @@ prefills_per_step  = max(1, 32 / 128) = 1
 prefill_budget     = 128
 candidate          = max(2048, 32, 32 + 128) = 2048
 ```
+
+The calculated token budget is an initial scheduler seed. If P99 TTFT still
+misses its objective while P99 TPOT has substantial headroom, Tune All should
+reduce workload concurrency or select a different TP/DP layout rather than
+reducing `max-num-seqs` below per-replica concurrency.
 
 If chunked prefill is explicitly disabled and `max-model-len` is available, the
 policy also ensures:
@@ -207,8 +224,10 @@ also needs measured per-replica throughput that still satisfies TTFT/TPOT:
 DP = ceil(target_qps / qps_per_replica_at_SLO)
 ```
 
-Because the converter does not have that measured capacity yet, it intentionally
-keeps the recipe DP value rather than guessing.
+Because the converter does not have that measured capacity yet, its initial
+configuration intentionally keeps the recipe DP value rather than guessing.
+Tune All subsequently benchmarks supported TP/DP layouts and replaces this seed
+with a measured layout before concurrency and scheduler tuning.
 
 ## Precedence
 

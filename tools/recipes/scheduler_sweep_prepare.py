@@ -96,8 +96,6 @@ def _build_serve_params(config: dict[str, Any]) -> list[dict[str, Any]]:
         ):
             minimum_batch = max(minimum_batch, max_model_len)
 
-    lower_seqs = max(1, (initial_seqs + 1) // 2)
-    middle_seqs = max(lower_seqs, (3 * initial_seqs + 3) // 4)
     lower_batch = max(minimum_batch, _strict_lower_power_of_two(initial_batch))
     smaller_batch = max(minimum_batch, _strict_lower_power_of_two(lower_batch))
     higher_batch = max(minimum_batch, _strict_upper_power_of_two(initial_batch))
@@ -128,10 +126,6 @@ def _build_serve_params(config: dict[str, Any]) -> list[dict[str, Any]]:
     add("smaller_batch_budget", initial_seqs, smaller_batch)
     add("lower_batch_budget", initial_seqs, lower_batch)
     add("higher_batch_budget", initial_seqs, higher_batch)
-    add("middle_seqs_lower_batch", middle_seqs, lower_batch)
-    add("middle_seqs_higher_batch", middle_seqs, higher_batch)
-    add("lower_seqs_lower_batch", lower_seqs, lower_batch)
-    add("lower_seqs_higher_batch", lower_seqs, higher_batch)
     add("vllm_default_max_num_seqs", None, initial_batch)
     add("vllm_default_max_num_batched_tokens", initial_seqs, None)
     add("vllm_defaults", None, None)
