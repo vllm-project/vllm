@@ -786,6 +786,37 @@ def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
     return sliding_window == 1024 and head_size in (128, 256)
 
 
+def _on_gfx1151() -> bool:
+    """True on gfx1151 (RDNA 3.5, Strix Halo), the only architecture tuned here."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx1151
+
+    return on_gfx1151()
+
+
+def _gfx1151_decode_3d_launch_config(
+    num_kv_heads: int, head_size: int
+) -> dict[str, int]:
+    """Launch parameters for the 3D decode path on gfx1151.
+
+    A single KV head gives the 3D grid one head to spread across, so the
+    Triton defaults leave the CUs waiting on KV loads rather than overlapping
+    them. The shape classes that benefit are opted in explicitly; everything
+    else keeps the defaults.
+
+    Args:
+        num_kv_heads: KV heads in the layer.
+        head_size: Attention head dimension.
+
+    Returns:
+        Launch keyword arguments, empty when the shape is not tuned.
+    """
+    if num_kv_heads == 1:
+        return {"num_warps": 4, "num_stages": 1, "waves_per_eu": 2}
+    return {}
+
+
 def _get_tile_size(
     head_size: int,
     sliding_window: int,
@@ -1087,6 +1118,8 @@ def unified_attention(
         tile_size = TILE_SIZE_DECODE
 
     launch_kwargs: dict[str, int] = {}
+    if use_3d and _on_gfx1151():
+        launch_kwargs.update(_gfx1151_decode_3d_launch_config(num_kv_heads, head_size))
     if launch_num_warps is not None:
         launch_kwargs["num_warps"] = launch_num_warps
     if launch_num_stages is not None:
