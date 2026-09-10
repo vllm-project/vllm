@@ -16,13 +16,13 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
     CrossAttentionManager,
     FullAttentionManager,
+    HiSparseSourceManager,
     MambaManager,
     SingleTypeKVCacheManager,
     SinkFullAttentionManager,
     SlidingWindowManager,
     register_all_kvcache_specs,
 )
-from vllm.v1.hisparse.cache_manager import HiSparseSourceManager
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CrossAttentionSpec,

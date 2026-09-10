@@ -12,11 +12,11 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
     KVCacheBlockCopy,
 )
-from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
-from vllm.v1.hisparse.cache_manager import (
+from vllm.v1.core.single_type_kv_cache_manager import (
     HiSparseHotManager,
     HiSparseResidentManager,
     HiSparseSourceManager,
+    SingleTypeKVCacheManager,
 )
 from vllm.v1.hisparse.types import (
     SparseKVOffloadCommand,
