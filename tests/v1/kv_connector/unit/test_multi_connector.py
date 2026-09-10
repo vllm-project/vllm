@@ -198,6 +198,25 @@ def mc() -> MultiConnector:
     return mc
 
 
+@pytest.mark.parametrize("active_children", [(), (0,), (1,), (0, 1)])
+def test_model_wait_callbacks(mc, active_children):
+    calls = []
+    for i, connector in enumerate(mc._connectors):
+        connector.get_model_wait_callback.return_value = (
+            (lambda i=i: calls.append(i)) if i in active_children else None
+        )
+
+    callback = mc.get_model_wait_callback()
+    if not active_children:
+        assert callback is None
+        return
+
+    assert callback is not None
+    callback()
+    callback()
+    assert calls == list(active_children) * 2
+
+
 # Helper function to compare directories recursively
 def _compare_directories(dir1: Path, dir2: Path) -> bool:
     """Compares two directories recursively for identical content."""

@@ -484,7 +484,11 @@ class P2PSession:
                 block_len=msg[ConnectMsg.BLOCK_LEN],
             )
         except Exception as exc:
-            logger.error("P2PSession %s: rejecting peer connect: %s", self.peer_id, exc)
+            logger.exception(
+                "P2PSession %s: rejecting peer connect: %s",
+                self.peer_id,
+                exc,
+            )
             if self._conn is not None:
                 self._conn.mark_dead()
             return

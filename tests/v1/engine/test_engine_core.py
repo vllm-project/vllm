@@ -23,6 +23,8 @@ from vllm.config import (
     SchedulerConfig,
     VllmConfig,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -69,7 +71,8 @@ def make_request() -> EngineCoreRequest:
 
 @pytest.mark.parametrize("batch_queue", [False, True])
 @pytest.mark.parametrize("multiproc", [False, True])
-def test_model_wait_services_connector(batch_queue, multiproc):
+@pytest.mark.parametrize("multi_connector", [False, True])
+def test_model_wait_services_connector(batch_queue, multiproc, multi_connector):
     core = EngineCore.__new__(EngineCore)
     core.scheduler = MagicMock()
     core.scheduler.schedule.return_value.total_num_scheduled_tokens = 1
@@ -100,8 +103,20 @@ def test_model_wait_services_connector(batch_queue, multiproc):
         async_output.get_output.side_effect = get_output
         future = AsyncOutputFuture(async_output, single_value=True)
     core.model_executor.execute_model.return_value = future
-    core._model_wait_callback = progress
-    with ThreadPoolExecutor(max_workers=1) as core._model_output_pool:
+    if multi_connector:
+        connector = MultiConnector.__new__(MultiConnector)
+        idle_child = MagicMock(spec=KVConnectorBase_V1)
+        idle_child.get_model_wait_callback.return_value = None
+        active_child = MagicMock(spec=KVConnectorBase_V1)
+        active_child.get_model_wait_callback.return_value = progress
+        connector._connectors = [idle_child, active_child]
+        core._model_wait_callback = connector.get_model_wait_callback()
+    else:
+        core._model_wait_callback = progress
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        core._model_output_pool = (
+            pool if core._model_wait_callback is not None else None
+        )
         (core.step_with_batch_queue if batch_queue else core.step)()
     core.scheduler.update_from_output.assert_called_once_with(
         core.scheduler.schedule.return_value, result

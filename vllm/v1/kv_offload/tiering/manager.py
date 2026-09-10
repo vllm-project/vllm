@@ -823,6 +823,8 @@ class TieringOffloadingManager(OffloadingManager):
     def get_model_wait_callback(self) -> Callable[[], None] | None:
         if not self.secondary_tiers:
             return None
+        # External requests can queue promotions and asynchronous lookups in
+        # other tiers, which need submission and the tiers' lookup flush hooks.
         return partial(self._poll, ScheduleEndContext((), ()))
 
     def _poll(self, context: ScheduleEndContext) -> None:

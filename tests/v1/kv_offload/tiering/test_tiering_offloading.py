@@ -829,6 +829,24 @@ class TestTieringOffloadingManager:
         assert set(jm_b.keys) == {blocks[2], blocks[3]}
         assert jm_b.req_context is ctx_b
 
+    def test_model_wait_promotes_external_lookup(self, manager_setup):
+        """A peer lookup can need another tier's data while the model runs."""
+        key = to_keys([0])[0]
+        self.secondary_tier2.blocks[key] = True
+        results = []
+
+        def serve(parent):
+            results.append(parent.lookup(key, _CTX))
+
+        self.secondary_tier1.serve_external_requests = serve
+        callback = self.manager.get_model_wait_callback()
+        assert callback is not None
+
+        callback()
+        callback()
+
+        assert results == [LookupResult.HIT_PENDING, LookupResult.HIT]
+
     def test_lookup_shared_block_no_duplicate_promotion(self, manager_setup):
         """A block looked up by two requests in the same step is promoted once.
 
