@@ -30,6 +30,9 @@ pub(super) fn salt_multimodal_identifiers_for_lora(
     features: Option<MmFeatures>,
     lora_name: &str,
 ) -> Option<MmFeatures> {
+    if lora_name.is_empty() {
+        return features;
+    }
     features.map(|features| {
         features
             .into_iter()
@@ -120,6 +123,12 @@ fn apply_encoder_cache_placeholders(text_request: &mut TextRequest) {
     }
 }
 
+pub(super) fn prepare_multimodal_cache_inputs(text_request: &mut TextRequest, lora_name: &str) {
+    text_request.mm_features =
+        salt_multimodal_identifiers_for_lora(text_request.mm_features.take(), lora_name);
+    apply_encoder_cache_placeholders(text_request);
+}
+
 impl InferenceServiceImpl {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
@@ -196,7 +205,7 @@ impl InferenceServiceImpl {
                     self.state
                         .chat
                         .validate_preprocessed_media(
-                            features.iter().map(|feature| feature.modality.as_str()),
+                            features.iter().map(|feature| feature.modality),
                         )
                         .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
                     let Prompt::TokenIds(token_ids) = &text_request.prompt else {
@@ -219,10 +228,7 @@ impl InferenceServiceImpl {
                     text_request.mm_features = Some(features);
                 }
             }
-            apply_encoder_cache_placeholders(&mut text_request);
-
-            text_request.mm_features =
-                salt_multimodal_identifiers_for_lora(text_request.mm_features, &lora_name);
+            prepare_multimodal_cache_inputs(&mut text_request, &lora_name);
 
             Ok(text_request)
         }

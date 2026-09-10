@@ -330,28 +330,28 @@ struct PreparedItem {
 }
 
 impl MultimodalModelInfo {
-    pub(crate) fn validate_preprocessed_modalities<'a>(
+    pub(crate) fn validate_preprocessed_modalities(
         &self,
-        modalities: impl IntoIterator<Item = &'a str>,
+        modalities: impl IntoIterator<Item = MmModality>,
     ) -> Result<()> {
-        let mut counts: HashMap<MmLimitModality, usize> = HashMap::new();
+        let mut counts: HashMap<MmModality, usize> = HashMap::new();
         for modality in modalities {
-            let limit_modality = match modality {
-                "image" if self.image.is_some() => MmLimitModality::Image,
-                "video" if self.video.is_some() => MmLimitModality::Video,
-                "audio" if self.audio.is_some() => MmLimitModality::Audio,
-                _ => {
-                    return Err(Error::UnsupportedModality {
-                        modality: modality.to_string(),
-                    });
-                }
+            let supported = match modality {
+                MmModality::Image => self.image.is_some(),
+                MmModality::Video => self.video.is_some(),
+                MmModality::Audio => self.audio.is_some(),
             };
-            *counts.entry(limit_modality).or_default() += 1;
+            if !supported {
+                return Err(Error::UnsupportedModality {
+                    modality: modality.as_str().to_string(),
+                });
+            }
+            *counts.entry(modality).or_default() += 1;
         }
         self.validate_mm_counts(counts)
     }
 
-    fn validate_mm_counts(&self, counts: HashMap<MmLimitModality, usize>) -> Result<()> {
+    fn validate_mm_counts(&self, counts: HashMap<MmModality, usize>) -> Result<()> {
         for (modality, count) in counts {
             let Some(limit) = self.limit_mm_per_prompt.get(&modality).and_then(MmLimitSpec::count)
             else {

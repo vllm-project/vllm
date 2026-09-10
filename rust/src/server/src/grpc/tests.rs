@@ -24,7 +24,7 @@ use tonic_health::pb::health_check_response::ServingStatus as HealthServingStatu
 use tonic_health::pb::health_client::HealthClient;
 use tonic_health::server::health_reporter;
 use tower::service_fn;
-use vllm_chat::multimodal::{MmLimitModality, MmLimitPerPrompt, MmLimitSpec};
+use vllm_chat::multimodal::{MmLimitPerPrompt, MmLimitSpec, MmModality};
 use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatTextBackend, DefaultChatOutputProcessor,
     DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, RenderedPrompt,
@@ -34,6 +34,7 @@ use vllm_engine_core_client::mock_engine::{
     default_ready_response,
 };
 use vllm_engine_core_client::protocol::decode_value;
+use vllm_engine_core_client::protocol::dtype::TensorDtype;
 use vllm_engine_core_client::protocol::handshake::{EngineCoreReadyResponse, KvEventsConfig};
 use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmKwargValue, PlaceholderRange,
@@ -49,14 +50,14 @@ use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task_w
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
 use vllm_llm::Llm;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend};
+use vllm_text::{Prompt, TextBackend, TextRequest};
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::control::kv_event_source;
 use super::convert::json_to_proto_struct;
-use super::inference::salt_multimodal_identifiers_for_lora;
+use super::inference::{prepare_multimodal_cache_inputs, salt_multimodal_identifiers_for_lora};
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
 use super::{ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, pb};
@@ -72,10 +73,26 @@ use crate::tls_tests::{TestCerts, server_tls};
 type TestFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
 #[test]
-fn lora_salts_multimodal_encoder_cache_identifiers() {
+fn lora_isolates_multimodal_encoder_cache_identifiers() {
+    let field = MmField::Batched(MmBatchedField { keep_on_cpu: false });
     let feature = MmFeatureSpec {
-        data: None,
-        modality: "image".to_string(),
+        data: Some(BTreeMap::from([
+            (
+                "image_grid_thw".to_string(),
+                MmFieldElem {
+                    data: Some(MmKwargValue::Int(1)),
+                    field: field.clone(),
+                },
+            ),
+            (
+                "pixel_values".to_string(),
+                MmFieldElem {
+                    data: Some(MmKwargValue::Int(2)),
+                    field,
+                },
+            ),
+        ])),
+        modality: MmModality::Image,
         identifier: "content-hash".to_string(),
         mm_position: PlaceholderRange {
             offset: 1,
@@ -85,42 +102,49 @@ fn lora_salts_multimodal_encoder_cache_identifiers() {
         mm_hash: Some("processor-hash".to_string()),
     };
 
-    let salted = salt_multimodal_identifiers_for_lora(Some(vec![feature.clone()]), "adapter")
+    let base = salt_multimodal_identifiers_for_lora(Some(vec![feature.clone()]), "")
         .expect("features should remain present");
-    let repeated = salt_multimodal_identifiers_for_lora(Some(vec![feature.clone()]), "adapter")
+    let adapter_a = salt_multimodal_identifiers_for_lora(Some(vec![feature.clone()]), "adapter-a")
         .expect("features should remain present");
-    let base = salt_multimodal_identifiers_for_lora(Some(vec![feature]), "")
+    let adapter_b = salt_multimodal_identifiers_for_lora(Some(vec![feature.clone()]), "adapter-b")
         .expect("features should remain present");
+    let adapter_a_identifier = adapter_a[0].identifier.clone();
 
-    assert_eq!(salted[0].identifier, repeated[0].identifier);
-    assert_ne!(salted[0].identifier, base[0].identifier);
-    assert_eq!(salted[0].identifier.len(), 64);
-    assert!(salted[0].identifier.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    assert_eq!(salted[0].mm_hash.as_deref(), Some("processor-hash"));
-}
+    assert_eq!(base[0].identifier, "content-hash");
+    assert_ne!(adapter_a_identifier, adapter_b[0].identifier);
+    assert_ne!(adapter_a_identifier, base[0].identifier);
 
-#[test]
-fn multimodal_encoder_cache_identifiers_do_not_collide_with_base_model_keys() {
-    fn feature(identifier: &str) -> MmFeatureSpec {
-        MmFeatureSpec {
-            data: None,
-            modality: "image".to_string(),
-            identifier: identifier.to_string(),
-            mm_position: PlaceholderRange {
-                offset: 1,
-                length: 2,
-                is_embed: None,
-            },
-            mm_hash: None,
-        }
-    }
+    let mut request = TextRequest::for_test();
+    request.mm_features = Some(vec![feature]);
+    request.sampling_params.vllm_xargs = Some(
+        [(
+            "ec_transfer_params".to_string(),
+            serde_json::json!({
+                "ec_items": [{
+                    "image_grid_thw": [[1, 16, 16]],
+                    "mm_hash": adapter_a_identifier,
+                }],
+            }),
+        )]
+        .into_iter()
+        .collect(),
+    );
 
-    let lora = salt_multimodal_identifiers_for_lora(Some(vec![feature("x")]), "adapter")
-        .expect("features should remain present");
-    let base = salt_multimodal_identifiers_for_lora(Some(vec![feature("adapter:x")]), "")
-        .expect("features should remain present");
+    prepare_multimodal_cache_inputs(&mut request, "adapter-a");
 
-    assert_ne!(lora[0].identifier, base[0].identifier);
+    let prepared = request.mm_features.expect("features should remain present");
+    assert_eq!(prepared[0].identifier, adapter_a[0].identifier);
+    assert_eq!(
+        prepared[0]
+            .data
+            .as_ref()
+            .expect("feature data")
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["image_grid_thw"]
+    );
+    assert_eq!(prepared[0].mm_hash.as_deref(), Some("processor-hash"));
 }
 
 fn boxed_test_future<'a>(future: impl Future<Output = ()> + Send + 'a) -> TestFuture<'a> {
@@ -851,9 +875,9 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 let features = request.mm_features.as_ref().expect("multimodal features");
                 assert_eq!(features.len(), 2);
 
-                for (feature, identifier) in features.iter().zip(["image-1", "image-2"]) {
+                for (feature, source_identifier) in features.iter().zip(["image-1", "image-2"]) {
                     assert_eq!(feature.modality.as_str(), "image");
-                    assert_eq!(feature.identifier, identifier);
+                    assert_eq!(feature.identifier, source_identifier);
                     assert!(feature.mm_position.length > 1);
                     assert_eq!(
                         feature
@@ -949,7 +973,7 @@ async fn unary_generate_forwards_preprocessed_multimodal_features() {
         "pixel_values".to_string(),
         MmFieldElem {
             data: Some(MmKwargValue::Tensor(WireTensor::from_raw(
-                "uint8",
+                TensorDtype::U8,
                 vec![3],
                 vec![1, 2, 3],
             ))),
@@ -971,8 +995,10 @@ async fn unary_generate_forwards_preprocessed_multimodal_features() {
                 let features = request.mm_features.as_ref().expect("multimodal features");
                 assert_eq!(features.len(), 1);
                 let feature = &features[0];
-                assert_eq!(feature.modality, "image");
-                assert_eq!(feature.identifier, "image-hash-a");
+                assert_eq!(feature.modality, MmModality::Image);
+                assert_ne!(feature.identifier, "image-hash-a");
+                assert_eq!(feature.identifier.len(), 72);
+                assert!(feature.identifier.starts_with("grpc-mm:"));
                 assert_eq!(feature.mm_hash.as_deref(), Some("image-hash-a"));
                 assert_eq!(feature.mm_position.offset, 1);
                 assert_eq!(feature.mm_position.length, 2);
@@ -1034,7 +1060,7 @@ fn preprocessed_grpc_media(
         "pixel_values".to_string(),
         MmFieldElem {
             data: Some(MmKwargValue::Tensor(WireTensor::from_raw(
-                "uint8",
+                TensorDtype::U8,
                 vec![1],
                 vec![1],
             ))),
@@ -1111,7 +1137,7 @@ async fn unary_generate_rejects_preprocessed_features_for_text_only_model() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unary_generate_enforces_preprocessed_multimodal_limits() {
-    let limits = MmLimitPerPrompt::from([(MmLimitModality::Image, MmLimitSpec::Count(1))]);
+    let limits = MmLimitPerPrompt::from([(MmModality::Image, MmLimitSpec::Count(1))]);
     let (inference_service, control_service, engine_health, _engine_task) =
         setup_grpc_service_with_backend(
             b"engine-grpc-preprocessed-limit",

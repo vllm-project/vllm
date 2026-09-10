@@ -42,7 +42,7 @@ pub use request::{
     ChatToolChoice, GenerationPromptMode, ReasoningEffort, ResolvedToolContext, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
-pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;
+pub use vllm_engine_core_client::protocol::multimodal::{MmFeatures, MmModality};
 pub use vllm_llm::FinishReason;
 pub use vllm_text::GenerationConfigMode;
 
@@ -286,9 +286,9 @@ impl ChatLlm {
     }
 
     /// Validate already-preprocessed multimodal feature modalities and limits.
-    pub fn validate_preprocessed_media<'a>(
+    pub fn validate_preprocessed_media(
         &self,
-        modalities: impl IntoIterator<Item = &'a str>,
+        modalities: impl IntoIterator<Item = MmModality>,
     ) -> Result<()> {
         let model_info = self.processor.backend.multimodal_model_info().ok_or(
             Error::UnsupportedMultimodalContent("preprocessed multimodal features"),
