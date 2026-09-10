@@ -12,10 +12,10 @@ import ray
 import torch
 import torch.distributed as dist
 
-import vllm.envs as envs
 import vllm._aiter_ops as aiter_ops
-from vllm import _custom_ops as ops
 import vllm.distributed as vllm_distributed
+import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators.quick_all_reduce import (
     KB,
@@ -244,6 +244,9 @@ def test_rocm_aiter_fused_rmsnorm_uses_aiter_qr_rmsnorm_for_prefill(
     class FakeAiterAllReduce:
         aiter_ca = SimpleNamespace(world_size=2, fully_connected=True)
 
+        def use_1stage_fused_ar_rms(self, inp):
+            return False
+
         def custom_fused_ar_rms(self, *args, **kwargs):
             raise AssertionError("expected fused QR+RMSNorm dispatch")
 
@@ -357,7 +360,7 @@ def test_rocm_aiter_fused_rmsnorm_keeps_1stage_decode_path(
         fully_connected = True
 
         def custom_fused_ar_rms(
-            self, inp, residual, weight, epsilon, *, use_1stage
+            self, inp, residual, weight, epsilon, *, use_1stage, gemma_norm
         ):
             calls.append(
                 {
@@ -366,12 +369,16 @@ def test_rocm_aiter_fused_rmsnorm_keeps_1stage_decode_path(
                     "weight": weight,
                     "eps": epsilon,
                     "use_1stage": use_1stage,
+                    "gemma_norm": gemma_norm,
                 }
             )
             return inp + 1, residual + 1
 
     class FakeAiterAllReduce:
         aiter_ca = FakeAiterCA()
+
+        def use_1stage_fused_ar_rms(self, inp):
+            return True
 
     monkeypatch.setattr(
         aiter_ops.rocm_aiter_ops,
@@ -393,6 +400,7 @@ def test_rocm_aiter_fused_rmsnorm_keeps_1stage_decode_path(
     assert calls[0]["residual"] is residual
     assert calls[0]["weight"] is weight
     assert calls[0]["use_1stage"] is True
+    assert calls[0]["gemma_norm"] is False
     torch.testing.assert_close(out, inp + 1)
     torch.testing.assert_close(residual_out, residual + 1)
 

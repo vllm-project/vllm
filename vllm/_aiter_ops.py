@@ -4,7 +4,7 @@ import ctypes
 import functools
 import os
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
@@ -40,7 +40,7 @@ MB = 1024 * KB
 
 
 def _get_or_create_aiter_qr_rmsnorm_comm(
-    device_comm: object,
+    device_comm: Any,
 ) -> tuple[int, int, bool] | None:
     """Create the AITER QR communicator used by fused QR+RMSNorm.
 
@@ -58,22 +58,22 @@ def _get_or_create_aiter_qr_rmsnorm_comm(
     try:
         import aiter
     except Exception:
-        setattr(device_comm, "_aiter_qr_rmsnorm_comm", False)
+        device_comm._aiter_qr_rmsnorm_comm = False
         return None
 
     if not hasattr(aiter, "qr_all_reduce_rmsnorm"):
-        setattr(device_comm, "_aiter_qr_rmsnorm_comm", False)
+        device_comm._aiter_qr_rmsnorm_comm = False
         return None
 
     group = getattr(device_comm, "cpu_group", None)
     if group is None:
-        setattr(device_comm, "_aiter_qr_rmsnorm_comm", False)
+        device_comm._aiter_qr_rmsnorm_comm = False
         return None
 
     world_size = dist.get_world_size(group=group)
     rank = dist.get_rank(group=group)
     if world_size not in (2, 4, 8):
-        setattr(device_comm, "_aiter_qr_rmsnorm_comm", False)
+        device_comm._aiter_qr_rmsnorm_comm = False
         return None
 
     qr_max_size_mb = envs.VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB
@@ -86,11 +86,11 @@ def _get_or_create_aiter_qr_rmsnorm_comm(
         dist.all_gather_object(handles, handle, group=group)
         aiter.qr_open_handles(ptr, handles)
     except Exception:
-        setattr(device_comm, "_aiter_qr_rmsnorm_comm", False)
+        device_comm._aiter_qr_rmsnorm_comm = False
         return None
 
     comm = (ptr, world_size, envs.VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16)
-    setattr(device_comm, "_aiter_qr_rmsnorm_comm", comm)
+    device_comm._aiter_qr_rmsnorm_comm = comm
     return comm
 
 
@@ -1051,6 +1051,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
 
         device_comm = get_tp_group().device_communicator
         qr_comm = getattr(device_comm, "qr_comm", None)
+        hidden_dim = input_.shape[-1]
         row_size = hidden_dim * input_.element_size()
         fused_qr_rmsnorm_ok = (
             qr_comm is not None
@@ -1069,6 +1070,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
             and (32 * KB) % row_size == 0
         )
         if fused_qr_rmsnorm_ok:
+            assert qr_comm is not None
             aiter_qr_comm = _get_or_create_aiter_qr_rmsnorm_comm(device_comm)
             if aiter_qr_comm is not None:
                 import aiter
