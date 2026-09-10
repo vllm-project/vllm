@@ -279,8 +279,7 @@ class SchedulerOutput:
     kv_connector_metadata: KVConnectorMetadata | None = None
 
     # Whether any scheduled request consumes KV that the connector loads
-    # synchronously during this step (load_async=False). Connectors may also
-    # set this from build_connector_meta when a step needs a pre-forward start.
+    # synchronously during this step (load_async=False).
     has_sync_kv_loads: bool = False
 
     # EC Cache Connector metadata
