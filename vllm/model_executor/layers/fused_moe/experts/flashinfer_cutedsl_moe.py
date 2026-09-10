@@ -14,8 +14,8 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
     activation_to_flashinfer_int,
+    get_nvfp4_per_token_base_global_scale,
     quantize_nvfp4_per_token_input,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -74,7 +74,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             assert quant_config.a2_gscale is not None
             self.per_token_global_scale = quant_config.a2_gscale.new_full(
                 (1,),
-                NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
+                get_nvfp4_per_token_base_global_scale(),
             )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

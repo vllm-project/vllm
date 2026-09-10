@@ -1275,6 +1275,41 @@ def test_online_nvfp4_quantizes_original_expert_weights(monkeypatch, e4m3_max) -
 
 
 @pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ),
+    reason="Per-token NVFP4 quantization needs a Blackwell (SM100) GPU.",
+)
+@pytest.mark.parametrize("e4m3_max", [256, 448])
+def test_online_nvfp4_per_token_4over6_scale(monkeypatch, e4m3_max):
+    from flashinfer import SfLayout, nvfp4_quantize
+
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        quantize_nvfp4_per_token_input,
+    )
+
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6", "1")
+    monkeypatch.setenv(
+        "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256", str(int(e4m3_max == 256))
+    )
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_MODE", "MSE")
+    monkeypatch.setenv("FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH", "1")
+    monkeypatch.setenv("FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH", "1")
+    torch.manual_seed(0)
+    x = torch.randn(17, 64, device="cuda", dtype=torch.bfloat16)
+    x[0].zero_()
+    actual = quantize_nvfp4_per_token_input(x)
+    expected = nvfp4_quantize(
+        x,
+        1.0 / (6.0 * e4m3_max),
+        sfLayout=SfLayout.layout_linear,
+        per_token_activation=True,
+    )
+    for output, reference in zip(actual, expected):
+        torch.testing.assert_close(output, reference, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )

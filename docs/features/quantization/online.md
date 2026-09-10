@@ -53,14 +53,16 @@ vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
 | `mxfp8` | fp8_e4m3 data, e8m0 per-1x32-block scale | fp8_e4m3 data, e8m0 per-1x32-block scale | Requires SM 100+ (Blackwell or newer) for w8a8, other GPUs use a w8a16 fallback |
 | `mxfp4` | fp4_e2m1 data, e8m0 per-1x32-block scale ([OCP MX specs](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)) | - linear: fp4_e2m1 data, e8m0 per-1x32-block scale in some backends, or BF16. <br> - MOE: fp4_e2m1 data, e8m0 per-1x32-block scale. | Linear MXFP4 backend is auto-selected per platform, not enforcing activation dtype. Some use BF16 activation. Use `--linear-backend` to pin one (e.g. `--linear-backend flashinfer`). |
 
-## NVFP4 weight quantization
+## NVFP4 quantization
 
-Online `nvfp4_per_token` uses FlashInfer's CUDA quantizer for MoE weights.
+Online `nvfp4_per_token` uses FlashInfer quantization for MoE weights and
+per-token activations.
 It honors FlashInfer's quantization settings, including adaptive four-over-six
 block scaling:
 
 ```bash
 FLASHINFER_NVFP4_4OVER6=1 \
+FLASHINFER_NVFP4_4OVER6_E4M3_USE_256=1 \
 FLASHINFER_NVFP4_4OVER6_ERR_MODE=MSE \
 FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH=1 \
 FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH=1 \
@@ -68,12 +70,12 @@ vllm serve <model> --quantization nvfp4_per_token
 ```
 
 `FLASHINFER_NVFP4_4OVER6_E4M3_USE_256=1` selects 256 instead of 448 as the
-4/6 weight global-scale normalization bound. The online weight quantizer
-derives its per-expert scales from this setting. With 4/6 disabled, weights
-use standard NVFP4 scaling with the 448 bound.
+4/6 global-scale normalization bound. Weight quantization and both activation
+quantizations use the selected bound with the FlashInfer TRTLLM and CuTe MoE
+backends. With 4/6 disabled, they use standard NVFP4 scaling with the 448 bound.
 
-These are FlashInfer process settings; they also affect FlashInfer activation
-quantizers. Configure them consistently on all inference processes. Ray workers
+These are FlashInfer process settings. Configure them consistently on all
+inference processes before model loading and CUDA graph capture. Ray workers
 receive `FLASHINFER_` variables from the driver through vLLM's environment
 forwarding mechanism.
 
