@@ -7,8 +7,12 @@ Four GPUs on one node split the hash heads four ways, whether as DEP
 the right rows if the ids of every replica are gathered, each rank looks up
 its own heads, and each replica trades those tokens back for the heads its
 peers own.
+
+With shared host storage, DP replicas instead map the same TP slice and
+prefetch only their own tokens without DP gathers.
 """
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +20,12 @@ import torch
 import torch.multiprocessing as mp
 from torch import nn
 
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import (
+    EngramConfig,
+    VllmConfig,
+    get_current_vllm_config_or_none,
+    set_current_vllm_config,
+)
 from vllm.config.parallel import ParallelConfig
 from vllm.distributed import cleanup_dist_env_and_memory, parallel_state
 from vllm.distributed.parallel_state import (
@@ -86,6 +95,7 @@ def _worker(
     n_heads: int,
     sequence_parallel: bool,
     port: int,
+    shared_memory: bool = False,
 ) -> None:
     monkeypatch = pytest.MonkeyPatch()
     with monkeypatch.context() as m:
@@ -107,7 +117,10 @@ def _worker(
                 tensor_parallel_size=tp_size,
                 data_parallel_size=dp_size,
                 data_parallel_rank=dp_rank,
-            )
+            ),
+        )
+        vllm_config.engram_config = EngramConfig(
+            enable_engram_shared_memory=shared_memory
         )
         init_distributed_environment()
         with set_current_vllm_config(vllm_config):
@@ -126,51 +139,130 @@ def _worker(
             weight, scale_inv = _full_table(rows)
             with torch.device("cuda"):
                 layer = ParallelEngramEmbedding(
-                    rows, DIM, head_sizes, block_size=BLOCK, cpu_offload=cpu_offload
+                    rows,
+                    DIM,
+                    head_sizes,
+                    block_size=BLOCK,
+                    cpu_offload=cpu_offload,
+                    shared_memory=shared_memory,
                 )
-            layer.weight.weight_loader(layer.weight, weight)
-            layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, scale_inv)
+            # Only the leader has valid checkpoint payload in shared mode.
+            loader_weight = weight if not shared_memory or dp_rank == 0 else None
+            loader_scale = scale_inv if not shared_memory or dp_rank == 0 else None
+            layer.weight.weight_loader(layer.weight, loader_weight)
+            layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, loader_scale)
+            if shared_memory:
+                assert layer.dp_size == 1
+                assert layer.head_start == tp_rank * layer.part_n_hash_cols
+                assert layer.weight.is_pinned() and layer.weight_scale_inv.is_pinned()
+
+                def unexpected_collective(*args, **kwargs):
+                    raise AssertionError("shared lookup must not use DP collectives")
+
+                m.setattr(get_engram_dp_group(), "all_gather", unexpected_collective)
 
             engram = Engram.__new__(Engram)
             nn.Module.__init__(engram)
             engram.embed_tokens = layer
+            engram._prefetch_streams = (torch.cuda.Stream(),) if cpu_offload else ()
             engram.use_sequence_parallel = sequence_parallel
             token_counts = _token_counts(dp_size)
             engram.staged_rows = torch.empty(
-                max(max(counts) for counts in token_counts) * dp_size,
+                max(max(counts) for counts in token_counts) * layer.dp_size,
                 layer.part_n_hash_cols,
                 DIM,
                 dtype=torch.bfloat16,
                 device="cuda",
             )
 
-            for batch_idx, counts in enumerate(token_counts):
-                num_tokens = counts[dp_rank]
-                # Ids differ per replica but must agree across its TP ranks.
-                ids = _make_ids(head_sizes, num_tokens, seed=100 + dp_rank)
-                if batch_idx == 2 and dp_rank == 1:
-                    ids.fill_(engram_ops.DEAD_ID)
-                with set_forward_context(
-                    None,
-                    vllm_config,
-                    num_tokens=num_tokens,
-                    num_tokens_across_dp=torch.tensor(counts, dtype=torch.int32),
-                ):
-                    gathered = gather_engram_hashes(ids)
-                    assert gathered.shape[0] == max(counts) * dp_size
-                    engram.prepare_embeddings(gathered)
-                    looked_up = engram.embed(ids)
-                    standalone = layer(ids)
-                expected = _reference(weight.cuda(), scale_inv.cuda(), ids)
-                torch.testing.assert_close(standalone, expected, atol=0, rtol=0)
-                if sequence_parallel:
-                    # SP hands back only this rank's token shard, zero-padded.
-                    chunk = -(-num_tokens // tp_size)
-                    expected = torch.nn.functional.pad(
-                        expected, (0, 0, 0, 0, 0, chunk * tp_size - num_tokens)
-                    )
-                    expected = expected[tp_rank * chunk : (tp_rank + 1) * chunk]
-                torch.testing.assert_close(looked_up, expected, atol=0, rtol=0)
+        # Production forward runs after the construction-time config has exited.
+        assert get_current_vllm_config_or_none() is None
+        for batch_idx, counts in enumerate(token_counts):
+            num_tokens = counts[dp_rank]
+            # Ids differ per replica but must agree across its TP ranks.
+            ids = _make_ids(head_sizes, num_tokens, seed=100 + dp_rank)
+            if batch_idx == 2 and dp_rank == 1:
+                ids.fill_(engram_ops.DEAD_ID)
+            with set_forward_context(
+                None,
+                vllm_config,
+                num_tokens=num_tokens,
+                num_tokens_across_dp=torch.tensor(counts, dtype=torch.int32),
+            ):
+                gathered = gather_engram_hashes(ids, shared_memory=layer.shared_memory)
+                expected_tokens = num_tokens if shared_memory else max(counts) * dp_size
+                assert gathered.shape[0] == expected_tokens
+                engram.prepare_embeddings(gathered)
+                looked_up = engram.embed(ids)
+                standalone = layer(ids)
+            expected = _reference(weight.cuda(), scale_inv.cuda(), ids)
+            torch.testing.assert_close(standalone, expected, atol=0, rtol=0)
+            if sequence_parallel:
+                # SP hands back only this rank's token shard, zero-padded.
+                chunk = -(-num_tokens // tp_size)
+                expected = torch.nn.functional.pad(
+                    expected, (0, 0, 0, 0, 0, chunk * tp_size - num_tokens)
+                )
+                expected = expected[tp_rank * chunk : (tp_rank + 1) * chunk]
+            torch.testing.assert_close(looked_up, expected, atol=0, rtol=0)
+
+        if shared_memory:
+            _check_shared_prefetch_replay(engram, head_sizes, weight, scale_inv, m)
+
+
+def _check_shared_prefetch_replay(engram, head_sizes, weight, scale_inv, patch):
+    from vllm import envs
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphCapture,
+        eager_break_during_capture,
+    )
+
+    patch.setattr(envs, "VLLM_USE_BREAKABLE_CUDAGRAPH", True)
+    for name in ("_start_prefetch", "_finish_prefetch"):
+        fn = eager_break_during_capture(inspect.unwrap(getattr(Engram, name)))
+        setattr(engram, name, fn.__get__(engram, Engram))
+    engram._prefetch_streams = (torch.cuda.Stream(), torch.cuda.Stream())
+    engram._extra_staged_rows = [torch.empty_like(engram.staged_rows)]
+    ids = [_make_ids(head_sizes, 8, seed=seed) for seed in (501, 502)]
+    tp_rank = engram_ops.get_tensor_model_parallel_rank()
+    tp_size = engram.embed_tokens.tp_size
+    tokens = 8 // tp_size if engram.use_sequence_parallel else 8
+    outputs = [
+        torch.empty(tokens, len(head_sizes), DIM, device="cuda", dtype=torch.bfloat16)
+        for _ in ids
+    ]
+
+    def step(cap=None):
+        for ubatch in (0, 1):
+            patch.setattr(engram_ops, "dbo_current_ubatch_id", lambda i=ubatch: i)
+            engram.prepare_embeddings(ids[ubatch].clone())
+        if cap is not None:
+            cap.add_eager(lambda: None)
+        for ubatch in (1, 0):
+            patch.setattr(engram_ops, "dbo_current_ubatch_id", lambda i=ubatch: i)
+            outputs[ubatch].copy_(engram.embed(ids[ubatch]))
+
+    warmup = torch.cuda.Stream()
+    warmup.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(warmup):
+        step()
+    torch.cuda.current_stream().wait_stream(warmup)
+    graph = BreakableCUDAGraphCapture()
+    with torch.cuda.stream(warmup), graph:
+        step(graph)
+    torch.cuda.current_stream().wait_stream(warmup)
+    for iteration in range(3):
+        for ubatch in (0, 1):
+            ids[ubatch].copy_(
+                _make_ids(head_sizes, 8, seed=600 + 2 * iteration + ubatch)
+            )
+        graph.replay()
+        for actual, indices in zip(outputs, ids):
+            expected = _reference(weight.cuda(), scale_inv.cuda(), indices)
+            if engram.use_sequence_parallel:
+                expected = expected[tp_rank * tokens : (tp_rank + 1) * tokens]
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    torch.accelerator.synchronize()
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -206,6 +298,68 @@ def test_engram_table_shared_across_dp_replicas(
         nprocs=WORLD_SIZE,
     )
     cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("n_heads", [8, 7])
+@pytest.mark.parametrize(
+    "tp_size,dp_size,sequence_parallel",
+    [(1, 4, False), (2, 2, False), (2, 2, True)],
+)
+def test_engram_shared_host_memory_prefetch(
+    tp_size: int, dp_size: int, sequence_parallel: bool, n_heads: int
+) -> None:
+    """All DP readers prefetch leader-loaded pages without exchanging tokens/rows."""
+    if torch.accelerator.device_count() < WORLD_SIZE:
+        pytest.skip(f"Need {WORLD_SIZE} GPUs to run the test.")
+    mp.spawn(
+        _worker,
+        args=(
+            tp_size,
+            dp_size,
+            True,
+            n_heads,
+            sequence_parallel,
+            get_open_port(),
+            True,
+        ),
+        nprocs=WORLD_SIZE,
+    )
+    cleanup_dist_env_and_memory()
+
+
+def test_engram_shared_memory_requires_cpu_offload():
+    with pytest.raises(ValueError, match="requires cpu_offload"):
+        EngramConfig(cpu_offload=False, enable_engram_shared_memory=True)
+
+
+def test_engram_shared_memory_requires_dp_peers(monkeypatch):
+    monkeypatch.setattr(engram_ops, "get_engram_dp_size", lambda: 1)
+    monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_world_size", lambda: 4)
+    with pytest.raises(AssertionError, match="requires co-located DP replicas"):
+        ParallelEngramEmbedding(
+            sum(HEAD_SIZES), DIM, HEAD_SIZES, cpu_offload=True, shared_memory=True
+        )
+
+
+@pytest.mark.parametrize("load_format,multithread", [("dummy", False), ("auto", True)])
+def test_engram_shared_memory_rejects_uncoordinated_loaders(
+    monkeypatch, load_format, multithread
+):
+    """Reject loaders that bypass the single writer or reorder collective loads."""
+    monkeypatch.setattr(engram_ops, "get_engram_dp_size", lambda: 4)
+    monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_world_size", lambda: 1)
+    config = SimpleNamespace(
+        load_config=SimpleNamespace(
+            load_format=load_format,
+            model_loader_extra_config={"enable_multithread_load": multithread},
+        )
+    )
+    monkeypatch.setattr(engram_ops, "get_current_vllm_config", lambda: config)
+    with pytest.raises(AssertionError, match="Shared Engram"):
+        ParallelEngramEmbedding(
+            sum(HEAD_SIZES), DIM, HEAD_SIZES, cpu_offload=True, shared_memory=True
+        )
 
 
 @pytest.mark.parametrize(
