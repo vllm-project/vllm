@@ -283,24 +283,11 @@ class MoERunner(MoERunnerInterface):
         self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
             can_overlap = lambda: self._quant_method.mk_can_overlap_shared_experts
-            # When unquantized, shared expert inputs alias the hidden states,
-            # which can lead to race condition in multi-stream mode. Quantized
-            # routed experts copy the input into a fresh buffer first, breaking
-            # the alias, so overlap is safe. Only observed on ROCm.
-            routed_input_is_quantized = lambda: (
-                self.routed_experts.quant_method.moe_quant_config is not None
-                and self.routed_experts.quant_method.moe_quant_config.quant_dtype
-                is not None
-            )
-            is_multistream_safe = lambda: (
-                not current_platform.is_rocm() or routed_input_is_quantized()
-            )
             self._shared_experts = SharedExperts(
                 shared_experts,
                 moe_config=moe_config,
                 enable_dbo=enable_dbo,
                 mk_can_overlap_shared_experts=can_overlap,
-                is_multistream_safe=is_multistream_safe,
             )
 
         # Needed for string -> MoERunner layer lookup in custom ops.

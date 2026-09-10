@@ -249,6 +249,45 @@ def use_aiter_triton_gemm(n, m, k, dtype):
     )
 
 
+def wvsplitkrc_dispatch(n: int, k: int, m: int, cu_count: int) -> tuple[int, bool]:
+    """Pick the K-shard split for wvSplitKrc and say whether the shape fits.
+
+    Mirrors wvSplitKrc() in csrc/rocm/skinny_gemms.cu, which is also where the
+    shard cap is explained. Both must pick the same chunkk or the workspace
+    check here bounds the wrong k_rnd.
+
+    Returns:
+        The CHUNKK the kernel will dispatch with, and whether the CU budget and
+        split-K workspace admit the shape at all.
+    """
+    # Next ^2 of n
+    N_p2 = 1 << (n - 1).bit_length()
+    # How many of 4 waves in a group can work on same 16 Ms at same time?
+    # This reduces the Ms each group works on, i.e. increasing the CUs needed.
+    GrpsShrB = min(N_p2 // 16, 4)
+    # With 64 Ms per CU (each of 4 SIMDs working on a 16x16 tile), and each
+    # working on a 512-shard of K, how many CUs would we need?
+    CuNeeded = ((m + 64 - 1) // 64) * ((k + 512 - 1) // 512) * GrpsShrB
+
+    CHUNKK2_MAX_SHARDS = 11
+    shards_chunkk2 = (k + 256 - 1) // 256  # 256-wide shards
+    chunkk = (
+        2
+        if (
+            N_p2 != 16
+            and CuNeeded * 2 <= cu_count
+            and shards_chunkk2 <= CHUNKK2_MAX_SHARDS
+        )
+        else 1
+    )
+
+    # Deterministic reduction stores one fp32 partial per (M, N, k-shard); all
+    # of them must fit the split-K workspace.
+    k_rnd = (k + 512 // chunkk - 1) // (512 // chunkk)
+    fits = N_p2 * m * k_rnd <= 128 * 1024 * 12 and CuNeeded <= cu_count
+    return chunkk, fits
+
+
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
@@ -260,21 +299,7 @@ def rocm_unquantized_gemm_impl(
 
     cu_count = num_compute_units()
 
-    # Next ^2 of n
-    N_p2 = 1 << (n - 1).bit_length()
-    # With 64 Ms per CU (each of 4 SIMDs working on a 16x16 tile),
-    # and each working on a 512-shard of K, how many CUs would we need?
-    rndup_cus = ((m + 64 - 1) // 64) * ((k + 512 - 1) // 512)
-    # How many of 4 waves in a group can work on same 16 Ms at same time?
-    # This reduces the Ms each group works on, i.e. increasing the number of CUs needed.
-    GrpsShrB = min(N_p2 // 16, 4)
-    # Given the above, how many CUs would we need?
-    CuNeeded = rndup_cus * GrpsShrB
-    # Deterministic reduction stores one float workspace value per K shard.
-    fits_wvsplitkrc = (
-        N_p2 * m * ((k + 512 - 1) // 512)
-    ) <= 128 * 1024 * 12  # deterministic
-    fits_wvsplitkrc &= CuNeeded <= cu_count
+    _, fits_wvsplitkrc = wvsplitkrc_dispatch(n, k, m, cu_count)
 
     skinny_operands_compatible = weight.is_contiguous() and (
         bias is None or bias.is_contiguous()
@@ -362,12 +387,18 @@ direct_register_custom_op(
 
 @functools.cache
 def warmup_rocm_skinny_gemm_workspaces(device: torch.device) -> None:
-    """Eagerly allocate wvSplitKrc's process-lifetime static workspaces.
+    """Eagerly allocate wvSplitKrc's per-device split-K workspace pool.
 
-    They are otherwise created lazily on the first qualifying GEMM
+    wvSplitKrc partitions one per-device allocation into ``kWvSlots`` slots
+    (csrc/rocm/skinny_gemms.cu) and hands each stream one on first use, so that
+    two streams never share the split-K partials and counters.
+
+    The pool is otherwise created lazily on the first qualifying GEMM
     (csrc/rocm/skinny_gemms.cu), which can be the first real request — after
-    the KV cache backing buffer exists. If one landed in that segment's
-    rounding tail, it would pin the entire segment at engine shutdown.
+    the KV cache backing buffer exists. If it landed in that segment's rounding
+    tail, it would pin the entire segment at engine shutdown; it could also land
+    inside a cudagraph capture, where it would be taken from the graph's private
+    pool and its zero-fill would become a replayed graph node.
     """
     from vllm.platforms.rocm import on_gfx950
 

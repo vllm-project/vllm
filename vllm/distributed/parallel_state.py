@@ -2357,6 +2357,12 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     from vllm.platforms import current_platform
 
     if not current_platform.is_cpu():
+        from vllm.triton_utils import HAS_TRITON
+
+        if HAS_TRITON:
+            from vllm.v1.sample.ops.topk_topp_triton import reset_buffer_cache
+
+            reset_buffer_cache()
         torch.accelerator.empty_cache()
         try:
             torch.accelerator.empty_host_cache()
