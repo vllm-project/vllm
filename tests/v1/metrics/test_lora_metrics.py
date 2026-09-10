@@ -4,10 +4,10 @@
 the test does not fight the process-global one."""
 
 import pytest
-from prometheus_client import CollectorRegistry, Gauge
+from prometheus_client import CollectorRegistry, Gauge, Histogram
 
 from vllm.v1.metrics.loggers import PrometheusStatLogger
-from vllm.v1.notifications import CustomNotification, LoRALoadEvent
+from vllm.v1.notifications import CustomNotification, LoRALoadEvent, LoRALoadTiming
 
 LABELNAMES = ["model_name", "engine"]
 
@@ -36,7 +36,39 @@ def _lora_logger(registry: CollectorRegistry, engine_indexes=(0,)):
         registry=registry,
     )
     logger._lora_loaded_series = {}
+    load_seconds = Histogram(
+        "vllm:lora_adapter_load_seconds",
+        "",
+        LABELNAMES + ["transition"],
+        buckets=[0.1, 1.0],
+        registry=registry,
+    )
+    logger.histogram_lora_load_seconds = {
+        idx: load_seconds.labels(*labels, "load")
+        for idx, labels in logger.per_engine_labelvalues.items()
+    }
+    logger.histogram_lora_activate_seconds = {
+        idx: load_seconds.labels(*labels, "activate")
+        for idx, labels in logger.per_engine_labelvalues.items()
+    }
     return logger
+
+
+def _load_seconds(
+    registry: CollectorRegistry,
+) -> dict[tuple[str, str], tuple[float, float]]:
+    """(engine, transition) -> (count, sum) for the load histogram."""
+    out: dict[tuple[str, str], list[float]] = {}
+    for metric in registry.collect():
+        if metric.name != "vllm:lora_adapter_load_seconds":
+            continue
+        for s in metric.samples:
+            key = (s.labels["engine"], s.labels["transition"])
+            if s.name.endswith("_count"):
+                out.setdefault(key, [0.0, 0.0])[0] = s.value
+            elif s.name.endswith("_sum"):
+                out.setdefault(key, [0.0, 0.0])[1] = s.value
+    return {k: (v[0], v[1]) for k, v in out.items()}
 
 
 def _loaded_series(registry: CollectorRegistry) -> dict[tuple[str, str, str], float]:
@@ -181,3 +213,32 @@ def test_pinned_label_tracks_the_event(pinned):
     )
 
     assert _loaded_series(registry) == {("alpha", "gpu", str(pinned).lower()): 1.0}
+
+
+def test_load_timings_land_in_the_histogram_per_engine_and_transition():
+    registry = CollectorRegistry()
+    logger = _lora_logger(registry, engine_indexes=(0, 1))
+    logger.record_engine_notifications(
+        [
+            LoRALoadEvent(
+                gpu_adapters=["alpha"],
+                cpu_adapters=["alpha"],
+                loads=[
+                    LoRALoadTiming("alpha", "load", 0.4),
+                    LoRALoadTiming("alpha", "activate", 0.05),
+                ],
+            )
+        ],
+        engine_idx=0,
+    )
+    logger.record_engine_notifications(
+        [LoRALoadEvent(loads=[LoRALoadTiming("beta", "load", 1.5)])], engine_idx=1
+    )
+
+    observed = _load_seconds(registry)
+    assert observed[("0", "load")] == (1.0, pytest.approx(0.4))
+    assert observed[("0", "activate")] == (1.0, pytest.approx(0.05))
+    assert observed[("1", "load")] == (1.0, pytest.approx(1.5))
+    assert observed[("1", "activate")] == (0.0, 0.0)
+    # A timing-only event leaves the residency series alone.
+    assert _loaded_series(registry) == {("alpha", "gpu", "false"): 1.0}

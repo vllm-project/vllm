@@ -29,6 +29,7 @@ from vllm.v1.notifications import (
     CustomNotification,
     EngineNotification,
     LoRALoadEvent,
+    LoRALoadTiming,
     has_pending_worker_notifications,
     publish_worker_notification,
     take_worker_notifications,
@@ -468,6 +469,7 @@ def test_lora_load_event_round_trips_through_msgpack():
         gpu_adapters=["alpha"],
         cpu_adapters=["alpha", "beta"],
         pinned_adapters=["alpha"],
+        loads=[LoRALoadTiming("beta", "load", 0.25)],
     )
     encoded = msgspec.msgpack.encode(
         EngineCoreOutputs(engine_index=1, engine_notifications=[event])
@@ -480,6 +482,7 @@ def test_lora_load_event_round_trips_through_msgpack():
             "gpu_adapters": ["alpha"],
             "cpu_adapters": ["alpha", "beta"],
             "pinned_adapters": ["alpha"],
+            "loads": [{"adapter_name": "beta", "transition": "load", "seconds": 0.25}],
         }
     ]
     decoded = msgspec.msgpack.decode(encoded, type=EngineCoreOutputs)
