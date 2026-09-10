@@ -803,6 +803,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 final_output,
                 tokenizer,
                 parser=context.response_parser,
+                prompt_token_ids=final_res.prompt_token_ids,
             )
 
             if request.enable_response_messages:
@@ -974,6 +975,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         final_output: CompletionOutput,
         tokenizer: TokenizerLike,
         parser: Parser | None = None,
+        prompt_token_ids: Sequence[int] | None = None,
     ) -> list[ResponseOutputItem]:
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
@@ -998,11 +1000,12 @@ class OpenAIServingResponses(GenerateBaseServing):
 
         # Use parser to extract reasoning, content, and tool calls
         if parser:
-            reasoning, content, tool_calls = parser.parse(
+            reasoning, content, tool_calls = parser.parse_with_prompt(
                 final_output.text,
                 request,
                 enable_auto_tools=self.enable_auto_tools,
                 model_output_token_ids=final_output.token_ids,
+                prompt_token_ids=prompt_token_ids,
             )
             if not request.include_reasoning:
                 reasoning = None

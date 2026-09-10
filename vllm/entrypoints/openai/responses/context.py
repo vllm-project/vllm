@@ -345,11 +345,12 @@ class ParsableContext(ConversationContext):
         self.finish_reason = completion.finish_reason
 
         if self.response_parser is not None:
-            reasoning, content, tool_calls = self.response_parser.parse(
+            reasoning, content, tool_calls = self.response_parser.parse_with_prompt(
                 completion.text,
                 self.request,
                 enable_auto_tools=self.enable_auto_tools,
                 model_output_token_ids=completion.token_ids,
+                prompt_token_ids=output.prompt_token_ids,
             )
             if not self.request.include_reasoning:
                 reasoning = None

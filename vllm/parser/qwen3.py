@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -248,6 +249,23 @@ class Qwen3Parser(ParserEngine):
         vocab = self.vocab
         self._tool_call_token_id: int | None = vocab.get(self.TOOL_START)
         self._tool_call_end_token_id: int | None = vocab.get(self.TOOL_END)
+
+    def _initial_state_from_prompt(
+        self, prompt_token_ids: Sequence[int]
+    ) -> ParserState | None:
+        if not self.thinking_enabled:
+            return ParserState.CONTENT
+
+        start_id = self._reasoning_start_token_id
+        end_id = self._reasoning_end_token_id
+        if end_id is None:
+            return None
+        for token_id in reversed(prompt_token_ids):
+            if token_id == end_id:
+                return ParserState.CONTENT
+            if token_id == start_id or token_id in self._turn_boundary_token_ids:
+                return None
+        return None
 
     def extract_reasoning(
         self,
