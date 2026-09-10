@@ -414,6 +414,21 @@ fn serve_args_resolve_auto_reasoning_parser_for_managed_engine() {
 }
 
 #[test]
+fn serve_args_resolve_unified_reasoning_parser_for_managed_engine() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "moonshotai/Kimi-K3"]).unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    expect![[r#"
+        [
+            "--reasoning-parser",
+            "kimi_k3",
+        ]
+    "#]]
+    .assert_debug_eq(&args.to_managed_engine_config(5555).python_args);
+}
+
+#[test]
 fn serve_args_forward_explicit_reasoning_parser_to_managed_engine() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
