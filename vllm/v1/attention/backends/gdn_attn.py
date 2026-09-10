@@ -214,6 +214,16 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
     ) -> GDNAttentionMetadata:
+        """Build the GDN attention metadata for one batch.
+
+        Splits the batch into spec-decode and non-spec rows and builds the
+        kernel-facing mask, index, and cumulative-query-length tensors for
+        each path; prefill batches additionally get pre-computed FLA chunk
+        metadata. A pure-spec batch whose final speculative group is
+        truncated at the max-model-len boundary is reclassified as a
+        stateful non-spec prefill, since the fused GDN kernels require
+        complete groups.
+        """
         m = common_attn_metadata
 
         query_start_loc = m.query_start_loc
