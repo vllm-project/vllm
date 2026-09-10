@@ -1031,11 +1031,12 @@ class DeepseekV4Indexer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         qr: torch.Tensor,
-        compressed_kv_score: torch.Tensor,
+        compressed_kv_score: torch.Tensor | None,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
         rotary_emb: nn.Module,
         qr_scale: torch.Tensor | None = None,
+        skip_compressor: bool = False,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         compressor = self.compressor
 
@@ -1048,40 +1049,8 @@ class DeepseekV4Indexer(nn.Module):
             ):
                 # candidates num smaller than topk, every candidate is selected
                 # but we still need to build k cache
-                compressor(compressed_kv_score, positions, rotary_emb)
-                return self.forward_q(
-                    qr, indexer_weights, positions, rotary_emb, qr_scale
-                )
-
-        # compressor returns None and writes K to the indexer KV cache; the
-        # join orders that write before indexer_op (skip_k_cache_insert=True).
-        query_result, _ = maybe_execute_in_parallel(
-            lambda: self.forward_q(
-                qr, indexer_weights, positions, rotary_emb, qr_scale
-            ),
-            lambda: compressor(compressed_kv_score, positions, rotary_emb),
-            self.ln_events[0],
-            self.ln_events[1],
-            self.aux_stream,
-        )
-        return query_result
-
-    def forward_q(
-        self,
-        qr: torch.Tensor,
-        indexer_weights: torch.Tensor,
-        positions: torch.Tensor,
-        rotary_emb: nn.Module,
-        qr_scale: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-        """Build indexer queries after the ROCm stream join."""
-        attn_metadata = get_forward_context().attn_metadata
-        if isinstance(attn_metadata, dict):
-            indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
-            if (
-                indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens
-                and not torch.cuda.is_current_stream_capturing()
-            ):
+                if not skip_compressor:
+                    compressor(compressed_kv_score, positions, rotary_emb)
                 assert self.topk_indices_buffer is not None
                 num_tokens = (
                     indexer_metadata.num_decode_tokens
@@ -1098,17 +1067,31 @@ class DeepseekV4Indexer(nn.Module):
                     )
                 return None, None, None
 
-        q = self._wq_b_proj(qr, qr_scale)
-        q = q.view(-1, self.n_head, self.head_dim)
-        q_quant, weights = fused_indexer_q_rope_quant(
-            positions,
-            q,
-            rotary_emb.cos_sin_cache,
-            indexer_weights,
-            self.softmax_scale,
-            self.n_head**-0.5,
-            use_fp4=self.use_fp4_kv,
-        )
+        def wq_b_and_q_quant():
+            q = self._wq_b_proj(qr, qr_scale)
+            q = q.view(-1, self.n_head, self.head_dim)
+            return fused_indexer_q_rope_quant(
+                positions,
+                q,
+                rotary_emb.cos_sin_cache,
+                indexer_weights,
+                self.softmax_scale,
+                self.n_head**-0.5,
+                use_fp4=self.use_fp4_kv,
+            )
+
+        if not skip_compressor:
+            # compressor returns None and writes K to the indexer KV cache; the
+            # join orders that write before indexer_op (skip_k_cache_insert=True).
+            (q_quant, weights), _ = maybe_execute_in_parallel(
+                wq_b_and_q_quant,
+                lambda: compressor(compressed_kv_score, positions, rotary_emb),
+                self.ln_events[0],
+                self.ln_events[1],
+                self.aux_stream,
+            )
+        else:
+            q_quant, weights = wq_b_and_q_quant()
         if isinstance(q_quant, tuple):
             q, q_scale = q_quant
         else:

@@ -698,12 +698,16 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         )
 
         indexer_weights_out, _ = indexer.weights_proj(hidden_states)
-        index_q, index_q_scale, weights = indexer.forward_q(
+        # The indexer compressor already ran on aux stream 1; build queries only.
+        index_q, index_q_scale, weights = indexer(
+            hidden_states,
             qr_out,
+            None,
             indexer_weights_out,
             positions,
             self.indexer_rotary_emb,
             qr_scale_out,
+            skip_compressor=True,
         )
         self._sparse_indexer_and_attn(
             hidden_states,
