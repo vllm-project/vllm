@@ -51,18 +51,16 @@ def fused_grouped_topk(
             1,  # scoring_func=1 for sigmoid
         )
     elif scoring_func == "softmax":
-        # Apply softmax in Python, then use fused kernel
-        # TODO: Add support for softmax in kernel
-        scores = torch.softmax(gating_output, dim=-1)
+        # Fully fused kernel path for softmax
         topk_values, topk_indices = ops.grouped_topk(
-            scores,  # pre-computed scores
+            gating_output,  # raw logits
             num_expert_group,
             topk_group,
             topk,
             renormalize,
             routed_scaling_factor,
             e_score_correction_bias,
-            0,  # scoring_func=0 (no activation, scores already computed)
+            2,  # scoring_func=2 for softmax
         )
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
