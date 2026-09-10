@@ -183,7 +183,8 @@ def _lora_expand(
         assert weight.dtype in [torch.float16, torch.bfloat16]
 
     assert inputs.size(0) == len(lora_b_weights)
-    assert output_tensor.is_contiguous()
+    # The expand kernel indexes output via output_tensor.stride(0/1), so it
+    # does not require a C-contiguous layout.
 
     # metadata sanity check.
     M = inputs.size(1)

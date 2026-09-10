@@ -179,8 +179,11 @@ def _lora_shrink(
         assert weight.dtype in [torch.float16, torch.bfloat16]
 
     assert inputs.size(1) == lora_a_weights[0].size(-1)
-    assert inputs.is_contiguous()
-    assert output_tensor.is_contiguous()
+    # The shrink kernel indexes inputs via inputs.stride(0)/stride(1) and the
+    # output via output_tensor.stride(0/1/2), so it does not require a
+    # C-contiguous layout.
+    assert inputs.ndim == 2
+    assert output_tensor.ndim == 3
 
     # metadata sanity check
     M = inputs.size(0)

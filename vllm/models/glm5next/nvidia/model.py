@@ -992,6 +992,24 @@ class Glm5NextForConditionalGeneration(
     has_inner_state: ClassVar[Literal[True]] = True
     is_hybrid: ClassVar[Literal[True]] = True
 
+    # Fused projections for LoRA: map runtime packed linear (attribute name)
+    # to its adapter-visible submodules so LoRA target modules resolve
+    # correctly. Keys are Python attribute names, not checkpoint prefixes.
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvbfg_a": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "b_proj",
+            "f_a_proj",
+            "g_a_proj",
+        ],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        "wk_weights_proj": ["wk", "weights_proj"],
+        "qkv": ["qkv"],
+    }
+
     # NOTE: weight-prefix mapping is inherited from Glm4vForConditionalGeneration
     # (``model.visual.`` -> ``visual.``, ``model.language_model.`` ->
     # ``language_model.model.``, ``lm_head.`` -> ``language_model.lm_head.``),
