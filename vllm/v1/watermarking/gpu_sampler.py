@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import cast
+from typing import Literal, cast
 
 import numpy as np
 import torch
@@ -28,8 +28,8 @@ class GPUWatermarkSampler(Sampler):
         self,
         watermarker: Watermarker,
         *args,
-        deduplicate_contexts: bool = True,
-        deduplicate_contexts_max_history: int | None = None,
+        deduplicate_contexts: Literal["none", "single_turn", "all"] = "single_turn",
+        deduplicate_contexts_max_history: int = 8192,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -85,7 +85,7 @@ class GPUWatermarkSampler(Sampler):
         processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
         contexts = self._get_contexts(expanded_idx_mapping)
         repeated_contexts = None
-        if self.deduplicate_contexts:
+        if self.deduplicate_contexts != "none":
             repeated_contexts = self._get_repeated_contexts(
                 expanded_idx_mapping, contexts
             )
@@ -166,6 +166,7 @@ class GPUWatermarkSampler(Sampler):
             self.req_states.total_len.gpu,
             contexts,
             self.deduplicate_contexts_max_history,
+            include_prompt=self.deduplicate_contexts == "all",
         )
 
     def _get_contexts(self, expanded_idx_mapping: torch.Tensor) -> torch.Tensor:
@@ -175,12 +176,17 @@ class GPUWatermarkSampler(Sampler):
         safe_req_indices = req_indices.clamp_min(0)
         total_lens = self.req_states.total_len.gpu[safe_req_indices].to(torch.int64)
         prompt_lens = self.req_states.prompt_len.gpu[safe_req_indices].to(torch.int64)
+        history_starts = (
+            torch.zeros_like(prompt_lens)
+            if self.deduplicate_contexts == "all"
+            else prompt_lens
+        )
         offsets = torch.arange(
             -context_width, 0, dtype=torch.int64, device=req_indices.device
         )
         positions = total_lens.unsqueeze(-1) + offsets
         valid_positions = valid_reqs.unsqueeze(-1) & (
-            positions >= prompt_lens.unsqueeze(-1)
+            positions >= history_starts.unsqueeze(-1)
         )
         positions = positions.clamp_min(0)
         contexts = self.req_states.all_token_ids.gpu[

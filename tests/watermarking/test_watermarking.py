@@ -42,13 +42,13 @@ def test_gumbel_config_warns_when_context_deduplication_is_disabled(monkeypatch)
     )
 
     WatermarkConfig(key=42)
-    WatermarkConfig(key=42, deduplicate_contexts=False)
+    WatermarkConfig(key=42, deduplicate_contexts="none")
 
     assert messages == [
         (
-            "Single-key Gumbel-max watermarking with deduplicate_contexts=False "
+            "Single-key Gumbel-max watermarking with deduplicate_contexts='none' "
             "may increase the frequency of degenerate generations, including "
-            "repetition loops; keep deduplicate_contexts=True to mitigate this."
+            "repetition loops; use 'single_turn' or 'all' to mitigate this."
         )
     ]
 
@@ -97,7 +97,7 @@ def test_gpu_sampler_respects_mixed_request_watermarking(monkeypatch):
 
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = StubWatermarker()
-    sampler.deduplicate_contexts = True
+    sampler.deduplicate_contexts = "single_turn"
     sampler.watermarking = SimpleNamespace(
         np=np.array([True, False]), gpu=torch.tensor([True, False])
     )
@@ -142,7 +142,7 @@ def test_gpu_sampler_skips_watermarking_for_repeated_contexts(monkeypatch):
 
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = StubWatermarker()
-    sampler.deduplicate_contexts = True
+    sampler.deduplicate_contexts = "single_turn"
     sampler.watermarking = SimpleNamespace(
         np=np.array([True, True]), gpu=torch.tensor([True, True])
     )
@@ -187,7 +187,7 @@ def test_gpu_sampler_can_disable_context_deduplication(monkeypatch):
 
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = StubWatermarker()
-    sampler.deduplicate_contexts = False
+    sampler.deduplicate_contexts = "none"
     sampler.watermarking = SimpleNamespace(
         np=np.array([True, True]), gpu=torch.tensor([True, True])
     )
@@ -241,6 +241,48 @@ def test_repeated_context_mask_ignores_prompt_tokens():
     assert torch.equal(repeated, torch.tensor([True, False, False]))
 
 
+def test_repeated_context_mask_can_include_prompt_tokens():
+    all_token_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 1, 2, 3, 4]])
+    req_indices = torch.tensor([0])
+    prompt_lens = torch.tensor([4])
+    total_lens = torch.tensor([10])
+    contexts = torch.tensor([[1, 2, 3, 4]])
+
+    single_turn = repeated_context_mask(
+        all_token_ids, req_indices, prompt_lens, total_lens, contexts
+    )
+    all_history = repeated_context_mask(
+        all_token_ids,
+        req_indices,
+        prompt_lens,
+        total_lens,
+        contexts,
+        include_prompt=True,
+    )
+
+    assert not single_turn.item()
+    assert all_history.item()
+
+
+def test_gpu_sampler_all_history_uses_prompt_context():
+    sampler = object.__new__(GPUWatermarkSampler)
+    sampler.watermarker = SimpleNamespace(context_width=4)
+    sampler.req_states = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=torch.tensor([[10, 11, 12, 13, 1, 2]])),
+        prompt_len=SimpleNamespace(gpu=torch.tensor([4])),
+        total_len=SimpleNamespace(gpu=torch.tensor([6])),
+    )
+    request_indices = torch.tensor([0])
+
+    sampler.deduplicate_contexts = "single_turn"
+    single_turn = sampler._get_contexts(request_indices)
+    sampler.deduplicate_contexts = "all"
+    all_history = sampler._get_contexts(request_indices)
+
+    assert torch.equal(single_turn, torch.tensor([[-1, -1, 1, 2]]))
+    assert torch.equal(all_history, torch.tensor([[12, 13, 1, 2]]))
+
+
 def test_repeated_context_mask_respects_max_history():
     all_token_ids = torch.tensor([[1, 2, 3, 4, 5, 6, 1, 2, 3, 4]])
     req_indices = torch.tensor([0])
@@ -267,7 +309,10 @@ def test_repeated_context_mask_respects_max_history():
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
 )
 @pytest.mark.parametrize("max_history", [5, 6])
-def test_repeated_context_mask_max_history_accelerator_parity(max_history: int):
+@pytest.mark.parametrize("include_prompt", [False, True])
+def test_repeated_context_mask_max_history_accelerator_parity(
+    max_history: int, include_prompt: bool
+):
     inputs = (
         torch.tensor([[1, 2, 3, 4, 5, 6, 1, 2, 3, 4]]),
         torch.tensor([0]),
@@ -276,9 +321,13 @@ def test_repeated_context_mask_max_history_accelerator_parity(max_history: int):
         torch.tensor([[1, 2, 3, 4]]),
     )
 
-    expected = repeated_context_mask(*inputs, max_history=max_history)
+    expected = repeated_context_mask(
+        *inputs, max_history=max_history, include_prompt=include_prompt
+    )
     actual = repeated_context_mask(
-        *(value.cuda() for value in inputs), max_history=max_history
+        *(value.cuda() for value in inputs),
+        max_history=max_history,
+        include_prompt=include_prompt,
     ).cpu()
 
     assert torch.equal(actual, expected)
