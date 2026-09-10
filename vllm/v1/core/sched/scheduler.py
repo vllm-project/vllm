@@ -683,8 +683,8 @@ class Scheduler(SchedulerInterface):
                     else:
                         preempted_req = self.running[-1]
 
-                    # A deferred free cannot satisfy this allocation retry.
-                    if self._should_defer_request_block_free(preempted_req):
+                    # A deferred free will not help with immediate allocation.
+                    if not self._request_blocks_can_be_freed(preempted_req):
                         break
 
                     if self.policy == SchedulingPolicy.PRIORITY:
@@ -2530,16 +2530,18 @@ class Scheduler(SchedulerInterface):
         logger.info("setting pause state to %s", pause_state.name)
         self._pause_state = pause_state
 
-    def _should_defer_request_block_free(self, request: Request) -> bool:
-        return (
-            self.defer_block_free and request.last_sched_seq > self.processed_step_seq
+    def _request_blocks_can_be_freed(self, request: Request) -> bool:
+        # We must defer freeing blocks if an async kv connector may
+        # write to them immediately (not ordered with GPU stream).
+        return not self.defer_block_free or (
+            request.last_sched_seq > self.processed_step_seq
         )
 
     def _free_request_blocks(self, request: Request):
         """Free the request's KV blocks, deferring the return to the block
         pool when an in-flight GPU step may still write them.
         """
-        if not self._should_defer_request_block_free(request):
+        if self._request_blocks_can_be_freed(request):
             self.kv_cache_manager.free(request)
             return
         blocks = self.kv_cache_manager.pop_blocks_for_free(request)
