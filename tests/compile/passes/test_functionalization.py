@@ -2,16 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import operator
 
 import pytest
 import torch
+from torch._higher_order_ops.auto_functionalize import auto_functionalized
+from torch._inductor.fx_passes.control_dependencies import (
+    control_deps,
+    preserve_node_ordering,
+)
+from torch.utils._ordered_set import OrderedSet
 
 from tests.compile.backend import TestBackend
 from tests.utils import TestFP8Layer
-from vllm.compilation.passes.fusion.act_quant_fusion import (
-    ActivationQuantFusionPass,
-)
-from vllm.compilation.passes.fusion.rms_quant_fusion import RMSNormQuantFusionPass
 from vllm.compilation.passes.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.passes.utility.fix_functionalization import (
     FixFunctionalizationPass,
@@ -251,6 +254,57 @@ class TestFunctionWithMutatedArgsAndReturn(torch.nn.Module):
         return []
 
 
+@pytest.mark.parametrize("use_return_value", [False, True])
+def test_defunctionalize_preserves_control_dependencies(use_return_value):
+    if use_return_value:
+        TestFunctionWithMutatedArgsAndReturn.register_test_custom_op()
+        target = torch.ops.vllm.function_with_mutated_args_and_return.default
+    else:
+
+        def mutate_only(x: torch.Tensor) -> None:
+            x.add_(2)
+
+        direct_register_custom_op(
+            op_name="function_with_mutated_args_without_return",
+            op_func=mutate_only,
+            mutates_args=["x"],
+            fake_impl=lambda x: None,
+        )
+        target = torch.ops.vllm.function_with_mutated_args_without_return.default
+    graph = torch.fx.Graph()
+    arg = graph.placeholder("arg")
+    functionalized = graph.call_function(
+        auto_functionalized, args=(target,), kwargs={"x": arg}
+    )
+    mutated = graph.call_function(operator.getitem, args=(functionalized, 1))
+    returned = (
+        graph.call_function(operator.getitem, args=(functionalized, 0))
+        if use_return_value
+        else mutated
+    )
+    output = graph.call_function(torch.ops.aten.add.Tensor, args=(returned, mutated))
+    graph.output(output)
+    module = torch.fx.GraphModule(torch.nn.Module(), graph)
+    preserve_node_ordering(graph, {output: OrderedSet([functionalized])})
+    module.recompile()
+    x = torch.arange(4, dtype=torch.float32, device="cpu")
+    expected = module(x.clone())
+
+    func_pass = FixFunctionalizationPass(VllmConfig())
+    func_pass.nodes_to_remove = []
+    func_pass.defunctionalize(graph, functionalized, mutated_args={1: "x"})
+    for node in func_pass.nodes_to_remove:
+        graph.erase_node(node)
+    graph.lint()
+    module.recompile()
+
+    mutation = next(node for node in graph.nodes if is_func(node, target))
+    ordered = next(node for node in graph.nodes if is_func(node, control_deps))
+    assert ordered.args[0] == ((mutation, arg),)
+    assert find_auto_fn_maybe(graph.nodes, target) is None
+    torch.testing.assert_close(module(x.clone()), expected)
+
+
 MODELS_AND_DO_FUSION = {
     TestSiluMul: [True, False],
     TestFusedAddRMSNorm: [True, False],
@@ -276,6 +330,11 @@ MODELS_AND_DO_FUSION = {
 def test_fix_functionalization(
     model_class: torch.nn.Module, do_fusion: bool, dtype: torch.dtype
 ):
+    from vllm.compilation.passes.fusion.act_quant_fusion import (
+        ActivationQuantFusionPass,
+    )
+    from vllm.compilation.passes.fusion.rms_quant_fusion import RMSNormQuantFusionPass
+
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
