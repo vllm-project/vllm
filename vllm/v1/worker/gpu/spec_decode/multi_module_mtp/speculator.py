@@ -1123,29 +1123,7 @@ def _dispatch_prepare_input_buffers(
     num_speculative_steps: int,
     num_reqs: int,
 ) -> DispatchSpec:
-    return (num_reqs,), dict(
-        last_token_indices_ptr=last_token_indices,
-        draft_input_ids_ptr=draft_input_ids,
-        draft_positions_ptr=draft_positions,
-        draft_seq_lens_ptr=draft_seq_lens,
-        target_input_ids_ptr=target_input_ids,
-        target_positions_ptr=target_positions,
-        cached_draft_input_ids_ptr=cached_draft_input_ids,
-        cached_draft_input_ids_stride0=cached_draft_input_ids.stride(0),
-        draft_input_id_overrides_ptr=draft_input_id_overrides,
-        draft_input_id_overrides_stride0=draft_input_id_overrides.stride(0),
-        idx_mapping_ptr=idx_mapping,
-        last_sampled_ptr=last_sampled,
-        next_prefill_tokens_ptr=next_prefill_tokens,
-        next_prefill_tokens_stride0=next_prefill_tokens.stride(0),
-        num_sampled_ptr=num_sampled,
-        num_rejected_ptr=num_rejected,
-        target_seq_lens_ptr=target_seq_lens,
-        query_start_loc_ptr=query_start_loc,
-        max_num_reqs=max_num_reqs,
-        num_speculative_steps=num_speculative_steps,
-        BLOCK_SIZE=1024,
-    )
+    return (num_reqs,), dict(BLOCK_SIZE=1024)
 
 
 def _prepare_input_hidden_states_warmup_inputs(
@@ -1214,21 +1192,9 @@ def _dispatch_prepare_input_hidden_states(
         (num_reqs, triton.cdiv(max_query_len, 16), triton.cdiv(hidden_size, 256)),
         dict(
             draft_input_hidden_states_ptr=hidden_states,
-            draft_input_hidden_states_stride0=hidden_states.stride(0),
-            target_hidden_states_ptr=target_hidden_states,
-            target_hidden_states_stride0=target_hidden_states.stride(0),
             cached_target_hidden_states_ptr=cached_target_hidden_states,
-            cached_target_hidden_states_stride0=cached_target_hidden_states.stride(0),
-            cached_target_hidden_states_stride1=cached_target_hidden_states.stride(1),
             input_embeds_ptr=input_embeds_ptr,
-            input_embeds_stride0=input_embeds_ptr.stride(0),
             cached_draft_input_embeds_ptr=cached_embeds_ptr,
-            cached_draft_input_embeds_stride0=cached_embeds_ptr.stride(0),
-            cached_draft_input_embeds_stride1=cached_embeds_ptr.stride(1),
-            idx_mapping_ptr=idx_mapping,
-            num_rejected_ptr=num_rejected,
-            query_start_loc_ptr=query_start_loc,
-            num_speculative_steps=num_speculative_steps,
             hidden_size=hidden_size,
             BLOCK_SIZE_Q=16,
             BLOCK_SIZE_H=256,
@@ -1263,10 +1229,6 @@ def _dispatch_pad_trailing_draft_slots(
     num_reqs: int,
 ) -> DispatchSpec:
     return (num_groups, num_reqs), dict(
-        slot_mappings_ptr=slot_mappings,
-        slot_mappings_stride0=slot_mappings.stride(0),
-        query_start_loc_ptr=query_start_loc,
-        last_token_indices_ptr=last_token_indices,
         PAD_ID=PAD_SLOT_ID,
         BLOCK_SIZE=256,
     )
@@ -1332,23 +1294,8 @@ def _dispatch_cache_inputs(
         else cached_target_hidden_states
     )
     return (num_reqs, triton.cdiv(hidden_size, 1024)), dict(
-        draft_input_ids_ptr=draft_input_ids,
         draft_input_embeds_ptr=draft_embeds_ptr,
-        draft_input_embeds_stride0=draft_embeds_ptr.stride(0),
-        draft_input_hidden_states_ptr=draft_input_hidden_states,
-        draft_input_hidden_states_stride0=draft_input_hidden_states.stride(0),
-        cached_draft_input_ids_ptr=cached_draft_input_ids,
-        cached_draft_input_ids_stride0=cached_draft_input_ids.stride(0),
         cached_draft_input_embeds_ptr=cached_embeds_ptr,
-        cached_draft_input_embeds_stride0=cached_embeds_ptr.stride(0),
-        cached_draft_input_embeds_stride1=cached_embeds_ptr.stride(1),
-        cached_target_hidden_states_ptr=cached_target_hidden_states,
-        cached_target_hidden_states_stride0=cached_target_hidden_states.stride(0),
-        cached_target_hidden_states_stride1=cached_target_hidden_states.stride(1),
-        idx_mapping_ptr=idx_mapping,
-        last_token_indices_ptr=last_token_indices,
-        query_start_loc_ptr=query_start_loc,
-        num_speculative_steps=num_speculative_steps,
         hidden_size=hidden_size,
         BLOCK_SIZE=1024,
         USE_INPUT_EMBEDS=use_input_embeds,
@@ -1378,14 +1325,7 @@ def _dispatch_shift_input_ids(
     draft_tokens: torch.Tensor,
     num_reqs: int,
 ) -> DispatchSpec:
-    return (num_reqs,), dict(
-        input_ids_ptr=input_ids,
-        idx_mapping_ptr=idx_mapping,
-        query_start_loc_ptr=query_start_loc,
-        last_token_indices_ptr=last_token_indices,
-        draft_tokens_ptr=draft_tokens,
-        BLOCK_SIZE=1024,
-    )
+    return (num_reqs,), dict(BLOCK_SIZE=1024)
 
 
 def _shift_input_embeds_warmup_inputs(
@@ -1420,13 +1360,6 @@ def _dispatch_shift_input_embeds(
 ) -> DispatchSpec:
     hidden_size = input_embeds.shape[-1]
     return (num_reqs, triton.cdiv(hidden_size, 256)), dict(
-        input_embeds_ptr=input_embeds,
-        input_embeds_stride0=input_embeds.stride(0),
-        draft_embeds_ptr=draft_embeds,
-        draft_embeds_stride0=draft_embeds.stride(0),
-        idx_mapping_ptr=idx_mapping,
-        query_start_loc_ptr=query_start_loc,
-        last_token_indices_ptr=last_token_indices,
         hidden_size=hidden_size,
         BLOCK_SIZE_Q=16,
         BLOCK_SIZE_H=256,

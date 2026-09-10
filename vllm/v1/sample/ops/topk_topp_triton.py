@@ -1388,7 +1388,6 @@ def _dispatch_topk_topp(
     )
     return (num_programs,), dict(
         LOGITS=logits,
-        LOGITS_STRIDE_0=logits.stride(0),
         BUFFER=buffer,
         PERCENTILE_TO_STD_TABLE=percentile_to_std_table,
         NORMAL_CDF_TO_SIGMA_TABLE=normal_cdf_to_sigma_table,
@@ -1442,7 +1441,6 @@ def _dispatch_topp_split_stats(
     splits = _topp_split_count(batch_size, num_sm)
     return (logits.shape[0] * splits,), dict(
         LOGITS=logits,
-        LOGITS_STRIDE_0=logits.stride(0),
         STATS=stats,
         K=k if k is not None else logits,
         P=p,
@@ -1495,7 +1493,6 @@ def _dispatch_topp_split_step(
     splits = _topp_split_count(batch_size, num_sm)
     return (logits.shape[0] * splits,), dict(
         LOGITS=logits,
-        LOGITS_STRIDE_0=logits.stride(0),
         STATS=stats,
         PARTS=parts,
         K=k if k is not None else logits,
@@ -1551,7 +1548,6 @@ def _dispatch_topp_split_mask(
     splits = _topp_split_count(batch_size, num_sm)
     return (logits.shape[0] * splits,), dict(
         LOGITS=logits,
-        LOGITS_STRIDE_0=logits.stride(0),
         STATS=stats,
         PARTS=parts,
         K=k if k is not None else logits,

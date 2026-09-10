@@ -166,7 +166,6 @@ class DFlash2Speculator(DFlashSpeculator):
             BLOCK_K=block_k,
             SAMPLE_PROBABILISTIC=self.draft_logits is not None,
             USE_FP64=self.use_fp64_gumbel,
-            num_warps=1,
         )
 
     def _cache_draft_logits(self, candidate_ids: torch.Tensor, num_sample: int) -> None:
@@ -179,13 +178,10 @@ class DFlash2Speculator(DFlashSpeculator):
             candidate_ids,
             self._selector_scores,
             self.sample_idx_mapping,
-            draft_logits.stride(0),
-            draft_logits.stride(1),
             num_sample=num_sample,
             num_steps=self.num_speculative_steps,
             top_k=self.selector_top_k,
             BLOCK_K=block_k,
-            num_warps=1,
         )
 
     def _generate_draft(
@@ -266,14 +262,7 @@ def _SELECTOR_WALK_KERNEL(
     SAMPLE_PROBABILISTIC: bool,
     USE_FP64: bool,
 ) -> DispatchSpec:
-    return (num_reqs,), dict(
-        num_steps=num_steps,
-        top_k=top_k,
-        BLOCK_K=BLOCK_K,
-        SAMPLE_PROBABILISTIC=SAMPLE_PROBABILISTIC,
-        USE_FP64=USE_FP64,
-        num_warps=1,
-    )
+    return (num_reqs,), dict(num_warps=1)
 
 
 def _cache_draft_logits_warmup_inputs(*, speculator: DFlash2Speculator):
@@ -290,8 +279,6 @@ def _cache_draft_logits_warmup_inputs(*, speculator: DFlash2Speculator):
         candidate=TritonWarmupTensor(torch.int64),
         scores=TritonWarmupTensor(torch.float32),
         req_state=TritonWarmupTensor(torch.int32),
-        draft_logits_stride_0=draft_logits.stride(0),
-        draft_logits_stride_1=draft_logits.stride(1),
         num_sample=1,
         num_steps=speculator.num_speculative_steps,
         top_k=top_k,
@@ -309,17 +296,10 @@ def _CACHE_DRAFT_LOGITS_KERNEL(
     candidate: torch.Tensor,
     scores: torch.Tensor,
     req_state: torch.Tensor,
-    draft_logits_stride_0: int,
-    draft_logits_stride_1: int,
     *,
     num_sample: int,
     num_steps: int,
     top_k: int,
     BLOCK_K: int,
 ) -> DispatchSpec:
-    return (num_sample,), dict(
-        num_steps=num_steps,
-        top_k=top_k,
-        BLOCK_K=BLOCK_K,
-        num_warps=1,
-    )
+    return (num_sample,), dict(num_warps=1)

@@ -1036,22 +1036,7 @@ def _dispatch_prepare_prefill_inputs(
     num_reqs: int,
 ) -> DispatchSpec:
     return (num_reqs,), dict(
-        last_token_indices_ptr=last_token_indices,
         draft_current_step_ptr=current_draft_step,
-        draft_input_ids_ptr=draft_input_ids,
-        draft_positions_ptr=draft_positions,
-        draft_query_start_loc_ptr=draft_query_start_loc,
-        draft_seq_lens_ptr=draft_seq_lens,
-        target_input_ids_ptr=target_input_ids,
-        target_positions_ptr=target_positions,
-        idx_mapping_ptr=idx_mapping,
-        last_sampled_ptr=last_sampled,
-        next_prefill_tokens_ptr=next_prefill_tokens,
-        num_sampled_ptr=num_sampled,
-        num_rejected_ptr=num_rejected,
-        query_start_loc_ptr=query_start_loc,
-        seq_lens_ptr=seq_lens,
-        max_num_reqs=max_num_reqs,
         BLOCK_SIZE=1024,
     )
 
@@ -1096,17 +1081,6 @@ def _dispatch_prepare_decode_inputs(
     advance_draft_positions: bool,
 ) -> DispatchSpec:
     return (num_reqs + 1,), dict(
-        draft_tokens_ptr=draft_tokens,
-        draft_tokens_stride=draft_tokens.stride(0),
-        target_seq_lens_ptr=target_seq_lens,
-        num_rejected_ptr=num_rejected,
-        input_ids_ptr=input_ids,
-        positions_ptr=positions,
-        sample_src_positions_ptr=sample_src_positions,
-        query_start_loc_ptr=query_start_loc,
-        seq_lens_ptr=seq_lens,
-        max_model_len=max_model_len,
-        max_num_reqs=max_num_reqs,
         BLOCK_SIZE=1024,
         ADVANCE_DRAFT_POSITIONS=advance_draft_positions,
     )
@@ -1161,21 +1135,7 @@ def _dispatch_update_draft_inputs(
 ) -> DispatchSpec:
     hidden_size = hidden_states.shape[-1]
     return (num_reqs,), dict(
-        output_draft_tokens_ptr=output_draft_tokens,
-        output_draft_tokens_stride=output_draft_tokens.stride(0),
-        next_input_hidden_states_ptr=next_input_hidden_states,
-        next_input_hidden_states_stride=next_input_hidden_states.stride(0),
-        input_ids_ptr=input_ids,
-        positions_ptr=positions,
-        sample_src_positions_ptr=sample_src_positions,
-        seq_lens_ptr=seq_lens,
-        draft_tokens_ptr=draft_tokens,
-        current_draft_step_ptr=current_draft_step,
-        hidden_states_ptr=hidden_states,
-        hidden_states_stride=hidden_states.stride(0),
         hidden_size=hidden_size,
-        max_model_len=max_model_len,
-        num_speculative_steps=num_speculative_steps,
         BLOCK_SIZE=1024,
         ADVANCE_DRAFT_POSITIONS=advance_draft_positions,
     )

@@ -106,10 +106,7 @@ def _dispatch_flatten_sampled(
     num_sampled: torch.Tensor,
     cu_num_logits: torch.Tensor,
 ) -> DispatchSpec:
-    return (num_sampled.shape[0],), dict(
-        sampled_stride=sampled.stride(0),
-        num_warps=1,
-    )
+    return (num_sampled.shape[0],), dict(num_warps=1)
 
 
 class RejectionSampler:

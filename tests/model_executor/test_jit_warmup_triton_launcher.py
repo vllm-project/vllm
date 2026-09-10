@@ -40,7 +40,7 @@ def _pointer_group_test_kernel(x_ptr, value, BLOCK: tl.constexpr):
 
 
 class _FakeTritonKernel:
-    arg_names = ("first", "second", "CONST")
+    arg_names: tuple[str, ...] = ("first", "second", "CONST")
 
     def __init__(self) -> None:
         self.warmup_calls: list[dict[str, Any]] = []
@@ -130,17 +130,25 @@ def test_triton_kernel_decorator_returns_launcher(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kernel = _FakeTritonKernel()
+    kernel.arg_names = (
+        "first_ptr",
+        "first_stride0",
+        "aliased_ptr",
+        "aliased_stride_0",
+        "second",
+        "CONST",
+    )
 
     def warmup_inputs() -> dict[str, Any]:
         return dict(
-            first="warmup",
+            first=TritonWarmupTensor(torch.float32, shape=(2, 3), strides=(5, 1)),
             second=WarmupChoices(1, 2),
             config=7,
         )
 
     @triton_kernel(kernel=kernel, warmup_inputs=warmup_inputs)
     def launch(first: str, second: int, config: int) -> LaunchSpec:
-        return (2,), dict(CONST=config)
+        return (2,), dict(aliased_ptr=first, CONST=config)
 
     def fake_keys(kernel: Any, kwargs: Any) -> set[TritonJitKey]:
         return {TritonJitKey(id(kernel), "fake", 0, kwargs["second"])}
@@ -148,14 +156,42 @@ def test_triton_kernel_decorator_returns_launcher(
     monkeypatch.setattr(jit_warmup_triton_helper, "_triton_compile_keys", fake_keys)
 
     keys = launch._owner.get_warmup_keys()
-    assert [key.inputs.as_dict()["second"] for key in keys] == [1, 2]
+    assert [dict(key.inputs)["second"] for key in keys] == [1, 2]
     launch._owner.compile(keys[0])
     assert kernel.warmup_calls == [
-        {"grid": (1,), "first": "warmup", "second": 1, "CONST": 7}
+        {
+            "grid": (1,),
+            "first_ptr": TritonWarmupTensor(
+                torch.float32, shape=(2, 3), strides=(5, 1)
+            ),
+            "first_stride0": 5,
+            "aliased_ptr": TritonWarmupTensor(
+                torch.float32, shape=(2, 3), strides=(5, 1)
+            ),
+            "aliased_stride_0": 5,
+            "second": 1,
+            "CONST": 7,
+        }
+    ]
+    first = torch.empty_strided((2, 3), (5, 1))
+    launch(first, 2, 7)
+    assert kernel.runtime_calls == [
+        (
+            (2,),
+            (),
+            {
+                "first_ptr": first,
+                "first_stride0": 5,
+                "aliased_ptr": first,
+                "aliased_stride_0": 5,
+                "second": 2,
+                "CONST": 7,
+            },
+        )
     ]
     assert launch.__name__ == "launch"
     with pytest.raises(TypeError, match="unexpected keyword"):
-        launch("runtime", 1, 7, stale_constexpr=True)
+        launch(first, 1, 7, stale_constexpr=True)
 
 
 def test_triton_kernel_decorator_compacts_large_ranges(
@@ -181,7 +217,7 @@ def test_triton_kernel_decorator_compacts_large_ranges(
     keys = dispatch._owner.get_warmup_keys()
     assert len(dispatched) < 64
     assert len(keys) == 2
-    assert {7 if key.inputs.as_dict()["second"] <= 17 else 8 for key in keys} == {7, 8}
+    assert {7 if dict(key.inputs)["second"] <= 17 else 8 for key in keys} == {7, 8}
 
 
 def test_triton_kernel_dispatch_uses_cuda_fake_tensors(
@@ -210,7 +246,7 @@ def test_triton_kernel_dispatch_uses_cuda_fake_tensors(
 
     keys = dispatch._owner.get_warmup_keys()
     assert len(keys) == 1
-    assert keys[0].inputs.as_dict()["first"].device.type == "cuda"
+    assert dict(keys[0].inputs)["first"].device.type == "cuda"
 
 
 def test_triton_kernel_decorates_native_launchers(
