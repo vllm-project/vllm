@@ -17,7 +17,7 @@ import math
 import random
 import statistics
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 from tabulate import tabulate
@@ -115,6 +115,10 @@ def _make_operations(
     device: torch.device,
 ) -> dict[str, Operation]:
     num_slots = num_blocks * block_size
+    if case.rope_tokens < 1 or not 0 <= case.cache_tokens <= case.rope_tokens:
+        raise ValueError(
+            "Require num_tokens > 0 and 0 <= num_cache_tokens <= num_tokens"
+        )
     if case.cache_tokens > num_slots:
         raise ValueError(
             f"Case needs {case.cache_tokens} cache slots, but only "
@@ -128,14 +132,15 @@ def _make_operations(
         dtype=dtype,
         device=device,
     )
+    max_pos = max(MAX_POS, case.rope_tokens)
     angles = torch.randn(
-        MAX_POS,
+        max_pos,
         head_size // 2,
         dtype=torch.float32,
         device=device,
     )
     cos_sin_cache = torch.cat((angles.cos(), angles.sin()), dim=-1).to(dtype)
-    positions = torch.randperm(MAX_POS, device=device)[: case.rope_tokens]
+    positions = torch.randperm(max_pos, device=device)[: case.rope_tokens]
     slot_mapping = torch.randperm(num_slots, device=device)[: case.cache_tokens]
     scale = torch.ones(1, dtype=torch.float32, device=device)
 
@@ -215,16 +220,26 @@ def _make_operations(
             cos_sin_cache,
             is_neox,
         )
-        ops.reshape_and_cache_flash(
-            unfused_key,
-            unfused_value,
-            unfused_key_cache,
-            unfused_value_cache,
-            slot_mapping,
-            "auto",
-            scale,
-            scale,
-        )
+        if case.cache_tokens:
+            ops.reshape_and_cache_flash(
+                unfused_key,
+                unfused_value,
+                unfused_key_cache,
+                unfused_value_cache,
+                slot_mapping,
+                "auto",
+                scale,
+                scale,
+            )
+
+    # Validate each requested shape before timing, then restore the in-place arm.
+    q_out()
+    unfused()
+    torch.testing.assert_close(q_out_buffer, unfused_query, rtol=0, atol=0)
+    torch.testing.assert_close(q_out_key_cache, unfused_key_cache, rtol=0, atol=0)
+    torch.testing.assert_close(q_out_value_cache, unfused_value_cache, rtol=0, atol=0)
+    unfused_query.copy_(q_out_query)
+    unfused_key.copy_(q_out_key)
 
     return {
         "q_out": q_out,
@@ -250,12 +265,22 @@ def _measure_arms(
     samples: int,
     repeats: int,
     rng: random.Random,
+    cuda_graph: bool = False,
 ) -> tuple[list[str], dict[str, list[float]]]:
     for order in _balanced_orders(warmup, rng):
         for name in order:
             for _ in range(repeats):
                 operations[name]()
     torch.accelerator.synchronize()
+
+    graphs = {}
+    if cuda_graph:
+        for name, operation in operations.items():
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                for _ in range(repeats):
+                    operation()
+            graphs[name] = graph
 
     records = []
     sample_orders = _balanced_orders(samples, rng)
@@ -265,8 +290,11 @@ def _measure_arms(
             start = torch.Event(enable_timing=True)
             end = torch.Event(enable_timing=True)
             start.record()
-            for _ in range(repeats):
-                operations[name]()
+            if cuda_graph:
+                graphs[name].replay()
+            else:
+                for _ in range(repeats):
+                    operations[name]()
             end.record()
             record[name] = (start, end)
         records.append(record)
@@ -315,8 +343,20 @@ def main(args) -> None:
     rng = random.Random(args.seed)
     rows = []
     raw_results = []
+    cases = []
     for case_name in args.cases:
-        case = CASES[case_name]
+        preset = CASES[case_name]
+        for tokens in args.num_tokens or [preset.rope_tokens]:
+            cache_tokens = args.num_cache_tokens
+            if cache_tokens is None:
+                cache_tokens = tokens if args.num_tokens else preset.cache_tokens
+            cases.append(
+                (
+                    case_name,
+                    replace(preset, rope_tokens=tokens, cache_tokens=cache_tokens),
+                )
+            )
+    for case_name, case in cases:
         head_size = args.head_size or case.head_size
         for layout_name in args.layouts:
             layout = KVCacheLayout[layout_name]
@@ -337,6 +377,7 @@ def main(args) -> None:
                 args.samples,
                 args.repeats,
                 rng,
+                args.cuda_graph,
             )
             versus_unfused = [
                 unfused / q_out
@@ -360,6 +401,9 @@ def main(args) -> None:
                     "case": case_name,
                     "layout": layout.name,
                     "head_size": head_size,
+                    "num_tokens": case.rope_tokens,
+                    "num_cache_tokens": case.cache_tokens,
+                    "cuda_graph": args.cuda_graph,
                     "orders": orders,
                     "q_out_us": samples_us["q_out"],
                     "unfused_us": samples_us["unfused"],
@@ -370,6 +414,7 @@ def main(args) -> None:
         f"Device: {current_platform.get_device_name()}\n"
         f"dtype={args.dtype} head_size={args.head_size or 'per-case'} "
         f"rope={args.rope_style} "
+        f"cuda_graph={args.cuda_graph} "
         f"warmup={args.warmup} samples={args.samples} "
         f"repeats/sample={args.repeats}"
     )
@@ -413,6 +458,22 @@ if __name__ == "__main__":
         help="Override the per-case head size.",
     )
     parser.add_argument("--rope-style", choices=["neox", "interleaved"], default="neox")
+    parser.add_argument(
+        "--num-tokens",
+        type=int,
+        nargs="+",
+        help="Override per-case token counts; sweeps both RoPE and cache rows.",
+    )
+    parser.add_argument(
+        "--num-cache-tokens",
+        type=int,
+        help="Override cache rows separately to exercise padding in a token sweep.",
+    )
+    parser.add_argument(
+        "--cuda-graph",
+        action="store_true",
+        help="Time captured repeated calls without per-op host submission.",
+    )
     parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)
     parser.add_argument("--num-blocks", type=int, default=256)
     parser.add_argument("--warmup", type=int, default=40)

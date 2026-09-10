@@ -178,6 +178,8 @@ Other attention backends do not support fused output quantization yet.
     By default, the fusion is limited to `num_tokens ≤ 256`, targeting small decode
     batches where avoiding the extra launch and memory traffic is useful. This
     threshold is configurable via `PassConfig.rope_kvcache_fusion_max_token_num`.
+    CUDA inherits this conservative default; its useful range depends on the
+    workload and GPU and should be selected from CUDA measurements.
 
 **What it fuses.** Fuses the rotary positional embedding kernel with the KV-cache scatter/write into
 a single kernel, eliminating one launch and the intermediate write/read of rotated K.
@@ -204,6 +206,28 @@ ROCm model definitions continue to use the compiler pass and require the
 either through Inductor graph partition or by removing the cache update from
 `splitting_ops`. They additionally require AITER. Other CUDA model definitions
 retain the unfused path until they gain a manual call site.
+
+**CUDA performance tuning.** Sweep token counts as well as attention shapes;
+the kernel has no intrinsic boundary at 256 tokens. Cache working-set size and
+head configuration can change the benefit of fusion, so validate a chosen
+threshold with end-to-end prefill and decode measurements too. In particular,
+the compiled above-threshold path includes the Q/K copies described above.
+
+The matched operator benchmark supports token sweeps and verifies output/cache
+parity before timing each shape:
+
+```bash
+python benchmarks/kernels/benchmark_fused_rope_kvcache.py \
+  --cases mha gqa mqa tinyllama-gqa --layouts LBHNC LBNHC \
+  --num-tokens 1 8 128 256 257 512 1024 2048 --raw-json
+```
+
+Repeat with `--cuda-graph` to time captured batches of calls without per-op host
+submission. Both modes repeatedly access the same input and cache allocations;
+their ratios are operator measurements, not serving speedups. Use
+`--num-cache-tokens` with a larger `--num-tokens` value to measure padded rows
+separately. Without overrides, the benchmark keeps its original small-decode
+and padded presets.
 
 **Code locations.**
 

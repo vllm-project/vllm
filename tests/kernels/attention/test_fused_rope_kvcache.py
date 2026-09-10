@@ -103,6 +103,34 @@ CASES = [
         True,
         id="gqa-head256-multicycle-block-head-layer-layout",
     ),
+    pytest.param(
+        torch.float16,
+        40,
+        40,
+        128,
+        64,
+        32,
+        257,
+        129,
+        KVCacheLayout.BLNHC,
+        256,
+        False,
+        id="mha-vector-value-large-padded-query",
+    ),
+    pytest.param(
+        torch.bfloat16,
+        32,
+        8,
+        82,
+        64,
+        32,
+        17,
+        13,
+        KVCacheLayout.LBHNC,
+        0,
+        True,
+        id="gqa-unaligned-head-stride-scalar-value",
+    ),
 ]
 
 
@@ -148,6 +176,108 @@ def _make_cache_views(
 
 def _assert_cache_equal(actual: torch.Tensor, expected: torch.Tensor) -> None:
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "dtype,offset,head_padding,cache_head_padding",
+    [
+        (torch.float16, 0, 0, 0),
+        (torch.bfloat16, 0, 1, 0),
+        (torch.bfloat16, 0, 0, 1),
+        (torch.float16, 1, 0, 0),
+    ],
+)
+@torch.inference_mode()
+def test_fused_value_copy_preserves_strided_storage(
+    dtype: torch.dtype,
+    offset: int,
+    head_padding: int,
+    cache_head_padding: int,
+) -> None:
+    device = torch.device("cuda")
+    set_random_seed(SEED)
+    tokens, q_heads, kv_heads, head_size, block_size = 9, 16, 8, 128, 16
+
+    def strided(
+        shape: tuple[int, ...],
+        strides: tuple[int, ...],
+        storage_offset: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        size = storage_offset + sum((n - 1) * s for n, s in zip(shape, strides)) + 3
+        storage = torch.full((size,), -7, dtype=dtype, device=device)
+        return storage.as_strided(shape, strides, storage_offset), storage
+
+    query = torch.randn(tokens, q_heads, head_size, dtype=dtype, device=device)
+    key = torch.randn(tokens, kv_heads, head_size, dtype=dtype, device=device)
+    value_head_stride = head_size + head_padding
+    value, value_storage = strided(
+        (tokens, kv_heads, head_size),
+        (kv_heads * value_head_stride + 1, value_head_stride, 1),
+        offset,
+    )
+    value.copy_(torch.randn_like(value))
+    original_value_storage = value_storage.clone()
+    cache_shape = (2, block_size, kv_heads, head_size)
+    key_head_stride = head_size + 4
+    key_token_stride = kv_heads * key_head_stride + 1
+    key_cache, key_storage = strided(
+        cache_shape,
+        (block_size * key_token_stride + 3, key_token_stride, key_head_stride, 1),
+    )
+    value_cache_head_stride = head_size + 8 + cache_head_padding
+    value_token_stride = kv_heads * value_cache_head_stride + 3
+    value_cache, cache_storage = strided(
+        cache_shape,
+        (
+            block_size * value_token_stride + 5,
+            value_token_stride,
+            value_cache_head_stride,
+            1,
+        ),
+        offset,
+    )
+    expected_key_storage = key_storage.clone()
+    expected_value_storage = cache_storage.clone()
+    expected_key_cache = expected_key_storage.as_strided(
+        key_cache.shape,
+        key_cache.stride(),
+        key_cache.storage_offset(),
+    )
+    expected_value_cache = expected_value_storage.as_strided(
+        value_cache.shape,
+        value_cache.stride(),
+        value_cache.storage_offset(),
+    )
+    slots = [0, 8, 16, -1, 3, 18, 2, 4, 1]
+    slot_mapping = torch.tensor(slots, dtype=torch.long, device=device)
+    positions = torch.arange(tokens, device=device)
+    cos_sin_cache = torch.randn(tokens, 64, dtype=dtype, device=device)
+    query_ref, key_ref = query.clone(), key.clone()
+    ops.rotary_embedding(positions, query_ref, key_ref, head_size, cos_sin_cache, True)
+    # The incumbent cache op cannot consume arbitrary source/cache strides.
+    for token, slot in enumerate(slots):
+        if slot >= 0:
+            block, row = divmod(slot, block_size)
+            expected_key_cache[block, row].copy_(key_ref[token])
+            expected_value_cache[block, row].copy_(value[token])
+
+    query_out = torch.empty_like(query)
+    ops.fused_rope_and_reshape_cache_flash_q_out(
+        query,
+        key,
+        value,
+        query_out,
+        positions,
+        cos_sin_cache,
+        True,
+        key_cache,
+        value_cache,
+        slot_mapping,
+    )
+    torch.testing.assert_close(query_out, query_ref, rtol=0, atol=0)
+    _assert_cache_equal(key_storage, expected_key_storage)
+    _assert_cache_equal(cache_storage, expected_value_storage)
+    _assert_cache_equal(value_storage, original_value_storage)
 
 
 @pytest.mark.parametrize(
