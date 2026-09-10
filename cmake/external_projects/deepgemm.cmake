@@ -29,8 +29,8 @@ if(DEEPGEMM_SRC_DIR)
 else()
   # Keep in sync with tools/install_deepgemm.sh
   set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/deepseek-ai/DeepGEMM.git")
-  # Pinned to the tip of the nv_dev branch (SM120 support).
-  set(_DEEPGEMM_UPSTREAM_TAG "8b1392b978f5a03c828dd1711090d7fb50958b8a")
+  # DeepGEMM 2.8.0 (mega_mhc and DeepJIT runtime).
+  set(_DEEPGEMM_UPSTREAM_TAG "39d8c4cacc2c07c1fa9921c6c29c6a8a2da75359")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
@@ -51,16 +51,14 @@ else()
       BINARY_DIR "${_deepgemm_bin}"
       GIT_REPOSITORY "${_DEEPGEMM_UPSTREAM_REPO}"
       GIT_TAG "${_DEEPGEMM_UPSTREAM_TAG}"
-      GIT_SUBMODULES "third-party/cutlass" "third-party/fmt"
+      GIT_SUBMODULES "third-party/cutlass" "third-party/deep_jit"
       GIT_PROGRESS TRUE
     )
   endif()
   message(STATUS "DeepGEMM is available at ${deepgemm_SOURCE_DIR}")
 endif()
 
-# DeepGEMM requires CUDA 12.3+ for SM90, 12.9+ for SM100 (official upstream),
-# and 12.8+ for SM120 / SM12x. CUDA 13+ can use the family-specific SM12x
-# arch; CUDA 12.x builds the arch-specific SM120/SM121 variants.
+# DeepGEMM requires CUDA 12.3+ for SM90 and 12.8+ for SM100.
 set(DEEPGEMM_SUPPORT_ARCHS)
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3)
   list(APPEND DEEPGEMM_SUPPORT_ARCHS "9.0a")
@@ -74,11 +72,12 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
   else()
     list(APPEND DEEPGEMM_SUPPORT_ARCHS "10.0a")
   endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    list(APPEND DEEPGEMM_SUPPORT_ARCHS "12.0f")
-  else()
-    list(APPEND DEEPGEMM_SUPPORT_ARCHS "12.0a" "12.1a")
-  endif()
+  # SM120 support can be restored when this pin is rebased onto nv_dev.
+  # if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+  #   list(APPEND DEEPGEMM_SUPPORT_ARCHS "12.0f")
+  # else()
+  #   list(APPEND DEEPGEMM_SUPPORT_ARCHS "12.0a" "12.1a")
+  # endif()
 endif()
 
 cuda_archs_loose_intersection(DEEPGEMM_ARCHS
@@ -119,13 +118,15 @@ if(DEEPGEMM_ARCHS)
   message(STATUS "DeepGEMM _C will be built for: ${_dg_pythons}")
 
   # add_custom_command does no implicit header scanning; glob explicitly so
-  # header-only edits in DeepGEMM/cutlass/fmt re-trigger the rebuild.
+  # header-only edits in DeepGEMM/CUTLASS/DeepJIT re-trigger the rebuild.
   file(GLOB_RECURSE _dg_headers
     "${deepgemm_SOURCE_DIR}/csrc/*.h"
     "${deepgemm_SOURCE_DIR}/csrc/*.hpp"
     "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.h"
     "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.hpp"
-    "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.cuh")
+    "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.cuh"
+    "${deepgemm_SOURCE_DIR}/third-party/deep_jit/include/*.h"
+    "${deepgemm_SOURCE_DIR}/third-party/deep_jit/include/*.hpp")
 
   set(_dg_markers)
   set(_dg_seen_soabis)

@@ -76,6 +76,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.engram import Engram, EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
+from .ops.mega_mhc import mhc_shifted_post_pre
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -334,30 +335,48 @@ class DeepseekV4DecoderLayer(nn.Module):
                     norm_eps=self.attn_norm.variance_epsilon,
                 )
         else:
-            residual = mhc_post_tilelang(x, residual, post_mix, res_mix)
             if self.engram is not None and engram_hashes is not None:
                 # Engram injection happens between the previous sublayer's
                 # post and this block's pre, on the full hc stream, so the
                 # mix coefficients see the injected stream.
+                residual = mhc_post_tilelang(x, residual, post_mix, res_mix)
                 residual = self.engram(
                     residual,
                     engram_hashes[:, self.engram.layer_hash_index],
                     engram_mask,
                 )
-            post_mix, res_mix, x, attn_pre = mhc_pre_delayed_tilelang(
-                residual,
-                self.hc_attn_fn,
-                self.hc_attn_scale,
-                self.hc_attn_base,
-                self.rms_norm_eps,
-                self.hc_eps,
-                self.hc_eps,
-                self.hc_post_alpha,
-                self.hc_sinkhorn_iters,
-                pre_mix=pre_mix,
-                norm_weight=self.attn_norm.weight,
-                norm_eps=self.attn_norm.variance_epsilon,
-            )
+                post_mix, res_mix, x, attn_pre = mhc_pre_delayed_tilelang(
+                    residual,
+                    self.hc_attn_fn,
+                    self.hc_attn_scale,
+                    self.hc_attn_base,
+                    self.rms_norm_eps,
+                    self.hc_eps,
+                    self.hc_eps,
+                    self.hc_post_alpha,
+                    self.hc_sinkhorn_iters,
+                    pre_mix=pre_mix,
+                    norm_weight=self.attn_norm.weight,
+                    norm_eps=self.attn_norm.variance_epsilon,
+                )
+            else:
+                assert pre_mix is not None
+                residual, post_mix, res_mix, x, attn_pre = mhc_shifted_post_pre(
+                    x,
+                    residual,
+                    pre_mix,
+                    post_mix,
+                    res_mix,
+                    self.hc_attn_fn,
+                    self.hc_attn_scale,
+                    self.hc_attn_base,
+                    self.rms_norm_eps,
+                    self.hc_eps,
+                    self.hc_post_alpha,
+                    self.hc_sinkhorn_iters,
+                    self.attn_norm.weight,
+                    self.attn_norm.variance_epsilon,
+                )
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
@@ -366,20 +385,21 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        residual = mhc_post_tilelang(x, residual, post_mix, res_mix)
-        post_mix, res_mix, x, ffn_pre = mhc_pre_delayed_tilelang(
+        residual, post_mix, res_mix, x, ffn_pre = mhc_shifted_post_pre(
+            x,
             residual,
+            attn_pre,
+            post_mix,
+            res_mix,
             self.hc_ffn_fn,
             self.hc_ffn_scale,
             self.hc_ffn_base,
             self.rms_norm_eps,
             self.hc_eps,
-            self.hc_eps,
             self.hc_post_alpha,
             self.hc_sinkhorn_iters,
-            pre_mix=attn_pre,
-            norm_weight=self.ffn_norm.weight,
-            norm_eps=self.ffn_norm.variance_epsilon,
+            self.ffn_norm.weight,
+            self.ffn_norm.variance_epsilon,
         )
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix, ffn_pre
