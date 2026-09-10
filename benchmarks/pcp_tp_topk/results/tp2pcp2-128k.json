@@ -1,0 +1,334 @@
+{
+  "settings": {
+    "output": "results/pcp-tp-indexer/tp2pcp2-128k-three-arm.json",
+    "tp": 2,
+    "pcp": 2,
+    "input": 131072
+  },
+  "records": [
+    {
+      "mode": "baseline",
+      "warmup": true,
+      "elapsed_s": 5.8665603450499475,
+      "ttft_s": 4.451315879821777,
+      "tokens": [
+        576,
+        43504,
+        572,
+        61350,
+        518,
+        279,
+        18143,
+        44361
+      ],
+      "route": [
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        }
+      ]
+    },
+    {
+      "mode": "sharded",
+      "warmup": true,
+      "elapsed_s": 5.2699724598787725,
+      "ttft_s": 3.8157477378845215,
+      "tokens": [
+        576,
+        43504,
+        572,
+        61350,
+        518,
+        279,
+        18143,
+        44361
+      ],
+      "route": [
+        {
+          "mode": "sharded",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        }
+      ]
+    },
+    {
+      "mode": "direct",
+      "warmup": true,
+      "elapsed_s": 5.3059300552122295,
+      "ttft_s": 3.8659558296203613,
+      "tokens": [
+        576,
+        43504,
+        572,
+        61350,
+        518,
+        279,
+        18143,
+        44361
+      ],
+      "route": [
+        {
+          "mode": "direct",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 42
+        },
+        {
+          "mode": "direct",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 42
+        },
+        {
+          "mode": "direct",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 42
+        },
+        {
+          "mode": "direct",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 42
+        }
+      ]
+    },
+    {
+      "mode": "baseline",
+      "warmup": false,
+      "elapsed_s": 5.5462774420157075,
+      "ttft_s": 4.094188928604126,
+      "tokens": [
+        576,
+        43504,
+        572,
+        61350,
+        518,
+        279,
+        18143,
+        44361
+      ],
+      "route": [
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        }
+      ]
+    },
+    {
+      "mode": "sharded",
+      "warmup": false,
+      "elapsed_s": 5.282434572931379,
+      "ttft_s": 3.8149383068084717,
+      "tokens": [
+        576,
+        43504,
+        572,
+        61350,
+        518,
+        279,
+        18143,
+        44361
+      ],
+      "route": [
+        {
+          "mode": "sharded",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        }
+      ]
+    },
+    {
+      "mode": "direct",
+      "warmup": false,
+      "elapsed_s": 5.279599999077618,
+      "ttft_s": 3.81303071975708,
+      "tokens": [
+        576,
+        43504,
+        572,
+        61350,
+        518,
+        279,
+        18143,
+        44361
+      ],
+      "route": [
+        {
+          "mode": "direct",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 42
+        },
+        {
+          "mode": "direct",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 42
+        },
+        {
+          "mode": "direct",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 42
+        },
+        {
+          "mode": "direct",
+          "sharded": 2,
+          "prefill_rows": [
+            32768,
+            32768
+          ],
+          "direct_lookups": 42
+        }
+      ]
+    }
+  ]
+}

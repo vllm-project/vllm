@@ -1,0 +1,310 @@
+{
+  "settings": {
+    "output": "results/pcp-tp-indexer/tp2pcp2-three-arm.json",
+    "tp": 2,
+    "pcp": 2,
+    "input": 65536
+  },
+  "records": [
+    {
+      "mode": "baseline",
+      "warmup": true,
+      "elapsed_s": 3.437599591910839,
+      "ttft_s": 1.927731990814209,
+      "tokens": [
+        279,
+        18143,
+        44361,
+        13,
+        220,
+        42258,
+        3255,
+        25
+      ],
+      "route": [
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        }
+      ]
+    },
+    {
+      "mode": "sharded",
+      "warmup": true,
+      "elapsed_s": 3.2815375896170735,
+      "ttft_s": 1.8361601829528809,
+      "tokens": [
+        279,
+        18143,
+        44361,
+        13,
+        220,
+        42258,
+        3255,
+        25
+      ],
+      "route": [
+        {
+          "mode": "sharded",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        }
+      ]
+    },
+    {
+      "mode": "direct",
+      "warmup": true,
+      "elapsed_s": 3.3169754021801054,
+      "ttft_s": 1.8897452354431152,
+      "tokens": [
+        279,
+        18143,
+        44361,
+        13,
+        220,
+        42258,
+        3255,
+        25
+      ],
+      "route": [
+        {
+          "mode": "direct",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 21
+        },
+        {
+          "mode": "direct",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 21
+        },
+        {
+          "mode": "direct",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 21
+        },
+        {
+          "mode": "direct",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 21
+        }
+      ]
+    },
+    {
+      "mode": "baseline",
+      "warmup": false,
+      "elapsed_s": 3.370904123876244,
+      "ttft_s": 1.9008393287658691,
+      "tokens": [
+        279,
+        18143,
+        44361,
+        13,
+        220,
+        42258,
+        3255,
+        25
+      ],
+      "route": [
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        }
+      ]
+    },
+    {
+      "mode": "sharded",
+      "warmup": false,
+      "elapsed_s": 3.2794794999063015,
+      "ttft_s": 1.8354685306549072,
+      "tokens": [
+        279,
+        18143,
+        44361,
+        13,
+        220,
+        42258,
+        3255,
+        25
+      ],
+      "route": [
+        {
+          "mode": "sharded",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 0
+        }
+      ]
+    },
+    {
+      "mode": "direct",
+      "warmup": false,
+      "elapsed_s": 3.28133691707626,
+      "ttft_s": 1.8330607414245605,
+      "tokens": [
+        279,
+        18143,
+        44361,
+        13,
+        220,
+        42258,
+        3255,
+        25
+      ],
+      "route": [
+        {
+          "mode": "direct",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 21
+        },
+        {
+          "mode": "direct",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 21
+        },
+        {
+          "mode": "direct",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 21
+        },
+        {
+          "mode": "direct",
+          "sharded": 1,
+          "prefill_rows": [
+            32768
+          ],
+          "direct_lookups": 21
+        }
+      ]
+    }
+  ]
+}
