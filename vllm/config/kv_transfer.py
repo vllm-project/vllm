@@ -155,10 +155,19 @@ class KVTransferConfig:
         return self.kv_connector_extra_config.get(key, default)
 
     def has_connector(self, connector_name: str) -> bool:
-        """Whether ``connector_name`` is configured, directly or in MultiConnector."""
-        if self.kv_connector == connector_name:
-            return True
-        return self.kv_connector == "MultiConnector" and any(
-            child.get("kv_connector") == connector_name
-            for child in self.kv_connector_extra_config.get("connectors", [])
-        )
+        """Whether a connector is configured directly or in nested MultiConnectors."""
+
+        def contains(name: str | None, extra_config: dict[str, Any]) -> bool:
+            if name == connector_name:
+                return True
+            if name != "MultiConnector":
+                return False
+            return any(
+                contains(
+                    child.get("kv_connector"),
+                    child.get("kv_connector_extra_config", {}),
+                )
+                for child in extra_config.get("connectors", [])
+            )
+
+        return contains(self.kv_connector, self.kv_connector_extra_config)

@@ -49,6 +49,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
     get_kv_cache_configs,
+    get_kv_cache_model_config_hash,
     get_request_block_hasher,
     init_none_hash,
     resolve_kv_cache_block_sizes,
@@ -129,6 +130,17 @@ class EngineCore:
         self.log_stats = log_stats
         # Opaque weight version supplied by the caller.
         self._weight_version = "default"
+
+        # Freeze before model construction mutates HF settings (e.g. DeepSeek's
+        # internal RoPE type), and before KV profiling can reduce max_model_len.
+        # The same identity is sent to workers with their KV cache configuration.
+        kv_transfer_config = vllm_config.kv_transfer_config
+        self._kv_cache_model_config_hash = (
+            get_kv_cache_model_config_hash(vllm_config.model_config)
+            if kv_transfer_config is not None
+            and kv_transfer_config.has_connector("OffloadingConnector")
+            else None
+        )
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -321,6 +333,7 @@ class EngineCore:
         )
         for kv_cache_config in kv_cache_configs:
             kv_cache_config.kv_cache_layout = vllm_config.cache_config.kv_cache_layout
+            kv_cache_config.model_config_hash = self._kv_cache_model_config_hash
 
         # If auto-fit reduced max_model_len, sync the new value to workers.
         # This is needed because workers were spawned before memory profiling

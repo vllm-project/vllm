@@ -4,6 +4,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from vllm.v1.kv_offload.base import OffloadingSpec, make_offload_key
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -39,6 +41,7 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
         model=OffloadingModelConfig(
             name=kwargs.get("model_name", "test-model"),
             dtype=kwargs.get("dtype", "float16"),
+            config_hash=kwargs.get("model_config_hash", "test-model-config"),
         ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=kwargs.get("tokens_per_hash", 16),
@@ -92,9 +95,7 @@ def test_get_file_name_full_structure():
     key = make_offload_key(block_hash, group_idx)
     path = fm.get_file_name(key)
 
-    expected_path = (
-        "/tmp/cache/test-model_de3bba26cf36_r3/000/10_g2/0001020304050607.bin"
-    )
+    expected_path = f"{fm.base_path}_r3/000/10_g2/0001020304050607.bin"
     assert path == expected_path
 
 
@@ -128,7 +129,24 @@ def test_get_run_config_fields():
         ],
         "inference_engine": "vllm",
         "parallel_agnostic": False,
+        "model_config_hash": "test-model-config",
     }
+
+
+@pytest.mark.parametrize("model_config_hash", [None, ""])
+def test_persistent_namespace_requires_model_identity(model_config_hash):
+    with pytest.raises(ValueError, match="requires a model configuration hash"):
+        make_mapper_from_offloading_spec(model_config_hash=model_config_hash)
+
+
+def test_model_identity_isolates_the_same_token_block():
+    key = make_offload_key(bytes(range(8)), 0)
+    first = make_mapper_from_offloading_spec(model_config_hash="config-a")
+    restarted = make_mapper_from_offloading_spec(model_config_hash="config-a")
+    changed = make_mapper_from_offloading_spec(model_config_hash="config-b")
+
+    assert first.get_file_name(key) == restarted.get_file_name(key)
+    assert first.get_file_name(key) != changed.get_file_name(key)
 
 
 def test_get_config_file_path():
