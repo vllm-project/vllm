@@ -5,6 +5,7 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 - [Deployment with CPUs](#deployment-with-cpus)
 - [Deployment with GPUs](#deployment-with-gpus)
 - [Serving with gRPC](#serving-with-grpc)
+- [Drain Shutdown](#drain-shutdown)
 - [Troubleshooting](#troubleshooting)
     - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
 - [Conclusion](#conclusion)
@@ -430,6 +431,98 @@ You can also verify the health service manually with `grpcurl`:
 ```bash
 grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check
 ```
+
+## Drain Shutdown
+
+For production deployments, vLLM supports a draining shutdown mode to enable zero-downtime rolling updates. When enabled, the server drains in-flight requests before terminating instead of abruptly closing connections.
+
+**Note:** A second SIGTERM will skip the drain timeout, causing immediate exit.
+
+### How It Works
+
+When vLLM receives a `SIGTERM` signal (sent by Kubernetes during pod termination):
+
+1. The server stops accepting new requests (returns `503 Service Unavailable`)
+1. The engine drains in-flight requests until completion or timeout
+1. The `/health` and `/metrics` endpoints remain accessible during drain
+
+### Configuration
+
+Enable drain shutdown by setting `--shutdown-timeout` to a non-zero value:
+
+| Argument                       | Default | Description                                                            |
+|--------------------------------|---------|------------------------------------------------------------------------|
+| `--shutdown-timeout=0`         | Yes     | Immediate shutdown — in-flight requests are aborted on SIGTERM         |
+| `--shutdown-timeout=SECONDS`   |         | Drain shutdown — wait up to SECONDS for in-flight requests to complete |
+
+### Example Deployment
+
+The example below uses a `preStop` hook to delay SIGTERM, giving Kubernetes time to remove the pod from service endpoints before shutdown begins. The `--shutdown-timeout` then controls how long vLLM waits for in-flight requests to drain.
+
+The key relationship between the three timeout values:
+
+```text
+terminationGracePeriodSeconds >= preStop sleep + --shutdown-timeout
+```
+
+<details>
+<summary>Yaml</summary>
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-server
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+      - name: vllm
+        image: vllm/vllm-openai:latest
+        command: ["/bin/sh", "-c"]
+        args: [
+          "vllm serve mistralai/Mistral-7B-Instruct-v0.3 --shutdown-timeout 45"
+        ]
+        ports:
+        - containerPort: 8000
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sleep", "15"]
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 5
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+```
+
+</details>
+
+### Key Considerations
+
+- **`terminationGracePeriodSeconds`**: Must be at least `preStop` sleep + `--shutdown-timeout`. If Kubernetes hits this limit, the pod is force-killed regardless of drain state.
+
+- **Pre-stop hook**: The `preStop` sleep gives Kubernetes time to remove the pod from load balancer endpoints before SIGTERM is sent. Without it, new requests may arrive at a pod that is already draining. A value of 15 seconds is typically sufficient.
+
+- **Choosing a timeout**: For online serving, 45 seconds is enough to generate ~2000 tokens at 50 tokens/sec/user. Increase `--shutdown-timeout` (and `terminationGracePeriodSeconds` accordingly) for workloads with longer requests.
 
 ## Troubleshooting
 
