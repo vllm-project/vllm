@@ -1157,18 +1157,13 @@ class SpeculativeConfig:
             )
             self.method = "mtp"
 
-        if self.method in _MODEL_FREE_METHODS:
-            if self.model is not None:
-                raise ValueError(
-                    f"method='{self.method}' does not use `model`; omit it."
-                )
-        elif self.method == "custom_class":
+        if self.method == "custom_class":
             if self.model is None:
                 raise ValueError(
                     "method='custom_class' requires 'model' to contain the "
                     "custom proposer module path (e.g., 'my_module.MyProposer')."
                 )
-        elif self.model is None:
+        elif self.model is None and self.method not in _MODEL_FREE_METHODS:
             if self.method == "mtp":
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
@@ -1410,15 +1405,6 @@ class SpeculativeConfig:
                 )
                 default_source = None
                 if n_predict is not None:
-                    if (
-                        not isinstance(n_predict, int)
-                        or isinstance(n_predict, bool)
-                        or n_predict <= 0
-                    ):
-                        raise ValueError(
-                            "The draft checkpoint n_predict must be a positive "
-                            f"integer, got {n_predict!r}."
-                        )
                     if self.num_speculative_tokens is None:
                         self.num_speculative_tokens = n_predict
                         default_source = f"draft checkpoint n_predict={n_predict}"
@@ -1912,7 +1898,17 @@ class SpeculativeConfig:
         return min(num_mtp_layers, self.num_speculative_tokens) > 1
 
     def __repr__(self) -> str:
-        return (
-            f"SpeculativeConfig(method={self.method!r}, model={self.model!r}, "
-            f"num_speculative_tokens={self.num_speculative_tokens!r})"
+        method = self.method
+        model = (
+            None
+            if method
+            in (
+                "ngram",
+                "suffix",
+                "extract_hidden_states",
+                "custom_class",
+            )
+            else self.draft_model_config.model
         )
+        num_spec_tokens = self.num_speculative_tokens
+        return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"

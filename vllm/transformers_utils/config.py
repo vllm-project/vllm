@@ -840,11 +840,11 @@ def maybe_override_with_speculators(
     )
     speculators_method = speculative_config["method"]
 
-    # Apply user --speculative-config runtime overrides.
+    # Apply user --speculative-config overrides (e.g. attention_backend).
     if isinstance(vllm_speculative_config, dict):
         speculative_config.update(vllm_speculative_config)
 
-    # Lock fields dictated by the speculators format.
+    # Lock fields dictated by the speculators format
     speculative_config["method"] = speculators_method
     speculative_config["model"] = model
 

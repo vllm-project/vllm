@@ -2554,18 +2554,6 @@ def test_speculative_config_requires_method(model):
 
 
 @pytest.mark.parametrize(
-    "method", ["extract_hidden_states", "ngram", "ngram_gpu", "suffix"]
-)
-def test_model_free_methods_reject_model(method):
-    with pytest.raises(ValueError, match="does not use `model`; omit it"):
-        SpeculativeConfig(
-            method=method,
-            model="unused",
-            num_speculative_tokens=1,
-        )
-
-
-@pytest.mark.parametrize(
     "method",
     [
         "custom_class",
