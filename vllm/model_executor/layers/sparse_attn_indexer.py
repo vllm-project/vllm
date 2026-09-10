@@ -13,6 +13,12 @@ from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
+    apply_candidate_mask as _apply_candidate_mask,
+)
+from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
+    select_candidate_blocks as _select_candidate_blocks,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -43,86 +49,6 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
-
-
-def _select_candidate_blocks(
-    logits: torch.Tensor,
-    row_ks: torch.Tensor,
-    row_ke: torch.Tensor,
-    topk_blocks: int,
-    block_size: int,
-    out: torch.Tensor,
-) -> None:
-    """Level one of the v4.1 two-level top-k: per-row candidate blocks.
-
-    Port of the reference ``select_candidate_blocks``: a block scores as its
-    best position; the row's newest (partially filled) block is pinned;
-    blocks the row cannot reach (-inf after the causal bound) are dropped.
-
-    ``logits`` is [R, W] in *packed* column space: row r may attend packed
-    columns [row_ks[r], row_ke[r]), which map to request-local positions
-    col - row_ks[r]. ``out`` [R, topk_blocks] receives request-local block
-    ids, -1 padded.
-    """
-    R, W = logits.shape
-    if R == 0:
-        return
-    cols = torch.arange(W, device=logits.device)
-    ks = row_ks.unsqueeze(1)
-    valid = (cols >= ks) & (cols < row_ke.unsqueeze(1))
-    scores = logits.masked_fill(~valid, -torch.inf)
-    # [R, W] local block index per column; out-of-range columns clamp to
-    # block 0 but carry -inf scores, so they never win the amax.
-    local_block = ((cols.unsqueeze(0) - ks) // block_size).clamp(min=0)
-    nblocks = (W + block_size - 1) // block_size
-    block_scores = logits.new_full((R, nblocks), -torch.inf)
-    block_scores.scatter_reduce_(
-        1, local_block, scores, reduce="amax", include_self=True
-    )
-    # Pin the block holding the row's newest position: it is only partially
-    # filled but holds the most recent tokens. Empty rows (cudagraph padding
-    # with seq_len 0) have no newest block and stay all -inf, so they select
-    # -1 everywhere.
-    row_len = row_ke - row_ks
-    last = ((row_len - 1) // block_size).clamp(min=0)
-    pin = torch.where(row_len > 0, torch.inf, -torch.inf).to(block_scores.dtype)
-    block_scores.scatter_(1, last.unsqueeze(1), pin.unsqueeze(1))
-    top = block_scores.topk(min(topk_blocks, nblocks), dim=-1)
-    out.fill_(-1)
-    k = top.indices.shape[1]
-    out[:, :k] = torch.where(top.values > -torch.inf, top.indices, -1).to(out.dtype)
-
-
-def _apply_candidate_mask(
-    logits: torch.Tensor,
-    row_ks: torch.Tensor,
-    row_ke: torch.Tensor,
-    candidate_blocks: torch.Tensor,
-    block_size: int,
-) -> None:
-    """Level two: keep only positions inside the row's candidate blocks.
-
-    ``candidate_blocks`` holds request-local block ids (-1 padded); they are
-    shifted back into packed column space with ``row_ks``. Everything outside
-    the causal range or outside the candidates is set to -inf in place.
-    """
-    R, W = logits.shape
-    if R == 0:
-        return
-    cols = torch.arange(W, device=logits.device)
-    ks = row_ks.unsqueeze(1)
-    valid = (cols >= ks) & (cols < row_ke.unsqueeze(1))
-    # [R, K, bs] packed columns of every candidate position; padded entries
-    # clamp to column 0 with a zero src so amax is unaffected.
-    pos = candidate_blocks.to(torch.int64).unsqueeze(-1) * block_size
-    packed = ks.unsqueeze(-1) + pos + torch.arange(block_size, device=ks.device)
-    idx = packed.clamp_(0, W - 1).view(R, -1)
-    src = (candidate_blocks >= 0).unsqueeze(-1).expand(-1, -1, block_size)
-    keep = torch.zeros(R, W, dtype=torch.int8, device=logits.device)
-    keep.scatter_reduce_(
-        1, idx, src.reshape(R, -1).to(torch.int8), reduce="amax", include_self=True
-    )
-    logits.masked_fill_((keep == 0) | ~valid, -torch.inf)
 
 
 def _assert_cutedsl_dcp_merge_supported(
@@ -736,27 +662,27 @@ def sparse_attn_indexer(
             # for native spec decode (per-row effective lens) and (B, 1)
             # otherwise.
             vis = seq_lens.reshape(-1)
-            if vis.numel() != num_rows:
-                vis = vis.repeat_interleave(next_n)
-            vis = vis[:num_rows].to(torch.int64)
-            row_ks = torch.zeros_like(vis)
+            row_repeat = next_n if vis.numel() != num_rows else 1
+            vis = vis[:num_rows]
             decode_candidates = candidate_blocks[:num_rows]
             if candidate_write:
                 _select_candidate_blocks(
                     logits,
-                    row_ks,
+                    None,
                     vis,
                     decode_candidates.shape[1],
                     candidate_block_size,
                     decode_candidates,
+                    row_repeat,
                 )
             else:
                 _apply_candidate_mask(
                     logits,
-                    row_ks,
+                    None,
                     vis,
                     decode_candidates,
                     candidate_block_size,
+                    row_repeat,
                 )
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
