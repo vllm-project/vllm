@@ -6,6 +6,7 @@ from einops import rearrange
 from torch import nn
 
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.distributed import divide
@@ -32,6 +33,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+    causal_conv1d_fn,
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
@@ -102,6 +104,14 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.local_projection_size = divide(self.projection_size, self.tp_size)
         self.conv_size = kda_config["short_conv_kernel_size"]
         self.use_full_rank_gate = True
+
+        self._fused_qkv_conv_fn = None
+        if rocm_aiter_ops.is_enabled():
+            from aiter.ops.triton.gated_delta_net import (
+                causal_conv1d_split_qkv_triton_tile_fn,
+            )
+
+            self._fused_qkv_conv_fn = causal_conv1d_split_qkv_triton_tile_fn
 
         # Keep f_a before the narrow beta shard, then pad each TP-local row to
         # select the aligned BF16 GEMM path. The padding also avoids an Inductor
@@ -368,6 +378,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
+        q_conv_weight, k_conv_weight, v_conv_weight = conv_weights.split(
+            self.local_projection_size, dim=0
+        )
+        q_conv_state, k_conv_state, v_conv_state = conv_state.split(
+            self.local_projection_size, dim=-2
+        )
 
         # Split tokens into the multi-query spec-decode part and the remaining
         # (prefill / plain decode) part.
@@ -448,26 +464,48 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if mixed_qkv_ns is not None:
             assert g1_ns is not None and beta_ns is not None
             if m.num_prefills > 0:
-                from aiter.ops.triton.gated_delta_net import (
-                    causal_conv1d_split_qkv_triton_tile_fn,
-                )
+                if self._fused_qkv_conv_fn is not None:
+                    # One launch (fused qkv) instead of 3
+                    q_ns, k_ns, v_ns = self._fused_qkv_conv_fn(
+                        mixed_qkv_ns.transpose(0, 1),
+                        conv_weights,
+                        None,
+                        conv_state,
+                        non_spec_query_start_loc,
+                        self.local_projection_size,
+                        self.local_projection_size,
+                        cache_indices=non_spec_state_indices_tensor,
+                        has_initial_state=has_initial_state,
+                        activation="silu",
+                        block_m=8,
+                        metadata=m,
+                        preserve_input_dtype=True,
+                    )
+                else:
+                    q_ns, k_ns, v_ns = mixed_qkv_ns.split(
+                        self.local_projection_size, dim=-1
+                    )
 
-                # One launch (fused qkv) instead of 3
-                q_ns, k_ns, v_ns = causal_conv1d_split_qkv_triton_tile_fn(
-                    mixed_qkv_ns.transpose(0, 1),
-                    conv_weights,
-                    None,
-                    conv_state,
-                    non_spec_query_start_loc,
-                    self.local_projection_size,
-                    self.local_projection_size,
-                    cache_indices=non_spec_state_indices_tensor,
-                    has_initial_state=has_initial_state,
-                    activation="silu",
-                    block_m=8,
-                    metadata=m,
-                    preserve_input_dtype=True,
-                )
+                    def _prefill_conv(
+                        x: torch.Tensor,
+                        state: torch.Tensor,
+                        weight: torch.Tensor,
+                    ) -> torch.Tensor:
+                        return causal_conv1d_fn(
+                            x.transpose(0, 1),
+                            weight,
+                            None,
+                            activation="silu",
+                            conv_states=state,
+                            has_initial_state=has_initial_state,
+                            cache_indices=non_spec_state_indices_tensor,
+                            query_start_loc=non_spec_query_start_loc,
+                            metadata=m,
+                        ).transpose(0, 1)
+
+                    q_ns = _prefill_conv(q_ns, q_conv_state, q_conv_weight)
+                    k_ns = _prefill_conv(k_ns, k_conv_state, k_conv_weight)
+                    v_ns = _prefill_conv(v_ns, v_conv_state, v_conv_weight)
                 q_ns, k_ns, v_ns = (
                     rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
                     for x in (q_ns, k_ns, v_ns)
