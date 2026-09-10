@@ -8,15 +8,18 @@ optionally plus the lane YAMLs that also run the area, such as
 
 1. Coverage: every ``test_*.py`` under the area's test tree is inside a
    directory that some job command runs WHOLE (``pytest <dir>`` with no
-   filter flags). An unclaimed file is reported with its path and the
-   nearest job whose target would need to claim it.
+   filter flags), or is itself the whole target of a single-file job
+   (``pytest <file>`` with no filter flags — e.g. the L4 granite
+   compatibility job, whose file IS the job boundary). An unclaimed file is
+   reported with its path and the nearest job whose target would need to
+   claim it.
 2. Partition filters: no job command carries a ``-k`` expression, a
-   per-file target inside the area tree, a partitioning ``-m`` expression,
-   or pytest-shard flags (``--num-shards``/``--shard-id``) combined with any
-   of those filters — anything that divides one directory between sibling
-   jobs on the same lane. Shard flags on an otherwise whole-directory
-   command are accepted: they split one job across its own ``parallelism:``
-   instances, not between sibling jobs.
+   FILTERED per-file target inside the area tree, a partitioning ``-m``
+   expression, or pytest-shard flags (``--num-shards``/``--shard-id``)
+   combined with any of those filters — anything that divides one directory
+   or file between sibling jobs on the same lane. Shard flags on an
+   otherwise whole-directory command are accepted: they split one job across
+   its own ``parallelism:`` instances, not between sibling jobs.
 
 Lane-filter exception: a lane-capability marker expression (a single marker
 from ``LANE_FILTER_MARKERS``, e.g. the CPU lane's recursive ``-m cpu_model``)
@@ -100,6 +103,22 @@ class PytestCommand:
         return (
             bool(self.dir_targets)
             and not self.file_targets
+            and self.m_expr is None
+            and self.k_expr is None
+        )
+
+    @property
+    def is_whole_file(self) -> bool:
+        """True if the command runs only file targets with no filter.
+
+        A single-file job (e.g. the L4 granite compatibility job) claims its
+        file completely: the file is the target boundary and nothing inside
+        it is split. Shard flags are ignored for the same reason as in
+        ``is_whole_dir`` (parallel instances of one job).
+        """
+        return (
+            bool(self.file_targets)
+            and not self.dir_targets
             and self.m_expr is None
             and self.k_expr is None
         )
@@ -216,14 +235,21 @@ def check_coverage(
     tests_root: Path, yaml_paths: list[Path]
 ) -> tuple[list[str], list[str]]:
     """Run the guard. Returns (violations, notes)."""
-    tests_dir = tests_root.parents[1]  # the tests/ directory
+    # Locate the ancestor directory named "tests" (the tree may sit at any
+    # depth below it, e.g. tests/models/language/generation).
+    tests_root = tests_root.resolve()
+    parts = tests_root.parts
+    tests_dir = Path(*parts[: len(parts) - 1 - parts[::-1].index("tests") + 1])
     tree_rel = tests_root.relative_to(tests_dir).as_posix()
     commands = load_commands(yaml_paths, tree_rel)
     whole_dirs = {t for c in commands if c.is_whole_dir for t in c.dir_targets}
+    whole_files = {t for c in commands if c.is_whole_file for t in c.file_targets}
     all_files = _test_files_under(tests_root)
 
     def covered(path: Path) -> bool:
         rel = path.parent.relative_to(tests_dir).as_posix()
+        if path.relative_to(tests_dir).as_posix() in whole_files:
+            return True
         return any(rel == d or rel.startswith(d + "/") for d in whole_dirs)
 
     violations: list[str] = []
@@ -241,7 +267,7 @@ def check_coverage(
         where = f"{cmd.step} [{cmd.lane}]"
         problems = []
         in_tree_files = cmd.file_targets
-        if in_tree_files:
+        if in_tree_files and not cmd.is_whole_file:
             problems.append(f"per-file target(s): {', '.join(in_tree_files)}")
         if cmd.k_expr is not None:
             problems.append(f"-k expression: {cmd.k_expr!r}")

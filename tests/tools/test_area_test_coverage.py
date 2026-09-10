@@ -64,8 +64,10 @@ def test_partition_filters_detected(tmp_path):
             "-k 'not granite-4.0-tiny-preview' "
             "--num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT "
             "--shard-id=$$BUILDKITE_PARALLEL_JOB",
-            # per-file target inside the tree
-            "pytest -v -s models/language/generation/hybrid/test_a.py",
+            # filtered per-file target inside the tree (splits one file's
+            # cases off from the rest; an UNFILTERED single-file job is fine)
+            "pytest -v -s models/language/generation/hybrid/test_a.py "
+            "-k 'not granite-4.0-tiny-preview'",
             # compound -m partition (splits by test content, not hardware)
             "pytest -v -s models/language -m 'core_model and slow_test'",
             # single marker that is not a lane-capability marker
@@ -83,11 +85,26 @@ def test_partition_filters_detected(tmp_path):
     assert "partitioning -m expression: 'hybrid_model'" in text
 
 
+def test_single_file_job_accepted_and_claims_its_file(tmp_path):
+    """A filter-free single-file job (e.g. the L4 granite job) is whole
+    coverage of its target: the file is the job boundary, nothing is split.
+    """
+    tree = _make_tree(tmp_path, "generation/test_granite_4_hybrid.py")
+    yaml_path = _write_yaml(
+        tmp_path,
+        ["pytest -v -s models/language/generation/test_granite_4_hybrid.py"],
+    )
+
+    violations, _ = check_coverage(tree, [yaml_path])
+
+    assert violations == []
+
+
 def test_cpu_recursive_command_accepted_as_lane_filter(tmp_path):
     tree = _make_tree(
         tmp_path,
         "generation/hybrid/test_a.py",
-        "generation/hybrid/test_granite_4_hybrid.py",
+        "generation/test_granite_4_hybrid.py",
         "generation/core/test_c.py",
         "pooling/test_p.py",
     )
@@ -116,7 +133,7 @@ def test_post_sharding_language_yaml_passes(tmp_path):
     tree = _make_tree(
         tmp_path,
         "generation/hybrid/test_a.py",
-        "generation/hybrid/test_granite_4_hybrid.py",
+        "generation/test_granite_4_hybrid.py",
         "generation/core/test_c.py",
         "pooling/test_p.py",
     )
@@ -160,3 +177,22 @@ def test_parse_invocation_handles_env_var_shard_flags_and_quotes():
     assert cmd.k_expr == "not granite-4.0-tiny-preview"
     assert cmd.sharded
     assert not cmd.is_whole_dir
+
+
+def test_real_language_yaml_passes():
+    """The real language area YAML must pass the guard over the generation tree.
+
+    Integration test over the checked-in files: the one-job-per-directory
+    language YAML plus the CPU hardware lane (whose recursive ``-m cpu_model``
+    command is the lane-filter exception). Pooling/PPL/MTEB commands are
+    out-of-tree for ``tests/models/language/generation`` and ignored.
+    """
+    tree = REPO_ROOT / "tests/models/language/generation"
+    yamls = [
+        REPO_ROOT / ".buildkite/test_areas/models_language.yaml",
+        REPO_ROOT / ".buildkite/hardware_tests/cpu.yaml",
+    ]
+
+    violations, _ = check_coverage(tree, yamls)
+
+    assert violations == []
