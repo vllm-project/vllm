@@ -132,6 +132,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
         curl \
         sudo \
         rdma-core-devel \
+        elfutils-devel \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
