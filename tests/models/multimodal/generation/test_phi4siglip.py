@@ -24,9 +24,10 @@ from ...utils import check_logprobs_close
 pytestmark = pytest.mark.skipif(
     Version("5.0") <= Version(version("transformers")),
     reason=(
-        "vllm upgraded transformers above v5.4 where HF model custom code uses siglip2 "
-        "internals (filter_out_non_signature_kwargs) removed by "
-        "huggingface/transformers#43514"
+        "The HF reference implementation reads siglip2 image-processing internals "
+        "through transformers.models.siglip2.image_processing_siglip2, which stopped "
+        "re-exporting them when it became a torchvision backend in v5.4. vLLM no "
+        "longer needs that custom code, but HfRunner still loads it."
     ),
 )
 
