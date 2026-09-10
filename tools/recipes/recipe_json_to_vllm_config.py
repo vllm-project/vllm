@@ -231,6 +231,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     sweep.add_argument(
+        "--tp-dp-numa-bind-workaround",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Temporary Xeon TP/DP NUMA-binding workaround. For parallel-layout "
+            "and full sweeps, generate an explicit VLLM_CPU_OMP_THREADS_BIND "
+            "from detected NUMA topology. Enabled by default; disable with "
+            "--no-tp-dp-numa-bind-workaround after the vLLM DP binding fix."
+        ),
+    )
+    sweep.add_argument(
         "--sweep-out-dir",
         default="sweep",
         help="Output directory for optional sweep files (default: sweep).",
@@ -795,10 +806,22 @@ def write_config(
     Path(path).write_text("\n".join(metadata) + "\n" + body, encoding="utf-8")
 
 
-def write_env(path: str, source: str, recipe: dict[str, Any]) -> None:
-    env = recipe.get("env") or {}
-    if not isinstance(env, dict):
-        raise ValueError(f"Recipe `env` must be an object, got {type(env).__name__}")
+def write_env(
+    path: str,
+    source: str,
+    recipe: dict[str, Any],
+    *,
+    env_overrides: dict[str, object] | None = None,
+) -> None:
+    recipe_env = recipe.get("env") or {}
+    if not isinstance(recipe_env, dict):
+        raise ValueError(
+            f"Recipe `env` must be an object, got {type(recipe_env).__name__}"
+        )
+
+    env = dict(recipe_env)
+    overrides = env_overrides or {}
+    env.update(overrides)
 
     lines = [
         "#!/usr/bin/env bash",
@@ -806,6 +829,11 @@ def write_env(path: str, source: str, recipe: dict[str, Any]) -> None:
         f"# Source: {source}",
         "",
     ]
+
+    if overrides:
+        lines.append(
+            "# Temporary runtime overrides derived from detected hardware."
+        )
 
     if env:
         for key, value in env.items():
@@ -816,7 +844,6 @@ def write_env(path: str, source: str, recipe: dict[str, Any]) -> None:
     lines.append("")
     Path(path).write_text("\n".join(lines), encoding="utf-8")
     Path(path).chmod(Path(path).stat().st_mode | 0o111)
-
 
 def main() -> int:
     args = parse_args()
@@ -875,6 +902,7 @@ def main() -> int:
         workload = None
         sweep_writer = None
         hardware = None
+        env_overrides: dict[str, object] = {}
         if tuning_requested:
             # Keep plain Recipes conversion lightweight. vLLM-specific modules
             # are imported only for optional runtime tuning or sweep generation.
@@ -907,9 +935,38 @@ def main() -> int:
             policies = get_runtime_tuning_policies(recipe_hardware)
 
             if args.detect_hardware:
-                from hardware_detection import detect_hardware
+                from hardware_detection import (
+                    build_numa_omp_threads_bind,
+                    detect_hardware,
+                )
 
                 hardware = detect_hardware()
+
+                if (
+                    args.tp_dp_numa_bind_workaround
+                    and str(recipe_hardware).lower() == "xeon6"
+                    and (
+                        args.generate_parallel_layout_sweep
+                        or args.generate_full_sweep
+                    )
+                ):
+                    recipe_env = recipe.get("env") or {}
+                    current_binding = (
+                        recipe_env.get("VLLM_CPU_OMP_THREADS_BIND")
+                        if isinstance(recipe_env, dict)
+                        else None
+                    )
+
+                    # Preserve an explicit recipe-provided manual binding.
+                    # Replace an unset or "auto" value with the temporary
+                    # topology-derived binding.
+                    if current_binding in (None, "auto"):
+                        env_overrides["VLLM_CPU_OMP_THREADS_BIND"] = (
+                            build_numa_omp_threads_bind(
+                                hardware,
+                                reserved_cores_per_numa=1,
+                            )
+                        )
 
             tuning = finetune_runtime_config(
                 config,
@@ -920,7 +977,12 @@ def main() -> int:
             config.update(tuning.overrides)
 
         write_config(args.config_out, source, recipe, config)
-        write_env(args.env_out, source, recipe)
+        write_env(
+            args.env_out,
+            source,
+            recipe,
+            env_overrides=env_overrides,
+        )
 
         sweep_files: list[Path] = []
         if args.generate_full_sweep:

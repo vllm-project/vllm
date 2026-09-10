@@ -125,6 +125,10 @@ For end-to-end tuning, `--generate-full-sweep` runs
 used independently, and `--generate-scheduler-sweep` is the explicit
 scheduler-only name (`--generate-sweep` remains an alias).
 
+Xeon TP/DP sweeps temporarily enable explicit NUMA-aware OMP binding by
+default. Disable that workaround with `--no-tp-dp-numa-bind-workaround` after
+the vLLM CPU DP NUMA-binding fix is available.
+
 To tune only the parallel layout, use
 `--generate-parallel-layout-sweep`. Hardware detection supplies the effective
 NUMA-node count. The sweep generates every supported factor pair that uses all

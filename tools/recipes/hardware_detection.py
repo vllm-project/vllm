@@ -46,6 +46,92 @@ class HardwareInfo:
         return asdict(self)
 
 
+
+
+def _compress_cpu_ids(cpu_ids: list[int] | tuple[int, ...]) -> str:
+    """Return a compact Linux CPU-list string while preserving CPU IDs."""
+    values = sorted(set(cpu_ids))
+    if not values:
+        return ""
+
+    ranges: list[str] = []
+    start = previous = values[0]
+    for cpu_id in values[1:]:
+        if cpu_id == previous + 1:
+            previous = cpu_id
+            continue
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+        start = previous = cpu_id
+    ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    return ",".join(ranges)
+
+
+def build_numa_omp_threads_bind(
+    hardware: HardwareInfo,
+    *,
+    reserved_cores_per_numa: int = 1,
+) -> str:
+    """Build explicit x86 OMP CPU lists for the effective NUMA nodes.
+
+    Temporary TP/DP sweep workaround:
+    - select one logical CPU per physical core, matching vLLM x86 auto-binding;
+    - reserve cores by omitting them from each explicit NUMA CPU list;
+    - emit one pipe-separated list per effective NUMA node.
+
+    Explicit VLLM_CPU_OMP_THREADS_BIND lists bypass vLLM's auto-binding reserve
+    logic, so the reserved cores must be excluded here.
+    """
+    if reserved_cores_per_numa < 0:
+        raise ValueError("reserved_cores_per_numa must be at least 0")
+
+    effective_nodes = {node.node_id for node in hardware.numa_nodes}
+    allowed_cpus = get_allowed_cpu_list()
+
+    groups: list[str] = []
+    for node in hardware.numa_nodes:
+        node_cpus = [
+            cpu
+            for cpu in allowed_cpus
+            if cpu.numa_node == node.node_id and cpu.numa_node in effective_nodes
+        ]
+
+        core_to_logical_ids: dict[int, list[int]] = {}
+        for cpu in node_cpus:
+            if cpu.physical_core < 0:
+                continue
+            core_to_logical_ids.setdefault(cpu.physical_core, []).append(cpu.id)
+
+        if not core_to_logical_ids:
+            raise RuntimeError(
+                f"NUMA node {node.node_id} has no physical-core topology "
+                "available for explicit OMP binding."
+            )
+
+        # Match vLLM's x86 auto-binding selector: for SMT siblings on a physical
+        # core, use the highest logical CPU ID.
+        selected_cpu_ids = sorted(
+            max(logical_ids)
+            for _, logical_ids in sorted(core_to_logical_ids.items())
+        )
+
+        if len(selected_cpu_ids) <= reserved_cores_per_numa:
+            raise RuntimeError(
+                f"NUMA node {node.node_id} has only {len(selected_cpu_ids)} "
+                "usable physical cores, which is not enough after reserving "
+                f"{reserved_cores_per_numa} core(s)."
+            )
+
+        if reserved_cores_per_numa:
+            selected_cpu_ids = selected_cpu_ids[:-reserved_cores_per_numa]
+
+        groups.append(_compress_cpu_ids(selected_cpu_ids))
+
+    if not groups:
+        raise RuntimeError("No effective NUMA CPU lists are available for OMP binding.")
+
+    return "|".join(groups)
+
+
 def _read_socket_id(cpu_id: int) -> int | None:
     path = Path(f"/sys/devices/system/cpu/cpu{cpu_id}/topology/physical_package_id")
     try:
