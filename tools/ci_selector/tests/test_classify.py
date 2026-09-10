@@ -159,7 +159,7 @@ def test_package_data_device_scoping_trims_cross_device(state, vllm_repo, monkey
     j = str(cfgs[0].relative_to(vllm_repo))
     scoped = select(state, [j])
     assert any(c.device_scope for c in scoped.claims)
-    monkeypatch.setattr(hw, "device_scoped_out", lambda step, prefix: False)
+    monkeypatch.setattr(hw, "device_scoped_out", lambda step, device, aliases: False)
     unscoped = select(state, [j])
     assert len(scoped.selected) < len(unscoped.selected)
 

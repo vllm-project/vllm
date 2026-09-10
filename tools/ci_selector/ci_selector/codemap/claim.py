@@ -81,8 +81,8 @@ class Claim:
     step_ids: set[str] = field(default_factory=set)
     # test files implicated, mapped to steps by the caller
     test_files: set[str] = field(default_factory=set)
-    # device prefix a device-named data file targets. Scopes the test_files
-    # routing, since no other known device can read the file.
+    # device name a data file targets, spelled as the loader spells it. Scopes
+    # the test_files routing: no other known device can read the file.
     device_scope: str | None = None
     # Which routings the record may overturn with function evidence. Per
     # mechanism, not per rule: one rule reaches a step several ways and they do

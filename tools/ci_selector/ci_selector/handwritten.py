@@ -51,6 +51,47 @@ FAMILY_DEVICE_EXACT: dict[str, frozenset[str]] = {
 # Build-runner sizes, not test hardware; deliberately family-less.
 INFRA_DEVICES = frozenset({"cpu-small", "cpu-medium"})
 
+# `device_name=` vendor token -> family, the file side of the hardware match.
+# A model number alone does not name a family.
+DEVICE_NAME_FAMILIES: tuple[tuple[str, str], ...] = (
+    ("nvidia", "cuda"),
+    ("amd", "amd"),
+    ("radeon", "amd"),
+    # Not a bare "intel": FAMILY_DEVICE_EXACT already splits that vendor into
+    # intel_cpu/intel_gpu/intel_hpu, so tagging Gaudi xpu would scope it out of
+    # its own queue. Only the Arc spelling the tree actually carries.
+    ("intel(r)_arc", "xpu"),
+)
+
+# Queue `device:` -> the device name a job on it reports, which is what the
+# tuning-file loader builds its filename from.
+#
+# No test can check a row: it is a fact about physical machines. Every row was
+# read from a real CI job log, and a queue with no row stays unscoped, which
+# over-selects safely. Never write a row you cannot evidence.
+QUEUE_DEVICE_NAMES: dict[str, str] = {
+    "a100": "NVIDIA_A100-SXM4-80GB",
+    "b200-k8s": "NVIDIA_B200",
+    "dgx-spark": "NVIDIA_GB10",
+    "gh200": "NVIDIA_GH200_480GB",
+    "h100": "NVIDIA_H100_80GB_HBM3",
+    # Every H200 variant is rewritten to NVIDIA_H200, so these three share one
+    # name by construction.
+    "h200": "NVIDIA_H200",
+    "h200_18gb": "NVIDIA_H200",
+    "h200_35gb": "NVIDIA_H200",
+    # An L4, not an L40S. No tuning file names an NVIDIA_L4, so this row is
+    # what scopes the L40S tables out.
+    "l4": "NVIDIA_L4",
+    "mi300_1": "AMD_Instinct_MI300X",
+    "mi300_2": "AMD_Instinct_MI300X",
+    "mi300_4": "AMD_Instinct_MI300X",
+    "mi300_8": "AMD_Instinct_MI300X",
+    # No mi355_* row: the queue reports a name no tuning file carries, so a row
+    # would scope every MI355 file out of its own hardware.
+    # No mi250_*, intel_gpu: reported spelling unconfirmed.
+}
+
 # path token -> family, ADDITIVE tagging only (first match wins).
 PATH_TOKEN_FAMILIES: tuple[tuple[frozenset[str], str], ...] = (
     (frozenset({"rocm", "aiter", "hip", "amd"}), "amd"),
@@ -61,7 +102,9 @@ PATH_TOKEN_FAMILIES: tuple[tuple[frozenset[str], str], ...] = (
     (frozenset({"cpu"}), "cpu"),
 )
 
-# Every literal naming a platform or device, from the three tables above. A
+# Every literal naming a platform or device, from the queue-side tables above.
+# Deliberately NOT DEVICE_NAME_FAMILIES: those tokens are the file side, and
+# widening dispatch's refusal set is a change to a different rule. A
 # guard comparing against one of these is platform dispatch, not config-key
 # dispatch, and routing tests by the literal would under-select. demote.py
 # refuses such guards.

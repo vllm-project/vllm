@@ -131,7 +131,9 @@ def _apply_claim_to_pipeline(
         # but a step on a different device loads its own config and not this
         # file, so scope that routing to the file's device. step_ids is left
         # alone: a declared dep is the generator's own trigger and must run.
-        if claim.device_scope and hardware.device_scoped_out(step, claim.device_scope):
+        if claim.device_scope and hardware.device_scoped_out(
+            step, claim.device_scope, state.gpu_name_aliases
+        ):
             continue
         st = pdata.targets.get(step.step_id)
         if st is None:

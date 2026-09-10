@@ -7,10 +7,13 @@ the table against the devices present in the job YAML at HEAD, so a new device
 lands here loudly instead of silently having no family.
 """
 
+import subprocess
+
 import pytest
 from ci_selector.codemap import hardware
 from ci_selector.codemap.pipeline.buildkite import load_pipeline_configs, load_steps
 from ci_selector.codemap.pipeline.step import LoadReport
+from ci_selector.codemap.state import _gpu_name_aliases
 from ci_selector.handwritten import INFRA_DEVICES
 from helpers import HW, drift_message
 
@@ -139,48 +142,84 @@ def test_family_of_device_spot_checks():
 
 
 def test_family_of_filename():
-    """Data-file device tags: device_name= fields, bare platform names, and
-    the digit-guard that keeps 'mixtral' from matching the 'mi' amd prefix."""
+    """Data-file device tags: platform tokens first, then the vendor named in
+    the device_name= field or in a vendor-named stem."""
     f = hardware.family_of_filename
     assert f("device_name=AMD_Instinct_MI325X,cache_dtype=float16.json") == "amd"
-    assert f("nvidia_b200.json") == "cuda"
-    assert f("NVIDIA_H200.json") == "cuda"
-    assert f("NVIDIA_GB200.json") == "cuda"  # b200 substring of gb200
+    assert (
+        f(
+            "nvidia_b200.json",
+            "vllm/kernels/helion/configs/silu_mul_fp8/nvidia_b200.json",
+        )
+        == "cuda"
+    )
+    # Only under the helion tree: a vendor-named asset anywhere else is not a
+    # device-named config, or it scopes out of every queue of that vendor.
+    assert f("nvidia_b200.json", "vllm/notes/nvidia_b200.json") is None
+    # A bare device-named file outside the helion tree stays unscoped: no
+    # family, no narrowing, over-select. Only the field carries authority.
+    assert f("NVIDIA_H200.json") is None
+    assert f("E=8,N=1792,device_name=NVIDIA_GB200.json") == "cuda"
     assert f("zzz_probe.json") is None
-    assert f("mixtral_moe.json") is None  # 'mi' prefix, no digit -> no match
+    assert f("mixtral_moe.json") is None  # names no vendor
 
 
-def test_device_prefix_of_filename():
-    """The finer device prefix a config filename names, for exact-device
-    scoping (vs family_of_filename's family). None -> no device token."""
-    p = hardware.device_prefix_of_filename
-    assert p("E=8,N=3584,device_name=NVIDIA_H200.json") == "h200"
-    assert p("device_name=NVIDIA_B200.json") == "b200"
-    assert p("device_name=AMD_Instinct_MI300X.json") == "mi"
-    assert p("E=8,N=3584.json") is None  # no device -> fall back to family
+def test_device_name_of_filename():
+    """The device a data filename names, read as the loaders read it: the
+    `device_name=` field, else a vendor-named stem, else nothing."""
+    d = hardware.device_name_of_filename
+    assert d("E=8,N=3584,device_name=NVIDIA_H200.json") == "NVIDIA_H200"
+    assert d("E=256,device_name=NVIDIA_H20-3e,dtype=fp8.json") == "NVIDIA_H20-3e"
+    assert (
+        d(
+            "nvidia_h100.json",
+            "vllm/kernels/helion/configs/silu_mul_fp8/nvidia_h100.json",
+        )
+        == "nvidia_h100"
+    )
+    assert d("nvidia_h100.json", "vllm/notes/nvidia_h100.json") is None
+    assert d("E=8,N=3584.json") is None
+    # A stem naming no vendor is not a device: this one used to resolve to the
+    # amd `mi` prefix and scope a chat template to AMD.
+    assert d("template_minicpmv45.jinja") is None
 
 
 def test_device_scoped_out():
-    """A step is scoped out of a device-named file only when its device is a
-    KNOWN different device; unknown/None devices are kept (conservative)."""
+    """A step is scoped out of a device-named file only when its queue reports a
+    known different device. Every unknown keeps the step."""
     from types import SimpleNamespace as St
 
     out = hardware.device_scoped_out
+    aliases = {"nvidia_h100_80gb_hbm3": "nvidia_h100"}
     h200 = St(device="h200_35gb", mirror_hw=None)
     b200 = St(device="b200-k8s", mirror_hw=None)
+    h100 = St(device="h100", mirror_hw=None)
     mi = St(device="mi300_1", mirror_hw=None)
-    unknown = St(device=None, mirror_hw=None)
+    mi355 = St(device="mi355_1", mirror_hw=None)
+    nodevice = St(device=None, mirror_hw=None)
     amd_mirror = St(device="h200_35gb", mirror_hw="amd")
-    # file scoped to h200
-    assert not out(h200, "h200")  # same device kept
-    assert out(b200, "h200")  # same family, different prefix -> dropped
-    assert out(mi, "h200")  # cross-family -> dropped
-    assert out(amd_mirror, "h200")  # runs on amd hardware -> dropped
-    assert not out(unknown, "h200")  # unknown queue kept
-    # file scoped to mi (amd): the amd-mirror step is kept
-    assert not out(mi, "mi")
-    assert not out(amd_mirror, "mi")
-    assert out(h200, "mi")
+
+    assert not out(h200, "NVIDIA_H200", aliases)
+    assert out(b200, "NVIDIA_H200", aliases)  # same family, other device
+    assert out(mi, "NVIDIA_H200", aliases)  # cross-family
+    assert out(amd_mirror, "NVIDIA_H200", aliases)  # runs on amd whatever it lists
+    assert not out(nodevice, "NVIDIA_H200", aliases)  # no device -> kept
+
+    # The collisions a prefix match cannot express.
+    assert out(h200, "NVIDIA_H20", aliases)  # "h200_35gb".startswith("h20")
+    assert out(St(device="l4", mirror_hw=None), "NVIDIA_L40S", aliases)  # l4/l40s
+
+    # A queue with no alias row keeps the step rather than guessing.
+    assert not out(mi355, "AMD_Instinct_MI355X", aliases)
+
+    # Helion configs are filed under the canonicalized name, so the h100 queue
+    # matches one.
+    assert not out(h100, "nvidia_h100", aliases)
+    assert out(h100, "nvidia_b200", aliases)
+    # An amd file: the mi300 queue and every amd mirror keep it, cuda drops it.
+    assert not out(mi, "AMD_Instinct_MI300X", aliases)
+    assert not out(amd_mirror, "AMD_Instinct_MI300X", aliases)
+    assert out(h200, "AMD_Instinct_MI300X", aliases)
 
 
 def test_exclusivity_disable_is_derived_invariant(state):
@@ -345,4 +384,161 @@ def test_device_tables_still_match_devices_at_head(vllm_repo):
         + HW
         + ". A queue that is only paused should keep its row, or it comes back "
         "with no family and nothing says so",
+    )
+
+
+@pytest.mark.drift
+def test_every_device_name_in_the_tree_resolves(vllm_repo):
+    """Every device a data filename names must resolve to a family. The guards
+    above walk the other way, queue -> family; nothing walked this direction."""
+    names = subprocess.check_output(
+        ["git", "-C", str(vllm_repo), "ls-files", "vllm/"], text=True
+    ).split()
+    devices = {
+        d
+        for n in names
+        if (d := hardware.device_name_of_filename(n.rsplit("/", 1)[-1], n))
+    }
+    assert len(devices) >= 25, drift_message(
+        f"only {len(devices)} device names were read out of the tree",
+        "The resolver is the thing under test here. Reading none would satisfy "
+        "the check below exactly like reading them all and placing them.",
+        "the tuning files moved or changed shape: check "
+        "hardware.device_name_of_filename against vllm/ at HEAD",
+    )
+    unplaced = sorted(d for d in devices if hardware.family_of_device_name(d) is None)
+    assert not unplaced, drift_message(
+        f"Tuning files name devices with no family: {unplaced}",
+        "A device-named data file with no family gets no device scope, so it "
+        "falls back to its package's whole reverse closure. Inside the import "
+        "cycle that is every test in the repo, for one JSON edit.",
+        f"a new vendor: add its token to DEVICE_NAME_FAMILIES in {HW}",
+    )
+
+
+@pytest.mark.drift
+def test_queue_alias_rows_still_describe_real_hardware(vllm_repo):
+    """Shape guard on the alias table. The mapping itself is a fact about real
+    machines that no test can check, so check both ends: the queue must be live
+    in the yaml, and the device name must be one some tuning file carries."""
+    from ci_selector.handwritten import QUEUE_DEVICE_NAMES
+
+    report = LoadReport()
+    live = {
+        step.device
+        for config in load_pipeline_configs(vllm_repo)
+        for step in load_steps(vllm_repo, config, report)
+        if step.device
+    }
+    # A value pasted onto the wrong key satisfies both legs below: the queue is
+    # live and the device is filed, just not by each other.
+    crossed = sorted(
+        f"{q} -> {dev}"
+        for q, dev in QUEUE_DEVICE_NAMES.items()
+        if hardware.family_of_device(q) != hardware.family_of_device_name(dev)
+    )
+    assert not crossed, drift_message(
+        f"Alias rows pair a queue with another family's device: {crossed}",
+        "The row then scopes every file of the queue's own family out of it, "
+        "and each half looks correct on its own.",
+        f"fix the pairing in {HW}",
+    )
+
+    dead_queues = sorted(q for q in QUEUE_DEVICE_NAMES if q not in live)
+    assert not dead_queues, drift_message(
+        f"Alias rows name queues that no longer exist: {dead_queues}",
+        "The row scopes nothing, and it hides the day that queue name returns "
+        "pointing at different hardware.",
+        f"the queue was renamed or retired: update or delete the row in {HW}",
+    )
+
+    names = subprocess.check_output(
+        ["git", "-C", str(vllm_repo), "ls-files", "vllm/"], text=True
+    ).split()
+    filed = {
+        d
+        for n in names
+        if (d := hardware.device_name_of_filename(n.rsplit("/", 1)[-1], n))
+    }
+    aliases = _gpu_name_aliases(vllm_repo)
+    # The table has to have loaded, or the canonical leg below decides nothing
+    # and this reads green while testing a single comparison.
+    assert aliases.get("nvidia_h100_80gb_hbm3") == "nvidia_h100", drift_message(
+        "vLLM's _GPU_NAME_ALIASES no longer canonicalizes the H100 SXM name",
+        "The helion configs are filed under the canonical name, so without the "
+        "table they scope out of the only queue that can load them.",
+        "the table moved or was renamed: check _gpu_name_aliases in state.py "
+        "against vllm/kernels/helion/utils.py",
+    )
+    # l4 and gh200 have no tuning files of their own -- the row is what scopes
+    # every other device's files out of them. Asserted as a positive control
+    # rather than skipped: the day such a file lands, that row starts scoping
+    # it out of its own queue and this has to say so.
+    expected_unfiled = {"gh200", "l4"}
+    for q in sorted(expected_unfiled):
+        dev = QUEUE_DEVICE_NAMES[q]
+        assert dev not in filed and (
+            hardware.canonicalize_gpu_name(dev, aliases) not in filed
+        ), drift_message(
+            f"A tuning file now names {dev}, the device the {q} row exempts",
+            "That row was written on the premise nothing is filed under it. A "
+            "file named for it is now scoped out of its own queue.",
+            f"re-verify the {q} row against a CI job log, then drop it from "
+            "expected_unfiled in this test",
+        )
+    unfiled = sorted(
+        q
+        for q, dev in QUEUE_DEVICE_NAMES.items()
+        if q not in expected_unfiled
+        and dev not in filed
+        and hardware.canonicalize_gpu_name(dev, aliases) not in filed
+    )
+    assert not unfiled, drift_message(
+        f"Alias rows name devices no tuning file carries: {unfiled}",
+        "Either the row misspells what the hardware reports, in which case it "
+        "scopes that device's own files out of its own queue and a test is "
+        "lost, or the device genuinely has no tuning files and the row only "
+        "scopes others out, which is fine but should be deliberate.",
+        f"check the spelling against a real CI job log, then fix the row in {HW}",
+        "the device has no tuning files on purpose: add it to the expected "
+        "list in this test",
+    )
+
+
+@pytest.mark.drift
+def test_stem_named_configs_still_resolve_to_a_device(vllm_repo):
+    """The helion tree names its configs for the device instead of carrying a
+    `device_name=` field, because its shape keys live inside the file rather
+    than in the filename. `device_name_of_filename` reads the stem only under
+    that one path, so if the tree moves those files silently lose their scope
+    and gain back their package's whole reverse closure.
+    """
+    from ci_selector.codemap.hardware import _STEM_NAMED_DIR
+
+    configs = [
+        n
+        for n in subprocess.check_output(
+            ["git", "-C", str(vllm_repo), "ls-files", _STEM_NAMED_DIR], text=True
+        ).split()
+        if n.endswith(".json")
+    ]
+    assert len(configs) >= 10, drift_message(
+        f"{_STEM_NAMED_DIR} holds {len(configs)} json configs, expected at least 10",
+        "That tree is the only place a filename stem counts as a device. Empty, "
+        "the rule is dead and any config left behind runs the whole reverse "
+        "closure of its package for a one-file edit.",
+        "the helion configs moved: update _STEM_NAMED_DIR in "
+        "ci_selector/codemap/hardware.py",
+    )
+    unscoped = sorted(
+        n.removeprefix(_STEM_NAMED_DIR)
+        for n in configs
+        if hardware.device_name_of_filename(n.rsplit("/", 1)[-1], n) is None
+    )
+    assert not unscoped, drift_message(
+        f"Stem-named configs no longer resolve to a device: {unscoped[:5]}",
+        "Each one loses its device scope and gains back every step its package "
+        "reaches, which inside the import cycle is most of the pipeline.",
+        "the naming convention changed: check canonicalize_gpu_name and "
+        "DEVICE_NAME_FAMILIES against vllm/kernels/helion/",
     )

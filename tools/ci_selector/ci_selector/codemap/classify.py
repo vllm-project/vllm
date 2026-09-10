@@ -579,8 +579,8 @@ def _classify_package_data(state: RepoState, path: str) -> Claim | None:
             c for c in closure if c.startswith(("examples/", "benchmarks/"))
         }
     filename = path.rsplit("/", 1)[-1]
-    family = hardware.family_of_filename(filename)
-    device_scope = hardware.device_prefix_of_filename(filename)
+    family = hardware.family_of_filename(filename, path)
+    device_scope = hardware.device_name_of_filename(filename, path)
     # A tuning file for one device matters only to that device's jobs, so
     # scope the family floor to the device the filename names.
     fam_steps = (
@@ -589,7 +589,10 @@ def _classify_package_data(state: RepoState, path: str) -> Claim | None:
             for p in state.pipelines
             for s in p.steps
             if hardware.step_in_family(s, family)
-            and not (device_scope and hardware.device_scoped_out(s, device_scope))
+            and not (
+                device_scope
+                and hardware.device_scoped_out(s, device_scope, state.gpu_name_aliases)
+            )
         }
         if family
         else set()

@@ -9,6 +9,7 @@ image DAG -- and `classify.py` decides what any of it means.
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -86,6 +87,10 @@ class RepoState:
     build_map: BuildMap = field(default_factory=BuildMap)
     # csrc path -> its ops -> the Python wrappers calling them
     native_ops: NativeOps = field(default_factory=NativeOps)
+    # vLLM's GPU-name alias table, read from the tree so it cannot go stale.
+    # Empty costs the helion configs their scoping, so `device_scoped_out`
+    # fails open rather than trusting it.
+    gpu_name_aliases: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def build(cls, repo: Path) -> RepoState:
@@ -115,6 +120,7 @@ class RepoState:
                 st = p.targets.get(s.step_id)
                 if st is not None:
                     auto_targets.append(st)
+        state.gpu_name_aliases = _gpu_name_aliases(repo)
         state.invoked = invoked_files(state.catalog, auto_targets)
         prefixes: set[str] = set()
         for st in auto_targets:
@@ -223,6 +229,32 @@ def detect_duplicate_ids(steps: list[Step], report: LoadReport) -> None:
         if s.step_id in seen and s.step_id not in report.duplicate_ids:
             report.duplicate_ids.append(s.step_id)
         seen.add(s.step_id)
+
+
+def _gpu_name_aliases(repo: Path) -> dict[str, str]:
+    """vLLM's `_GPU_NAME_ALIASES`, parsed from the checkout rather than copied,
+    so a transcription cannot go stale. Empty only costs the alias step."""
+    src = repo / "vllm/kernels/helion/utils.py"
+    if not src.is_file():
+        return {}
+    try:
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+    except SyntaxError:
+        return {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AnnAssign | ast.Assign):
+            continue
+        targets = [node.target] if isinstance(node, ast.AnnAssign) else node.targets
+        if not any(getattr(t, "id", None) == "_GPU_NAME_ALIASES" for t in targets):
+            continue
+        if not isinstance(node.value, ast.Dict):
+            return {}
+        out = {}
+        for k, v in zip(node.value.keys, node.value.values):
+            if isinstance(k, ast.Constant) and isinstance(v, ast.Constant):
+                out[str(k.value)] = str(v.value)
+        return out
+    return {}
 
 
 def _graph_known(state: RepoState, path: str) -> bool:
