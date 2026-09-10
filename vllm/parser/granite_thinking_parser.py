@@ -115,12 +115,17 @@ class GraniteThinkingParser(NemotronV3Parser):
     ) -> tuple[str | None, str | None]:
         reasoning, content = Qwen3Parser.extract_reasoning(self, model_output, request)
 
+        # Track whether content was truly absent (None) vs present
+        # but whitespace-only — the swap should only fire for absent.
+        content_was_absent = content is None
+
         if content is not None:
             content = content.lstrip("\n") or None
 
-        if self._should_force_content(request) and (
-            content is None or not content.strip()
-        ):
+        # Only swap when content was truly absent from model output
+        # (truncated reasoning or max_tokens cut at </think>), not
+        # when it was present but stripped to empty (newlines-only).
+        if self._should_force_content(request) and content_was_absent:
             reasoning, content = content, reasoning
 
         return reasoning, content

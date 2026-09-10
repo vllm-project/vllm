@@ -25,7 +25,7 @@ class ReasoningCase(TypedDict):
     content: str | None
 
 
-class FakeGraniteTokenizer:
+class GraniteThinkingTokenizer:
     def __init__(self):
         self._vocab = {
             "<think>": 1,
@@ -53,7 +53,7 @@ class FakeGraniteTokenizer:
 
 @pytest.fixture
 def tokenizer():
-    return FakeGraniteTokenizer()
+    return GraniteThinkingTokenizer()
 
 
 # ── Basic reasoning extraction (non-streaming + streaming) ───────────
@@ -173,7 +173,7 @@ def tokenizer():
     ],
 )
 def test_granite_thinking_reasoning(
-    tokenizer: FakeGraniteTokenizer,
+    tokenizer: GraniteThinkingTokenizer,
     streaming: bool,
     param_dict: ReasoningCase,
 ):
@@ -195,7 +195,7 @@ def test_granite_thinking_reasoning(
 
 
 def test_granite_thinking_no_content_after_end_token(
-    tokenizer: FakeGraniteTokenizer,
+    tokenizer: GraniteThinkingTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
     parser = parser_cls(tokenizer)
@@ -215,7 +215,7 @@ def test_granite_thinking_no_content_after_end_token(
 
 @pytest.mark.parametrize("streaming", [False, True])
 def test_granite_thinking_whitespace_only_content(
-    tokenizer: FakeGraniteTokenizer,
+    tokenizer: GraniteThinkingTokenizer,
     streaming: bool,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
@@ -235,7 +235,7 @@ def test_granite_thinking_whitespace_only_content(
 
 
 def test_granite_thinking_unterminated_think_block(
-    tokenizer: FakeGraniteTokenizer,
+    tokenizer: GraniteThinkingTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
     parser = parser_cls(tokenizer)
@@ -260,7 +260,7 @@ def test_granite_thinking_unterminated_think_block(
 
 
 def test_granite_thinking_disabled_moves_into_content(
-    tokenizer: FakeGraniteTokenizer,
+    tokenizer: GraniteThinkingTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
     parser = parser_cls(tokenizer)
@@ -285,7 +285,7 @@ def test_granite_thinking_disabled_moves_into_content(
 
 
 def test_granite_thinking_disabled_with_leading_newline(
-    tokenizer: FakeGraniteTokenizer,
+    tokenizer: GraniteThinkingTokenizer,
 ):
     # With enable_thinking=False, model output goes through the swap
     # path: content is initially None (all text classified as
@@ -316,7 +316,7 @@ def test_granite_thinking_disabled_with_leading_newline(
 
 
 def test_granite_thinking_force_nonempty_content_moves_into_content(
-    tokenizer: FakeGraniteTokenizer,
+    tokenizer: GraniteThinkingTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
     parser = parser_cls(tokenizer)
@@ -337,8 +337,57 @@ def test_granite_thinking_force_nonempty_content_moves_into_content(
     assert content == "This is plain content"
 
 
+def test_granite_thinking_force_nonempty_no_swap_when_newlines_only(
+    tokenizer: GraniteThinkingTokenizer,
+):
+    # When </think> IS present and content is newlines-only, lstrip
+    # removes them but the swap should NOT fire — content was present,
+    # just whitespace. Matches the HF plugin behavior.
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser = parser_cls(tokenizer)
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        chat_template_kwargs={"force_nonempty_content": True},
+    )
+
+    reasoning, content = run_reasoning_extraction(
+        parser,
+        ["<think>", "reasoning", "</think>", "\n\n"],
+        request=request,
+        streaming=False,
+    )
+
+    assert reasoning == "reasoning"
+    assert content is None
+
+
+def test_granite_thinking_force_nonempty_swaps_when_content_absent(
+    tokenizer: GraniteThinkingTokenizer,
+):
+    # When </think> IS present but content is truly absent (zero
+    # characters after </think>, e.g. max_tokens cut), swap fires.
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser = parser_cls(tokenizer)
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+        chat_template_kwargs={"force_nonempty_content": True},
+    )
+
+    reasoning, content = run_reasoning_extraction(
+        parser,
+        ["<think>", "reasoning", "</think>"],
+        request=request,
+        streaming=False,
+    )
+
+    assert reasoning is None
+    assert content == "reasoning"
+
+
 def test_granite_thinking_force_nonempty_keeps_real_content(
-    tokenizer: FakeGraniteTokenizer,
+    tokenizer: GraniteThinkingTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
     parser = parser_cls(tokenizer)
@@ -363,7 +412,7 @@ def test_granite_thinking_force_nonempty_keeps_real_content(
 
 
 def test_granite_thinking_keeps_truncated_reasoning(
-    tokenizer: FakeGraniteTokenizer,
+    tokenizer: GraniteThinkingTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
     parser = parser_cls(tokenizer)
@@ -423,7 +472,7 @@ def _run_parse_delta(parser, tokenizer, text, request):
 
 
 def test_granite_thinking_streaming_enable_thinking_false(
-    tokenizer: FakeGraniteTokenizer,
+    tokenizer: GraniteThinkingTokenizer,
 ):
     # With enable_thinking=False, the parser (constructed without
     # kwargs) starts in REASONING state. All text streams as reasoning
@@ -445,7 +494,7 @@ def test_granite_thinking_streaming_enable_thinking_false(
 
 
 def test_granite_thinking_streaming_strips_leading_newline(
-    tokenizer: FakeGraniteTokenizer,
+    tokenizer: GraniteThinkingTokenizer,
 ):
     request = ChatCompletionRequest(
         model="test-model",
@@ -462,7 +511,7 @@ def test_granite_thinking_streaming_strips_leading_newline(
 
 
 def test_granite_thinking_streaming_promotes_reasoning_to_content(
-    tokenizer: FakeGraniteTokenizer,
+    tokenizer: GraniteThinkingTokenizer,
 ):
     request = ChatCompletionRequest(
         model="test-model",
@@ -478,7 +527,7 @@ def test_granite_thinking_streaming_promotes_reasoning_to_content(
 
 
 def test_granite_thinking_streaming_no_promotion_with_real_content(
-    tokenizer: FakeGraniteTokenizer,
+    tokenizer: GraniteThinkingTokenizer,
 ):
     request = ChatCompletionRequest(
         model="test-model",
@@ -499,7 +548,7 @@ def test_granite_thinking_streaming_no_promotion_with_real_content(
 
 
 def test_granite_thinking_streaming_no_promotion_without_opt_in(
-    tokenizer: FakeGraniteTokenizer,
+    tokenizer: GraniteThinkingTokenizer,
 ):
     request = ChatCompletionRequest(model="test-model", messages=[])
     parser = _make_reasoning_parser(tokenizer)
@@ -508,3 +557,87 @@ def test_granite_thinking_streaming_no_promotion_without_opt_in(
 
     assert reasoning == "4"
     assert content == ""
+
+
+# ── Empty think block ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+def test_granite_thinking_empty_think_block(
+    tokenizer: GraniteThinkingTokenizer,
+    streaming: bool,
+):
+    # <think></think>\nHello — empty reasoning, content after newline.
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser = parser_cls(tokenizer)
+
+    reasoning, content = run_reasoning_extraction(
+        parser,
+        ["<think>", "</think>", "\n", "Hello"],
+        streaming=streaming,
+    )
+
+    assert reasoning is None or reasoning == ""
+    assert content == "Hello"
+
+
+# ── Chunking-independence streaming test ─────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "text,expected_reasoning,expected_content",
+    [
+        ("<think>r</think>\nHello", "r", "Hello"),
+        ("<think></think>\nHello", "", "Hello"),
+    ],
+)
+def test_granite_thinking_streaming_chunking_independent(
+    tokenizer: GraniteThinkingTokenizer,
+    text: str,
+    expected_reasoning: str,
+    expected_content: str,
+):
+    # Verify the same input produces identical results regardless
+    # of how it's chunked into streaming deltas.  Uses the
+    # DelegatingParser path (_run_parse_delta) which matches the
+    # real serving flow.
+    tokens = tokenizer.tokenize(text)
+    request = ChatCompletionRequest(model="test-model", messages=[])
+
+    chunk_patterns = [
+        tokens,
+        # Split at the </think> boundary
+        [
+            tokenizer.convert_tokens_to_string(tokens[: tokens.index("</think>") + 1]),
+            tokenizer.convert_tokens_to_string(tokens[tokens.index("</think>") + 1 :]),
+        ],
+    ]
+
+    for chunks in chunk_patterns:
+        parser = _make_reasoning_parser(tokenizer)
+        reasoning_parts: list[str] = []
+        content_parts: list[str] = []
+        all_tokens = []
+        for chunk in chunks:
+            chunk_tokens = tokenizer.tokenize(chunk)
+            all_tokens.extend(chunk_tokens)
+        for i, token in enumerate(all_tokens):
+            delta = parser.parse_delta(
+                delta_text=token,
+                delta_token_ids=[_token_id(token)],
+                request=request,
+                prompt_token_ids=[] if i == 0 else None,
+                finished=(i == len(all_tokens) - 1),
+            )
+            if delta is None:
+                continue
+            if delta.reasoning:
+                reasoning_parts.append(delta.reasoning)
+            if delta.content:
+                content_parts.append(delta.content)
+        reasoning = "".join(reasoning_parts)
+        content = "".join(content_parts)
+        assert reasoning == expected_reasoning or (
+            not expected_reasoning and not reasoning
+        ), f"reasoning mismatch with chunks={chunks}"
+        assert content == expected_content, f"content mismatch with chunks={chunks}"
