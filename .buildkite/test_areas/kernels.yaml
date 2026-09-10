@@ -254,6 +254,7 @@ steps:
       - csrc/quantization/cutlass_w8a8/moe/
       - csrc/moe/
       - tests/kernels/moe
+      - tests/kernels/expert_pool
       - vllm/model_executor/layers/fused_moe/
       - vllm/distributed/device_communicators/
       - vllm/envs.py
