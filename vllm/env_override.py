@@ -138,7 +138,7 @@ def _maybe_promote_torch_symbols_for_rocm():
             )
             if not deps:
                 return
-            ctypes.CDLL(deps[0], mode=ctypes.RTLD_GLOBAL)
+            ctypes.CDLL(deps[0], mode=ctypes.RTLD_LOCAL)
             ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
     except Exception:
         return
