@@ -31,8 +31,8 @@ class WatermarkConfig:
     """Number of prior tokens used by the watermark PRF."""
     deduplicate_contexts: Literal["none", "single_turn", "all"] = "single_turn"
     """History scope used to identify repeated watermark contexts."""
-    deduplicate_contexts_max_history: int = Field(default=8192, ge=1)
-    """Maximum prior positions searched within the selected history scope."""
+    deduplicate_contexts_max_history: int | None = Field(default=8192, ge=1)
+    """Maximum prior positions searched, or ``None`` for the full scope."""
     prf: WatermarkPRFName = "philox"
     """Pseudorandom function used by the watermarking algorithm."""
 
