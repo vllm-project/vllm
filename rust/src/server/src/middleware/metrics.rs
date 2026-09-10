@@ -34,17 +34,17 @@ const EXCLUDED_HANDLERS: &[&str] = &[
 ///
 /// HTTP parsers accept arbitrary method tokens. Recording the raw token as a
 /// label would let unique values create unbounded time series.
-pub(crate) fn http_metrics_method(method: &Method) -> &'static str {
-    match method.as_str() {
-        "GET" => "GET",
-        "POST" => "POST",
-        "PUT" => "PUT",
-        "PATCH" => "PATCH",
-        "DELETE" => "DELETE",
-        "HEAD" => "HEAD",
-        "OPTIONS" => "OPTIONS",
-        "CONNECT" => "CONNECT",
-        "TRACE" => "TRACE",
+pub(crate) fn http_metrics_method(method: &Method) -> &str {
+    match *method {
+        Method::GET
+        | Method::POST
+        | Method::PUT
+        | Method::PATCH
+        | Method::DELETE
+        | Method::HEAD
+        | Method::OPTIONS
+        | Method::CONNECT
+        | Method::TRACE => method.as_str(),
         _ => "other",
     }
 }
