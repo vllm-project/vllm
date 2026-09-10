@@ -287,14 +287,14 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
-            job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_WRITE
+            job_metadata.job_id, job_metadata.chunk_ids, obj_keys, NIXL_WRITE
         )
 
     def submit_load(self, job_metadata: TransferJob) -> None:
         self._load_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
-            job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_READ
+            job_metadata.job_id, job_metadata.chunk_ids, obj_keys, NIXL_READ
         )
 
     def on_request_finished(self, req_context: ReqContext) -> None:
