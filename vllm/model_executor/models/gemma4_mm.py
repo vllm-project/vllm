@@ -15,7 +15,7 @@ reason about temporal order.
 """
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 import numpy as np
@@ -1812,6 +1812,7 @@ class Gemma4ForConditionalGeneration(
         device: torch.device | str = "cpu",
         dtype: torch.dtype | None = None,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
         **kwargs: Any,
     ) -> "EncoderCudaGraphCaptureInputs":
         from vllm.v1.worker.encoder_cudagraph_defs import (
