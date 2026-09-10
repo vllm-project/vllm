@@ -407,6 +407,23 @@ def _collect_input_names(
     }
 
 
+def _named_assignment(
+    statement: ast.stmt,
+    subject: str,
+) -> tuple[str, ast.AST] | None:
+    match statement:
+        case ast.Assign(targets=[ast.Name(id=name)], value=value):
+            return name, value
+        case ast.AnnAssign(target=ast.Name(id=name), value=value) if value is not None:
+            return name, value
+        case ast.Assign() | ast.AnnAssign():
+            raise _dispatch_expr_error(
+                statement, f"{subject} assignments require one name"
+            )
+        case _:
+            return None
+
+
 def _collect_expression_body(
     fn: Callable[..., Any],
     function_def: ast.FunctionDef | ast.Lambda,
@@ -423,37 +440,18 @@ def _collect_expression_body(
         ):
             continue
 
-        if isinstance(statement, ast.Assign):
-            if len(statement.targets) != 1 or not isinstance(
-                statement.targets[0], ast.Name
-            ):
-                raise _dispatch_expr_error(
-                    statement,
-                    "Traced warmup helper assignments must target one local name",
-                )
-            local_exprs.append((statement.targets[0].id, statement.value))
+        if (
+            assignment := _named_assignment(statement, "Traced warmup helper")
+        ) is not None:
+            local_exprs.append(assignment)
             continue
-
-        if isinstance(statement, ast.AnnAssign):
-            if statement.value is None:
-                raise _dispatch_expr_error(
-                    statement, "Traced warmup helper annotations must assign a value"
-                )
-            if not isinstance(statement.target, ast.Name):
-                raise _dispatch_expr_error(
-                    statement,
-                    "Traced warmup helper assignments must target one local name",
-                )
-            local_exprs.append((statement.target.id, statement.value))
-            continue
-
-        if isinstance(statement, ast.Return) and statement.value is not None:
-            return local_exprs, statement.value
 
         if isinstance(statement, ast.Return):
-            raise _dispatch_expr_error(
-                statement, "Traced warmup helper must return an expression"
-            )
+            if statement.value is None:
+                raise _dispatch_expr_error(
+                    statement, "Traced warmup helper must return an expression"
+                )
+            return local_exprs, statement.value
 
         raise _dispatch_expr_error(
             statement,
@@ -725,28 +723,9 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
                 and isinstance(statement.value.value, str)
             ):
                 continue
-            if isinstance(statement, ast.Assign):
-                if len(statement.targets) != 1 or not isinstance(
-                    statement.targets[0], ast.Name
-                ):
-                    raise _dispatch_expr_error(
-                        statement, "Warmup case assignments require one name"
-                    )
-                name = statement.targets[0].id
-                value_expr = statement.value
-            elif isinstance(statement, ast.AnnAssign):
-                if statement.value is None or not isinstance(
-                    statement.target, ast.Name
-                ):
-                    raise _dispatch_expr_error(
-                        statement, "Warmup case assignments require one name"
-                    )
-                name = statement.target.id
-                value_expr = statement.value
-            else:
-                name = None
-                value_expr = None
-            if name is not None and value_expr is not None:
+            assignment = _named_assignment(statement, "Warmup case")
+            if assignment is not None:
+                name, value_expr = assignment
                 call_name = (
                     (get_ast_full_name(value_expr.func) or "").split(".")[-1]
                     if isinstance(value_expr, ast.Call)
@@ -827,31 +806,12 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
             case = _eval_dispatch_expr(return_expr, evaluated, globals_)
             if not isinstance(case, Mapping):
                 raise TypeError("AST-traced warmup cases must return a mapping")
-            inline_domains = [
-                (name, _value_expander(value))
-                for name, value in case.items()
-                if isinstance(value, WarmupChoices | WarmupIntRange)
-            ]
-            if not inline_domains:
-                yield dict(case)
-                continue
-            inline_names = tuple(name for name, _ in inline_domains)
-            for inline_values in itertools.product(
-                *(values for _, values in inline_domains)
+            if any(
+                isinstance(value, WarmupChoices | WarmupIntRange)
+                for value in case.values()
             ):
-                yield dict(case) | dict(zip(inline_names, inline_values))
-
-    def _trace_warmup_cases(
-        self,
-        cases_fn: Callable[..., Any],
-        *args: Any,
-        **kwargs: Any,
-    ) -> list[CompileKeyT]:
-        """Trace symbolic warmup cases into deduplicated compile keys."""
-        keys: dict[CompileKeyT, None] = {}
-        for case in self._expand_warmup_cases(cases_fn, *args, **kwargs):
-            keys[self.CompileKey(**case)] = None
-        return list(keys)
+                raise TypeError("Warmup domains must be direct expressions")
+            yield dict(case)
 
     def dispatch(self, **kwargs: Any) -> CompileKeyT:
         """Build one compile key from one concrete dispatch point."""
