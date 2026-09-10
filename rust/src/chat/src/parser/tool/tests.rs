@@ -148,6 +148,10 @@ fn factory_new_resolves_default_patterns() {
         Some(names::DEEPSEEK_V4)
     );
     assert_eq!(
+        factory.resolve_name_for_model("DeepSeek-V4.1-Flash"),
+        Some(names::DEEPSEEK_V41)
+    );
+    assert_eq!(
         factory.resolve_name_for_model("deepseek-ai/DeepSeek-R1-0528"),
         Some(names::DEEPSEEK_V3)
     );

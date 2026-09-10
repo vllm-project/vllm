@@ -44,6 +44,8 @@ pub use self::step3p5::Step3p5ReasoningParser;
 pub type DeepSeekV3ReasoningParser = Qwen3ReasoningParser;
 /// DeepSeek V4 currently shares the standard `<think>...</think>` parser.
 pub type DeepSeekV4ReasoningParser = Qwen3ReasoningParser;
+/// DeepSeek V4.1 shares Qwen3's `<think>` reasoning format.
+pub type DeepSeekV41ReasoningParser = Qwen3ReasoningParser;
 /// GLM45 currently shares the standard `<think>...</think>` parser.
 pub type Glm45ReasoningParser = Qwen3ReasoningParser;
 /// Kimi K2 currently shares the standard `<think>...</think>` parser.

@@ -34,6 +34,7 @@ from .device import DeviceConfig
 from .diffusion import DiffusionConfig
 from .ec_manager_config import EncoderCacheManagerConfig
 from .ec_transfer import ECTransferConfig
+from .engram import EngramConfig
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
@@ -79,6 +80,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "DeepseekV4ForCausalLM",
         "DeepseekV4ForConditionalGeneration",
         "DeepSeekV4MTPModel",
+        "DeepseekV41ForCausalLM",
         "Dots3NoteForCausalLM",
         "Dots3NoteMTPModel",
         "Glm5NextForCausalLM",
@@ -367,6 +369,9 @@ class VllmConfig:
     """Model weight offloading configuration."""
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
+    engram_config: EngramConfig | None = None
+    """Optional Engram configuration, only valid for models with n-gram
+    embeddings."""
     mamba_config: MambaConfig = Field(default_factory=MambaConfig)
     """Mamba configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
@@ -503,6 +508,11 @@ class VllmConfig:
             vllm_factors.append(self.attention_config.compute_hash())
         else:
             vllm_factors.append("None")
+        vllm_factors.append(
+            self.engram_config.compute_hash()
+            if self.engram_config is not None
+            else "None"
+        )
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
         else:
@@ -1080,6 +1090,22 @@ class VllmConfig:
         if not self.use_v2_model_runner:
             raise ValueError("trace replay requires Model Runner V2")
 
+    def _verify_engram_config(self) -> None:
+        """Validate Engram settings against the model being served."""
+        if self.engram_config is None:
+            return
+        model_config = self.model_config
+        speculative_config = self.speculative_config
+        # Draft configs inherit the target's groups and settings, and MTP
+        # layers carry no engram of their own, so validate the target.
+        if (
+            speculative_config is not None
+            and model_config is speculative_config.draft_model_config
+        ):
+            model_config = speculative_config.target_model_config
+        self.engram_config.verify_model_config(model_config)
+        logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1092,6 +1118,7 @@ class VllmConfig:
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
         self.try_verify_and_update_config()
+        self._verify_engram_config()
 
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.

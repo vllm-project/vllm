@@ -174,6 +174,10 @@ struct ResolvedMultimodalSpec {
     modality: Modality,
     field_layouts: EncoderFieldLayouts,
     keep_on_cpu_keys: HashSet<String>,
+    /// Spec-declared wire key for the primary encoder input tensor, when it
+    /// differs from the per-modality default (e.g. `"patches"` for
+    /// DeepSeek-V4.1 images).
+    encoder_input_key: Option<String>,
 }
 
 impl ResolvedMultimodalSpec {
@@ -183,10 +187,14 @@ impl ResolvedMultimodalSpec {
             modality,
             field_layouts: raw.encoder_field_layouts_for(modality),
             keep_on_cpu_keys: raw.keep_on_cpu_keys_for(modality).into_iter().collect(),
+            encoder_input_key: raw.encoder_input_key_for(modality),
         }
     }
 
-    fn primary_key(&self) -> &'static str {
+    fn primary_key(&self) -> &str {
+        if let Some(key) = &self.encoder_input_key {
+            return key;
+        }
         match self.modality {
             Modality::Image => image::IMAGE_PRIMARY_KEY,
             Modality::Video => video::VIDEO_PRIMARY_KEY,
@@ -858,6 +866,9 @@ mod tests {
     pub(super) const QWEN3_IMAGE_PAD_ID: u32 = 151655;
     pub(super) const QWEN3_VIDEO_PAD_ID: u32 = 151656;
 
+    pub(super) const DEEPSEEK_V41_IMAGE_ID: u32 = 129264;
+    pub(super) const DEEPSEEK_V41_IMAGE_PAD_ID: u32 = 129265;
+
     fn llama4_tokenizer() -> TestTokenizer {
         TestTokenizer::new()
             .with_regular_token("<|image_start|>", LLAMA4_IMAGE_START_ID)
@@ -969,6 +980,33 @@ mod tests {
 
         assert_eq!(info.placeholder_token(Modality::Image), Some("<|image|>"));
         assert_eq!(info.placeholder_token(Modality::Video), None);
+    }
+
+    fn deepseek_v41_info() -> MultimodalModelInfo {
+        let config = serde_json::json!({
+            "model_type": "deepseek_v41",
+            "image_token_id": DEEPSEEK_V41_IMAGE_ID,
+        });
+        let tokenizer = TestTokenizer::new()
+            .with_regular_token("<｜deepseek_image｜>", DEEPSEEK_V41_IMAGE_ID)
+            .with_regular_token("<|place_holder_mm_span_0436|>", DEEPSEEK_V41_IMAGE_PAD_ID);
+        test_info("deepseek_v41", config, tokenizer)
+    }
+
+    #[test]
+    fn deepseek_v41_resolves_image_support_only() {
+        let info = deepseek_v41_info();
+
+        assert_eq!(
+            info.placeholder_token(Modality::Image),
+            Some("<｜deepseek_image｜>")
+        );
+        assert_eq!(info.placeholder_token(Modality::Video), None);
+        let image = info.image.as_ref().expect("image support");
+        assert_eq!(image.placeholder.marker_token_id, DEEPSEEK_V41_IMAGE_ID);
+        assert_eq!(image.placeholder.embed_token_id, DEEPSEEK_V41_IMAGE_ID);
+        // The engine's forward kwargs pop `patches` (not `pixel_values`).
+        assert_eq!(image.spec.primary_key(), "patches");
     }
 
     #[test]

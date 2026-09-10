@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CUDAGraphMode
+from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -800,6 +800,32 @@ def rocm_fp8_mqa_logits(
         return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
 
+def _max_decode_logits_rows(num_batched_tokens: int) -> int:
+    """Upper bound on decode rows the paged-MQA logits buffer can ever hold.
+
+    ``rocm_fp8_paged_mqa_logits`` sizes its workspace as
+    ``(batch_size * next_n, max_model_len)``. ``batch_size`` is bounded by
+    ``max_num_seqs`` and ``next_n`` by ``1 + num_speculative_tokens``, which is
+    far tighter than ``max_num_batched_tokens`` -- 192 vs 16384 for a typical
+    32-seq DSpark-5 deployment. The loose bound is harmless at short contexts
+    but scales with ``max_model_len``, so at the model's full context it asks
+    for tens of TiB and the engine cannot start. Take whichever valid bound is
+    smaller; the workspace is locked after profiling, so it must not be under-
+    estimated.
+    """
+    try:
+        vllm_config = get_current_vllm_config()
+    except Exception:
+        return num_batched_tokens
+    scheduler_config = getattr(vllm_config, "scheduler_config", None)
+    max_num_seqs = getattr(scheduler_config, "max_num_seqs", None)
+    if not max_num_seqs:
+        return num_batched_tokens
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    num_spec = getattr(speculative_config, "num_speculative_tokens", 0) or 0
+    return min(num_batched_tokens, max_num_seqs * (1 + num_spec))
+
+
 def rocm_aiter_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
@@ -816,6 +842,9 @@ def rocm_aiter_sparse_attn_indexer_fake(
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
     compress_ratio: int = 1,
+    candidate_blocks: torch.Tensor | None = None,
+    candidate_block_size: int = 0,
+    candidate_write: bool = False,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -837,6 +866,9 @@ def rocm_aiter_sparse_attn_indexer(
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
     compress_ratio: int = 1,
+    candidate_blocks: torch.Tensor | None = None,
+    candidate_block_size: int = 0,
+    candidate_write: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -862,15 +894,15 @@ def rocm_aiter_sparse_attn_indexer(
         )
 
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
-        # batch_size * next_n <= hidden_states.shape[0] == max_num_batched_tokens
+        decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
         if _ON_GFX942 or _ON_GFX950:
             workspace_manager.get_simultaneous(
-                ((hidden_states.shape[0], max_model_len), torch.float32),
+                ((decode_rows, max_model_len), torch.float32),
             )
         else:
             workspace_manager.get_simultaneous(
                 (
-                    (q_fp8.shape[1], hidden_states.shape[0], max_model_len),
+                    (q_fp8.shape[1], decode_rows, max_model_len),
                     torch.float32,
                 ),
             )
@@ -900,6 +932,9 @@ def rocm_aiter_sparse_attn_indexer(
             topk_indices_buffer,
             skip_k_cache_insert,
             compress_ratio,
+            candidate_blocks,
+            candidate_block_size,
+            candidate_write,
         )
     layer_attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
@@ -955,6 +990,30 @@ def rocm_aiter_sparse_attn_indexer(
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
             )
+            if candidate_blocks is not None:
+                from vllm.model_executor.layers.sparse_attn_indexer import (
+                    _apply_candidate_mask,
+                    _select_candidate_blocks,
+                )
+
+                chunk_candidates = candidate_blocks[chunk.token_start : chunk.token_end]
+                if candidate_write:
+                    _select_candidate_blocks(
+                        logits,
+                        chunk.cu_seqlen_ks,
+                        chunk.cu_seqlen_ke,
+                        chunk_candidates.shape[1],
+                        candidate_block_size,
+                        chunk_candidates,
+                    )
+                else:
+                    _apply_candidate_mask(
+                        logits,
+                        chunk.cu_seqlen_ks,
+                        chunk.cu_seqlen_ke,
+                        chunk_candidates,
+                        candidate_block_size,
+                    )
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
@@ -1022,6 +1081,37 @@ def rocm_aiter_sparse_attn_indexer(
             max_model_len=max_model_len,
         )
 
+        if candidate_blocks is not None:
+            from vllm.model_executor.layers.sparse_attn_indexer import (
+                _apply_candidate_mask,
+                _select_candidate_blocks,
+            )
+
+            num_rows = logits.shape[0]
+            visible = decode_metadata.seq_lens.reshape(-1)
+            if visible.numel() != num_rows:
+                visible = visible.repeat_interleave(next_n)
+            visible = visible[:num_rows].to(torch.int64)
+            row_starts = torch.zeros_like(visible)
+            decode_candidates = candidate_blocks[:num_rows]
+            if candidate_write:
+                _select_candidate_blocks(
+                    logits,
+                    row_starts,
+                    visible,
+                    decode_candidates.shape[1],
+                    candidate_block_size,
+                    decode_candidates,
+                )
+            else:
+                _apply_candidate_mask(
+                    logits,
+                    row_starts,
+                    visible,
+                    decode_candidates,
+                    candidate_block_size,
+                )
+
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
         num_rows = logits.shape[0]
 
@@ -1078,6 +1168,10 @@ def _decode_e8m0_scales(scale: torch.Tensor) -> torch.Tensor:
         )
 
         return _upcast_e8m0_to_fp32(scale).contiguous()
+    if scale.dtype == torch.uint8:
+        # MXFP8 parameters preserve E8M0 scales as their raw exponent bytes.
+        # They are biased exponents, not numeric uint8 scale values.
+        return torch.exp2(scale.to(torch.int16).to(torch.float32) - 127.0)
     return scale.to(torch.float32)
 
 
@@ -1202,14 +1296,17 @@ def _get_cached_wo_a_bf16(
     cached = getattr(wo_a, "_dsv4_wo_a_bf16", None)
     if cached is not None:
         return cached
-    if hasattr(wo_a, "weight_scale_inv"):
+    weight_scale = getattr(wo_a, "weight_scale_inv", None)
+    if weight_scale is None:
+        # ModelOpt MXFP8 stores the multiplicative E8M0 scale without the
+        # historical ``_inv`` suffix.
+        weight_scale = getattr(wo_a, "weight_scale", None)
+    if weight_scale is not None:
         wo_a_weight = wo_a.weight.view(n_local_groups, o_lora_rank, hidden_dim).to(
             torch.float32
         )
         wo_a_scale = _expand_2d_block_scales(
-            wo_a.weight_scale_inv.view(
-                n_local_groups, -1, wo_a.weight_scale_inv.shape[-1]
-            ),
+            weight_scale.view(n_local_groups, -1, weight_scale.shape[-1]),
             o_lora_rank,
             hidden_dim,
         )

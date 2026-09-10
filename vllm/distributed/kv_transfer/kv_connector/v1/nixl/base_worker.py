@@ -175,7 +175,7 @@ class NixlBaseConnectorWorker:
         num_fa_descs = self.num_regions * num_blocks
 
         # All-attention fast path: single vectorized broadcast.
-        if num_ssm_regions == 0:
+        if num_ssm_regions == 0 and not self._scratch_region_indices:
             # NOTE (NickLucche) With HMA, every kv group has the same number of layers
             # and layers from different groups share the same kv tensor.
             # eg block_ids=[[1, 2], [3]]->blocks [1, 2] need to be
@@ -416,11 +416,13 @@ class NixlBaseConnectorWorker:
                     for spec in iter_layer_specs(group.kv_cache_spec)
                 )
             ]
-            if len(ple_groups) != 1 or len(ple_groups[0][1].layer_names) != 1:
+            if len(ple_groups) > 1 or any(
+                len(group.layer_names) != 1 for _, group in ple_groups
+            ):
                 raise ValueError(
-                    "CSA-linear NIXL requires exactly one PLE cache owner."
+                    "CSA-linear NIXL requires at most one PLE cache owner."
                 )
-            self._ple_group_index = ple_groups[0][0]
+            self._ple_group_index = ple_groups[0][0] if ple_groups else None
 
         if self._has_mamba:
             assert self._is_hma_required
