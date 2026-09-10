@@ -295,6 +295,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GlmMoeDsaForCausalLM": _HfExamplesInfo(
         "zai-org/GLM-5", min_transformers_version="5.0.1", is_available_online=False
     ),
+    "Glm5NextForCausalLM": _HfExamplesInfo("zai-org/GLM-5.3-Flash"),
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2"),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
@@ -364,6 +365,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "tiny": "ai21labs/Jamba-tiny-dev",
             "random": "ai21labs/Jamba-tiny-random",
         },
+    ),
+    "K2HorizonForCausalLM": _HfExamplesInfo(
+        "IFM/K2-Horizon-36B",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "KimiLinearForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Linear-48B-A3B-Instruct", trust_remote_code=True
@@ -532,9 +538,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         is_available_online=True,
         max_transformers_version="5.3",
         transformers_version_reason={
-            "vllm": (
-                "vllm upgraded transformers above v5.4 where "
-                "validate_rope() no longer accepts ignore_keys param"
+            "hf": (
+                "Transformers v5.4 removed the ignore_keys param from "
+                "validate_rope(); vLLM patches validate_rope() and is unaffected"
             )
         },
     ),
@@ -803,6 +809,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"command-a-plus": "CohereLabs/command-a-plus-05-2026-bf16"},
         min_transformers_version="5.9.0",
     ),
+    "CohereCompassForConditionalGeneration": _HfExamplesInfo(
+        "CohereLabs/North-Micro-Vision-Instruct",
+        min_transformers_version="5.16.0",
+    ),
     "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Cosmos3-Nano",
         extras={"super": "nvidia/Cosmos3-Super"},
@@ -832,6 +842,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "DeepseekOCR2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-OCR-2",
+    ),
+    "DeepseekV4ForConditionalGeneration": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
     ),
     "Dots3NoteForCausalLM": _HfExamplesInfo(
         "dots-studio/dots3-note-prev",
@@ -867,12 +880,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
     ),
     "FunASRForConditionalGeneration": _HfExamplesInfo(
-        "allendou/Fun-ASR-Nano-2512-vllm",
+        "FunAudioLLM/Fun-ASR-Nano-2512-vllm",
         trust_remote_code=True,
-        max_transformers_version="5.1",
+        max_transformers_version="5.15",
         transformers_version_reason={
-            "vllm": "Incompatible with transformers v5.2+ "
-            "(dict object has no attribute '__name__').",
+            "vllm": "The official Fun-ASR-Nano vLLM package is validated "
+            "through transformers v5.15.0; newer versions require separate "
+            "validation.",
         },
     ),
     "FunAudioChatForConditionalGeneration": _HfExamplesInfo(
@@ -926,6 +940,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "zai-org/GLM-OCR",
         min_transformers_version="5.1.0",
     ),
+    "Glm5NextForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-5.3-Flash"),
     "H2OVLChatModel": _HfExamplesInfo(
         "h2oai/h2ovl-mississippi-800m",
         trust_remote_code=True,
@@ -1723,8 +1738,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "GlmOcrMTPModel": _HfExamplesInfo(
         "zai-org/GLM-OCR",
         speculative_model="zai-org/GLM-OCR",
-        is_available_online=False,
         min_transformers_version="5.1.0",
+    ),
+    "Glm5NextMTPModel": _HfExamplesInfo(
+        "zai-org/GLM-5.3-Flash",
+        speculative_model="zai-org/GLM-5.3-Flash",
     ),
     "HYV3MTPModel": _HfExamplesInfo(
         "tencent/Hy3-preview",

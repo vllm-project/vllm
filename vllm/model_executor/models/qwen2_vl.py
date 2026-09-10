@@ -85,6 +85,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
@@ -536,6 +537,7 @@ class Qwen2VisionTransformer(nn.Module):
         vision_config: Qwen2VLVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -562,6 +564,9 @@ class Qwen2VisionTransformer(nn.Module):
             temporal_patch_size=temporal_patch_size,
             in_channels=in_channels,
             embed_dim=embed_dim,
+        )
+        self.input_norm = (
+            input_norm if input_norm is not None else FusedInputNorm.identity()
         )
 
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
@@ -707,7 +712,7 @@ class Qwen2VisionTransformer(nn.Module):
         return {
             "rotary_pos_emb_cos": rotary_pos_emb_cos,
             "rotary_pos_emb_sin": rotary_pos_emb_sin,
-            "cu_seqlens": cu_seqlens.to(device=device, non_blocking=True),
+            "cu_seqlens": async_tensor_h2d(cu_seqlens, device),
             "max_seqlen": max_seqlen,
         }
 
@@ -719,7 +724,7 @@ class Qwen2VisionTransformer(nn.Module):
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         # patchify
-        x = x.to(device=self.device, dtype=self.dtype)
+        x = self.input_norm(x.to(device=self.device), self.dtype)
         x = self.patch_embed(x)
 
         if encoder_metadata is None:
@@ -1300,9 +1305,9 @@ class Qwen2VLForConditionalGeneration(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
+                input_norm=FusedInputNorm.from_model_config(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
-            self.input_norm = FusedInputNorm.from_model_config(self.model_config)
 
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
@@ -1373,11 +1378,13 @@ class Qwen2VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-            pixel_values = self.input_norm(pixel_values, self.visual.dtype)
 
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw.tolist(), rope_type="rope_3d"
+                    self.visual,
+                    pixel_values.type(self.visual.dtype),
+                    grid_thw.tolist(),
+                    rope_type="rope_3d",
                 )
             else:
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
@@ -1397,13 +1404,10 @@ class Qwen2VLForConditionalGeneration(
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
-            pixel_values_videos = self.input_norm(
-                pixel_values_videos, self.visual.dtype
-            )
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual,
-                    pixel_values_videos,
+                    pixel_values_videos.type(self.visual.dtype),
                     grid_thw.tolist(),
                     rope_type="rope_3d",
                 )
