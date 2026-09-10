@@ -22,7 +22,7 @@ def render(messages, **kwargs):
 
 @pytest.mark.parametrize("case_id", [1, 2])
 def test_reference_encoder_fixtures(case_id):
-    # Expected prompts come from ckpt20260903's ds-code-260903-new encoder.
+    # Expected prompts come from the DeepSeek V4.1 reference encoder.
     data = json.loads(
         (FIXTURES / "deepseek_v4" / f"test_input_{case_id}.json").read_text()
     )
