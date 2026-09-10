@@ -147,9 +147,17 @@ def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
         drafter. Mapped to both eagle_aux_hidden_state_layer_ids and
         target_layer_ids (DSpark's i-1 layer semantics).
     """
-    pre_trained_config["architectures"] = ["Qwen3DSparkModel"]
-    # Speculators DSpark uses the 1+N fill-in block (anchor is a bonus token).
-    pre_trained_config["dspark_bonus_anchor"] = True
+    architectures = config_dict.get("architectures") or []
+    architecture = (
+        "Qwen3VLDSparkModel"
+        if "Qwen3VLDSparkModel" in architectures
+        else "Qwen3DSparkModel"
+    )
+    pre_trained_config["architectures"] = [architecture]
+
+    sample_from_anchor = config_dict.get("sample_from_anchor", False)
+    pre_trained_config["sample_from_anchor"] = sample_from_anchor
+    pre_trained_config["dspark_bonus_anchor"] = not sample_from_anchor
 
     aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
     pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
