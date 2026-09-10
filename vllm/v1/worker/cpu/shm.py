@@ -147,6 +147,18 @@ gpu_block_table.BlockTables.compute_slot_mappings = (
 gpu_buffer_utils.StagedWriteTensor.apply_write = cpu_buffer_utils.apply_write
 gpu_buffer_utils.FusedStagedWriter.apply = cpu_buffer_utils.fused_apply
 
+# Patch multi-dimensional RoPE position setup.
+import vllm.v1.worker.cpu.mm.rope as cpu_rope
+import vllm.v1.worker.gpu.mm.rope as gpu_rope
+
+gpu_rope._prepare_rope_positions_kernel = TorchKernel(cpu_rope.prepare_rope_positions)
+
+import vllm.v1.worker.cpu.kv_zero as cpu_kv_zero
+import vllm.v1.worker.utils as worker_utils
+
+worker_utils.KVBlockZeroer.__init__ = cpu_kv_zero.init
+worker_utils.KVBlockZeroer.zero_block_ids = cpu_kv_zero.zero_block_ids
+
 # Patch sampler kernels.
 import vllm.v1.worker.cpu.sample.gumbel as cpu_gumbel
 import vllm.v1.worker.gpu.sample.gumbel as gpu_gumbel
