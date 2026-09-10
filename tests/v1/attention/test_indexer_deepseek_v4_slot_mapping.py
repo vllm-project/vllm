@@ -157,3 +157,95 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_num_states():
         device=device,
     )
     torch.testing.assert_close(valid_slots, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_compressed_flattened_seq_lens_reuses_cudagraph_buffer():
+    """Flattened context lengths must keep one address across decode layouts."""
+    device = torch.device("cuda")
+    max_tokens = 32
+    compress_ratio = 4
+    speculative_config = SimpleNamespace(
+        num_speculative_tokens=3,
+        enable_adaptive_verification=False,
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        num_speculative_tokens=3,
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=max_tokens,
+            max_num_seqs=max_tokens,
+        ),
+        model_config=SimpleNamespace(max_model_len=1024),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+        attention_config=SimpleNamespace(
+            resolve_indexer_kv_dtype=lambda default: default
+        ),
+    )
+    builder = DeepseekV32IndexerMetadataBuilder(
+        kv_cache_spec=MLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            tokens_per_state=compress_ratio,
+        ),
+        layer_names=["dummy"],
+        vllm_config=vllm_config,
+        device=device,
+        block_table_width=1,
+    )
+    assert builder.use_flattening
+
+    def make_metadata(query_lens: list[int], context_lens: list[int]):
+        query_start_loc_cpu = torch.zeros(len(query_lens) + 1, dtype=torch.int32)
+        query_start_loc_cpu[1:] = torch.tensor(query_lens, dtype=torch.int32).cumsum(0)
+        query_start_loc = query_start_loc_cpu.to(device)
+        seq_lens = torch.tensor(
+            [
+                context_len + query_len
+                for context_len, query_len in zip(context_lens, query_lens)
+            ],
+            dtype=torch.int32,
+            device=device,
+        )
+        return CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens.cpu(),
+            num_reqs=len(query_lens),
+            num_actual_tokens=sum(query_lens),
+            max_query_len=max(query_lens),
+            max_seq_len=int(seq_lens.max().item()),
+            block_table_tensor=torch.arange(
+                len(query_lens), dtype=torch.int32, device=device
+            ).unsqueeze(1),
+            slot_mapping=torch.zeros(sum(query_lens), dtype=torch.int64, device=device),
+            causal=True,
+        )
+
+    # Both layouts use the same four-token graph size. The first build takes
+    # the max_decode_len > 1 path; the second takes max_decode_len == 1.
+    first = builder.build(0, make_metadata([2, 2], [100, 200]))
+    assert first.decode is not None
+    first_seq_lens = first.decode.seq_lens
+    torch.testing.assert_close(
+        first_seq_lens,
+        torch.tensor([[25], [25], [50], [50]], dtype=torch.int32, device=device),
+    )
+    first_ptr = first_seq_lens.data_ptr()
+
+    second = builder.build(0, make_metadata([1, 1, 1, 1], [400, 500, 600, 700]))
+    assert second.decode is not None
+    second_seq_lens = second.decode.seq_lens
+    torch.testing.assert_close(
+        second_seq_lens,
+        torch.tensor([[100], [125], [150], [175]], dtype=torch.int32, device=device),
+    )
+
+    assert second_seq_lens.data_ptr() == first_ptr
