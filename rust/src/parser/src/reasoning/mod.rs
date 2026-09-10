@@ -53,6 +53,8 @@ pub type Step3ReasoningParser = DeepSeekR1ReasoningParser;
 
 /// DeepSeek V4 currently shares the DeepSeek V3 reasoning parser.
 pub type DeepSeekV4ReasoningParser = DeepSeekV3ReasoningParser;
+/// DeepSeek V4.1 uses bare `<think>...</think>` delimiters.
+pub type DeepSeekV41ReasoningParser = DeepSeekV3ReasoningParser;
 /// GLM-4.7 and GLM-5 use bare reasoning delimiters.
 pub type Glm47ReasoningParser = DeepSeekV3ReasoningParser;
 /// Kimi K2 currently shares the DeepSeek V3 reasoning parser.

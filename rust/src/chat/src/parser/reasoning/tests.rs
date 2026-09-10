@@ -33,6 +33,10 @@ fn factory_resolves_deepseek_v4() {
         factory.resolve_name_for_model("deepseek_v4"),
         Some(names::DEEPSEEK_V4)
     );
+    assert_eq!(
+        factory.resolve_name_for_model("deepseek-ai/DeepSeek-V4.1-Flash"),
+        Some(names::DEEPSEEK_V41)
+    );
 }
 
 #[test]

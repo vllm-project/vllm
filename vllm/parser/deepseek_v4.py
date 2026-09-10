@@ -70,11 +70,17 @@ _PARTIAL_PARAM_RE = re.compile(
 )
 
 
-def _dsml_arg_converter(raw_args: str, partial: bool) -> str:
+def _dsml_arg_converter(
+    raw_args: str,
+    partial: bool,
+    *,
+    param_re: re.Pattern = _PARAM_RE,
+    partial_param_re: re.Pattern = _PARTIAL_PARAM_RE,
+) -> str:
     params: dict[str, object] = {}
 
     last_end = 0
-    for m in _PARAM_RE.finditer(raw_args):
+    for m in param_re.finditer(raw_args):
         name, is_str, value = m.group(1), m.group(2), m.group(3)
         if is_str == "true":
             params[name] = value
@@ -86,7 +92,7 @@ def _dsml_arg_converter(raw_args: str, partial: bool) -> str:
         last_end = m.end()
 
     if partial:
-        pm = _PARTIAL_PARAM_RE.search(raw_args, last_end)
+        pm = partial_param_re.search(raw_args, last_end)
         if pm:
             name, is_str, value = pm.group(1), pm.group(2), pm.group(3)
             if is_str == "true":
@@ -229,6 +235,8 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
 
 
 class DeepSeekV4Parser(ParserEngine):
+    parser_config = staticmethod(deepseek_v4_config)
+
     def __init__(
         self,
         tokenizer: TokenizerLike,
@@ -245,13 +253,15 @@ class DeepSeekV4Parser(ParserEngine):
         super().__init__(
             tokenizer,
             tools,
-            parser_engine_config=deepseek_v4_config(thinking=thinking),
+            parser_engine_config=self.parser_config(thinking=thinking),
             **kwargs,
         )
         self._arg_converter = self._convert_args
 
     def _convert_args(self, raw_args: str, partial: bool) -> str:
-        result = _dsml_arg_converter(raw_args, partial)
+        converter = self.parser_engine_config.arg_converter
+        assert converter is not None
+        result = converter(raw_args, partial)
         if not self._tools:
             return result
         func_name = next((s.name for s in self._tool_slots if s.args == raw_args), None)
