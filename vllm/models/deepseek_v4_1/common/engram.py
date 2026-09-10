@@ -42,10 +42,13 @@ from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
+    get_engram_dp_group,
+    get_engram_dp_size,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -53,6 +56,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -462,6 +466,21 @@ class NgramHashState(nn.Module):
         self._kv_cache_ref = weakref.ref(kv_cache)
         return True
 
+    def dummy_hashes(
+        self, input_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Participate in DP lookups without valid rows or hash-cache updates."""
+        num_tokens = input_ids.shape[0]
+        num_layers, max_ngram = self.multipliers.shape
+        num_heads = self.primes.shape[-1]
+        hashes = input_ids.new_full(
+            (num_tokens, num_layers, (max_ngram - 1) * num_heads),
+            DEAD_ID,
+            dtype=torch.int32,
+        )
+        keep = torch.zeros(num_tokens, dtype=torch.bool, device=input_ids.device)
+        return hashes, keep
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -546,6 +565,46 @@ class NgramHashState(nn.Module):
         return output
 
 
+def engram_head_shard_rank() -> int:
+    """This rank's slot among the hash-head shards of one engram table.
+
+    TP-major, so the shards a DP gather brings in are contiguous heads and
+    the following TP gather completes the head order.
+    """
+    dp_group = get_engram_dp_group()
+    dp_size = dp_group.world_size if dp_group is not None else 1
+    dp_rank = dp_group.rank_in_group if dp_group is not None else 0
+    return get_tensor_model_parallel_rank() * dp_size + dp_rank
+
+
+def engram_gathered_num_tokens() -> int:
+    """Per-replica token slot of the DP-gathered n-gram id stream."""
+    dp_metadata = get_forward_context().dp_metadata
+    if dp_metadata is None:
+        raise RuntimeError("a DP-shared engram table needs DP token metadata")
+    return int(dp_metadata.num_tokens_across_dp_cpu.max())
+
+
+def gather_engram_hashes(hash_ids: torch.Tensor) -> torch.Tensor:
+    """Collect the n-gram ids of every DP replica sharing one table.
+
+    Replicas are padded to a common token slot, so the gathered shape is
+    static under CUDA graph capture (where DP already pads alike).
+    """
+    dp_group = get_engram_dp_group()
+    if dp_group is None:
+        return hash_ids
+    slot = engram_gathered_num_tokens()
+    if hash_ids.shape[0] > slot:
+        raise ValueError("Engram token count exceeds the DP token slot")
+    if hash_ids.shape[0] < slot:
+        pad = hash_ids.new_full(
+            (slot - hash_ids.shape[0], *hash_ids.shape[1:]), DEAD_ID
+        )
+        hash_ids = torch.cat((hash_ids, pad))
+    return dp_group.all_gather(hash_ids, dim=0)
+
+
 def _engram_head_shard_weight_loader(
     param: torch.nn.Parameter, loaded_weight: torch.Tensor
 ) -> None:
@@ -623,8 +682,13 @@ class ParallelEngramEmbedding(nn.Module):
     """The n-gram hash table, sharded by complete hash heads over TP ranks.
     Rows stay fp8 and are dequantized with ue8m0 per-32 scales on lookup.
 
+    DP replicas that sit on the same node split the heads further
+    (`get_engram_dp_size()`), so a node holds one table instead of a copy per
+    replica; the lookup then covers every replica's tokens and `Engram.embed`
+    trades those tokens back for the heads the peers own.
+
     With `cpu_offload` the shard lives in pinned host memory and is read over
-    UVA instead of HBM; the TP sharding is unchanged either way.
+    UVA instead of HBM; the sharding is unchanged either way.
     """
 
     def __init__(
@@ -637,7 +701,7 @@ class ParallelEngramEmbedding(nn.Module):
     ):
         super().__init__()
         tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
+        dp_size = get_engram_dp_size()
         assert head_sizes and all(size > 0 for size in head_sizes)
         assert sum(head_sizes) <= num_embeddings
         if cpu_offload and not is_uva_available():
@@ -646,13 +710,19 @@ class ParallelEngramEmbedding(nn.Module):
         self.dim = dim
         self.block_size = block_size
         self.n_hash_cols = len(head_sizes)
-        self.part_n_hash_cols = triton.cdiv(self.n_hash_cols, tp_size)
-        self.head_start = tp_rank * self.part_n_hash_cols
+        num_shards = tp_size * dp_size
+        self.part_n_hash_cols = triton.cdiv(self.n_hash_cols, num_shards)
+        assert (num_shards - 1) * self.part_n_hash_cols < self.n_hash_cols, (
+            f"Engram sharding leaves ranks without hash heads: "
+            f"{self.n_hash_cols} heads over TP={tp_size} x DP={dp_size}"
+        )
+        self.head_start = engram_head_shard_rank() * self.part_n_hash_cols
         head_end = self.head_start + self.part_n_hash_cols
         self.vocab_start_idx = sum(head_sizes[: self.head_start])
         self.vocab_end_idx = sum(head_sizes[:head_end])
         self.part_num_embeddings = self.vocab_end_idx - self.vocab_start_idx
         self.tp_size = tp_size
+        self.dp_size = dp_size
         self.cpu_offload = cpu_offload
         self._views: tuple[torch.Tensor, torch.Tensor] | None = None
         self._view_src: tuple[int, int] | None = None
@@ -749,17 +819,21 @@ class ParallelEngramEmbedding(nn.Module):
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
         """indices: [num_tokens, n_hash_cols] -> [num_tokens, n_hash_cols, dim]
-        bf16, gathered from all TP shards."""
+        bf16, gathered from all shards for this replica's tokens."""
+        num_tokens = indices.shape[0]
+        if self.dp_size > 1:
+            indices = gather_engram_hashes(indices)
         out = torch.empty(
             (indices.shape[0], self.part_n_hash_cols, self.dim),
             dtype=torch.bfloat16,
             device=indices.device,
         )
         self.lookup(indices, out)
+        if self.dp_size > 1:
+            out = _gather_engram_rows(out, num_tokens)
         if self.tp_size > 1:
             out = tensor_model_parallel_all_gather(out, dim=1)
-            out = out[:, : self.n_hash_cols]
-        return out
+        return out[:, : self.n_hash_cols]
 
 
 @triton.jit(do_not_specialize=["num_kv_tokens"])
@@ -855,7 +929,7 @@ def _fused_engram_post_wkv_kernel(
 
 
 @triton.jit(do_not_specialize=["num_tokens", "token_start", "num_elements"])
-def _engram_sp_rows_kernel(
+def _engram_select_rows_kernel(
     gathered,
     output,
     num_tokens,
@@ -874,6 +948,51 @@ def _engram_sp_rows_kernel(
         gathered + source, (offsets < num_elements) & (tokens < num_tokens), other=0
     )
     tl.store(output + offsets, values, offsets < num_elements)
+
+
+def _engram_select_rows(
+    gathered: torch.Tensor,
+    output: torch.Tensor,
+    source_tokens: int,
+    token_start: int,
+    local_width: int,
+) -> None:
+    """Copy one token window out of a rank-major gathered buffer.
+
+    Both gathers land rank-major ([rank][token][local width]); this walks the
+    window the rank keeps and lays its ranks out side by side as width.
+    """
+    if output.numel() == 0:
+        return
+    _engram_select_rows_kernel[(triton.cdiv(output.numel(), 1024),)](
+        gathered,
+        output,
+        source_tokens,
+        token_start,
+        output.numel(),
+        local_width,
+        output.shape[1] * output.shape[2],
+        BLOCK_SIZE=1024,
+    )
+
+
+def _gather_engram_rows(staged: torch.Tensor, num_tokens: int) -> torch.Tensor:
+    """Exchange DP tokens for heads, retaining only this replica's tokens."""
+    dp_group = get_engram_dp_group()
+    assert dp_group is not None
+    slot, remainder = divmod(staged.shape[0], dp_group.world_size)
+    assert remainder == 0 and 0 <= num_tokens <= slot
+    gathered = dp_group.all_gather(staged, dim=0)
+    local_heads, dim = staged.shape[1:]
+    rows = staged.new_empty((num_tokens, dp_group.world_size * local_heads, dim))
+    _engram_select_rows(
+        gathered,
+        rows,
+        staged.shape[0],
+        dp_group.rank_in_group * slot,
+        local_heads * dim,
+    )
+    return rows
 
 
 class Engram(nn.Module):
@@ -931,41 +1050,75 @@ class Engram(nn.Module):
             requires_grad=False,
         )
 
-        max_tokens = get_current_vllm_config().scheduler_config.max_num_batched_tokens
-        # Keep lookup results alive across breakable graph segments.
+        vllm_config = get_current_vllm_config()
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        # Keep lookup results alive across breakable graph segments. A table
+        # shared by DP replicas stages every replica's tokens at once.
         self.staged_rows = torch.empty(
-            max_tokens,
+            max_tokens * self.embed_tokens.dp_size,
             self.embed_tokens.part_n_hash_cols,
             layout.head_dim,
             dtype=torch.bfloat16,
         )
 
+        self._extra_staged_rows = [
+            torch.empty_like(self.staged_rows)
+            for _ in range(vllm_config.parallel_config.num_ubatches - 1)
+        ]
+
+    def _staged_rows_for_ubatch(self) -> torch.Tensor:
+        ubatch_id = dbo_current_ubatch_id()
+        if ubatch_id == 0:
+            return self.staged_rows
+        return self._extra_staged_rows[ubatch_id - 1]
+
     def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
-        """Gather this layer's rows on the main stream before decoder layers."""
-        self.embed_tokens.lookup(hash_ids, self.staged_rows[: hash_ids.shape[0]])
+        """Gather this layer's rows on the main stream before decoder layers.
+
+        `hash_ids` covers every DP replica sharing the table (see
+        `gather_engram_hashes`), so only `embed` narrows back to this one.
+        """
+        rows = self._staged_rows_for_ubatch()[: hash_ids.shape[0]]
+        assert rows.shape[0] == hash_ids.shape[0], "engram staging buffer too small"
+        self.embed_tokens.lookup(hash_ids, rows)
+
+    def _trade_dp_tokens_for_heads(self, num_tokens: int) -> torch.Tensor:
+        """Keep this replica's tokens, take the heads its DP peers own.
+
+        An all-to-all would move `dp_size` times less, but the gather stays on
+        vLLM's own collective path and so survives graph capture.
+        """
+        dp_group = get_engram_dp_group()
+        assert dp_group is not None
+        slot = engram_gathered_num_tokens()
+        staged = self._staged_rows_for_ubatch()[: slot * dp_group.world_size]
+        return _gather_engram_rows(staged, num_tokens)
 
     def embed(self, hash_ids: torch.Tensor) -> torch.Tensor:
         """Gather heads, returning only local tokens when SP is enabled."""
-        rows = self.staged_rows[: hash_ids.shape[0]]
-        if self.embed_tokens.tp_size == 1:
-            return rows
+        if self.embed_tokens.dp_size > 1:
+            rows = self._trade_dp_tokens_for_heads(hash_ids.shape[0])
+            if self.embed_tokens.tp_size == 1:
+                # No TP gather follows to drop the padded heads.
+                return rows[:, : self.embed_tokens.n_hash_cols]
+        else:
+            rows = self._staged_rows_for_ubatch()[: hash_ids.shape[0]]
+            if self.embed_tokens.tp_size == 1:
+                return rows
         if self.use_sequence_parallel:
             tp_size = self.embed_tokens.tp_size
             num_tokens, local_heads, dim = rows.shape
             gathered = tensor_model_parallel_all_gather(rows, dim=0)
             chunk = (num_tokens + tp_size - 1) // tp_size
-            rows = rows.new_empty((chunk, self.embed_tokens.n_hash_cols, dim))
-            _engram_sp_rows_kernel[(triton.cdiv(rows.numel(), 1024),)](
+            out = rows.new_empty((chunk, self.embed_tokens.n_hash_cols, dim))
+            _engram_select_rows(
                 gathered,
-                rows,
+                out,
                 num_tokens,
                 get_tensor_model_parallel_rank() * chunk,
-                rows.numel(),
                 local_heads * dim,
-                self.embed_tokens.n_hash_cols * dim,
-                BLOCK_SIZE=1024,
             )
-            return rows
+            return out
         rows = tensor_model_parallel_all_gather(rows, dim=1)
         return rows[:, : self.embed_tokens.n_hash_cols]
 

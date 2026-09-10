@@ -32,6 +32,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
+from math import gcd
 from multiprocessing import shared_memory
 from typing import TYPE_CHECKING, Any, Protocol
 from unittest.mock import patch
@@ -59,6 +60,7 @@ from vllm.utils.torch_utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
 
@@ -1560,6 +1562,23 @@ def get_etp_group() -> GroupCoordinator:
     return _ETP
 
 
+_ENGRAM_DP: GroupCoordinator | None = None
+
+
+def get_engram_dp_group() -> GroupCoordinator | None:
+    """Return the DP replicas that share one engram embedding table.
+
+    None when every replica holds a full (TP-sharded) copy, which is the case
+    for models without engram layers and for replicas that span nodes.
+    """
+    return _ENGRAM_DP
+
+
+def get_engram_dp_size() -> int:
+    """Number of DP replicas one engram embedding table is sharded over."""
+    return _ENGRAM_DP.world_size if _ENGRAM_DP is not None else 1
+
+
 _DCP: GroupCoordinator | None = None
 
 
@@ -1917,6 +1936,48 @@ def init_distributed_environment(
             _INNER_DP_WORLD = _WORLD
 
 
+def _engram_dp_shard_size(
+    config: "VllmConfig",
+    world_size: int,
+    data_parallel_size: int,
+    replica_size: int,
+    enable_elastic_ep: bool,
+) -> int:
+    """DP replicas that can share one engram table: those co-located on a node.
+
+    The tables run to ~100GB per layer, so a node holding one copy instead of
+    one per replica is a large win. Replicas on different nodes are left
+    alone: their per-step row exchange would land on the slow link.
+    """
+    from vllm.config.engram import model_has_engram_layers
+    from vllm.platforms import current_platform
+
+    if (
+        data_parallel_size == 1
+        or enable_elastic_ep
+        or not current_platform.is_cuda()
+        or not model_has_engram_layers(config.model_config)
+    ):
+        return 1
+    node_count = get_node_count()
+    if world_size % node_count:
+        return 1
+    ranks_per_node = world_size // node_count
+    if ranks_per_node % replica_size:
+        return 1
+    shard_size = gcd(data_parallel_size, ranks_per_node // replica_size)
+    if shard_size > 1 and node_count > 1:
+        # The arithmetic assumes uniform nodes with contiguous global ranks.
+        for start in range(0, world_size, ranks_per_node):
+            same_node = in_the_same_node_as(get_world_group().cpu_group, start)
+            if any(
+                bool(local) != (start <= rank < start + ranks_per_node)
+                for rank, local in enumerate(same_node)
+            ):
+                return 1
+    return shard_size
+
+
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -2037,6 +2098,37 @@ def initialize_model_parallel(
             get_world_group().local_rank,
             backend,
             group_name="etp",
+        )
+
+    # Build the engram embedding group: the DP replicas that shard one n-gram
+    # table between them. Hash IDs and lookup results are gathered over
+    # it every step, so it never spans nodes.
+    global _ENGRAM_DP
+    assert _ENGRAM_DP is None, "engram data parallel group is already initialized"
+    engram_dp_size = _engram_dp_shard_size(
+        config,
+        world_size,
+        data_parallel_size,
+        tensor_model_parallel_size
+        * pipeline_model_parallel_size
+        * prefill_context_model_parallel_size,
+        enable_elastic_ep,
+    )
+    if engram_dp_size > 1:
+        group_ranks = (
+            all_ranks.permute(0, 2, 3, 4, 1).reshape(-1, engram_dp_size).unbind(0)
+        )
+        _ENGRAM_DP = init_model_parallel_group(
+            [x.tolist() for x in group_ranks],
+            get_world_group().local_rank,
+            backend,
+            group_name="edp",
+        )
+        logger.info_once(
+            "Engram tables are sharded over %d ranks (TP=%d x DP=%d)",
+            engram_dp_size * tensor_model_parallel_size,
+            tensor_model_parallel_size,
+            engram_dp_size,
         )
 
     # Build the DCP model-parallel groups.
@@ -2284,6 +2376,11 @@ def destroy_model_parallel():
     if _TP:
         _TP.destroy()
     _TP = None
+
+    global _ENGRAM_DP
+    if _ENGRAM_DP:
+        _ENGRAM_DP.destroy()
+    _ENGRAM_DP = None
 
     global _DCP
     if _DCP:

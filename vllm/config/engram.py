@@ -34,6 +34,16 @@ def _default_cpu_offload() -> bool:
     return envs.VLLM_PLE_CPU_OFFLOAD
 
 
+def model_has_engram_layers(model_config: "ModelConfig | None") -> bool:
+    """Whether the model carries n-gram embedding layers."""
+    if model_config is None:
+        return False
+    field = _NGRAM_LAYER_FIELDS.get(model_config.architecture)
+    if field is None:
+        return False
+    return bool(getattr(model_config.hf_text_config, field, None))
+
+
 @config
 class EngramConfig:
     """Configuration for Engram embedding storage and sharding."""
