@@ -22,11 +22,12 @@ PROMPT = "Paris is the capital of France. " * 24
 
 
 @pytest.fixture(
-    scope="module",
     params=[(False, True), (True, True), (True, False)],
     ids=["MRV1-eager", "MRV2-eager", "MRV2-graph"],
 )
 def server_url(request):
+    # Keep this function-scoped so the server releases GPU memory before
+    # vLLM's function-scoped global cleanup fixture runs.
     use_v2, eager = request.param
     with server(
         model=MODEL,
