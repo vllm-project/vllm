@@ -760,15 +760,22 @@ def is_test_module(repo_path: str) -> bool:
 
 
 def all_test_modules() -> list[str]:
-    """Every tracked test module under ``tests/``, sorted. Tracked-only (via
-    ``git ls-files``) so a developer's local scratch files are never flagged."""
-    tracked = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "ls-files", "tests/"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    return sorted(path for path in tracked.splitlines() if is_test_module(path))
+    """Every test module under ``tests/``, sorted. Prefers ``git ls-files`` so a
+    developer's local scratch files are never flagged; falls back to a
+    filesystem walk when run outside a git checkout - the CI test images bake in
+    ``tests/`` with no ``.git``, and there are no untracked scratch files there.
+    """
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "ls-files", "tests/"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        paths = tracked.splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        paths = [p.relative_to(REPO_ROOT).as_posix() for p in TESTS_DIR.rglob("*.py")]
+    return sorted(path for path in paths if is_test_module(path))
 
 
 def load_allowlist() -> set[str]:

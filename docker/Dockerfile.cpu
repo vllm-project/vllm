@@ -465,6 +465,10 @@ ADD ./benchmarks/ ./benchmarks/
 ADD ./vllm/collect_env.py .
 ADD ./docker/ ./docker/
 ADD ./.buildkite/ ./.buildkite/
+# tools/ carries repo-tooling code that a few tests exercise directly
+# (e.g. tests/tools/test_check_test_tethering.py imports
+# tools.pre_commit.check_test_tethering).
+ADD ./tools/ ./tools/
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
