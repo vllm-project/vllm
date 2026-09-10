@@ -23,8 +23,8 @@ use serde_json::Value;
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
+use vllm_chat::GenerationConfigMode;
 use vllm_chat::multimodal::MmLimitPerPrompt;
-use vllm_chat::{GenerationConfigMode, ReasoningParserFactory};
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
@@ -756,13 +756,7 @@ impl ServeArgs {
 }
 
 fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -> Option<String> {
-    match selection {
-        ParserSelection::Auto => ReasoningParserFactory::global()
-            .resolve_name_for_model(model)
-            .map(str::to_string),
-        ParserSelection::None => None,
-        ParserSelection::Explicit(name) => Some(name.clone()),
-    }
+    selection.resolve_reasoning_name(model).map(str::to_owned)
 }
 
 /// Allocate fresh IPC endpoints for one managed frontend instance.

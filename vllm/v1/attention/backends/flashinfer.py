@@ -628,6 +628,9 @@ class FlashInferTrtllmAPIDecode:
     mask: torch.Tensor | None = None
     """Packed XQA draft mask."""
 
+    dcp_query_start_loc: torch.Tensor | None = None
+    """Decode query boundaries for masking empty DCP shards during reduction."""
+
 
 @dataclass
 class FlashInferMetadata:
@@ -741,7 +744,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
             self.dcp_kv_cache_interleave_size = (
-                vllm_config.parallel_config.dcp_kv_cache_interleave_size
+                vllm_config.parallel_config.cp_kv_cache_interleave_size
             )
         except AssertionError:
             # DCP might not be initialized in testing
@@ -1407,17 +1410,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if needs_seq_lens_cpu:
             with gpu_sync_allowed():
                 seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-            seq_lens_np = seq_lens_cpu.numpy()
-            num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
         else:
             seq_lens_cpu = None
-            seq_lens_np = None
-            num_blocks_np = None
 
         # Adjust seq_lens_cpu for DCP
         if self.use_dcp:
             assert seq_lens_cpu is not None
             if num_prefills > 0:
+                # Other attention groups may reuse the same common metadata.
+                seq_lens_cpu = seq_lens_cpu.clone()
                 qo_indptr_prefill_cpu = (
                     qo_indptr_cpu[num_decodes:] - qo_indptr_cpu[num_decodes]
                 )
@@ -1434,6 +1435,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.dcp_rank,
                 self.dcp_kv_cache_interleave_size,
             )
+
+        # Native paged attention consumes rank-local lengths (context only
+        # for DCP prefills), so derive its page counts after the conversion.
+        if seq_lens_cpu is not None:
+            seq_lens_np = seq_lens_cpu.numpy()
+            num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
+        else:
+            seq_lens_np = None
+            num_blocks_np = None
 
         # Adjust num_block_np for cascade attention
         if use_cascade:
@@ -1700,6 +1710,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     q_len_per_req=q_len_per_req,
                     q_cu_seq_lens=q_cu_seq_lens,
                     mask=decode_mask,
+                    dcp_query_start_loc=(
+                        qo_indptr[: num_decodes + 1] if self.use_dcp else None
+                    ),
                 )
             else:
                 assert seq_lens_cpu is not None
@@ -2566,6 +2579,8 @@ class FlashInferImpl(AttentionImpl):
                         out,
                         lse,
                         get_dcp_group(),
+                        seq_lens=seq_lens_decode,
+                        query_start_loc=attn_metadata.decode.dcp_query_start_loc,
                     )
                 elif needs_fp8_out:
                     output[:num_decode_tokens].copy_(out)
