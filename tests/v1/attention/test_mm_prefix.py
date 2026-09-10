@@ -701,7 +701,7 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
         TritonAttentionMetadata,
     )
     from vllm.v1.attention.backends.triton_flashinfer import (
-        TRITON_FLASHINFER as TritonFlashInferBackend,
+        TritonFlashInferBackend,
     )
     from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 
@@ -743,7 +743,8 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
         backend = create_composite_attention_backend(
             FlashInferBackend,
             TritonAttentionBackend,
-            name="CUSTOM",
+            name="ReversedCompositeBackend",
+            backend_name="CUSTOM",
             module=__name__,
             routing_policy=ReversedRouting,
         )

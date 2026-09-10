@@ -149,6 +149,7 @@ def create_composite_attention_backend(
     causal_backend: type[AttentionBackend],
     *,
     name: str,
+    backend_name: str,
     module: str,
     routing_policy: type[CompositeAttentionRouting],
     head_sizes: tuple[int, ...] = (),
@@ -367,7 +368,7 @@ def create_composite_attention_backend(
 
         @staticmethod
         def get_name():
-            return name
+            return backend_name
 
         @staticmethod
         def get_impl_cls():

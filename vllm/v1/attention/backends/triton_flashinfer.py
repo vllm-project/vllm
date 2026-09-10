@@ -9,10 +9,11 @@ from vllm.v1.attention.backends.composite import (
 from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 
-TRITON_FLASHINFER = create_composite_attention_backend(
+TritonFlashInferBackend = create_composite_attention_backend(
     TritonAttentionBackend,
     FlashInferBackend,
-    name="TRITON_FLASHINFER",
+    name="TritonFlashInferBackend",
+    backend_name="TRITON_FLASHINFER",
     module=__name__,
     routing_policy=MMPrefixAttentionRouting,
     head_sizes=(256, 512),

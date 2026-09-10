@@ -771,7 +771,7 @@ def test_mm_prefix_selects_composite_without_changing_causal_default(use_mm_pref
 def test_composite_rejects_features_not_shared_by_both_routes(feature_kwargs, reason):
     """Automatic selection must not admit features only one child can execute."""
     from vllm.engine.arg_utils import EngineArgs
-    from vllm.v1.attention.backends.triton_flashinfer import TRITON_FLASHINFER
+    from vllm.v1.attention.backends.triton_flashinfer import TritonFlashInferBackend
 
     config = EngineArgs(
         model="google/gemma-4-31B-it", dtype="bfloat16"
@@ -791,7 +791,7 @@ def test_composite_rejects_features_not_shared_by_both_routes(feature_kwargs, re
     )
     args.update(feature_kwargs)
     with set_current_vllm_config(config):
-        reasons = TRITON_FLASHINFER.validate_configuration(**args)
+        reasons = TritonFlashInferBackend.validate_configuration(**args)
     assert any(reason in message for message in reasons), reasons
 
 
