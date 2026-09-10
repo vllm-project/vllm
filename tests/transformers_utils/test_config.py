@@ -18,8 +18,10 @@ from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils import config as config_module
 from vllm.transformers_utils.config import (
     get_safetensors_params_metadata,
+    mrope_num_dims,
     patch_legacy_rope_type,
     try_get_generation_config,
+    uses_mrope,
 )
 from vllm.transformers_utils.configs.glm5_next import (
     Glm5NextConfig,
@@ -176,3 +178,49 @@ def test_safetensors_metadata_of_repo_without_safetensors():
         assert get_safetensors_params_metadata("some/pytorch-only-model") == {}
 
     get_safetensors_metadata.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("section_key", "mrope_section", "expected_num_dims"),
+    [
+        ("mrope_section", [16, 24, 24], 3),
+        ("mrope_section", [16, 16, 16, 16], 4),
+        # Interleaved M-RoPE takes 2 sections but still consumes 3D positions
+        ("mrope_section", [32, 32], 3),
+        # HunYuan-VL checkpoints ship the section under its legacy name
+        ("xdrope_section", [16, 16, 16, 16], 4),
+    ],
+)
+def test_mrope_num_dims(section_key, mrope_section, expected_num_dims):
+    config = PretrainedConfig()
+    config.rope_parameters = {"rope_type": "default", section_key: mrope_section}
+
+    assert uses_mrope(config)
+    assert mrope_num_dims(config) == expected_num_dims
+
+
+@pytest.mark.parametrize("section_name", ["mrope_section", "xdrope_section"])
+def test_mrope_num_dims_from_config_attribute(section_name):
+    """Some configs expose the section as an attribute rather than under
+    `rope_parameters`."""
+    config = PretrainedConfig()
+    setattr(config, section_name, [16, 16, 16, 16])
+
+    assert uses_mrope(config)
+    assert mrope_num_dims(config) == 4
+
+
+def test_mrope_num_dims_from_nested_rope_parameters():
+    """Sections nested by layer type must be found, not silently defaulted."""
+    config = PretrainedConfig()
+    config.rope_parameters = {
+        "full_attention": {"mrope_section": [16, 16, 16, 16]},
+        "linear_attention": {"rope_type": "default"},
+    }
+
+    assert uses_mrope(config)
+    assert mrope_num_dims(config) == 4
+
+
+def test_mrope_num_dims_without_mrope():
+    assert mrope_num_dims(PretrainedConfig()) == 0
