@@ -1036,15 +1036,20 @@ class Glm5NextForConditionalGeneration(
     has_inner_state: ClassVar[Literal[True]] = True
     is_hybrid: ClassVar[Literal[True]] = True
 
-    # GLM-5.3-Flash stores the dense-MLP gate/up as separate tensors (like
-    # ``Glm4vMoeForConditionalGeneration``, ``glm4_moe`` and ``deepseek_v2``),
-    # so the fused ``gate_up_proj`` must expand to its real shard names for
-    # per-layer quant-scheme resolution. The identity ``gate_up_proj`` entry
-    # inherited from ``Glm4vForConditionalGeneration`` (pre-fused gate_up_proj)
-    # would otherwise route the module to ``global_quant_config`` and mismatch
-    # at load for mixed-precision Quark checkpoints.
+    # Fused projections for LoRA
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvbfg_a": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "b_proj",
+            "f_a_proj",
+            "g_a_proj",
+        ],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        "wk_weights_proj": ["wk", "weights_proj"],
+        "qkv": ["qkv"],
     }
 
     # NOTE: weight-prefix mapping is inherited from Glm4vForConditionalGeneration
