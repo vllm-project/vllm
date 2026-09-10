@@ -7,6 +7,7 @@ from bisect import bisect_right
 from collections.abc import (
     AsyncGenerator,
     Callable,
+    Hashable,
     Mapping,
     MutableSequence,
     Sequence,
@@ -1782,10 +1783,9 @@ class SupportsMRoPE(Protocol):
             mm_features: Information about each multi-modal data item
 
         Returns:
-            Tuple of `(llm_positions, mrope_position_delta)`
-            - llm_positions: Tensor of shape `[num_dims, num_tokens]`, one row
-              per M-RoPE position channel (e.g. T/H/W)
-            - mrope_position_delta: Delta for position calculations
+            llm_positions: Tensor of shape `[num_dims, num_tokens]`, one row
+                per M-RoPE position channel (e.g. T/H/W).
+            mrope_position_delta: Delta for position calculations.
         """
         ...
 
@@ -1876,6 +1876,11 @@ class SupportsEncoderCudaGraph(Protocol):
         - Qwen-family: slice concatenated pixel_values by cumulative
           patch offsets, subset grid_thw by indices.
         - Batched models (CLIP): index pixel_values along dim 0.
+
+        Models that configure ``EncoderCudaGraphConfig.capture_axes`` must
+        additionally store the resolved per-axis keys (one key per axis, in
+        order) under ``ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG`` in the returned
+        dict; the manager pops it before the kwargs are used elsewhere.
         """
         ...
 
@@ -1910,8 +1915,16 @@ class SupportsEncoderCudaGraph(Protocol):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> "EncoderCudaGraphCaptureInputs":
-        """Create dummy inputs and buffers for CUDA graph capture."""
+        """Create dummy inputs and buffers for CUDA graph capture.
+
+        Args:
+            axis_keys: The resolved capture-axis keys (one per axis of
+                ``EncoderCudaGraphConfig.capture_axes``) this capture is for.
+                None or empty when no capture axes are configured; models
+                without capture axes ignore it.
+        """
         ...
 
     def prepare_encoder_cudagraph_replay_buffers(
