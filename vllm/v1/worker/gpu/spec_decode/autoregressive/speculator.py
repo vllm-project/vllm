@@ -275,6 +275,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 input_batch,
                 self.input_buffers.input_ids[:num_tokens_padded],
             )
+            prefill = self.pcp_manager.draft_prefill_batch
+            if prefill is not None:
+                num_tokens = prefill.num_tokens
+                num_tokens_padded = prefill.num_tokens_after_padding
         self.hidden_states[:num_tokens_padded].copy_(hidden_states)
 
         # When all requests are decoding (no true prefills), each has

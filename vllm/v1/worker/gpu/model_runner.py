@@ -1966,10 +1966,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Last rank: sample tokens
         draft_hidden_states = hidden_states
-        num_draft_tokens = hidden_states.shape[0]  # type: ignore[union-attr]
+        assert draft_hidden_states is not None
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
             self.pcp_manager, hidden_states, input_batch
         )
+        if self.pcp_manager is not None and aux_hidden_states is not None:
+            aux_hidden_states = [
+                self.pcp_manager.restore_hidden_states(states)
+                for states in aux_hidden_states
+            ]
 
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
@@ -2049,7 +2054,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             spec_hidden_states = draft_hidden_states
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pre_hc_hidden_states[:num_draft_tokens]  # type: ignore[union-attr]
+                spec_hidden_states = pre_hc_hidden_states[: draft_hidden_states.size(0)]
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,
