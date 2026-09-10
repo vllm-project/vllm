@@ -2,13 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for native offloading specs and their factory."""
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from vllm.v1.kv_offload.base import (
+    KV_OFFLOAD_CONFIG_INFO,
     CanonicalKVCaches,
+    OffloadingConfigInfo,
+    OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingSpec,
@@ -101,6 +106,15 @@ class SingleArgExternalOffloadingSpec(OffloadingSpec):
 
     def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
         raise NotImplementedError
+
+    @classmethod
+    def config_info_classes(
+        cls, extra_config: Mapping[str, Any]
+    ) -> tuple[tuple[str, type[OffloadingConfigInfo]], ...]:
+        return ()
+
+    def config_info(self) -> tuple[OffloadingConfigInfo, ...]:
+        return ()
 
 
 def test_pre_registered_specs_can_be_imported():
@@ -592,3 +606,104 @@ def test_build_metric_definitions_returns_counter_at_threshold():
     metrics = spec_cls.build_metric_definitions(extra_config)
 
     assert CPUOffloadingMetrics.STORES_SKIPPED in metrics
+
+
+@dataclass(frozen=True)
+class _CPUConfigInfo(OffloadingConfigInfo):
+    chunks: int
+    policy: str
+
+    @classmethod
+    def help_text(cls) -> str:
+        return "chunks holds the capacity, policy holds the eviction policy."
+
+
+@dataclass(frozen=True)
+class _FsConfigInfo(OffloadingConfigInfo):
+    path: str
+
+    @classmethod
+    def help_text(cls) -> str:
+        return "path holds the mount point."
+
+
+class _ConfigInfoOffloadingSpec(OffloadingSpec):
+    """Test-only spec that declares three config sources, two with one name.
+
+    The constructor takes the reported facts directly, because these tests
+    exercise the info hooks alone and need no offloading config.
+    """
+
+    def __init__(self, infos: tuple[OffloadingConfigInfo, ...]):
+        self._infos = infos
+        self.extra_config: Mapping[str, Any] = {}
+
+    def get_manager(self) -> OffloadingManager:
+        raise NotImplementedError
+
+    def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
+        raise NotImplementedError
+
+    @classmethod
+    def config_info_classes(
+        cls, extra_config: Mapping[str, Any]
+    ) -> tuple[tuple[str, type[OffloadingConfigInfo]], ...]:
+        return (("cpu", _CPUConfigInfo), ("fs", _FsConfigInfo), ("fs", _FsConfigInfo))
+
+    def config_info(self) -> tuple[OffloadingConfigInfo, ...]:
+        return self._infos
+
+
+def test_info_metric_prefixes_every_label_with_the_source_index():
+    metadata = _ConfigInfoOffloadingSpec.build_info_metric_definition({})[
+        KV_OFFLOAD_CONFIG_INFO
+    ]
+
+    assert isinstance(metadata, OffloadingGaugeMetadata)
+    assert metadata.labelnames == ("cpu0_chunks", "cpu0_policy", "fs1_path", "fs2_path")
+
+
+def test_info_metric_help_holds_one_title_per_source_name():
+    metadata = _ConfigInfoOffloadingSpec.build_info_metric_definition({})[
+        KV_OFFLOAD_CONFIG_INFO
+    ]
+
+    assert metadata.documentation.count("cpu:") == 1
+    assert metadata.documentation.count("fs:") == 1
+
+
+def test_info_labelvalues_follow_the_declared_label_order():
+    spec = _ConfigInfoOffloadingSpec(
+        (
+            _CPUConfigInfo(chunks=8, policy="lru"),
+            _FsConfigInfo(path="/a"),
+            _FsConfigInfo(path="/b"),
+        )
+    )
+
+    assert spec.info_labelvalues() == ("8", "lru", "/a", "/b")
+
+
+def test_info_labelvalues_reject_a_source_that_reports_no_facts():
+    """A source owns its own placeholder, so a missing config info is a bug."""
+    spec = _ConfigInfoOffloadingSpec(
+        (None, _FsConfigInfo(path="/a"), _FsConfigInfo(path="/b"))  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(AssertionError, match="got NoneType"):
+        spec.info_labelvalues()
+
+
+def test_info_labelvalues_reject_a_source_count_mismatch():
+    spec = _ConfigInfoOffloadingSpec((_CPUConfigInfo(chunks=8, policy="lru"),))
+
+    with pytest.raises(AssertionError, match="declares 3 config info"):
+        spec.info_labelvalues()
+
+
+def test_cpu_spec_declares_the_info_metric_without_labels():
+    metadata = CPUOffloadingSpec.build_info_metric_definition({})[
+        KV_OFFLOAD_CONFIG_INFO
+    ]
+
+    assert metadata.labelnames == ()

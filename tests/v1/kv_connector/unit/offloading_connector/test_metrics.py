@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
 from vllm.v1.kv_offload.base import (
+    KV_OFFLOAD_CONFIG_INFO,
     OffloadingCounterMetadata,
     OffloadingGaugeMetadata,
     OffloadingHistogramMetadata,
@@ -123,6 +124,10 @@ def _spec_cls_with_metric_definitions(
         @staticmethod
         def build_metric_definitions(extra_config):
             return metric_definitions
+
+        @staticmethod
+        def build_info_metric_definition(extra_config):
+            return {}
 
     return _FakeOffloadingSpec
 
@@ -784,3 +789,19 @@ def test_prom_metrics_rejects_undeclared_metric():
                 _StatsKey.DATA: {"unknown:metric": {(): 1}},
             }
         )
+
+
+def test_scheduler_stats_report_the_info_metric(request_runner):
+    """The info metric appears with no labels, because MockOffloadingSpec
+    declares no tiers."""
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+
+    stats = runner.connector_scheduler.get_stats()
+
+    assert stats is not None
+    assert stats.data[_StatsKey.TYPES][KV_OFFLOAD_CONFIG_INFO] == _MetricType.GAUGE
+    assert stats.data[_StatsKey.DATA][KV_OFFLOAD_CONFIG_INFO] == {(): 1}
