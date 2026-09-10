@@ -12,9 +12,16 @@ from vllm.config.watermarking import WatermarkConfig
 from vllm.platforms import current_platform
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
-from vllm.v1.watermarking.watermarker import WatermarkSample
+from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
+
+
+class StubWatermarker(Watermarker):
+    context_width = 1
+
+    def _sample_watermarked(self, logits, contexts):
+        return WatermarkSample(torch.tensor([7, 7]), logits + 10)
 
 
 @pytest.mark.parametrize("algorithm", ["gumbel"])
@@ -108,12 +115,6 @@ def test_gpu_sampler_warns_when_watermarking_is_enabled_for_greedy(monkeypatch):
 
 
 def test_gpu_sampler_respects_mixed_request_watermarking(monkeypatch):
-    class StubWatermarker:
-        context_width = 1
-
-        def sample(self, logits, contexts, random_sample):
-            return WatermarkSample(torch.tensor([7, 7]), logits + 10)
-
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = StubWatermarker()
     sampler.deduplicate_contexts = "single_turn"
@@ -153,12 +154,6 @@ def test_gpu_sampler_respects_mixed_request_watermarking(monkeypatch):
 
 
 def test_gpu_sampler_skips_watermarking_for_repeated_contexts(monkeypatch):
-    class StubWatermarker:
-        context_width = 1
-
-        def sample(self, logits, contexts, random_sample):
-            return WatermarkSample(torch.tensor([7, 7]), logits + 10)
-
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = StubWatermarker()
     sampler.deduplicate_contexts = "single_turn"
@@ -198,12 +193,6 @@ def test_gpu_sampler_skips_watermarking_for_repeated_contexts(monkeypatch):
 
 
 def test_gpu_sampler_can_disable_context_deduplication(monkeypatch):
-    class StubWatermarker:
-        context_width = 1
-
-        def sample(self, logits, contexts, random_sample):
-            return WatermarkSample(torch.tensor([7, 7]), logits + 10)
-
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = StubWatermarker()
     sampler.deduplicate_contexts = "none"

@@ -8,10 +8,7 @@ from vllm.platforms import current_platform
 from vllm.v1.watermarking import GumbelWatermarkDetector, GumbelWatermarker
 from vllm.v1.watermarking.gumbel import _gamma_survival_integer_shape
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
-from vllm.v1.worker.gpu.sample.watermark import (
-    mixed_philox_gumbel_sample,
-    philox_gumbel_sample,
-)
+from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
 
 
 def test_gamma_survival_integer_shape():
@@ -93,7 +90,7 @@ def test_fused_watermarker_handles_noncontiguous_inputs():
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
 )
 @pytest.mark.parametrize("use_fp64", [False, True])
-def test_mixed_philox_gumbel_sample_matches_separate_samplers(use_fp64: bool):
+def test_philox_gumbel_sample_skip_mask_matches_separate_samplers(use_fp64: bool):
     torch.manual_seed(0)
     logits = torch.randn(8, 8193, device="cuda")
     context_storage = torch.randint(0, 248320, (8, 8), dtype=torch.int64, device="cuda")
@@ -125,16 +122,15 @@ def test_mixed_philox_gumbel_sample_matches_separate_samplers(use_fp64: bool):
         use_fp64=use_fp64,
     )
     expected = torch.where(watermark_mask, watermarked, ordinary)
-    actual = mixed_philox_gumbel_sample(
+    actual = philox_gumbel_sample(
         logits,
         contexts,
         42,
-        repeated_mask,
-        watermarking,
-        req_indices,
-        temperatures,
-        seeds,
-        positions,
+        skip_mask=~watermark_mask,
+        expanded_idx_mapping=req_indices,
+        temperatures=temperatures,
+        seeds=seeds,
+        positions=positions,
         use_fp64=use_fp64,
     )
 
