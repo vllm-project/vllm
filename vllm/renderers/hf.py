@@ -9,7 +9,6 @@ import itertools
 import weakref
 from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Final, Literal, cast, overload
 
@@ -1016,25 +1015,21 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             )
 
     def _replace_executor(self) -> None:
-        """Replace the render executor with a fresh pool.
+        """Replace the inner render pool after a stuck worker.
 
         Called after a render timeout so that the stuck thread (which CPython
         cannot interrupt) does not permanently block all subsequent renders.
-        The old executor is abandoned with wait=False — its thread will
+        The executor *object* is kept so ``make_async`` wrappers bound at
+        init (tokenize, decode, pooling, derender) keep submitting work.
+        The old inner pool is abandoned with wait=False — its thread will
         eventually finish or be reaped on process exit.
         """
-        old = self._executor
-        old.shutdown(wait=False)
-        pool_workers = self.model_config.renderer_num_workers
-        self._executor = ThreadPoolExecutor(max_workers=pool_workers)
-        self._apply_chat_template_async = make_async(
-            safe_apply_chat_template, executor=self._executor
-        )
+        self._executor.replace_inner()
         logger.warning(
             "Chat template render timed out — executor pool replaced "
             "(%d worker(s)). The stuck thread may continue consuming "
             "CPU until the process exits.",
-            pool_workers,
+            self.model_config.renderer_num_workers,
         )
 
     async def _render_with_timeout(self, coro):

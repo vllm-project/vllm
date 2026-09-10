@@ -71,6 +71,31 @@ logger = init_logger(__name__)
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 
 
+class _SwappableExecutor(Executor):
+    """Executor whose inner pool can be replaced without changing identity.
+
+    ``make_async`` captures the executor object at wrap time. Replacing
+    ``self._executor`` with a new ``ThreadPoolExecutor`` would leave those
+    wrappers (tokenize, decode, pooling, derender) bound to a shutdown pool.
+    """
+
+    def __init__(self, max_workers: int) -> None:
+        super().__init__()
+        self._max_workers = max_workers
+        self._inner = ThreadPoolExecutor(max_workers=max_workers)
+
+    def submit(self, fn, /, *args, **kwargs):
+        return self._inner.submit(fn, *args, **kwargs)
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        self._inner.shutdown(wait=wait, cancel_futures=cancel_futures)
+
+    def replace_inner(self) -> None:
+        old = self._inner
+        old.shutdown(wait=False)
+        self._inner = ThreadPoolExecutor(max_workers=self._max_workers)
+
+
 class BaseRenderer(ABC, Generic[_T]):
     def __init__(self, config: "VllmConfig", tokenizer: _T | None) -> None:
         super().__init__()
@@ -109,7 +134,7 @@ class BaseRenderer(ABC, Generic[_T]):
         # multimodal processor receives a deep-copied tokenizer (see #36557)
         # so it is safe to run tokenization and MM preprocessing concurrently.
         pool_workers = config.model_config.renderer_num_workers
-        self._executor = ThreadPoolExecutor(max_workers=pool_workers)
+        self._executor = _SwappableExecutor(max_workers=pool_workers)
         self._resources.callback(self._executor.shutdown, wait=False)
 
         # Separate single-worker executor so tokenization never queues behind
