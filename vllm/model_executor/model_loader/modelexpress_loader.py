@@ -55,6 +55,14 @@ class ModelExpressModelLoader(BaseModelLoader):
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         self._loader.load_weights(model, model_config)
 
+    def on_sleep(self, level: int) -> None:
+        if hasattr(self._loader, "on_sleep"):
+            self._loader.on_sleep(level)
+
+    def on_wake_up(self, tags: list[str] | None) -> None:
+        if hasattr(self._loader, "on_wake_up"):
+            self._loader.on_wake_up(tags)
+
     @instrument(span_name="Load model")
     def load_model(
         self,
