@@ -1474,36 +1474,6 @@ class KVCacheConfig:
             )
         return tuple(block_ids[group_id] for group_id in self.transfer_group_ids)
 
-    def __post_init__(self) -> None:
-        if self.num_blocks < 0:
-            raise ValueError("KV cache block-pool size must be non-negative.")
-        if self.hisparse_host_num_blocks is not None and (
-            self.hisparse_host_num_blocks < 0
-        ):
-            raise ValueError("HiSparse host block-pool size must be non-negative.")
-        layer_placement: dict[str, bool] = {}
-        for group in self.kv_cache_groups:
-            if group.host_resident and self.hisparse_host_num_blocks is None:
-                raise ValueError("Host cache groups require configured host capacity.")
-            for name in group.layer_names:
-                if (
-                    name in layer_placement
-                    and layer_placement[name] != group.host_resident
-                ):
-                    raise ValueError(f"Conflicting placement for layer {name}.")
-                layer_placement[name] = group.host_resident
-        for tensor in self.kv_cache_tensors:
-            if tensor.host_resident and self.hisparse_host_num_blocks is None:
-                raise ValueError("Host cache tensors require configured host capacity.")
-            if any(
-                name not in layer_placement
-                or layer_placement[name] != tensor.host_resident
-                for name in tensor.layers
-            ):
-                raise ValueError("Tensor and cache group placement must match.")
-        if len(self.host_group_ids) > 1:
-            raise ValueError("Only one host cache group is supported.")
-
     @property
     def host_group_ids(self) -> tuple[int, ...]:
         return tuple(

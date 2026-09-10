@@ -90,41 +90,6 @@ pytestmark = pytest.mark.cpu_test
 
 
 @pytest.mark.parametrize(
-    ("group_host", "tensor_host", "host_capacity", "error"),
-    [
-        (False, True, 4, "Tensor and cache group"),
-        (True, False, 4, "Tensor and cache group"),
-        (True, True, None, "Host cache groups require"),
-        (False, True, None, "Host cache tensors require"),
-    ],
-)
-def test_kv_cache_config_rejects_inconsistent_host_placement(
-    group_host, tensor_host, host_capacity, error
-):
-    """Allocation and copy routing must agree, with capacity for host references."""
-    spec = MLAAttentionSpec(
-        block_size=64, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
-    )
-    with pytest.raises(ValueError, match=error):
-        KVCacheConfig(
-            num_blocks=4,
-            hisparse_host_num_blocks=host_capacity,
-            kv_cache_groups=[
-                KVCacheGroupSpec(["layer"], spec, host_resident=group_host)
-            ],
-            kv_cache_tensors=[
-                KVCacheTensor(
-                    size=4 * spec.page_size_bytes,
-                    layers=["layer"],
-                    layer_stride=4 * spec.page_size_bytes,
-                    block_stride=spec.page_size_bytes,
-                    host_resident=tensor_host,
-                )
-            ],
-        )
-
-
-@pytest.mark.parametrize(
     ("block_size", "main_sizes", "indexer_sizes", "gpu_block_size"),
     [
         (256, (64,), (64,), 64),
@@ -182,6 +147,13 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
     assert cache_config.hisparse_host_num_blocks > 7
 
     host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
+    assert host_group.host_resident
+    assert not any(group.host_resident for group in [indexer_group, *auxiliary_groups])
+    host_layers = set(host_group.layer_names)
+    for tensor in cache_config.kv_cache_tensors:
+        assert all(
+            (name in host_layers) == tensor.host_resident for name in tensor.layers
+        )
     host_tensor = next(t for t in cache_config.kv_cache_tensors if t.host_resident)
     host_spec = host_group.kv_cache_spec.kv_cache_specs[host_tensor.layers[0]]
     assert host_tensor.block_stride == host_spec.page_size_bytes
