@@ -138,17 +138,28 @@ class DualKeyGumbelWatermarker(Watermarker, SupportsSpeculativeDecoding):
         self,
         logits: torch.Tensor,
         contexts: torch.Tensor,
-        random_sample: RandomSampler,
+        random_sampler: RandomSampler | None = None,
+        skip_mask: torch.Tensor | None = None,
     ) -> WatermarkSample:
         if self.alpha == 0:
-            return self.draft_watermarker.sample(logits, contexts, random_sample)
+            return self.draft_watermarker.sample(
+                logits, contexts, random_sampler, skip_mask
+            )
         if self.alpha == 1:
-            return self.target_watermarker.sample(logits, contexts, random_sample)
+            return self.target_watermarker.sample(
+                logits, contexts, random_sampler, skip_mask
+            )
+        if random_sampler is None:
+            raise ValueError("dual-key Gumbel routing requires a random sampler")
 
-        key_a_sample = self.draft_watermarker.sample(logits, contexts, random_sample)
-        key_b_sample = self.target_watermarker.sample(logits, contexts, random_sample)
+        key_a_sample = self.draft_watermarker.sample(
+            logits, contexts, random_sampler, skip_mask
+        )
+        key_b_sample = self.target_watermarker.sample(
+            logits, contexts, random_sampler, skip_mask
+        )
         routing_logits = self._routing_logits(logits.device).expand(logits.shape[0], -1)
-        use_key_a = random_sample(routing_logits) == 0
+        use_key_a = random_sampler(routing_logits) == 0
         return WatermarkSample(
             torch.where(
                 use_key_a,
@@ -157,6 +168,13 @@ class DualKeyGumbelWatermarker(Watermarker, SupportsSpeculativeDecoding):
             ),
             logits,
         )
+
+    def _sample_watermarked(
+        self,
+        logits: torch.Tensor,
+        contexts: torch.Tensor,
+    ) -> WatermarkSample:
+        raise ValueError("dual-key Gumbel routing requires a random sampler")
 
 
 class GumbelWatermarkDetector(WatermarkDetector):

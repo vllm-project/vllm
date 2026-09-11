@@ -64,11 +64,11 @@ class WatermarkConfig:
             self.deduplicate_contexts_max_history is not None
             and self.deduplicate_contexts_max_history < _MIN_RECOMMENDED_DEDUP_HISTORY
         )
-        if self.algorithm == "gumbel" and (
+        if self.algorithm in ("gumbel", "dual_key_gumbel") and (
             self.deduplicate_contexts == "none" or history_is_too_short
         ):
             logger.warning_once(
-                "Single-key Gumbel-max watermarking with context deduplication "
+                "Gumbel-max watermarking with context deduplication "
                 "disabled or limited to fewer than "
                 f"{_MIN_RECOMMENDED_DEDUP_HISTORY} positions may increase the "
                 "frequency of degenerate generations, including repetition loops. "

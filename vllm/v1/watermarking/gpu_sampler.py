@@ -87,7 +87,6 @@ class GPUWatermarkSampler(Sampler):
         temperatures = self.sampling_states.temperature.gpu[expanded_idx_mapping]
         needs_mixed_sampling = repeated_contexts is not None or not np.all(enabled)
         skip_mask = None
-        random_sampler = None
         if needs_mixed_sampling:
             watermarking = self.watermarking.gpu[expanded_idx_mapping] & (
                 temperatures != 0
@@ -96,13 +95,13 @@ class GPUWatermarkSampler(Sampler):
                 watermarking &= ~repeated_contexts
             skip_mask = ~watermarking
 
-            random_sampler = RandomSampler(
-                expanded_idx_mapping=expanded_idx_mapping,
-                temperatures=self.sampling_states.temperature.gpu,
-                seeds=self.sampling_states.seeds.gpu,
-                positions=pos,
-                use_fp64=self.use_fp64_gumbel,
-            )
+        random_sampler = RandomSampler(
+            expanded_idx_mapping=expanded_idx_mapping,
+            temperatures=self.sampling_states.temperature.gpu,
+            seeds=self.sampling_states.seeds.gpu,
+            positions=pos,
+            use_fp64=self.use_fp64_gumbel,
+        )
         output = self.watermarker.sample(
             processed_logits,
             contexts,

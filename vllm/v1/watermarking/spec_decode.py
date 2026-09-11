@@ -49,7 +49,6 @@ class DraftWatermarker:
         watermarked = self.watermarker.sample(
             processed_logits,
             self.contexts[: logits.shape[0]],
-            lambda _: ordinary_sampled,
         ).token_ids
         enabled = self.enabled[: logits.shape[0]] & (request_temperatures != 0)
         sampled = torch.where(enabled, watermarked, ordinary_sampled)
