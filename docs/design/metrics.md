@@ -394,10 +394,19 @@ Encoding a running/waiting counts for multiple adapters in a
 comma-separated string seems quite misguided - we could use labels to
 distinguish between per-adapter counts. This should be revisited.
 
-That metric is now deprecated in favour of three gauges fed by the
-engine notification channel (`vllm/v1/notifications.py`), which the
-worker updates whenever its adapter caches change, including on an
-idle engine with statically configured adapters:
+Note that `multiprocess_mode="livemostrecent"` is used - the most
+recent metric is used, but only from currently running processes.
+
+This was added in <https://github.com/vllm-project/vllm/pull/9477> and there is
+[at least one known user](https://github.com/kubernetes-sigs/gateway-api-inference-extension/pull/54).
+
+`vllm:lora_requests_info` is now deprecated. It is still emitted
+unchanged, and follows the [deprecation policy](../usage/metrics.md#deprecation-policy)
+before it is hidden and removed. Downstream users such as the gateway
+API inference extension should migrate to the metrics below, which are
+fed by the engine notification channel (`vllm/v1/notifications.py`).
+The worker updates them whenever its adapter caches change, including
+on an idle engine with statically configured adapters:
 
 - `vllm:lora_adapter_loaded{adapter_name, level="gpu"|"cpu", pinned, rank}`:
   one series per resident adapter, present while it is loaded and
@@ -415,14 +424,6 @@ idle engine with statically configured adapters:
   `load` for disk into the CPU cache and `activate` for the CPU cache
   into a GPU slot. A router can turn this into the expected cost of
   sending a request to a server that has to load the adapter first.
-
-Note that `multiprocess_mode="livemostrecent"` is used - the most
-recent metric is used, but only from currently running processes.
-
-This was added in <https://github.com/vllm-project/vllm/pull/9477> and there is
-[at least one known user](https://github.com/kubernetes-sigs/gateway-api-inference-extension/pull/54).
-If we revisit this design and deprecate the old metric, we should
-coordinate with downstream users so they can migrate before the removal.
 
 ### Prefix Cache metrics
 
