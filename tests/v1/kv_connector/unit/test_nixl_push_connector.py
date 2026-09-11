@@ -634,9 +634,9 @@ def test_do_start_push_kv_drops_request_on_handshake_failure():
     assert xfer_calls == []
     assert len(failures) == 1
     assert failures[0]["failure_type"] == "push_handshake_failed"
-    # Handshake failures are recorded as transport failures, separately
-    # from KV expiry.
-    assert w.xfer_stats.data["num_failed_handshakes"] == [1]
+    # The handshake metric is counted once by _ensure_handshake's own
+    # callback (stubbed out here); the push side must not double-record it.
+    assert w.xfer_stats.data["num_failed_handshakes"] == []
     assert w.xfer_stats.data["num_failed_transfers"] == []
 
 

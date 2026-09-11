@@ -13,7 +13,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import numpy as np
@@ -1185,7 +1185,7 @@ class NixlBaseConnectorWorker:
                     error=e,
                     meta=meta,
                 )
-                self._handle_failed_transfer(req_id, None, failure=None)
+                self._handle_failed_transfer(req_id, None, record_failed_transfer=False)
 
         fut.add_done_callback(request_ready)
 
@@ -2765,10 +2765,7 @@ class NixlBaseConnectorWorker:
         return done_req_ids
 
     def _handle_failed_transfer(
-        self,
-        req_id: str,
-        handle: int | None,
-        failure: Literal["transfer", "handshake"] | None = "transfer",
+        self, req_id: str, handle: int | None, record_failed_transfer: bool = True
     ):
         """
         Handle a failed transfer by marking all (logical) blocks as invalid and
@@ -2777,10 +2774,10 @@ class NixlBaseConnectorWorker:
         Args:
             req_id: The request ID.
             handle: The transfer handle.
-            failure: The failure category to record, grouped with transfer
-                failures when the handshake failed, or ``None`` when the
-                caller already recorded a more specific metric (eg KV expiry,
-                which is reported separately from transport failures).
+            record_failed_transfer: Whether to count the failure toward the
+                transport-failure metric. Callers that already recorded a more
+                specific metric (eg KV expiry, reported separately from
+                transport failures) pass False.
         """
         # (multi-read) One handle is created per remote rank, and they do not
         # all fail in the same _pop_done_transfers poll. The request is
@@ -2795,10 +2792,8 @@ class NixlBaseConnectorWorker:
             self._failed_recv_reqs.put(req_id)
         if handle is not None:
             self.nixl_wrapper.release_xfer_handle(handle)
-        if failure == "transfer":
+        if record_failed_transfer:
             self.xfer_stats.record_failed_transfer()
-        elif failure == "handshake":
-            self.xfer_stats.record_failed_handshake()
 
     def _send_pending_recv_notifs(self, req_id: str) -> None:
         for agent_name, notif_id in self._pending_recv_notifs.pop(req_id, []):

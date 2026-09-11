@@ -338,7 +338,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._log_failure(
                     failure_type="push_reg_handshake_failed", req_id=rid, error=e
                 )
-                self._handle_failed_transfer(rid, None, failure=None)
+                self._handle_failed_transfer(rid, None, record_failed_transfer=False)
                 return
             # Re-queue for the writer to send now that the handshake is done.
             self._reg_send_inbox.put((rid, rd))

@@ -151,7 +151,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             self.xfer_stats.record_kv_expired_req()
             # KV expiry is reported separately from transport failures, so only
             # the state cleanup side of _handle_failed_transfer runs here.
-            self._handle_failed_transfer(req_id, None, failure=None)
+            self._handle_failed_transfer(req_id, None, record_failed_transfer=False)
             return
 
         if any(len(group) > 0 for group in meta.local_block_ids):
