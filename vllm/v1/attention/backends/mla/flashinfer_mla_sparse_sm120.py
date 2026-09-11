@@ -6,6 +6,9 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SharedTopkIndicesBuffer,
+)
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
@@ -29,7 +32,9 @@ def _kv_scale_format_for_model(model_type: str | None) -> str:
     return "pow2_fp32"
 
 
-class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]):
+class FlashInferMLASparseSM120Impl(
+    MLAAttentionImpl[FlashInferMLASparseMetadata], SharedTopkIndicesBuffer
+):
     """SM120 FlashInfer sparse-MLA implementation."""
 
     is_sparse = True
@@ -86,11 +91,7 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
 
         # Skip-topk layers are built with indexer=None and get the shared
         # buffer via mla_args instead (cf. FLASHMLA_SPARSE).
-        self.topk_indices_buffer: torch.Tensor | None = (
-            indexer.topk_indices_buffer
-            if indexer is not None
-            else mla_args.get("topk_indices_buffer")
-        )
+        self.init_topk_indices_buffer(indexer, mla_args.get("topk_indices_buffer"))
         from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
 
         if not has_flashinfer_sparse_mla_sm120():

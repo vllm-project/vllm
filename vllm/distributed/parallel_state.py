@@ -673,11 +673,11 @@ class GroupCoordinator:
         else:
             stream = graph_capture_context.stream
 
-        # only cuda uses this function,
+        # only cuda/rocm uses this function,
         # so we don't abstract it into the base class
         maybe_ca_context = nullcontext()
         maybe_fi_pcie_ipc_context: AbstractContextManager[Any] = nullcontext()
-        maybe_aiter_context = nullcontext()
+        maybe_aiter_ar_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
         )
@@ -698,12 +698,10 @@ class GroupCoordinator:
                 if fi_pcie_ipc_ar_comm is not None:
                     maybe_fi_pcie_ipc_context = fi_pcie_ipc_ar_comm.capture()
 
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            if rocm_aiter_ops.is_enabled():
-                aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
-                if aiter_ar is not None:
-                    maybe_aiter_context = aiter_ar.capture()  # type: ignore
+            # Capture each group's own comm. A global lookup would double-capture
+            aiter_ar_comm = getattr(self.device_communicator, "aiter_ar_comm", None)
+            if aiter_ar_comm is not None:
+                maybe_aiter_ar_context = aiter_ar_comm.capture()  # type: ignore
 
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
@@ -715,7 +713,7 @@ class GroupCoordinator:
             torch.cuda.stream(stream),
             maybe_ca_context,
             maybe_fi_pcie_ipc_context,
-            maybe_aiter_context,
+            maybe_aiter_ar_context,
         ):
             yield graph_capture_context
 
@@ -1551,6 +1549,15 @@ def get_tp_group() -> GroupCoordinator:
     return _TP
 
 
+_ETP: GroupCoordinator | None = None
+
+
+def get_etp_group() -> GroupCoordinator:
+    """Return the Engram Tensor Parallel (ETP) group that shards one embedding table."""
+    assert _ETP is not None, "Engram tensor-parallel group is not initialized"
+    return _ETP
+
+
 _DCP: GroupCoordinator | None = None
 
 
@@ -1631,7 +1638,11 @@ def graph_capture(
     context = graph_capture_context or GraphCaptureContext(
         torch.cuda.Stream(device=device)
     )
-    with get_tp_group().graph_capture(context), get_pp_group().graph_capture(context):
+    with (
+        get_tp_group().graph_capture(context),
+        get_pp_group().graph_capture(context),
+        get_dp_group().graph_capture(context),
+    ):
         yield context
 
 
@@ -2008,6 +2019,28 @@ def initialize_model_parallel(
         group_name="tp",
     )
 
+    global _ETP
+    assert _ETP is None, "Engram tensor-parallel group is already initialized"
+    engram_tensor_parallel_size = (
+        config.engram_config.get_parallel_size(parallel_config)
+        if config.engram_config is not None
+        else tensor_model_parallel_size
+    )
+    if engram_tensor_parallel_size == tensor_model_parallel_size:
+        _ETP = _TP
+    else:
+        group_ranks = (
+            all_ranks.permute(0, 2, 3, 1, 4)
+            .reshape(-1, engram_tensor_parallel_size)
+            .unbind(0)
+        )
+        _ETP = init_model_parallel_group(
+            [ranks.tolist() for ranks in group_ranks],
+            get_world_group().local_rank,
+            backend,
+            group_name="etp",
+        )
+
     # Build the DCP model-parallel groups.
     global _DCP
     assert _DCP is None, "decode context model parallel group is already initialized"
@@ -2142,13 +2175,14 @@ def initialize_model_parallel(
     logger.info_once(
         "rank %s in world size %s is assigned as "
         "DP rank %s, PP rank %s, PCP rank %s, "
-        "TP rank %s, EP rank %s, EPLB rank %s",
+        "TP rank %s, ETP rank %s, EP rank %s, EPLB rank %s",
         rank,
         world_size,
         _DP.rank_in_group,
         _PP.rank_in_group,
         _PCP.rank_in_group,
         _TP.rank_in_group,
+        _ETP.rank_in_group,
         _EP.rank_in_group if _EP is not None else "N/A",
         _EPLB.rank_in_group if _EPLB is not None else "N/A",
     )
@@ -2243,7 +2277,11 @@ def get_node_count() -> int:
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
-    global _TP
+    global _TP, _ETP
+
+    if _ETP and _ETP is not _TP:
+        _ETP.destroy()
+    _ETP = None
 
     if _TP:
         _TP.destroy()
@@ -2321,6 +2359,12 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     from vllm.platforms import current_platform
 
     if not current_platform.is_cpu():
+        from vllm.triton_utils import HAS_TRITON
+
+        if HAS_TRITON:
+            from vllm.v1.sample.ops.topk_topp_triton import reset_buffer_cache
+
+            reset_buffer_cache()
         torch.accelerator.empty_cache()
         try:
             torch.accelerator.empty_host_cache()

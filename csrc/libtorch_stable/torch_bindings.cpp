@@ -27,8 +27,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "per_token_group_quant_int8(Tensor input, Tensor! output_q, Tensor! "
       "output_s, int group_size, float eps, float int8_min, float int8_max) -> "
       "()");
-  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
-
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
 
 #ifndef USE_ROCM
@@ -85,15 +83,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
       "Tensor? b_bias_or_none,Tensor b_scales, "
       "Tensor? a_scales, Tensor? global_scale, Tensor? b_zeros_or_none, "
-      "Tensor? "
-      "g_idx_or_none, Tensor? perm_or_none, Tensor workspace, int b_type_id, "
-      "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
+      "Tensor workspace, int b_type_id, "
+      "SymInt size_m, SymInt size_n, SymInt size_k, "
       "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor");
   // conditionally compiled so impl registrations are in source file
 
   // gptq_marlin repack from GPTQ.
   ops.def(
-      "gptq_marlin_repack(Tensor b_q_weight, Tensor perm, "
+      "gptq_marlin_repack(Tensor b_q_weight, "
       "SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
   // conditionally compiled so impl registrations are in source file
 
@@ -432,7 +429,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert("
       "Tensor q_in, Tensor kv, Tensor! k_cache, "
       "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
-      "int q_head_padded, float eps, int cache_block_size) -> Tensor");
+      "int q_head_padded, float eps, int cache_block_size, "
+      "bool apply_q_norm=True) -> Tensor");
 
   // FlashInfer V4 full-cache variants: write Q in place (bf16) or to a separate
   // FP8 tensor, and KV into a contiguous 512-wide token-strided cache.
@@ -440,13 +438,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert("
       "Tensor! q, Tensor kv, Tensor! k_cache, Tensor slot_mapping, "
       "Tensor position_ids, Tensor cos_sin_cache, float eps, "
-      "int cache_block_size) -> ()");
+      "int cache_block_size, bool apply_q_norm=True) -> ()");
   ops.def(
       "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert("
       "Tensor q, Tensor kv, Tensor! q_fp8, Tensor! k_cache, "
       "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
       "Tensor fp8_scale, Tensor q_fp8_scale_inv, float eps, "
-      "int cache_block_size) -> ()");
+      "int cache_block_size, bool apply_q_norm=True) -> ()");
 
   // Kimi-K3 MLA epilogues: optional RoPE followed by concat/cache insertion.
   ops.def(
@@ -537,6 +535,26 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor! state, Tensor output_gate, Tensor norm_weight, Tensor! out, "
       "float scale, float norm_eps=1e-5, "
       "str output_gate_activation='silu') -> ()");
+#endif
+
+#ifdef VLLM_ENABLE_FUSED_KDA_CHUNK
+  ops.def(
+      "fused_kda_prologue("
+      "Tensor q, Tensor k, Tensor v, Tensor raw_g, Tensor raw_beta, "
+      "Tensor A_log, Tensor dt_bias, Tensor! qg, Tensor! w, Tensor! u, "
+      "Tensor! kg_t, Tensor! aqk, Tensor! decay, Tensor cu_seqlens, "
+      "Tensor chunk_indices, Tensor? conv_weight, Tensor(e!)? conv_state, "
+      "Tensor? conv_state_indices, Tensor? conv_has_initial_state, "
+      "float scale, float lower_bound) -> ()");
+  ops.def(
+      "fused_kda_chunk("
+      "Tensor qg, Tensor w, Tensor u, Tensor kg_t, Tensor aqk, Tensor decay, "
+      "Tensor? initial_state, Tensor(a!)? final_state, Tensor! out, "
+      "Tensor cu_seqlens, Tensor chunk_offsets, float scale, "
+      "Tensor(b!)? group_state, int groups, "
+      "Tensor(c!)? checkpoint_state=None, Tensor? checkpoint_offsets=None, "
+      "Tensor? checkpoint_state_indices=None, Tensor(d!)? state_cache=None, "
+      "Tensor? state_indices=None, Tensor? has_initial_state=None) -> ()");
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
@@ -679,12 +697,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // to prevent the meta function registry.
   ops.def(
       "gptq_gemm(Tensor a, Tensor b_q_weight, Tensor b_gptq_qzeros, "
-      "Tensor b_gptq_scales, Tensor b_g_idx, bool use_exllama, bool "
+      "Tensor b_gptq_scales, bool use_exllama, bool "
       "use_v2_format, int bit) "
       "-> Tensor");
 
   // Post processing for GPTQ.
-  ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
+  ops.def("gptq_shuffle(Tensor! q_weight, int bit) -> ()");
 
   // Mamba selective scan kernel
   ops.def(
@@ -734,8 +752,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&per_token_group_quant_8bit_packed));
   ops.impl("per_token_group_quant_int8",
            TORCH_BOX(&per_token_group_quant_int8));
-
-  ops.impl("permute_cols", TORCH_BOX(&permute_cols));
 
 #ifndef USE_ROCM
   // CUTLASS scaled_mm ops
@@ -827,6 +843,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 #ifdef VLLM_ENABLE_FUSED_GDN_DECODE
   ops.impl("fused_gdn_decode_post_conv_mtp",
            TORCH_BOX(&fused_gdn_decode_post_conv_mtp));
+#endif
+
+#ifdef VLLM_ENABLE_FUSED_KDA_CHUNK
+  ops.impl("fused_kda_prologue", TORCH_BOX(&fused_kda_prologue));
+  ops.impl("fused_kda_chunk", TORCH_BOX(&fused_kda_chunk));
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
@@ -955,14 +976,16 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     str kv_cache_dtype,"
       "                     Tensor scale) -> ()");
 
-  // Grouped concat_and_cache_mla across all layers (bf16 only). Each
-  // layer's cache base pointer is read from kv_cache_ptrs.
+  // Grouped concat_and_cache_mla across all layers. Each layer's cache base
+  // pointer and optional plain-FP8 scale are read from device tensors.
   ops.def(
       "concat_and_cache_mla_grouped(Tensor kv_c, Tensor k_pe,"
       "                             Tensor kv_cache_ptrs,"
       "                             Tensor slot_mapping,"
       "                             int block_size, int block_stride,"
-      "                             int entry_stride) -> ()");
+      "                             int entry_stride,"
+      "                             Tensor? kv_scales=None,"
+      "                             str kv_cache_dtype='auto') -> ()");
 
   // Rotate Q and K, then write to kv cache for MLA
   ops.def(
