@@ -110,6 +110,10 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.models.minimax_m3.nvidia.sparse_attention_msa."
         "MiniMaxM3SparseCutlassBackend"
     )
+    FLASHINFER_MSA = (
+        "vllm.models.minimax_m3.nvidia.sparse_attention_msa."
+        "MiniMaxM3SparseFlashInferBackend"
+    )
     TRITON_MSA = (
         "vllm.models.minimax_m3.nvidia.sparse_attention_msa."
         "MiniMaxM3SparseTritonBackend"

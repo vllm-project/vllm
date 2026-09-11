@@ -565,7 +565,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         )
 
     def _allocate_query_fp8(self, qkv: torch.Tensor) -> torch.Tensor | None:
-        if not getattr(self.impl, "use_cutlass_decode", False):
+        if not (
+            getattr(self.impl, "use_cutlass_decode", False)
+            or getattr(self.impl, "use_flashinfer_decode", False)
+        ):
             return None
         return torch.empty(
             (qkv.shape[0], self.q_size),

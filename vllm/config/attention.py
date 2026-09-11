@@ -14,7 +14,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 logger = init_logger(__name__)
 
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
-MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
+MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass", "flashinfer"]
 
 
 @config
@@ -108,6 +108,7 @@ class AttentionConfig:
     def __post_init__(self) -> None:
         msa_aliases: dict[AttentionBackendEnum, MiniMaxM3MSADecodeBackend] = {
             AttentionBackendEnum.CUTLASS_MSA: "cutlass",
+            AttentionBackendEnum.FLASHINFER_MSA: "flashinfer",
             AttentionBackendEnum.TRITON_MSA: "triton",
         }
         if self.backend in msa_aliases:
