@@ -169,7 +169,7 @@ def maybe_create_ubatch_slices(
     num_tokens_padded: int,
     num_reqs_padded: int,
     num_ubatches: int,
-    split_point: list[int] | int | None = None,
+    split_point: int | None = None,
 ) -> tuple[UBatchSlices | None, UBatchSlices | None]:
     if not should_ubatch:
         return None, None
@@ -188,7 +188,7 @@ def maybe_create_ubatch_slices(
     start_token = 0
 
     # Add the end point to the split points to make iteration easier
-    all_points = token_split_points + [cu_num_tokens[-1]]
+    all_points = token_split_points + [int(cu_num_tokens[-1])]
 
     for end_token in all_points:
         token_slice = slice(start_token, end_token)
@@ -345,6 +345,11 @@ def _make_metadata_with_slice(
         max_seq_len=max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
+        positions=(
+            attn_metadata.positions[token_slice]
+            if attn_metadata.positions is not None
+            else None
+        ),
         seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
         _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=num_computed_tokens_cpu,
