@@ -12,13 +12,10 @@ from .base import (
     check_frame_pixel_limit,
 )
 
-VideoDecoderBackend = Literal[
-    "opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"
-]
+VideoDecoderBackend = Literal["opencv", "torchcodec", "pynvvideocodec", "deepstream"]
 
 _BACKEND_OPTION_DEFAULTS: dict[str, dict[str, Any]] = {
     "opencv": {},
-    "pyav": {},
     "torchcodec": {
         "num_ffmpeg_threads": 0,
         "seek_mode": "exact",
