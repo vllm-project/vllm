@@ -980,6 +980,10 @@ class SparseAttnIndexer(CustomOp):
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
+        if self.candidate_blocks is not None:
+            raise NotImplementedError(
+                "ROCm sparse attention indexer does not support candidate blocks"
+            )
         from vllm.platforms.rocm import on_gfx11, on_gfx950
 
         if (
@@ -1007,9 +1011,6 @@ class SparseAttnIndexer(CustomOp):
                 self.topk_indices_buffer,
                 skip_k_cache_insert=self.skip_k_cache_insert,
                 compress_ratio=self.compress_ratio,
-                candidate_blocks=self.candidate_blocks,
-                candidate_block_size=self.candidate_block_size,
-                candidate_write=self.candidate_write,
             )
         raise RuntimeError(
             "Sparse attention indexer ROCm path requires AITER or a supported "
