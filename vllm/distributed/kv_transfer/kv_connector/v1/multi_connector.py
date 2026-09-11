@@ -487,6 +487,11 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.set_xfer_handshake_metadata_pp_aware(metadata)
 
+    def drop_peer(self, engine_id: str) -> None:
+        """Forward the dead-peer notification to all sub-connectors."""
+        for c in self._connectors:
+            c.drop_peer(engine_id)
+
     def _aggregate_request_finished(
         self,
         request: "Request",

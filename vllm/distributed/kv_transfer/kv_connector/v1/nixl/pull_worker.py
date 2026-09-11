@@ -100,8 +100,19 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Remove all requests that are not to be processed (eg aborted).
         for req_id in metadata.reqs_not_processed:
             self._reqs_to_process.discard(req_id)
-            # We should never get an abort after setting an expiry timer
-            assert req_id not in self._reqs_to_send
+            # A re-aborted request (e.g. drop_peer when the remote engine
+            # died) may already be in _reqs_to_send with blocks held for the
+            # remote engine to read. Force-free the lease entry; the blocks
+            # were already freed on the scheduler side.
+            if req_id in self._reqs_to_send:
+                del self._reqs_to_send[req_id]
+                self.consumer_notification_counts_by_req.pop(req_id, None)
+                self.xfer_stats.record_kv_expired_req()
+                logger.info(
+                    "Force-freeing send blocks for request %s "
+                    "(re-aborted via drop_peer)",
+                    req_id,
+                )
 
         # Add to requests that are waiting to be read and track expiration.
         # Deadlines are stamped with the scheduler process's perf_counter,
@@ -119,6 +130,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                         expiration_time - metadata.scheduler_clock
                     )
                 self._reqs_to_send[req_id] = expiration_time
+
+        # Release NIXL state for engines the router declared dead.
+        for engine_id in metadata.dropped_engines:
+            self.drop_peer(engine_id)
 
         # Send heartbeats to P-side engines to keep KV blocks alive while
         # requests sit in the D scheduler WAITING queue.

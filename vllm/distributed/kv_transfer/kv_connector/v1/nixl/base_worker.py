@@ -3158,21 +3158,29 @@ class NixlBaseConnectorWorker:
             if now - last_active > self._engine_ttl:
                 self._cleanup_remote_engine(eid)
 
+    def drop_peer(self, engine_id: EngineId) -> None:
+        """Release all NIXL state for a remote engine declared dead by the
+        router (drop_peer).
+
+        Idempotent: engines we never handshaked with are a no-op. Releasing
+        the agents lets a replacement reusing the engine id re-handshake.
+        """
+        logger.info("Dropping remote engine %s (reported dead).", engine_id)
+        self._cleanup_remote_engine(engine_id, log_eviction=False)
+
     def _cleanup_remote_engine(
         self, engine_id: EngineId, *, log_eviction: bool = True
     ) -> None:
         """Remove all state for a single remote engine.
 
         Releases NIXL resources (dlist handles, remote agents) and clears
-        all per-engine data structures. Used by both TTL eviction and
-        shutdown.
+        all per-engine data structures. Used by TTL eviction, shutdown and
+        drop_peer. Idempotent: engines with no registered agents are a no-op.
         """
-        assert engine_id in self._remote_agents
-
         # Notif-only engines (push-mode D side) have no descriptor state.
         for handle in self.dst_xfer_side_handles.pop(engine_id, {}).values():
             self.nixl_wrapper.release_dlist_handle(handle)
-        for agent_name in self._remote_agents.pop(engine_id).values():
+        for agent_name in self._remote_agents.pop(engine_id, {}).values():
             self.nixl_wrapper.remove_remote_agent(agent_name)
 
         self.kv_caches_base_addr.pop(engine_id, None)

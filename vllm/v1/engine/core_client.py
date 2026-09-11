@@ -194,6 +194,9 @@ class EngineCoreClient(ABC):
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         raise NotImplementedError
 
+    def drop_peer(self, engine_id: str) -> None:
+        raise NotImplementedError
+
     def wake_up(self, tags: list[str] | None = None) -> None:
         raise NotImplementedError
 
@@ -284,6 +287,9 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
+        raise NotImplementedError
+
+    async def drop_peer_async(self, engine_id: str) -> None:
         raise NotImplementedError
 
     async def wake_up_async(self, tags: list[str] | None = None) -> None:
@@ -401,6 +407,9 @@ class InprocClient(EngineCoreClient):
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.engine_core.wake_up(tags)
+
+    def drop_peer(self, engine_id: str) -> None:
+        self.engine_core.drop_peer(engine_id)
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
@@ -1013,6 +1022,9 @@ class SyncMPClient(MPClient):
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         self.call_utility("sleep", level, mode)
 
+    def drop_peer(self, engine_id: str) -> None:
+        self.call_utility("drop_peer", engine_id)
+
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.call_utility("wake_up", tags)
 
@@ -1256,6 +1268,9 @@ class AsyncMPClient(MPClient):
 
     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
         await self.call_utility_async("sleep", level, mode)
+
+    async def drop_peer_async(self, engine_id: str) -> None:
+        await self.call_utility_async("drop_peer", engine_id)
 
     async def wake_up_async(self, tags: list[str] | None = None) -> None:
         await self.call_utility_async("wake_up", tags)

@@ -2566,6 +2566,45 @@ class Scheduler(SchedulerInterface):
 
         return valid_requests
 
+    def drop_peer(self, engine_id: str) -> None:
+        """Abort all requests routed to a dead remote engine and drop the
+        connector's state for it.
+
+        The router calls this when it declares a peer engine (e.g. a decode
+        instance) dead. Requests are attributed via
+        ``kv_transfer_params["decode_engine_id"]``; untagged requests are
+        left untouched.
+
+        Live requests go through the normal abort path. Requests that
+        already finished with their blocks deferred for the dead peer are
+        not reachable that way: ``finish_requests`` skips finished
+        requests, and their id no longer exists at the serving layer, so
+        the router cannot abort them either. They are re-aborted here
+        instead, which reruns the connector's ``request_finished`` with an
+        aborted status (queuing the worker-side transfer drop) and frees
+        the pinned blocks immediately. The connector then releases any
+        per-peer state so a replacement reusing the engine id can
+        re-handshake.
+        """
+        deferred: list[Request] = []
+        live_ids: list[str] = []
+        for request in self.requests.values():
+            params = request.kv_transfer_params
+            if params is None or params.get("decode_engine_id") != engine_id:
+                continue
+            if request.is_finished():
+                deferred.append(request)
+            else:
+                live_ids.append(request.request_id)
+
+        self.finish_requests(live_ids, RequestStatus.FINISHED_ABORTED)
+        for request in deferred:
+            request.status = RequestStatus.FINISHED_ABORTED
+            self._free_request(request)
+
+        if self.connector is not None:
+            self.connector.drop_peer(engine_id)
+
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:

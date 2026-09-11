@@ -269,6 +269,9 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         # Push mode (P side): newly finished request blocks to be matched
         # against pending D registrations on the P worker.
         self.push_finished_blocks: dict[ReqId, BlockIds] = {}
+        # Remote engines declared dead by the router (drop_peer): the worker
+        # releases their NIXL state (agents, dlist handles, topology).
+        self.dropped_engines: set[EngineId] = set()
 
     def _add_new_req(
         self,

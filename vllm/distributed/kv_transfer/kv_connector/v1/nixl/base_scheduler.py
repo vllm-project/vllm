@@ -120,6 +120,10 @@ class NixlBaseConnectorScheduler:
         # remote prefill or aborted.
         self._reqs_not_processed: set[ReqId] = set()
 
+        # Remote engines declared dead by the router (drop_peer), queued for
+        # worker-side cleanup via the next connector metadata.
+        self._pending_dropped_engines: set[EngineId] = set()
+
         # Heartbeat tracking: requests needing periodic lease-renewal heartbeats to
         # remote P-side, stored as ready-to-send HeartbeatInfo grouped by remote engine
         self._heartbeat_by_engine: dict[EngineId, HeartbeatInfo] = {}
@@ -489,6 +493,9 @@ class NixlBaseConnectorScheduler:
         self._reqs_not_processed = set()
         self._reqs_need_send = {}
 
+        meta.dropped_engines = self._pending_dropped_engines
+        self._pending_dropped_engines = set()
+
         return meta
 
     def update_connector_output(self, connector_output: "KVConnectorOutput") -> None:
@@ -497,7 +504,13 @@ class NixlBaseConnectorScheduler:
             self._stop_heartbeat(req_id)
 
     def has_pending_push_work(self) -> bool:
-        return False
+        # Keep the engine stepping until dropped engines and un-flushed
+        # force-frees reach the worker through the next connector metadata.
+        return bool(self._pending_dropped_engines or self._reqs_not_processed)
+
+    def drop_peer(self, engine_id: EngineId) -> None:
+        """Queue a dead remote engine for worker-side NIXL cleanup."""
+        self._pending_dropped_engines.add(engine_id)
 
     ############################################################
     # Abstract methods that subclasses must implement

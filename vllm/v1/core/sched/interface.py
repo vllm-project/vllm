@@ -166,6 +166,19 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def drop_peer(self, engine_id: str) -> None:
+        """Abort all requests routed to a dead remote engine and release the
+        resources kept for it.
+
+        The router calls this (e.g. via the /drop_peer endpoint) when it
+        declares a peer engine dead.
+
+        Args:
+            engine_id: The id of the dead remote engine.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def get_num_unfinished_requests(self) -> int:
         """Number of unfinished requests in the scheduler's internal queue."""
         raise NotImplementedError

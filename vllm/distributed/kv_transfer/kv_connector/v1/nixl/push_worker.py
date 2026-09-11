@@ -46,6 +46,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
+    EngineId,
     NixlConnectorMetadata,
     RemoteMeta,
     ReqId,
@@ -117,6 +118,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # ``_push_finished_blocks`` so an unmatched entry doesn't keep the
         # writer busy-polling forever.
         self._evict_finished_inbox: queue.Queue[str] = queue.Queue()
+        # Main thread → writer: engines declared dead (drop_peer). Writer
+        # drops their pending registrations from
+        # ``_pending_d_registrations``.
+        self._drop_engine_inbox: queue.Queue[EngineId] = queue.Queue()
         # Handshakes that have just completed and are ready for the WRITE on wthread
         self._deferred_push_inbox = queue.Queue[tuple[str, BlockIds, dict[str, Any]]]()
 
@@ -200,7 +205,24 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             self._reqs_to_process.add(req_id)
         for req_id in metadata.reqs_not_processed:
             self._reqs_to_process.discard(req_id)
-            assert req_id not in self._reqs_to_send
+            # A re-aborted request (e.g. drop_peer when the remote engine
+            # died) may already be in _reqs_to_send with blocks held for the
+            # remote engine to read. Force-free the lease entry; the blocks
+            # were already freed on the scheduler side.
+            if req_id in self._reqs_to_send:
+                del self._reqs_to_send[req_id]
+                self.consumer_notification_counts_by_req.pop(req_id, None)
+                self.xfer_stats.record_kv_expired_req()
+                logger.info(
+                    "Force-freeing send blocks for request %s "
+                    "(re-aborted via drop_peer)",
+                    req_id,
+                )
+            # The writer may still hold unmatched finished blocks for this
+            # request; without the eviction it would self-poll on them forever.
+            self._evict_finished_inbox.put(req_id)
+        if metadata.reqs_not_processed:
+            self._push_writer_wake.set()
         # Rebase scheduler-clock deadlines onto this worker's clock — see the
         # equivalent block in pull_worker.start_load_kv for the rationale.
         now_local = time.perf_counter()
@@ -212,8 +234,20 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     )
                 self._reqs_to_send[req_id] = expiration_time
 
+        # Release NIXL state for engines the router declared dead.
+        for engine_id in metadata.dropped_engines:
+            self.drop_peer(engine_id)
+
         # Heartbeats still leave from the main thread (base worker behaviour).
         self._send_heartbeats(metadata)
+
+    def drop_peer(self, engine_id: EngineId) -> None:
+        super().drop_peer(engine_id)
+        # The writer owns ``_pending_d_registrations``; have it drop any
+        # registration sent by the dead engine so a replacement reusing the
+        # engine id never gets matched against stale P blocks.
+        self._drop_engine_inbox.put(engine_id)
+        self._push_writer_wake.set()
 
     # --- Writer thread ------------------------------------------------- #
 
@@ -261,6 +295,18 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         break
                     self._push_finished_blocks.pop(rid, None)
                     self._pending_d_registrations.pop(rid, None)
+
+                # 3c. Registrations from engines declared dead (drop_peer):
+                # never match them against new P blocks.
+                while True:
+                    try:
+                        eid = self._drop_engine_inbox.get_nowait()
+                    except queue.Empty:
+                        break
+                    for rid in list(self._pending_d_registrations):
+                        reg = self._pending_d_registrations[rid]
+                        if reg.get("decode_engine_id") == eid:
+                            del self._pending_d_registrations[rid]
 
                 # 4. NIXL notifs: route PUSH_REG; forward the rest.
                 for notifs in self.nixl_wrapper.get_new_notifs().values():
