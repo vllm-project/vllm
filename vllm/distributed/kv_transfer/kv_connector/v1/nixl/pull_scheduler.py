@@ -282,7 +282,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             remote_request_id=request.request_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
-            tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            tp_size=self.transfer_tp_size,
             dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
