@@ -1192,6 +1192,7 @@ class VllmConfig:
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
+            self.parallel_config.validate_sequence_parallel()
 
         if (
             self.model_config is not None
@@ -1673,6 +1674,17 @@ class VllmConfig:
                 self.compilation_config.cudagraph_capture_sizes = []
             else:
                 self.compilation_config.cudagraph_num_of_warmups = 1
+
+            if (
+                self.parallel_config.use_sequence_parallel
+                and self.parallel_config.is_moe_model is False
+            ):
+                logger.info_once(
+                    "CUDA graphs are disabled for dynamic dense sequence parallelism."
+                )
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+                self.compilation_config.max_cudagraph_capture_size = 0
+                self.compilation_config.cudagraph_capture_sizes = []
 
             self._set_cudagraph_sizes()
 

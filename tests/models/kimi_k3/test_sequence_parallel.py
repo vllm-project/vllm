@@ -112,15 +112,20 @@ def test_sp_padding_mask_marks_added_rows(
 
 
 @pytest.mark.parametrize(
-    ("data_parallel_size", "expected"),
+    ("data_parallel_size", "enable_sequence_parallel", "expected"),
     [
-        (1, False),
-        (2, True),
+        (1, None, False),
+        (1, True, True),
+        (1, False, False),
+        (2, None, True),
+        (2, False, False),
+        (2, True, True),
     ],
 )
-def test_moe_sequence_parallel_requires_data_parallel(
+def test_moe_sequence_parallel_config_override(
     monkeypatch,
     data_parallel_size: int,
+    enable_sequence_parallel: bool | None,
     expected: bool,
 ):
     monkeypatch.setattr(current_platform, "device_count", lambda: 2)
@@ -129,9 +134,24 @@ def test_moe_sequence_parallel_requires_data_parallel(
         data_parallel_size=data_parallel_size,
         enable_expert_parallel=True,
         all2all_backend="allgather_reducescatter",
+        enable_sequence_parallel=enable_sequence_parallel,
     )
 
-    assert parallel_config.use_sequence_parallel_moe is expected
+    assert parallel_config.use_sequence_parallel is expected
+
+
+def test_moe_sequence_parallel_config_rejects_unsupported_topology(monkeypatch):
+    monkeypatch.setattr(current_platform, "device_count", lambda: 2)
+
+    with pytest.raises(
+        ValueError,
+        match="MoE sequence parallelism requires",
+    ):
+        ParallelConfig(
+            tensor_parallel_size=2,
+            enable_sequence_parallel=True,
+            is_moe_model=True,
+        )
 
 
 def test_kimi_decoder_layer_keeps_moe_states_sequence_sharded(monkeypatch):

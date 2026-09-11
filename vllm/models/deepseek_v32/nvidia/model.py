@@ -71,7 +71,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         self.layer_idx = layer_idx
         self.use_mha = False
         self.use_sequence_parallel = (
-            parallel_config.use_sequence_parallel_moe
+            parallel_config.use_sequence_parallel
             and parallel_config.pipeline_parallel_size == 1
         )
 
@@ -176,7 +176,7 @@ class DeepseekV32Model(torch.nn.Module):
         self.vocab_size = config.vocab_size
         parallel_config = vllm_config.parallel_config
         self.use_sequence_parallel = (
-            parallel_config.use_sequence_parallel_moe
+            parallel_config.use_sequence_parallel
             and parallel_config.pipeline_parallel_size == 1
         )
         # DSA is always sparse (has index_topk); allocate the shared top-k

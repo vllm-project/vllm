@@ -10,6 +10,7 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
+from vllm.forward_context import is_sequence_parallel_enabled
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
@@ -170,7 +171,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[current_step_idx]
-        if mtp_layer.use_attn_reduce_scatter_for_moe:
+        if mtp_layer.is_sequence_parallel and is_sequence_parallel_enabled():
             assert hidden_states.shape[0] == positions.shape[-1]
             hidden_states = sequence_parallel_chunk(hidden_states)
             assert residual is None
@@ -186,7 +187,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
-        if mtp_layer.use_attn_reduce_scatter_for_moe:
+        if mtp_layer.is_sequence_parallel and is_sequence_parallel_enabled():
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
             hidden_states = hidden_states[: positions.shape[-1]]
         return hidden_states

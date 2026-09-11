@@ -85,7 +85,7 @@ class DPMetadata:
         assert num_tokens_across_dp_cpu is not None
         assert (
             parallel_config.data_parallel_size > 1
-            or parallel_config.use_sequence_parallel_moe
+            or parallel_config.use_sequence_parallel
         )
         assert parallel_config.is_moe_model is not False
         dp_rank = parallel_config.data_parallel_rank
@@ -186,6 +186,7 @@ class ForwardContext:
     moe_layer_index: int = 0
 
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
+    sequence_parallel_enabled: bool = True
 
     def __post_init__(self):
         assert self.cudagraph_runtime_mode.is_valid_runtime_mode(), (
@@ -207,6 +208,10 @@ def get_forward_context() -> ForwardContext:
 
 def is_forward_context_available() -> bool:
     return _forward_context is not None
+
+
+def is_sequence_parallel_enabled() -> bool:
+    return _forward_context is None or _forward_context.sequence_parallel_enabled
 
 
 def create_forward_context(
@@ -268,6 +273,7 @@ def set_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    sequence_parallel_num_tokens: int | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -282,7 +288,7 @@ def set_forward_context(
     if (
         (
             vllm_config.parallel_config.data_parallel_size > 1
-            or vllm_config.parallel_config.use_sequence_parallel_moe
+            or vllm_config.parallel_config.use_sequence_parallel
         )
         and vllm_config.parallel_config.is_moe_model is not False
         and (attn_metadata is not None or num_tokens is not None)
@@ -337,6 +343,14 @@ def set_forward_context(
         additional_kwargs,
         skip_compiled,
         is_padding=is_padding,
+    )
+
+    forward_context.sequence_parallel_enabled = (
+        vllm_config.parallel_config.sequence_parallel_enabled_for_tokens(
+            sequence_parallel_num_tokens
+            if sequence_parallel_num_tokens is not None
+            else num_tokens or 0
+        )
     )
 
     try:

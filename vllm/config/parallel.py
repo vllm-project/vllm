@@ -166,6 +166,16 @@ class ParallelConfig:
     """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    enable_sequence_parallel: bool | None = None
+    """Enable sequence parallelism.
+
+    When unset (default), the effective value is derived from
+    :attr:`all2all_backend`, :attr:`enable_expert_parallel`,
+    :attr:`tensor_parallel_size` and :attr:`data_parallel_size` (the legacy
+    heuristic). ``False`` disables it. ``True`` requires TP > 1; MoE also
+    requires EP and a supported all2all backend, but permits DP = 1.
+    Dense models use SP only for steps with more than 1000 tokens.
+    """
     enable_batch_sharded_sampling: bool | None = None
     """Use sharded sampling across tensor parallel ranks. Each rank samples
     a slice of the batch instead of every rank sampling all of it. Currently
@@ -707,8 +717,7 @@ class ParallelConfig:
     # In this case, ensure the input to the experts is sequence parallel
     # to avoid the excess work.
     #
-    @property
-    def use_sequence_parallel_moe(self) -> bool:
+    def _supports_sequence_parallel_moe(self) -> bool:
         return (
             self.all2all_backend
             in (
@@ -722,14 +731,40 @@ class ParallelConfig:
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
-            and self.data_parallel_size > 1
+            and self.is_moe_model is not False
         )
+
+    @property
+    def use_sequence_parallel(self) -> bool:
+        if self.pipeline_parallel_size > 1 or self.enable_sequence_parallel is False:
+            return False
+        if self.enable_sequence_parallel is True:
+            return self.tensor_parallel_size > 1 and (
+                self.is_moe_model is False or self._supports_sequence_parallel_moe()
+            )
+        return self.data_parallel_size > 1 and self._supports_sequence_parallel_moe()
+
+    def sequence_parallel_enabled_for_tokens(self, num_tokens: int) -> bool:
+        return self.use_sequence_parallel and (
+            self.is_moe_model is not False or num_tokens > 1000
+        )
+
+    def validate_sequence_parallel(self) -> None:
+        if self.enable_sequence_parallel is not True:
+            return
+        if self.tensor_parallel_size <= 1:
+            raise ValueError("enable_sequence_parallel=True requires TP > 1.")
+        if self.is_moe_model is True and not self._supports_sequence_parallel_moe():
+            raise ValueError(
+                "MoE sequence parallelism requires enable_expert_parallel=True "
+                "and a supported all2all_backend."
+            )
 
     @property
     def use_all2all(self) -> bool:
         return (
             self.data_parallel_size > 1
-            or self.use_sequence_parallel_moe
+            or self.use_sequence_parallel
             or (self.enable_expert_parallel and self.prefill_context_parallel_size > 1)
         )
 
@@ -874,6 +909,8 @@ class ParallelConfig:
             * self.tensor_parallel_size
             * self.prefill_context_parallel_size
         )
+
+        self.validate_sequence_parallel()
 
         if self.distributed_executor_backend == "external_launcher":
             logger.info("Using external launcher for distributed inference.")

@@ -162,7 +162,7 @@ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         parallel_config = vllm_config.parallel_config
-        if parallel_config.use_sequence_parallel_moe:
+        if parallel_config.use_sequence_parallel:
             raise NotImplementedError(
                 "Qwen4Exp HC does not support sequence-parallel MoE"
             )
@@ -187,7 +187,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
         self.config = config
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
-        if vllm_config.parallel_config.use_sequence_parallel_moe:
+        if vllm_config.parallel_config.use_sequence_parallel:
             raise NotImplementedError(
                 "Qwen4Exp HC does not support sequence-parallel MoE"
             )

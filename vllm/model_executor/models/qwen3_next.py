@@ -15,8 +15,8 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
-    tensor_model_parallel_reduce_scatter,
 )
+from vllm.forward_context import is_sequence_parallel_enabled
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -81,18 +81,6 @@ from .utils import (
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
-def _should_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
-    config = vllm_config.model_config.hf_text_config
-    parallel_config = vllm_config.parallel_config
-    return (
-        parallel_config.use_sequence_parallel_moe
-        and parallel_config.pipeline_parallel_size == 1
-        and getattr(config, "num_experts", 0) > 0
-        and not getattr(config, "mlp_only_layers", [])
-        and getattr(config, "decoder_sparse_step", 1) == 1
-    )
-
-
 def _should_replicate_misaligned_shared_expert(
     intermediate_size: int,
     tp_size: int,
@@ -139,7 +127,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
-        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel
 
         # Resolve shared-expert fusion first (when enabled, TP alignment constraint no
         # longer applies)
@@ -239,15 +227,11 @@ class Qwen3NextSparseMoeBlock(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        already_sequence_parallel: bool = False,
     ) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
         orig_shape = hidden_states.shape
-        num_tokens, hidden_dim = hidden_states.shape
+        _, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-
-        if self.is_sequence_parallel and not already_sequence_parallel:
-            hidden_states = sequence_parallel_chunk(hidden_states)
 
         replicated_shared_output = (
             self.shared_expert(hidden_states)
@@ -258,13 +242,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             hidden_states=hidden_states, router_logits=hidden_states
         )
         if replicated_shared_output is not None:
-            final_hidden_states += replicated_shared_output
-
-        if self.is_sequence_parallel and not already_sequence_parallel:
-            final_hidden_states = tensor_model_parallel_all_gather(
-                final_hidden_states, 0
-            )
-            final_hidden_states = final_hidden_states[:num_tokens]
+            final_hidden_states = final_hidden_states + replicated_shared_output
 
         return final_hidden_states.view(orig_shape)
 
@@ -277,6 +255,7 @@ class Qwen3NextAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
+        sequence_parallel: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -312,6 +291,7 @@ class Qwen3NextAttention(nn.Module):
             self.total_num_kv_heads,
             bias=getattr(config, "qkv_bias", False),
             quant_config=quant_config,
+            sequence_parallel=sequence_parallel,
             prefix=f"{prefix}.qkv_proj",
         )
 
@@ -320,6 +300,7 @@ class Qwen3NextAttention(nn.Module):
             config.hidden_size,
             bias=False,
             reduce_results=reduce_results,
+            sequence_parallel=sequence_parallel,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
@@ -450,7 +431,10 @@ class Qwen3NextAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
+        qkv, _ = self.qkv_proj(
+            hidden_states,
+            sequence_parallel_unpadded_size=positions.shape[-1],
+        )
         q, k, v, gate = self._project_qkv_gate(qkv, positions)
         attn_output = self.attn(q, k, v)
         if gate is not None:
@@ -471,10 +455,15 @@ class Qwen3NextDecoderLayer(nn.Module):
         config = vllm_config.model_config.hf_config
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
+        parallel_config = vllm_config.parallel_config
         quant_config = vllm_config.quant_config
 
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
+        self.is_sequence_parallel = (
+            parallel_config.use_sequence_parallel
+            and parallel_config.pipeline_parallel_size == 1
+        )
 
         mlp_only_layers = (
             [] if not hasattr(config, "mlp_only_layers") else config.mlp_only_layers
@@ -483,9 +472,6 @@ class Qwen3NextDecoderLayer(nn.Module):
             config.num_experts > 0
             and (self.layer_idx + 1) % config.decoder_sparse_step == 0
         )
-        self.use_attn_reduce_scatter_for_moe = _should_use_sequence_parallel(
-            vllm_config
-        )
 
         if self.layer_type == "linear_attention":
             self.linear_attn = QwenGatedDeltaNetAttention(
@@ -493,7 +479,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=True,
-                reduce_results=not self.use_attn_reduce_scatter_for_moe,
+                sequence_parallel=self.is_sequence_parallel,
             )
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
@@ -501,7 +487,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
-                reduce_results=not self.use_attn_reduce_scatter_for_moe,
+                sequence_parallel=self.is_sequence_parallel,
                 prefix=f"{prefix}.self_attn",
             )
         else:
@@ -518,6 +504,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
+                sequence_parallel=self.is_sequence_parallel,
                 prefix=f"{prefix}.mlp",
             )
 
@@ -552,20 +539,17 @@ class Qwen3NextDecoderLayer(nn.Module):
         positions: torch.Tensor,
         **kwargs: object,
     ):
-        full_num_tokens = positions.shape[-1]
-
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        if self.use_attn_reduce_scatter_for_moe:
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-            hidden_states = hidden_states[:full_num_tokens]
-
         if self.layer_type == "linear_attention":
-            hidden_states = self.linear_attn(hidden_states=hidden_states)
+            hidden_states = self.linear_attn(
+                hidden_states=hidden_states,
+                sequence_parallel_unpadded_size=positions.shape[-1],
+            )
         elif self.layer_type == "full_attention":
             hidden_states = self.self_attn(
                 hidden_states=hidden_states,
@@ -584,23 +568,9 @@ class Qwen3NextDecoderLayer(nn.Module):
                     self.attn_layer_scale.to(hidden_states.dtype) + 1
                 )
 
-        if self.use_attn_reduce_scatter_for_moe:
-            tp_world_size = get_tensor_model_parallel_world_size()
-            # small trick using minus, eg. -17 % 8 = 7
-            sp_pad = (-hidden_states.shape[0]) % tp_world_size
-            # pad if not divisible by world size
-            hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
-            hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
-
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        if self.use_attn_reduce_scatter_for_moe:
-            hidden_states = self.mlp(
-                hidden_states,
-                already_sequence_parallel=True,
-            )
-        else:
-            hidden_states = self.mlp(hidden_states)
+        hidden_states = self.mlp(hidden_states)
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:
@@ -639,6 +609,10 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
 
         config: Qwen3NextConfig = vllm_config.model_config.hf_text_config
         parallel_config = vllm_config.parallel_config
+        self.is_sequence_parallel = (
+            parallel_config.use_sequence_parallel
+            and parallel_config.pipeline_parallel_size == 1
+        )
 
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
@@ -681,10 +655,6 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
-    @property
-    def use_sequence_parallel(self) -> bool:
-        return self.layers[self.start_layer].use_attn_reduce_scatter_for_moe
-
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -698,16 +668,14 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             else:
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
+            if self.is_sequence_parallel and is_sequence_parallel_enabled():
+                hidden_states = sequence_parallel_chunk(hidden_states)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
         full_num_tokens = positions.shape[-1]
-        if self.use_sequence_parallel:
-            hidden_states = sequence_parallel_chunk(hidden_states)
-            assert residual is None
-
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
@@ -727,7 +695,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
-        if self.use_sequence_parallel:
+        if self.is_sequence_parallel and is_sequence_parallel_enabled():
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
                 hidden_states = torch.cat([hidden_states, *aux_hidden_states], dim=-1)

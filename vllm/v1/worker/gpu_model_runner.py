@@ -3496,7 +3496,12 @@ class GPUModelRunner(
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if self.compilation_config.pass_config.enable_sp and tp_size > 1:
+        if tp_size > 1 and (
+            self.compilation_config.pass_config.enable_sp
+            or self.parallel_config.sequence_parallel_enabled_for_tokens(
+                num_scheduled_tokens
+            )
+        ):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
@@ -4448,6 +4453,7 @@ class GPUModelRunner(
                 attn_metadata,
                 self.vllm_config,
                 num_tokens=num_tokens_padded,
+                sequence_parallel_num_tokens=num_tokens_unpadded,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_mode,
                 batch_descriptor=batch_desc,
@@ -6165,6 +6171,7 @@ class GPUModelRunner(
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens_padded,
+                    sequence_parallel_num_tokens=num_tokens_unpadded,
                     num_tokens_across_dp=num_tokens_across_dp,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
