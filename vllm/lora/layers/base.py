@@ -73,6 +73,84 @@ class BaseLayerWithLoRA(nn.Module):
         """Overwrites lora tensors at index."""
         ...
 
+    def _get_lora_shard_buffers(
+        self, index: int
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
+        raise NotImplementedError(
+            f"Local LoRA shards are unsupported by {type(self).__name__}"
+        )
+
+    def get_lora_shard_shapes(
+        self, rank: int
+    ) -> tuple[tuple[tuple[int, ...], tuple[int, ...]], ...]:
+        """Describe already partitioned factors in runtime packed order."""
+        shapes = []
+        for a, b in self._get_lora_shard_buffers(0):
+            if not 0 < rank <= min(a.shape[-2], b.shape[-1]):
+                raise ValueError("Local LoRA rank exceeds the allocated capacity")
+            shapes.append(
+                (
+                    tuple(a.shape[:-2]) + (rank, a.shape[-1]),
+                    tuple(b.shape[:-1]) + (rank,),
+                )
+            )
+        return tuple(shapes)
+
+    def validate_lora_shard(
+        self,
+        rank: int,
+        lora_a: list[torch.Tensor],
+        lora_b: list[torch.Tensor],
+    ) -> None:
+        shapes = self.get_lora_shard_shapes(rank)
+        if len(lora_a) != len(shapes) or len(lora_b) != len(shapes):
+            raise ValueError("Local LoRA factors must match every packed slice")
+        buffers = self._get_lora_shard_buffers(0)
+        owned_storage = {
+            (tensor.device, tensor.untyped_storage().data_ptr())
+            for pair in buffers
+            for tensor in pair
+        }
+        for (a, b), (a_shape, b_shape), (a_buffer, b_buffer) in zip(
+            zip(lora_a, lora_b), shapes, buffers
+        ):
+            for tensor in (a, b):
+                if tensor.is_meta or tensor.layout != torch.strided:
+                    raise ValueError(
+                        "Local LoRA factors must be materialized dense tensors"
+                    )
+                if (
+                    tensor.device,
+                    tensor.untyped_storage().data_ptr(),
+                ) in owned_storage:
+                    raise ValueError(
+                        "Local LoRA factors must not alias runtime buffers"
+                    )
+            if tuple(a.shape) != a_shape or tuple(b.shape) != b_shape:
+                raise ValueError(
+                    f"Local LoRA shape mismatch: expected {a_shape}, {b_shape}; "
+                    f"received {tuple(a.shape)}, {tuple(b.shape)}"
+                )
+            if a.dtype != a_buffer.dtype or b.dtype != b_buffer.dtype:
+                raise ValueError("Local LoRA dtype must match the runtime buffers")
+
+    def set_lora_shard(
+        self,
+        index: int,
+        rank: int,
+        lora_a: list[torch.Tensor],
+        lora_b: list[torch.Tensor],
+    ) -> None:
+        """Copy pre-scaled local factors without TP or EP slicing."""
+        if index < 0:
+            raise ValueError("Local LoRA slot index must be nonnegative")
+        self.validate_lora_shard(rank, lora_a, lora_b)
+        buffers = self._get_lora_shard_buffers(index)
+        self.reset_lora(index)
+        for a, b, (a_buffer, b_buffer) in zip(lora_a, lora_b, buffers):
+            a_buffer[..., :rank, :].copy_(a, non_blocking=True)
+            b_buffer[..., :rank].copy_(b, non_blocking=True)
+
     def set_mapping(
         self,
         punica_wrapper,

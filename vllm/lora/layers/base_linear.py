@@ -150,6 +150,16 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         )
         self.output_slices = (self.lora_b_stacked[0].shape[2],)
 
+    def _get_lora_shard_buffers(
+        self, index: int
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], ...]:
+        if self.lora_config.fully_sharded_loras:
+            raise NotImplementedError("Local fully-sharded LoRA is unsupported")
+        return tuple(
+            (a[index, 0], b[index, 0])
+            for a, b in zip(self.lora_a_stacked, self.lora_b_stacked)
+        )
+
     def reset_lora(self, index: int):
         for s_index in range(self.n_slices):
             self.lora_a_stacked[s_index][index] = 0
