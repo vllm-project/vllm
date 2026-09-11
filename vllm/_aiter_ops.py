@@ -1046,11 +1046,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
     assert result is not None
     out, res_out, scale = result[0], result[1], result[2]
     if transpose_scale:
-        # AITER writes the scales into a contiguous [G, M] buffer and hands
-        # back its transposed view; the b-preshuffle GEMM wants that buffer as
-        # a contiguous [M, G] tensor (the bytes of As.T). Re-view, no copy.
-        m, g = scale.shape
-        scale = scale.transpose(0, 1).view(m, g)
+        scale = scale.transpose(0, 1).view(scale.shape)
     return out, res_out, scale
 
 
@@ -1343,10 +1339,8 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
     transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if transpose_scale:
-        # The Triton act+quant kernel has no transposed-scale mode; the HIP
-        # silu_and_mul_quant kernel writes the per-group scales in the
-        # b-preshuffle GEMM's column-major layout directly (shuffle_scale is
-        # the same flag per_group_quant_hip maps transpose_scale to).
+        # The Triton act_mul_and_fp8_group_quant kernel has no transposed-scale mode; 
+        # the HIP silu_and_mul_quant kernel uses shuffle_scale
         from aiter import silu_and_mul_quant
 
         m, n2 = x.shape

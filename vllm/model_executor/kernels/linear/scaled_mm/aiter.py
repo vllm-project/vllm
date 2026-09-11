@@ -506,10 +506,8 @@ class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 ),
             )
 
-        # The (16, 16) weight preshuffle needs N % 16 == 0; the 128-wide
-        # block scales need K % 128 == 0. N need not be a multiple of 128: the
-        # kernel handles a partial last N block (DeepSeek's fused_qkv_a_proj,
-        # N = 2112, is the case that matters).
+        # The (16, 16) weight preshuffle needs N % 16 == 0; 
+        # the block scales need K % 128 == 0
         n, k = config.weight_shape
         if not (n % 16 == 0 and k % 128 == 0):
             return (
