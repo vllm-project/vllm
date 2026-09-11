@@ -50,9 +50,7 @@ def _apply_head_perm(
     x: torch.Tensor, num: int, head_dim: int, idx: torch.Tensor
 ) -> torch.Tensor:
     return (
-        x.reshape(*x.shape[:-1], num, head_dim)[..., idx]
-        .reshape(*x.shape)
-        .contiguous()
+        x.reshape(*x.shape[:-1], num, head_dim)[..., idx].reshape(*x.shape).contiguous()
     )
 
 
@@ -92,9 +90,7 @@ def fold_qk_proj_weight(
     weight: torch.Tensor, head_dim: int, idx: torch.Tensor
 ) -> torch.Tensor:
     hidden = weight.shape[-1]
-    return (
-        weight.view(-1, head_dim, hidden)[:, idx, :].reshape(-1, hidden).contiguous()
-    )
+    return weight.view(-1, head_dim, hidden)[:, idx, :].reshape(-1, hidden).contiguous()
 
 
 SHAPES = [
