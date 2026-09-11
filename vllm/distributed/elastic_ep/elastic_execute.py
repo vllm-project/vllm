@@ -12,7 +12,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed import P2POp
 
-from vllm import envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.wrapper import reset_compile_wrapper
@@ -723,9 +722,7 @@ class ElasticEPScalingExecutor:
         unlock_workspace()
 
         runner = self.worker.model_runner
-        with runner.preserve_serving_state(
-            full_pool=envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS
-        ):
+        with runner.preserve_serving_state():
             runner.warm_up_workspace()
             self.worker.compile_or_warm_up_model()
 

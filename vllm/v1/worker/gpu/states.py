@@ -16,7 +16,6 @@ class RequestState:
         vocab_size: int,
         device: torch.device,
         num_prefill_lookahead: int = 1,
-        num_reserved_slots: int = 0,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -27,10 +26,7 @@ class RequestState:
 
         self.req_id_to_index: dict[str, int] = {}
         self.index_to_req_id: dict[int, str] = {}
-        assert 0 <= num_reserved_slots < max_num_reqs
-        serving_capacity = max_num_reqs - num_reserved_slots
-        self.free_indices = list(range(serving_capacity))
-        self.reserved_indices = list(range(serving_capacity, max_num_reqs))
+        self.free_indices = list(range(max_num_reqs))
 
         # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
         # depending on the configured max_num_reqs and max_model_len.

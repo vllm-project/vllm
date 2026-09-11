@@ -548,7 +548,6 @@ class EngineArgs:
     max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: int | None = None
-    num_reserved_warmup_seqs: int = SchedulerConfig.num_reserved_warmup_seqs
     max_num_queued_reqs: int | None = None
     max_num_queued_tokens: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
@@ -1597,10 +1596,6 @@ class EngineArgs:
             "--long-prefill-token-threshold",
             **scheduler_kwargs["long_prefill_token_threshold"],
         )
-        scheduler_group.add_argument(
-            "--num-reserved-warmup-seqs",
-            **scheduler_kwargs["num_reserved_warmup_seqs"],
-        )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
         scheduler_group.add_argument(
@@ -2427,7 +2422,6 @@ class EngineArgs:
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
-            num_reserved_warmup_seqs=self.num_reserved_warmup_seqs,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,

@@ -7,6 +7,7 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
+from http import HTTPStatus
 from typing import Any
 
 import vllm.envs as envs
@@ -18,7 +19,10 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
-from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
+from vllm.entrypoints.serve.elastic_ep.middleware import (
+    get_scaling_elastic_ep,
+    set_scaling_elastic_ep,
+)
 from vllm.exceptions import (
     GracefulHTTPError,
     MaxQueuedTokensError,
@@ -117,6 +121,7 @@ class AsyncLLM(EngineClient):
 
         self.vllm_config = vllm_config
         self._elastic_ep_lock = asyncio.Lock()
+        self._admission_lock = asyncio.Lock()
         self.model_config = vllm_config.model_config
         self.scheduler_config = vllm_config.scheduler_config
         self.observability_config = vllm_config.observability_config
@@ -310,6 +315,8 @@ class AsyncLLM(EngineClient):
             QueueOverflowError: If ``max_num_queued_reqs`` would be exceeded.
             MaxQueuedTokensError: If ``max_num_queued_tokens`` would be exceeded.
         """
+        self._check_elastic_ep_admission(request_id)
+
         max_num_reqs = self.scheduler_config.max_num_queued_reqs
         if max_num_reqs is not None:
             current = self.get_num_unfinished_requests()
@@ -336,6 +343,17 @@ class AsyncLLM(EngineClient):
                     max_queued_tokens,
                 )
                 raise MaxQueuedTokensError()
+
+    def _check_elastic_ep_admission(self, request_id: str | None = None) -> None:
+        if get_scaling_elastic_ep():
+            logger.info(
+                "Elastic EP scaling is in progress - rejecting request %s",
+                request_id,
+            )
+            raise GracefulHTTPError(
+                "The model is currently scaling. Please try again later.",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if not hasattr(self, "_supported_tasks"):
@@ -472,7 +490,7 @@ class AsyncLLM(EngineClient):
         params = request.params
 
         if is_pooling or params.n == 1:
-            await self._add_request(request, prompt_text, None, 0, queue)
+            await self._enqueue_request(request, prompt_text, None, 0, queue)
             return queue
 
         parent_params = params
@@ -480,15 +498,32 @@ class AsyncLLM(EngineClient):
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request)
-        for idx in range(parent_params.n):
-            request_id, child_params = parent_request.get_child_info(idx)
-            child_request = request if idx == parent_params.n - 1 else copy(request)
-            child_request.request_id = request_id
-            child_request.sampling_params = child_params
-            await self._add_request(
-                child_request, prompt_text, parent_request, idx, queue
-            )
+        async with self._admission_lock:
+            self.check_admission(parent_params.n, request.request_id)
+            for idx in range(parent_params.n):
+                request_id, child_params = parent_request.get_child_info(idx)
+                child_request = request if idx == parent_params.n - 1 else copy(request)
+                child_request.request_id = request_id
+                child_request.sampling_params = child_params
+                await self._add_request(
+                    child_request, prompt_text, parent_request, idx, queue
+                )
         return queue
+
+    async def _enqueue_request(
+        self,
+        request: EngineCoreRequest,
+        prompt: str | None,
+        parent_req: ParentRequest | None,
+        index: int,
+        queue: RequestOutputCollector,
+    ) -> None:
+        async with self._admission_lock:
+            if parent_req is None and not self.output_processor.has_request(
+                request.request_id
+            ):
+                self.check_admission(request_id=request.request_id)
+            await self._add_request(request, prompt, parent_req, index, queue)
 
     async def _add_request(
         self,
@@ -498,11 +533,6 @@ class AsyncLLM(EngineClient):
         index: int,
         queue: RequestOutputCollector,
     ):
-        if parent_req is None and not self.output_processor.has_request(
-            request.request_id
-        ):
-            self.check_admission(request_id=request.request_id)
-
         # Register locally before the first await so concurrent tasks see this request.
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
@@ -580,7 +610,7 @@ class AsyncLLM(EngineClient):
                     prompt_text, _, _ = extract_prompt_components(
                         self.model_config, input_chunk.prompt
                     )
-                    await self._add_request(req, prompt_text, None, 0, queue)
+                    await self._enqueue_request(req, prompt_text, None, 0, queue)
             except (asyncio.CancelledError, GeneratorExit):
                 cancelled = True
             except Exception as error:
@@ -592,7 +622,7 @@ class AsyncLLM(EngineClient):
                 if not cancelled:
                     # Send empty final request to indicate that inputs have
                     # finished. Don't send if cancelled (session was aborted).
-                    await self._add_request(final_req, None, None, 0, queue)
+                    await self._enqueue_request(final_req, None, None, 0, queue)
 
         # Ensure output handler is running.
         self._run_output_handler()
@@ -1127,10 +1157,7 @@ class AsyncLLM(EngineClient):
 
     async def _drain_requests_for_elastic_ep(self, drain_timeout: int) -> None:
         try:
-            logger.info(
-                "VLLM_ELASTIC_EP_DRAIN_REQUESTS is set, "
-                "waiting for requests to drain before scaling"
-            )
+            logger.info("Waiting for requests to drain before Elastic EP scaling")
             await self.wait_for_requests_to_drain(drain_timeout)
         except BaseException:
             set_scaling_elastic_ep(False)
@@ -1155,7 +1182,6 @@ class AsyncLLM(EngineClient):
             return
 
         await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
-
         # recreate stat loggers
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
             # TODO(rob): fix this after talking with Ray team.
@@ -1173,11 +1199,20 @@ class AsyncLLM(EngineClient):
                 self._logger_ref[0] = self.logger_manager
             self.logger_manager.log_engine_initialized()
 
-        set_scaling_elastic_ep(True)
-        if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
+        async with self._admission_lock:
+            set_scaling_elastic_ep(True)
+
+        if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS or self.vllm_config.use_v2_model_runner:
             await self._drain_requests_for_elastic_ep(drain_timeout)
 
-        await self.engine_core.commit_elastic_ep()
+        try:
+            await self.engine_core.commit_elastic_ep()
+        except BaseException:
+            logger.exception(
+                "Elastic EP commit failed; admission remains closed because "
+                "the distributed topology may be partially mutated"
+            )
+            raise
         self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
         set_scaling_elastic_ep(False)
 

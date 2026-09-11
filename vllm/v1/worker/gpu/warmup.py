@@ -279,7 +279,6 @@ def _warmup_kernels(
         model_runner.scheduler_config.max_num_batched_tokens
         // max(prompt_len, decode_query_len),
     )
-    num_reqs = min(num_reqs, len(model_runner.req_states.free_indices))
     if num_reqs <= 0:
         return
     block_tables = getattr(model_runner, "block_tables", None)

@@ -122,8 +122,7 @@ class Scheduler(SchedulerInterface):
         self.prev_step_scheduled_req_ids: set[str] = set()
 
         # Scheduling constraints.
-        num_reserved = self.scheduler_config.num_reserved_warmup_seqs
-        self.max_num_running_reqs = self.scheduler_config.max_num_seqs - num_reserved
+        self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = (
             self.scheduler_config.max_num_scheduled_tokens
             if self.scheduler_config.max_num_scheduled_tokens is not None

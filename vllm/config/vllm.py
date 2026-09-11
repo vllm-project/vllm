@@ -1183,17 +1183,6 @@ class VllmConfig:
         self._resolve_and_verify_engram_config()
         self._check_watermarking_unsupported()
 
-        if (
-            self.parallel_config.enable_elastic_ep
-            and not self.scheduler_config.num_reserved_warmup_seqs
-            and not envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS
-        ):
-            logger.warning(
-                "Elastic EP cannot re-warm with live requests unless request "
-                "slots are reserved. Pass --num-reserved-warmup-seqs or set "
-                "VLLM_ELASTIC_EP_DRAIN_REQUESTS=1."
-            )
-
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()

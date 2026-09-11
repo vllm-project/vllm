@@ -314,7 +314,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.vocab_size,
             device=self.device,
             num_prefill_lookahead=num_prefill_lookahead,
-            num_reserved_slots=self.scheduler_config.num_reserved_warmup_seqs,
         )
         self.adaptive_verification: AdaptiveVerificationManager | None = None
         self.input_buffers = InputBuffers(
@@ -2215,10 +2214,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def eep_eplb_suppressed(self, suppressed: bool) -> None:
         self.eplb.suppressed = suppressed
 
-    def preserve_serving_state(
-        self, *, full_pool: bool = False
-    ) -> AbstractContextManager[None]:
-        return preserve_serving_state(self, full_pool=full_pool)
+    def preserve_serving_state(self) -> AbstractContextManager[None]:
+        return preserve_serving_state(self)
 
     def warm_up_workspace(self) -> None:
         self._dummy_run(self.max_num_tokens, is_profile=True, skip_eplb=True)

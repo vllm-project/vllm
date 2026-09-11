@@ -2558,14 +2558,6 @@ def test_scheduler_config_init():
         print(SchedulerConfig.default_factory().max_model_len)
 
 
-@pytest.mark.parametrize("num_reserved", [1, 8])
-def test_reserved_warmup_seqs_rejects_unusable_reserves(num_reserved: int):
-    with pytest.raises(ValidationError, match="num_reserved_warmup_seqs"):
-        SchedulerConfig.default_factory(
-            max_num_seqs=8, num_reserved_warmup_seqs=num_reserved
-        )
-
-
 @pytest.mark.parametrize(
     (
         "model_id",

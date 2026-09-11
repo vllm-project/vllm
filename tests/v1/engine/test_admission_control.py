@@ -63,6 +63,7 @@ def _make_async_llm(
         max_num_queued_reqs=max_num_queued_reqs,
         max_num_queued_tokens=max_num_queued_tokens,
     )
+    llm._admission_lock = asyncio.Lock()
     llm.output_processor = MagicMock()
     llm.output_processor.get_num_unfinished_requests.return_value = num_unfinished
     llm.output_processor.get_num_queued_tokens.return_value = num_queued_tokens
@@ -282,6 +283,7 @@ async def test_concurrent_single_request_admission_respects_limit():
         add_request_async=AsyncMock(side_effect=add_request_async),
         shutdown=MagicMock(),
     )
+    llm._admission_lock = asyncio.Lock()
     llm.log_requests = False
 
     requests = [
@@ -290,7 +292,7 @@ async def test_concurrent_single_request_admission_respects_limit():
     ]
     results = await asyncio.gather(
         *(
-            llm._add_request(request, None, None, 0, MagicMock())
+            llm._enqueue_request(request, None, None, 0, MagicMock())
             for request in requests
         ),
         return_exceptions=True,
@@ -382,3 +384,185 @@ def test_human_readable_int_parses_notation(input_str: str, expected: int):
 def test_human_readable_int_rejects_invalid(invalid: str):
     with pytest.raises((argparse.ArgumentTypeError, ValueError)):
         human_readable_int(invalid)
+
+
+def _make_scaling_llm() -> AsyncLLM:
+    llm = AsyncLLM.__new__(AsyncLLM)
+    llm._admission_lock = asyncio.Lock()
+    llm.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_size=2),
+        use_v2_model_runner=True,
+    )
+    llm.engine_core = SimpleNamespace(
+        prepare_elastic_ep=AsyncMock(),
+        commit_elastic_ep=AsyncMock(),
+        dp_engines_running=MagicMock(return_value=False),
+        shutdown=MagicMock(),
+    )
+    llm.log_stats = False
+    return llm
+
+
+@pytest.mark.asyncio
+async def test_enqueue_rechecks_admission_after_middleware_passes():
+    llm = _make_async_llm()
+    llm.output_processor.has_request.return_value = False
+    llm.engine_core = SimpleNamespace(
+        add_request_async=AsyncMock(), shutdown=MagicMock()
+    )
+    request = SimpleNamespace(request_id="late")
+
+    from vllm.entrypoints.serve.elastic_ep.middleware import (
+        set_scaling_elastic_ep,
+    )
+
+    set_scaling_elastic_ep(False)
+    llm.check_admission(request_id=request.request_id)
+    set_scaling_elastic_ep(True)
+    try:
+        with pytest.raises(GracefulHTTPError) as exc_info:
+            await llm._enqueue_request(request, None, None, 0, MagicMock())
+        assert exc_info.value.http_status == HTTPStatus.SERVICE_UNAVAILABLE
+        llm.engine_core.add_request_async.assert_not_awaited()
+    finally:
+        set_scaling_elastic_ep(False)
+
+
+@pytest.mark.asyncio
+async def test_existing_request_can_enqueue_after_admission_closes():
+    llm = _make_async_llm()
+    llm.output_processor.has_request.return_value = True
+    llm.engine_core = SimpleNamespace(
+        add_request_async=AsyncMock(), shutdown=MagicMock()
+    )
+    llm.log_requests = False
+    request = SimpleNamespace(request_id="streaming-continuation")
+
+    from vllm.entrypoints.serve.elastic_ep.middleware import (
+        set_scaling_elastic_ep,
+    )
+
+    set_scaling_elastic_ep(True)
+    try:
+        await llm._enqueue_request(request, None, None, 0, MagicMock())
+        llm.engine_core.add_request_async.assert_awaited_once_with(request)
+    finally:
+        set_scaling_elastic_ep(False)
+
+
+@pytest.mark.asyncio
+async def test_mrv2_scaling_closes_admission_drains_then_commits():
+    llm = _make_scaling_llm()
+    events: list[str | tuple[str, bool]] = []
+    from vllm.entrypoints.serve.elastic_ep.middleware import (
+        get_scaling_elastic_ep,
+        set_scaling_elastic_ep,
+    )
+
+    llm.engine_core.prepare_elastic_ep.side_effect = lambda _: events.append("prepare")
+
+    async def drain(_: int) -> None:
+        events.append(("drain", bool(get_scaling_elastic_ep())))
+
+    llm._drain_requests_for_elastic_ep = AsyncMock(side_effect=drain)
+    llm.engine_core.commit_elastic_ep.side_effect = lambda: events.append("commit")
+
+    set_scaling_elastic_ep(False)
+    try:
+        await llm._scale_elastic_ep(4, 30)
+        assert events == ["prepare", ("drain", True), "commit"]
+        assert llm.engine_core.commit_elastic_ep.await_count == 1
+        assert not get_scaling_elastic_ep()
+        assert llm.vllm_config.parallel_config.data_parallel_size == 4
+    finally:
+        set_scaling_elastic_ep(False)
+
+
+@pytest.mark.asyncio
+async def test_scaling_waits_for_inflight_admission():
+    llm = _make_scaling_llm()
+    llm.scheduler_config = SimpleNamespace(
+        max_num_queued_reqs=None,
+        max_num_queued_tokens=None,
+    )
+    llm.output_processor = MagicMock()
+    llm.output_processor.has_request.return_value = False
+    enqueue_started = asyncio.Event()
+    release_enqueue = asyncio.Event()
+    prepare_finished = asyncio.Event()
+
+    async def add_request_async(_request):
+        enqueue_started.set()
+        await release_enqueue.wait()
+
+    async def prepare(_: int):
+        prepare_finished.set()
+
+    llm.engine_core.add_request_async = AsyncMock(side_effect=add_request_async)
+    llm.engine_core.prepare_elastic_ep = AsyncMock(side_effect=prepare)
+    llm._drain_requests_for_elastic_ep = AsyncMock()
+    llm.log_requests = False
+    request = SimpleNamespace(request_id="in-flight")
+
+    from vllm.entrypoints.serve.elastic_ep.middleware import (
+        get_scaling_elastic_ep,
+        set_scaling_elastic_ep,
+    )
+
+    set_scaling_elastic_ep(False)
+    enqueue_task = asyncio.create_task(
+        llm._enqueue_request(request, None, None, 0, MagicMock())
+    )
+    scaling_task = asyncio.create_task(llm._scale_elastic_ep(4, 30))
+    try:
+        await enqueue_started.wait()
+        await prepare_finished.wait()
+        await asyncio.sleep(0)
+        assert not get_scaling_elastic_ep()
+
+        release_enqueue.set()
+        await enqueue_task
+        await scaling_task
+        assert get_scaling_elastic_ep() is False
+        llm._drain_requests_for_elastic_ep.assert_awaited_once_with(30)
+    finally:
+        set_scaling_elastic_ep(False)
+        if not enqueue_task.done():
+            release_enqueue.set()
+        await asyncio.gather(enqueue_task, scaling_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_mrv2_drain_failure_reopens_admission():
+    llm = _make_scaling_llm()
+    llm.wait_for_requests_to_drain = AsyncMock(side_effect=TimeoutError)
+
+    from vllm.entrypoints.serve.elastic_ep.middleware import (
+        get_scaling_elastic_ep,
+        set_scaling_elastic_ep,
+    )
+
+    set_scaling_elastic_ep(False)
+    with pytest.raises(TimeoutError):
+        await llm._scale_elastic_ep(4, 30)
+    assert not get_scaling_elastic_ep()
+    llm.engine_core.commit_elastic_ep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mrv2_commit_failure_leaves_admission_closed():
+    llm = _make_scaling_llm()
+    llm.wait_for_requests_to_drain = AsyncMock()
+    llm.engine_core.commit_elastic_ep.side_effect = RuntimeError("commit failed")
+
+    from vllm.entrypoints.serve.elastic_ep.middleware import (
+        get_scaling_elastic_ep,
+        set_scaling_elastic_ep,
+    )
+
+    set_scaling_elastic_ep(False)
+    with pytest.raises(RuntimeError, match="commit failed"):
+        await llm._scale_elastic_ep(4, 30)
+    assert get_scaling_elastic_ep()
+    assert llm.engine_core.commit_elastic_ep.await_count == 1
+    set_scaling_elastic_ep(False)

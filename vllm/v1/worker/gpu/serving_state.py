@@ -9,10 +9,8 @@ if TYPE_CHECKING:
 
 
 @contextmanager
-def preserve_serving_state(
-    runner: "GPUModelRunner", *, full_pool: bool = False
-) -> Iterator[None]:
-    """Isolate an MRV2 warmup from live request state and cached KV."""
+def preserve_serving_state(runner: "GPUModelRunner") -> Iterator[None]:
+    """Prepare MRV2 request state for warmup after requests have drained."""
     req_states = runner.req_states
     block_tables = getattr(runner, "block_tables", None)
 
@@ -20,16 +18,24 @@ def preserve_serving_state(
     saved_id_to_index = dict(req_states.req_id_to_index)
     saved_index_to_id = dict(req_states.index_to_req_id)
     saved_eplb_suppressed = runner.eep_eplb_suppressed
-
-    if full_pool:
-        assert not saved_id_to_index, (
-            f"full_pool warmup wanted an empty request pool, found "
-            f"{len(saved_id_to_index)} live requests"
-        )
-    available_indices = (
-        range(req_states.max_num_reqs) if full_pool else req_states.reserved_indices
+    # Preserve the previous redirect state for nested contexts.
+    saved_redirect = (
+        block_tables.redirect_writes_to_null_block
+        if block_tables is not None
+        else False
     )
-    req_states.free_indices[:] = available_indices
+
+    assert (
+        not saved_id_to_index
+        and not saved_index_to_id
+        and len(saved_free) == req_states.max_num_reqs
+    ), (
+        "MRV2 warmup requires an empty request pool, "
+        f"found {len(saved_id_to_index)} request ids, "
+        f"{len(saved_index_to_id)} request indices, and "
+        f"{len(saved_free)}/{req_states.max_num_reqs} free slots"
+    )
+    req_states.free_indices[:] = range(req_states.max_num_reqs)
 
     if block_tables is not None:
         block_tables.redirect_writes_to_null_block = True
@@ -39,8 +45,7 @@ def preserve_serving_state(
         yield
     finally:
         for req_id in list(req_states.req_id_to_index):
-            if req_id not in saved_id_to_index:
-                runner._remove_request(req_id)
+            runner._remove_request(req_id)
 
         req_states.free_indices[:] = saved_free
         req_states.req_id_to_index.clear()
@@ -50,6 +55,6 @@ def preserve_serving_state(
 
         runner.eep_eplb_suppressed = saved_eplb_suppressed
         if block_tables is not None:
-            block_tables.redirect_writes_to_null_block = False
+            block_tables.redirect_writes_to_null_block = saved_redirect
         if runner.kv_block_zeroer is not None:
             runner.kv_block_zeroer.zero_block_ids([0])

@@ -67,9 +67,6 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
-    num_reserved_warmup_seqs: int = Field(default=0, ge=0)
-    """Request slots withheld from serving for elastic EP warmup."""
-
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens. 0 disables the cap (default)."""
@@ -292,14 +289,6 @@ class SchedulerConfig:
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
                 self.max_num_batched_tokens,
             )
-
-        if self.num_reserved_warmup_seqs == 1:
-            raise ValueError(
-                "num_reserved_warmup_seqs must be 0 or at least 2 so all DP "
-                "ranks run matching warmup steps."
-            )
-        if self.num_reserved_warmup_seqs >= self.max_num_seqs:
-            raise ValueError("num_reserved_warmup_seqs must be less than max_num_seqs.")
 
         self.verify_max_model_len(max_model_len)
 
