@@ -51,10 +51,6 @@ from vllm.v1.sample.ops.topk_topp_sampler import (
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
-    _COPY_AND_EXPAND_EAGLE_INPUTS_KERNEL,
-    _EAGLE_PREPARE_INPUTS_PADDED_KERNEL,
-    _EAGLE_PREPARE_NEXT_TOKEN_PADDED_KERNEL,
-    _EAGLE_STEP_SLOT_MAPPING_METADATA_KERNEL,
     PADDING_SLOT_ID,
     _copy_and_expand_eagle_inputs,
     _eagle_prepare_inputs_padded,

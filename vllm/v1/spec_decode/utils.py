@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
-from typing import Any
-
 import torch
 
 from vllm.model_executor.warmup.jit_warmup import (
@@ -855,10 +852,3 @@ def unconditional_to_conditional_rates(rates: list[float]) -> list[float]:
     """Convert per-position unconditional rates to per-position conditional
     rates for the early-terminating rejection loop (c_i = p_i / p_{i-1})."""
     return [p / q if q > 0.0 else 0.0 for p, q in zip(rates, [1.0, *rates[:-1]])]
-
-
-_EAGLE_STEP_SLOT_MAPPING_METADATA_KERNEL = EagleStepSlotMappingMetadataKernel()
-_EAGLE_PREPARE_INPUTS_PADDED_KERNEL = EaglePrepareInputsPaddedKernel()
-_EAGLE_PREPARE_NEXT_TOKEN_PADDED_KERNEL = EaglePrepareNextTokenPaddedKernel()
-_COPY_AND_EXPAND_EAGLE_INPUTS_KERNEL = CopyAndExpandEagleInputsKernel()
-_COPY_AND_EXPAND_DFLASH_INPUTS_KERNEL = CopyAndExpandDflashInputsKernel()

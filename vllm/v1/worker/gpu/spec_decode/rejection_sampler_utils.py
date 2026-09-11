@@ -1601,11 +1601,3 @@ def rejection_sample(
         PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
     )
     return sampled, num_sampled
-
-
-_COMPUTE_LOCAL_LOGITS_STATS_KERNEL = ComputeLocalLogitsStatsKernel()
-_COMPUTE_CUMULATIVE_LOG_P_KERNEL = ComputeCumulativeLogPKernel()
-_COMPUTE_LOCAL_RESIDUAL_MASS_KERNEL = ComputeLocalResidualMassKernel()
-_REJECTION_KERNEL = RejectionKernel()
-_RESAMPLE_KERNEL = ResampleKernel()
-_INSERT_RESAMPLED_KERNEL = InsertResampledKernel()

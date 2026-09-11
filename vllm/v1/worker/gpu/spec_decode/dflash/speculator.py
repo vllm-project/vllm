@@ -416,7 +416,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         assert self.draft_kv_cache_group_id >= 0
         # Support multiple draft KV cache groups by preparing inputs once for each
         for i, gid in enumerate(self.draft_kv_cache_group_ids):
-            _PREPARE_DFLASH_INPUTS_KERNEL(
+            prepare_dflash_inputs(
                 self.input_buffers,
                 self.block_tables.slot_mappings[gid],
                 self.context_positions,

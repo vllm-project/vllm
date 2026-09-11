@@ -367,6 +367,3 @@ class RejectionSampler:
             num_sampled=num_sampled,
             num_rejected=num_rejected,
         )
-
-
-_FLATTEN_SAMPLED_KERNEL = FlattenSampledKernel()
