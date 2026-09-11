@@ -22,7 +22,7 @@ def _shard_of_position(
 def _remapped_row(
     token: int, region_start: int, rows_per_rank: int, world: int, interleave: int = 1
 ) -> int:
-    """Where the top-k kernel's WORKSPACE_RANK_MAJOR branch sends a token."""
+    """Where the top-k kernel sends a token in the rank-major gathered workspace."""
     owning_rank = (token // interleave) % world
     local_idx = (token // (world * interleave)) * interleave + token % interleave
     return owning_rank * rows_per_rank + region_start + local_idx
@@ -63,7 +63,7 @@ def _simulate_gathered_kv(
 )
 def test_gathered_workspace_round_trips_every_token(world, extents):
     """Every global token must be readable back from the gathered buffer."""
-    rows = np.arange(len(extents), dtype=np.int64)
+    rows = np.arange(len(extents))
     plan = plan_gathered_prefill(
         rows, np.array(extents, dtype=np.int64), world, max_gathered_rows=1 << 20
     )
@@ -89,7 +89,7 @@ def test_gathered_workspace_round_trips_every_token(world, extents):
 def test_rows_per_rank_is_the_per_rank_maximum(world, extent):
     """ceil(extent / W) has to cover the busiest rank, and waste at most a row."""
     plan = plan_gathered_prefill(
-        np.zeros(1, dtype=np.int64),
+        np.arange(1),
         np.array([extent], dtype=np.int64),
         world,
         max_gathered_rows=1 << 20,
@@ -102,9 +102,8 @@ def test_rows_per_rank_is_the_per_rank_maximum(world, extent):
 
 def test_rows_of_one_request_share_a_region():
     """PCP gives a rank several chunks of one request; they share one context."""
-    rows = np.array([3, 3, 5, 5, 9], dtype=np.int64)
-    extents = np.zeros(10, dtype=np.int64)
-    extents[[3, 5, 9]] = [128, 256, 64]
+    rows = np.array([7, 7, 3, 3, 9])
+    extents = np.array([128, 128, 256, 256, 64], dtype=np.int64)
 
     plan = plan_gathered_prefill(
         rows, extents, dcp_world_size=2, max_gathered_rows=1 << 20
@@ -118,7 +117,7 @@ def test_rows_of_one_request_share_a_region():
 
 def test_chunks_rebase_workspace_starts_and_respect_the_budget():
     """Each chunk reuses the buffer from row 0, so its starts restart at 0."""
-    rows = np.arange(4, dtype=np.int64)
+    rows = np.arange(4)
     extents = np.array([256, 256, 256, 256], dtype=np.int64)
 
     # 512 gathered rows = 256 per rank at W=2 = two requests' worth per chunk.
@@ -131,12 +130,12 @@ def test_chunks_rebase_workspace_starts_and_respect_the_budget():
         assert rows_per_rank * 2 <= 512
 
 
-def test_unordered_rows_are_rejected():
-    """The layout keys on run-length dedup, so it needs grouped rows."""
-    with pytest.raises(AssertionError, match="ascending global request"):
+def test_rows_of_one_request_must_be_adjacent():
+    """A region is one contiguous run; an interleaved request has no region."""
+    with pytest.raises(AssertionError, match="adjacent"):
         plan_gathered_prefill(
-            np.array([1, 0, 1], dtype=np.int64),
-            np.array([64, 64], dtype=np.int64),
+            np.array([0, 1, 0]),
+            np.array([64, 64, 64], dtype=np.int64),
             dcp_world_size=2,
             max_gathered_rows=1 << 20,
         )

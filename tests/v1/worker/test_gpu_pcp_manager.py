@@ -115,94 +115,29 @@ def test_graph_padding_cannot_be_smaller_than_largest_pcp_rank(monkeypatch):
         )
 
 
-def _schedule_for_rank(pcp_rank: int, pcp_world_size: int, monkeypatch):
-    """Run one PCP rank's _build_batch_layout and return its schedule."""
-    manager = PCPManager(
-        pcp_world_size=pcp_world_size,
-        pcp_rank=pcp_rank,
-        device=torch.device("cpu"),
-        dcp_world_size=8,
-    )
-    monkeypatch.setattr(pcp_manager_module, "async_copy_to_gpu", _copy_to_cpu)
-    # Two prefills of 32 tokens each, one with 100 tokens already computed.
-    num_scheduled_tokens = np.full(2, 32, dtype=np.int32)
-    manager._build_batch_layout(
-        num_scheduled_tokens=num_scheduled_tokens,
-        num_computed_tokens=np.array([0, 100], dtype=np.int32),
-        is_prefilling=np.ones(2, dtype=np.bool_),
-        query_start_loc_np=np.array([0, 32, 64], dtype=np.int32),
-    )
-    schedule = pcp_manager_module.get_current_pcp_schedule()
-    assert schedule is not None
-    return schedule.seq_lens_np
-
-
-def test_schedule_context_lens_are_identical_across_pcp_ranks(monkeypatch):
-    """The DCP gather schedule must not depend on which PCP rank builds it."""
-    pcp_world_size = 4
-    schedules = [
-        _schedule_for_rank(rank, pcp_world_size, monkeypatch)
-        for rank in range(pcp_world_size)
-    ]
-    for rank, schedule in enumerate(schedules[1:], start=1):
-        assert np.array_equal(schedules[0], schedule), (
-            f"rank {rank} schedule {schedule} != rank 0 schedule {schedules[0]}"
-        )
-
-
-def test_schedule_context_lens_bound_every_rank_local_context(monkeypatch):
-    """The schedule must bound every rank's local extent, and no more."""
-    pcp_world_size = 4
-    schedule = _schedule_for_rank(0, pcp_world_size, monkeypatch)
-    num_scheduled_tokens = np.full(2, 32, dtype=np.int32)
-    num_computed = np.array([0, 100], dtype=np.int32)
-    is_prefilling = np.ones(2, dtype=np.bool_)
-
-    for req_idx in range(2):
-        assert schedule[req_idx] == num_computed[req_idx] + 32
-
-    reached = {req_idx: 0 for req_idx in range(2)}
-    for rank in range(pcp_world_size):
-        manager = PCPManager(
-            pcp_world_size=pcp_world_size, pcp_rank=rank, device=torch.device("cpu")
-        )
-        for req_idx, chunk_offset, chunk_len in manager._iter_rank_chunks(
-            rank, num_scheduled_tokens, is_prefilling
-        ):
-            local_extent = num_computed[req_idx] + chunk_offset + chunk_len
-            assert local_extent <= schedule[req_idx]
-            reached[req_idx] = max(reached[req_idx], local_extent)
-    assert reached == {0: int(schedule[0]), 1: int(schedule[1])}
-
-
-def _published_schedule_for_rank(
+def _rank_rows(
     pcp_rank: int,
     pcp_world_size: int,
     num_scheduled_tokens: np.ndarray,
     num_computed_tokens: np.ndarray,
     is_prefilling: np.ndarray,
-    monkeypatch,
-    padded_num_tokens: int | None = None,
-):
-    """Build one PCP rank's layout and return the schedule it publishes."""
+) -> tuple[np.ndarray, np.ndarray]:
+    """One PCP+DCP rank's rows as (global request, extent)."""
     manager = PCPManager(
         pcp_world_size=pcp_world_size,
         pcp_rank=pcp_rank,
         device=torch.device("cpu"),
         dcp_world_size=2,
     )
-    monkeypatch.setattr(pcp_manager_module, "async_copy_to_gpu", _copy_to_cpu)
     query_start_loc_np = np.concatenate([[0], np.cumsum(num_scheduled_tokens)]).astype(
         np.int32
     )
-    manager._build_batch_layout(
-        num_scheduled_tokens=num_scheduled_tokens,
-        num_computed_tokens=num_computed_tokens,
-        is_prefilling=is_prefilling,
-        query_start_loc_np=query_start_loc_np,
-        padded_num_tokens=padded_num_tokens,
+    segments = manager._get_rank_segments(
+        pcp_rank, num_scheduled_tokens, is_prefilling, query_start_loc_np
     )
-    return pcp_manager_module.get_current_pcp_schedule()
+    rows = np.array([segment.global_batch_req_idx for segment in segments])
+    extents = (num_computed_tokens + num_scheduled_tokens)[rows]
+    return rows, extents
 
 
 @pytest.mark.parametrize(
@@ -220,7 +155,7 @@ def _published_schedule_for_rank(
 )
 @pytest.mark.parametrize("pcp_world_size", [2, 4])
 def test_published_row_order_is_identical_on_every_pcp_rank(
-    num_scheduled_tokens, num_computed_tokens, pcp_world_size, monkeypatch
+    num_scheduled_tokens, num_computed_tokens, pcp_world_size
 ):
     """Every rank must map its rows to the same global requests, in the same order."""
     num_scheduled_tokens = np.array(num_scheduled_tokens, dtype=np.int32)
@@ -228,14 +163,13 @@ def test_published_row_order_is_identical_on_every_pcp_rank(
     is_prefilling = np.ones(len(num_scheduled_tokens), dtype=np.bool_)
 
     orders = [
-        _published_schedule_for_rank(
+        _rank_rows(
             rank,
             pcp_world_size,
             num_scheduled_tokens,
             num_computed_tokens,
             is_prefilling,
-            monkeypatch,
-        ).local_to_global_req_idx_np
+        )[0]
         for rank in range(pcp_world_size)
     ]
     for rank, order in enumerate(orders[1:], start=1):
@@ -246,23 +180,35 @@ def test_published_row_order_is_identical_on_every_pcp_rank(
     assert np.all(np.diff(orders[0]) >= 0)
 
 
-def test_published_row_order_puts_every_decode_before_every_prefill(monkeypatch):
+def test_published_row_order_puts_every_decode_before_every_prefill():
     """split_decodes_and_prefills takes the FIRST prefilling row as the boundary."""
     # req 0 is a continued prefill, req 1 is a decode.
-    schedule = _published_schedule_for_rank(
+    req_idx, _ = _rank_rows(
         pcp_rank=0,
         pcp_world_size=2,
         num_scheduled_tokens=np.array([32, 1], dtype=np.int32),
         num_computed_tokens=np.array([100, 20], dtype=np.int32),
         is_prefilling=np.array([True, False], dtype=np.bool_),
-        monkeypatch=monkeypatch,
     )
     # The decode (request 1) must be row 0.
-    assert schedule.local_to_global_req_idx_np[0] == 1
+    assert req_idx[0] == 1
+
+
+def test_split_prefill_rows_repeat_the_request_and_its_full_extent():
+    """Equal adjacent request indices are what let a backend share a KV region."""
+    req_idx, extents = _rank_rows(
+        pcp_rank=1,
+        pcp_world_size=2,
+        num_scheduled_tokens=np.array([64, 3], dtype=np.int32),
+        num_computed_tokens=np.array([100, 0], dtype=np.int32),
+        is_prefilling=np.ones(2, dtype=np.bool_),
+    )
+    assert req_idx.tolist() == [0, 0, 1]
+    assert extents.tolist() == [164, 164, 3]
 
 
 @pytest.mark.parametrize("query_len", [1, 2, 3, 5, 6, 9])
-def test_dcp_replicates_prefills_too_short_to_split(query_len, monkeypatch):
+def test_dcp_replicates_prefills_too_short_to_split(query_len):
     """A prefill that cannot fill 2*pcp chunks is replicated, not split."""
     pcp_world_size = 2
     num_scheduled_tokens = np.array([query_len], dtype=np.int32)

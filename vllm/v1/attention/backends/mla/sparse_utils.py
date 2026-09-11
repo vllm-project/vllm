@@ -25,11 +25,17 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.block_table import get_block_table_width
 
 
-def run_length_regions(row_global_req_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Group adjacent rows sharing a request into regions."""
-    starts_region = np.empty(row_global_req_idx.shape, dtype=bool)
-    starts_region[0] = True
-    np.not_equal(row_global_req_idx[1:], row_global_req_idx[:-1], out=starts_region[1:])
+def run_length_regions(req_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Group adjacent rows of one request into regions.
+
+    Returns each row's region and each region's first row.
+    """
+    assert req_idx.size > 0
+    starts_region = np.ones(req_idx.shape, dtype=bool)
+    np.not_equal(req_idx[1:], req_idx[:-1], out=starts_region[1:])
+    assert starts_region.sum() == len(np.unique(req_idx)), (
+        "rows of one request must be adjacent"
+    )
     return np.cumsum(starts_region) - 1, np.flatnonzero(starts_region)
 
 
@@ -73,7 +79,6 @@ class ConvertReqIndexToGlobalIndexKernel(
         dcp_size: int
         dcp_rank: int
         dcp_interleave: int
-        workspace_rank_major: bool
         num_warps: int
         num_topk_tokens: int
         block_table_stride: int
@@ -88,7 +93,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         valid_count_ptr,  # int32 [num_tokens] - output valid count per row
         prefill_request_id_ptr,  # int32 [num_tokens], -1 for decode, >=0 for prefill
         workspace_starts_ptr,  # int32 [num_prefill_reqs+1] or nullptr
-        workspace_rank_stride,  # int32, rows per DCP rank; 0 unless rank-major
+        workspace_rank_stride,  # rows per DCP rank of a gathered prefill workspace
         # shapes (compile-time where possible)
         max_num_blocks_per_req,
         BLOCK_SIZE: tl.constexpr,
@@ -105,9 +110,6 @@ class ConvertReqIndexToGlobalIndexKernel(
         # Requires COUNT_VALID and an out buffer pre-filled with -1. Order within the
         # prefix is unspecified (only the selected set matters).
         COMPACT_TO_FRONT: tl.constexpr,
-        # The prefill workspace holds the DCP all-gather of every rank's KV
-        # shard - rank-major blocks of `workspace_rank_stride` row.
-        WORKSPACE_RANK_MAJOR: tl.constexpr,
         # DCP de-interleave: with DCP_SIZE == 1 these are an exact no-op
         DCP_SIZE: tl.constexpr,
         DCP_RANK: tl.constexpr,
@@ -160,7 +162,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         # Guard block_table access
         valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
         bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
-        is_invalid_tok |= ~valid_block | is_remote
+        is_invalid_tok |= ~valid_block | (is_remote & ~is_prefill)
         base = tl.load(bt_ptr, mask=valid_block & ~is_prefill & ~is_remote, other=0)
         out_val = base * BLOCK_STRIDE_ROWS + inblock_off
 
@@ -169,14 +171,12 @@ class ConvertReqIndexToGlobalIndexKernel(
             workspace_start = tl.load(
                 workspace_starts_ptr + prefill_req_id, mask=is_prefill, other=0
             )
-            if WORKSPACE_RANK_MAJOR:
-                prefill_out = (
-                    owning_rank * workspace_rank_stride + workspace_start + local_idx
-                )
-            else:
-                prefill_out = workspace_start + tok
+            # Under DCP the prefill workspace is the all-gather of every rank's
+            # shard, rank-major. With DCP_SIZE == 1 this is workspace_start + tok.
+            prefill_out = (
+                owning_rank * workspace_rank_stride + workspace_start + local_idx
+            )
             out_val = tl.where(is_prefill, prefill_out, out_val)
-            is_invalid_tok = tl.where(is_prefill, tok < 0, is_invalid_tok)
         out_val = tl.where(is_invalid_tok, -1, out_val)
 
         if COMPACT_TO_FRONT:
@@ -223,7 +223,6 @@ class ConvertReqIndexToGlobalIndexKernel(
         DCP_SIZE: int,
         DCP_RANK: int,
         DCP_INTERLEAVE: int,
-        WORKSPACE_RANK_MAJOR: bool,
         max_num_blocks_per_req: int,
     ) -> CompileKey:
         tiling = _remap_tiling(NUM_TOPK_TOKENS, BLOCK_N, COUNT_VALID)
@@ -238,7 +237,6 @@ class ConvertReqIndexToGlobalIndexKernel(
             dcp_size=DCP_SIZE,
             dcp_rank=DCP_RANK,
             dcp_interleave=DCP_INTERLEAVE,
-            workspace_rank_major=WORKSPACE_RANK_MAJOR,
             num_warps=tiling[3],
             num_topk_tokens=NUM_TOPK_TOKENS,
             block_table_stride=triton_scalar_specialization_rep(max_num_blocks_per_req),
@@ -260,61 +258,13 @@ class ConvertReqIndexToGlobalIndexKernel(
             block_size * dcp_size,
         )
         max_num_blocks_per_req = get_block_table_width(max_num_blocks, block_size)
-        combos = [
-            dict(
-                HAS_PREFILL_WORKSPACE=False,
-                COUNT_VALID=False,
-                COMPACT_TO_FRONT=False,
-                DCP_SIZE=1,
-                DCP_RANK=0,
-                DCP_INTERLEAVE=1,
-                WORKSPACE_RANK_MAJOR=False,
-            ),
-            dict(
-                HAS_PREFILL_WORKSPACE=False,
-                COUNT_VALID=True,
-                COMPACT_TO_FRONT=True,
-                DCP_SIZE=1,
-                DCP_RANK=0,
-                DCP_INTERLEAVE=1,
-                WORKSPACE_RANK_MAJOR=False,
-            ),
-            dict(
-                HAS_PREFILL_WORKSPACE=True,
-                COUNT_VALID=True,
-                COMPACT_TO_FRONT=True,
-                DCP_SIZE=1,
-                DCP_RANK=0,
-                DCP_INTERLEAVE=1,
-                WORKSPACE_RANK_MAJOR=False,
-            ),
-            dict(
-                HAS_PREFILL_WORKSPACE=False,
-                COUNT_VALID=True,
-                COMPACT_TO_FRONT=False,
-                DCP_SIZE=dcp_size,
-                DCP_RANK=dcp_rank,
-                DCP_INTERLEAVE=dcp_interleave,
-                WORKSPACE_RANK_MAJOR=False,
-            ),
-            dict(
-                HAS_PREFILL_WORKSPACE=False,
-                COUNT_VALID=True,
-                COMPACT_TO_FRONT=dcp_size > 1,
-                DCP_SIZE=dcp_size,
-                DCP_RANK=dcp_rank,
-                DCP_INTERLEAVE=dcp_interleave,
-                WORKSPACE_RANK_MAJOR=False,
-            ),
-        ]
+        pcp_dcp_combos = []
         if (
             vllm_config.parallel_config.prefill_context_parallel_size > 1
             and dcp_size > 1
         ):
-            # PCP + DCP gathers each rank's KV shard into a rank-major workspace.
-            # The combos above never pair a prefill workspace with DCP > 1, so
-            # without this the first PCP+DCP prefill pays a JIT compile.
-            combos.append(
+            # PCP + DCP attends prefill rows over a DCP-gathered workspace.
+            pcp_dcp_combos.append(
                 dict(
                     HAS_PREFILL_WORKSPACE=True,
                     COUNT_VALID=True,
@@ -322,11 +272,52 @@ class ConvertReqIndexToGlobalIndexKernel(
                     DCP_SIZE=dcp_size,
                     DCP_RANK=dcp_rank,
                     DCP_INTERLEAVE=dcp_interleave,
-                    WORKSPACE_RANK_MAJOR=True,
                 )
             )
         return self._trace_dispatch(self.dispatch)(
-            zip_inputs(*combos),
+            zip_inputs(
+                dict(
+                    HAS_PREFILL_WORKSPACE=False,
+                    COUNT_VALID=False,
+                    COMPACT_TO_FRONT=False,
+                    DCP_SIZE=1,
+                    DCP_RANK=0,
+                    DCP_INTERLEAVE=1,
+                ),
+                dict(
+                    HAS_PREFILL_WORKSPACE=False,
+                    COUNT_VALID=True,
+                    COMPACT_TO_FRONT=True,
+                    DCP_SIZE=1,
+                    DCP_RANK=0,
+                    DCP_INTERLEAVE=1,
+                ),
+                dict(
+                    HAS_PREFILL_WORKSPACE=True,
+                    COUNT_VALID=True,
+                    COMPACT_TO_FRONT=True,
+                    DCP_SIZE=1,
+                    DCP_RANK=0,
+                    DCP_INTERLEAVE=1,
+                ),
+                dict(
+                    HAS_PREFILL_WORKSPACE=False,
+                    COUNT_VALID=True,
+                    COMPACT_TO_FRONT=False,
+                    DCP_SIZE=dcp_size,
+                    DCP_RANK=dcp_rank,
+                    DCP_INTERLEAVE=dcp_interleave,
+                ),
+                dict(
+                    HAS_PREFILL_WORKSPACE=False,
+                    COUNT_VALID=True,
+                    COMPACT_TO_FRONT=dcp_size > 1,
+                    DCP_SIZE=dcp_size,
+                    DCP_RANK=dcp_rank,
+                    DCP_INTERLEAVE=dcp_interleave,
+                ),
+                *pcp_dcp_combos,
+            ),
             BLOCK_SIZE=block_size,
             BLOCK_STRIDE_ROWS=block_stride_rows,
             BLOCK_N=128,
@@ -373,7 +364,6 @@ class ConvertReqIndexToGlobalIndexKernel(
             DCP_SIZE=compile_key.dcp_size,
             DCP_RANK=compile_key.dcp_rank,
             DCP_INTERLEAVE=compile_key.dcp_interleave,
-            WORKSPACE_RANK_MAJOR=compile_key.workspace_rank_major,
         )
 
     @kernel_launcher
@@ -399,7 +389,6 @@ class ConvertReqIndexToGlobalIndexKernel(
         DCP_SIZE: int,
         DCP_RANK: int,
         DCP_INTERLEAVE: int,
-        WORKSPACE_RANK_MAJOR: bool,
     ) -> LaunchSpec:
         single_tile, block_n, tiles_per_row, num_warps = _remap_tiling(
             NUM_TOPK_TOKENS, BLOCK_N, COUNT_VALID
@@ -534,16 +523,6 @@ def triton_convert_req_index_to_global_index(
         assert prefill_workspace_request_ids.is_contiguous()
         assert prefill_workspace_starts.is_contiguous()
 
-    workspace_rank_major = prefill_workspace_rank_stride is not None
-    if workspace_rank_major:
-        assert HAS_PREFILL_WORKSPACE, (
-            "prefill_workspace_rank_stride describes the prefill workspace, "
-            "but HAS_PREFILL_WORKSPACE is False"
-        )
-        assert prefill_workspace_rank_stride is not None  # for mypy
-        assert prefill_workspace_rank_stride > 0
-        assert dcp_size > 1, "the rank-major layout needs a DCP group to gather"
-
     _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL(
         req_id_c,
         block_table_c,
@@ -564,7 +543,6 @@ def triton_convert_req_index_to_global_index(
         HAS_PREFILL_WORKSPACE=HAS_PREFILL_WORKSPACE,
         COUNT_VALID=return_valid_counts,
         COMPACT_TO_FRONT=return_valid_counts,
-        WORKSPACE_RANK_MAJOR=workspace_rank_major,
         DCP_SIZE=dcp_size,
         DCP_RANK=dcp_rank,
         DCP_INTERLEAVE=cp_kv_cache_interleave_size,
@@ -672,7 +650,6 @@ def triton_filter_and_convert_dcp_index(
         HAS_PREFILL_WORKSPACE=False,
         COUNT_VALID=count_valid,
         COMPACT_TO_FRONT=compact_valid_to_front,
-        WORKSPACE_RANK_MAJOR=False,
         DCP_SIZE=dcp_size,
         DCP_RANK=dcp_rank,
         DCP_INTERLEAVE=cp_kv_cache_interleave_size,

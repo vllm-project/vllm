@@ -432,7 +432,14 @@ class CommonAttentionMetadata:
     """(batch_size,) CPU upper bound on seq_lens. Precise for prefill rows
     and for all rows outside async spec decode; optimistic for async-spec
     decode rows (assumes every draft was accepted). Not safe for kernels
-    that need exact per-row context lengths on decode rows."""
+    that need exact per-row context lengths on decode rows. Under PCP+DCP a
+    chunk row carries its whole request's extent, identical on every PCP
+    rank, so DCP collectives are sized the same everywhere."""
+
+    req_idx: np.ndarray | None = None
+    """(batch_size,) index of each row's request in the runner's request
+    table. Rows of one request are adjacent, so equal neighbours are PCP
+    chunks sharing one KV context."""
 
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
     """PrefixLM bidirectional ranges for multimodal tokens. Maps
@@ -565,6 +572,7 @@ class CommonAttentionMetadata:
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
+            req_idx=maybe_slice_reqs(self.req_idx),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
             replayssm_decode_base_cpu=maybe_slice_reqs(self.replayssm_decode_base_cpu),
         )

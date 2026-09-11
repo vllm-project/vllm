@@ -1373,8 +1373,8 @@ class DCPCombine(Protocol):
         partial_output: torch.Tensor,
         partial_lse: torch.Tensor,
         *,
-        seq_lens: torch.Tensor | None,
-        query_start_loc: torch.Tensor | None,
+        seq_lens: torch.Tensor,
+        query_start_loc: torch.Tensor,
     ) -> torch.Tensor: ...
 
 

@@ -45,7 +45,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
 )
-from vllm.v1.worker.gpu.pcp_manager import get_current_pcp_schedule
 
 logger = init_logger(__name__)
 
@@ -265,7 +264,7 @@ class PCPRegionPacking:
 
 
 def plan_pcp_region_packing(
-    row_global_req_idx: np.ndarray,
+    row_req_idx: np.ndarray,
     row_seq_lens: np.ndarray,
     row_query_lens: np.ndarray,
     dcp_world_size: int,
@@ -275,17 +274,23 @@ def plan_pcp_region_packing(
     PCP hands each rank two chunks of every split prefill, so one global request
     shows up as two consecutive local rows over ONE context. Chunking has to see
     that context once: charging it per row halves the usable logits budget.
+
+    ``row_seq_lens`` holds the whole request's extent on every row.
     """
-    assert row_global_req_idx.size > 0, "no prefill rows to pack"
-    _, region_first_row = run_length_regions(row_global_req_idx)
+    assert row_req_idx.size > 0, "no prefill rows to pack"
+    _, region_first_row = run_length_regions(row_req_idx)
+    row_bounds = np.append(region_first_row, row_req_idx.shape[0])
     region_seq_lens = row_seq_lens[region_first_row].astype(np.int64)
     gathered_seq_lens = (
         (region_seq_lens + dcp_world_size - 1) // dcp_world_size
     ) * dcp_world_size
+    # Rank 0 holds the short tail chunk as a region's LAST row; a region's first
+    # row is always a full chunk, so this query length matches on every rank.
+    query_lens = np.diff(row_bounds) * row_query_lens[region_first_row]
     return PCPRegionPacking(
         seq_lens=gathered_seq_lens.astype(np.int32),
-        query_lens=np.add.reduceat(row_query_lens, region_first_row).astype(np.int32),
-        row_bounds=np.append(region_first_row, row_global_req_idx.shape[0]),
+        query_lens=query_lens.astype(np.int32),
+        row_bounds=row_bounds,
     )
 
 
@@ -307,18 +312,17 @@ class PCPGlobalChunkPlan:
 
 
 def build_pcp_global_chunk_plan(
-    row_global_req_idx: np.ndarray,
+    row_req_idx: np.ndarray,
     scheduled_lens: np.ndarray,
     dcp_world_size: int,
     device: torch.device,
 ) -> PCPGlobalChunkPlan:
     """Plan the PCP packing for one chunk from its scheduled contexts."""
-    req_idx = np.ascontiguousarray(row_global_req_idx)
     scheduled = np.ascontiguousarray(scheduled_lens, dtype=np.int64)
-    assert req_idx.shape == scheduled.shape
+    assert row_req_idx.shape == scheduled.shape
     num_rows = len(scheduled)
 
-    region_of_row, region_first_row = run_length_regions(req_idx)
+    region_of_row, region_first_row = run_length_regions(row_req_idx)
 
     region_extent = scheduled[region_first_row]
     assert np.all(region_extent > 0), (
@@ -1087,6 +1091,38 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
         return indices
 
+    def _split_pcp_dcp_prefill_chunks(
+        self,
+        row_req_idx: np.ndarray,
+        row_seq_lens_cpu: torch.Tensor,
+        row_query_lens_cpu: torch.Tensor,
+        max_logits_bytes: int,
+        request_offset: int,
+    ) -> list[tuple[slice, slice]]:
+        """Chunk by request rather than by row, then widen each chunk's request
+        slice back to the rows it covers."""
+        packing = plan_pcp_region_packing(
+            row_req_idx,
+            row_seq_lens_cpu.numpy(),
+            row_query_lens_cpu.numpy(),
+            self.dcp_world_size,
+        )
+        return [
+            (
+                slice(
+                    request_offset + int(packing.row_bounds[region_slice.start]),
+                    request_offset + int(packing.row_bounds[region_slice.stop]),
+                ),
+                query_slice,
+            )
+            for region_slice, query_slice in self._split_indexer_prefill_chunks(
+                torch.from_numpy(packing.seq_lens),
+                torch.from_numpy(packing.query_lens),
+                self.max_prefill_buffer_size,
+                max_logits_bytes,
+            )
+        ]
+
     @staticmethod
     def _split_indexer_prefill_chunks(
         compressed_seq_lens_cpu: torch.Tensor,
@@ -1217,65 +1253,43 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
             max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-
-            # PCP + DCP: the gathered KV buffer must be packed identically on
-            # every PCP rank, so its per-request extents come from the
-            # PCP-invariant schedule rather than this rank's own context lengths.
-            pcp_schedule = None
+            # Upper bound is exact for prefill rows (the `[num_decodes:]`
+            # slice below).
+            assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            req_idx = None
             if self.use_pcp and self.dcp_world_size > 1:
-                pcp_schedule = get_current_pcp_schedule()
-                assert pcp_schedule is not None, (
-                    "PCP+DCP prefill needs the PCP schedule published by "
-                    "PCPManager.partition_batch; got None."
+                # The gathered KV must be packed identically on every PCP rank:
+                # chunk by request, whose whole extent the upper bound holds on
+                # every rank. A dummy batch has one row per request.
+                req_idx = common_attn_metadata.req_idx
+                if req_idx is None:
+                    req_idx = np.arange(common_attn_metadata.num_reqs)
+                chunk_specs = self._split_pcp_dcp_prefill_chunks(
+                    req_idx[num_decodes:],
+                    seq_lens_cpu[num_decodes:],
+                    prefill_query_lens_cpu,
+                    max_logits_bytes,
+                    request_offset=num_decodes,
                 )
-
-            # Row bounds of each packed unit, or None when rows are the unit.
-            region_row_bounds = None
-            if pcp_schedule is None:
-                packer_seq_lens = compressed_seq_lens_cpu[num_decodes:]
-                packer_query_lens = prefill_query_lens_cpu
             else:
-                prefill_global_reqs = pcp_schedule.local_to_global_req_idx_np[
-                    num_decodes:
-                ]
-                row_seq_lens = pcp_schedule.seq_lens_np[prefill_global_reqs]
-                packing = plan_pcp_region_packing(
-                    prefill_global_reqs,
-                    row_seq_lens,
-                    pcp_schedule.nominal_chunk_query_lens_np[prefill_global_reqs],
-                    self.dcp_world_size,
+                chunk_specs = self._split_indexer_prefill_chunks(
+                    compressed_seq_lens_cpu[num_decodes:],
+                    prefill_query_lens_cpu,
+                    self.max_prefill_buffer_size,
+                    max_logits_bytes,
+                    request_offset=num_decodes,
                 )
-                region_row_bounds = packing.row_bounds
-                packer_seq_lens = torch.from_numpy(packing.seq_lens)
-                packer_query_lens = torch.from_numpy(packing.query_lens)
-
-            chunk_specs = self._split_indexer_prefill_chunks(
-                packer_seq_lens,
-                packer_query_lens,
-                self.max_prefill_buffer_size,
-                max_logits_bytes,
-            )
 
             chunks = []
-            for packed_slice, query_slice in chunk_specs:
+            for req_slice, query_slice in chunk_specs:
                 pcp_plan = None
-                if region_row_bounds is None:
-                    req_slice = slice(
-                        packed_slice.start + num_decodes,
-                        packed_slice.stop + num_decodes,
-                    )
-                else:
-                    req_slice = slice(
-                        num_decodes + int(region_row_bounds[packed_slice.start]),
-                        num_decodes + int(region_row_bounds[packed_slice.stop]),
-                    )
-                if pcp_schedule is not None:
-                    global_req_idx = pcp_schedule.local_to_global_req_idx_np[
-                        req_slice.start : req_slice.stop
-                    ]
-                    scheduled = pcp_schedule.seq_lens_np[global_req_idx]
+                if req_idx is not None:
                     pcp_plan = build_pcp_global_chunk_plan(
-                        global_req_idx, scheduled, self.dcp_world_size, self.device
+                        req_idx[req_slice],
+                        seq_lens_cpu[req_slice].numpy(),
+                        self.dcp_world_size,
+                        self.device,
                     )
                 metadata = build_prefill_chunk_metadata(
                     req_slice.start,
@@ -1402,7 +1416,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     )
                     block_table = self.indexer_decode_block_table_buffer[:rows, :cols]
 
-            seq_lens_is_buffer_view = not use_native or next_n > 1
+            seq_lens_is_buffer_view = (use_native and next_n > 1) or (
+                not use_native and max_decode_len > 1
+            )
 
             # DCP: localize the now-expanded per-token global bounds to this
             # rank's owned KV. Done here (after expansion) so each token's global

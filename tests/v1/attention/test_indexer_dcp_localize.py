@@ -972,7 +972,7 @@ def test_pcp_plan_deinterleave_restores_global_order(dcp_world_size, req_lens):
     from vllm.v1.attention.backends.mla.indexer import build_pcp_global_chunk_plan
 
     scheduled = np.array(req_lens, dtype=np.int64)
-    rows = np.arange(len(scheduled), dtype=np.int32)
+    rows = np.arange(len(scheduled))
     plan = build_pcp_global_chunk_plan(
         rows, scheduled, dcp_world_size, torch.device("cpu")
     )
@@ -997,7 +997,7 @@ def test_pcp_plan_pads_each_request_independently():
     from vllm.v1.attention.backends.mla.indexer import build_pcp_global_chunk_plan
 
     plan = build_pcp_global_chunk_plan(
-        np.array([0, 1, 2]), np.array([5, 8, 1]), 4, torch.device("cpu")
+        np.arange(3), np.array([5, 8, 1]), 4, torch.device("cpu")
     )
     # ceil(5/4), ceil(8/4), ceil(1/4) = 2, 2, 1 -> cumsum 0, 2, 4, 5.
     assert plan.padded_local_cu.tolist() == [0, 2, 4, 5]

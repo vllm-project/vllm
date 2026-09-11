@@ -862,7 +862,7 @@ def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_s
 
     # Set some to out of bounds
     token_indices[2, 100:110] = max_blocks_per_req * block_size
-    token_indices[6, 110:120] = max_blocks_per_req * block_size
+    token_indices[6, 150:160] = max_blocks_per_req * block_size
 
     result = triton_convert_req_index_to_global_index(
         req_id,

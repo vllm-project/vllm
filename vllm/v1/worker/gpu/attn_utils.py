@@ -5,6 +5,7 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from typing import Any, cast
 
+import numpy as np
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
@@ -278,6 +279,7 @@ def build_attn_metadata(
     causal: bool | torch.Tensor | Mapping[int, bool] = True,
     rswa_prefix_lens: torch.Tensor | None = None,
     ubatch_idx: int = 0,
+    req_idx: np.ndarray | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
@@ -322,6 +324,7 @@ def build_attn_metadata(
             is_prefilling=group_is_prefilling,
             mm_req_doc_ranges=mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
+            req_idx=req_idx,
             **common_attn_metadata_extra_kwargs,
         )
 
