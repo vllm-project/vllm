@@ -15,7 +15,6 @@ from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_context
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
-from vllm.v1.worker.gpu.states import RequestState
 
 
 def _copy_to_cpu(value, out=None, device=None):
@@ -262,6 +261,7 @@ def _make_global_decode_batch(
 
     base = InputBatch.make_dummy(num_reqs, num_tokens, buffers)
     buffers.seq_lens[:num_reqs] = torch.from_numpy(seq_lens_np).to(device)
+    buffers.positions[:num_reqs] = torch.tensor(num_computed_tokens, device=device)
     query_start_loc_np = np.arange(num_reqs + 1, dtype=np.int32)
     buffers.query_start_loc[: num_reqs + 1] = torch.from_numpy(query_start_loc_np).to(
         device
@@ -303,19 +303,10 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
     the field afterwards from the PCP-owned buffers.
     """
     device = torch.device("cuda:0")
-    req_states = RequestState(
-        max_num_reqs=4,
-        max_model_len=64,
-        max_num_batched_tokens=8,
-        num_speculative_steps=1,
-        vocab_size=8,
-        device=device,
-    )
     manager = PCPManager(
         pcp_world_size=2,
         pcp_rank=0,
         device=device,
-        req_states=req_states,
         max_num_reqs=4,
         max_num_tokens=8,
         dcp_world_size=2,
@@ -328,10 +319,14 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
     global_batch.dcp_local_seq_lens = global_buffers.dcp_local_seq_lens[:2]
     global_batch.dcp_local_seq_lens.fill_(-1)
 
-    local_batch = manager.partition_batch(global_batch, padded_num_tokens=2)
+    local_batch = manager.partition_batch(
+        global_batch,
+        padded_num_tokens=4,
+        padded_num_reqs=4,
+    )
 
     assert local_batch.dcp_local_seq_lens is None
-    assert local_batch.seq_lens.tolist() == [17, 25]
+    assert local_batch.seq_lens.tolist() == [17, 25, 0, 0]
 
     # What execute_model does next: derive DCP metadata from the final batch
     # on the PCP-owned buffers.
@@ -345,7 +340,7 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
         num_reqs_padded=local_batch.num_reqs_after_padding,
     )
     expected = get_dcp_local_seq_lens(
-        torch.tensor([17, 25], dtype=torch.int32), 2, 0, 1
+        torch.tensor([17, 25, 0, 0], dtype=torch.int32), 2, 0, 1
     )
     assert local_batch.dcp_local_seq_lens is not None
     assert torch.equal(local_batch.dcp_local_seq_lens.cpu(), expected)

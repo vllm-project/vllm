@@ -104,6 +104,7 @@ from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
+    has_compiled_submodule,
     make_cudagraph_stats,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -152,6 +153,7 @@ from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
     maybe_create_adaptive_verification_manager,
+    resolve_adaptive_cudagraph_mode,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
@@ -656,7 +658,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config,
             self.device,
             self.supports_mm_inputs,
-            self.req_states,
             self.block_tables,
             cls=self.pcp_manager_cls,
         )
@@ -668,13 +669,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config,
             self.max_num_reqs,
         )
+        if self.speculator is not None:
+            self.speculator.pcp_manager = self.pcp_manager
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config,
             self.kv_cache_config,
             use_replayssm=self.cache_config.use_replayssm,
         )
+        piecewise_capture_available = bool(
+            envs.VLLM_USE_BREAKABLE_CUDAGRAPH or has_compiled_submodule(self.model)
+        )
         if self.adaptive_verification is not None:
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+            self.compilation_config.cudagraph_mode = resolve_adaptive_cudagraph_mode(
+                self.compilation_config.cudagraph_mode,
+                piecewise_capture_available=piecewise_capture_available,
+            )
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
@@ -684,6 +693,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_config=self.kv_cache_config,
             max_num_reqs=self.max_num_reqs,
             is_profiling=is_profiling,
+            piecewise_capture_available=piecewise_capture_available,
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
@@ -697,7 +707,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.fast_prefill = FastPrefillHelper(
                 self.cudagraph_manager, self.max_num_tokens
             )
-        check_attention_cp_compatibility(self.vllm_config)
+        check_attention_cp_compatibility(self.vllm_config, target_attn_layer_names)
         if isinstance(self.speculator, DraftModelSpeculator):
             # HACK(woosuk)
             self.speculator.set_attn(
@@ -1969,9 +1979,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
         # Last rank: sample tokens
+        draft_hidden_states = hidden_states
+        assert draft_hidden_states is not None
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
             self.pcp_manager, hidden_states, input_batch
         )
+        if self.pcp_manager is not None and aux_hidden_states is not None:
+            aux_hidden_states = [
+                self.pcp_manager.restore_hidden_states(states)
+                for states in aux_hidden_states
+            ]
 
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
@@ -2048,10 +2065,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
             # target returns a persistent buffer sized at max_num_batched_tokens;
             # slice to the active token count that propose() expects.
-            spec_hidden_states = hidden_states
+            spec_hidden_states = draft_hidden_states
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+                spec_hidden_states = pre_hc_hidden_states[: draft_hidden_states.size(0)]
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,
