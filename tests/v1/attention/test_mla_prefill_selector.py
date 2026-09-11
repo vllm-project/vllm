@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for MLA prefill backend selector."""
 
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -570,26 +569,50 @@ class TestAiterAsmValidation:
             assert any(reason.lower() in r.lower() for r in reasons)
 
 
-class TestAiterAsmIsAvailable:
-    """AITER_ASM needs gfx950 and an AITER that ships the PS ASM kernel pair.
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Imports vllm.platforms.rocm, whose module init requires a CUDA or "
+    "ROCm torch build; not importable on XPU/CPU/TPU.",
+)
+class TestAiterAsmAvailabilityGating:
+    """AITER_ASM needs gfx950 (compute capability) and an installed AITER.
 
-    The chunked-prefill final_lse fix (ROCm/aiter#3606) is assumed present in
-    the installed aiter, so only the kernel exports are probed.
+    The two halves are gated separately: arch by supports_compute_capability,
+    library presence by is_available. The chunked-prefill final_lse fix
+    (ROCm/aiter#3606) is assumed present in the installed aiter.
     """
 
+    @pytest.mark.parametrize("found", [True, False])
+    def test_is_available_tracks_aiter_installation(self, aiter_asm_cls, found):
+        with patch("vllm._aiter_ops.is_aiter_found_and_supported", return_value=found):
+            assert aiter_asm_cls.is_available() is found
+
     @pytest.mark.parametrize("on_gfx950", [True, False])
-    def test_tracks_gfx950(self, aiter_asm_cls, on_gfx950):
-        pytest.importorskip("aiter")
-        with patch("vllm.platforms.rocm.on_gfx950", return_value=on_gfx950):
-            assert aiter_asm_cls.is_available() is on_gfx950
+    def test_compute_capability_tracks_gfx950(self, aiter_asm_cls, on_gfx950):
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            patch("vllm.platforms.rocm.on_gfx950", return_value=on_gfx950),
+        ):
+            mock_platform.is_rocm.return_value = True
+            assert aiter_asm_cls.supports_compute_capability(GFX950) is on_gfx950
 
-    def test_unavailable_when_rocm_platform_unimportable(self, aiter_asm_cls):
-        with patch.dict(sys.modules, {"vllm.platforms.rocm": None}):
-            assert not aiter_asm_cls.is_available()
+    def test_compute_capability_false_off_rocm(self, aiter_asm_cls):
+        with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_rocm.return_value = False
+            assert not aiter_asm_cls.supports_compute_capability(GFX950)
 
-    def test_unavailable_without_asm_kernels(self, aiter_asm_cls):
-        with patch.dict(sys.modules, {"aiter": None}):
-            assert not aiter_asm_cls.is_available()
+    def test_unavailable_aiter_is_reported_as_invalid(self, aiter_asm_cls):
+        with patch.object(aiter_asm_cls, "is_available", return_value=False):
+            reasons = aiter_asm_cls.validate_configuration(
+                GFX950,
+                MLAPrefillSelectorConfig(
+                    dtype=torch.bfloat16,
+                    mla_dimensions=_R1_DIMS,
+                    cache_dtype="fp8",
+                    num_heads=128,
+                ),
+            )
+        assert any("dependencies" in r for r in reasons)
 
 
 @requires_gfx950
