@@ -96,7 +96,7 @@ def m3_weights():
     return raw, rocm_aiter_ops.shuffle_mxfp8_moe_weights(w13_q, w2_q, w13_s, w2_s)
 
 
-def _run(shuffled, x, topk_ids, topk_weights):
+def _run(shuffled, x, topk_ids, topk_weights, fused_shared_expert=True):
     from vllm.models.minimax_m3.amd.ops.moe_a8w8_decode import a16w8_decode_moe
 
     w13, w2, w13_s, w2_s = shuffled
@@ -113,6 +113,7 @@ def _run(shuffled, x, topk_ids, topk_weights):
         num_experts=NUM_EXPERTS,
         swiglu_alpha=SWIGLU_ALPHA,
         swiglu_limit=SWIGLU_LIMIT,
+        fused_shared_expert=fused_shared_expert,
     )
 
 
@@ -194,3 +195,26 @@ def test_a16w8_decode_moe_graph_replay(m3_weights, m):
     torch.accelerator.synchronize()
     for got, want in zip(outs, eager):
         assert _cos(got, want) > 0.9999
+
+
+@pytest.mark.parametrize("m", [40, 192, 256])
+def test_a16w8_decode_moe_separate_shared_expert(m3_weights, m):
+    """The routing vLLM produces for ModelOpt MXFP8, where the shared expert is
+    a separate module: top-k over the routed experts only, no expert routed by
+    every token. The wide-first sort layout (from 40 tokens) budgets the last
+    expert's blocks from M and must stay off; these M broke without the flag."""
+    from vllm.models.minimax_m3.amd.ops.moe_a8w8_decode import wide_for
+
+    assert wide_for(m)
+    raw, shuffled = m3_weights
+    torch.manual_seed(m)
+    device = shuffled[0].device
+    x = torch.randn((m, HIDDEN), dtype=torch.bfloat16, device=device)
+    topk_ids, topk_weights = _routing(m, device)
+    topk_ids, topk_weights = topk_ids[:, :TOPK].contiguous(), topk_weights[:, :TOPK]
+    out = _run(shuffled, x, topk_ids, topk_weights, fused_shared_expert=False)
+    ref_aiter = _run_aiter(shuffled, x, topk_ids, topk_weights.contiguous())
+    torch.accelerator.synchronize()
+    ref = _float_reference(x, raw, topk_ids, topk_weights)
+    assert _cos(out, ref) > 0.9999
+    assert _cos(out, ref_aiter) > 0.998

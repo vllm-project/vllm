@@ -40,6 +40,9 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.models.minimax_m3.amd.ops.moe_a8w8_mid import MIN_MID_TOKENS, a8w8_mid_moe
+from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.hook import (
+    maybe_run_shared_experts,
+)
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.prefill import (
     MAX_PREFILL_TOKENS,
     MIN_PREFILL_TOKENS,
@@ -393,9 +396,10 @@ def install_prefill_fast_path(experts, prefix: str = "") -> bool:
     ``experts`` is what ``FusedMoEFactory`` returned or the RoutedExperts layer
     itself. Wraps the layer's ``quant_method.apply`` (on top of the decode
     package's wrapper when that is installed, so that no batch size is left to
-    aiter); a call outside the gate (unfused shared experts, an unexpected
-    dtype or layout) goes to the wrapped implementation unchanged. Returns
-    True when installed.
+    aiter); a call outside the gate (an unexpected dtype or layout) goes to
+    the wrapped implementation unchanged. The layer's unfused shared experts
+    are handled the way the modular kernel does (``maybe_run_shared_experts``).
+    Returns True when installed.
     """
     layer = getattr(experts, "routed_experts", experts)
     try:
@@ -427,7 +431,7 @@ def install_prefill_fast_path(experts, prefix: str = "") -> bool:
         **kwargs,
     ):
         global _warmed
-        if shared_experts is not None or kwargs or not supports_batch(x):
+        if kwargs or not supports_batch(x):
             return orig_apply(
                 layer,
                 x,
@@ -437,6 +441,7 @@ def install_prefill_fast_path(experts, prefix: str = "") -> bool:
                 shared_experts_input,
                 **kwargs,
             )
+        maybe_run_shared_experts(shared_experts, shared_experts_input)
         if not _warmed and x.shape[0] >= MIN_PREFILL_TOKENS:
             _warmed = True
             _warm_up(layer, x, topk_weights, topk_ids, hidden, inter)

@@ -219,8 +219,9 @@ def test_a8w8_fast_path_gate():
 def test_a8w8_fast_path_routes_by_batch(m3_weights, monkeypatch):
     """``install_prefill_fast_path`` wraps ``quant_method.apply``: 257..3071 go
     to the mid chain, 3072 and up to the prefill chain, the first prefill-range
-    call also warms up the other kernel configurations, and everything else
-    (the decode range, unfused shared experts) stays with the wrapped apply."""
+    call also warms up the other kernel configurations, the decode range stays
+    with the wrapped apply, and the layer's unfused shared experts are handed to
+    the runner's module the way the modular kernel does."""
     from types import SimpleNamespace
 
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -303,6 +304,22 @@ def test_a8w8_fast_path_routes_by_batch(m3_weights, monkeypatch):
     calls.clear()
     apply(layer, x, topk_weights, topk_ids)
     assert calls == [("prefill", 4096)]
+    # vLLM keeps the shared expert separate for ModelOpt MXFP8: the runner
+    # computes it (NO_OVERLAP) and adds it after apply; the call still takes our
+    # chain, and the module is offered the kernel-internal order like the MK does
+    from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+        SharedExpertsOrder,
+    )
+
+    orders: list[SharedExpertsOrder] = []
     calls.clear()
-    apply(layer, x[:512], topk_weights[:512], topk_ids[:512], shared_experts=object())
-    assert calls == [("aiter", 512)]
+    apply(
+        layer,
+        x[:512],
+        topk_weights[:512],
+        topk_ids[:512],
+        shared_experts=lambda inp, order: orders.append(order),
+        shared_experts_input=x[:512],
+    )
+    assert calls == [("mid", 512)]
+    assert orders == [SharedExpertsOrder.MK_INTERNAL_OVERLAPPED]

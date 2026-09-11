@@ -12,8 +12,9 @@ and its two quant passes are dropped.
 Weights are the tensors ``ModelOptMxFp8FusedMoE`` stores on the layer for the
 AITER_MXFP8 backend (``shuffle_mxfp8_moe_weights``: gate/up-interleaved
 ``shuffle_weight`` + ``shuffle_scale``). The install hook wraps that method's
-``apply`` and routes every ``M <= 256`` call with fused shared experts to these
-kernels; everything else stays on aiter.
+``apply`` and routes every ``M <= 256`` call to these kernels (the layer's
+unfused shared experts, which vLLM keeps separate for ModelOpt MXFP8, stay with
+the runner); everything else stays on aiter.
 """
 
 import torch
@@ -23,6 +24,9 @@ from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.decode import (
     MAX_DECODE_TOKENS,
     supports_batch,
     supports_shapes,
+)
+from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.hook import (
+    maybe_run_shared_experts,
 )
 
 # Sort row block: 16 (one MFMA tile per block) below BM32_MIN_TOKENS, 32 from
@@ -103,13 +107,16 @@ def a16w8_decode_moe(
     num_experts: int,
     swiglu_alpha: float,
     swiglu_limit: float,
+    fused_shared_expert: bool = True,
 ) -> torch.Tensor:
     """One MoE layer for ``M <= 256`` tokens on the FlyDSL a16w8 kernels.
 
     ``w13``/``w2`` (fp8) and their e8m0 scales are the layer tensors after
     ``shuffle_mxfp8_moe_weights``; only their data pointers are used.
-    ``topk_ids`` / ``topk_weights`` are ``[M, topk]`` and already include the
-    fused shared expert. Returns ``[M, hidden_size]`` bf16.
+    ``topk_ids`` / ``topk_weights`` are ``[M, topk]``. ``fused_shared_expert``
+    says that the last expert is the fused shared one, routed by every token:
+    the wide-first sort layout (``WIDE_MIN_TOKENS``) budgets its blocks from
+    ``M`` and is only used then. Returns ``[M, hidden_size]`` bf16.
     """
     from vllm.models.minimax_m3.amd.ops.moe_a8w8_decode.host import (
         a16w8_gemm1,
@@ -130,7 +137,7 @@ def a16w8_decode_moe(
     out = torch.empty((n_tokens, hidden_size), dtype=torch.bfloat16, device=x.device)
     bm = block_m_for(n_tokens)
     inline = n_tokens <= bm
-    wide = wide_for(n_tokens)
+    wide = fused_shared_expert and wide_for(n_tokens)
     if inline:
         sorted_ids = sorted_w = sorted_eids = num_valid = None
     else:
@@ -238,6 +245,15 @@ def _unsupported_reason(layer) -> str | None:
     return None
 
 
+def _fused_shared_expert(experts) -> bool:
+    """True when the router appends the model's shared expert to every
+    token's top-k as the last expert (aiter's fused shared experts), the
+    routing the wide-first sort layout is built for. vLLM keeps the shared
+    expert a separate module for ModelOpt MXFP8, so this is False there."""
+    router = getattr(experts, "router", None)
+    return getattr(router, "num_fused_shared_experts", 0) > 0
+
+
 def install_decode_fast_path(experts, prefix: str = "") -> bool:
     """Route ``M <= 256`` calls of a MiniMax-M3 MXFP8 MoE layer to the FlyDSL
     a16w8 kernels. Returns True
@@ -263,6 +279,7 @@ def install_decode_fast_path(experts, prefix: str = "") -> bool:
     inter = layer.moe_config.intermediate_size_per_partition
     alpha = float(layer.swiglu_alpha)
     limit = float(layer.swiglu_limit)
+    fused_shared = _fused_shared_expert(experts)
 
     def apply(
         layer,
@@ -273,7 +290,7 @@ def install_decode_fast_path(experts, prefix: str = "") -> bool:
         shared_experts_input=None,
         **kwargs,
     ):
-        if shared_experts is not None or kwargs or not supports_batch(x):
+        if kwargs or not supports_batch(x):
             return orig_apply(
                 layer,
                 x,
@@ -283,6 +300,7 @@ def install_decode_fast_path(experts, prefix: str = "") -> bool:
                 shared_experts_input,
                 **kwargs,
             )
+        maybe_run_shared_experts(shared_experts, shared_experts_input)
         return a16w8_decode_moe(
             x,
             layer.w13_weight,
@@ -296,12 +314,15 @@ def install_decode_fast_path(experts, prefix: str = "") -> bool:
             num_experts=layer.w13_weight.shape[0],
             swiglu_alpha=alpha,
             swiglu_limit=limit,
+            fused_shared_expert=fused_shared,
         )
 
     qm.apply = apply
     qm._m3_decode_fast_path = True
     logger.info_once(
-        "M3 FlyDSL a16w8 decode MoE installed (MXFP8, M <= %d)", MAX_DECODE_TOKENS
+        "M3 FlyDSL a16w8 decode MoE installed (MXFP8, M <= %d, shared expert %s)",
+        MAX_DECODE_TOKENS,
+        "fused" if fused_shared else "separate",
     )
     logger.debug("M3 FlyDSL a16w8 decode MoE installed for %s", prefix or "experts")
     return True
