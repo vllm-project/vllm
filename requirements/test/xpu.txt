@@ -115,6 +115,8 @@ datasets==5.0.1
     #   mteb
 decorator==5.3.1
     # via librosa
+decord==0.6.0
+    # via -r requirements/test/xpu.in
 defusedxml==0.7.1
     # via nltk
 depyf==0.20.0
@@ -442,6 +444,7 @@ numpy==2.3.5
     #   albumentations
     #   bm25s
     #   datasets
+    #   decord
     #   evaluate
     #   librosa
     #   lm-eval
