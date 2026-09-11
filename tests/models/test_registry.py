@@ -60,9 +60,9 @@ def test_registry_imports(model_arch):
         pytest.skip("Dots3 NOTE is only supported on CUDA")
 
     if model_arch in ("HYV4ForCausalLM", "HYV4MTPModel") and not (
-        current_platform.is_cuda()
+        current_platform.is_cuda() or current_platform.is_rocm()
     ):
-        pytest.skip("HY V4 is only supported on CUDA")
+        pytest.skip("HY V4 is only supported on CUDA and ROCm")
 
     if model_arch == "DeepseekV4ForConditionalGeneration" and not (
         current_platform.is_cuda()
@@ -93,6 +93,7 @@ def test_registry_imports(model_arch):
     [
         ("LlamaForCausalLM", False, False, "bi-encoder"),
         ("LlavaForConditionalGeneration", True, True, "bi-encoder"),
+        ("DeepseekV41ForCausalLM", True, False, "bi-encoder"),
         ("BertForSequenceClassification", False, False, "cross-encoder"),
         ("RobertaForSequenceClassification", False, False, "cross-encoder"),
         ("XLMRobertaForSequenceClassification", False, False, "cross-encoder"),
@@ -128,6 +129,8 @@ def test_registry_model_property(model_arch, is_mm, init_cuda, score_type):
         # in V1.
         # ("MLPSpeculatorPreTrainedModel", False, False),
         ("DeepseekV2ForCausalLM", True, False),
+        ("KimiLinearForCausalLM", True, False),
+        ("KimiK3ForConditionalGeneration", True, False),
         ("Qwen2VLForConditionalGeneration", True, True),
     ],
 )
