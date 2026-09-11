@@ -399,6 +399,7 @@ def _make_scaling_llm() -> AsyncLLM:
         dp_engines_running=MagicMock(return_value=False),
         shutdown=MagicMock(),
     )
+    llm.output_processor = MagicMock()
     llm.log_stats = False
     return llm
 
@@ -476,6 +477,20 @@ async def test_mrv2_scaling_closes_admission_drains_then_commits():
         assert llm.vllm_config.parallel_config.data_parallel_size == 4
     finally:
         set_scaling_elastic_ep(False)
+
+
+@pytest.mark.asyncio
+async def test_drain_waits_for_frontend_streaming_request(monkeypatch):
+    llm = _make_scaling_llm()
+    llm.engine_core.dp_engines_running.return_value = False
+    llm.output_processor.has_unfinished_requests.side_effect = [True, False]
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+
+    await llm.wait_for_requests_to_drain(drain_timeout=2)
+
+    assert llm.output_processor.has_unfinished_requests.call_count == 2
+    sleep.assert_awaited_once_with(1)
 
 
 @pytest.mark.asyncio

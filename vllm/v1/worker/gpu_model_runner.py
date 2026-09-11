@@ -4905,8 +4905,7 @@ class GPUModelRunner(
         self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
     @contextmanager
-    def preserve_serving_state(self, *, full_pool: bool = False):
-        del full_pool
+    def preserve_serving_state(self):
         multi_block_table = self.input_batch.block_table
         saved = [
             (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())

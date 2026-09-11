@@ -1143,7 +1143,12 @@ class AsyncLLM(EngineClient):
         """Wait for all requests to be drained."""
         start_time = time.time()
         while time.time() - start_time < drain_timeout:
-            if not self.engine_core.dp_engines_running():
+            async with self._admission_lock:
+                dp_engines_running = self.engine_core.dp_engines_running()
+                has_unfinished_requests = (
+                    self.output_processor.has_unfinished_requests()
+                )
+            if not dp_engines_running and not has_unfinished_requests:
                 logger.info("Engines are idle, requests have been drained")
                 return
 
