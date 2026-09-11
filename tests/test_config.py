@@ -57,6 +57,45 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
+@pytest.mark.parametrize(
+    ("is_mm_prefix_lm", "is_multimodal_model", "expected"),
+    [
+        pytest.param(True, True, True, id="multimodal-prefix-lm"),
+        pytest.param(False, True, False, id="multimodal-causal"),
+        pytest.param(True, False, False, id="text-prefix-lm"),
+        pytest.param(None, True, False, id="missing-model-config"),
+    ],
+)
+def test_rocm_mm_prefix_lm_disables_chunked_mm_input(
+    is_mm_prefix_lm: bool | None,
+    is_multimodal_model: bool,
+    expected: bool,
+) -> None:
+    from vllm.platforms.rocm import RocmPlatform
+
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            worker_cls="test-worker",
+        ),
+        model_config=(
+            None
+            if is_mm_prefix_lm is None
+            else SimpleNamespace(is_mm_prefix_lm=is_mm_prefix_lm)
+        ),
+        scheduler_config=SimpleNamespace(
+            is_multimodal_model=is_multimodal_model,
+            disable_chunked_mm_input=False,
+        ),
+    )
+
+    RocmPlatform.check_and_update_config(config)
+
+    assert config.scheduler_config.disable_chunked_mm_input is expected
+
+
 def test_kda_recoverssm_derivation_is_revalidated():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -1851,6 +1890,54 @@ def test_get_and_verify_max_len_with_nope_layers(
 
     assert actual_max_len == (max_model_len or expected_max_len)
     assert hf_config.rope_parameters["full_attention"] is None
+
+
+@pytest.mark.parametrize(
+    ("rope_type", "factor", "expected_max_len"),
+    [
+        # TeleChat3-36B-Thinking: 32768 already scaled from 8192 by 4
+        ("yarn", 4.0, 32768),
+        # sarvam-105b: declares factor 40 but only serves 131072 of it
+        ("deepseek_yarn", 40.0, 32768),
+        ("deepseek_llama_scaling", 40.0, 32768),
+        # Non-YaRN scaling still multiplies
+        ("linear", 4.0, 131072),
+    ],
+)
+def test_get_and_verify_max_len_yarn_is_already_scaled(
+    rope_type, factor, expected_max_len
+):
+    """YaRN variants must not re-apply `factor` to max_position_embeddings.
+
+    Transformers treats max_position_embeddings as the final context length
+    for every YaRN variant, so scaling it again overstates the limit and lets
+    requests past the end of the cos/sin cache.
+    """
+    from transformers import PretrainedConfig
+
+    from vllm.config.model import _get_and_verify_max_len
+    from vllm.transformers_utils.model_arch_config_convertor import (
+        ModelArchConfigConvertorBase,
+    )
+
+    hf_config = PretrainedConfig(max_position_embeddings=32768)
+    hf_config.rope_parameters = {
+        "rope_type": rope_type,
+        "factor": factor,
+        "original_max_position_embeddings": 8192,
+    }
+    model_arch_config = ModelArchConfigConvertorBase(hf_config, hf_config).convert()
+
+    actual_max_len = _get_and_verify_max_len(
+        hf_config=hf_config,
+        model_arch_config=model_arch_config,
+        tokenizer_config=None,
+        max_model_len=None,
+        disable_sliding_window=False,
+        sliding_window=None,
+    )
+
+    assert actual_max_len == expected_max_len
 
 
 class MockConfig:

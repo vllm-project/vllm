@@ -564,10 +564,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.is_amx_bmm_enabled = getattr(self.impl, "uses_amx_bmm", False)
-        # AMX reads kv_b_proj's weight directly and never calls it live; the
-        # reference CPU MLA backend calls it but isn't perf-critical. Skip
-        # the packed-kernel dispatch either way.
-        kv_b_proj._cpu_skip_gemm_dispatch = True
+        # MLA reads this weight directly to build W_UK/W_UV, so a backend must
+        # not relayout it at load time.
+        kv_b_proj.skip_weight_relayout = True
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         vllm_config = get_current_vllm_config()
@@ -2544,16 +2543,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         if num_decodes > 0:
             dcp_tot_seq_lens_device = None
             if self.dcp_world_size > 1:
-                assert seq_lens is not None, (
-                    "MLA DCP decode requires seq_lens on CommonAttentionMetadata"
-                )
-                if dcp_local_seq_lens is None:
-                    dcp_local_seq_lens = get_dcp_local_seq_lens(
-                        seq_lens,
-                        dcp_size=self.dcp_world_size,
-                        dcp_rank=get_dcp_group().rank_in_group,
-                        cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
-                    )
                 dcp_tot_seq_lens_device = seq_lens[:num_decodes]
                 seq_lens = dcp_local_seq_lens
 
