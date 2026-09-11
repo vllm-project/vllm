@@ -15,6 +15,12 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
 )
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    SlidingWindowSpec,
+)
 
 from .utils import (
     create_request,
@@ -22,6 +28,12 @@ from .utils import (
     make_kv_cache_config,
     make_nixl_scheduler,
 )
+
+
+class _EagleBlockDropConfig:
+
+    def use_eagle_block_drop(self) -> bool:
+        return True
 
 
 @pytest.mark.cpu_test
@@ -61,6 +73,97 @@ def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
     assert scheduler.blocks_per_sw == expected_sw_sizes, (
         f"Expected sw_sizes={expected_sw_sizes}, got {scheduler.blocks_per_sw}"
     )
+
+
+@pytest.mark.cpu_test
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
+def test_sw_sizes_keep_eagle_replay_slack_for_matching_specs(mock_platform):
+    """EAGLE SWA groups keep enough blocks for the previous replay boundary."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
+        NixlConnectorScheduler,
+    )
+
+    mock_platform.device_type = "cpu"
+    vllm_config = create_vllm_config(block_size=32)
+    swa_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=16,
+        dtype=torch.float16,
+        sliding_window=64,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["fa"],
+                FullAttentionSpec(
+                    block_size=32,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(["swa0"], swa_spec),
+            KVCacheGroupSpec(["swa1"], swa_spec, is_eagle_group=True),
+        ],
+    )
+
+    scheduler = NixlConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=kv_cache_config,
+    )
+    assert scheduler.blocks_per_sw == [0, 7, 7]
+
+
+@pytest.mark.cpu_test
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
+def test_sw_sizes_keep_eagle_replay_slack_without_marked_group(mock_platform):
+    """Mirror core's fallback when EAGLE has no explicitly marked KV group."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
+        NixlConnectorScheduler,
+    )
+
+    mock_platform.device_type = "cpu"
+    vllm_config = create_vllm_config(block_size=32)
+    vllm_config.speculative_config = _EagleBlockDropConfig()
+    swa_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=16,
+        dtype=torch.float16,
+        sliding_window=64,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["fa"],
+                FullAttentionSpec(
+                    block_size=32,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(["swa0"], swa_spec),
+            KVCacheGroupSpec(["swa1"], swa_spec),
+        ],
+    )
+
+    scheduler = NixlConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=kv_cache_config,
+    )
+    assert scheduler.blocks_per_sw == [0, 7, 7]
 
 
 @pytest.mark.cpu_test

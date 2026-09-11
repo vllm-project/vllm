@@ -404,6 +404,88 @@ def test_chunked_local_attention_possible_cached_prefix():
     run_one_case([random.choice([True, False])] * 8 + [False, False], 1, 10)
 
 
+def test_sliding_window_eagle_keeps_prefix_replay_slack():
+    block_size = 32
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
+    )
+    manager = SlidingWindowManager(
+        sliding_window_spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=64,
+        max_admission_blocks_per_request=10**9,
+    )
+    manager.use_eagle = True
+
+    # The attention window alone would skip to block 2044. EAGLE local APC
+    # lookup cannot use the partial tail as its lookahead block, so it falls
+    # back to the previous 64-token boundary and needs blocks 2042-2046.
+    assert manager.get_num_skipped_tokens(65551) // block_size == 2042
+
+
+def test_sliding_window_eagle_replay_slack_counts_toward_admission_cap():
+    block_size = 32
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+
+    base_cap = sliding_window_spec.max_admission_blocks_per_request(
+        max_in_flight_tokens=64,
+        max_model_len=4096,
+    )
+    eagle_cap = sliding_window_spec.max_admission_blocks_per_request(
+        max_in_flight_tokens=64,
+        max_model_len=4096,
+        prefix_replay_tokens=64,
+    )
+
+    assert base_cap == 7
+    assert eagle_cap == 9
+
+
+def test_swa_reachable_block_mask_eagle_partial_tail_replay_boundary():
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    spec = SlidingWindowSpec(
+        block_size=32,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+    mask = SlidingWindowManager.reachable_block_mask(
+        start_block=2042,
+        end_block=2048,
+        alignment_tokens=64,
+        kv_cache_spec=spec,
+        use_eagle=True,
+        retention_interval=0,
+        reachable_boundaries=(65472, 65536),
+    )
+    assert mask is not None
+    assert {2042 + i for i, keep in enumerate(mask) if keep} == {
+        2042,
+        2043,
+        2044,
+        2045,
+        2046,
+        2047,
+    }
+
+
 def test_sliding_window_possible_cached_prefix():
     block_size = 2
     sliding_window_spec = SlidingWindowSpec(
