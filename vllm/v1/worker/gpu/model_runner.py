@@ -185,6 +185,8 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
+    jit_warmup_registry: JitWarmupRegistry
+
     @JitWarmupRegistry.capture
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
