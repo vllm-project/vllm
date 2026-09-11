@@ -195,6 +195,78 @@ def test_prepare_next_token_ids_padded():
     assert torch.equal(valid_sampled_tokens_count, expected_valid_sampled_tokens_count)
 
 
+def test_prepare_next_token_ids_padded_multi_token():
+    """
+    Test for prepare_next_token_ids_padded with multi-token outputs.
+
+    When num_speculative_tokens >= 1, sampled_token_ids can have shape
+    (batch_size, num_speculative_tokens + 1), e.g., [batch_size, 2].
+    The method should find the last valid token across all columns,
+    not just the first column.
+    """
+    device = torch.device(DEVICE_TYPE)
+
+    num_requests = 4
+    req_ids = [f"req_{i + 1}" for i in range(num_requests)]
+    mock_input_batch = mock.MagicMock(spec=InputBatch)
+    mock_input_batch.req_ids = req_ids
+    mock_input_batch.num_reqs = num_requests
+    mock_input_batch.vocab_size = 100
+    mock_input_batch.num_tokens_no_spec = np.array([5] * num_requests)
+
+    mock_requests = {}
+    for req_id in req_ids:
+        mock_request = mock.MagicMock(spec=CachedRequestState)
+        # Each request will have a backup next token id of 10, 20, 30, 40
+        mock_request.get_token_id.return_value = int(req_id.split("_")[1]) * 10
+        mock_requests[req_id] = mock_request
+
+    # explicitly discard the last request
+    discarded_req_mask = torch.tensor(
+        [False, False, False, True], dtype=torch.bool, device=device
+    )
+
+    # Multi-token outputs with shape [batch_size, 2]
+    # Simulating num_speculative_tokens=1, so we get target token + 1 speculative
+    sampled_token_ids = torch.tensor(
+        [
+            [15, 18],   # both valid, should use 18 (last valid)
+            [4, -1],    # first valid, second invalid, should use 4
+            [-1, -1],   # both invalid, use backup token "30"
+            [2, 7],     # explicitly discarded, use backup token "40"
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+
+    # Expected: use the last valid token for each row
+    expected_next_token_ids_cpu = [18, 4, 30, 40]
+    expected_next_token_ids_tensor = torch.tensor(
+        expected_next_token_ids_cpu, dtype=torch.int32, device=device
+    )
+
+    proposer = _create_proposer(num_speculative_tokens=1)
+
+    # valid_sampled_tokens_count counts how many valid tokens in each row
+    expected_valid_sampled_tokens_count = torch.tensor(
+        [2, 1, 0, 2], dtype=torch.int32, device=device
+    )
+
+    next_token_ids, valid_sampled_tokens_count = proposer.prepare_next_token_ids_padded(
+        sampled_token_ids,
+        mock_requests,
+        mock_input_batch,
+        discarded_req_mask,
+    )
+
+    assert torch.equal(next_token_ids, expected_next_token_ids_tensor), (
+        f"Expected {expected_next_token_ids_tensor}, got {next_token_ids}"
+    )
+    assert torch.equal(valid_sampled_tokens_count, expected_valid_sampled_tokens_count), (
+        f"Expected {expected_valid_sampled_tokens_count}, got {valid_sampled_tokens_count}"
+    )
+
+
 def test_propose():
     """
     Test the propose() method of ExtractHiddenStatesProposer.
