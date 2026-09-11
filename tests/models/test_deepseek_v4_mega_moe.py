@@ -57,7 +57,10 @@ def v41_moe_config(dist_init):
             ),
         ),
         quant_config=None,
-        kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe"),
+        kernel_config=SimpleNamespace(
+            moe_backend="deep_gemm_mega_moe",
+            enable_jit_warmup=True,
+        ),
         parallel_config=SimpleNamespace(
             enable_expert_parallel=True,
             enable_eplb=False,
@@ -131,6 +134,7 @@ def test_deepseek_v41_fused_moe_uses_draft_counts_or_main_defaults(
     config.dspark_n_routed_experts = draft_experts
     config.dspark_num_experts_per_tok = draft_top_k
     v41_moe_config.kernel_config.moe_backend = "auto"
+    v41_moe_config.kernel_config.enable_jit_warmup = False
     captured = {}
 
     def make_experts(**kwargs):

@@ -424,7 +424,7 @@ def test_gate_linear_uses_ll_bf16_for_bf16_fast_path(monkeypatch):
     x = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
     calls = []
 
-    def fake_ll_bf16_gemm(hidden_states, router_weight):
+    def fake_ll_bf16_gemm(hidden_states, router_weight, output_dtype):
         calls.append((hidden_states, router_weight))
         return torch.full(
             (hidden_states.shape[0], router_weight.shape[0]),
@@ -446,7 +446,7 @@ def test_gate_linear_uses_ll_bf16_for_bf16_fast_path(monkeypatch):
     assert calls[0][1] is gate.weight
 
 
-def test_gate_linear_fp32_weight_falls_back(monkeypatch):
+def test_gate_linear_fp32_weight_falls_back(monkeypatch, default_vllm_config):
     gate = _make_gate_linear(monkeypatch, params_dtype=torch.float32)
     assert not gate.allow_ll_bf16_gemm
     x = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
