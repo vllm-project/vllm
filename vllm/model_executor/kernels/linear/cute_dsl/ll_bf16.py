@@ -13,6 +13,7 @@ import torch
 
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, zip_inputs
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import compile_cutedsl
+from vllm.platforms import current_platform
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +188,7 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
         return self._trace_dispatch(self.dispatch)(
             zip_inputs(*shape_rows),
             M=m_options,
-            use_pdl=(False, True),
+            use_pdl=current_platform.is_arch_support_pdl(),
         )
 
     def compile(self, compile_key: CompileKey) -> None:
@@ -298,8 +299,6 @@ class LLBf16Gemm(VllmJitKernel["LLBf16Gemm.CompileKey"]):
 
         M, K = hidden_states.shape
         N = router_weight.shape[0]
-        from vllm.platforms import current_platform
-
         compile_key = self.dispatch(
             M=M, K=K, N=N, use_pdl=current_platform.is_arch_support_pdl()
         )
