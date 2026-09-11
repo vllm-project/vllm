@@ -432,10 +432,9 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             getattr(self.model_config.hf_config, "is_original_qwen3_reranker", False)
             and self.chat_template is None
         ):
-            is_vl = "VL" in (self.model_config.architecture or "")
             suggested_template = (
                 "examples/pooling/score/template/qwen3_vl_reranker.jinja"
-                if is_vl
+                if self.model_config.is_multimodal_model
                 else "examples/pooling/score/template/qwen3_reranker.jinja"
             )
             logger.warning(
