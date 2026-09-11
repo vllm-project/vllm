@@ -845,6 +845,120 @@ def test_full_cache_bf16_matches_reference(
     torch.testing.assert_close(k_cache_fused, k_cache_ref, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(
+    not _full_cache_bf16_op_available(),
+    reason="full-cache BF16 DeepseekV4 op not built in",
+)
+@pytest.mark.parametrize("num_tokens", [4, 128])
+@pytest.mark.parametrize("block_size", [16, 64])
+def test_full_cache_bf16_h0_matches_dummy_q(num_tokens: int, block_size: int):
+    """num_heads_q=0 writes the same BF16 cache as a discarded dummy-Q."""
+    torch.manual_seed(11)
+    device = "cuda"
+    dtype = torch.bfloat16
+    eps = 1e-6
+    n_heads = 8
+    kv = torch.randn(num_tokens, HEAD_DIM, dtype=dtype, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    cos_sin_cache = make_cos_sin_cache(num_tokens + 16, ROPE_DIM, torch.float32, device)
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+
+    dummy_q = torch.zeros(num_tokens, n_heads, HEAD_DIM, dtype=dtype, device=device)
+    k_dummy = torch.zeros(
+        num_blocks, block_size, HEAD_DIM, dtype=dtype, device=device
+    )
+    _call_full_cache_bf16_fused(
+        dummy_q,
+        kv,
+        k_dummy,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        eps,
+        block_size,
+        False,
+    )
+
+    empty_q = torch.empty(num_tokens, 0, HEAD_DIM, dtype=dtype, device=device)
+    k_h0 = torch.zeros_like(k_dummy)
+    _call_full_cache_bf16_fused(
+        empty_q,
+        kv,
+        k_h0,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        eps,
+        block_size,
+        False,
+    )
+    torch.testing.assert_close(k_h0, k_dummy, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not _full_cache_fp8_op_available(),
+    reason="full-cache per-tensor FP8 DeepseekV4 op not built in",
+)
+@pytest.mark.parametrize("num_tokens", [4, 128])
+@pytest.mark.parametrize("block_size", [16, 64])
+def test_full_cache_fp8_h0_matches_dummy_q(num_tokens: int, block_size: int):
+    """num_heads_q=0 writes the same e4m3fn cache as a discarded dummy-Q."""
+    torch.manual_seed(12)
+    device = "cuda"
+    dtype = torch.bfloat16
+    eps = 1e-6
+    n_heads = 8
+    kv = torch.randn(num_tokens, HEAD_DIM, dtype=dtype, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    cos_sin_cache = make_cos_sin_cache(num_tokens + 16, ROPE_DIM, torch.float32, device)
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    fp8_scale = torch.tensor([1.0], dtype=torch.float32, device=device)
+    q_fp8_scale_inv = torch.tensor([1.0], dtype=torch.float32, device=device)
+
+    dummy_q = torch.zeros(num_tokens, n_heads, HEAD_DIM, dtype=dtype, device=device)
+    dummy_q_fp8 = torch.empty_like(dummy_q, dtype=torch.float8_e4m3fn)
+    k_dummy = torch.zeros(
+        num_blocks, block_size, HEAD_DIM, dtype=torch.float8_e4m3fn, device=device
+    )
+    _call_full_cache_fp8_fused(
+        dummy_q,
+        kv,
+        dummy_q_fp8,
+        k_dummy,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        fp8_scale,
+        q_fp8_scale_inv,
+        eps,
+        block_size,
+        False,
+    )
+
+    empty_q = torch.empty(num_tokens, 0, HEAD_DIM, dtype=dtype, device=device)
+    empty_q_fp8 = torch.empty(
+        num_tokens, 0, HEAD_DIM, dtype=torch.float8_e4m3fn, device=device
+    )
+    k_h0 = torch.zeros_like(k_dummy)
+    _call_full_cache_fp8_fused(
+        empty_q,
+        kv,
+        empty_q_fp8,
+        k_h0,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        fp8_scale,
+        q_fp8_scale_inv,
+        eps,
+        block_size,
+        False,
+    )
+    assert torch.equal(k_h0, k_dummy)
+
+
 # ── KV-only insert (no dummy Q) vs the existing Q+KV dummy-Q path ───────────
 
 

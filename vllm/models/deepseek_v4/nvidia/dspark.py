@@ -196,11 +196,12 @@ class DSparkDeepseekV4Model(nn.Module):
             attn = layer.attn
             proj = attn.fused_wqa_wkv
             layer_quant = getattr(proj, "quant_method", None)
+            layer_fp8 = getattr(layer_quant, "fp8_linear", None)
             if (
                 attn.q_lora_rank != q_lora_rank
                 or attn.head_dim != first_attn.head_dim
                 or getattr(layer_quant, "weight_block_size", None) != block_size
-                or getattr(layer_quant, "fp8_linear", None) is not fp8_linear
+                or type(layer_fp8) is not type(fp8_linear)
             ):
                 logger.info_once(
                     "DSpark fused WKV skipped: layer projection mismatch"
@@ -364,8 +365,8 @@ def _insert_context_kv(
     ``kv`` is the un-normed projection output. The fp8_ds_mla (uint8) path
     folds kv_norm into the KV-only insert kernel when the fused op is built;
     otherwise it norms externally and falls back to the plain KV-only op.
-    Other cache dtypes norm externally and reuse the Q+KV fused ops with a
-    dummy query.
+    Other cache dtypes norm externally and reuse the Q+KV fused ops with
+    ``num_heads_q=0`` (no dummy query allocation).
     """
     swa_cache = attn.swa_cache_layer.kv_cache
     block_size = attn.swa_cache_layer.block_size
@@ -399,15 +400,16 @@ def _insert_context_kv(
         return
     kv = attn.kv_norm(kv).contiguous()
     n_ctx = kv.shape[0]
-    dummy_q = torch.zeros(
-        (n_ctx, attn.n_local_heads, attn.head_dim),
+    # Full-cache kernel already accepts num_heads_q=0 (one KV slot per token).
+    empty_q = torch.empty(
+        (n_ctx, 0, attn.head_dim),
         dtype=kv.dtype,
         device=kv.device,
     )
     if cache_dtype == torch.bfloat16:
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
-            dummy_q,
+            empty_q,
             kv,
             swa_3d,
             slot_mapping,
@@ -415,14 +417,19 @@ def _insert_context_kv(
             cos_sin_cache,
             attn.eps,
             block_size,
+            False,
         )
     else:  # per-tensor fp8 (torch.float8_e4m3fn)
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
-        dummy_q_fp8 = torch.zeros_like(dummy_q, dtype=torch.float8_e4m3fn)
+        empty_q_fp8 = torch.empty(
+            (n_ctx, 0, attn.head_dim),
+            dtype=torch.float8_e4m3fn,
+            device=kv.device,
+        )
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
-            dummy_q,
+            empty_q,
             kv,
-            dummy_q_fp8,
+            empty_q_fp8,
             swa_3d,
             slot_mapping,
             positions,
@@ -431,6 +438,7 @@ def _insert_context_kv(
             attn._flashinfer_fp8_q_scale_inv,
             attn.eps,
             block_size,
+            False,
         )
 
 
@@ -652,6 +660,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def process_weights_after_loading(self) -> None:
         self._finalize_moe()
+        self.model._build_fused_wkv_buffer()
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.
