@@ -74,7 +74,7 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
 
@@ -1665,6 +1665,15 @@ class TestMaximalPrefixLookup:
 
 
 class TestSlidingWindowLookup:
+    def test_pending_chunk_behind_gap_does_not_defer(self):
+        """A pending suffix too short for the window cannot improve the hit."""
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.HIT, 2: LookupResult.HIT, 4: LookupResult.HIT_PENDING}
+        )
+        assert (
+            sched._sliding_window_lookup(to_keys([1, 2, 3, 4]), 2, _EMPTY_REQ_CTX) == 2
+        )
+
     def test_all_hit_exact_window(self):
         sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
         assert sched._sliding_window_lookup(to_keys([1, 2]), 2, _EMPTY_REQ_CTX) == 2
@@ -1781,6 +1790,73 @@ class TestSlidingWindowLookup:
 # ---------------------------------------------------------------------------
 # Tests for SWA store pruning vs. load demand
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_swa_load_does_not_wait_for_unusable_pending_suffix(
+    request_runner, async_scheduling
+):
+    """A CPU store beyond a missing SWA chunk must not block a ready prefix."""
+    groups = [
+        KVCacheGroupSpec(
+            ["full"],
+            FullAttentionSpec(
+                block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["swa"],
+            SlidingWindowSpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=8,
+            ),
+        ),
+    ]
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=32,
+        async_scheduling=async_scheduling,
+        kv_cache_groups=groups,
+    )
+    sched = runner.connector_scheduler
+    manager = CPUOffloadingManager(num_chunks=16)
+    sched.manager = manager
+    runner.new_request(token_ids=list(range(17)))
+    state = sched._req_status["0"]
+    state.update_offload_keys()
+    full, swa = (g.offload_keys for g in state.group_states)
+    ready = manager.prepare_store(full[:4] + swa[:2], state.req_context)
+    assert ready is not None
+    manager.complete_store(ready.keys_to_store, state.req_context)
+    pending = manager.prepare_store(swa[3:4], state.req_context)
+    assert pending is not None
+
+    # The last SWA chunk is still being written; the preceding one is missing.
+    output = runner.scheduler.schedule()
+    metadata = output.kv_connector_metadata
+    assert isinstance(metadata, OffloadingConnectorMetadata)
+    [(job_id, load)] = metadata.load_jobs.items()
+    assert isinstance(load.dst_spec, GPULoadStoreSpec)
+    assert load.dst_spec.group_sizes == [2, 2]
+    assert manager.lookup(swa[3], state.req_context) is LookupResult.HIT_PENDING
+
+    runner.scheduler.update_from_output(
+        output,
+        ModelRunnerOutput.with_kv_conn_output_only(
+            KVConnectorOutput(
+                finished_recving={"0"},
+                kv_connector_worker_meta=OffloadingWorkerMetadata(
+                    completed_jobs={job_id: 1}
+                ),
+            )
+        ),
+    )
+    resumed = runner.scheduler.schedule()
+    assert resumed.num_scheduled_tokens == {"0": 9}
+    assert manager.lookup(swa[3], state.req_context) is LookupResult.HIT_PENDING
 
 
 @pytest.mark.parametrize("alignment_chunk_count", [4, 8, 64])

@@ -680,6 +680,7 @@ class OffloadingConnectorScheduler:
         The first run may need a larger window for a partial rightmost chunk.
         Returns 0 on miss, None if the backend deferred a lookup."""
         defer_lookup = False
+        pending_in_window = False
         consecutive_hits = 0
         required_window = initial_window_size or sliding_window_size
         for idx in range(len(keys) - 1, -1, -1):
@@ -690,7 +691,7 @@ class OffloadingConnectorScheduler:
                     # Block is in cache, just not readable yet — counts
                     # as hit for the consecutive streak. Don't break:
                     # keep scanning to let manager kick off async lookups.
-                    defer_lookup = True
+                    pending_in_window = True
                     consecutive_hits += 1
                 case LookupResult.RETRY:
                     # Block location uncertain — does not count as hit.
@@ -698,13 +699,18 @@ class OffloadingConnectorScheduler:
                     # async lookups.
                     defer_lookup = True
                     consecutive_hits = 0
+                    pending_in_window = False
                     required_window = sliding_window_size
                 case LookupResult.MISS:
                     consecutive_hits = 0
+                    # This gap rules out the incomplete window to its right.
+                    pending_in_window = False
                     required_window = sliding_window_size
             if consecutive_hits == required_window:
-                return idx + required_window if not defer_lookup else None
-        return consecutive_hits if not defer_lookup else None
+                return (
+                    None if defer_lookup or pending_in_window else idx + required_window
+                )
+        return None if defer_lookup or pending_in_window else consecutive_hits
 
     def _touch(self, req_status: RequestOffloadState):
         for group_config, group_state in zip(
