@@ -11,6 +11,7 @@ from torch import nn
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
 )
@@ -68,6 +69,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
+    sp_padding_mask,
     sp_reduce_scatter,
     sp_shard,
 )
@@ -89,19 +91,19 @@ from .qsa import Qwen4ExpQSAAttention
 
 
 def is_sequence_parallel_enabled(vllm_config: VllmConfig) -> bool:
-    """Enable token-sharded GR and PLE within a single pipeline stage."""
-    parallel = vllm_config.parallel_config
-    if (
-        not envs.VLLM_QWEN4_EXP_SP
-        or parallel.tensor_parallel_size == 1
-        or parallel.pipeline_parallel_size != 1
-    ):
+    """Enable GR/PLE SP explicitly or automatically with sequence-parallel MoE."""
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.tensor_parallel_size == 1:
         return False
-    if parallel.use_sequence_parallel_moe:
-        raise ValueError("Qwen4Exp SP cannot be combined with sequence-parallel MoE")
-    if vllm_config.compilation_config.pass_config.enable_sp:
-        raise ValueError("Qwen4Exp SP cannot be combined with compiler SP")
-    return True
+    if (
+        parallel_config.use_sequence_parallel_moe
+        and parallel_config.pipeline_parallel_size != 1
+    ):
+        # Reject configurations that disable model SP while leaving MoE SP enabled.
+        raise ValueError("Qwen4Exp SP with sequence-parallel MoE requires PP=1")
+    if parallel_config.pipeline_parallel_size != 1:
+        return False
+    return envs.VLLM_QWEN4_EXP_SP or parallel_config.use_sequence_parallel_moe
 
 
 def without_modelopt_fp4(
@@ -189,15 +191,10 @@ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
         prefix: str = "",
         reduce_results: bool = True,
     ) -> None:
-        parallel_config = vllm_config.parallel_config
-        if parallel_config.use_sequence_parallel_moe:
-            raise NotImplementedError(
-                "Qwen4Exp HC does not support sequence-parallel MoE"
-            )
         super().__init__(
             vllm_config=vllm_config, prefix=prefix, reduce_results=reduce_results
         )
-        if self.replicate_shared_expert:
+        if self.replicate_shared_expert and not self.is_sequence_parallel:
             # Reduce routed outputs before adding replicated shared outputs.
             # SP then slices the result to avoid summing shared outputs again via RS.
             self.experts.moe_config.skip_final_all_reduce = False
@@ -222,10 +219,9 @@ class Qwen4ExpDecoderLayer(nn.Module):
         self.layer_type = layer_type
         self.use_sequence_parallel = is_sequence_parallel_enabled(vllm_config)
         self.layer_idx = extract_layer_index(prefix)
-        if vllm_config.parallel_config.use_sequence_parallel_moe:
-            raise NotImplementedError(
-                "Qwen4Exp HC does not support sequence-parallel MoE"
-            )
+        self.use_sequence_parallel_moe = (
+            vllm_config.parallel_config.use_sequence_parallel_moe
+        )
         self.ple: Qwen4ExpPLELayer | None = None
         ple_layer_ids = config.ple_layer_ids
         if (self.layer_idx + 1) in ple_layer_ids:
@@ -287,6 +283,9 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 reduce_results=not self.use_sequence_parallel,
             )
         else:
+            assert not self.use_sequence_parallel, (
+                "Qwen4Exp SP does not support dense MLP layers"
+            )
             self.mlp = Qwen3NextMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
@@ -372,16 +371,20 @@ class Qwen4ExpDecoderLayer(nn.Module):
         hidden_states, block_input, injection = mlp_hc.combine_and_mix(
             hidden_states, attn_out, injection
         )
-        if self.use_sequence_parallel:
-            block_input = sp_all_gather(block_input)[: positions.shape[-1]]
-        mlp_out = self.mlp(block_input)
-        if self.use_sequence_parallel:
-            if isinstance(self.mlp, Qwen4ExpSparseMoeBlock):
+        if self.use_sequence_parallel_moe:
+            # MoE consumes local tokens and returns complete local outputs.
+            mlp_out = self.mlp(block_input, already_sequence_parallel=True)
+        else:
+            if self.use_sequence_parallel:
+                block_input = sp_all_gather(block_input)[: positions.shape[-1]]
+            mlp_out = self.mlp(block_input)
+            if self.use_sequence_parallel:
+                assert isinstance(self.mlp, Qwen4ExpSparseMoeBlock)
                 reduce_output = self.mlp.experts.moe_config.skip_final_all_reduce
-            else:
-                reduce_output = not self.mlp.down_proj.reduce_results
-            # Only sum partial outputs. Reduced outputs already include all ranks.
-            mlp_out = sp_reduce_scatter(mlp_out) if reduce_output else sp_shard(mlp_out)
+                # Only sum partial outputs. Reduced outputs already include all ranks.
+                mlp_out = (
+                    sp_reduce_scatter(mlp_out) if reduce_output else sp_shard(mlp_out)
+                )
         return hidden_states, mlp_out, injection
 
 
@@ -446,6 +449,9 @@ class Qwen4ExpModel(nn.Module):
             vllm_config.parallel_config.eplb_config.num_redundant_experts
         )
         self.use_sequence_parallel = is_sequence_parallel_enabled(vllm_config)
+        self.use_sequence_parallel_moe = (
+            vllm_config.parallel_config.use_sequence_parallel_moe
+        )
         self.vocab_size = config.vocab_size
         self._qsa_layer_ids = frozenset(
             layer_idx
@@ -550,6 +556,15 @@ class Qwen4ExpModel(nn.Module):
                     raise ValueError("input_ids or inputs_embeds is required")
                 hidden_states = self.embed_input_ids(input_ids)
             if self.use_sequence_parallel:
+                if (
+                    self.use_sequence_parallel_moe
+                    and envs.VLLM_MOE_SKIP_PADDING
+                    and is_forward_context_available()
+                ):
+                    forward_context = get_forward_context()
+                    forward_context.is_padding = sp_padding_mask(
+                        forward_context.is_padding, hidden_states
+                    )
                 hidden_states = sp_shard(hidden_states)
             # Expand only the local token rows when SP is enabled.
             hidden_states = hidden_states.repeat(1, self.config.hc_count)

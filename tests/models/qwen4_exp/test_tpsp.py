@@ -5,6 +5,7 @@
 from dataclasses import MISSING, fields
 from itertools import accumulate, product
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import torch.multiprocessing as mp
@@ -22,12 +23,13 @@ from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
+    sp_padding_mask,
     sp_reduce_scatter,
     sp_shard,
 )
@@ -38,7 +40,9 @@ from vllm.models.qwen4_exp.nvidia.hyperconnection import (
 )
 from vllm.models.qwen4_exp.nvidia.model import (
     Qwen4ExpDecoderLayer,
+    Qwen4ExpModel,
     Qwen4ExpSparseMoeBlock,
+    is_sequence_parallel_enabled,
 )
 from vllm.models.qwen4_exp.nvidia.mtp import Qwen4ExpMultiTokenPredictor
 from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
@@ -107,6 +111,9 @@ def _make_decoder(
     nn.Module.__init__(layer)
     layer.layer_type = "full_attention"
     layer.ple = None
+    layer.use_sequence_parallel_moe = (
+        vllm_config.parallel_config.use_sequence_parallel_moe
+    )
     hc_config = HyperConnectionConfig(
         hc_count=config.hc_count,
         hidden_size=config.hidden_size,
@@ -125,6 +132,9 @@ def _make_decoder(
         param.normal_(std=0.08)
     layer.self_attn.proj.weight.add_(rank * 0.01)
     experts = layer.mlp.experts.routed_experts
+    if layer.use_sequence_parallel_moe:
+        # Distinct expert owners expose wrong EP routing or duplicate reductions.
+        experts.w13_weight.add_(rank * 0.01)
     experts.quant_method.process_weights_after_loading(experts)
     return layer
 
@@ -173,14 +183,17 @@ def _check_decoder(vllm_config: VllmConfig, rank: int) -> None:
                 )
 
 
-def _check_mtp(vllm_config: VllmConfig, rank: int) -> None:
-    """Preserve full, contiguous sample and multi-stream outputs across draft steps."""
+def _make_mtp(vllm_config: VllmConfig, rank: int) -> Qwen4ExpMultiTokenPredictor:
+    """Build an MTP wrapper around real GR and MoE kernels."""
     config = vllm_config.model_config.hf_text_config
     model = Qwen4ExpMultiTokenPredictor.__new__(Qwen4ExpMultiTokenPredictor)
     nn.Module.__init__(model)
     model.hc_count = config.hc_count
     model.hidden_size = config.hidden_size
     model.num_mtp_layers = 1
+    model.use_sequence_parallel_moe = (
+        vllm_config.parallel_config.use_sequence_parallel_moe
+    )
     model.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
     model.pre_fc_norm_embedding = nn.Identity()
     model.pre_fc_norm_hidden = nn.Identity()
@@ -201,6 +214,14 @@ def _check_mtp(vllm_config: VllmConfig, rank: int) -> None:
         param.normal_(std=0.08)
     layer = _make_decoder(vllm_config, rank, "mtp")
     model.layers = nn.ModuleList([layer])
+    return model
+
+
+def _check_mtp(vllm_config: VllmConfig, rank: int) -> None:
+    """Preserve full, contiguous sample and multi-stream outputs across draft steps."""
+    config = vllm_config.model_config.hf_text_config
+    model = _make_mtp(vllm_config, rank)
+    layer = model.layers[0]
     for num_tokens in (1, 3, 8, 17):
         hidden = torch.randn(num_tokens, config.hc_count * config.hidden_size)
         reference_hidden = local_hidden = hidden
@@ -327,13 +348,102 @@ def _check_ple(vllm_config: VllmConfig) -> None:
             torch.testing.assert_close(sp_state, ref_state, atol=0.002, rtol=0.02)
 
 
-def _run_tpsp(rank: int, port: int) -> None:
-    """Run decoder, MTP, and PLE regressions inside one two-rank TP group."""
+def _check_moe_sp(vllm_config: VllmConfig, rank: int) -> None:
+    """Compare native SP with the existing MoE wrapper across unequal DP batches."""
+    config = vllm_config.model_config.hf_text_config
+    assert is_sequence_parallel_enabled(vllm_config)
+    mtp = _make_mtp(vllm_config, rank)
+    layer = mtp.layers[0]
+    assert layer.mlp.shared_expert.gate_up_proj.tp_size == 1
+    assert layer.mlp.experts.moe_config.tp_size == 1
+    assert layer.mlp.experts.moe_config.ep_size == 4
+    assert layer.mlp.experts.moe_config.sp_size == 2
+
+    target = Qwen4ExpModel.__new__(Qwen4ExpModel)
+    nn.Module.__init__(target)
+    target.config = config
+    target.embed_tokens = mtp.embed_tokens
+    target.hyper_connection_mixer = mtp.hyper_connection_mixer
+    # Reuse a block to exercise delayed GR state across three decoder layers.
+    target.layers = nn.ModuleList([layer] * 3)
+    target.start_layer, target.end_layer = 0, 3
+    target._mtp_hidden_buffer = torch.empty(32, config.hc_count * config.hidden_size)
+    dp_rank = vllm_config.parallel_config.data_parallel_rank
+
+    def forward(model, use_sp: bool, **kwargs):
+        """Use the current batch with full-token or local-token GR."""
+        model.use_sequence_parallel = layer.use_sequence_parallel = use_sp
+        model.use_sequence_parallel_moe = layer.use_sequence_parallel_moe = use_sp
+        layer.self_attn.proj.reduce_results = not use_sp
+        # The baseline MoE wrapper chunks tokens internally and needs a local mask.
+        with set_forward_context(
+            None,
+            vllm_config,
+            num_tokens=num_tokens,
+            num_tokens_across_dp=counts,
+            is_padding=padding if use_sp else local_padding,
+        ):
+            output = model(input_ids=ids, positions=positions, **kwargs)
+            torch.testing.assert_close(get_forward_context().is_padding, local_padding)
+            return output
+
+    for base_tokens in (1, 3, 8, 17):
+        counts = torch.tensor([base_tokens, base_tokens + 2], device="cpu")
+        num_tokens = int(counts[dp_rank])
+        torch.manual_seed(30 + dp_rank)
+        ids = torch.randint(0, config.vocab_size, (num_tokens,))
+        positions = torch.arange(num_tokens)
+        embeds = torch.randn(num_tokens, config.hidden_size)
+        padding = None
+        if num_tokens > 1:
+            padding = torch.arange(num_tokens) == num_tokens - 1
+        local_padding = sp_padding_mask(padding, embeds)
+
+        expected = forward(target, False, inputs_embeds=embeds)
+        expected_multi = target._mtp_hidden_buffer[:num_tokens].clone()
+        with (
+            patch(
+                "vllm.models.qwen4_exp.nvidia.model.sp_all_gather", wraps=sp_all_gather
+            ) as all_gather,
+            patch(
+                "vllm.models.qwen4_exp.nvidia.model.sp_reduce_scatter",
+                wraps=sp_reduce_scatter,
+            ) as reduce_scatter,
+        ):
+            actual = forward(target, True, inputs_embeds=embeds)
+            # One AG/RS per layer, plus the packed model-output AG.
+            assert all_gather.call_count == target.end_layer + 1
+            assert reduce_scatter.call_count == target.end_layer
+        actual_multi = target._mtp_hidden_buffer[:num_tokens].clone()
+        torch.testing.assert_close(actual, expected, atol=0.002, rtol=0.02)
+        torch.testing.assert_close(actual_multi, expected_multi, atol=0.02, rtol=0.02)
+
+        for step in range(2):
+            expected = forward(
+                mtp, False, hidden_states=expected_multi, spec_step_idx=step
+            )
+            actual = forward(mtp, True, hidden_states=actual_multi, spec_step_idx=step)
+            for output, reference in zip(actual, expected):
+                assert output.is_contiguous()
+                torch.testing.assert_close(output, reference, atol=0.002, rtol=0.02)
+            expected_multi, actual_multi = expected[1], actual[1]
+
+
+def _run_tpsp(rank: int, port: int, use_moe_sp: bool = False) -> None:
+    """Run first-stage TP or second-stage TP=2, DP=2, EP regressions."""
     torch.accelerator.set_device_index(rank)
     torch.set_num_threads(1)
-    config = VllmConfig(parallel_config=ParallelConfig(tensor_parallel_size=2))
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            data_parallel_size=2 if use_moe_sp else 1,
+            data_parallel_rank=rank // 2,
+            enable_expert_parallel=use_moe_sp,
+            all2all_backend="allgather_reducescatter",
+        )
+    )
     init_distributed_environment(
-        world_size=2,
+        world_size=4 if use_moe_sp else 2,
         rank=rank,
         local_rank=rank,
         distributed_init_method=f"tcp://127.0.0.1:{port}",
@@ -363,11 +473,14 @@ def _run_tpsp(rank: int, port: int) -> None:
             )
             with torch.device(f"cuda:{rank}"), torch.inference_mode():
                 torch.set_default_dtype(torch.bfloat16)
-                with set_forward_context(None, config):
-                    _check_vocab_embedding()
-                    _check_decoder(config, rank)
-                    _check_mtp(config, rank)
-                _check_ple(config)
+                if use_moe_sp:
+                    _check_moe_sp(config, rank)
+                else:
+                    with set_forward_context(None, config):
+                        _check_vocab_embedding()
+                        _check_decoder(config, rank)
+                        _check_mtp(config, rank)
+                    _check_ple(config)
     finally:
         cleanup_dist_env_and_memory()
 
@@ -376,3 +489,11 @@ def _run_tpsp(rank: int, port: int) -> None:
 def test_tpsp_decoder_and_ple() -> None:
     """Catch duplicate reductions, token misalignment, and diverging PLE/MTP state."""
     mp.spawn(_run_tpsp, args=(get_open_port(),), nprocs=2)
+
+
+@multi_gpu_test(num_gpus=4)
+def test_moe_sp_target_and_mtp(monkeypatch) -> None:
+    """Validate automatic MoE SP, padding, and native EP outputs for target and MTP."""
+    monkeypatch.setenv("VLLM_QWEN4_EXP_SP", "0")
+    monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
+    mp.spawn(_run_tpsp, args=(get_open_port(), True), nprocs=4)

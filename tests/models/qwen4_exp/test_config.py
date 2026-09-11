@@ -48,34 +48,70 @@ def _text_config(**kwargs) -> Qwen4ExpTextConfig:
     return Qwen4ExpTextConfig(**values)
 
 
-@pytest.mark.parametrize("parallel_mode", [None, "ep", "moe_sp", "compiler_sp"])
+@pytest.mark.parametrize(
+    "parallel_mode", [None, "ep", "moe_sp", "compiler_sp", "moe_compiler_sp"]
+)
 @pytest.mark.parametrize("pp_size", [1, 2])
-def test_sp_parallel_modes(monkeypatch, parallel_mode, pp_size) -> None:
-    """Allow DP=1 and EP, fall back for PP, and reject overlapping SP modes."""
+@pytest.mark.parametrize("explicit_sp", [False, True])
+def test_sp_parallel_modes(monkeypatch, parallel_mode, pp_size, explicit_sp) -> None:
+    """Keep native SP independent of compiler SP and validate PP support."""
     from vllm.models.qwen4_exp.nvidia.model import is_sequence_parallel_enabled
 
-    monkeypatch.setenv("VLLM_QWEN4_EXP_SP", "1")
+    monkeypatch.setenv("VLLM_QWEN4_EXP_SP", str(int(explicit_sp)))
+    moe_sp = parallel_mode in ("moe_sp", "moe_compiler_sp")
+    compiler_sp = parallel_mode in ("compiler_sp", "moe_compiler_sp")
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             tensor_parallel_size=2,
-            data_parallel_size=1,
+            data_parallel_size=2 if moe_sp else 1,
             pipeline_parallel_size=pp_size,
-            enable_expert_parallel=parallel_mode == "ep",
-            use_sequence_parallel_moe=parallel_mode == "moe_sp",
+            enable_expert_parallel=parallel_mode == "ep" or moe_sp,
+            use_sequence_parallel_moe=moe_sp,
         ),
         compilation_config=SimpleNamespace(
-            pass_config=SimpleNamespace(enable_sp=parallel_mode == "compiler_sp")
+            pass_config=SimpleNamespace(enable_sp=compiler_sp)
         ),
     )
-    if pp_size > 1:
-        assert not is_sequence_parallel_enabled(config)
-    elif parallel_mode in ("moe_sp", "compiler_sp"):
-        with pytest.raises(ValueError, match="Qwen4Exp SP"):
+    if pp_size > 1 and moe_sp:
+        with pytest.raises(ValueError, match="requires PP=1"):
             is_sequence_parallel_enabled(config)
+    elif pp_size > 1:
+        assert not is_sequence_parallel_enabled(config)
     else:
-        assert is_sequence_parallel_enabled(config)
+        assert is_sequence_parallel_enabled(config) == (explicit_sp or moe_sp)
     config.parallel_config.tensor_parallel_size = 1
     assert not is_sequence_parallel_enabled(config)
+
+
+@pytest.mark.parametrize(
+    "dense_config", [{"num_experts": 0}, {"num_experts": 4, "mlp_only_layers": [0]}]
+)
+@pytest.mark.parametrize("use_moe_sp", [False, True])
+def test_sp_rejects_dense_layers(monkeypatch, dense_config, use_moe_sp) -> None:
+    """Reject dense layers under either native SP mode."""
+    from vllm.models.qwen4_exp.nvidia import model as qwen4_model
+
+    monkeypatch.setenv("VLLM_QWEN4_EXP_SP", "0" if use_moe_sp else "1")
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=_text_config(ple_layer_ids=[], **dense_config)
+        ),
+        cache_config=None,
+        quant_config=None,
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=1,
+            use_sequence_parallel_moe=use_moe_sp,
+        ),
+        compilation_config=SimpleNamespace(
+            pass_config=SimpleNamespace(enable_sp=False)
+        ),
+    )
+    monkeypatch.setattr(
+        qwen4_model, "Qwen3NextAttention", lambda *args, **kwargs: torch.nn.Identity()
+    )
+    with pytest.raises(AssertionError, match="does not support dense MLP"):
+        qwen4_model.Qwen4ExpDecoderLayer(config, "full_attention", "model.layers.0")
 
 
 def test_qwen4_exp_mtp_returns_sample_and_multi_streams() -> None:
