@@ -47,10 +47,8 @@ def test_fused_watermarker_matches_cpu(key: int, context_width: int):
     logits = torch.randn(32, 8193)
     watermarker = GumbelWatermarker(key, context_width)
 
-    expected = watermarker.sample(logits, contexts, lambda values: None).token_ids
-    actual = watermarker.sample(
-        logits.cuda(), contexts.cuda(), lambda values: None
-    ).token_ids.cpu()
+    expected = watermarker.sample(logits, contexts).token_ids
+    actual = watermarker.sample(logits.cuda(), contexts.cuda()).token_ids.cpu()
 
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
@@ -63,7 +61,7 @@ def test_fused_watermarker_handles_nan_logits():
     logits = torch.full((2, 1025), float("nan"), device="cuda")
     watermarker = GumbelWatermarker(key=42, context_width=4)
 
-    token_ids = watermarker.sample(logits, contexts, lambda values: None).token_ids
+    token_ids = watermarker.sample(logits, contexts).token_ids
 
     assert torch.all((token_ids >= 0) & (token_ids < logits.shape[-1]))
 
@@ -78,10 +76,8 @@ def test_fused_watermarker_handles_noncontiguous_inputs():
     logits = torch.randn(8, 2050, device="cuda")[:, ::2]
     watermarker = GumbelWatermarker(key=42, context_width=4)
 
-    expected = watermarker.sample(
-        logits.contiguous(), contexts.contiguous(), lambda values: None
-    ).token_ids
-    actual = watermarker.sample(logits, contexts, lambda values: None).token_ids
+    expected = watermarker.sample(logits.contiguous(), contexts.contiguous()).token_ids
+    actual = watermarker.sample(logits, contexts).token_ids
 
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 

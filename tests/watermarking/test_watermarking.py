@@ -35,10 +35,9 @@ def test_watermarker_contract(algorithm: str):
     )
     logits = torch.zeros(2, 128)
     contexts = torch.tensor([[1, 2, 3, 4], [4, 5, 6, 7]])
-    random_sample = lambda sample_logits: sample_logits.argmax(dim=-1)
 
-    first = watermarker.sample(logits, contexts, random_sample)
-    second = watermarker.sample(logits, contexts, random_sample)
+    first = watermarker.sample(logits, contexts)
+    second = watermarker.sample(logits, contexts)
 
     assert first.token_ids.shape == (2,)
     assert first.logits.shape == logits.shape
@@ -137,7 +136,7 @@ def test_gpu_sampler_respects_mixed_request_watermarking(monkeypatch):
         2, dtype=torch.bool
     )
     monkeypatch.setattr(
-        "vllm.v1.watermarking.gpu_sampler.gumbel_sample",
+        "vllm.v1.watermarking.watermarker.gumbel_sample",
         lambda *args, **kwargs: torch.tensor([3, 4]),
     )
     logits = torch.zeros(2, 8)
@@ -176,7 +175,7 @@ def test_gpu_sampler_skips_watermarking_for_repeated_contexts(monkeypatch):
         torch.tensor([True, False])
     )
     monkeypatch.setattr(
-        "vllm.v1.watermarking.gpu_sampler.gumbel_sample",
+        "vllm.v1.watermarking.watermarker.gumbel_sample",
         lambda *args, **kwargs: torch.tensor([3, 4]),
     )
     logits = torch.zeros(2, 8)
@@ -672,7 +671,7 @@ def test_gpu_sampler_skips_watermarking_for_greedy_batch(monkeypatch):
     class StubWatermarker:
         context_width = 1
 
-        def sample(self, logits, contexts, random_sample):
+        def sample(self, logits, contexts, random_sampler=None, skip_mask=None):
             raise AssertionError("watermarker should not run for greedy requests")
 
     sampler = object.__new__(GPUWatermarkSampler)

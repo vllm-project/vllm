@@ -2,13 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeAlias
 
 import torch
 
-RandomSampler: TypeAlias = Callable[[torch.Tensor], torch.Tensor]
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 
 
 @dataclass(frozen=True)
@@ -18,12 +16,24 @@ class WatermarkSample:
 
 
 @dataclass(frozen=True)
-class RandomSamplingState:
+class RandomSampler:
     expanded_idx_mapping: torch.Tensor
     temperatures: torch.Tensor
     seeds: torch.Tensor
     positions: torch.Tensor
     use_fp64: bool = False
+
+    def __call__(self, logits: torch.Tensor) -> torch.Tensor:
+        return gumbel_sample(
+            logits,
+            self.expanded_idx_mapping,
+            self.temperatures,
+            self.seeds,
+            self.positions,
+            apply_temperature=False,
+            is_drafting=False,
+            use_fp64=self.use_fp64,
+        )
 
 
 class Watermarker(ABC):
@@ -36,12 +46,13 @@ class Watermarker(ABC):
         self,
         logits: torch.Tensor,
         contexts: torch.Tensor,
-        random_sample: RandomSampler,
+        random_sampler: RandomSampler | None = None,
         skip_mask: torch.Tensor | None = None,
-        sampling_state: RandomSamplingState | None = None,
     ) -> WatermarkSample:
         if skip_mask is not None:
-            mixed = self._try_sample_mixed(logits, contexts, skip_mask, sampling_state)
+            if random_sampler is None:
+                raise ValueError("skip_mask requires a random sampler")
+            mixed = self._try_sample_mixed(logits, contexts, skip_mask, random_sampler)
             if mixed is not None:
                 return mixed
 
@@ -49,7 +60,10 @@ class Watermarker(ABC):
         if skip_mask is None:
             return watermarked
 
-        token_ids = torch.where(skip_mask, random_sample(logits), watermarked.token_ids)
+        assert random_sampler is not None
+        token_ids = torch.where(
+            skip_mask, random_sampler(logits), watermarked.token_ids
+        )
         output_logits = watermarked.logits
         if output_logits is not logits:
             output_logits = torch.where(skip_mask.unsqueeze(-1), logits, output_logits)
@@ -68,6 +82,6 @@ class Watermarker(ABC):
         logits: torch.Tensor,
         contexts: torch.Tensor,
         skip_mask: torch.Tensor,
-        sampling_state: RandomSamplingState | None,
+        random_sampler: RandomSampler,
     ) -> WatermarkSample | None:
         return None
