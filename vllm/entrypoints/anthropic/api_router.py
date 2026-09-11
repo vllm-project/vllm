@@ -30,6 +30,14 @@ logger = init_logger(__name__)
 router = APIRouter()
 
 
+def serialize_messages_response(response: AnthropicMessagesResponse) -> dict:
+    """Serialize a Messages response while retaining required nullable fields."""
+    payload = response.model_dump(exclude_none=True)
+    payload.setdefault("stop_reason", None)
+    payload.setdefault("stop_sequence", None)
+    return payload
+
+
 def messages(request: Request) -> AnthropicServingMessages:
     return request.app.state.anthropic_serving_messages
 
@@ -85,7 +93,7 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         return translate_error_response(generator)
 
     elif isinstance(generator, AnthropicMessagesResponse):
-        resp = generator.model_dump(exclude_none=True)
+        resp = serialize_messages_response(generator)
         logger.debug("Anthropic Messages Response: %s", resp)
         return JSONResponse(content=resp)
 
