@@ -67,9 +67,11 @@ def _make_mock_model_config(
     qk_rope_head_dim: int = 64,
     v_head_dim: int = 128,
     dtype: torch.dtype = torch.bfloat16,
+    num_heads: int = 128,
 ) -> ModelConfig:
     mock_config = MagicMock(spec=ModelConfig)
     mock_config.dtype = dtype
+    mock_config.get_num_attention_heads.return_value = num_heads
     mock_config.hf_text_config = MagicMock()
     mock_config.hf_text_config.qk_nope_head_dim = qk_nope_head_dim
     mock_config.hf_text_config.qk_rope_head_dim = qk_rope_head_dim
@@ -516,12 +518,28 @@ class TestAiterAsmValidation:
     """AITER_ASM-specific validate_configuration contract (gfx950 FP8 only)."""
 
     @pytest.mark.parametrize(
-        ("capability", "cache_dtype", "is_r1_compatible", "expect_valid", "reason"),
+        (
+            "capability",
+            "cache_dtype",
+            "dtype",
+            "num_heads",
+            "is_r1_compatible",
+            "expect_valid",
+            "reason",
+        ),
         [
-            (GFX950, "fp8", True, True, None),
-            (GFX950, "auto", True, False, "fp8"),
-            (GFX942, "fp8", True, False, "compute capability"),
-            (GFX950, "fp8", False, False, "MLA dimensions"),
+            (GFX950, "fp8", torch.bfloat16, 128, True, True, None),
+            # Unaligned counts are padded up to the next multiple of 16, and an
+            # unknown (0) count cannot be validated against.
+            (GFX950, "fp8", torch.bfloat16, 12, True, True, None),
+            (GFX950, "fp8", torch.bfloat16, 0, True, True, None),
+            (GFX950, "auto", torch.bfloat16, 128, True, False, "fp8"),
+            (GFX942, "fp8", torch.bfloat16, 128, True, False, "compute capability"),
+            (GFX950, "fp8", torch.bfloat16, 128, False, False, "MLA dimensions"),
+            # The kernel writes bf16 through a raw output pointer.
+            (GFX950, "fp8", torch.float16, 128, True, False, "dtype"),
+            # Above 128 only 16-aligned counts are supported.
+            (GFX950, "fp8", torch.bfloat16, 136, True, False, "num_heads"),
         ],
     )
     def test_validate_configuration(
@@ -529,6 +547,8 @@ class TestAiterAsmValidation:
         aiter_asm_cls,
         capability,
         cache_dtype,
+        dtype,
+        num_heads,
         is_r1_compatible,
         expect_valid,
         reason,
@@ -538,9 +558,10 @@ class TestAiterAsmValidation:
             reasons = cls.validate_configuration(
                 capability,
                 MLAPrefillSelectorConfig(
-                    dtype=torch.bfloat16,
+                    dtype=dtype,
                     mla_dimensions=_R1_DIMS if is_r1_compatible else _NON_R1_DIMS,
                     cache_dtype=cache_dtype,
+                    num_heads=num_heads,
                 ),
             )
         if expect_valid:
@@ -550,14 +571,15 @@ class TestAiterAsmValidation:
 
 
 class TestAiterAsmIsAvailable:
-    """AITER_ASM is a gfx950-only backend.
+    """AITER_ASM needs gfx950 and an AITER that ships the PS ASM kernel pair.
 
     The chunked-prefill final_lse fix (ROCm/aiter#3606) is assumed present in
-    the installed aiter, so the architecture is the whole availability contract.
+    the installed aiter, so only the kernel exports are probed.
     """
 
     @pytest.mark.parametrize("on_gfx950", [True, False])
     def test_tracks_gfx950(self, aiter_asm_cls, on_gfx950):
+        pytest.importorskip("aiter")
         with patch("vllm.platforms.rocm.on_gfx950", return_value=on_gfx950):
             assert aiter_asm_cls.is_available() is on_gfx950
 
@@ -565,56 +587,9 @@ class TestAiterAsmIsAvailable:
         with patch.dict(sys.modules, {"vllm.platforms.rocm": None}):
             assert not aiter_asm_cls.is_available()
 
-
-class TestAsmPrefillBackendActiveGate:
-    """`_asm_prefill_backend_active` gates the in-impl FP8 PS path.
-
-    The AITER MLA builder/impl keep their exact main-branch FP8 PS behavior
-    until the AITER ASM prefill backend is the active prefill backend. When it
-    is active, the in-impl path is dead and must be disabled to avoid its
-    multi-TB workspace reservation OOM at startup.
-    """
-
-    def _gate_fn(self):
-        try:
-            from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
-                _asm_prefill_backend_active,
-            )
-        except ImportError:
-            pytest.skip("rocm_aiter_mla not importable")
-        return _asm_prefill_backend_active
-
-    def test_active_when_asm_is_selected(self, aiter_asm_cls):
-        gate = self._gate_fn()
-        vllm_config = _make_vllm_config()
-        with patch(
-            "vllm.v1.attention.backends.mla.prefill.selector.get_mla_prefill_backend",
-            return_value=aiter_asm_cls,
-        ):
-            assert gate(vllm_config) is True
-
-    def test_inactive_when_other_backend_selected(self):
-        gate = self._gate_fn()
-        try:
-            fa_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
-        except ImportError:
-            pytest.skip("FLASH_ATTN backend not importable")
-        vllm_config = _make_vllm_config()
-        with patch(
-            "vllm.v1.attention.backends.mla.prefill.selector.get_mla_prefill_backend",
-            return_value=fa_cls,
-        ):
-            assert gate(vllm_config) is False
-
-    def test_inactive_when_selection_raises(self):
-        gate = self._gate_fn()
-        vllm_config = _make_vllm_config()
-        with patch(
-            "vllm.v1.attention.backends.mla.prefill.selector.get_mla_prefill_backend",
-            side_effect=ValueError("no valid backend"),
-        ):
-            # Any resolution failure must fall back to main-branch behavior.
-            assert gate(vllm_config) is False
+    def test_unavailable_without_asm_kernels(self, aiter_asm_cls):
+        with patch.dict(sys.modules, {"aiter": None}):
+            assert not aiter_asm_cls.is_available()
 
 
 @requires_gfx950

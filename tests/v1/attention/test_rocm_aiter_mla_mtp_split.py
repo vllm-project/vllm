@@ -546,7 +546,6 @@ def test_mtp_builder_init_sizes_native_fp8_metadata(
         "__init__",
         init_common_builder,
     )
-    monkeypatch.setattr(rocm_aiter_mla, "_fp8_mla_prefill_supported", lambda: False)
 
     config = SimpleNamespace(
         speculative_config=SimpleNamespace(
