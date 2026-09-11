@@ -1911,20 +1911,29 @@ def test_backend_correctness(
     qk_nope_head_dim: int,
     v_head_dim: int,
 ):
-    if (
-        batch_spec_name.startswith("spec_decode")
-        and current_platform.is_rocm()
-        and kv_cache_dtype == "auto"
-        and BATCH_SPECS[batch_spec_name].query_lens[0] > 4
-    ):
-        # ROCM_AITER_MLA (in BACKENDS_TO_TEST on ROCm, bf16 KV only) has no
-        # persistent MLA-decode kernel for query_len > 4 on gfx942; aiter's
-        # get_heuristic_kernel_mla raises (ROCm/aiter#5297). query_len <= 4 and
-        # the fp8 KV paths (TRITON_MLA only) still run. See vllm#55609.
-        pytest.skip(
-            "ROCM_AITER_MLA has no persistent MLA-decode kernel for "
-            "query_len > 4 on gfx942 (ROCm/aiter#5297). See vllm#55609."
-        )
+    if batch_spec_name.startswith("spec_decode") and current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx942
+
+        if (
+            on_gfx942()
+            and kv_cache_dtype == "auto"
+            and BATCH_SPECS[batch_spec_name].query_lens[0] > 4
+            and tensor_parallel_size in (4, 8)
+        ):
+            # ROCM_AITER_MLA (in BACKENDS_TO_TEST on ROCm, bf16 KV only) has no
+            # persistent MLA-decode kernel for query_len > 4 on gfx942 at these
+            # head counts (32 heads at TP4, 16 heads at TP8); aiter's
+            # get_heuristic_kernel_mla raises (ROCm/aiter#5297). TP16 (8 heads)
+            # falls back to the non-persistent kernel and TP1 (128 heads) takes
+            # a separate non-persistent code path, so both are unaffected; gfx950
+            # ships the persistent kernel variant these TPs need, so it isn't
+            # affected either. query_len <= 4 and the fp8 KV paths (TRITON_MLA
+            # only) still run. See vllm#55609.
+            pytest.skip(
+                "ROCM_AITER_MLA has no persistent MLA-decode kernel for "
+                "query_len > 4 on gfx942 at TP4/TP8 (ROCm/aiter#5297). "
+                "See vllm#55609."
+            )
     _run_backend_correctness(
         default_vllm_config,
         dist_init,
