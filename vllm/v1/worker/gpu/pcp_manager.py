@@ -625,38 +625,40 @@ class PCPManager:
             prompt_lens=None,
         )
 
-    def prepare_inputs_to_capture(
-        self,
-        num_reqs: int,
-        num_tokens: int,
-        max_query_len: int | None = None,
-    ) -> tuple[InputBatch, tuple[torch.Tensor, ...], torch.Tensor]:
-        """Prepare persistent PCP buffers for graph capture and dummy runs."""
-        assert self._input_buffers is not None
-        assert self._local_block_tables is not None
-        input_batch = InputBatch.make_dummy(
-            num_reqs,
-            num_tokens,
-            self._input_buffers,
-            max_query_len=max_query_len,
+    def prepare_inputs_to_capture(self, input_batch: InputBatch) -> InputBatch:
+        """Stage a capture or dummy batch in persistent PCP input buffers."""
+        input_buffers = self.input_buffers
+        num_reqs = input_batch.num_reqs_after_padding
+        num_tokens = input_batch.num_tokens_after_padding
+        input_batch = replace(
+            input_batch,
+            input_ids=input_buffers.input_ids[:num_tokens].copy_(input_batch.input_ids),
+            positions=input_buffers.positions[:num_tokens].copy_(input_batch.positions),
+            is_padding=input_buffers.is_padding[:num_tokens].copy_(
+                input_batch.is_padding
+            ),
+            query_start_loc=input_buffers.query_start_loc[: num_reqs + 1].copy_(
+                input_batch.query_start_loc
+            ),
+            seq_lens=input_buffers.seq_lens[:num_reqs].copy_(input_batch.seq_lens),
         )
-        input_block_tables = tuple(
-            block_table[:num_reqs].zero_() for block_table in self._local_block_tables
-        )
-        slot_mappings = self.get_dummy_slot_mappings(num_tokens)
         if self.dcp_world_size > 1:
             prepare_dcp_local_seq_lens(
-                self._input_buffers.dcp_local_seq_lens,
+                input_buffers.dcp_local_seq_lens,
                 input_batch.seq_lens,
                 num_reqs,
                 self.dcp_world_size,
                 self.dcp_rank,
                 self.cp_interleave,
             )
-            input_batch.dcp_local_seq_lens = self._input_buffers.dcp_local_seq_lens[
-                :num_reqs
-            ]
-        return input_batch, input_block_tables, slot_mappings
+            input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
+        return input_batch
+
+    def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
+        assert self._local_block_tables is not None
+        return tuple(
+            block_table[:num_reqs].zero_() for block_table in self._local_block_tables
+        )
 
     def prepare_attn(
         self, input_batch: InputBatch

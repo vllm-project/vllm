@@ -1426,7 +1426,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def prepare_dummy_attn(
         self, input_batch: InputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
+        block_table_provider = self.pcp_manager or self.block_tables
+        block_tables = block_table_provider.get_dummy_block_tables(input_batch.num_reqs)
         if valid_state_slots:
             state_slots = torch.arange(
                 1,
@@ -1669,23 +1670,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             dummy_num_reqs = batch_desc.num_reqs or num_reqs
+            input_batch = InputBatch.make_dummy(
+                dummy_num_reqs,
+                batch_desc.num_tokens,
+                self.input_buffers,
+                max_query_len=batch_desc.max_query_len,
+            )
             if self.pcp_manager is not None:
-                input_batch, block_tables, slot_mappings = (
-                    self.pcp_manager.prepare_inputs_to_capture(
-                        dummy_num_reqs,
-                        batch_desc.num_tokens,
-                        max_query_len=batch_desc.max_query_len,
-                    )
-                )
-            else:
-                input_batch = InputBatch.make_dummy(
-                    dummy_num_reqs,
-                    batch_desc.num_tokens,
-                    self.input_buffers,
-                    max_query_len=batch_desc.max_query_len,
-                )
-                block_tables = None
-                slot_mappings = None
+                input_batch = self.pcp_manager.prepare_inputs_to_capture(input_batch)
             if skip_attn_for_dummy_run:
                 assert batch_desc.cg_mode != CUDAGraphMode.FULL, (
                     "Attention metadata must be prepared for dummy runs when using "
@@ -1693,7 +1685,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 block_tables = None
                 slot_mappings = None
-            elif block_tables is None:
+            else:
                 block_tables, slot_mappings = self.prepare_dummy_attn(
                     input_batch, valid_dummy_state_slots
                 )

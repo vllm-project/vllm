@@ -10,7 +10,7 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
-from vllm.v1.worker.gpu.input_batch import set_dummy_context
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_context
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 
@@ -202,31 +202,35 @@ def test_partition_padding_is_derived_from_batch_descriptor(
 def test_capture_uses_pcp_persistent_inputs():
     manager, _ = _make_capture_manager(torch.ones((4, 2), dtype=torch.int32))
 
-    input_batch, _, _ = manager.prepare_inputs_to_capture(
+    dummy_batch = InputBatch.make_dummy(
         num_reqs=4,
         num_tokens=4,
+        input_buffers=InputBuffers(4, 8, torch.device("cpu")),
         max_query_len=1,
     )
+    dummy_batch.input_ids.copy_(torch.arange(4))
+    dummy_batch.positions.fill_(7)
+    input_batch = manager.prepare_inputs_to_capture(dummy_batch)
 
-    assert (
-        input_batch.input_ids.data_ptr() == manager.input_buffers.input_ids.data_ptr()
-    )
-    assert (
-        input_batch.positions.data_ptr() == manager.input_buffers.positions.data_ptr()
-    )
-    assert (
-        input_batch.is_padding.data_ptr() == manager.input_buffers.is_padding.data_ptr()
-    )
+    assert input_batch is not dummy_batch
+    assert input_batch.req_ids == dummy_batch.req_ids
+    for name in ("input_ids", "positions", "is_padding", "query_start_loc", "seq_lens"):
+        actual = getattr(input_batch, name)
+        torch.testing.assert_close(actual, getattr(dummy_batch, name))
+        assert actual.data_ptr() == getattr(manager.input_buffers, name).data_ptr()
 
 
 def test_dummy_context_updates_pcp_local_block_tables():
     global_block_table = torch.full((4, 4), -1, dtype=torch.int32)
     manager, block_tables = _make_capture_manager(global_block_table)
-    input_batch, local_block_tables, _ = manager.prepare_inputs_to_capture(
+    input_batch = InputBatch.make_dummy(
         num_reqs=2,
         num_tokens=2,
+        input_buffers=manager.input_buffers,
         max_query_len=1,
     )
+    input_batch = manager.prepare_inputs_to_capture(input_batch)
+    local_block_tables = manager.get_dummy_block_tables(input_batch.num_reqs)
 
     set_dummy_context(
         input_batch,
