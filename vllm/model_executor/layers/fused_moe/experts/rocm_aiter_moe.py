@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
@@ -235,6 +236,181 @@ def rocm_aiter_grouped_topk(
     return topk_weights, topk_ids
 
 
+def _rocm_aiter_moe_pads(
+    hidden_states: torch.Tensor,
+    moe_config: FusedMoEConfig,
+    activation: MoEActivation = MoEActivation.SILU,
+) -> tuple[int, int]:
+    """Compute the (hidden, intermediate) padding for the CK MXFP4 kernels."""
+    assert moe_config.hidden_dim_unpadded is not None
+    assert moe_config.intermediate_size_per_partition_unpadded is not None
+    hidden_pad = hidden_states.shape[1] - moe_config.hidden_dim_unpadded
+    intermediate_pad = (
+        (
+            moe_config.intermediate_size_per_partition
+            - moe_config.intermediate_size_per_partition_unpadded
+        )
+        if moe_config.intermediate_pad is None
+        else moe_config.intermediate_pad
+    )
+
+    # Round hidden_pad/intermediate_pad to match AITER's CK/FlyDSL MoE
+    # dispatch (currently pinned to v0.1.13.post1):
+    # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1073
+    # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1099
+    # TODO: Revisit this once we bump AITER to 0.1.15 with padding fixes
+    # for CK/FlyDSL MoE GEMM e.g. https://github.com/ROCm/aiter/pull/3401
+    # SITU's A16W4 FlyDSL kernel pads per gate/up half; pass through unrounded.
+    if activation != MoEActivation.SITU:
+        hidden_pad = hidden_pad // 128 * 128
+        intermediate_pad = (
+            intermediate_pad // 64 * 64 * (2 if moe_config.tp_size == 1 else 1)
+        )
+    return hidden_pad, intermediate_pad
+
+
+def _rocm_aiter_gate_mode(
+    quant_config: FusedMoEQuantConfig,
+    activation_interleave: bool | None,
+    activation: MoEActivation = MoEActivation.SILU,
+) -> str:
+    """Pick the AITER stage1 gate/up layout hint matching the weight shuffle."""
+    # https://github.com/ROCm/aiter/pull/3123 specialized the AITER stage1 GEMMs
+    # for interleaved vs separated gate and up weights.
+    # For gpt-oss i.e. use_mxfp4_w4a16=True, the weights are shuffled by
+    # `rocm_aiter_ops.shuffle_weight_a16w4` in `oracle/mxfp4.py`,
+    # which always sets `is_guinterleave=True`.
+    # Hence, we pass in GateMode.INTERLEAVE to match the weight shuffling.
+    from aiter.ops.flydsl.moe_common import GateMode
+
+    if activation == MoEActivation.SITU:
+        # a8w4 (VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1) uses the gate/up-
+        # interleaved (_gui_) fp8 flydsl kernels; default a16w4 SiTU stays
+        # separated.
+        return (
+            GateMode.INTERLEAVE.value
+            if rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
+            else GateMode.SEPARATED.value
+        )
+    if quant_config.use_mxfp4_w4a16:
+        return GateMode.INTERLEAVE.value
+    if activation_interleave is not None:
+        return (
+            GateMode.INTERLEAVE.value
+            if activation_interleave
+            else GateMode.SEPARATED.value
+        )
+    return ""
+
+
+def rocm_aiter_fused_router_experts(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    router_logits: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    topk: int,
+    moe_config: FusedMoEConfig,
+    num_expert_group: int,
+    topk_group: int,
+    renormalize: bool,
+    routed_scaling_factor: float,
+    expert_map: torch.Tensor | None = None,
+    quant_config: FusedMoEQuantConfig | None = None,
+    output_dtype: torch.dtype | None = None,
+) -> torch.Tensor | None:
+    """AITER MoE with the routing preamble fused into the expert launch.
+
+    Runs top-k selection, the expert sort and the activation quant inside the
+    expert kernel instead of as four separate kernels before it. AITER only
+    accepts small (decode-shaped) batches, so the check below depends on the
+    token count and has to run on every forward.
+
+    Args:
+        router_logits: Unrouted gating output, shape (num_tokens, num_experts).
+        e_score_correction_bias: Per-expert routing bias.
+        topk: Experts selected per token.
+        renormalize: Renormalize the top-k weights after selection.
+        expert_map: AITER expert mask under EP, or None.
+
+    Returns:
+        The MoE output, or None if AITER cannot fuse this call and the caller
+        should fall back to `rocm_aiter_fused_experts`.
+    """
+    if quant_config is None:
+        quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+
+    quant_method = (
+        QuantMethod.BLOCK_1X32.value
+        if quant_config.use_mxfp4_w4a4
+        else QuantMethod.NO.value
+    )
+    hidden_pad, intermediate_pad = _rocm_aiter_moe_pads(hidden_states, moe_config)
+    # No interleave hint: this path is SILU-only, and only the SWIGLUOAI
+    # activations override it.
+    gate_mode = _rocm_aiter_gate_mode(quant_config, None)
+
+    n_shared = moe_config.num_fused_shared_experts
+    # AITER's shared slot weight is left at its 1.0 default, matching the
+    # hardcoded shared_experts_score the unfused arm gets from
+    # `expert_map_manager`: both arms of this layer must agree, since fused
+    # routing declines per call.
+    #
+    # Shared weights are replicated on every rank while every rank sees every
+    # token, so the kernel round-robins token ownership over ep_size to keep the
+    # all-reduce from summing ep_size copies. Without a mask there is no
+    # sentinel to park non-owners on, so that path is single-rank.
+    ep_size = moe_config.ep_size if expert_map is not None else 1
+    ep_rank = moe_config.ep_rank if expert_map is not None else 0
+
+    if not rocm_aiter_ops.fused_moe_router_supported(
+        hidden_states,
+        w1,
+        w2,
+        topk,
+        num_fused_shared_experts=n_shared,
+        global_num_experts=router_logits.shape[-1],
+        quant_method=quant_method,
+        activation_method=ActivationMethod.SILU.value,
+        num_expert_group=num_expert_group,
+        topk_group=topk_group,
+        gate_mode=gate_mode,
+        hidden_pad=hidden_pad,
+        intermediate_pad=intermediate_pad,
+        a1_scale=quant_config.a1_scale,
+        output_dtype=output_dtype,
+        expert_mask=expert_map,
+    ):
+        return None
+
+    return rocm_aiter_ops.fused_moe_router(
+        hidden_states,
+        router_logits,
+        e_score_correction_bias,
+        w1,
+        w2,
+        topk,
+        num_expert_group=num_expert_group,
+        topk_group=topk_group,
+        need_renorm=renormalize,
+        routed_scaling_factor=routed_scaling_factor,
+        expert_mask=expert_map,
+        activation_method=ActivationMethod.SILU.value,
+        quant_method=quant_method,
+        w1_scale=quant_config.w1_scale,
+        w2_scale=quant_config.w2_scale,
+        a1_scale=quant_config.a1_scale,
+        a2_scale=quant_config.a2_scale,
+        output_dtype=output_dtype,
+        hidden_pad=hidden_pad,
+        intermediate_pad=intermediate_pad,
+        gate_mode=gate_mode,
+        num_fused_shared_experts=n_shared,
+        ep_rank=ep_rank,
+        ep_size=ep_size,
+    )
+
+
 def rocm_aiter_fused_experts(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -348,59 +524,12 @@ def rocm_aiter_fused_experts(
             )
 
         # Compute padding on-the-fly for CK MXFP4 kernels
-        hidden_pad = 0
-        intermediate_pad = 0
-        assert moe_config.hidden_dim_unpadded is not None
-        assert moe_config.intermediate_size_per_partition_unpadded is not None
-        hidden_pad = hidden_states.shape[1] - moe_config.hidden_dim_unpadded
-        intermediate_pad = (
-            (
-                moe_config.intermediate_size_per_partition
-                - moe_config.intermediate_size_per_partition_unpadded
-            )
-            if moe_config.intermediate_pad is None
-            else moe_config.intermediate_pad
+        hidden_pad, intermediate_pad = _rocm_aiter_moe_pads(
+            hidden_states, moe_config, activation
         )
-
-        # Round hidden_pad/intermediate_pad to match AITER's CK/FlyDSL MoE
-        # dispatch (currently pinned to v0.1.13.post1):
-        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1073
-        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1099
-        # TODO: Revisit this once we bump AITER to 0.1.15 with padding fixes
-        # for CK/FlyDSL MoE GEMM e.g. https://github.com/ROCm/aiter/pull/3401
-        # SITU's A16W4 FlyDSL kernel pads per gate/up half; pass through unrounded.
-        if activation != MoEActivation.SITU:
-            hidden_pad = hidden_pad // 128 * 128
-            intermediate_pad = (
-                intermediate_pad // 64 * 64 * (2 if moe_config.tp_size == 1 else 1)
-            )
-
-        # https://github.com/ROCm/aiter/pull/3123 specialized the AITER stage1 GEMMs
-        # for interleaved vs separated gate and up weights.
-        # For gpt-oss i.e. use_mxfp4_w4a16=True, the weights are shuffled by
-        # `rocm_aiter_ops.shuffle_weight_a16w4` in `oracle/mxfp4.py`,
-        # which always sets `is_guinterleave=True`.
-        # Hence, we pass in GateMode.INTERLEAVE to match the weight shuffling.
-        from aiter.ops.flydsl.moe_common import GateMode
-
-        gate_mode = ""
-        if activation == MoEActivation.SITU:
-            # a8w4 (VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1) uses the gate/up-
-            # interleaved (_gui_) fp8 flydsl kernels; default a16w4 SiTU stays
-            # separated.
-            gate_mode = (
-                GateMode.INTERLEAVE.value
-                if rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
-                else GateMode.SEPARATED.value
-            )
-        elif quant_config.use_mxfp4_w4a16:
-            gate_mode = GateMode.INTERLEAVE.value
-        elif activation_interleave is not None:
-            gate_mode = (
-                GateMode.INTERLEAVE.value
-                if activation_interleave
-                else GateMode.SEPARATED.value
-            )
+        gate_mode = _rocm_aiter_gate_mode(
+            quant_config, activation_interleave, activation
+        )
 
         return rocm_aiter_ops.fused_moe(
             hidden_states,
@@ -593,3 +722,237 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             output.set_(result)
         else:
             output.copy_(result)
+
+
+class AiterFusedRouterExperts(mk.FusedMoEExpertsMonolithic):
+    """AITER MXFP4 experts with the routing preamble fused into the kernel.
+
+    Does the same work as `rocm_aiter_grouped_topk` + `AiterExperts`, but in
+    one kernel instead of four. Falls back to that unfused path whenever AITER
+    declines the call.
+
+    The fused routing is biased-sigmoid top-k with renormalization and has no
+    expert-group stage, so real grouped routing (DeepSeek-V3, 8 groups of 32)
+    always falls back.
+    """
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(moe_config, quant_config)
+        self.topk = moe_config.experts_per_token
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        # The fused kernel quantizes the activations itself.
+        return True
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        # The oracle already only offers this class when the flag is on; this
+        # repeats the check so the class is safe to use from anywhere.
+        if not rocm_aiter_ops.is_fused_router_enabled():
+            return False
+        return rocm_aiter_ops.fused_moe_router_arch_supported()
+
+    @staticmethod
+    def is_supported_config(
+        cls, moe_config, weight_key, activation_key, activation_format
+    ):
+        is_supported, reason = super().is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        if not is_supported:
+            return is_supported, reason
+
+        # The `super()` call above must stay first: it runs
+        # `_supports_current_device`, so by here AITER is known to be importable.
+        #
+        # There is no `quant_config` yet at selection time, so map the QuantKeys
+        # to the AITER quant type directly. `_supports_quant_scheme` reads the
+        # same table, so a scheme can never be allowed without also having
+        # AITER parameters for it.
+        w1_dtype, quant_method = cls._aiter_quant_params(weight_key, activation_key)
+
+        # AITER picks a kernel variant based on the activation, so it has to be
+        # translated, not just checked. `_supports_activation` allows SILU only
+        # today; GELU is listed so that widening it declines cleanly here
+        # instead of passing the wrong enum to AITER.
+        AITER_ACTIVATION = {
+            MoEActivation.SILU: ActivationMethod.SILU,
+            MoEActivation.GELU: ActivationMethod.GELU,
+        }
+        activation_method = AITER_ACTIVATION.get(moe_config.activation)
+        if activation_method is None:
+            return False, f"kernel does not support {moe_config.activation}"
+
+        # AITER owns the list of supported shapes and dtypes. The remaining
+        # per-call limits (token count, expert grouping) are unknown here and
+        # get checked on every forward instead.
+        if not rocm_aiter_ops.fused_moe_router_config_supported(
+            hidden_dim=moe_config.hidden_dim,
+            hidden_dtype=moe_config.in_dtype,
+            w1_dtype=w1_dtype,
+            quant_method=quant_method,
+            activation_method=activation_method.value,
+            gate_mode="",
+            num_fused_shared_experts=moe_config.num_fused_shared_experts,
+        ):
+            return False, (
+                f"kernel does not support this AITER fused-router config "
+                f"(hidden_dim={moe_config.hidden_dim}, dtype={moe_config.in_dtype})"
+            )
+        return True, None
+
+    @classmethod
+    def _aiter_quant_params(
+        cls,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> tuple[torch.dtype | None, int | None]:
+        """AITER (w1 dtype, quant type) for a vLLM (weight, act) QuantKey pair.
+
+        Returns:
+            The pair, or ``(None, None)`` when the scheme is not fusable.
+        """
+        # Imported here, not at module scope, because AITER is ROCm-only.
+        from aiter.utility import dtypes
+
+        SUPPORTED_W_A_TO_AITER = {
+            (kMxfp4Static, kMxfp4Dynamic): (
+                dtypes.fp4x2,
+                QuantMethod.BLOCK_1X32.value,
+            ),
+        }
+        return SUPPORTED_W_A_TO_AITER.get((weight_key, activation_key), (None, None))
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # Same table that supplies the AITER parameters, so the two cannot
+        # disagree about what is supported.
+        return AiterFusedRouterExperts._aiter_quant_params(
+            weight_key, activation_key
+        ) != (None, None)
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SILU
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        # Routing happens inside the expert kernel, so it cannot feed
+        # dispatch/combine kernels that expect top-k ids up front.
+        return not (
+            moe_parallel_config.use_all2all_kernels or moe_parallel_config.enable_eplb
+        )
+
+    @staticmethod
+    def _supports_routing_method(
+        routing_method: RoutingMethodType,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # DeepSeekV3 means sigmoid + routing bias + renormalize, which is what
+        # the fused kernel does. It is necessary but not sufficient: the kernel
+        # has no expert-group stage, and the group counts are not known here.
+        # Models that really use groups pass this check and are declined later
+        # at runtime, falling back in `apply`.
+        return routing_method == RoutingMethodType.DeepSeekV3
+
+    @staticmethod
+    def _supports_router_logits_dtype(
+        router_logits_dtype: torch.dtype | None,
+        routing_method: RoutingMethodType,
+    ) -> bool:
+        return router_logits_dtype in (None, torch.bfloat16)
+
+    def apply(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        # grouped topk + fused topk bias parameters
+        num_expert_group: int | None = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float | None = None,
+        topk_group: int | None = None,
+    ) -> torch.Tensor:
+        assert a1q_scale is None, "the fused kernel quantizes activations itself"
+        assert e_score_correction_bias is not None, (
+            "DeepSeekV3 routing requires e_score_correction_bias"
+        )
+
+        num_expert_group = num_expert_group or 1
+        topk_group = topk_group or 1
+        routed_scaling_factor = (
+            1.0 if routed_scaling_factor is None else routed_scaling_factor
+        )
+
+        # Fused routing declines per call (token count, expert grouping), so the
+        # unfused path below stays live: keep it in sync with `AiterExperts.apply`.
+        output = None
+        if not apply_router_weight_on_input:
+            output = rocm_aiter_fused_router_experts(
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                router_logits=router_logits,
+                e_score_correction_bias=e_score_correction_bias,
+                topk=self.topk,
+                moe_config=self.moe_config,
+                num_expert_group=num_expert_group,
+                topk_group=topk_group,
+                renormalize=True,
+                routed_scaling_factor=routed_scaling_factor,
+                expert_map=expert_map,
+                quant_config=self.quant_config,
+                output_dtype=hidden_states.dtype,
+            )
+        if output is not None:
+            return output
+
+        topk_weights, topk_ids = rocm_aiter_grouped_topk(
+            hidden_states=hidden_states,
+            gating_output=router_logits,
+            topk=self.topk,
+            renormalize=True,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            scoring_func="sigmoid",
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            num_fused_shared_experts=self.moe_config.num_fused_shared_experts,
+        )
+        return rocm_aiter_fused_experts(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            moe_config=self.moe_config,
+            activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            expert_map=expert_map,
+            quant_config=self.quant_config,
+            output_dtype=hidden_states.dtype,
+            moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
+        )
