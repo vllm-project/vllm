@@ -839,9 +839,14 @@ class SimpleCPUOffloadScheduler:
             # the middle of the request.
             group_size = self.group_block_sizes[g]
             ready = min(len(group_gpu_ids), aligned_tokens // group_size)
-            resolved_hashes = resolve_block_hashes(
-                request.block_hashes, self.hash_block_size, group_size
-            )
+            if not self.cpu_kv_cache_config.kv_cache_groups[
+                g
+            ].kv_cache_spec.prefix_cacheable:
+                resolved_hashes = []
+            else:
+                resolved_hashes = resolve_block_hashes(
+                    request.block_hashes, self.hash_block_size, group_size
+                )
             curr_mm_idx = 0
             secondary_mm_idx = 0
             start = state.num_stored_blocks[g]
