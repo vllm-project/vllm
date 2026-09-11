@@ -12,9 +12,13 @@ from vllm.config.watermarking import WatermarkConfig
 from vllm.platforms import current_platform
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
+from vllm.v1.watermarking.gumbel import GumbelWatermarker
 from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
 from vllm.v1.worker.gpu.sample.sampler import Sampler
-from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
+from vllm.v1.worker.gpu.sample.watermark import (
+    philox_gumbel_sample,
+    repeated_context_mask,
+)
 
 
 class StubWatermarker(Watermarker):
@@ -313,6 +317,41 @@ def test_repeated_context_mask_respects_max_history():
     assert not last_five.item()
 
 
+@pytest.mark.parametrize("max_history", [0, -1])
+def test_repeated_context_mask_rejects_non_positive_max_history(max_history: int):
+    with pytest.raises(ValueError, match="max_history must be positive or None"):
+        repeated_context_mask(
+            torch.tensor([[1, 2, 3, 4]], dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int32),
+            torch.tensor([4], dtype=torch.int32),
+            torch.tensor([[1, 2, 3, 4]], dtype=torch.int32),
+            max_history=max_history,
+        )
+
+
+def test_gpu_sampler_wires_request_history_scope():
+    sampler = object.__new__(GPUWatermarkSampler)
+    sampler.req_states = SimpleNamespace(
+        all_token_ids=SimpleNamespace(
+            gpu=torch.tensor([[1, 2, 3, 4, 5, 6, 1, 2, 3, 4]])
+        ),
+        prompt_len=SimpleNamespace(gpu=torch.tensor([4])),
+        total_len=SimpleNamespace(gpu=torch.tensor([10])),
+    )
+    sampler.deduplicate_contexts_max_history = None
+    request_indices = torch.tensor([0])
+    contexts = torch.tensor([[1, 2, 3, 4]])
+
+    sampler.deduplicate_contexts = "single_turn"
+    single_turn = sampler._get_repeated_contexts(request_indices, contexts)
+    sampler.deduplicate_contexts = "all"
+    all_history = sampler._get_repeated_contexts(request_indices, contexts)
+
+    assert not single_turn.item()
+    assert all_history.item()
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
 )
@@ -465,6 +504,94 @@ def test_repeated_context_mask_scans_multiple_blocks():
 
     assert torch.equal(expected, torch.tensor([True, False]))
     assert torch.equal(actual, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_repeated_context_mask_last_request_at_capacity():
+    max_model_len = 1024
+    all_token_ids = torch.arange(
+        2 * max_model_len, dtype=torch.int32, device="cuda"
+    ).reshape(2, max_model_len)
+    inputs = (
+        all_token_ids,
+        torch.tensor([1], dtype=torch.int32, device="cuda"),
+        torch.tensor([0, 0], dtype=torch.int32, device="cuda"),
+        torch.tensor([max_model_len, max_model_len], dtype=torch.int32, device="cuda"),
+        all_token_ids[1, -4:].to(torch.int64).unsqueeze(0),
+    )
+
+    repeated = repeated_context_mask(*inputs)
+
+    assert not repeated.item()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_gpu_sampler_uses_fused_gumbel_for_repeated_contexts():
+    device = torch.device("cuda")
+    logits = torch.tensor([[0.0, 1.0, 2.0, 3.0], [3.0, 2.0, 1.0, 0.0]], device=device)
+    all_token_ids = torch.tensor(
+        [[101, 102, 1, 2, 1, 2], [101, 102, 3, 4, 5, 6]],
+        dtype=torch.int32,
+        device=device,
+    )
+    request_indices = torch.tensor([0, 1], dtype=torch.int64, device=device)
+    request_indices_np = np.array([0, 1])
+    temperatures = torch.ones(2, device=device)
+    seeds = torch.tensor([11, 22], dtype=torch.int64, device=device)
+    positions = torch.tensor([6, 6], dtype=torch.int64, device=device)
+
+    sampler = object.__new__(GPUWatermarkSampler)
+    sampler.watermarker = GumbelWatermarker(key=42, context_width=1)
+    sampler.deduplicate_contexts = "single_turn"
+    sampler.deduplicate_contexts_max_history = None
+    sampler.watermarking = SimpleNamespace(
+        np=np.ones(2, dtype=bool), gpu=torch.ones(2, dtype=torch.bool, device=device)
+    )
+    sampler.sampling_states = SimpleNamespace(
+        temperature=SimpleNamespace(np=np.ones(2), gpu=temperatures),
+        seeds=SimpleNamespace(gpu=seeds),
+    )
+    sampler.req_states = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=all_token_ids),
+        prompt_len=SimpleNamespace(
+            gpu=torch.tensor([2, 2], dtype=torch.int32, device=device)
+        ),
+        total_len=SimpleNamespace(
+            gpu=torch.tensor([6, 6], dtype=torch.int32, device=device)
+        ),
+    )
+    sampler.use_fp64_gumbel = False
+
+    contexts = sampler._get_contexts(request_indices)
+    repeated = sampler._get_repeated_contexts(request_indices, contexts)
+    expected = philox_gumbel_sample(
+        logits,
+        contexts,
+        42,
+        skip_mask=repeated,
+        expanded_idx_mapping=request_indices,
+        temperatures=temperatures,
+        seeds=seeds,
+        positions=positions,
+    )
+
+    actual, output_logits = sampler._sample_random(
+        logits,
+        request_indices,
+        request_indices_np,
+        positions,
+        None,
+        None,
+        False,
+    )
+
+    assert torch.equal(repeated, torch.tensor([True, False], device=device))
+    assert torch.equal(actual, expected)
+    assert output_logits is logits
 
 
 def test_gpu_sampler_skips_watermarking_for_greedy_batch(monkeypatch):

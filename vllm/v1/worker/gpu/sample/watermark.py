@@ -153,6 +153,8 @@ def repeated_context_mask(
             reaches `context_width` tokens further back.
         include_prompt: Search the prompt as well as the generated tokens.
     """
+    if max_history is not None and max_history < 1:
+        raise ValueError("max_history must be positive or None")
     if all_token_ids.device.type == "cpu":
         return _repeated_context_mask_cpu(
             all_token_ids,
