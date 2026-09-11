@@ -4,10 +4,11 @@
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, TypeAlias
 
-from openai.types.responses import FunctionTool
+from openai.types.responses import CustomTool, FunctionTool, NamespaceTool
 from openai.types.responses.response import ToolChoice as ResponsesToolChoice
 from openai.types.responses.tool import Tool as ResponsesTool
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
+from openai.types.responses.tool_choice_custom import ToolChoiceCustom
 from openai.types.responses.tool_choice_function import ToolChoiceFunction
 from xgrammar import StructuralTag, normalize_tool_choice
 from xgrammar import get_model_structural_tag as get_xgrammar_model_structural_tag
@@ -33,6 +34,10 @@ from xgrammar.structural_tag import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
+)
+from vllm.tool_parsers.utils import (
+    custom_tool_to_function_dict,
+    flat_namespace_tool_name,
 )
 
 ToolChoice: TypeAlias = (
@@ -119,7 +124,9 @@ def get_model_structural_tag(
     if tool_choice == "auto" and not _any_tool_strict(tools):
         return None
 
-    dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
+    dumped_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        dumped_tools.extend(_dump_tools_for_xgrammar(tool))
     dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)
 
     if model in _VLLM_STRUCTURAL_TAG_REGISTRY:
@@ -153,13 +160,40 @@ def get_model_structural_tag(
     )
 
 
+def _dump_tools_for_xgrammar(
+    tool: ChatCompletionToolsParam | ResponsesTool,
+) -> list[dict[str, Any]]:
+    """Flatten namespace tools and shim custom tools for xgrammar."""
+    if isinstance(tool, NamespaceTool):
+        dumped: list[dict[str, Any]] = []
+        for namespaced_tool in tool.tools:
+            if namespaced_tool.type not in ("function", "custom"):
+                continue
+            dumped.append(
+                _dump_tool_for_xgrammar(
+                    namespaced_tool,
+                    name=flat_namespace_tool_name(tool.name, namespaced_tool.name),
+                )
+            )
+        return dumped
+    return [_dump_tool_for_xgrammar(tool)]
+
+
 def _dump_tool_for_xgrammar(
     tool: ChatCompletionToolsParam | ResponsesTool,
+    name: str | None = None,
 ) -> dict[str, Any]:
     """Convert tool objects to xgrammar's Chat Completions tool protocol."""
 
+    if isinstance(tool, CustomTool):
+        function = {
+            k: v
+            for k, v in custom_tool_to_function_dict(tool, name).items()
+            if k != "type"
+        }
+        return {"type": "function", "function": function}
     if isinstance(tool, FunctionTool):
-        function: dict[str, Any] = {"name": tool.name}
+        function = {"name": name or tool.name}
         if tool.description is not None:
             function["description"] = tool.description
         if tool.parameters is not None:
@@ -187,7 +221,7 @@ def _dump_tool_choice_for_xgrammar(
     if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
         return tool_choice.model_dump(mode="json", exclude_none=True)
 
-    if isinstance(tool_choice, ToolChoiceFunction):
+    if isinstance(tool_choice, (ToolChoiceFunction, ToolChoiceCustom)):
         return {
             "type": "function",
             "function": {"name": tool_choice.name},
