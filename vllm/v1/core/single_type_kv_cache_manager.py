@@ -48,6 +48,16 @@ class SingleTypeKVCacheManager(ABC):
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
 
+    @property
+    def has_positionally_stable_blocks(self) -> bool:
+        """Whether positional offload scans can follow this block table.
+
+        True means already-scanned indices will not be reused for a different
+        token range. Managers may still null blocks that left their retention
+        window, as long as the cursor's positional history remains valid.
+        """
+        return True
+
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
@@ -452,7 +462,7 @@ class SingleTypeKVCacheManager(ABC):
         num_tokens: int,
         retention_interval: int | None = None,
         *,
-        replay_boundary: int,
+        replay_boundaries: Sequence[int],
     ) -> None:
         """
         Cache the blocks for the request.
@@ -465,6 +475,8 @@ class SingleTypeKVCacheManager(ABC):
                 keeps dense checkpointing; ``0`` keeps only the latest replay
                 boundary; a positive multiple of ``scheduler_block_size`` keeps
                 a tail once per that-sized segment. Only SWA acts on it.
+            replay_boundaries: Positions a later request replaying this prompt
+                can resume at, from ``get_replay_boundaries``.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
@@ -473,9 +485,9 @@ class SingleTypeKVCacheManager(ABC):
             return
 
         # Token boundaries whose reachable tail must be retained under sparse
-        # retention: the replay boundary (``num_prompt - 1``, capped by
-        # ``get_computed_blocks``) and any detected shared-prefix junction.
-        reachable_boundaries = [replay_boundary]
+        # retention: every position a replaying sibling can resume at (see
+        # ``get_replay_boundaries``) and any detected shared-prefix junction.
+        reachable_boundaries = [*replay_boundaries]
         if request.shared_prefix_boundary:
             reachable_boundaries.append(request.shared_prefix_boundary)
 
@@ -818,13 +830,13 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         num_tokens: int,
         retention_interval: int | None = None,
         *,
-        replay_boundary: int,
+        replay_boundaries: Sequence[int],
     ) -> None:
         super().cache_blocks(
             request,
             num_tokens,
             retention_interval=retention_interval,
-            replay_boundary=replay_boundary,
+            replay_boundaries=replay_boundaries,
         )
         hash_block_size = self.block_pool.hash_block_size
         if self.block_size == hash_block_size:
@@ -1228,7 +1240,7 @@ class CircularBufferManager(FullAttentionManager):
         num_tokens: int,
         retention_interval: int | None = None,
         *,
-        replay_boundary: int,
+        replay_boundaries: Sequence[int],
     ) -> None:
         return
 
@@ -1421,6 +1433,12 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 class MambaManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
 
+    @property
+    def has_positionally_stable_blocks(self) -> bool:
+        # Align-mode Mamba can null interior states and relocate speculative
+        # blocks in place. Other modes retain positional identity.
+        return self.mamba_cache_mode != "align"
+
     def __init__(
         self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs
     ) -> None:
@@ -1442,6 +1460,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # Mapping from request ID to the index of the block
             # allocated in the previous step
             self.last_state_block_idx: dict[str, int] = {}
+            self._num_retired_blocks: dict[str, int] = {}
             # The set of the requests that have been allocated blocks
             self._allocated_block_reqs: set[str] = set()
             # checkpoint position and reserved block index for the current
@@ -1591,6 +1610,27 @@ class MambaManager(SingleTypeKVCacheManager):
                 mask[boundary_block - start_block] = True
 
         return mask
+
+    def _remove_blocks_in_range(
+        self, request_id: str, first_block: int, last_block: int
+    ) -> None:
+        if self.mamba_cache_mode != "align":
+            return super()._remove_blocks_in_range(request_id, first_block, last_block)
+        blocks = self.req_to_blocks.get(request_id, [])
+        first_block = max(first_block, self._num_retired_blocks.get(request_id, 0))
+        last_block = min(last_block, len(blocks))
+        if first_block >= last_block:
+            return
+        freed: list[KVCacheBlock] = []
+        # Mamba prefill leaves null gaps between states awaiting retirement.
+        for i in range(last_block - 1, first_block - 1, -1):
+            if blocks[i].is_null:
+                continue
+            freed.append(blocks[i])
+            blocks[i] = self._null_block
+        if freed:
+            self.block_pool.free_blocks(freed)
+        self._num_retired_blocks[request_id] = last_block
 
     def remove_skipped_blocks(
         self,
@@ -1912,6 +1952,7 @@ class MambaManager(SingleTypeKVCacheManager):
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
+            self._num_retired_blocks.pop(request_id, None)
             self._checkpoints.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
             # An offer is only guaranteed to hold committed bytes until the end
@@ -1940,14 +1981,14 @@ class MambaManager(SingleTypeKVCacheManager):
         num_tokens: int,
         retention_interval: int | None = None,
         *,
-        replay_boundary: int,
+        replay_boundaries: Sequence[int],
     ) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
         super().cache_blocks(
             request,
             num_tokens,
             retention_interval=retention_interval,
-            replay_boundary=replay_boundary,
+            replay_boundaries=replay_boundaries,
         )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if self.mamba_cache_mode == "align":
@@ -2090,7 +2131,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         num_tokens: int,
         retention_interval: int | None = None,
         *,
-        replay_boundary: int,
+        replay_boundaries: Sequence[int],
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.

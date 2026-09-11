@@ -98,6 +98,14 @@ def pad_nvfp4_weight_for_cutlass(
     return weight, weights_padding_bytes
 
 
+def nvfp4_weight_padding_bytes(layer: torch.nn.Module) -> int:
+    """
+    Compute K-dim padding (packed bytes) of an NVFP4 weight,
+    Aligned with `pad_nvfp4_weight_for_cutlass` above.
+    """
+    return layer.weight.shape[1] - layer.input_size_per_partition // 2
+
+
 def pad_nvfp4_activation_for_cutlass(
     x_fp4: torch.Tensor,
     weights_padding_bytes: int,

@@ -165,9 +165,13 @@ class IndexerQRopeQuantKernel:
         # NOTE: token_id may exceed bounds, hence we need to add load/store guards
         # we can't do early exit because CuteDSL doesn't support it. and we also need
         # all threads in a warp to be active since we utilize warp shuffle later.
-        # must_in_bounds is constexpr, True when 1 threadblock fit within 1 token
-        # position. the compiler will remove bounds check when that happens.
-        must_in_bounds = cutlass.const_expr(self.tb_size % self.threads_per_token == 0)
+        # must_in_bounds is constexpr, True when a token spans a whole number of
+        # threadblocks. Then num_tokens * threads_per_token is always a multiple of
+        # tb_size, so the trailing block never straddles num_tokens and the compiler
+        # removes the bounds check. Otherwise the guard has to stay: e.g. 32 heads
+        # with coarsen=4 needs 64 threads per token, so an odd num_tokens leaves half
+        # of the last block addressing token num_tokens.
+        must_in_bounds = cutlass.const_expr(self.threads_per_token % self.tb_size == 0)
         in_bounds = must_in_bounds or (token_id < num_tokens)
 
         cp_op = cute.nvgpu.CopyUniversalOp()
