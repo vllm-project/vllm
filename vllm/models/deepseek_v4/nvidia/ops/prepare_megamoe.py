@@ -157,18 +157,20 @@ def _prepare_megamoe_inputs_kernel(
 
 
 def _prepare_megamoe_inputs_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
-    hidden_size = vllm_config.model_config.hf_config.hidden_size
-    top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+    hf_config = vllm_config.model_config.hf_text_config
+    hidden_size = hf_config.hidden_size
+    top_k = hf_config.num_experts_per_tok
     max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    has_shared_experts = getattr(hf_config, "n_shared_experts", None) is not None
     shared_block_m: Any = WarmupChoices(
         1,
-        8 if vllm_config.model_config.hf_config.n_shared_experts is not None else 1,
-        16 if vllm_config.model_config.hf_config.n_shared_experts is not None else 1,
-        32 if vllm_config.model_config.hf_config.n_shared_experts is not None else 1,
-        64 if vllm_config.model_config.hf_config.n_shared_experts is not None else 1,
-        96 if vllm_config.model_config.hf_config.n_shared_experts is not None else 1,
-        128 if vllm_config.model_config.hf_config.n_shared_experts is not None else 1,
-        192 if vllm_config.model_config.hf_config.n_shared_experts is not None else 1,
+        8 if has_shared_experts else 1,
+        16 if has_shared_experts else 1,
+        32 if has_shared_experts else 1,
+        64 if has_shared_experts else 1,
+        96 if has_shared_experts else 1,
+        128 if has_shared_experts else 1,
+        192 if has_shared_experts else 1,
     )
     has_padding: Any = WarmupChoices(False, True)
     x_scale_width = hidden_size // _PREPARE_MEGAMOE_BLOCK_K

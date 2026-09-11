@@ -343,7 +343,7 @@ def _fused_moe_nvfp4_emulation_kernel_warmup_inputs(vllm_config: Any) -> dict[st
     kernel=fused_moe_nvfp4_emulation_kernel,
     warmup_inputs=_fused_moe_nvfp4_emulation_kernel_warmup_inputs,
 )
-def _FUSED_MOE_NVFP4_EMULATION_KERNEL(
+def _fused_moe_nvfp4_emulation(
     A: torch.Tensor,
     B: torch.Tensor,
     C: torch.Tensor,
@@ -418,7 +418,7 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
             A.size(0) * top_k * config["BLOCK_SIZE_M"],
         )
 
-    return _FUSED_MOE_NVFP4_EMULATION_KERNEL(
+    return _fused_moe_nvfp4_emulation(
         A,
         B,
         C,
