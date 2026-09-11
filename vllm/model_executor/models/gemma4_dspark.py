@@ -268,6 +268,11 @@ class Gemma4DSparkModel(DFlashQwen3Model):
 class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
     """Gemma4 DSpark speculator over a self-contained draft checkpoint."""
 
+    # Gemma4DSparkModel overrides the context-KV precompute
+    # (_build_context_kv_buffers/_project_context_kv), so the inherited
+    # capture-safety audit does not apply; stay eager until re-audited.
+    context_kv_capture_safe: bool = False
+
     dspark_shares_target_embeddings = False
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
 

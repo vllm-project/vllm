@@ -195,12 +195,48 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType a_type,
   return kernel;
 }
 
+// Wave-quantization-aware blocks_per_sm for small-M (M <= 8) launches.
+// With gridDim == sms, an n-slice count just above sms serializes into a
+// second, nearly empty wave (e.g. 161 slices over 152 SMs). Two blocks per
+// SM merge the tail into the first wave: measured graph-timed on sm100 and
+// sm103, -23% at M=4 for K=2688/N=10304 FP8-channelwise and -15% for
+// K=2688/N=131072 NVFP4-g16, neutral (<1%) when all slices fit one wave
+// (hence the n_slices > sms gate). The kernel indexes locks (and C_tmp via
+// locks_off) with up to gridDim entries, so blocks_per_sm == 2 requires a
+// 2 * sms workspace. C_tmp is allocated as sms * 16 * max_thread_n floats for
+// M <= 8 (max_m_block_size == 16) while each of the up-to-2*sms lock slots
+// uses 16 * thread_n floats under fp32 reduce, so two blocks per SM fit iff
+// thread_n <= max_thread_n / 2 -- exactly saturated by the small-batch
+// table's thread_n == 128 entries and enforced below so a future config
+// cannot silently overflow C_tmp.
+// Fail-closed: any unmet condition keeps the single-wave launch.
+int determine_blocks_per_sm(thread_config_t const& th_config, int prob_m,
+                            int prob_n, int prob_k, int thread_m_blocks,
+                            bool m_block_size_8, int num_bits, int group_size,
+                            int has_zp, bool is_zp_float, bool is_a_8bit,
+                            int stages, int max_shared_mem, int sms,
+                            int major_capability, int workspace_len) {
+  if (thread_m_blocks != 1 || !m_block_size_8 || has_zp ||
+      major_capability < 10 || workspace_len < 2 * sms ||
+      th_config.thread_n * 2 > max_thread_n ||
+      prob_n / th_config.thread_n <= sms) {
+    return 1;
+  }
+  if (!is_valid_config(th_config, thread_m_blocks, prob_m, prob_n, prob_k,
+                       num_bits, group_size, has_zp, is_zp_float, is_a_8bit,
+                       stages, max_shared_mem / 2 - 1024)) {
+    return 1;
+  }
+  return 2;
+}
+
 exec_config_t determine_exec_config(
     const vllm::ScalarType& a_type, const vllm::ScalarType& b_type,
     const vllm::ScalarType& c_type, const vllm::ScalarType& s_type, int prob_m,
     int prob_n, int prob_k, int thread_m_blocks, bool m_block_size_8,
     int num_bits, int group_size, bool has_zp, bool is_zp_float, int is_a_8bit,
-    int stages, int max_shared_mem, int sms) {
+    int stages, int max_shared_mem, int sms, int major_capability,
+    int workspace_len) {
   exec_config_t exec_cfg = exec_config_t{1, thread_config_t{-1, -1, -1}};
   thread_config_t* thread_configs = thread_m_blocks > 1
                                         ? large_batch_thread_configs
@@ -232,7 +268,12 @@ exec_config_t determine_exec_config(
 
     if (kernel == MarlinDefault) continue;
 
-    return {1, th_config};
+    return {determine_blocks_per_sm(th_config, prob_m, prob_n, prob_k,
+                                    thread_m_blocks, m_block_size_8, num_bits,
+                                    group_size, has_zp, is_zp_float, is_a_8bit,
+                                    stages, max_shared_mem, sms,
+                                    major_capability, workspace_len),
+            th_config};
   }
 
   return exec_cfg;
@@ -241,12 +282,12 @@ exec_config_t determine_exec_config(
 void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                void* a_s, void* b_s, void* g_s, void* zp, int prob_m,
                int prob_n, int prob_k, int lda, void* workspace,
-               vllm::ScalarType const& a_type, vllm::ScalarType const& b_type,
-               vllm::ScalarType const& c_type, vllm::ScalarType const& s_type,
-               bool has_bias, bool has_zp, int num_groups, int group_size,
-               int dev, cudaStream_t stream, int thread_k_init,
-               int thread_n_init, int sms, bool use_atomic_add,
-               bool use_fp32_reduce, bool is_zp_float) {
+               int workspace_len, vllm::ScalarType const& a_type,
+               vllm::ScalarType const& b_type, vllm::ScalarType const& c_type,
+               vllm::ScalarType const& s_type, bool has_bias, bool has_zp,
+               int num_groups, int group_size, int dev, cudaStream_t stream,
+               int thread_k_init, int thread_n_init, int sms,
+               bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) {
   bool is_a_8bit = a_type.size_bits() == 8;
   STD_TORCH_CHECK(prob_m > 0 && prob_n > 0 && prob_k > 0, "Invalid MNK = [",
                   prob_m, ", ", prob_n, ", ", prob_k, "]");
@@ -334,7 +375,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
       exec_cfg = determine_exec_config(
           a_type, b_type, c_type, s_type, prob_m_split, prob_n, prob_k,
           thread_m_blocks, m_block_size_8, num_bits, group_size, has_zp,
-          is_zp_float, is_a_8bit, stages, max_shared_mem, sms);
+          is_zp_float, is_a_8bit, stages, max_shared_mem, sms, major_capability,
+          workspace_len);
       thread_tfg = exec_cfg.tb_cfg;
       if (thread_tfg.thread_n != -1) {
         if (prob_n / thread_tfg.thread_n *
@@ -395,8 +437,13 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
           ", num_threads = ", num_threads, ", num_bits = ", num_bits);
     }
 
+    // Keep the sticky per-kernel attribute at the full opt-in: one kernel
+    // instantiation may launch at blocks_per_sm 1 (full dynamic smem) and 2
+    // (halved) within one capture, and the attribute must never drop below
+    // any captured launch. Residency is bounded by the launch's dynamic
+    // smem (max_shared_mem_new), not the attribute.
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         max_shared_mem_new);
+                         max_shared_mem);
 
     bool part_use_atomic_add =
         use_atomic_add && div_ceil(prob_m_split, 64) * prob_n <= 2048;
@@ -720,8 +767,9 @@ torch::stable::Tensor marlin_gemm(
       c_tmp.mutable_data_ptr(), b_bias.mutable_data_ptr(),
       a_scales.mutable_data_ptr(), b_scales.mutable_data_ptr(),
       global_scale.mutable_data_ptr(), b_zeros.mutable_data_ptr(), size_m,
-      size_n, size_k, a.stride(0), workspace.mutable_data_ptr(), a_type, b_type,
-      c_type, s_type, has_bias, has_zp, num_groups, group_size, device_index,
+      size_n, size_k, a.stride(0), workspace.mutable_data_ptr(),
+      (int)workspace.numel(), a_type, b_type, c_type, s_type, has_bias, has_zp,
+      num_groups, group_size, device_index,
       get_current_cuda_stream(device_index), thread_k, thread_n, sms,
       use_atomic_add, use_fp32_reduce, is_zp_float);
 

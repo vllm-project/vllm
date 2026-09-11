@@ -407,11 +407,13 @@ def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tenso
 
 def marlin_make_workspace_new(
     device: torch.device,
-    max_blocks_per_sm: int = 1,
+    max_blocks_per_sm: int = 2,
     existing: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # In the new marlin kernel, we use the num of threadblocks as workspace
-    # size. The num of threadblocks is sms_count * max_blocks_per_sm.
+    # size. The num of threadblocks is sms_count * max_blocks_per_sm. The
+    # default of 2 admits the kernel's small-M wave-quantization launch of
+    # two blocks per SM (it fails closed to one wave on a smaller workspace).
     sms = num_compute_units(device.index)
     size = sms * max_blocks_per_sm
     # On weight reload, reuse the existing storage so the workspace address

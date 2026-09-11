@@ -688,6 +688,12 @@ class DFlashQwen3Model(nn.Module):
 class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
     model_cls = DFlashQwen3Model
 
+    # precompute_and_store_context_kv is CUDA-graph capture safe: no
+    # data-dependent host control flow after the fused buffers are built
+    # (warmup precedes capture), and every kernel reads only the tensors
+    # passed in. A subclass overriding the precompute must re-audit this.
+    context_kv_capture_safe: bool = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
