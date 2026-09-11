@@ -341,6 +341,43 @@ def test_repeated_context_mask_max_history_accelerator_parity(
     assert torch.equal(actual, expected)
 
 
+def _unaligned_max_history_inputs() -> tuple[torch.Tensor, ...]:
+    """One row whose only repeated context ends at position 680.
+
+    680 is not a multiple of the kernel's 512-position block, so the scan window
+    selected by ``max_history`` starts in the middle of a block.
+    """
+    history = list(range(1_000, 2_200))
+    history[676:680] = [1, 2, 3, 4]
+    return (
+        torch.tensor([history], dtype=torch.int32),
+        torch.tensor([0], dtype=torch.int32),
+        torch.tensor([0], dtype=torch.int32),
+        torch.tensor([len(history)], dtype=torch.int32),
+        torch.tensor([[1, 2, 3, 4]], dtype=torch.int32),
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+@pytest.mark.parametrize(
+    "max_history,expected", [(1200 - 680, True), (1200 - 680 - 1, False)]
+)
+def test_repeated_context_mask_unaligned_max_history_accelerator_parity(
+    max_history: int, expected: bool
+):
+    inputs = _unaligned_max_history_inputs()
+
+    reference = repeated_context_mask(*inputs, max_history=max_history)
+    actual = repeated_context_mask(
+        *(value.cuda() for value in inputs), max_history=max_history
+    ).cpu()
+
+    assert torch.equal(reference, torch.tensor([expected]))
+    assert torch.equal(actual, reference)
+
+
 def _repeated_context_inputs(
     context_width: int, device: str = "cpu"
 ) -> tuple[torch.Tensor, ...]:

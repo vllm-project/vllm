@@ -79,9 +79,12 @@ def _repeated_context_mask_kernel(
     scan_start = 0
     if MAX_HISTORY > 0:
         scan_start = tl.maximum(history_len - MAX_HISTORY, 0)
-    for block_start in tl.range(scan_start, history_len, BLOCK):
+    # Aligned loop bounds let the per-lane offsets fold into immediates.
+    aligned_start = (scan_start // BLOCK) * BLOCK
+    for block_start in tl.range(aligned_start, history_len, BLOCK):
         previous_pos = block_start + offsets
-        matches = valid_req & (previous_pos < history_len)
+        in_window = (previous_pos >= scan_start) & (previous_pos < history_len)
+        matches = valid_req & in_window
         for offset in range(CONTEXT_WIDTH):
             context_token = tl.sum(
                 tl.where(context_offsets == offset, context_tokens, 0), axis=0
@@ -92,7 +95,7 @@ def _repeated_context_mask_kernel(
                 + safe_req_idx * all_token_ids_stride
                 + sequence_start
                 + tl.maximum(historical_pos, 0),
-                mask=valid_req & (historical_pos >= 0),
+                mask=valid_req & (historical_pos >= 0) & in_window,
                 other=-1,
             )
             matches &= historical_token == context_token
