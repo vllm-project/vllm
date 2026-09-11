@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+import zlib
 from collections.abc import Iterable
 from typing import Any
 
+import pybase64 as base64
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
     ChatCompletionMessageToolCallParam,
@@ -13,6 +16,7 @@ from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool,
 )
 from openai.types.responses import (
+    ResponseCustomToolCall,
     ResponseFunctionToolCall,
     ResponseOutputItem,
     ResponseOutputMessage,
@@ -40,6 +44,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tool_parsers.utils import (
+    CUSTOM_TOOL_INPUT_KEY,
     build_responses_tool_call_name_map,
     flat_namespace_tool_name,
     iter_response_function_tool_dicts,
@@ -49,6 +54,131 @@ from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
+_REASONING_STATE_PREFIX = "vllm-reasoning-v1."
+
+
+def encode_reasoning_state(text: str) -> str:
+    """Opaque ``reasoning.encrypted_content`` blob for ``store=false`` replay.
+
+    Encoded rather than encrypted: vLLM holds no key, the blob only has to
+    survive a client round trip intact.
+    """
+    packed = base64.urlsafe_b64encode(zlib.compress(text.encode("utf-8")))
+    return _REASONING_STATE_PREFIX + packed.decode("ascii")
+
+
+def decode_reasoning_state(blob: str | None) -> str | None:
+    if not blob or not blob.startswith(_REASONING_STATE_PREFIX):
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(blob[len(_REASONING_STATE_PREFIX) :])
+        return zlib.decompress(raw).decode("utf-8")
+    except (ValueError, zlib.error, UnicodeDecodeError):
+        return None
+
+
+def custom_tool_names(tools: list[Tool] | None) -> frozenset[str]:
+    return frozenset(tool.name for tool in tools or [] if tool.type == "custom")
+
+
+def encode_custom_tool_input(payload: str) -> str:
+    return json.dumps({CUSTOM_TOOL_INPUT_KEY: payload}, ensure_ascii=False)
+
+
+def decode_custom_tool_input(arguments: str) -> str:
+    """Payload of a completed shim call; bare text is passed through."""
+    try:
+        parsed = json.loads(arguments)
+    except ValueError:
+        return arguments
+    if isinstance(parsed, dict):
+        value = parsed.get(CUSTOM_TOOL_INPUT_KEY)
+        if not isinstance(value, str) and len(parsed) == 1:
+            value = next(iter(parsed.values()))
+        if isinstance(value, str):
+            return value
+    return arguments
+
+
+_JSON_SIMPLE_ESCAPES = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
+
+
+def _decode_unicode_escape(buffer: str, i: int) -> tuple[str, int] | None:
+    """Decode ``\\uXXXX`` at ``buffer[i]``, joining a complete surrogate pair."""
+
+    def code_at(pos: int) -> int | None:
+        if pos + 6 > len(buffer) or buffer[pos : pos + 2] != "\\u":
+            return None
+        try:
+            return int(buffer[pos + 2 : pos + 6], 16)
+        except ValueError:
+            return None
+
+    code = code_at(i)
+    if code is None:
+        return None
+    if not 0xD800 <= code <= 0xDBFF:
+        return chr(code), i + 6
+    if i + 8 <= len(buffer) and buffer[i + 6 : i + 8] != "\\u":
+        return chr(code), i + 6
+    low = code_at(i + 6)
+    if low is None:
+        return None
+    if not 0xDC00 <= low <= 0xDFFF:
+        return chr(code), i + 6
+    return chr(0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)), i + 12
+
+
+def decode_custom_tool_input_prefix(arguments: str) -> str:
+    """Longest decodable payload prefix of partial shim arguments, so that
+    streamed ``custom_tool_call_input`` deltas stay a prefix of the final input."""
+    key = json.dumps(CUSTOM_TOOL_INPUT_KEY)
+    key_at = arguments.find(key)
+    colon = arguments.find(":", key_at + len(key)) if key_at >= 0 else -1
+    start = arguments.find('"', colon + 1) if colon >= 0 else -1
+    if start < 0:
+        return ""
+    out: list[str] = []
+    i, n = start + 1, len(arguments)
+    while i < n:
+        ch = arguments[i]
+        if ch == '"':
+            break
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        if i + 1 >= n:
+            break
+        escaped = arguments[i + 1]
+        if escaped in _JSON_SIMPLE_ESCAPES:
+            out.append(_JSON_SIMPLE_ESCAPES[escaped])
+            i += 2
+            continue
+        decoded = _decode_unicode_escape(arguments, i) if escaped == "u" else None
+        if decoded is None:
+            break
+        out.append(decoded[0])
+        i = decoded[1]
+    return "".join(out)
+
+
+def _item_type(item: ResponseInputOutputItem) -> str | None:
+    return item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+
+
+def _item_dict(item: ResponseInputOutputItem) -> dict[str, Any]:
+    return item if isinstance(item, dict) else item.model_dump()
+
 
 def build_response_output_items(
     reasoning: str | None,
@@ -56,9 +186,11 @@ def build_response_output_items(
     tool_calls: list[FunctionCall] | None,
     logprobs: list[Logprob] | None = None,
     tools: list[Tool] | None = None,
+    encrypted_reasoning: bool = False,
 ) -> list[ResponseOutputItem]:
     outputs: list[ResponseOutputItem] = []
     tool_call_name_map = build_responses_tool_call_name_map(tools)
+    custom_names = custom_tool_names(tools)
 
     if reasoning:
         outputs.append(
@@ -69,6 +201,9 @@ def build_response_output_items(
                 content=[
                     ResponseReasoningTextContent(text=reasoning, type="reasoning_text")
                 ],
+                encrypted_content=(
+                    encode_reasoning_state(reasoning) if encrypted_reasoning else None
+                ),
                 status=None,
             )
         )
@@ -93,14 +228,27 @@ def build_response_output_items(
 
     if tool_calls:
         for idx, tool_call in enumerate(tool_calls):
+            call_id = tool_call.id or make_tool_call_id(
+                func_name=tool_call.name, idx=idx
+            )
+            if tool_call.name in custom_names:
+                outputs.append(
+                    ResponseCustomToolCall(
+                        id=f"ctc_{random_uuid()}",
+                        call_id=call_id,
+                        type="custom_tool_call",
+                        name=tool_call.name,
+                        input=decode_custom_tool_input(tool_call.arguments),
+                    )
+                )
+                continue
             call_name = resolve_responses_tool_call_name(
                 tool_call.name, tool_call_name_map=tool_call_name_map
             )
             outputs.append(
                 ResponseFunctionToolCall(
                     id=f"fc_{random_uuid()}",
-                    call_id=tool_call.id
-                    or make_tool_call_id(func_name=tool_call.name, idx=idx),
+                    call_id=call_id,
                     type="function_call",
                     status="completed",
                     name=call_name.name,
@@ -234,6 +382,7 @@ def _construct_message_from_response_item(
         prev_msg if prev_msg and prev_msg.get("role") == "assistant" else None
     )
 
+    tool_call: ChatCompletionMessageToolCallParam | None = None
     if isinstance(item, ResponseFunctionToolCall):
         tool_name = item.name
         if item.namespace:
@@ -246,6 +395,17 @@ def _construct_message_from_response_item(
             ),
             type="function",
         )
+    elif _item_type(item) == "custom_tool_call":
+        call = _item_dict(item)
+        tool_call = ChatCompletionMessageToolCallParam(
+            id=call["call_id"],
+            function=FunctionCallTool(
+                name=call["name"],
+                arguments=encode_custom_tool_input(call.get("input") or ""),
+            ),
+            type="function",
+        )
+    if tool_call is not None:
         if prev_assistant_msg:
             tool_calls = prev_assistant_msg.get("tool_calls")
             if tool_calls is None:
@@ -264,22 +424,19 @@ def _construct_message_from_response_item(
             logger.warning(
                 "Previous assistant message has unknown tool_calls format. "
                 "Tool call merging is skipped and a new assistant message is created. "
-                "Item %s",
-                item.id,
+                "Call %s",
+                tool_call["id"],
             )
         return ChatCompletionAssistantMessageParam(
             role="assistant",
             tool_calls=[tool_call],
         )
-    elif isinstance(item, ResponseReasoningItem):
+    if isinstance(item, ResponseReasoningItem):
         reasoning = ""
-        if item.encrypted_content:
-            raise VLLMValidationError(
-                "Encrypted content is not supported.",
-                parameter="input",
-            )
-        elif item.content and len(item.content) >= 1:
+        if item.content and len(item.content) >= 1:
             reasoning = item.content[0].text
+        elif (restored := decode_reasoning_state(item.encrypted_content)) is not None:
+            reasoning = restored
         elif len(item.summary) >= 1:
             reasoning = item.summary[0].text
             logger.warning(
@@ -315,12 +472,12 @@ def _construct_message_from_response_item(
             content=item.output,
             tool_call_id=item.call_id,
         )
-    elif isinstance(item, dict) and item.get("type") == "function_call_output":
-        # Append the function call output as a tool message.
+    elif _item_type(item) in ("function_call_output", "custom_tool_call_output"):
+        output = _item_dict(item)
         return ChatCompletionToolMessageParam(
             role="tool",
-            content=item.get("output"),
-            tool_call_id=item.get("call_id"),
+            content=output.get("output"),
+            tool_call_id=output.get("call_id"),
         )
     elif isinstance(item, dict) and item.get("role") == "assistant":
         content = item.get("content")

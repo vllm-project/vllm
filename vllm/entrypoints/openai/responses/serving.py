@@ -12,6 +12,7 @@ from typing import Any, Final, cast
 from fastapi import Request
 from openai.types.responses import (
     ResponseOutputItem,
+    ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
     ResponseOutputText,
     ResponseStatus,
@@ -719,6 +720,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         created_time: int | None = None,
+        output_items: list[ResponseOutputItem] | None = None,
     ) -> ErrorResponse | ResponsesResponse:
         if created_time is None:
             created_time = int(time.time())
@@ -796,13 +798,12 @@ class OpenAIServingResponses(GenerateBaseServing):
             if final_output.finish_reason == "length":
                 status = "incomplete"
 
-            # TODO: Build final response items from the accumulated streaming
-            # parser results instead of reparsing the complete output.
             output = self._make_response_output_items(
                 request,
                 final_output,
                 tokenizer,
                 parser=context.response_parser,
+                streamed_items=output_items,
             )
 
             if request.enable_response_messages:
@@ -974,6 +975,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         final_output: CompletionOutput,
         tokenizer: TokenizerLike,
         parser: Parser | None = None,
+        streamed_items: list[ResponseOutputItem] | None = None,
     ) -> list[ResponseOutputItem]:
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
@@ -985,6 +987,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                 is_streaming=False,
                 delta=False,
             )
+
+        if streamed_items is not None:
+            return streamed_items
 
         # Compute logprobs if requested
         logprobs = None
@@ -1013,6 +1018,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 tool_calls=tool_calls,
                 logprobs=logprobs,
                 tools=request.tools,
+                encrypted_reasoning=request.is_include_encrypted_reasoning(),
             )
 
         # Fallback when no parser is configured
@@ -1172,7 +1178,10 @@ class OpenAIServingResponses(GenerateBaseServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        processor = SimpleStreamingEventProcessor(tools=request.tools)
+        processor = SimpleStreamingEventProcessor(
+            tools=request.tools,
+            encrypt_reasoning=request.is_include_encrypted_reasoning(),
+        )
 
         hide_stream_metadata = not request.include_reasoning and self.parser is not None
 
@@ -1335,6 +1344,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                 )
             )
 
+            streamed_items: list[ResponseOutputItem] | None = (
+                None if self.use_harmony else []
+            )
             try:
                 async for event_data in processor(
                     request,
@@ -1347,6 +1359,10 @@ class OpenAIServingResponses(GenerateBaseServing):
                     created_time,
                     _increment_sequence_number_and_return,
                 ):
+                    if streamed_items is not None and isinstance(
+                        event_data, ResponseOutputItemDoneEvent
+                    ):
+                        streamed_items.append(event_data.item)
                     yield event_data
             except GenerationError as e:
                 error_json = self._convert_generation_error_to_streaming_response(e)
@@ -1370,6 +1386,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 tokenizer,
                 request_metadata,
                 created_time=created_time,
+                output_items=streamed_items,
             )
             yield _increment_sequence_number_and_return(
                 ResponseCompletedEvent(

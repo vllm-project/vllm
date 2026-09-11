@@ -700,6 +700,29 @@ class TestConvertDeveloperToSystem:
         assert original["role"] == "developer"
         assert "tools" in original
 
+    def test_labels_developer_block_alongside_system_message(self):
+        conversation = [
+            {"role": "system", "content": "Be brief."},
+            {"role": "developer", "content": "Reply with exactly OK."},
+            {"role": "user", "content": "Hello"},
+        ]
+        result = _convert_developer_to_system(conversation)
+        assert result[1]["role"] == "system"
+        assert result[1]["content"] == "Developer instructions:\nReply with exactly OK."
+
+    def test_labels_first_text_part_of_list_content(self):
+        conversation = [
+            {"role": "system", "content": "Be brief."},
+            {
+                "role": "developer",
+                "content": [{"type": "text", "text": "Reply with exactly OK."}],
+            },
+        ]
+        result = _convert_developer_to_system(conversation)
+        assert result[1]["content"] == [
+            {"type": "text", "text": "Developer instructions:\nReply with exactly OK."}
+        ]
+
 
 # --- Developer role detection and conversion tests ---
 

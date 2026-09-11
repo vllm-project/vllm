@@ -1712,3 +1712,74 @@ class TestAutoToolStreaming:
         assert len(function_done) == 1
         assert function_done[0].item.name == "get_weather"
         assert function_done[0].item.arguments == tool_args
+
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.asyncio
+    async def test_completed_response_reuses_streamed_items(self, monkeypatch):
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        serving = _make_serving_instance_with_reasoning()
+        response_parser = _mock_parser_with_reasoning(
+            serving,
+            [
+                DeltaMessage(reasoning="think"),
+                DeltaMessage(content="The weather is mild."),
+                DeltaMessage(
+                    tool_calls=[
+                        DeltaToolCall(
+                            index=0,
+                            function=DeltaFunctionCall(
+                                name="get_weather",
+                                arguments='{"location":"Berlin"}',
+                            ),
+                        )
+                    ]
+                ),
+            ],
+        )
+        response_parser.count_reasoning_tokens = MagicMock(return_value=0)
+        ctx = _make_simple_context_with_output("chunk", [10], response_parser)
+
+        async def result_generator():
+            for _ in range(3):
+                yield ctx
+
+        request = ResponsesRequest(
+            input="hi",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                    },
+                }
+            ],
+            tool_choice="auto",
+            stream=True,
+            include=["reasoning.encrypted_content"],
+        )
+        events = [
+            event
+            async for event in serving.responses_stream_generator(
+                request=request,
+                sampling_params=SamplingParams(max_tokens=64),
+                result_generator=result_generator(),
+                context=ctx,
+                model_name="test-model",
+                tokenizer=MagicMock(),
+                request_metadata=RequestResponseMetadata(request_id="req"),
+                created_time=0,
+            )
+        ]
+
+        done_items = [e.item for e in events if e.type == "response.output_item.done"]
+        completed = next(e for e in events if e.type == "response.completed")
+        assert [item.type for item in done_items] == [
+            "reasoning",
+            "message",
+            "function_call",
+        ]
+        assert completed.response.output == done_items
+        assert done_items[0].encrypted_content
+        assert [item.id[:3] for item in done_items] == ["rs_", "msg", "fc_"]
