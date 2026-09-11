@@ -401,12 +401,18 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     bool part_use_atomic_add =
         use_atomic_add && div_ceil(prob_m_split, 64) * prob_n <= 2048;
 
+    bool group_m_tiles = major_capability == 8 && minor_capability == 9 &&
+                         a_type == vllm::kBFloat16 &&
+                         b_type == vllm::kFE4M3fn && group_blocks == 8 &&
+                         !has_bias && use_fp32_reduce && prob_m_split >= 256 &&
+                         prob_n >= 24576 && prob_k >= 4096 && prob_k <= 8192;
+
     // avoid ">>>" being formatted to "> > >"
     // clang-format off
     kernel<<<blocks, num_threads, max_shared_mem_new, stream>>>(
         A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, a_s_ptr, b_s_ptr, g_s_ptr, zp_ptr,
         prob_m_split, prob_n, prob_k, lda, locks, has_bias, part_use_atomic_add,
-        use_fp32_reduce, max_shared_mem_new);
+        use_fp32_reduce, max_shared_mem_new, group_m_tiles);
     // clang-format on
 
     bool is_a_8bit = a_type.size_bits() == 8;
