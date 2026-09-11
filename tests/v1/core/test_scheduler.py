@@ -56,6 +56,129 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
+def _add_running_decodes(scheduler: Scheduler, count: int) -> list[Request]:
+    requests = create_requests(
+        num_requests=count,
+        req_ids=[f"decode-{i}" for i in range(count)],
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id for request in requests],
+            req_id_to_index={
+                request.request_id: index
+                for index, request in enumerate(requests)
+            },
+            sampled_token_ids=[[100 + index] for index in range(count)],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    return requests
+
+
+def test_prefill_admission_wave_keeps_full_decode_batch():
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        prefill_admission_slots=2,
+    )
+    decodes = _add_running_decodes(scheduler, 4)
+    prefills = create_requests(
+        num_requests=2,
+        req_ids=["prefill-0", "prefill-1"],
+    )
+    for request in prefills:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert set(output.num_scheduled_tokens) == {
+        request.request_id for request in decodes
+    }
+    assert len(scheduler.running) == 4
+    assert len(scheduler.waiting) == 2
+
+
+def test_prefill_admission_wave_returns_unused_slots_to_decode():
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        prefill_admission_slots=2,
+    )
+    decodes = _add_running_decodes(scheduler, 3)
+    prefill = create_requests(
+        num_requests=1,
+        req_ids=["prefill"],
+    )[0]
+    scheduler.add_request(prefill)
+
+    output = scheduler.schedule()
+
+    assert set(output.num_scheduled_tokens) == {
+        *(request.request_id for request in decodes),
+        prefill.request_id,
+    }
+    assert len(scheduler.running) == 4
+
+
+def test_prefill_admission_wave_bounds_new_prefills():
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        prefill_admission_slots=2,
+    )
+    decodes = _add_running_decodes(scheduler, 3)
+    prefills = create_requests(
+        num_requests=4,
+        req_ids=[f"prefill-{i}" for i in range(4)],
+    )
+    for request in prefills:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert set(output.num_scheduled_tokens) == {
+        decodes[0].request_id,
+        decodes[1].request_id,
+        prefills[0].request_id,
+        prefills[1].request_id,
+    }
+    assert [request.request_id for request in scheduler.running[:2]] == [
+        prefills[0].request_id,
+        prefills[1].request_id,
+    ]
+    assert len(scheduler.running) == 5
+    assert len(scheduler.waiting) == 2
+
+
+def test_prefill_admission_caps_total_scheduled_requests():
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        prefill_admission_slots=2,
+    )
+    decodes = _add_running_decodes(scheduler, 3)
+    cached_decodes = create_requests(
+        num_requests=3,
+        req_ids=[f"cached-decode-{i}" for i in range(3)],
+    )
+    for request in cached_decodes:
+        request.num_computed_tokens = request.num_tokens - 1
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert len(output.num_scheduled_tokens) == 4
+    assert set(output.num_scheduled_tokens) == {
+        *(request.request_id for request in decodes),
+        cached_decodes[0].request_id,
+    }
+    assert len(scheduler.running) == 4
+    assert len(scheduler.waiting) == 2
+
+
 def test_make_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
     mm_features = [

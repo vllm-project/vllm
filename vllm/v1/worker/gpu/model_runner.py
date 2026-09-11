@@ -215,7 +215,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.vocab_size = self.model_config.get_vocab_size()
         self.max_model_len = self.model_config.max_model_len
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
+        # The scheduler can retain deferred decodes while admitting a bounded
+        # prefill wave. Execution buffers remain limited by max_num_seqs.
         self.max_num_reqs = self.scheduler_config.max_num_seqs
+        self.max_num_resident_reqs = self.scheduler_config.max_num_resident_seqs
         self.is_encoder_decoder = self.model_config.is_encoder_decoder
 
         self.output_copy_stream = torch.cuda.Stream(self.device)
@@ -308,7 +311,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # General request states.
         self.req_states = RequestState(
-            max_num_reqs=self.max_num_reqs,
+            max_num_reqs=self.max_num_resident_reqs,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
             num_speculative_steps=self.num_speculative_steps,
@@ -325,7 +328,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.fast_prefill: FastPrefillHelper | None = None
         if self.use_pp:
             self.pp_handler = PPHandler(
-                max_num_reqs=self.max_num_reqs,
+                max_num_reqs=self.max_num_resident_reqs,
                 num_speculative_steps=self.num_speculative_steps,
                 device=self.device,
             )
@@ -340,7 +343,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cudagraph_manager: ModelCudaGraphManager | None = None
 
         # LoRA-related workers.
-        self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
+        self.lora_state = LoraState(max_num_reqs=self.max_num_resident_reqs)
         self.lora_capture_cases = [0]
         if self.lora_config:
             self.lora_capture_cases = get_lora_capture_cases(
@@ -457,7 +460,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Initialize samplers. Model states may override via custom_sampler().
         if self.is_last_pp_rank and not self.is_pooling_model:
             sampler_kwargs: dict[str, Any] = {
-                "max_num_reqs": self.max_num_reqs,
+                "max_num_reqs": self.max_num_resident_reqs,
                 "vocab_size": self.vocab_size,
                 "device": self.device,
                 "req_states": self.req_states,
@@ -485,7 +488,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.device,
                 )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
-                self.max_num_reqs,
+                self.max_num_resident_reqs,
                 logprobs_mode=self.model_config.logprobs_mode,
             )
             self.structured_outputs_worker = StructuredOutputsWorker(
@@ -642,7 +645,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
-            max_num_reqs=self.max_num_reqs,
+            max_num_reqs=self.max_num_resident_reqs,
             max_num_batched_tokens=self.max_num_tokens,
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,

@@ -47,6 +47,7 @@ from vllm.v1.core.sched.output import (
     ScheduledEncoderInputStats,
     SchedulerOutput,
 )
+from vllm.v1.core.sched.prefill_admission import PrefillAdmissionPolicy
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
     SchedulingPolicy,
@@ -123,6 +124,13 @@ class Scheduler(SchedulerInterface):
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
+        self.prefill_admission_policy = PrefillAdmissionPolicy(
+            self.max_num_running_reqs,
+            self.scheduler_config.prefill_admission_slots,
+        )
+        self.max_num_resident_reqs = (
+            self.prefill_admission_policy.max_num_resident_reqs
+        )
         self.max_num_scheduled_tokens = (
             self.scheduler_config.max_num_scheduled_tokens
             if self.scheduler_config.max_num_scheduled_tokens is not None
@@ -609,9 +617,58 @@ class Scheduler(SchedulerInterface):
             throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
 
+        if self.prefill_admission_policy.enabled:
+            num_running_prefills = sum(
+                request.is_prefill_chunk for request in self.running
+            )
+            num_resident_decodes = (
+                len(self.running)
+                - num_running_prefills
+                + self.num_waiting_for_streaming_input
+            )
+            waiting_prefills = (
+                request
+                for queue in (self.skipped_waiting, self.waiting)
+                for request in queue
+                if request.num_computed_tokens < request.num_tokens - 1
+            )
+            num_waiting_prefills = sum(
+                1
+                for _ in itertools.islice(
+                    waiting_prefills,
+                    self.prefill_admission_policy.prefill_admission_slots,
+                )
+            )
+            resident_prefill_capacity = max(
+                0,
+                self.max_num_resident_reqs
+                - len(self.running)
+                - self.num_waiting_for_streaming_input,
+            )
+            admission_limits = self.prefill_admission_policy.get_limits(
+                num_resident_decodes=num_resident_decodes,
+                num_running_prefills=num_running_prefills,
+                num_waiting_prefills=num_waiting_prefills,
+                resident_prefill_capacity=resident_prefill_capacity,
+                defer_prefills=defer_prefills,
+            )
+        else:
+            admission_limits = self.prefill_admission_policy.get_limits(
+                num_resident_decodes=0,
+                num_running_prefills=0,
+                num_waiting_prefills=0,
+                resident_prefill_capacity=0,
+                defer_prefills=defer_prefills,
+            )
+
         # First, schedule the RUNNING requests.
         req_index = 0
-        while req_index < len(self.running) and token_budget > 0:
+        while (
+            req_index < len(self.running)
+            and token_budget > 0
+            and len(scheduled_running_reqs)
+            < admission_limits.max_scheduled_running
+        ):
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
@@ -638,9 +695,11 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            if defer_prefills and request.is_prefill_chunk:
-                # DP prefill balancing: defer this in-progress prefill chunk to a
-                # cadence-aligned step; decodes still run to fill this step.
+            if (
+                defer_prefills or admission_limits.defer_running_prefills
+            ) and request.is_prefill_chunk:
+                # Keep this step decode-only when required by DP balancing or
+                # when decode residency already fills max_num_seqs.
                 req_index += 1
                 continue
 
@@ -848,16 +907,25 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
+        newly_admitted_prefill_ids: set[str] = set()
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
+            num_new_prefills = 0
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if input_budget <= draft_slots:
                     break
+                num_scheduled_reqs = (
+                    len(scheduled_running_reqs)
+                    + len(scheduled_new_reqs)
+                    + len(scheduled_resumed_reqs)
+                )
+                if num_scheduled_reqs >= self.max_num_running_reqs:
+                    break
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
-                if num_running >= self.max_num_running_reqs:
+                if num_running >= self.max_num_resident_reqs:
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
@@ -1013,6 +1081,14 @@ class Scheduler(SchedulerInterface):
                         request_queue.pop_request()
                         step_skipped_waiting.prepend_request(request)
                         continue
+
+                requires_prefill = num_computed_tokens < request.num_tokens - 1
+                if (
+                    requires_prefill
+                    and admission_limits.max_new_prefills is not None
+                    and num_new_prefills >= admission_limits.max_new_prefills
+                ):
+                    break
 
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
@@ -1235,6 +1311,9 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 self.running.append(request)
+                if requires_prefill:
+                    num_new_prefills += 1
+                    newly_admitted_prefill_ids.add(request_id)
                 if num_external_computed_tokens > 0:
                     # load_kv_async is False here
                     has_sync_kv_loads = True
@@ -1292,19 +1371,43 @@ class Scheduler(SchedulerInterface):
             if not defer_prefills:
                 self.prefill_capacity_bound = bool(self.waiting)
 
+        if newly_admitted_prefill_ids:
+            scheduled_running_ids = {
+                request.request_id for request in scheduled_running_reqs
+            }
+            newly_admitted = [
+                request
+                for request in self.running
+                if request.request_id in newly_admitted_prefill_ids
+            ]
+            scheduled_running = [
+                request
+                for request in self.running
+                if request.request_id in scheduled_running_ids
+            ]
+            deferred_running = [
+                request
+                for request in self.running
+                if request.request_id
+                not in newly_admitted_prefill_ids | scheduled_running_ids
+            ]
+            # Keep the active wave at the front of the persistent batch.
+            self.running = newly_admitted + scheduled_running + deferred_running
+
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
 
         assert token_budget >= 0
         assert input_budget >= 0
-        assert len(self.running) <= self.max_num_running_reqs
+        assert len(self.running) <= self.max_num_resident_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
             scheduled_running_reqs
         ) <= len(self.running)
+        assert len(num_scheduled_tokens) <= self.max_num_running_reqs
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
