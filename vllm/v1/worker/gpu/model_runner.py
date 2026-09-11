@@ -64,7 +64,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import PIN_MEMORY, STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
@@ -141,6 +141,7 @@ from vllm.v1.worker.gpu.sample.batch_shard import (
     all_to_all_logits,
     gather_sampler_output,
 )
+from vllm.v1.worker.gpu.sample.logits_processor import build_logitsprocs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -463,6 +464,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 enable_trace_replay=self.model_config.enable_trace_replay,
                 reasoning_config=self.vllm_config.reasoning_config,
                 return_sampling_mask=self.model_config.return_sampling_mask,
+                logitsprocs=build_logitsprocs(
+                    self.vllm_config,
+                    self.device,
+                    PIN_MEMORY,
+                    self.is_pooling_model,
+                    self.model_config.logits_processors or (),
+                ),
             )
             custom = self.model_state.custom_sampler(self.sampler)
 
@@ -1021,6 +1029,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.prompt_logprobs_worker is not None:
             self.prompt_logprobs_worker.remove_request(req_id)
         self.lora_state.remove_request(req_id)
+        if self.sampler is not None:
+            self.sampler.remove_request(req_idx)
         return True
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:

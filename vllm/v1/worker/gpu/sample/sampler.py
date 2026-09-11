@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.config.reasoning import ReasoningConfig
 from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.gpu.sample.logits_processor.state import LogitsProcessors
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
     flashinfer_sample,
@@ -43,12 +44,14 @@ class Sampler:
         enable_trace_replay: bool = False,
         reasoning_config: ReasoningConfig | None = None,
         return_sampling_mask: bool = False,
+        logitsprocs: LogitsProcessors | None = None,
     ):
         self.logprobs_mode = logprobs_mode
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
         self.use_fp64_gumbel = use_fp64_gumbel
 
         self.req_states = req_states
+        self.logitsprocs = logitsprocs or LogitsProcessors()
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
         self.penalties_state = PenaltiesState(req_states)
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
@@ -79,6 +82,12 @@ class Sampler:
 
         states = self.sampling_states
         temperature = states.temperature.np[req_idx]
+        use_logitsproc = any(
+            processor.should_apply(sampling_params) for processor in self.logitsprocs.all
+        )
+        if use_logitsproc:
+            for processor in self.logitsprocs.all:
+                processor.add_request(req_idx, sampling_params)
         self.needs_logits_processing[req_idx] = (
             self.logit_bias_state.use_logit_bias[req_idx]
             or self.penalties_state.use_penalty[req_idx]
@@ -91,7 +100,18 @@ class Sampler:
             or states.min_p.np[req_idx] != 0.0
             or states.top_k.np[req_idx] != states.vocab_size
             or states.top_p.np[req_idx] != 1.0
+            or use_logitsproc
         )
+
+    def remove_request(self, req_idx: int) -> None:
+        """Drop per-slot state for a finished request.
+
+        The model runner calls this on removal; V2 slots are recycled through
+        a free list, so this is the only lifecycle notification custom logits
+        processors receive.
+        """
+        for processor in self.logitsprocs.all:
+            processor.remove_request(req_idx)
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
@@ -223,6 +243,10 @@ class Sampler:
         # Copy logits to a new FP32 tensor.
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
+        # Let custom logits processors observe the latest batch state.
+        for processor in self.logitsprocs.all:
+            processor.update_state()
+
         # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
         self.logit_bias_state.apply_logit_bias(
             logits, expanded_idx_mapping, idx_mapping_np, pos
@@ -257,6 +281,11 @@ class Sampler:
             expanded_local_pos,
         )
 
+        # Apply custom processors that can change the greedy (argmax) outcome,
+        # before temperature scaling.
+        for processor in self.logitsprocs.non_argmax_invariant:
+            logits = processor.apply(logits, expanded_idx_mapping, idx_mapping_np)
+
         # Apply temperature in place.
         self.sampling_states.apply_temperature(
             logits, expanded_idx_mapping, idx_mapping_np
@@ -264,6 +293,11 @@ class Sampler:
 
         # Apply min_p in place.
         self.sampling_states.apply_min_p(logits, expanded_idx_mapping, idx_mapping_np)
+
+        # Apply custom processors that leave the argmax unchanged, after
+        # temperature and before top-k/top-p (mirroring the V1 pipeline).
+        for processor in self.logitsprocs.argmax_invariant:
+            logits = processor.apply(logits, expanded_idx_mapping, idx_mapping_np)
 
         if skip_top_k_top_p:
             return logits
