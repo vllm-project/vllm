@@ -15,6 +15,7 @@ use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 
 use crate::config::{ApiServerOptions, CorsConfig, LoraModulePath};
+use crate::grpc_services::GrpcServices;
 use crate::lora::{
     LoadLoraError, LoraDisabledError, LoraManager, LoraModelResolution, UnloadLoraError,
 };
@@ -55,6 +56,8 @@ pub struct AppState {
     /// Profiler mode that registers `/start_profile` and `/stop_profile`
     /// routes when present.
     pub profiler: Option<String>,
+    /// gRPC services mounted on the frontend's gRPC port.
+    grpc_services: GrpcServices,
 }
 
 impl AppState {
@@ -83,6 +86,7 @@ impl AppState {
             model_path: None,
             request_runtime: OnceLock::new(),
             profiler: None,
+            grpc_services: GrpcServices::empty(),
         }
     }
 
@@ -108,6 +112,17 @@ impl AppState {
     pub fn with_profiler(mut self, profiler: Option<String>) -> Self {
         self.profiler = profiler;
         self
+    }
+
+    /// Set the gRPC services mounted on the frontend's gRPC port.
+    pub fn with_grpc_services(mut self, grpc_services: GrpcServices) -> Self {
+        self.grpc_services = grpc_services;
+        self
+    }
+
+    /// The gRPC services mounted on the frontend's gRPC port.
+    pub fn grpc_services(&self) -> GrpcServices {
+        self.grpc_services
     }
 
     /// Attach the runtime server information snapshot used by `/server_info`.
