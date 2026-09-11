@@ -9,7 +9,7 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import (
@@ -156,6 +156,10 @@ class PCPManager:
                 )
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+        if parallel_config.decode_context_parallel_size > 1 and not is_sparse_mla:
+            # Dense MLA prefill sizes its DCP KV gather from each rank's own
+            # chunk rows, so the ranks' collectives diverge (#53573).
+            raise NotImplementedError("MRV2 PCP + DCP supports sparse MLA models only.")
         if (
             is_sparse_mla
             and parallel_config.decode_context_parallel_size == 1
@@ -553,18 +557,19 @@ class PCPManager:
         )
         seq_lens_cpu_upper_bound_np = np.zeros(num_local_reqs, dtype=np.int32)
         seq_lens_cpu_upper_bound_np[:] = local_start_pos_np + local_num_scheduled_tokens
+        dcp_local_seq_lens_cpu_upper_bound = None
         if self.dcp_world_size > 1:
-            # Every PCP rank sees the whole request's extent on each of its
-            # rows, so the sparse backends size DCP collectives identically.
-            pcp_global_seq_lens_np = (num_computed_tokens + num_scheduled_tokens)[
+            # The largest DCP shard of each row's whole request, identical on
+            # every PCP rank: the sparse backends pad their KV gather to it.
+            request_seq_lens = (num_computed_tokens + num_scheduled_tokens)[
                 local_to_global_batch_req_idx_np
-            ].astype(np.int32)
-            assert np.all(pcp_global_seq_lens_np >= seq_lens_cpu_upper_bound_np), (
-                "PCP+DCP whole-request extents must bound this rank's chunk "
-                f"extents, got global {pcp_global_seq_lens_np.tolist()} vs local "
-                f"{seq_lens_cpu_upper_bound_np.tolist()}"
+            ]
+            dcp_local_seq_lens_cpu_upper_bound = get_dcp_local_seq_lens(
+                torch.from_numpy(request_seq_lens.astype(np.int32)),
+                self.dcp_world_size,
+                0,
+                self.cp_interleave,
             )
-            seq_lens_cpu_upper_bound_np = pcp_global_seq_lens_np
 
         self._local_batch = replace(
             input_batch,
@@ -587,6 +592,7 @@ class PCPManager:
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_cpu_upper_bound_np),
             dcp_local_seq_lens=None,
+            dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
             num_computed_tokens_np=local_start_pos_np,
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
