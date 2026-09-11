@@ -8,6 +8,7 @@ import multiprocessing as mp
 import os
 import random
 import time
+import warnings
 from collections import Counter, deque
 from datetime import datetime
 from enum import Enum
@@ -65,6 +66,7 @@ class RequestArgs(NamedTuple):
     limit_min_tokens: int  # Use negative value for no limit
     limit_max_tokens: int  # Use negative value for no limit
     timeout_sec: int
+<<<<<<< HEAD
     send_conversation_id: bool
     headers: dict[str, str]
 
@@ -91,6 +93,9 @@ def build_request_headers(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
+=======
+    extra_body: dict  # Extra fields merged into every request payload
+>>>>>>> 0811bb1ca (bench: add --disable-thinking and --extra-request-body to benchmark_serving_multi_turn)
 
 
 class BenchmarkArgs(NamedTuple):
@@ -245,11 +250,17 @@ async def send_request(
     timeout_sec: int = 120,
     conversation_id: str | None = None,
     headers: dict[str, str] | None = None,
+    extra_body: dict | None = None,
 ) -> ServerResponse:
     payload = {
         "model": model,
         "messages": messages,
     }
+
+    # Merge extra_body fields first so explicit payload keys take precedence
+    if extra_body:
+        for key, value in extra_body.items():
+            payload.setdefault(key, value)
 
     if conversation_id is not None:
         payload["conversation_id"] = conversation_id
@@ -456,6 +467,7 @@ async def send_turn(
         req_args.timeout_sec,
         conversation_id=conv_id if req_args.send_conversation_id else None,
         headers=req_args.headers,
+        extra_body=req_args.extra_body,
     )
 
     if response.valid is False:
@@ -901,6 +913,29 @@ def get_client_config(
     if args.request_timeout_sec <= 0:
         raise ValueError("Request timeout must be a positive number")
 
+    # Build extra_body from --extra-request-body and --disable-thinking flags
+    extra_body: dict = {}
+    if args.extra_request_body:
+        try:
+            parsed_extra = json.loads(args.extra_request_body)
+            if not isinstance(parsed_extra, dict):
+                raise ValueError("The provided JSON must be an object.")
+            extra_body.update(parsed_extra)
+        except (json.JSONDecodeError, ValueError) as e:
+            raise ValueError(
+                f"--extra-request-body is not valid JSON object: {e}"
+            ) from e
+
+    if args.disable_thinking:
+        # Inject thinking-disable fields for reasoning models (Qwen3, DeepSeek-R1,
+        # gpt-oss). chat_template_kwargs is honoured by Qwen3 and similar models;
+        # reasoning_effort is honoured by gpt-oss / OpenAI-compatible endpoints.
+        # Unknown fields are silently dropped by vLLM, so the union is safe across
+        # model families.
+        extra_body.setdefault("chat_template_kwargs", {})
+        extra_body["chat_template_kwargs"]["enable_thinking"] = False
+        extra_body.setdefault("reasoning_effort", "low")
+
     # Arguments for API requests
     chat_url = f"{args.url}/v1/chat/completions"
     model_name = args.served_model_name if args.served_model_name else args.model
@@ -915,6 +950,7 @@ def get_client_config(
         timeout_sec=args.request_timeout_sec,
         send_conversation_id=args.send_conversation_id,
         headers=headers,
+        extra_body=extra_body,
     )
 
     return client_args, req_args
@@ -1125,6 +1161,21 @@ def process_statistics(
     logger.info(f"Processing {len(client_metrics)} samples...")
 
     raw_data = pd.DataFrame(client_metrics)
+
+    # Warn if output_num_tokens p50 is 0 — likely a reasoning model consuming the
+    # entire max_tokens budget in the thinking phase, leaving no tokens for content.
+    output_tokens = raw_data["output_num_tokens"].to_numpy()
+    if float(np.percentile(output_tokens, 50)) == 0:
+        warnings.warn(
+            "output_num_tokens p50 is 0. If you are benchmarking a reasoning model "
+            "(e.g. Qwen3, DeepSeek-R1, gpt-oss), the thinking phase may be consuming "
+            "the entire max_tokens budget, leaving no tokens for visible content. "
+            "Re-run with --disable-thinking (or pass "
+            "'--extra-request-body '{\"reasoning_effort\": \"low\"}'') to obtain "
+            "meaningful throughput numbers. See: "
+            "https://github.com/vllm-project/vllm/issues/42548",
+            stacklevel=2,
+        )
 
     if verbose:
         # Calculate the time between user turns in each conversation (in a new column)
@@ -1546,6 +1597,32 @@ async def main() -> None:
         help="Trust remote code when loading the tokenizer.",
     )
 
+    # -------------------------------------------------------------------------
+    # Reasoning-model controls
+    # -------------------------------------------------------------------------
+    parser.add_argument(
+        "--disable-thinking",
+        action="store_true",
+        default=False,
+        help="Disable the thinking/reasoning phase for models that support it "
+        "(e.g. Qwen3, DeepSeek-R1, gpt-oss). "
+        "Injects {'chat_template_kwargs': {'enable_thinking': false}, "
+        "'reasoning_effort': 'low'} into every request so that the visible "
+        "content is not silently starved of tokens by the thinking phase. "
+        "Use this flag when benchmarking reasoning models to obtain meaningful "
+        "throughput and latency numbers. See: "
+        "https://github.com/vllm-project/vllm/issues/42548",
+    )
+    parser.add_argument(
+        "--extra-request-body",
+        type=str,
+        default=None,
+        help="JSON string of additional fields merged into every request body. "
+        "Merged before explicit payload keys, so built-in fields (model, "
+        "messages, max_tokens, …) are never overridden. "
+        "Example: --extra-request-body '{\"reasoning_effort\": \"low\"}'",
+    )
+
     args = parser.parse_args()
 
     logger.info(args)
@@ -1557,6 +1634,17 @@ async def main() -> None:
 
     if args.verify_output:
         logger.info(f"{Color.PURPLE}Verify is enabled{Color.RESET}")
+
+    if args.disable_thinking:
+        logger.info(
+            f"{Color.PURPLE}Thinking disabled: injecting enable_thinking=false "
+            f"and reasoning_effort=low into every request{Color.RESET}"
+        )
+
+    if args.extra_request_body:
+        logger.info(
+            f"{Color.PURPLE}Extra request body: {args.extra_request_body}{Color.RESET}"
+        )
 
     # Calculate the amount of samples to filter (as warmup samples/measurements).
     try:
