@@ -25,6 +25,7 @@ from vllm.model_executor.kernels.linear import (
     MarlinNvFp4LinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     LINEAR_ALGOS,
@@ -222,6 +223,37 @@ def test_modelopt_mixed_precision_dispatches_every_linear_algo(algo):
     )
 
     assert isinstance(method, ModelOptLinearMethod), (algo, type(method).__name__)
+
+
+@pytest.mark.parametrize("algo", ["FP8_PB_WO", "FP8_BLOCK_SCALES"])
+def test_modelopt_mixed_precision_dispatches_block_fp8_moe(algo):
+    config = ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "quantized_layers": {
+                    "mtp.layers.48.mlp.experts": {
+                        "quant_algo": algo,
+                        "group_size": 128,
+                    }
+                },
+            }
+        }
+    )
+    layer = MagicMock(spec=RoutedExperts)
+    expected = object()
+
+    with patch(
+        "vllm.model_executor.layers.quantization.modelopt.Fp8MoEMethod",
+        return_value=expected,
+    ) as method_cls:
+        method = config.get_quant_method(layer, "mtp.layers.48.mlp.experts")
+
+    assert method is expected
+    fp8_config, called_layer = method_cls.call_args.args
+    assert called_layer is layer
+    assert fp8_config.weight_block_size == [128, 128]
+    assert fp8_config.activation_scheme == "dynamic"
 
 
 def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
@@ -650,7 +682,9 @@ def test_modelopt_linear_exposes_humming_layer_attrs(dist_init, monkeypatch):
     from vllm.config.quantization import QuantSpec
     from vllm.model_executor.layers.quantization import modelopt as mo
 
-    monkeypatch.setattr(mo, "select_linear_kernel", lambda spec, layer, rt: Mock())
+    monkeypatch.setattr(
+        mo, "select_linear_kernel", lambda spec, layer, rt, **kwargs: Mock()
+    )
     monkeypatch.setattr(mo, "expose_input_quant_key", lambda layer, kernel: None)
 
     def build(layer):
@@ -829,7 +863,8 @@ def test_modelopt_fp8_pb_wo_hides_output_padding(monkeypatch):
     )
 
     kernel = Mock()
-    monkeypatch.setattr(mo, "select_linear_kernel", lambda spec, layer, rt: kernel)
+    init_fp8_linear_kernel = Mock(return_value=kernel)
+    monkeypatch.setattr(mo, "init_fp8_linear_kernel", init_fp8_linear_kernel)
     monkeypatch.setattr(mo, "expose_input_quant_key", lambda layer, k: None)
 
     method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
@@ -860,6 +895,7 @@ def test_modelopt_fp8_pb_wo_hides_output_padding(monkeypatch):
     # loaded at logical size; scale is cdiv(2624, 128) = 21 block rows
     assert layer.weight.shape == (2624, 128)
     assert layer.weight_scale.shape == (21, 1, 1, 1)
+    assert init_fp8_linear_kernel.call_args.kwargs["weight_shape"] == (2688, 128)
 
     layer.weight.data.fill_(1)
     method.process_weights_after_loading(layer)
