@@ -3182,14 +3182,81 @@ def _rocm_sparse_attn_decode_ragged_triton(
 
 
 @triton.jit
+def _v4_plan_kernel(
+    indices_ptr,
+    indptr_ptr,
+    rank_ptr,
+    lens_ptr,
+    num_rows,
+    n_entries,
+    MAX_LEN: tl.constexpr,
+):
+    """Per query: rank each surviving entry, and count the survivors.
+
+    A single ASM call cannot mask entries the way the Triton decode does, so
+    the rejected ones are compacted out of the CSR instead. Rank is the
+    exclusive prefix count of survivors within the query, which is what the
+    gather turns into a destination row.
+
+    Entries are rejected when the Triton kernel would mask them (`slot < 0` or
+    `slot >= num_rows`) or when they sit past `indptr[T]`, which happens because
+    the ragged arrays are capacity-sized workspaces. Rejected entries get
+    rank -1.
+    """
+    t = tl.program_id(0)
+    start = tl.load(indptr_ptr + t)
+    end = tl.load(indptr_ptr + t + 1)
+
+    off = tl.arange(0, MAX_LEN)
+    e = start + off
+    live = (off < end - start) & (e < n_entries)
+    slot = tl.load(indices_ptr + e, mask=live, other=-1)
+    ok = live & (slot >= 0) & (slot < num_rows)
+
+    okin = ok.to(tl.int32)
+    rank = tl.cumsum(okin, axis=0) - okin
+    tl.store(rank_ptr + e, tl.where(ok, rank, -1), mask=live)
+    tl.store(lens_ptr + t, tl.sum(okin, axis=0))
+
+
+@triton.jit
+def _v4_combine_kernel(
+    lens_e_ptr,
+    lens_m_ptr,
+    combined_ptr,
+    base_m_ptr,
+    n_queries,
+    BLOCK: tl.constexpr,
+):
+    """Exclusive prefix sum over per-query lengths, in one program.
+
+    `combined` is both the CSR indptr the ASM kernel reads and the first row of
+    each query's slice; `base_m` is where that query's SWA rows start, which is
+    its own start plus the compressed rows it kept.
+    """
+    off = tl.arange(0, BLOCK)
+    m = off < n_queries
+    le = tl.load(lens_e_ptr + off, mask=m, other=0)
+    lm = tl.load(lens_m_ptr + off, mask=m, other=0)
+    tot = le + lm
+    excl = tl.cumsum(tot, axis=0) - tot
+    tl.store(combined_ptr + off, excl, mask=m)
+    tl.store(combined_ptr + n_queries, tl.sum(tot, axis=0))
+    tl.store(base_m_ptr + off, excl + le, mask=m)
+
+
+@triton.jit
 def _v4_gather_repack_kernel(
     out_nope_ptr,
     out_rope_ptr,
     cache_ptr,
     cache_stride0,
     indices_ptr,
-    dst_ptr,
+    rank_ptr,
+    base_ptr,
+    indptr_ptr,
     n_entries,
+    n_queries,
     block_size: tl.constexpr,
     NOPE: tl.constexpr,
     ROPE: tl.constexpr,
@@ -3205,17 +3272,27 @@ def _v4_gather_repack_kernel(
     token data. Nothing is requantized; the 448 FP8 bytes are copied verbatim
     and the 7 UE8M0 scale bytes are duplicated into ``[448, 462)``.
 
-    ``dst_ptr`` carries a precomputed destination row per entry, negative for
-    entries the Triton path would have masked out. Keeping that decision on the
-    host side of a device array means this kernel never reads a device value
-    from the host, so it is safe inside a captured CUDA graph.
+    The destination row is ``base[query] + rank[entry]``, with a negative rank
+    marking an entry the planner compacted out. The owning query comes from
+    bisecting ``indptr`` rather than from a host-built array, so nothing here
+    reads a device value on the host and the whole path is capture-safe.
     """
     e = tl.program_id(0)
     if e >= n_entries:
         return
-    dst = tl.load(dst_ptr + e)
-    if dst < 0:
+    rank = tl.load(rank_ptr + e)
+    if rank < 0:
         return
+
+    lo = 0
+    hi = n_queries
+    while lo < hi - 1:
+        mid = (lo + hi) // 2
+        if tl.load(indptr_ptr + mid) <= e:
+            lo = mid
+        else:
+            hi = mid
+    dst = tl.load(base_ptr + lo) + rank
 
     slot = tl.load(indices_ptr + e).to(tl.int64)
     blk = slot // block_size
@@ -3249,6 +3326,11 @@ def _v4_gather_repack_kernel(
 
 _V4_NOPE, _V4_ROPE, _V4_QK = 448, 64, 512
 _V4_NTILES, _V4_SOFF, _V4_FP8_MAX = 7, 448, 448.0
+# Per-query scan width for the planner. Must cover topk plus the SWA window for
+# a single query; the kernel masks beyond the real length.
+_V4_PLAN_BLOCK = 2048
+# Prefix-sum width for the cross-query combine, which runs in one program.
+_V4_COMBINE_BLOCK = 256
 # gfx950 ships the v4 nm decode kernel only for these gqa ratios at qSeqLen 1
 # (aiter asm_mla_v4.cu). TP1/DP8 keeps every head on the rank, so we land on a
 # shipped variant without ATOM's head padding.
@@ -3257,6 +3339,26 @@ _V4_SHIPPED_GQA = (16, 32, 64, 128)
 # 2^18 rows is 168 MB, roughly 7x a real C64 decode step, and keeps the
 # worst-case profiling shape off this path.
 _V4_MAX_UNIFIED_ROWS = 1 << 18
+
+_V4_IOTA: dict[torch.device, torch.Tensor] = {}
+
+
+def _v4_iota(n: int, device: torch.device) -> torch.Tensor:
+    """`arange(n)` from a grown-on-demand cache.
+
+    Both the qo_indptr and the page-index array this path hands aiter are plain
+    iotas that depend only on a length. Rebuilding them per layer per step is a
+    kernel launch each, which matters once everything else is fused.
+    """
+    buf = _V4_IOTA.get(device)
+    if buf is None or buf.numel() < n:
+        buf = torch.arange(
+            max(n, 1 << 12), dtype=torch.int32, device=device
+        )
+        _V4_IOTA[device] = buf
+    return buf[:n]
+
+
 # A served rank holds millions of token slots per cache; the profiling dummy run
 # holds 128. Anything below this is not a real decode.
 _V4_MIN_CACHE_ROWS = 1 << 14
@@ -3273,26 +3375,71 @@ def _v4_asm_decode_fn():
     return mla_decode_fwd_v4_nm
 
 
-def _v4_pack_query(q: torch.Tensor):
-    """BF16 q [T,H,512] -> (packed FP8 [T,H,512], BF16 RoPE [T,H,64]).
+@triton.jit
+def _v4_pack_query_kernel(
+    q_ptr,
+    out_fp8_ptr,
+    out_u8_ptr,
+    out_rope_ptr,
+    n_rows,
+    NOPE: tl.constexpr,
+    ROPE: tl.constexpr,
+    QK: tl.constexpr,
+    NT: tl.constexpr,
+    TILE: tl.constexpr,
+    SOFF: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+):
+    """Pack one BF16 query row into the packed FP8 NoPE + BF16 RoPE pair.
 
-    Quantizes the 448 NoPE dims per 64-element tile with the same UE8M0 rule the
-    cache writer uses, so Q and K are on the same scale grid.
+    Same UE8M0 rule the cache writers use, so Q and K land on one scale grid:
+    per 64-element tile the exponent is ceil(log2(absmax / 448)).
+
+    ``out_fp8_ptr`` and ``out_u8_ptr`` alias the same buffer through different
+    dtypes, which lets the FP8 values and the scale bytes be written without
+    casting a pointer inside the kernel.
     """
-    T, H, _ = q.shape
-    flat = q.reshape(T * H, _V4_QK)
-    nope = flat[:, :_V4_NOPE].float().view(T * H, _V4_NTILES, 64)
-    absmax = nope.abs().amax(dim=-1).clamp_min(1e-4)
-    exp = torch.ceil(torch.log2(absmax / _V4_FP8_MAX))
-    qn = (nope / torch.pow(2.0, exp).unsqueeze(-1)).clamp(-_V4_FP8_MAX, _V4_FP8_MAX)
+    r = tl.program_id(0)
+    if r >= n_rows:
+        return
+    row = q_ptr + r * QK
 
-    packed = torch.zeros((T * H, _V4_QK), dtype=torch.uint8, device=q.device)
-    packed[:, :_V4_NOPE] = (
-        qn.to(torch.float8_e4m3fn).view(T * H, _V4_NOPE).view(torch.uint8)
+    for i in tl.static_range(NT):
+        off = i * TILE + tl.arange(0, TILE)
+        x = tl.load(row + off).to(tl.float32)
+        amax = tl.maximum(tl.max(tl.abs(x), axis=0), 1e-4)
+        e = tl.ceil(tl.log2(amax / FP8_MAX))
+        qv = x * tl.exp2(-e)
+        qv = tl.minimum(tl.maximum(qv, -FP8_MAX), FP8_MAX)
+        tl.store(out_fp8_ptr + r * QK + off, qv.to(out_fp8_ptr.dtype.element_ty))
+        sb = (e.to(tl.int32) + 127).to(tl.uint8)
+        tl.store(out_u8_ptr + r * QK + SOFF + 2 * i, sb)
+        tl.store(out_u8_ptr + r * QK + SOFF + 2 * i + 1, sb)
+
+    rr = tl.arange(0, ROPE)
+    tl.store(out_rope_ptr + r * ROPE + rr, tl.load(row + NOPE + rr))
+
+
+def _v4_pack_query(q: torch.Tensor):
+    """BF16 q [T,H,512] -> (packed FP8 [T,H,512], BF16 RoPE [T,H,64])."""
+    T, H, _ = q.shape
+    rows = T * H
+    packed = torch.zeros((rows, _V4_QK), dtype=torch.uint8, device=q.device)
+    rope = torch.empty((rows, _V4_ROPE), dtype=torch.bfloat16, device=q.device)
+    _v4_pack_query_kernel[(rows,)](
+        q.reshape(rows, _V4_QK),
+        packed.view(torch.float8_e4m3fn),
+        packed,
+        rope,
+        rows,
+        NOPE=_V4_NOPE,
+        ROPE=_V4_ROPE,
+        QK=_V4_QK,
+        NT=_V4_NTILES,
+        TILE=64,
+        SOFF=_V4_SOFF,
+        FP8_MAX=_V4_FP8_MAX,
     )
-    sc = (exp.to(torch.int32) + 127).clamp(0, 255).to(torch.uint8)
-    packed[:, _V4_SOFF : _V4_SOFF + _V4_NTILES * 2] = sc.repeat_interleave(2, dim=1)
-    rope = flat[:, _V4_NOPE :].contiguous().to(torch.bfloat16)
     return (
         packed.view(torch.float8_e4m3fn).view(T, H, _V4_QK),
         rope.view(T, H, _V4_ROPE),
@@ -3342,15 +3489,12 @@ def _rocm_sparse_attn_decode_aiter_asm(
         in_profiling = False
     if in_profiling:
         return False
-    # The probe fired at T=256, which is the FULL cudagraph capture size, not a
-    # real decode step. Capture drives dummy metadata whose slots this path
-    # filters out as invalid, leaving every sequence with zero KV length, and
-    # the ASM kernel aborts on that with HSA_STATUS_ERROR_EXCEPTION rather than
-    # a memory fault. Capture therefore records Triton and replay keeps using
-    # it; the ASM path serves the eager decode steps. is_current_stream_capturing
-    # is a host-side query and does not synchronise.
-    if torch.cuda.is_current_stream_capturing():
-        return False
+    # NOTE: this path deliberately runs under CUDA graph capture. Capture is
+    # where it pays off: the host-side planning below is recorded into the
+    # graph, so replay pays no launch overhead for it. Everything here is
+    # therefore capture-safe, which means no device-to-host reads and no
+    # pageable H2D copies, including inside the aiter wrapper (see the explicit
+    # split_indptr at the call).
     # The memory-profiling dummy run keeps attn_metadata a dict and is not a
     # capture, so neither check above sees it. What gives it away is the cache:
     # profiling allocates 64 blocks, so the compressed cache holds 64*2 = 128
@@ -3381,44 +3525,40 @@ def _rocm_sparse_attn_decode_aiter_asm(
     # determine_available_memory. Bound it and let those steps use Triton.
     if total == 0 or total > _V4_MAX_UNIFIED_ROWS:
         return False
+    # The planner scans a whole query in one program, so a query longer than
+    # _V4_PLAN_BLOCK would be silently truncated, and the combine holds every
+    # query in one program. Decline rather than drop entries.
+    if T > _V4_COMBINE_BLOCK or n_extra > T * _V4_PLAN_BLOCK or (
+        n_main > T * _V4_PLAN_BLOCK
+    ):
+        return False
 
-    def plan(indices, indptr, n, cache):
-        """Per-entry destination row, negative where the Triton path masks out.
-
-        The ragged arrays are preallocated workspaces, so entries past
-        ``indptr[T]`` are stale, and live entries may still hold a slot the
-        Triton kernel would reject (`slot < 0 or slot >= num_rows`). A single
-        ASM call cannot mask per entry, so those are compacted out of the CSR
-        instead: lengths count only surviving entries.
-        """
-        num_rows = cache.shape[0] * cache.shape[1]
-        pos = torch.arange(n, device=dev, dtype=torch.int32)
-        owner = torch.searchsorted(indptr, pos, right=True) - 1
-        live = (pos < indptr[T]) & (owner >= 0)
-        ok = live & (indices >= 0) & (indices < num_rows)
-        # searchsorted returns T for entries past indptr[T], and those exist
-        # because the ragged arrays are capacity-sized workspaces. Their owner
-        # is only ever used to index T-element tensors (`lens_e` below), so it
-        # must be clamped on BOTH sides; clamping only the low side reads one
-        # past the end and faults the device. `ok` already excludes them from
-        # the result, so any in-range value works here.
-        owner = owner.clamp(0, max(T - 1, 0))
-        # Exclusive prefix count of survivors, so rank within a query is the
-        # difference against that query's own base.
-        cp = torch.zeros((n + 1,), dtype=torch.int32, device=dev)
-        torch.cumsum(ok.to(torch.int32), dim=0, out=cp[1:])
-        lens = cp[indptr[1:].long()] - cp[indptr[:-1].long()]
-        rank = cp[pos.long()] - cp[indptr[owner.long()].long()]
-        return ok, owner, rank, lens
-
-    ok_e, own_e, rank_e, lens_e = plan(extra_indices, extra_indptr, n_extra, extra_cache)
-    ok_m, own_m, rank_m, lens_m = plan(main_indices, main_indptr, n_main, main_cache)
-
-    combined = torch.zeros((T + 1,), dtype=torch.int32, device=dev)
-    torch.cumsum(lens_e + lens_m, dim=0, out=combined[1:])
-
-    dst_e = torch.where(ok_e, combined[own_e.long()] + rank_e, -1)
-    dst_m = torch.where(ok_m, combined[own_m.long()] + lens_e[own_m.long()] + rank_m, -1)
+    # Planning is two small kernels rather than ~30 torch ops. Doing it in torch
+    # measured 0.41 ms per call against 0.078 ms for the kernels it feeds, which
+    # is launch-bound and independent of batch size, and it is recorded into the
+    # CUDA graph so replay pays for every one of those launches too.
+    # Prefilled with -1, not left uninitialized: the planner only writes the
+    # entries that belong to some query, so the stale tail past indptr[T] would
+    # otherwise hand the gather a garbage rank and an out-of-range destination.
+    rank_e = torch.full((max(n_extra, 1),), -1, dtype=torch.int32, device=dev)
+    rank_m = torch.full((max(n_main, 1),), -1, dtype=torch.int32, device=dev)
+    lens_e = torch.empty((T,), dtype=torch.int32, device=dev)
+    lens_m = torch.empty((T,), dtype=torch.int32, device=dev)
+    _v4_plan_kernel[(T,)](
+        extra_indices, extra_indptr, rank_e, lens_e,
+        extra_cache.shape[0] * extra_cache.shape[1], n_extra,
+        MAX_LEN=_V4_PLAN_BLOCK,
+    )
+    _v4_plan_kernel[(T,)](
+        main_indices, main_indptr, rank_m, lens_m,
+        main_cache.shape[0] * main_cache.shape[1], n_main,
+        MAX_LEN=_V4_PLAN_BLOCK,
+    )
+    combined = torch.empty((T + 1,), dtype=torch.int32, device=dev)
+    base_m = torch.empty((T,), dtype=torch.int32, device=dev)
+    _v4_combine_kernel[(1,)](
+        lens_e, lens_m, combined, base_m, T, BLOCK=_V4_COMBINE_BLOCK
+    )
 
     nope = torch.empty((total, _V4_QK), dtype=torch.uint8, device=dev)
     rope = torch.empty((total, _V4_ROPE), dtype=torch.bfloat16, device=dev)
@@ -3429,14 +3569,18 @@ def _rocm_sparse_attn_decode_aiter_asm(
         NT=_V4_NTILES,
         SOFF=_V4_SOFF,
     )
-    # Compressed rows occupy the head of each query's slice, SWA the tail.
+    # Compressed rows occupy the head of each query's slice, SWA the tail, so
+    # the SWA base is the query's start plus however many compressed rows it
+    # kept. `combined` doubles as the per-query start and as the CSR indptr.
     _v4_gather_repack_kernel[(n_extra,)](
-        nope, rope, extra_cache, extra_cache.stride(0), extra_indices, dst_e,
-        n_extra, block_size=extra_cache.shape[1], **cfg
+        nope, rope, extra_cache, extra_cache.stride(0), extra_indices,
+        rank_e, combined, extra_indptr, n_extra, T,
+        block_size=extra_cache.shape[1], **cfg
     )
     _v4_gather_repack_kernel[(n_main,)](
-        nope, rope, main_cache, main_cache.stride(0), main_indices, dst_m,
-        n_main, block_size=main_cache.shape[1], **cfg
+        nope, rope, main_cache, main_cache.stride(0), main_indices,
+        rank_m, base_m, main_indptr, n_main, T,
+        block_size=main_cache.shape[1], **cfg
     )
 
     q_packed, q_rope = _v4_pack_query(q)
@@ -3446,9 +3590,9 @@ def _rocm_sparse_attn_decode_aiter_asm(
         nope.view(torch.float8_e4m3fn).view(total, 1, 1, _V4_QK),
         rope.view(total, 1, 1, _V4_ROPE),
         out,
-        torch.arange(T + 1, dtype=torch.int32, device=dev),
+        _v4_iota(T + 1, dev),
         combined,
-        torch.arange(total, dtype=torch.int32, device=dev),
+        _v4_iota(total, dev),
         1,
         sink=attn_sink.contiguous().to(torch.float32),
         # ATOM always passes an explicit split count. Leaving it to aiter's
@@ -3457,7 +3601,15 @@ def _rocm_sparse_attn_decode_aiter_asm(
         # at 61 layers and decode frequency that is heavy transient churn.
         # num_kv_splits=1 keeps the single-pass path, where the kernel writes
         # BF16 straight into `out` and no merge runs.
+        #
+        # split_indptr must be passed too, and built on the device. Omitting it
+        # sends the wrapper through get_meta_param, which finishes with a
+        # pageable host-to-device copy of the indptr it computed. That copy is
+        # illegal under stream capture and is what previously forced this path
+        # to decline captured steps. For a single pass the uniform indptr the
+        # wrapper would have built is [0, 1, ..., T].
         num_kv_splits=1,
+        split_indptr=_v4_iota(T + 1, dev),
     )
     return True
 
