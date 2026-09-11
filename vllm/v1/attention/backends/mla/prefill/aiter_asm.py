@@ -85,17 +85,15 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
 
         if not current_platform.is_rocm():
             return False
-        return device_capability.major == 9 and device_capability.minor == 5
+        from vllm.platforms.rocm import on_gfx950
+
+        return on_gfx950()
 
     @classmethod
     def is_available(cls) -> bool:
-        try:
-            from aiter import mla_prefill_ps_asm_fwd, mla_reduce_v1  # noqa: F401
+        from vllm._aiter_ops import is_aiter_found_and_supported
 
-            from vllm.platforms.rocm import on_gfx950
-        except Exception:  # noqa: BLE001
-            return False
-        return on_gfx950()
+        return is_aiter_found_and_supported()
 
     @classmethod
     def validate_configuration(
