@@ -418,7 +418,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # The constructor barrier above guarantees that every worker has
             # finished opening/mapping before this abort cleanup runs.  Thus
             # removing the name cannot make a peer create a second inode.
-            worker_mmap.cleanup(force_unlink=True)
+            worker_mmap.cleanup(unlink_shared_path=True)
             raise
 
     def _validate_canonical_refs(self, kv_caches: CanonicalKVCaches) -> None:

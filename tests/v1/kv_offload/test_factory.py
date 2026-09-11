@@ -294,7 +294,7 @@ def test_tiering_spec_aborts_region_when_worker_creation_fails(monkeypatch):
     with pytest.raises(RuntimeError, match="worker setup failed"):
         spec.create_worker(MagicMock())
 
-    region.cleanup.assert_called_once_with(force_unlink=True)
+    region.cleanup.assert_called_once_with(unlink_shared_path=True)
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])

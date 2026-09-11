@@ -75,8 +75,8 @@ class SharedOffloadRegion:
     to open the file with O_EXCL initializes it with ftruncate; the rest open
     the existing file and wait until it reaches the expected size. Each worker
     then mmap()s the full file. The caller selects the successful-path unlink
-    owner; coordinated startup-abort paths may explicitly force an unlink
-    after all openers have reached the mapping barrier.
+    owner; coordinated startup-abort paths may explicitly unlink the shared
+    path after all openers have reached the mapping barrier.
 
     File path: /dev/shm/vllm_offload_{engine_id}.mmap. The caller-selected
     unlink owner removes the path after the optional barrier; without a
@@ -347,12 +347,12 @@ class SharedOffloadRegion:
         )
         return memoryview(np_arr)
 
-    def cleanup(self, *, force_unlink: bool = False) -> None:
-        """Release this mapping and optionally abort the shared region.
+    def cleanup(self, *, unlink_shared_path: bool = False) -> None:
+        """Release this mapping and optionally unlink the shared path.
 
-        ``force_unlink`` is reserved for coordinated startup-abort paths.  A
-        normal worker cleanup must not remove the name before the scheduler
-        has attached to the region.
+        ``unlink_shared_path`` is reserved for coordinated startup-abort
+        paths. A normal worker cleanup must not remove the name before the
+        scheduler has attached to the region.
         """
         if self.is_pinned and self._base is not None:
             if current_platform.is_cuda_alike():
@@ -389,7 +389,9 @@ class SharedOffloadRegion:
             except Exception:
                 logger.warning("Failed to close fd %s", self.fd, exc_info=True)
             self.fd = None
-        if (self._is_unlink_owner or force_unlink) and getattr(self, "mmap_path", None):
+        if (self._is_unlink_owner or unlink_shared_path) and getattr(
+            self, "mmap_path", None
+        ):
             try:
                 os.unlink(self.mmap_path)
                 logger.info("Removed mmap file %s", self.mmap_path)
