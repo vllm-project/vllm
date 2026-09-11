@@ -850,6 +850,13 @@ class Scheduler(SchedulerInterface):
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
+            # Tracks whether any waiting request was skipped this step because
+            # it couldn't allocate KV blocks (as opposed to other skip reasons
+            # like blocked status or LoRA limits). `self.waiting` can end up
+            # empty after such a skip -- the request moves to
+            # `step_skipped_waiting` instead -- so `bool(self.waiting)` alone
+            # would miss it when updating `prefill_capacity_bound` below.
+            waiting_capacity_bound = False
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if input_budget <= draft_slots:
@@ -1177,6 +1184,7 @@ class Scheduler(SchedulerInterface):
                     # See: https://github.com/vllm-project/vllm/issues/31731
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
+                    waiting_capacity_bound = True
                     continue
 
                 # KVTransfer: the connector uses this info to determine
@@ -1294,7 +1302,7 @@ class Scheduler(SchedulerInterface):
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
             if not defer_prefills:
-                self.prefill_capacity_bound = bool(self.waiting)
+                self.prefill_capacity_bound = bool(self.waiting) or waiting_capacity_bound
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())

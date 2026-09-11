@@ -544,6 +544,33 @@ def test_throttle_capacity_bound_guard_admits():
     assert "b" in output.num_scheduled_tokens
 
 
+def test_throttle_capacity_bound_guard_admits_after_kv_blocked_skip():
+    """A request skipped for lacking KV blocks (not token budget) is moved out
+    of `self.waiting` into `skipped_waiting`, which can leave `self.waiting`
+    empty. `prefill_capacity_bound` must still record the step as
+    capacity-bound in that case, or the saturation guard would incorrectly
+    defer this request again on the next throttled step even after blocks
+    free up."""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=8,
+        max_num_seqs=2,
+        num_blocks=2,
+        block_size=4,
+        enable_chunked_prefill=True,
+    )
+    (heavy,) = create_requests(
+        num_requests=1, num_tokens=9, block_size=4, req_ids=["heavy"]
+    )
+    scheduler.add_request(heavy)
+
+    # Release step: `heavy` cannot allocate KV blocks and is skipped, draining
+    # the (now empty) `self.waiting` queue -- not because of token budget.
+    output = scheduler.schedule()
+    assert "heavy" not in output.num_scheduled_tokens
+    assert not scheduler.waiting
+    assert scheduler.prefill_capacity_bound
+
+
 def test_no_mm_input_chunking():
     # Disable multimodal input chunking.
     scheduler = create_scheduler(
@@ -5021,6 +5048,30 @@ def test_fcfs_mixed_skipped_waiting_types_keep_order():
     assert [req.req_id for req in second_output.scheduled_new_reqs] == expected_order
     assert [req.request_id for req in scheduler.running] == expected_order
     scheduler._update_waiting_for_remote_kv.assert_called_once_with(req_remote)
+
+
+def test_waiting_kv_blocked_request_does_not_block_lighter_request():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=8,
+        max_num_seqs=2,
+        num_blocks=2,
+        block_size=4,
+        enable_chunked_prefill=True,
+    )
+
+    heavy = create_requests(
+        num_requests=1, num_tokens=9, block_size=4, req_ids=["heavy"]
+    )[0]
+    light = create_requests(
+        num_requests=1, num_tokens=4, block_size=4, req_ids=["light"]
+    )[0]
+
+    scheduler.add_request(heavy)
+    scheduler.add_request(light)
+
+    output = scheduler.schedule()
+    scheduled_ids = [req.req_id for req in output.scheduled_new_reqs]
+    assert scheduled_ids == ["light"]
 
 
 def test_abort_request_waiting_for_remote_kvs():
