@@ -57,13 +57,25 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.model, "Qwen/Qwen2.5-0.5B-Instruct");
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 8080);
-    assert_eq!(config.max_model_len, 32768);
+    assert_eq!(config.max_model_len, Some(32768));
     assert_eq!(config.served_model_name, ["qwen"]);
     assert_eq!(config.tool_call_parser, ParserSelection::Auto);
     assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
     assert_eq!(config.max_logprobs, Some(-1));
     assert!(config.tls.is_none());
+}
+
+#[test]
+fn render_args_allow_omitted_max_model_len() {
+    let cli = Cli::try_parse_from(["vllm-rs", "render", "Qwen/Qwen2.5-0.5B-Instruct"]).unwrap();
+
+    let Command::Render(args) = cli.command else {
+        panic!("expected render args");
+    };
+    let config = args.into_config();
+
+    assert_eq!(config.max_model_len, None);
 }
 
 #[test]
@@ -399,6 +411,21 @@ fn serve_args_resolve_auto_reasoning_parser_for_managed_engine() {
         ]
     "#]]
     .assert_debug_eq(&config.python_args);
+}
+
+#[test]
+fn serve_args_resolve_unified_reasoning_parser_for_managed_engine() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "moonshotai/Kimi-K3"]).unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    expect![[r#"
+        [
+            "--reasoning-parser",
+            "kimi_k3",
+        ]
+    "#]]
+    .assert_debug_eq(&args.to_managed_engine_config(5555).python_args);
 }
 
 #[test]
@@ -876,7 +903,7 @@ fn serve_args_reject_unknown_renderer_value() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, harmony, inkling, kimi_k3)
+        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32, deepseek_v4, deepseek_v41, harmony, inkling, kimi_k3)
 
         For more information, try '--help'.
     "#]]

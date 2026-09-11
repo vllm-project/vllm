@@ -24,7 +24,10 @@ from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE, is
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import RCP_LN2, cdiv, next_power_of_2
 
-from .fused_recurrent import fused_recurrent_gated_delta_rule_fwd_kernel
+from .fused_recurrent import (
+    fused_recurrent_gated_delta_rule_fwd_kernel,
+    token_stride,
+)
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
@@ -70,7 +73,7 @@ def fused_recurrent_kda_fwd(
         g_bias = g_bias.reshape(-1).contiguous()
 
     if out is None:
-        o = torch.empty_like(k)
+        o = torch.empty(k.shape, dtype=k.dtype, device=k.device)
     else:
         # Caller-provided output buffer; must be layout-compatible with the
         # tensor the kernel indexes (contiguous, same shape/dtype as k).
@@ -119,6 +122,10 @@ def fused_recurrent_kda_fwd(
         stride_final_state_token=stride_final_state_token,
         stride_indices_seq=stride_indices_seq,
         stride_indices_tok=stride_indices_tok,
+        stride_q_t=token_stride(q),
+        stride_k_t=token_stride(k),
+        stride_v_t=token_stride(v),
+        stride_beta_t=token_stride(beta),
         IS_BETA_HEADWISE=beta.ndim == v.ndim,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
@@ -165,12 +172,15 @@ def fused_recurrent_kda(
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
+    # q/k/v/beta are consumed in place with an explicit token stride, so
+    # column slices of the fused projection buffer need no copy; layouts the
+    # kernel cannot address fail loudly in `token_stride`.
     o, final_state = fused_recurrent_kda_fwd(
-        q=q.contiguous(),
-        k=k.contiguous(),
-        v=v.contiguous(),
+        q=q,
+        k=k,
+        v=v,
         g=g.contiguous(),
-        beta=beta.contiguous(),
+        beta=beta,
         scale=scale,
         initial_state=initial_state,
         inplace_final_state=inplace_final_state,

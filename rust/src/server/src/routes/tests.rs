@@ -692,11 +692,24 @@ fn test_render_app_with_parser_selections(
     tool_call_parser: ParserSelection,
     reasoning_parser: ParserSelection,
 ) -> axum::Router {
+    test_render_app_with(Some(128), tool_call_parser, reasoning_parser)
+}
+
+fn test_render_app_with_max_model_len(max_model_len: Option<u32>) -> axum::Router {
+    test_render_app_with(max_model_len, ParserSelection::Auto, ParserSelection::Auto)
+}
+
+fn test_render_app_with(
+    max_model_len: Option<u32>,
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+) -> axum::Router {
     let backend = Arc::new(FakeChatBackend::new());
     build_render_router(Arc::new(RenderState {
         model: "backend-model".to_string(),
         served_model_names: vec!["render-model".to_string()],
-        text: TextRequestProcessor::new(backend.clone(), 128),
+        max_model_len,
+        text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
         chat: ChatRequestProcessor::render_only(backend)
             .with_parser_selections(tool_call_parser, reasoning_parser),
     }))
@@ -1412,6 +1425,26 @@ async fn render_completion_returns_generate_request_with_body_request_id() {
     assert!(json[0].get("stream_options").is_none());
     assert!(json[0].get("prompt_token_ids").is_none());
     assert!(json[0].get("mm_features").is_none());
+}
+
+#[tokio::test]
+async fn render_list_models_reports_configured_max_model_len() {
+    for (configured, expected) in [(Some(128), json!(128)), (None, serde_json::Value::Null)] {
+        let mut app = test_render_app_with_max_model_len(configured);
+        let response = app
+            .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        let card = json["data"][0].as_object().expect("card object");
+        assert!(card.contains_key("max_model_len"));
+        assert_eq!(
+            card["max_model_len"], expected,
+            "configured: {configured:?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2703,7 +2736,7 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
 
             let features = request.mm_features.as_ref().expect("multimodal features");
             assert_eq!(features.len(), 1);
-            assert_eq!(features[0].modality, "image");
+            assert_eq!(features[0].modality.as_str(), "image");
             assert_eq!(features[0].identifier, "image-1");
             assert!(features[0].mm_position.length > 0);
             assert!(features[0].mm_position.is_embed.is_some());
@@ -2766,7 +2799,7 @@ async fn non_stream_chat_rejects_when_image_count_exceeds_limit_mm_per_prompt() 
         default_stream_output_specs(),
         Arc::new(FakeChatBackend::with_multimodal_model_info(
             qwen_multimodal_model_info_with_limits(std::collections::HashMap::from([(
-                vllm_chat::multimodal::MmLimitModality::Image,
+                vllm_chat::multimodal::MmModality::Image,
                 vllm_chat::multimodal::MmLimitSpec::Count(1),
             )])),
         )),
@@ -3079,6 +3112,64 @@ async fn http_metrics_group_error_statuses() {
             Some("method=\"POST\",status=\"4xx\",handler=\"/v1/chat/completions\""),
         ),
         1.0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn http_metrics_collapse_unknown_methods() {
+    let mut app = test_app().await;
+    let before = METRICS.render().unwrap();
+
+    for (method, path) in [
+        ("XVULNCARD000001", "/tokenize"),
+        ("XVULNCARD000002", "/tokenize"),
+        ("XVULNCARD000003", "/detokenize"),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    let after = METRICS.render().unwrap();
+    assert!(
+        !after.contains("XVULNCARD"),
+        "raw method tokens must not appear in metrics: {after}"
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"other\",status=\"4xx\",handler=\"/tokenize\""),
+        ),
+        2.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_requests_total",
+            Some("method=\"other\",status=\"4xx\",handler=\"/detokenize\""),
+        ),
+        1.0
+    );
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "http_request_duration_seconds_count",
+            Some("method=\"other\",handler=\"/tokenize\""),
+        ),
+        2.0
     );
 }
 
