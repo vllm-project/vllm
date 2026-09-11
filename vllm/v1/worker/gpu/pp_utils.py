@@ -144,6 +144,7 @@ class PPHandler:
         if slot.draft_tokens is not None and draft_tokens_to_update is not None:
             draft_tokens = slot.draft_tokens
             draft_idx_mapping = slot.idx_mapping
+            # A freed index may already belong to a new request.
             if exclude_mask.any():
                 keep = ~exclude_mask
                 keep_t = torch.as_tensor(keep, device=self.device)

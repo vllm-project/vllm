@@ -60,6 +60,7 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
+    spec_decode_needs_target_embed,
 )
 from vllm.models.kimi_k3.amd.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.amd.latent_moe_runner import ROCmLatentMoERunner
@@ -664,6 +665,8 @@ class KimiDecoderLayer(nn.Module):
 
 
 class KimiLinearModel(nn.Module, EagleModelMixin):
+    supports_aux_hidden_states_over_pp = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -672,7 +675,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 
         self.vocab_size = config.vocab_size
 
-        if get_pp_group().is_first_rank:
+        if get_pp_group().is_first_rank or spec_decode_needs_target_embed(vllm_config):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -777,9 +780,15 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state(
-            [], self.start_layer, hidden_states, residual
-        )
+        remote_aux: list[torch.Tensor] = []
+        if get_pp_group().is_last_rank and self.aux_hidden_state_layers:
+            remote_aux = self.collect_remote_aux_hidden_states(intermediate_tensors)
+
+        aux_hidden_states: list[torch.Tensor] = []
+        if get_pp_group().is_first_rank:
+            self._maybe_add_hidden_state(
+                aux_hidden_states, self.start_layer, hidden_states, residual
+            )
 
         if self.config.attn_res_block_size is None:
             for layer_idx, layer in enumerate(
@@ -796,14 +805,18 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 )
 
             if not get_pp_group().is_last_rank:
-                return IntermediateTensors(
-                    {"hidden_states": hidden_states, "residual": residual}
-                )
+                tensors = {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                    **self.pack_local_aux_hidden_states(aux_hidden_states),
+                }
+                return IntermediateTensors(tensors)
 
             # NOTE: the final norm is applied in compute_logits instead of here,
             # so the MTP draft model receives the pre-norm hidden states.
             if residual is not None:
                 hidden_states = hidden_states + residual
+            aux_hidden_states = remote_aux + aux_hidden_states
             if aux_hidden_states:
                 return hidden_states, aux_hidden_states
             return hidden_states
@@ -833,9 +846,12 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 )
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
+            tensors = {
+                "hidden_states": hidden_states,
+                "residual": residual,
+                **self.pack_local_aux_hidden_states(aux_hidden_states),
+            }
+            return IntermediateTensors(tensors)
 
         hidden_states = _apply_attn_res(
             hidden_states,
@@ -846,6 +862,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         )
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
+        aux_hidden_states = remote_aux + aux_hidden_states
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states

@@ -36,6 +36,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
+    get_world_group,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
@@ -1004,6 +1005,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             self.lora_config, self
                         ),
                     )
+                    draft_over_pp = self.speculative_config is not None and self.use_pp
+                    if draft_over_pp:
+                        get_world_group().barrier()
                     if self.speculator is not None:
                         with use_workspace_lane(self._draft_workspace_lane):
                             self.speculator.capture()
@@ -1014,6 +1018,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             ):
                                 self._dummy_run(**batch)
                         self.adaptive_verification.set_initial_cost_curves(timings)
+                    if draft_over_pp:
+                        get_world_group().barrier()
 
             end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
