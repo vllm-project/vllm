@@ -563,9 +563,11 @@ class RocmAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        # ROCM_ATTN still uses the old KV layout -> [2, blocks, blocksize, heads,
-        # head_size], with K/V on dim 0, so unbind(0)
-        key_cache, value_cache = kv_cache.unbind(0)
+        # kv_cache is logical [num_blocks, 2, block_size, num_kv_heads * head_size]
+        # (see forward); the AITER shuffle writer takes one (B, N, H, hs) per side.
+        key_cache, value_cache = kv_cache.unflatten(
+            -1, (self.num_kv_heads, self.head_size)
+        ).unbind(1)
         use_shuffle_layout = self._use_interleaved_v_cache
         rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
             qkv=qkv,

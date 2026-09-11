@@ -479,16 +479,13 @@ def test_qk_norm_rope_kvcache_fusion(
     custom_op: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    layouts = attn_backend.get_class().supported_kv_cache_layouts()
     if (
-        attn_backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
-        and use_shuffle_kv_layout == "1"
+        attn_backend == AttentionBackendEnum.ROCM_ATTN
+        and layouts is not None
+        and kv_layout not in layouts
     ):
-        pytest.skip("ROCM_AITER_UNIFIED_ATTN is NHD-only; shuffle env is ignored")
-    if attn_backend == AttentionBackendEnum.ROCM_ATTN and use_shuffle_kv_layout == "1":
-        pytest.skip(
-            "ROCM_ATTN ignores VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT; V interleaving "
-            "is keyed on the fusion's _use_interleaved_v_cache flag"
-        )
+        pytest.skip(f"ROCM_ATTN kernels do not consume the {kv_layout.name} layout")
     _run_qk_norm_rope_kvcache_fusion_test(
         attn_backend=attn_backend,
         enable_aiter_triton_rope=enable_aiter_triton_rope,
