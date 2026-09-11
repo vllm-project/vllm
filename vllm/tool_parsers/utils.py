@@ -330,13 +330,11 @@ def _get_tool_schema_from_tool(tool: Tool) -> dict:
 
 
 def _get_tool_schema_defs(
-    tools: list[Tool],
+    tool_schemas: list[dict[str, Any]],
 ) -> dict:
     all_defs: dict[str, dict[str, Any]] = {}
-    for tool in tools:
-        _, params = _extract_tool_info(tool)
-        if params is None:
-            continue
+    for tool_schema in tool_schemas:
+        params = tool_schema["properties"]["parameters"]
         defs = params.pop("$defs", {})
         for def_name, def_schema in defs.items():
             if def_name in all_defs and all_defs[def_name] != def_schema:
@@ -352,18 +350,14 @@ def _get_json_schema_from_tools(
     tools: list[Tool],
 ) -> dict:
     fn_tool_schemas: list[dict[str, Any]] = []
-    fn_tools: list[Tool] = []
     for tool in tools:
         if isinstance(tool, (FunctionTool, NamespaceTool)):
             fn_tool_schemas.extend(
                 _get_tool_schema_from_name_and_params(name, params)
                 for name, params in iter_response_function_tool_info(tool)
             )
-            if isinstance(tool, FunctionTool):
-                fn_tools.append(tool)
         elif _is_function_tool(tool):
             fn_tool_schemas.append(_get_tool_schema_from_tool(tool))
-            fn_tools.append(tool)
     json_schema = {
         "type": "array",
         "minItems": 1,
@@ -372,7 +366,7 @@ def _get_json_schema_from_tools(
             "anyOf": fn_tool_schemas,
         },
     }
-    json_schema_defs = _get_tool_schema_defs(fn_tools)
+    json_schema_defs = _get_tool_schema_defs(fn_tool_schemas)
     if json_schema_defs:
         json_schema["$defs"] = json_schema_defs
     return json_schema

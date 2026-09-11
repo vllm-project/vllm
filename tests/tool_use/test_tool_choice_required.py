@@ -5,7 +5,7 @@ from copy import deepcopy
 
 import pytest
 import regex as re
-from openai.types.responses import FunctionTool, WebSearchTool
+from openai.types.responses import FunctionTool, NamespaceTool, WebSearchTool
 from pydantic import TypeAdapter
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -13,6 +13,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
 from vllm.tool_parsers.utils import (
+    Tool,
     find_tool_properties,
     get_json_schema_from_tools,
 )
@@ -67,13 +68,8 @@ EXAMPLE_TOOLS = [
 ]
 
 
-def _compile_and_check(
-    tools: list[ChatCompletionToolsParam], sample_output, should_match: bool
-):
-    # self = MagicMock(tool_choice="required", tools=tools)
-    # schema = ChatCompletionRequest._get_json_schema_from_tool(self)
+def _compile_and_check(tools: list[Tool], sample_output, should_match: bool):
     schema = get_json_schema_from_tools(tools=tools, tool_choice="required")
-    assert isinstance(schema, dict)
 
     # use build_regex_from_schema used in JSONLogitsProcessor to create Guide
     from outlines_core.json_schema import build_regex_from_schema
@@ -389,8 +385,40 @@ class TestNonFunctionToolsSkipped:
 
     def test_get_json_schema_with_mixed_tools(self):
         tools = [WEB_SEARCH_TOOL, FUNCTION_TOOL]
-        schema = get_json_schema_from_tools(tools=tools, tool_choice="required")
-        assert isinstance(schema, dict)
-        any_of = schema["items"]["anyOf"]
-        assert len(any_of) == 1
-        assert any_of[0]["properties"]["name"]["enum"] == ["get_weather"]
+        _compile_and_check(
+            tools,
+            [{"name": "get_weather", "parameters": {"city": "Vienna"}}],
+            True,
+        )
+        _compile_and_check(
+            tools,
+            [{"name": "web_search", "parameters": {"city": "Vienna"}}],
+            False,
+        )
+
+
+@pytest.mark.parametrize("city, should_match", [("Vienna", True), (42, False)])
+def test_required_namespace_tool_resolves_parameter_definitions(city, should_match):
+    tool = NamespaceTool(
+        type="namespace",
+        name="weather",
+        description="Weather tools",
+        tools=[
+            {
+                "type": "function",
+                "name": "forecast",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"$ref": "#/$defs/City"}},
+                    "required": ["city"],
+                    "additionalProperties": False,
+                    "$defs": {"City": {"type": "string"}},
+                },
+            }
+        ],
+    )
+    _compile_and_check(
+        [tool],
+        [{"name": "weather__forecast", "parameters": {"city": city}}],
+        should_match,
+    )

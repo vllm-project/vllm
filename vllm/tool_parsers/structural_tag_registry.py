@@ -4,7 +4,7 @@
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, TypeAlias
 
-from openai.types.responses import FunctionTool
+from openai.types.responses import FunctionTool, NamespaceTool
 from openai.types.responses.response import ToolChoice as ResponsesToolChoice
 from openai.types.responses.tool import Tool as ResponsesTool
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
@@ -33,6 +33,10 @@ from xgrammar.structural_tag import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
+)
+from vllm.tool_parsers.utils import (
+    flat_namespace_tool_name,
+    iter_response_function_tool_dicts,
 )
 
 ToolChoice: TypeAlias = (
@@ -101,6 +105,10 @@ def _any_tool_strict(
             return True
         if isinstance(tool, ChatCompletionToolsParam) and tool.function.strict is True:
             return True
+        if isinstance(tool, NamespaceTool) and any(
+            child.type == "function" and child.strict is True for child in tool.tools
+        ):
+            return True
     return False
 
 
@@ -119,7 +127,15 @@ def get_model_structural_tag(
     if tool_choice == "auto" and not _any_tool_strict(tools):
         return None
 
-    dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
+    dumped_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        if isinstance(tool, NamespaceTool):
+            dumped_tools.extend(
+                {"type": "function", "function": function}
+                for function in iter_response_function_tool_dicts([tool])
+            )
+        else:
+            dumped_tools.append(_dump_tool_for_xgrammar(tool))
     dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)
 
     if model in _VLLM_STRUCTURAL_TAG_REGISTRY:
@@ -188,10 +204,9 @@ def _dump_tool_choice_for_xgrammar(
         return tool_choice.model_dump(mode="json", exclude_none=True)
 
     if isinstance(tool_choice, ToolChoiceFunction):
-        return {
-            "type": "function",
-            "function": {"name": tool_choice.name},
-        }
+        return _dump_allowed_tool_ref_for_xgrammar(
+            tool_choice.model_dump(mode="json", exclude_none=True)
+        )
 
     if isinstance(tool_choice, ToolChoiceAllowed):
         return {
@@ -214,9 +229,13 @@ def _dump_allowed_tool_ref_for_xgrammar(tool_ref: AllowedToolRef) -> AllowedTool
         and "function" not in tool_ref
         and "name" in tool_ref
     ):
+        name = tool_ref["name"]
+        namespace = tool_ref.get("namespace")
+        if isinstance(namespace, str) and isinstance(name, str):
+            name = flat_namespace_tool_name(namespace, name)
         return {
             "type": "function",
-            "function": {"name": tool_ref["name"]},
+            "function": {"name": name},
         }
     return tool_ref
 
