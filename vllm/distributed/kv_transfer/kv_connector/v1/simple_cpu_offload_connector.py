@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     SupportsHMA,
 )
 from vllm.logger import init_logger
@@ -228,10 +229,22 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             return self.worker_handler.get_finished(finished_req_ids)
         return None, None
 
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        if self.worker_handler is not None:
+            return self.worker_handler.get_transfer_results(finished_req_ids)
+        return KVConnectorTransferResults()
+
     def build_connector_worker_meta(self):
         if self.worker_handler is not None:
             return self.worker_handler.build_connector_worker_meta()
         return None
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        if self.worker_handler is not None:
+            return self.worker_handler.get_block_ids_with_load_errors()
+        return set()
 
     # --- Scheduler-side methods ---
 

@@ -161,6 +161,9 @@ class SimpleCPUOffloadScheduler:
         assert self.block_size % self.hash_block_size == 0
         # Derive a CPU KVCacheConfig from the GPU config and build a coordinator
         assert kv_cache_config is not None
+        self._request_level_load_failures = (
+            disk_capacity_bytes > 0 and len(kv_cache_config.kv_cache_groups) > 1
+        )
         self.cpu_kv_cache_config = self._derive_cpu_config(
             kv_cache_config, offload_capacity
         )
@@ -253,6 +256,7 @@ class SimpleCPUOffloadScheduler:
         # Events must be reported by all world_size workers before considered complete.
         self._expected_worker_count = vllm_config.parallel_config.world_size
         self._store_event_pending_counts: dict[int, int] = {}
+        self._failed_store_events: set[int] = set()
 
     @staticmethod
     def _derive_cpu_config(
@@ -519,6 +523,7 @@ class SimpleCPUOffloadScheduler:
         load_gpu: list[int] = []
         load_cpu: list[int] = []
         load_req_ids: list[str] = []
+        load_block_req_ids: list[str] = []
         for req_id, load_state in self._reqs_to_load.items():
             if load_state.load_event is not None:
                 continue
@@ -526,6 +531,10 @@ class SimpleCPUOffloadScheduler:
             load_gpu.extend(load_state.transfer_meta.gpu_block_ids)
             load_cpu.extend(load_state.transfer_meta.cpu_block_ids)
             load_req_ids.append(req_id)
+            if self._request_level_load_failures:
+                load_block_req_ids.extend(
+                    [req_id] * len(load_state.transfer_meta.gpu_block_ids)
+                )
         if load_req_ids:
             load_event = self._load_event_counter
             self._load_event_counter += 1
@@ -537,6 +546,7 @@ class SimpleCPUOffloadScheduler:
             load_event=load_event,
             load_gpu_blocks=load_gpu,
             load_cpu_blocks=load_cpu,
+            load_req_ids=load_block_req_ids,
             load_event_to_reqs={
                 event_idx: list(req_ids)
                 for event_idx, req_ids in self._load_event_to_reqs.items()
@@ -955,6 +965,19 @@ class SimpleCPUOffloadScheduler:
         per-event worker counts. We accumulate across steps and process
         a store event only when all workers have reported completion.
         """
+        # Evict failed sources before releasing load refs. Errors may arrive
+        # from one rank before all ranks report finished_recving.
+        invalid_blocks = connector_output.invalid_block_ids
+        failed_requests = connector_output.failed_recving
+        if invalid_blocks or failed_requests:
+            for states in (self._reqs_to_load, self._abandoned_reqs_to_load):
+                for req_id, state in states.items():
+                    transfer = state.transfer_meta
+                    if req_id in failed_requests or invalid_blocks.intersection(
+                        transfer.gpu_block_ids
+                    ):
+                        self.cpu_block_pool.evict_blocks(set(transfer.cpu_block_ids))
+
         # --- Load completions ---
         for req_id in list(connector_output.finished_recving or []):
             self._cleanup_load_request(req_id)
@@ -963,6 +986,7 @@ class SimpleCPUOffloadScheduler:
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, SimpleCPUOffloadWorkerMetadata):
             return
+        self._failed_store_events.update(meta.failed_store_events)
         for event_idx, count in meta.completed_store_events.items():
             total = self._store_event_pending_counts.get(event_idx, 0) + count
             if total >= self._expected_worker_count:
@@ -973,6 +997,8 @@ class SimpleCPUOffloadScheduler:
 
     def _process_store_event(self, event_idx: int) -> None:
         """Process a fully-completed store event."""
+        failed = event_idx in self._failed_store_events
+        self._failed_store_events.discard(event_idx)
         transfer = self._store_event_to_blocks.pop(event_idx, None)
         if transfer is None:
             transfer = self._abandoned_store_event_to_blocks.pop(event_idx, None)
@@ -984,14 +1010,18 @@ class SimpleCPUOffloadScheduler:
         if not self._lazy_mode:
             self._in_flight_store_gpu_blocks.difference_update(transfer.gpu_block_ids)
 
-        self._process_store_completion(
-            transfer.gpu_block_ids,
-            transfer.cpu_block_ids,
-            transfer.block_meta,
-        )
+        if failed:
+            self._release_transfer_refs(transfer)
+        else:
+            self._process_store_completion(
+                transfer.gpu_block_ids,
+                transfer.cpu_block_ids,
+                transfer.block_meta,
+            )
         logger.debug(
-            "Store event %d completed: cached %d blocks to CPU",
+            "Store event %d completed: %s %d offload blocks",
             event_idx,
+            "discarded" if failed else "cached",
             len(transfer.cpu_block_ids),
         )
 

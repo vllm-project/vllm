@@ -16,15 +16,17 @@ INVALID_JOB_ID = -1
 class SimpleCPUOffloadMetadata(KVConnectorMetadata):
     """Metadata passed from scheduler to worker for CPU offload operations.
 
-    The worker receives flat block lists keyed by a monotonic event_idx.
-    Job->req_id translation is handled by the scheduler-side manager
-    (via inverse maps), so the worker never knows about request identities.
+    The worker receives flat block lists keyed by a monotonic event_idx,
+    with request identities for completion and load failure reporting.
     """
 
     # Load event per step. INVALID_JOB_ID means no blocks to load this step.
     load_event: int = INVALID_JOB_ID
     load_gpu_blocks: list[int] = field(default_factory=list)
     load_cpu_blocks: list[int] = field(default_factory=list)
+    # Per-transfer request IDs for multi-group disk loads, where block IDs
+    # alone cannot identify failed requests. Empty for block-level reporting.
+    load_req_ids: list[str] = field(default_factory=list)
     # Reverse map: load_event->req_ids, for tracking requests with finished load events
     load_event_to_reqs: dict[int, list[str]] = field(default_factory=dict)
 
@@ -41,13 +43,15 @@ class SimpleCPUOffloadMetadata(KVConnectorMetadata):
 class SimpleCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
     """Worker -> Scheduler metadata for completed store events.
 
-    Each worker reports {event_idx: 1} for newly completed stores.
+    Each worker reports {event_idx: 1} for newly completed stores, including
+    failures whose DMA has drained. Any rank's failure prevents caching.
     ``aggregate()`` sums counts across workers within a step.
     The scheduler-side manager accumulates across steps and processes
     a store completion only when count reaches ``world_size``.
     """
 
     completed_store_events: dict[int, int]
+    failed_store_events: set[int] = field(default_factory=set)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -56,4 +60,7 @@ class SimpleCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
         merged = dict(self.completed_store_events)
         for k, v in other.completed_store_events.items():
             merged[k] = merged.get(k, 0) + v
-        return SimpleCPUOffloadWorkerMetadata(completed_store_events=merged)
+        return SimpleCPUOffloadWorkerMetadata(
+            completed_store_events=merged,
+            failed_store_events=self.failed_store_events | other.failed_store_events,
+        )
