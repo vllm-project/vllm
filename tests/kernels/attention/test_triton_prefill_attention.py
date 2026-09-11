@@ -9,6 +9,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.v1.attention.ops import triton_prefill_attention as prefill_attn
 from vllm.v1.attention.ops.triton_prefill_attention import (
+    _get_encoder_launch,
     _get_head_dim_blocks,
     _split_head_dim,
     context_attention_fwd,
@@ -346,3 +347,34 @@ def test_context_attention_split_d_forced(monkeypatch: pytest.MonkeyPatch, D: in
         )
 
     torch.testing.assert_close(o, o_ref, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize(
+    "head_dim,expected",
+    [(64, (16, 4)), (72, (16, 4)), (80, (16, 4)), (96, (32, 8)), (128, (32, 8))],
+)
+def test_gfx115x_encoder_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    head_dim: int,
+    expected: tuple[int, int],
+    dtype: torch.dtype,
+):
+    """gfx115x takes a narrow KV tile, widening it past a head dim of 80."""
+    monkeypatch.setattr(prefill_attn, "_ON_GFX115X", True)
+    assert _get_encoder_launch(head_dim, dtype) == expected
+
+
+@pytest.mark.parametrize(
+    "on_gfx115x,dtype",
+    [
+        (False, torch.bfloat16),  # any other architecture
+        (True, torch.float32),  # untuned dtype
+    ],
+)
+def test_get_encoder_launch_declines(
+    monkeypatch: pytest.MonkeyPatch, on_gfx115x: bool, dtype: torch.dtype
+):
+    """Everything outside the measured envelope keeps the generic config."""
+    monkeypatch.setattr(prefill_attn, "_ON_GFX115X", on_gfx115x)
+    assert _get_encoder_launch(72, dtype) is None
