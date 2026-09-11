@@ -351,7 +351,9 @@ vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` en
 
 ## gRPC Interface
 
-vLLM provides optional gRPC `Inference` and `Control` services on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
+vLLM provides optional gRPC `Inference`, `Control`, `KvTransfer` and `RlControl` services on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
+
+Which of the four services are mounted is controlled by `--grpc-services`. The default, `all`, mounts all four whatever the engines are configured for; RPCs for an unconfigured feature answer `FailedPrecondition`. Hardening the port is opt-in: `configured` mounts `Inference` and `Control`, adds `KvTransfer` when ZMQ KV cache events are configured, and adds `RlControl` when every engine has weight transfer or sleep mode configured. A comma-separated list of `inference`, `control`, `kv-transfer`, `rl-control` pins the set exactly, and naming a service the engines are not configured for fails startup. An unmounted service answers `Unimplemented`. `Control.GetServerInfo` reports the mounted set in its `services` field, which is readable only when `Control` itself is mounted. The RPCs that moved off `Control` to `KvTransfer` and `RlControl` remain callable at their old `Control` paths for one release, deprecated, and follow the mounted set: they answer `Unimplemented` when the service they moved to is not mounted. While they exist, a caller admitted to `/vllm.Control/*` can reach every mounted `KvTransfer` and `RlControl` RPC through its alias, so a policy that separates callers by service prefix must also deny those `/vllm.Control/<Method>` paths. Unmounting a service with `--grpc-services` removes both paths.
 
 **Warning:** The gRPC interface is **insecure by default** — it does not implement authentication, authorization, or encryption. It should be considered a private, internal interface intended for use only between co-located services within a trusted network. Do not expose the gRPC port to the public internet or untrusted clients. If you enable the gRPC interface, protect it via network-level access controls such as firewall rules, network segmentation, or deployment on an isolated private network.
 
@@ -360,13 +362,14 @@ vLLM provides optional gRPC `Inference` and `Control` services on a separate TCP
 An attacker who can reach the gRPC port can:
 
 1. **Run arbitrary inference** via the `Generate` and `GenerateStream` RPCs without any credentials
-2. **Mutate engine state** by pausing generation, sleeping the engine, or initiating configured RL weight updates through the `Control` service
+2. **Mutate engine state** by pausing generation, sleeping the engine, or initiating configured RL weight updates through the `RlControl` service
 3. **Consume GPU and compute resources** by submitting unbounded generation requests
 4. **Cause Denial of Service** by exploiting bugs in the gRPC interface that can crash vLLM.
 
 ### Recommendations
 
 - Only enable `--grpc-port` when you have a specific need for gRPC-based inference
+- Narrow the mounted set with `--grpc-services`. An instance that only serves a router can run `--grpc-services inference,control`, which removes the pause, sleep and weight-update RPCs from the port instead of relying on a network policy to reject them. Each service has its own gRPC path prefix, such as `/vllm.RlControl/`, so a service mesh or proxy authorization policy can also admit callers per service. Until the deprecated `Control` aliases are removed, such a policy must also deny the aliased `/vllm.Control/` methods of the services a caller should not reach
 - Ensure the gRPC port is only accessible from trusted hosts or services
 - Use firewall rules to block external access to the gRPC port
 - Consider deploying the gRPC interface on a dedicated internal network interface

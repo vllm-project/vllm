@@ -4,8 +4,8 @@
 use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{
-    Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, ParserSelection,
-    RendererSelection,
+    Config, GenerationConfigMode, GrpcServiceSelection, GrpcServices, HttpListenerMode,
+    LoraModulePath, ParserSelection, RendererSelection,
 };
 
 use super::{BenchCommand, Cli, Command};
@@ -181,6 +181,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         language_model_only: false,
                         max_logprobs: None,
                         grpc_port: None,
+                        grpc_services: All,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -565,6 +566,114 @@ fn serve_passes_enable_prompt_tokens_details_into_config() {
     };
     let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
     assert!(config.api_server_options.enable_prompt_tokens_details);
+}
+
+#[test]
+fn serve_passes_grpc_services_into_config() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert_eq!(config.grpc_services, GrpcServiceSelection::All);
+
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--grpc-port",
+        "50051",
+        "--grpc-services",
+        "control,kv-transfer",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert_eq!(
+        config.grpc_services,
+        GrpcServiceSelection::Explicit(GrpcServices::CONTROL | GrpcServices::KV_TRANSFER)
+    );
+    config.validate().expect("explicit services with a gRPC port are valid");
+
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--grpc-port",
+        "50051",
+        "--grpc-services",
+        "rl",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string()).grpc_services,
+        GrpcServiceSelection::Explicit(GrpcServices::RL_CONTROL)
+    );
+}
+
+#[test]
+fn serve_args_reject_unknown_grpc_service() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--grpc-services",
+        "control,weights",
+    ])
+    .expect_err("unknown gRPC service is rejected");
+    assert!(
+        error.to_string().contains("unknown gRPC service `weights`"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn serve_rejects_grpc_services_without_grpc_port() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--grpc-services",
+        "configured",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let error = config.validate().expect_err("--grpc-services needs --grpc-port");
+    assert!(
+        error.to_string().contains("--grpc-services requires --grpc-port"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn frontend_args_json_passes_grpc_services_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","grpc_port":50051,"grpc_services":"all"}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert_eq!(config.grpc_services, GrpcServiceSelection::All);
 }
 
 #[test]
@@ -1015,6 +1124,7 @@ fn frontend_args_accept_json() {
                         language_model_only: false,
                         max_logprobs: None,
                         grpc_port: None,
+                        grpc_services: All,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -1612,6 +1722,7 @@ fn serve_args_accept_handshake_aliases() {
                         language_model_only: false,
                         max_logprobs: None,
                         grpc_port: None,
+                        grpc_services: All,
                         shutdown_timeout: 0,
                         http_timeout_keep_alive: None,
                         chat_template: None,
@@ -1789,6 +1900,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             api_keys: [],
             disable_log_stats: false,
             grpc_port: None,
+            grpc_services: All,
             shutdown_timeout: 0ns,
             keep_alive_timeout: 5s,
             profiler: None,
@@ -1876,6 +1988,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             api_keys: [],
             disable_log_stats: false,
             grpc_port: None,
+            grpc_services: All,
             shutdown_timeout: 0ns,
             keep_alive_timeout: 5s,
             profiler: None,
@@ -1984,6 +2097,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             api_keys: [],
             disable_log_stats: false,
             grpc_port: None,
+            grpc_services: All,
             shutdown_timeout: 0ns,
             keep_alive_timeout: 5s,
             profiler: None,

@@ -16,8 +16,8 @@ use uuid::Uuid;
 use vllm_llm::current_unix_timestamp_secs;
 use vllm_text::{DecodedTextEvent, Prompt, SampledDelta, TextOutputStreamExt as _, TextRequest};
 
-use super::convert::{self, ResponseOpts};
-use super::{InferenceServer, pb};
+use crate::grpc::convert::{self, ResponseOpts};
+use crate::grpc::{InferenceServer, pb};
 use crate::state::AppState;
 
 pub(crate) type InferenceGrpcService = InferenceServer<InferenceServiceImpl>;
