@@ -51,6 +51,13 @@ def _get_profile_num_reqs(
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
 
+    def get_num_reqs_for_dummy_run(self, num_reqs: int) -> int:
+        return _get_profile_num_reqs(
+            num_reqs,
+            self.max_num_tokens,
+            self.num_query_per_req,
+        )
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         parallel_config = vllm_config.parallel_config
         if parallel_config.prefill_context_parallel_size > 1:

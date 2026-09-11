@@ -11,6 +11,31 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
     DFlashSpeculator,
     _get_profile_num_reqs,
 )
+from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
+
+
+class _DefaultSpeculator(BaseSpeculator):
+    def init_cudagraph_manager(self, cudagraph_mode):
+        pass
+
+    def capture(self):
+        pass
+
+    def propose(self, *args, **kwargs):
+        raise NotImplementedError
+
+
+def test_default_dummy_run_request_count_is_unchanged():
+    speculator = _DefaultSpeculator()
+    assert speculator.get_num_reqs_for_dummy_run(128) == 128
+
+
+def test_dflash_dummy_run_request_count_is_capped():
+    speculator = DFlashSpeculator.__new__(DFlashSpeculator)
+    speculator.num_query_per_req = 8
+    speculator.max_num_tokens = 512
+
+    assert speculator.get_num_reqs_for_dummy_run(128) == 64
 
 
 def test_profile_num_reqs_caps_to_full_query_blocks():
