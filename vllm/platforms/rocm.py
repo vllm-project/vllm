@@ -394,28 +394,70 @@ def use_rocm_custom_paged_attention(
     alibi_slopes: torch.Tensor | None = None,
     sinks: torch.Tensor | None = None,
 ) -> bool:
+    """Whether the ROCm custom paged-attention op can serve this configuration.
+
+    Callers fall back to the Triton paged-attention path when this returns
+    False. Two families of kernel sit behind the op: template-specialized
+    "non-free" kernels for a fixed head_size/block_size, and a "free" kernel
+    that takes both at runtime and covers everything else.
+
+    Args:
+        qtype: Query dtype. Only float16 and bfloat16 are supported.
+        head_size: Attention head dimension.
+        block_size: KV-cache page size in tokens.
+        gqa_ratio: Query heads per KV head.
+        max_seq_len: Longest sequence in the batch.
+        sliding_window: Sliding-window size; must be disabled (0 or (-1, -1)),
+            as the custom kernels do not apply the window mask.
+        kv_cache_dtype: KV-cache dtype, e.g. "auto" or "fp8".
+        alibi_slopes: Per-head ALiBi slopes, or None.
+        sinks: Attention sinks, unsupported by the custom kernels.
+
+    Returns:
+        True if the custom op can handle this configuration on this GPU.
+    """
     # custom paged attn always supported on V0. On V1, requires sliding window
     # disabled due to observed numerical discrepancy.
-    if on_cdna():
+    # The free kernel (runtime head_size/block_size) handles any combination not
+    # covered by the template-specialized non-free kernels.
+    if _ON_GFX9:
+        # Non-free kernel: head_size in {64,128} and block_size in {16,32}.
+        # Free kernel: any head_size in {64,128,192,256} and any block_size.
         return (
             (sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
-            and (head_size == 64 or head_size == 128)
-            and (block_size == 16 or block_size == 32)
+            and head_size in (64, 128, 192, 256)
             and (gqa_ratio >= 1 and gqa_ratio <= 16)
-            and max_seq_len <= 128 * 1024
             and sinks is None
         )
-
-    else:
+    elif on_gfx12x():
+        # gfx1250 is excluded here and below: _ON_GFX12X/_ON_GFX1X both include
+        # it, but is_navi_gpu() routes it to the navi launcher, whose __GFX12__
+        # kernels all go through gcn_wmma16x16x16_instr -- and that is a
+        # __builtin_trap() on gfx1250, which provides only the K=32 WMMA
+        # (v_wmma_f32_16x16x32_f16), not the K=16 variant gfx1200/1201 have.
+        # Route gfx1250 to Triton until the kernels grow a K=32 path.
+        # Non-free kernel: head_size=128 and block_size=16.
+        # Free kernel: any head_size in {64,128,192,256} and any block_size.
         return (
-            _ON_GFX1X
+            (sliding_window == 0 or sliding_window == (-1, -1))
+            and (qtype == torch.half or qtype == torch.bfloat16)
+            and head_size in (64, 128, 192, 256)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16)
+            and alibi_slopes is None
+            and kv_cache_dtype == "auto"
+            and sinks is None
+        )
+    else:
+        # GFX11: only the template-specialized non-free kernel
+        # (head_size=128, block_size=16).
+        return (
+            on_gfx1x()
             and (sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
             and head_size == 128
             and block_size == 16
             and (gqa_ratio >= 3 and gqa_ratio <= 16)
-            and max_seq_len <= 128 * 1024
             and alibi_slopes is None
             and kv_cache_dtype == "auto"
             and sinks is None
