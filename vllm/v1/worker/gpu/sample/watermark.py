@@ -54,7 +54,6 @@ def _repeated_context_mask_kernel(
     contexts_ptr,
     context_stride,
     CONTEXT_WIDTH: tl.constexpr,
-    CONTEXT_BLOCK: tl.constexpr,
     MAX_HISTORY: tl.constexpr,
     INCLUDE_PROMPT: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -69,12 +68,6 @@ def _repeated_context_mask_kernel(
     history_len = total_len - sequence_start
 
     offsets = tl.arange(0, BLOCK)
-    context_offsets = tl.arange(0, CONTEXT_BLOCK)
-    context_tokens = tl.load(
-        contexts_ptr + row * context_stride + context_offsets,
-        mask=context_offsets < CONTEXT_WIDTH,
-        other=-1,
-    )
     repeated = tl.full((), 0, tl.int32)
     scan_start = 0
     if MAX_HISTORY > 0:
@@ -86,9 +79,7 @@ def _repeated_context_mask_kernel(
         in_window = (previous_pos >= scan_start) & (previous_pos < history_len)
         matches = valid_req & in_window
         for offset in range(CONTEXT_WIDTH):
-            context_token = tl.sum(
-                tl.where(context_offsets == offset, context_tokens, 0), axis=0
-            )
+            context_token = tl.load(contexts_ptr + row * context_stride + offset)
             historical_pos = previous_pos + offset - CONTEXT_WIDTH
             historical_token = tl.load(
                 all_token_ids_ptr
@@ -169,7 +160,6 @@ def repeated_context_mask(
         contexts,
         contexts.stride(0),
         CONTEXT_WIDTH=contexts.shape[-1],
-        CONTEXT_BLOCK=triton.next_power_of_2(contexts.shape[-1]),
         MAX_HISTORY=0 if max_history is None else max_history,
         INCLUDE_PROMPT=include_prompt,
         BLOCK=512,
