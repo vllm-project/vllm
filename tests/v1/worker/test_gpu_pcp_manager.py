@@ -218,7 +218,9 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
         ([1], [True]),
     ],
 )
-@pytest.mark.parametrize("consumer", ["sampling", "full", "prompt_logprobs"])
+@pytest.mark.parametrize(
+    "consumer", ["sampling", "batch_sharding", "speculation", "prompt_logprobs"]
+)
 def test_sampling_matches_global_rows(
     monkeypatch, world, queries, prefilling, consumer
 ):
@@ -286,13 +288,15 @@ def test_sampling_matches_global_rows(
         monkeypatch.setattr(
             pcp_manager_module, "get_pcp_group", lambda: NS(all_gather=gather)
         )
-        restored, sampled, batch = pcp_manager_module.maybe_restore_pcp_for_sampling(
-            manager,
-            hidden,
-            NS(),
-            needs_full_hidden_states=consumer == "full",
+        runner = NS(
+            pcp_manager=manager,
+            batch_sharder=NS() if consumer == "batch_sharding" else None,
+            speculator=NS() if consumer == "speculation" else None,
             prompt_logprobs_worker=prompt_logprobs_worker,
-            prompt_lens=q,
+            req_states=NS(prompt_len=NS(np=q)),
+        )
+        restored, sampled, batch = pcp_manager_module.maybe_restore_pcp_for_sampling(
+            runner, hidden, NS()
         )
         assert batch is manager._global_batch
         torch.testing.assert_close(
@@ -300,6 +304,16 @@ def test_sampling_matches_global_rows(
         )
         if dense:
             torch.testing.assert_close(restored, global_hidden)
+
+
+def test_restore_without_pcp_preserves_inputs():
+    """Non-PCP runners need no restore metadata or prompt-logprob worker."""
+    hidden = torch.zeros(2, 3)
+    input_batch = NS()
+    restored, sampled, batch = pcp_manager_module.maybe_restore_pcp_for_sampling(
+        NS(pcp_manager=None), hidden, input_batch
+    )
+    assert restored is hidden and sampled is None and batch is input_batch
 
 
 def test_prompt_logprob_worker_exposes_dense_hidden_requirement() -> None:

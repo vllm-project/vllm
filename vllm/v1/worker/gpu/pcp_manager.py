@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -16,7 +17,9 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
 )
-from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -747,25 +750,24 @@ def maybe_get_pcp_dummy_slot_mappings(
 
 
 def maybe_restore_pcp_for_sampling(
-    manager: PCPManager | None,
+    runner: "GPUModelRunner",
     hidden_states: torch.Tensor | None,
     input_batch: InputBatch,
-    *,
-    needs_full_hidden_states: bool,
-    prompt_logprobs_worker: PromptLogprobsWorker | None,
-    prompt_lens: np.ndarray,
 ) -> tuple[torch.Tensor, torch.Tensor | None, InputBatch]:
     assert hidden_states is not None
+    manager = runner.pcp_manager
     if manager is None:
         return hidden_states, None, input_batch
     assert manager._global_batch is not None
+    prompt_logprobs_worker = runner.prompt_logprobs_worker
     return manager.restore_for_sampling(
         hidden_states,
         needs_full_hidden_states=(
-            needs_full_hidden_states
+            runner.batch_sharder is not None
+            or runner.speculator is not None
             or prompt_logprobs_worker is None
             or prompt_logprobs_worker.needs_prompt_hidden_states(
-                manager._global_batch, prompt_lens
+                manager._global_batch, runner.req_states.prompt_len.np
             )
         ),
     )
