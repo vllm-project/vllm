@@ -17,6 +17,7 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from vllm.distributed import mooncake_store
 from vllm.distributed.kv_events import KVEventAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     rdma_utils,
@@ -356,6 +357,7 @@ def _install_fake_mooncake(monkeypatch, store_instance: MagicMock):
     fake_store_module = types.ModuleType("mooncake.store")
     fake_store_module.MooncakeDistributedStore = lambda: store_instance  # type: ignore[attr-defined]
     fake_store_module.ReplicateConfig = FakeReplicateConfig  # type: ignore[attr-defined]
+    fake_store_module.ObjectDataType = SimpleNamespace(TENSOR=1)  # type: ignore[attr-defined]
     fake_mooncake_module = types.ModuleType("mooncake")
     fake_mooncake_module.store = fake_store_module  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "mooncake", fake_mooncake_module)
@@ -544,7 +546,7 @@ def test_pool_key_cache_prefix_namespaces_and_disambiguates():
 def test_default_local_buffer_size_matches_pr40900():
     """PR-40900 shipped a 4 GiB default for local_buffer_size; the dual-mode
     patch preserves it (and the JSON key) so unchanged PR-40900 configs work."""
-    assert worker.DEFAULT_LOCAL_BUFFER_SIZE == 4 * 1024**3
+    assert mooncake_store.DEFAULT_LOCAL_BUFFER_SIZE == 4 * 1024**3
 
 
 def test_get_requester_local_hostname_prefers_override(monkeypatch):
@@ -2811,6 +2813,7 @@ def test_requester_worker_group_semantics_string_true_enables(
     fake_store_module = types.ModuleType("mooncake.store")
     fake_store_module.MooncakeDistributedStore = lambda: store  # type: ignore[attr-defined]
     fake_store_module.ReplicateConfig = FakeReplicateConfig  # type: ignore[attr-defined]
+    fake_store_module.ObjectDataType = SimpleNamespace(TENSOR=1)  # type: ignore[attr-defined]
     fake_mooncake_module = types.ModuleType("mooncake")
     fake_mooncake_module.store = fake_store_module  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "mooncake", fake_mooncake_module)
@@ -4120,10 +4123,10 @@ def test_config_defaults_to_embedded():
     """A JSON without explicit mode parses as embedded with 4 GiB segment."""
     cfg = _make_config()
     assert cfg.mode == "embedded"
-    assert cfg.global_segment_size == worker.DEFAULT_GLOBAL_SEGMENT_SIZE
-    assert cfg.local_buffer_size == worker.DEFAULT_LOCAL_BUFFER_SIZE
+    assert cfg.global_segment_size == mooncake_store.DEFAULT_GLOBAL_SEGMENT_SIZE
+    assert cfg.local_buffer_size == mooncake_store.DEFAULT_LOCAL_BUFFER_SIZE
     assert cfg.enable_offload is False
-    assert cfg.tenant_id == worker.DEFAULT_TENANT_ID
+    assert cfg.tenant_id == mooncake_store.DEFAULT_TENANT_ID
 
 
 def test_config_pr40900_unchanged(tmp_path):
@@ -4145,7 +4148,7 @@ def test_config_pr40900_unchanged(tmp_path):
     assert cfg.global_segment_size == 4 * 1024**3
     assert cfg.local_buffer_size == 4 * 1024**3
     assert cfg.enable_offload is False
-    assert cfg.tenant_id == worker.DEFAULT_TENANT_ID
+    assert cfg.tenant_id == mooncake_store.DEFAULT_TENANT_ID
 
 
 def test_config_from_file_normalizes_tenant_id(tmp_path):
@@ -4175,7 +4178,7 @@ def test_config_from_file_normalizes_empty_tenant_id_to_default(tmp_path):
 
     cfg = worker.MooncakeStoreConfig.from_file(config_path)
 
-    assert cfg.tenant_id == worker.DEFAULT_TENANT_ID
+    assert cfg.tenant_id == mooncake_store.DEFAULT_TENANT_ID
 
 
 def test_config_from_file_rejects_non_string_tenant_id(tmp_path):
@@ -4327,7 +4330,20 @@ def test_topology_embedded_cpu_only(tmp_path, monkeypatch):
     assert w.disk_offload_buffer_budget_bytes is None
 
 
-def test_topology_forwards_non_default_tenant_id(tmp_path, monkeypatch):
+def _create_store_client_for_tenant_test(consumer):
+    if consumer == "ec":
+        from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.store_client import (  # noqa: E501
+            create_mooncake_embedding_store_client,
+        )
+
+        return create_mooncake_embedding_store_client()
+    return worker.MooncakeStoreWorker(
+        _make_vllm_config(rank=1), _make_kv_cache_config()
+    )
+
+
+@pytest.mark.parametrize("consumer", ["kv", "ec"])
+def test_topology_forwards_non_default_tenant_id(tmp_path, monkeypatch, consumer):
     store = MagicMock()
     store.setup.return_value = 0
     _install_fake_mooncake(monkeypatch, store)
@@ -4348,12 +4364,13 @@ def test_topology_forwards_non_default_tenant_id(tmp_path, monkeypatch):
         ),
     )
 
-    worker.MooncakeStoreWorker(_make_vllm_config(rank=1), _make_kv_cache_config())
+    _create_store_client_for_tenant_test(consumer)
 
     assert store.setup.call_args.kwargs == {"tenant_id": "tenant-a"}
 
 
-def test_non_default_tenant_preserves_setup_type_error(tmp_path, monkeypatch):
+@pytest.mark.parametrize("consumer", ["kv", "ec"])
+def test_non_default_tenant_preserves_setup_type_error(tmp_path, monkeypatch, consumer):
     store = MagicMock()
     setup_error = TypeError(
         "setup(): incompatible function arguments; "
@@ -4379,7 +4396,7 @@ def test_non_default_tenant_preserves_setup_type_error(tmp_path, monkeypatch):
     )
 
     with pytest.raises(TypeError) as exc_info:
-        worker.MooncakeStoreWorker(_make_vllm_config(rank=1), _make_kv_cache_config())
+        _create_store_client_for_tenant_test(consumer)
 
     assert exc_info.value is setup_error
 

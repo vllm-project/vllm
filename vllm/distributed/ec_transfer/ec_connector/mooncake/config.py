@@ -69,6 +69,9 @@ class MooncakeECConfig:
     control_timeout_ms: int
     push_wait_timeout_s: float
     pool_size: int
+    cross_encoder_cache: bool = False
+    store_max_pending_items: int = 32
+    store_max_pending_bytes: int = 2 * 1024**3
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> MooncakeECConfig:
@@ -94,6 +97,16 @@ class MooncakeECConfig:
             "ec_buffer_size", ec_config.ec_buffer_size
         )
         get = ec_config.get_from_extra_config
+        shared_reuse = get("cross_encoder_cache", False)
+        if not isinstance(shared_reuse, bool):
+            raise ValueError("cross_encoder_cache must be a boolean")
+        if shared_reuse:
+            if not ec_config.is_ec_producer or ec_config.is_ec_consumer:
+                raise ValueError("cross_encoder_cache requires an Encoder producer")
+            if not vllm_config.use_v2_model_runner:
+                raise ValueError("cross_encoder_cache requires Model Runner V2")
+            if vllm_config.lora_config is not None:
+                raise ValueError("cross_encoder_cache does not support dynamic LoRA")
         control_port = int(ec_config.ec_port) + (
             parallel_config.data_parallel_index * parallel_config.tensor_parallel_size
         )
@@ -120,4 +133,11 @@ class MooncakeECConfig:
                 "push_wait_timeout_s", get("push_wait_timeout_s", 60)
             ),
             pool_size=registered_buffer_size,
+            cross_encoder_cache=shared_reuse,
+            store_max_pending_items=_positive_int(
+                "store_max_pending_items", get("store_max_pending_items", 32)
+            ),
+            store_max_pending_bytes=_positive_int(
+                "store_max_pending_bytes", get("store_max_pending_bytes", 2 * 1024**3)
+            ),
         )

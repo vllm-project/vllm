@@ -45,6 +45,9 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.state import (
 from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     ensure_mooncake_available,
 )
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
+    TensorSpec,
+)
 from vllm.distributed.ec_transfer.ec_connector.utils import (
     PlaceholderMetadataResolver,
     collect_ec_item_metadata,
@@ -76,6 +79,8 @@ class ECMooncakeScheduler:
         ensure_mooncake_available()
         config = MooncakeECConfig.from_vllm_config(vllm_config)
 
+        self._store_candidates: list[tuple[str, str, TensorSpec]] = []
+        self._cross_encoder_cache = config.cross_encoder_cache
         self._is_producer = config.is_producer
         self._is_consumer = config.is_consumer
         self._control_addr = config.control_addr
@@ -427,28 +432,40 @@ class ECMooncakeScheduler:
             transfer_id = f"{request.request_id}:{index}"
         if not consumer_zmq or transfer_id in self._prepared_push_transfer_ids:
             return
-        num_tokens = request.get_num_encoder_embeds(index)
-        dtype = self._model_config.dtype
-        assert isinstance(dtype, torch.dtype)
-        assert self._encoder_cache_hidden_dim is not None
-        dtype_name = str(dtype).split(".")[-1]
-        shape = (num_tokens, self._encoder_cache_hidden_dim)
-        nbytes = math.prod(shape) * dtype.itemsize
+        output = self._encoder_output_spec(request, index)
         self._pushes_to_prepare[transfer_id] = ECMooncakePushSpec(
             mm_hash=mm_hash,
-            nbytes=nbytes,
-            shape=shape,
-            dtype=dtype_name,
+            nbytes=output.nbytes,
+            shape=output.shape,
+            dtype=output.dtype.removeprefix("torch."),
             consumer_zmq=str(consumer_zmq),
             transfer_id=transfer_id,
             request_id=request.request_id,
         )
         self._prepared_push_transfer_ids.add(transfer_id)
 
+    def _encoder_output_spec(self, request: Any, index: int) -> TensorSpec:
+        dtype = self._model_config.dtype
+        assert isinstance(dtype, torch.dtype)
+        assert self._encoder_cache_hidden_dim is not None
+        shape = (request.get_num_encoder_embeds(index), self._encoder_cache_hidden_dim)
+        return TensorSpec(shape, str(dtype), math.prod(shape) * dtype.itemsize)
+
     def update_state_after_alloc(self, request: Any, index: int) -> None:
         self._local_cache.add(request.mm_features[index].identifier)
         if self._is_producer:
             self._prepare_push_spec(request, index)
+            if (
+                self._cross_encoder_cache
+                and request.mm_features[index].modality == "image"
+            ):
+                self._store_candidates.append(
+                    (
+                        request.request_id,
+                        request.mm_features[index].identifier,
+                        self._encoder_output_spec(request, index),
+                    )
+                )
 
     def update_state_after_free(self, request: Any, index: int) -> None:
         if not self._is_consumer:
@@ -474,6 +491,13 @@ class ECMooncakeScheduler:
         meta = ECMooncakeConnectorMetadata(
             freed=scheduler_output.free_encoder_mm_hashes
         )
+        preempted = scheduler_output.preempted_req_ids or set()
+        meta.store_candidates = {
+            identifier: output
+            for request_id, identifier, output in self._store_candidates
+            if request_id not in preempted
+        }
+        self._store_candidates.clear()
         for push_spec in self._pushes_to_prepare.values():
             meta.pushes.append(push_spec)
         self._pushes_to_prepare.clear()
