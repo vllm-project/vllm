@@ -1657,7 +1657,16 @@ class VllmConfig:
 
         if self.attention_config.hisparse_config is not None:
             if not current_platform.is_cuda():
-                raise ValueError("HiSparse currently requires NVIDIA CUDA.")
+                # The fused cache ops now build and pass on ROCm, but HiSparse
+                # is only reachable through HiSparseMLAIndexGroup, which no
+                # ROCm attention backend consumes yet. Keep the gate closed
+                # until ROCMAiterMLASparseBackend is wired up, otherwise
+                # enabling HiSparse here silently has no effect.
+                raise ValueError(
+                    "HiSparse currently requires NVIDIA CUDA. The ROCm cache "
+                    "kernels are implemented, but no ROCm sparse-MLA "
+                    "attention backend consumes the HiSparse index group yet."
+                )
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError("HiSparse does not support pipeline parallelism.")
             if self.parallel_config.decode_context_parallel_size > 1:

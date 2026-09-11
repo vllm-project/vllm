@@ -1002,7 +1002,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                             Tensor? kv_scales=None,"
       "                             str kv_cache_dtype='auto') -> ()");
 
-#ifndef USE_ROCM
   ops.def(
       "hisparse_resolve_residency(Tensor host_cache,"
       "                 Tensor! hot_cache,"
@@ -1051,8 +1050,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                        Tensor miss_global_indices,"
       "                        Tensor miss_hot_indices,"
       "                        Tensor miss_counts) -> ()");
-
-#endif  // !USE_ROCM
 
   // Rotate Q and K, then write to kv cache for MLA
   ops.def(
@@ -1160,14 +1157,12 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
   ops.impl("concat_and_cache_mla_grouped",
            TORCH_BOX(&concat_and_cache_mla_grouped));
 
-#ifndef USE_ROCM
   ops.impl("hisparse_resolve_residency",
            TORCH_BOX(&hisparse_resolve_residency));
   ops.impl("hisparse_invalidate_written_slots",
            TORCH_BOX(&hisparse_invalidate_written_slots));
   ops.impl("hisparse_gather_plan", TORCH_BOX(&hisparse_gather_plan));
   ops.impl("hisparse_gather_compact", TORCH_BOX(&hisparse_gather_compact));
-#endif  // !USE_ROCM
   ops.impl("concat_and_cache_mla_rope_fused",
            TORCH_BOX(&concat_and_cache_mla_rope_fused));
   ops.impl("convert_fp8", TORCH_BOX(&convert_fp8));
