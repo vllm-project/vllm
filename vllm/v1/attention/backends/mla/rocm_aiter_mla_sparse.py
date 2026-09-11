@@ -53,13 +53,16 @@ def _use_rocm_sparse_triton(
     num_decode_tokens: int,
     max_query_len: int,
 ) -> bool:
-    """Select the rope-free BF16 path not supported by AITER sparse MLA."""
-    plain_decode = num_decode_tokens == num_decodes
+    """Select the rope-free BF16 path not supported by AITER sparse MLA.
+
+    The ragged Triton kernel indexes metadata per query token, so multi-token
+    speculative verification rows have the same capability requirements as
+    plain decode rows.
+    """
     return (
         not kv_cache_dtype.startswith("fp8")
         and head_size == kv_lora_rank
-        and plain_decode
-        and (num_prefills > 0 or (num_decodes > 0 and max_query_len == 1))
+        and (num_prefills > 0 or num_decodes > 0)
     )
 
 
