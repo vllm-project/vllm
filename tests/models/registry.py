@@ -966,6 +966,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "HCXVisionV2ForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
         trust_remote_code=True,
+        revision="a6cdfd3464d1b767259cad23e164eaf39d3e3960",
     ),
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
         "tencent/HunyuanOCR",
