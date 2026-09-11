@@ -34,6 +34,7 @@ from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm.config import (
+    AITERConfig,
     AttentionConfig,
     CacheConfig,
     CompilationConfig,
@@ -694,6 +695,7 @@ class EngineArgs:
     engram_config: EngramConfig | None = VllmConfig.engram_config
     mamba_config: MambaConfig = get_field(VllmConfig, "mamba_config")
     kernel_config: KernelConfig = get_field(VllmConfig, "kernel_config")
+    aiter_config: AITERConfig = get_field(VllmConfig, "aiter_config")
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
@@ -797,6 +799,8 @@ class EngineArgs:
             self.mamba_config = MambaConfig(**self.mamba_config)
         if isinstance(self.kernel_config, dict):
             self.kernel_config = KernelConfig(**self.kernel_config)
+        if isinstance(self.aiter_config, dict):
+            self.aiter_config = AITERConfig(**self.aiter_config)
         if isinstance(self.ec_manager_config, dict):
             self.ec_manager_config = EncoderCacheManagerConfig(**self.ec_manager_config)
         if isinstance(self.eplb_config, dict):
@@ -1710,6 +1714,7 @@ class EngineArgs:
         vllm_group.add_argument("--engram-config", **vllm_kwargs["engram_config"])
         vllm_group.add_argument("--reasoning-config", **vllm_kwargs["reasoning_config"])
         vllm_group.add_argument("--kernel-config", **vllm_kwargs["kernel_config"])
+        vllm_group.add_argument("--aiter-config", **vllm_kwargs["aiter_config"])
         vllm_group.add_argument(
             "--additional-config", **vllm_kwargs["additional_config"]
         )
@@ -2635,6 +2640,7 @@ class EngineArgs:
             engram_config=self.engram_config,
             mamba_config=mamba_config,
             kernel_config=kernel_config,
+            aiter_config=self.aiter_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
             watermark_config=watermark_config,

@@ -959,6 +959,16 @@ class RocmPlatform(Platform):
             scheduler_config.disable_chunked_mm_input = True
 
     @classmethod
+    def sync_process_config_state(cls, vllm_config: "VllmConfig") -> None:
+        # rocm_aiter_ops reads the VLLM_ROCM_USE_AITER* env vars into class
+        # vars at import for a plain-attribute-read hot path; point them at
+        # aiter_config, which is typed, part of the compilation hash, and
+        # serialized to workers.
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        rocm_aiter_ops.init_from_config(vllm_config.aiter_config)
+
+    @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         if model_arch in _ROCM_UNSUPPORTED_MODELS:
             raise ValueError(
