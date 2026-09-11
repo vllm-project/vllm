@@ -535,6 +535,21 @@ def has_flashinfer_b12x_moe() -> bool:
 
 
 @functools.cache
+def has_flashinfer_b12x_w4a16_moe() -> bool:
+    """Return ``True`` if FlashInfer's SM12x fused MoE can run W4A16
+    (BF16 activations, NVFP4 weights) via ``B12xMoEWrapper(quant_mode=...)``."""
+    if not has_flashinfer_b12x_moe():
+        return False
+    mod = _get_submodule("flashinfer.fused_moe")
+    wrapper = getattr(mod, "B12xMoEWrapper", None)
+    if wrapper is None:
+        return False
+    import inspect
+
+    return "quant_mode" in inspect.signature(wrapper.__init__).parameters
+
+
+@functools.cache
 def has_nvidia_artifactory() -> bool:
     """Return `True` if NVIDIA's artifactory is accessible.
 
