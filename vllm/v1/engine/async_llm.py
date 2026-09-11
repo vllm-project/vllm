@@ -20,6 +20,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
 from vllm.exceptions import (
+    EngineFaultedError,
     GracefulHTTPError,
     MaxQueuedTokensError,
     QueueOverflowError,
@@ -306,9 +307,22 @@ class AsyncLLM(EngineClient):
             request_id: Request id, used for logging only.
 
         Raises:
+            EngineFaultedError: If the engine has faulted and is awaiting
+                FT recovery.
             QueueOverflowError: If ``max_num_queued_reqs`` would be exceeded.
             MaxQueuedTokensError: If ``max_num_queued_tokens`` would be exceeded.
         """
+        if (
+            self.vllm_config.parallel_config.enable_fault_tolerance
+            and self.engine_core.engine_status.get("status") != "healthy"
+        ):
+            logger.info(
+                "Engine %s - rejecting request %s.",
+                self.engine_core.engine_status.get("status"),
+                request_id,
+            )
+            raise EngineFaultedError()
+
         max_num_reqs = self.scheduler_config.max_num_queued_reqs
         if max_num_reqs is not None:
             current = self.get_num_unfinished_requests()
