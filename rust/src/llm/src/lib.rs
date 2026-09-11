@@ -87,12 +87,17 @@ impl Llm {
         self
     }
 
-    /// Advertise this frontend's gRPC control plane in the `kv_transfer_params`
-    /// returned to clients (`remote_control_port`, plus `remote_control_host`
-    /// when `host` is given), so a peer frontend can fetch this instance's
-    /// handshake metadata over gRPC.
-    pub fn with_kv_control_address(mut self, port: Option<u16>, host: Option<String>) -> Self {
-        self.kv_control_address = KvControlAddress { port, host };
+    /// Advertise this frontend's gRPC control plane in returned
+    /// `kv_transfer_params` (`remote_control_port`, plus `remote_control_host`
+    /// when `host` is given and `remote_control_tls` when it terminates TLS), so
+    /// a peer frontend can fetch this instance's handshake metadata over gRPC.
+    pub fn with_kv_control_address(
+        mut self,
+        port: Option<u16>,
+        host: Option<String>,
+        tls: bool,
+    ) -> Self {
+        self.kv_control_address = KvControlAddress { port, host, tls };
         self
     }
 

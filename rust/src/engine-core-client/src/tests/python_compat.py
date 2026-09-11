@@ -401,6 +401,7 @@ class KVTransferInfo:
     engine_id: str
     kv_connector: str
     kv_role: str
+    handshake_transport: str | None = None
 
 
 @dataclass
@@ -466,6 +467,7 @@ ready_response = EngineCoreReadyResponse(
         engine_id="prefill-0_dp0",
         kv_connector="NixlConnector",
         kv_role="kv_producer",
+        handshake_transport="grpc",
     ),
 )
 

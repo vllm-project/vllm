@@ -2870,6 +2870,10 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     assert_eq!(kv_transfer_info.engine_id, "prefill-0_dp0");
     assert_eq!(kv_transfer_info.kv_connector, "NixlConnector");
     assert_eq!(kv_transfer_info.kv_role, "kv_producer");
+    assert_eq!(
+        kv_transfer_info.handshake_transport,
+        Some(crate::protocol::handshake::HandshakeTransport::Grpc)
+    );
 
     // The utility result path decodes through an rmpv::Value, so go that way too.
     let handshake_value = decode_value(&hex::decode(handshake_entries_hex).unwrap());

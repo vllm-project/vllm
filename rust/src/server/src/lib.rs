@@ -54,7 +54,7 @@ pub use vllm_chat::{
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
 
-use crate::kv_peer::KvPeerHandshaker;
+use crate::kv_peer::{KvPeerHandshaker, PeerTlsConfig};
 use vllm_text::TextLlm;
 
 use crate::listener::{Listener, MaybeTlsListener};
@@ -143,11 +143,27 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         .context("invalid --grpc-services selection")?;
     let kv_control_port =
         config.grpc_port.filter(|_| grpc_services.contains(GrpcServices::KV_TRANSFER));
+    let kv_transfer_infos: Vec<_> = client
+        .ready_responses()
+        .iter()
+        .filter_map(|ready| ready.kv_transfer_info.clone())
+        .collect();
+    kv_peer::check_handshake_transport(&kv_transfer_infos, kv_control_port)?;
+    let peer_tls = config.tls.as_ref().map(PeerTlsConfig::from_server_tls).unwrap_or_default();
+    let kv_peer_handshake = KvPeerHandshaker::new(
+        kv_peer::local_handshake_transport(&kv_transfer_infos),
+        &peer_tls,
+    )
+    .context("invalid TLS configuration for KV peer handshakes")?;
 
     let llm = Llm::new(client)
         .with_log_stats(!config.disable_log_stats)
-        .with_kv_peer_handshake(Arc::new(KvPeerHandshaker::new()))
-        .with_kv_control_address(kv_control_port, config.kv_control_advertise_host.clone());
+        .with_kv_peer_handshake(Arc::new(kv_peer_handshake))
+        .with_kv_control_address(
+            kv_control_port,
+            config.kv_control_advertise_host.clone(),
+            config.tls.is_some(),
+        );
     let text = TextLlm::new(llm, text_backend).with_max_logprobs(config.max_logprobs);
 
     let chat = ChatLlm::new(text, chat_backend)

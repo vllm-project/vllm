@@ -173,6 +173,15 @@ using the ZMQ side channel. The `handshake_transport` connector option pins the 
 --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"handshake_transport":"grpc"}}'
 ```
 
+The decoder frontend reads the setting from its engines. Under `auto`, a failed fetch from the
+prefiller's control plane is logged and the request goes ahead, so the workers fall back to the
+side channel; under `grpc` the request fails with the fetch error; under `zmq` the frontend does
+not fetch at all. One fetch is bounded at 15 seconds, and a failed fetch is retried only after
+10 seconds, so an unreachable peer does not add a connect timeout to every request. A
+prefilling instance (`kv_producer` or `kv_both`) set to `grpc` refuses to start without
+`--grpc-port` and the `kv-transfer` service, since it would then offer peers no handshake at
+all.
+
 By default a peer dials `remote_host` (the side-channel host, usually the pod IP) on
 `remote_control_port`. Pass `--kv-control-advertise-host <name>` to advertise a different
 host as `remote_control_host`; under a service mesh this must be a Service name, since the
@@ -238,7 +247,14 @@ and authenticated when the network is shared.
 - **TLS terminated by vLLM.** The gRPC listener uses the frontend's TLS flags:
   `--ssl-certfile` (optionally `--ssl-keyfile`), plus `--ssl-ca-certs` and
   `--ssl-cert-reqs 2` to require a client certificate. This is the option when no service mesh
-  is in place.
+  is in place. A prefiller with TLS configured adds `remote_control_tls` to the
+  `kv_transfer_params` it returns, and the decoder dials it over TLS with its own flags:
+  `--ssl-ca-certs` verifies the prefiller's certificate (the system CA bundle when unset), and
+  `--ssl-certfile`/`--ssl-keyfile` are presented as the client certificate. Issue every
+  instance a certificate from the same CA and run them all with `--ssl-cert-reqs 2`. The
+  certificate must name the address peers dial, `remote_control_host` or else `remote_host`, so
+  set `--kv-control-advertise-host` to a name in the certificate when it does not cover the pod
+  IP.
 - **Service mesh.** With Istio in sidecar mode, require mTLS on the gRPC port alone, admit the
   router's identity to it, and admit peer instances to the two handshake RPCs only, since the
   same port can also carry `Generate`, `PauseGeneration`, `Sleep`, the weight-update RPCs and the

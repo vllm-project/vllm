@@ -32,6 +32,7 @@ from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreReadyResponse,
     EngineCoreRequest,
+    KVTransferInfo,
 )
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (
@@ -437,6 +438,34 @@ def test_apply_ready_response_syncs_mamba_block_size():
     )
     client._apply_ready_response(payload)
     assert client.vllm_config.cache_config.mamba_block_size == 1056
+
+
+@pytest.mark.parametrize(
+    ("kv_connector", "extra_config", "expected"),
+    [
+        ("NixlConnector", {"handshake_transport": "grpc"}, "grpc"),
+        ("NixlConnector", {}, None),
+        ("ExampleConnector", {"handshake_transport": "grpc"}, None),
+    ],
+)
+def test_kv_transfer_info_reports_nixl_handshake_transport(
+    kv_connector, extra_config, expected
+):
+    import msgspec
+
+    from vllm.config.kv_transfer import KVTransferConfig
+
+    info = KVTransferInfo.from_config(
+        KVTransferConfig(
+            kv_connector=kv_connector,
+            kv_role="kv_both",
+            kv_connector_extra_config=extra_config,
+        )
+    )
+    assert info is not None
+    assert info.handshake_transport == expected
+    encoded = msgspec.msgpack.encode(info)
+    assert msgspec.msgpack.decode(encoded, type=KVTransferInfo) == info
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):

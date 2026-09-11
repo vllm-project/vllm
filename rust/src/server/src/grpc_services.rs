@@ -299,6 +299,7 @@ mod tests {
             engine_id: "prefill-0".to_string(),
             kv_connector: "NixlConnector".to_string(),
             kv_role: "kv_producer".to_string(),
+            handshake_transport: None,
         }
     }
 

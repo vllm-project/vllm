@@ -37,12 +37,29 @@ pub struct KvEventsConfig {
     pub topic: String,
 }
 
+/// How NIXL workers obtain a remote engine's handshake metadata, set by
+/// `handshake_transport` in `kv_connector_extra_config`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HandshakeTransport {
+    /// Metadata pushed by the frontend when present, else the ZMQ side channel.
+    #[default]
+    Auto,
+    /// Pushed metadata only; the ZMQ side channel is closed.
+    Grpc,
+    /// The ZMQ side channel only.
+    Zmq,
+}
+
 /// Identity of one engine in the KV transfer (P/D) topology.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KvTransferInfo {
     pub engine_id: String,
     pub kv_connector: String,
     pub kv_role: String,
+    /// `None` when the connector has no such setting or the engine predates it.
+    #[serde(default)]
+    pub handshake_transport: Option<HandshakeTransport>,
 }
 
 /// Post-initialization configuration sent from each engine on the input socket

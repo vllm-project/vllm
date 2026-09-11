@@ -225,11 +225,12 @@ pub struct GenerateOutputStream {
 
 /// Where peers reach this frontend's gRPC control plane. Advertised only when a
 /// port is set; the host is optional and defaults, on the peer, to the KV
-/// connector's own `remote_host`.
+/// connector's own `remote_host`. `tls` tells peers to dial it over TLS.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KvControlAddress {
     pub port: Option<u16>,
     pub host: Option<String>,
+    pub tls: bool,
 }
 
 impl GenerateOutputStream {
@@ -428,6 +429,9 @@ fn advertise_control_address(
         if let Some(host) = &address.host {
             map.insert("remote_control_host".to_string(), host.clone().into());
         }
+        if address.tls {
+            map.insert("remote_control_tls".to_string(), true.into());
+        }
     }
     Some(params)
 }
@@ -442,7 +446,7 @@ mod control_address_tests {
     fn advertises_only_when_params_name_a_remote_engine() {
         let port_only = KvControlAddress {
             port: Some(50051),
-            host: None,
+            ..Default::default()
         };
         assert_eq!(advertise_control_address(None, &port_only), None);
         let params = json!({"remote_engine_id": "p0", "remote_host": "10.0.0.1"});
@@ -459,11 +463,26 @@ mod control_address_tests {
         let with_host = KvControlAddress {
             port: Some(50051),
             host: Some("prefill-control".into()),
+            tls: false,
         };
         assert_eq!(
             advertise_control_address(Some(params), &with_host),
             Some(
                 json!({"remote_engine_id": "p0", "remote_host": "10.0.0.1", "remote_control_port": 50051, "remote_control_host": "prefill-control"})
+            )
+        );
+        let with_tls = KvControlAddress {
+            port: Some(50051),
+            host: None,
+            tls: true,
+        };
+        assert_eq!(
+            advertise_control_address(
+                Some(json!({"remote_engine_id": "p0", "remote_host": "10.0.0.1"})),
+                &with_tls
+            ),
+            Some(
+                json!({"remote_engine_id": "p0", "remote_host": "10.0.0.1", "remote_control_port": 50051, "remote_control_tls": true})
             )
         );
         let consumed = json!({"do_remote_prefill": false});

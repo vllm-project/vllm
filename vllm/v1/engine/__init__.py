@@ -77,13 +77,24 @@ class KVTransferInfo:
     engine_id: str
     kv_connector: str
     kv_role: str
+    handshake_transport: str | None = None
 
     @classmethod
     def from_config(cls, config: KVTransferConfig | None) -> "KVTransferInfo | None":
         if config is None or not config.is_kv_transfer_instance:
             return None
         assert config.engine_id and config.kv_connector and config.kv_role
-        return cls(config.engine_id, config.kv_connector, config.kv_role)
+        handshake_transport = (
+            config.get_from_extra_config("handshake_transport", None)
+            if config.has_connector("NixlConnector")
+            else None
+        )
+        return cls(
+            config.engine_id,
+            config.kv_connector,
+            config.kv_role,
+            handshake_transport,
+        )
 
 
 @dataclass
