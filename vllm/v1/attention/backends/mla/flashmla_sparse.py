@@ -42,7 +42,7 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -242,9 +242,19 @@ class FlashMLASparseMetadataBuilder(
     SparseMLACommonMetadataBuilder[FlashMLASparseMetadata]
 ):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-    require_uniform_decodes: ClassVar[bool] = True
+    require_uniform_decodes: bool = True
     hisparse_supports_multi_token_decode: ClassVar[bool] = True
     metadata_cls = FlashMLASparseMetadata
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> AttentionCGSupport:
+        if vllm_config.attention_config.hisparse_config is not None:
+            return AttentionCGSupport.ALWAYS
+        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
 
     def __init__(
         self,
@@ -267,6 +277,7 @@ class FlashMLASparseMetadataBuilder(
         self.use_hisparse = vllm_config.attention_config.hisparse_config is not None
         if self.use_hisparse:
             threshold = 1
+            self.require_uniform_decodes = False
         # Varlen decodes are safe under DCP: causality comes from the
         # indexer's top-k indices, not from the kernel metadata.
         self._init_reorder_batch_threshold(
@@ -403,11 +414,17 @@ class FlashMLASparseMetadataBuilder(
         decode_query_len = 0
         active_num_decodes = num_decodes
         if num_decodes > 0:
-            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-            decode_query_len = (query_start_loc_cpu[1] - query_start_loc_cpu[0]).item()
+            if self.use_hisparse:
+                decode_query_len = metadata.decode_max_query_len
+            else:
+                query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+                decode_query_len = (
+                    query_start_loc_cpu[1] - query_start_loc_cpu[0]
+                ).item()
             assert decode_query_len > 0
-            active_num_decodes = num_decode_tokens // decode_query_len
-            assert active_num_decodes * decode_query_len == num_decode_tokens
+            if not self.use_hisparse:
+                active_num_decodes = num_decode_tokens // decode_query_len
+                assert active_num_decodes * decode_query_len == num_decode_tokens
 
         FP8Meta = FlashMLASparseMetadata.FP8SeparatePrefillDecode
         fp8_metadata = FP8Meta(
@@ -518,11 +535,12 @@ class FlashMLASparseMetadataBuilder(
         if num_decodes > 0:
             # Use padded head count since that's what the kernel will see
             scheduler_metadata, _ = get_mla_metadata()
+            kernel_batch_size = 1 if self.use_hisparse else active_num_decodes
 
             kernel_meta = FlashMLASparseMetadata.FP8KernelMetadata(
                 scheduler_metadata=scheduler_metadata,
-                dummy_block_table=self.dummy_block_table[:active_num_decodes],
-                cache_lens=self.max_model_len_tensor[:active_num_decodes],
+                dummy_block_table=self.dummy_block_table[:kernel_batch_size],
+                cache_lens=self.max_model_len_tensor[:kernel_batch_size],
             )
             fp8_metadata.decode = FP8Meta.Decode(
                 seq_lens=common_attn_metadata.seq_lens[:active_num_decodes],
@@ -818,8 +836,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     topk_indices,
                     attn_metadata,
                     fp8_metadata.decode.kernel_metadata,
-                    num_decodes,
-                    fp8_metadata.decode.decode_query_len,
                 )
             # Reshape q: (num_decode_tokens, num_heads, head_dim)
             #         -> (num_decodes, seq_len, num_heads, head_dim)
@@ -1046,8 +1062,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
         kernel_metadata: FlashMLASparseMetadata.FP8KernelMetadata,
-        num_decodes: int,
-        decode_query_len: int,
     ) -> torch.Tensor:
         assert isinstance(self.index_group, HiSparseMLAIndexGroup)
         physical_topk = self.index_group.convert_decode_logical_to_physical_topk(
@@ -1055,21 +1069,17 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             topk_indices,
             attn_metadata,
             return_valid_counts=False,
-            num_decodes=num_decodes,
-            decode_query_len=decode_query_len,
         )
         assert isinstance(physical_topk, torch.Tensor)
-        q = reshape_query_for_spec_decode(q, num_decodes)
-        physical_topk = physical_topk.view(num_decodes, q.shape[1], -1)
         output, _ = self._fp8_flash_mla_kernel(
-            q=q,
+            q=q.unsqueeze(0),
             kv_c_and_k_pe_cache=self.index_group.physical_kv_cache(
                 self.index_group_index
             ),
-            topk_indices=physical_topk,
+            topk_indices=physical_topk.unsqueeze(0),
             kernel_metadata=kernel_metadata,
         )
-        return reshape_attn_output_for_spec_decode(output)
+        return output.squeeze(0)
 
     def _bf16_flash_mla_kernel(
         self,
