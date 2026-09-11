@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from openai.types.responses import ResponseFunctionWebSearch
+from openai_harmony import Message, Role
+
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -8,9 +11,33 @@ from vllm.entrypoints.generate.base.protocol import (
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     SimpleStreamingEventProcessor,
+    StreamingState,
     _StateType,
+    emit_browser_tool_events,
     split_delta,
 )
+
+
+def test_browser_find_uses_responses_action_type():
+    """Both streaming output items must use the Responses find action type."""
+    message = (
+        Message.from_role_and_content(
+            Role.ASSISTANT, '{"pattern": "vLLM", "cursor": 42}'
+        )
+        .with_channel("analysis")
+        .with_recipient("browser.find")
+    )
+
+    events = emit_browser_tool_events(message, StreamingState())
+
+    added, done = events[0], events[-1]
+    assert added.type == "response.output_item.added"
+    assert done.type == "response.output_item.done"
+    for event in (added, done):
+        assert isinstance(event.item, ResponseFunctionWebSearch)
+        assert event.item.action.type == "find_in_page"
+        assert event.item.action.pattern == "vLLM"
+        assert event.item.action.url == "cursor:42"
 
 
 def _make_tool_call(
