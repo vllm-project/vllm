@@ -387,7 +387,40 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
                     model_config.hf_token,
                 )
             )
-            if sentence_transformers_config is not None:
+            self._sentence_transformers_config = sentence_transformers_config
+            if (
+                sentence_transformers_config is not None
+                and sentence_transformers_config.logit_score_config is not None
+            ):
+                parallel_config = vllm_config.parallel_config
+                if (
+                    parallel_config.tensor_parallel_size != 1
+                    or parallel_config.pipeline_parallel_size != 1
+                    or vllm_config.quant_config is not None
+                    or vllm_config.lora_config is not None
+                ):
+                    raise ValueError(
+                        "The LogitScore prototype requires unquantized merged "
+                        "weights without runtime LoRA and TP=PP=1."
+                    )
+                language_model = _get_language_model_for_seq_cls(self)
+                lm_head = getattr(language_model, "lm_head", None)
+                logits_processor = getattr(language_model, "logits_processor", None)
+                if (
+                    lm_head is None
+                    or getattr(lm_head, "bias", None) is not None
+                    or logits_processor is None
+                    or logits_processor.scale != 1.0
+                    or logits_processor.soft_cap is not None
+                ):
+                    raise ValueError(
+                        "LogitScore requires a bias-free linear LM head without "
+                        "logit scaling or soft-capping."
+                    )
+            if (
+                sentence_transformers_config is not None
+                and sentence_transformers_config.dense_config is not None
+            ):
                 dense_config = sentence_transformers_config.dense_config
                 hidden_size = model_config.get_hidden_size()
                 if dense_config["in_features"] != hidden_size:
@@ -458,6 +491,22 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
             )
             method = getattr(hf_config, "method", getattr(text_config, "method", None))
 
+            original_config = self._sentence_transformers_config
+            if (
+                original_config is not None
+                and original_config.logit_score_config is not None
+            ):
+                get_sentence_transformers_cross_encoder_config.cache_clear()
+                if (
+                    get_sentence_transformers_cross_encoder_config(
+                        model_config.model, model_config.revision, model_config.hf_token
+                    )
+                    != original_config
+                ):
+                    raise ValueError(
+                        "The reload checkpoint has incompatible LogitScore semantics."
+                    )
+
             if self._uses_sentence_transformers_score:
                 # The checkpoint may have been updated in place, so reload its
                 # module metadata rather than reusing the construction snapshot.
@@ -477,6 +526,12 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
 
                 original_config = self._sentence_transformers_config
                 dense_config = sentence_transformers_config.dense_config
+                if dense_config is None:
+                    raise ValueError("Cannot reload a Dense checkpoint as LogitScore.")
+                assert (
+                    original_config is not None
+                    and original_config.dense_config is not None
+                )
                 dense_keys = (
                     "in_features",
                     "out_features",
@@ -661,7 +716,7 @@ def load_weights_using_from_2_way_softmax(
     hf_config = model.config
     text_config = hf_config.get_text_config()
 
-    tokens: list[str] = getattr(
+    tokens: list[str | int] = getattr(
         hf_config,
         "classifier_from_token",
         getattr(text_config, "classifier_from_token", []),
@@ -676,7 +731,11 @@ def load_weights_using_from_2_way_softmax(
         text_config.vocab_size,
         text_config.hidden_size,
     )
-    if text_config.tie_word_embeddings:
+    if getattr(
+        text_config,
+        "tie_word_embeddings",
+        getattr(model_config.hf_config, "tie_word_embeddings", False),
+    ):
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.
@@ -700,8 +759,10 @@ def load_weights_using_from_2_way_softmax(
         trust_remote_code=model_config.trust_remote_code,
     )
 
-    false_id = tokenizer.convert_tokens_to_ids(tokens[0])
-    true_id = tokenizer.convert_tokens_to_ids(tokens[1])
+    false_id, true_id = [
+        token if isinstance(token, int) else tokenizer.convert_tokens_to_ids(token)
+        for token in tokens
+    ]
     lm_head_weight = language_model.lm_head.weight
     score_weight = lm_head_weight.data[[true_id]].to(
         torch.float32
@@ -734,7 +795,7 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     model_config = model.vllm_config.model_config
     text_config = model.config.get_text_config()
 
-    tokens: list[str] = getattr(text_config, "classifier_from_token", [])
+    tokens: list[str | int] = getattr(text_config, "classifier_from_token", [])
     assert len(tokens) > 0
 
     language_model = _get_language_model_for_seq_cls(model)
@@ -745,7 +806,11 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
         text_config.vocab_size,
         text_config.hidden_size,
     )
-    if text_config.tie_word_embeddings:
+    if getattr(
+        text_config,
+        "tie_word_embeddings",
+        getattr(model_config.hf_config, "tie_word_embeddings", False),
+    ):
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.
@@ -770,7 +835,10 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
         trust_remote_code=model_config.trust_remote_code,
     )
 
-    token_ids = [tokenizer.convert_tokens_to_ids(t) for t in tokens]
+    token_ids = [
+        token if isinstance(token, int) else tokenizer.convert_tokens_to_ids(token)
+        for token in tokens
+    ]
     score_weight = language_model.lm_head.weight.data[token_ids]
 
     score_layer = language_model.score if using_vlm_head else model.score

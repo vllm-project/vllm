@@ -785,6 +785,34 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 if key != "restore_suffix"
             }
 
+        system_prompt = None
+        if (
+            sentence_transformers_config is not None
+            and sentence_transformers_config.logit_score_config is not None
+        ):
+            saved_config = sentence_transformers_config.model_config
+            chat_template_kwargs = {
+                **(sentence_transformers_config.chat_template_kwargs or {}),
+                **(chat_template_kwargs or {}),
+            }
+            prompt_name = chat_template_kwargs.pop(
+                "prompt_name", saved_config.get("default_prompt_name")
+            )
+            system_prompt = chat_template_kwargs.pop("prompt", None)
+            if system_prompt is None and prompt_name is not None:
+                prompts = saved_config.get("prompts") or {}
+                if not isinstance(prompt_name, str) or prompt_name not in prompts:
+                    raise ValueError(
+                        f"Unknown saved CrossEncoder prompt: {prompt_name!r}."
+                    )
+                system_prompt = prompts[prompt_name]
+            if system_prompt is not None and not isinstance(system_prompt, str):
+                raise ValueError("The CrossEncoder prompt must be a string.")
+            if system_prompt and not uses_message_format:
+                raise ValueError(
+                    "LogitScore prompts require structured message inputs."
+                )
+
         prompt_1 = prompt_2 = ""
         messages: list[ConversationMessage] | None = None
         if uses_message_format:
@@ -800,6 +828,14 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             if max_tokens_per_doc > 0:
                 messages[1] = _truncate_message_text_content(
                     messages[1], tokenizer, max_tokens_per_doc
+                )
+            if system_prompt:
+                messages.insert(
+                    0,
+                    ConversationMessage(
+                        role="system",
+                        content=cast(Any, [{"type": "text", "text": system_prompt}]),
+                    ),
                 )
         else:
             prompt_1, prompt_2, mm_data, mm_uuids = parse_score_data(

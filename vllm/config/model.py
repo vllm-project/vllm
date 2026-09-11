@@ -651,10 +651,31 @@ class ModelConfig:
             self.model, self.revision, self.hf_token
         )
         if sentence_transformers_config is not None:
-            num_labels = sentence_transformers_config.dense_config["out_features"]
+            dense_config = sentence_transformers_config.dense_config
+            num_labels = dense_config["out_features"] if dense_config is not None else 1
             self.hf_config.sentence_transformers = (
                 sentence_transformers_config.model_config
             )
+            if logit_config := sentence_transformers_config.logit_score_config:
+                true_id = logit_config["true_token_id"]
+                false_id = logit_config.get("false_token_id")
+                token_ids = [true_id] if false_id is None else [false_id, true_id]
+                if any(
+                    token_id >= self.hf_text_config.vocab_size for token_id in token_ids
+                ):
+                    raise ValueError(
+                        "LogitScore token ID is outside the model vocabulary."
+                    )
+                self.hf_config.classifier_from_token = token_ids
+                self.hf_config.method = (
+                    "no_post_processing" if false_id is None else "from_2_way_softmax"
+                )
+                self.hf_text_config.classifier_from_token = token_ids
+                self.hf_text_config.method = self.hf_config.method
+                # Without a message template, ST tokenizes a pair rather than
+                # concatenating query and document strings.
+                self.hf_config.use_sep_token = True
+                self.hf_text_config.use_sep_token = True
             self.hf_config.num_labels = num_labels
             if self.hf_text_config is not self.hf_config:
                 self.hf_text_config.num_labels = num_labels

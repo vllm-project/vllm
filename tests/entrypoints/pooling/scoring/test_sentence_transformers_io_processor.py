@@ -85,7 +85,10 @@ def processor(tokenizer):
     processor.supports_score_template = False
     processor.model = None
     processor.use_sep_token = True
-    processor.sentence_transformers_config = SimpleNamespace(uses_message_format=True)
+    processor.sentence_transformers_config = SimpleNamespace(
+        uses_message_format=True,
+        logit_score_config=None,
+    )
     processor.renderer = SimpleNamespace(
         default_cmpl_tok_params=TokenizeParams(max_total_tokens=16),
         process_for_engine=lambda prompt, arrival_time: prompt,
@@ -141,6 +144,64 @@ def _render_pair(processor, pair, tokenization_kwargs=None, chat_template_kwargs
     factory, count = processor.get_request_factory_offline(context)
     assert count == 1
     return processor.render(next(factory()))
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected_prompt,expected_generation",
+    [
+        ({}, "default instruction", True),
+        ({"prompt_name": "other"}, "other instruction", True),
+        ({"prompt": "override", "add_generation_prompt": False}, "override", False),
+        ({"prompt": ""}, None, True),
+    ],
+)
+def test_logit_score_preserves_saved_and_request_prompt_semantics(
+    processor,
+    tokenizer,
+    kwargs,
+    expected_prompt,
+    expected_generation,
+):
+    processor.sentence_transformers_config = SimpleNamespace(
+        uses_message_format=True,
+        logit_score_config={"true_token_id": 7},
+        chat_template_kwargs={"add_generation_prompt": True},
+        model_config={
+            "prompts": {"default": "default instruction", "other": "other instruction"},
+            "default_prompt_name": "default",
+        },
+    )
+    template = _CHAT_TEMPLATE + "{% if add_generation_prompt %}assistant:{% endif %}"
+    full_prompt, engine_prompt = processor.get_score_prompt(
+        "query",
+        "document",
+        {},
+        chat_template=template,
+        chat_template_kwargs=kwargs,
+    )
+    messages = [
+        {"role": "query", "content": [{"type": "text", "text": "query"}]},
+        {"role": "document", "content": [{"type": "text", "text": "document"}]},
+    ]
+    if expected_prompt:
+        messages.insert(
+            0,
+            {"role": "system", "content": [{"type": "text", "text": expected_prompt}]},
+        )
+    expected = tokenizer.apply_chat_template(
+        messages,
+        chat_template=template,
+        tokenize=False,
+        add_generation_prompt=expected_generation,
+    )
+    assert full_prompt == expected
+    assert (
+        engine_prompt["prompt_token_ids"]
+        == tokenizer(expected, add_special_tokens=False)["input_ids"]
+    )
+    assert processor.sentence_transformers_config.chat_template_kwargs == {
+        "add_generation_prompt": True
+    }
 
 
 @pytest.mark.parametrize(

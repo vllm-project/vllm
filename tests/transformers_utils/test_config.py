@@ -12,7 +12,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-from transformers import BertConfig, LlamaConfig, PreTrainedConfig
+from transformers import BertConfig, LlamaConfig, PreTrainedConfig, Qwen3Config
 
 from vllm.config.model import ModelConfig
 from vllm.tokenizers import get_tokenizer
@@ -646,32 +646,15 @@ def test_cross_encoder_rejects_left_padded_cls_pooling(tmp_path):
         get_sentence_transformers_cross_encoder_config(str(tmp_path), revision=None)
 
 
-@pytest.mark.parametrize(
-    ("transformer_task", "module_output_name", "post_processing_type"),
-    [
-        ("sequence-classification", "scores", None),
-        (
-            "text-generation",
-            "causal_logits",
-            "sentence_transformers.cross_encoder.modules.logit_score.LogitScore",
-        ),
-    ],
-    ids=["sequence-classification", "logit-score"],
-)
-def test_non_pooled_cross_encoder_topologies_are_not_claimed(
-    tmp_path,
-    transformer_task,
-    module_output_name,
-    post_processing_type,
-):
+def test_traditional_cross_encoder_topology_is_not_claimed(tmp_path):
     _write_sentence_transformers_cross_encoder(tmp_path)
 
     transformer_config_path = tmp_path / "sentence_bert_config.json"
     transformer_config = json.loads(transformer_config_path.read_text(encoding="utf-8"))
     transformer_config.update(
         {
-            "transformer_task": transformer_task,
-            "module_output_name": module_output_name,
+            "transformer_task": "sequence-classification",
+            "module_output_name": "scores",
             "modality_config": {
                 "text": {
                     "method": "forward",
@@ -684,21 +667,120 @@ def test_non_pooled_cross_encoder_topologies_are_not_claimed(
 
     modules_path = tmp_path / "modules.json"
     modules = json.loads(modules_path.read_text(encoding="utf-8"))[:1]
-    if post_processing_type is not None:
-        modules.append(
-            {
-                "idx": 1,
-                "name": "1",
-                "path": "1_LogitScore",
-                "type": post_processing_type,
-            }
-        )
     modules_path.write_text(json.dumps(modules), encoding="utf-8")
 
     assert (
         get_sentence_transformers_cross_encoder_config(str(tmp_path), revision=None)
         is None
     )
+
+
+def _write_logit_score_cross_encoder(path, *, false_id=5, task="text-generation"):
+    _write_sentence_transformers_cross_encoder(path)
+    Qwen3Config(
+        architectures=["Qwen3ForCausalLM"],
+        hidden_size=128,
+        intermediate_size=256,
+        head_dim=32,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_hidden_layers=1,
+        vocab_size=32,
+        max_position_embeddings=64,
+    ).save_pretrained(path)
+    modules = json.loads((path / "modules.json").read_text())[:1]
+    modules.append(
+        {
+            "idx": 1,
+            "name": "1",
+            "path": "1_LogitScore",
+            "type": (
+                "sentence_transformers.cross_encoder.modules.logit_score.LogitScore"
+            ),
+        }
+    )
+    (path / "modules.json").write_text(json.dumps(modules))
+    (path / "sentence_bert_config.json").write_text(
+        json.dumps(
+            {
+                "transformer_task": task,
+                "module_output_name": "causal_logits",
+                "modality_config": {
+                    "text": {"method": "forward", "method_output_name": "logits"}
+                },
+            }
+        )
+    )
+    (path / "1_LogitScore").mkdir()
+    (path / "1_LogitScore/config.json").write_text(
+        json.dumps(
+            {
+                "true_token_id": 7,
+                "false_token_id": false_id,
+                "module_input_name": "causal_logits",
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize("false_id", [None, 0, 5])
+@pytest.mark.parametrize("task", ["text-generation", "any-to-any"])
+def test_logit_score_automatically_resolves_to_last_token_classifier(
+    tmp_path, false_id, task
+):
+    _write_logit_score_cross_encoder(tmp_path, false_id=false_id, task=task)
+    config = ModelConfig(str(tmp_path), dtype="float32")
+    assert config.runner_type == "pooling"
+    assert config.convert_type == "classify"
+    assert config.pooler_config is not None
+    assert config.pooler_config.seq_pooling_type == "LAST"
+    assert config.hf_config.num_labels == 1
+    assert config.use_sep_token
+    assert config.hf_config.classifier_from_token == (
+        [7] if false_id is None else [false_id, 7]
+    )
+    assert config.hf_config.method == (
+        "no_post_processing" if false_id is None else "from_2_way_softmax"
+    )
+    assert config.max_model_len == 16
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        {"text": {"max_length": 16}},
+        {"chat_template": {"add_generation_prompt": "true"}},
+        {"chat_template": {"continue_final_message": True}},
+    ],
+)
+def test_logit_score_rejects_unsupported_processing_settings(tmp_path, setting):
+    _write_logit_score_cross_encoder(tmp_path)
+    path = tmp_path / "sentence_bert_config.json"
+    config = json.loads(path.read_text())
+    config["processing_kwargs"] = setting
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="LogitScore supports only"):
+        ModelConfig(str(tmp_path), dtype="float32")
+
+
+@pytest.mark.parametrize(
+    "field,value,match",
+    [
+        ("true_token_id", -1, "non-negative integers"),
+        ("true_token_id", True, "non-negative integers"),
+        ("true_token_id", 32, "outside the model vocabulary"),
+        ("false_token_id", "no", "non-negative integers"),
+        ("module_input_name", "hidden_states", "must read causal_logits"),
+    ],
+)
+def test_logit_score_rejects_invalid_contract(tmp_path, field, value, match):
+    _write_logit_score_cross_encoder(tmp_path)
+    path = tmp_path / "1_LogitScore/config.json"
+    config = json.loads(path.read_text())
+    config[field] = value
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match=match):
+        ModelConfig(str(tmp_path), dtype="float32")
 
 
 def test_unsupported_pooled_sentence_transformers_cross_encoder_fails_closed(

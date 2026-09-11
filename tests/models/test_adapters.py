@@ -439,6 +439,41 @@ def test_sequence_classification_preserves_native_cross_encoder():
     assert as_seq_cls_model(NativeCrossEncoder) is NativeCrossEncoder
 
 
+@pytest.mark.parametrize(
+    "tp,pp,quantized,lora",
+    [
+        (2, 1, False, False),
+        (1, 2, False, False),
+        (1, 1, True, False),
+        (1, 1, False, True),
+    ],
+)
+def test_logit_score_rejects_unvalidated_loading_modes(
+    monkeypatch, tp, pp, quantized, lora
+):
+    """Reject modes for which deriving a static scoring row is not validated."""
+    monkeypatch.setattr(
+        adapters_module,
+        "get_sentence_transformers_cross_encoder_config",
+        lambda *_args: SimpleNamespace(logit_score_config={"true_token_id": 7}),
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=Qwen2Config(),
+            model="unused",
+            revision=None,
+            hf_token=None,
+        ),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=tp, pipeline_parallel_size=pp
+        ),
+        quant_config=object() if quantized else None,
+        lora_config=object() if lora else None,
+    )
+    with pytest.raises(ValueError, match="LogitScore prototype requires"):
+        as_seq_cls_model(ExistingEmbeddingModel)(vllm_config=config)
+
+
 def test_sequence_classification_replaces_existing_embedding_pooler(
     monkeypatch,
     tmp_path,
