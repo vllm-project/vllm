@@ -1235,6 +1235,7 @@ async def _empty_context_generator():
 
 async def _make_full_metrics_response(
     enable_per_request_metrics: bool,
+    request_metrics_cover_all_generation_turns: bool = True,
 ):
     serving = _make_serving_instance(
         enable_per_request_metrics=enable_per_request_metrics
@@ -1242,6 +1243,9 @@ async def _make_full_metrics_response(
     request = ResponsesRequest(input="hi", tools=[], stream=False, store=False)
     context = _make_simple_context_with_output(
         "hello", [10, 20], metrics=_PER_REQUEST_STATS
+    )
+    context.request_metrics_cover_all_generation_turns = (
+        request_metrics_cover_all_generation_turns
     )
     response = await serving.responses_full_generator(
         request=request,
@@ -1296,40 +1300,13 @@ async def test_responses_streaming_metrics_only_on_completed_event():
 
 
 @pytest.mark.asyncio
-async def test_responses_metrics_suppressed_for_multiple_generation_streams(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    serving = _make_serving_instance(enable_per_request_metrics=True)
-    context = MockConversationContext()
-    monkeypatch.setattr(
-        context, "need_builtin_tool_call", MagicMock(side_effect=[True, False])
+async def test_responses_metrics_suppressed_for_multiple_generation_turns():
+    response = await _make_full_metrics_response(
+        True, request_metrics_cover_all_generation_turns=False
     )
 
-    async def generate(*args, **kwargs):
-        yield RequestOutput(
-            request_id="req",
-            prompt=None,
-            prompt_token_ids=[],
-            prompt_logprobs=None,
-            outputs=[],
-            finished=True,
-            metrics=_PER_REQUEST_STATS,
-        )
-
-    monkeypatch.setattr(serving.engine_client, "generate", generate)
-
-    results = [
-        result
-        async for result in serving._generate_with_builtin_tools(
-            request_id="req",
-            engine_input=tokens_input([1]),
-            sampling_params=SamplingParams(max_tokens=8),
-            context=context,
-        )
-    ]
-
-    assert len(results) == 2
-    assert context.request_metrics_attributable is False
+    assert response.metrics is None
+    assert "metrics" not in response.model_dump(mode="json")
 
 
 def _make_serving_instance_with_reasoning():

@@ -105,7 +105,10 @@ class TurnMetrics:
 class ConversationContext(ABC):
     response_parser: Parser | None = None
     request_metrics: "RequestStateStats | None" = None
-    request_metrics_attributable: bool = True
+    # Built-in tools can trigger additional model generations. In that case,
+    # the stored engine timestamps cover only one turn, while token usage is
+    # accumulated across all turns.
+    request_metrics_cover_all_generation_turns: bool = True
 
     @abstractmethod
     def append_output(self, output: RequestOutput) -> None:

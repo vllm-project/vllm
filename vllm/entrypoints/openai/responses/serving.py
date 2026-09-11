@@ -660,7 +660,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 break
 
             # Call the tool and update the context with the result.
-            context.request_metrics_attributable = False
+            context.request_metrics_cover_all_generation_turns = False
             tool_output = await context.call_tool()
             context.append_tool_output(tool_output)
 
@@ -864,7 +864,10 @@ class OpenAIServingResponses(GenerateBaseServing):
             ),
         )
         per_request_metrics = None
-        if self.enable_per_request_metrics and context.request_metrics_attributable:
+        if (
+            self.enable_per_request_metrics
+            and context.request_metrics_cover_all_generation_turns
+        ):
             per_request_metrics = build_per_request_timing_metrics(
                 context.request_metrics, num_generated_tokens
             )
