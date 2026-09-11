@@ -329,11 +329,7 @@ review process:
   The bot reports the lag and warns that outdated CI configuration may cause
   failures. Before merging, merge or rebase onto the latest target branch and
   rerun CI without `--allow-stale` on the latest PR commit.
-- `/ci retry` and `/amd-ci retry` allow **at most 50 commits behind** the target
-  branch. This limit applies both to retries of jobs in an existing build and
-  to new builds that retry selected failed jobs. At 51 or more commits behind,
-  update your branch and rerun CI. Retry commands do not accept `--allow-stale`.
-  Cancelling builds does not check branch freshness.
+- Retrying or cancelling builds does not check branch freshness.
 - These commands do not modify your branch or enforce merge requirements.
   Direct Buildkite launches are outside this workflow. No additional token is
   needed.
