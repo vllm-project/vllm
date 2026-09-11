@@ -145,6 +145,7 @@ PIDS+=($!)
 env "$DEVICE_AFFINITY_ENV=$GPU_PD" vllm serve "$MODEL" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION_PD" \
     --port "$PREFILL_DECODE_PORT" \
+    --enable-mm-embeds \
     --enforce-eager \
     --enable-request-id-headers \
     --max-num-seqs "$MAX_NUM_SEQS" \

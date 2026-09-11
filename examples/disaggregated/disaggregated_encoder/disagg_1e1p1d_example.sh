@@ -155,6 +155,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5559 \
 vllm serve "$MODEL" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION_P" \
     --port "$PREFILL_PORT" \
+    --enable-mm-embeds \
     --enforce-eager \
     --enable-request-id-headers \
     --max-num-seqs "$MAX_NUM_SEQS" \
@@ -189,6 +190,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=6000 \
 vllm serve "$MODEL" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION_D" \
     --port "$DECODE_PORT" \
+    --enable-mm-embeds \
     --enforce-eager \
     --enable-request-id-headers \
     --max-num-seqs "$MAX_NUM_SEQS" \
