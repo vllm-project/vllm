@@ -10,10 +10,8 @@
 # ]
 # ///
 
-import json
 from dataclasses import dataclass
 from enum import Enum, IntEnum
-from pathlib import Path
 
 import msgpack
 import msgspec
@@ -423,7 +421,7 @@ class EngineCoreReadyResponse:
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
-    kv_cache_group_metadata: list[dict] | None = None
+    effective_attention_block_size: int | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -447,9 +445,7 @@ ready_response = EngineCoreReadyResponse(
     weight_transfer_backend="nccl",
     enable_sleep_mode=True,
     supports_draft_weight_updates=True,
-    kv_cache_group_metadata=json.loads(
-        Path(__file__).with_name("kv_cache_group_metadata.json").read_text()
-    ),
+    effective_attention_block_size=64,
     kv_events_config=KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",

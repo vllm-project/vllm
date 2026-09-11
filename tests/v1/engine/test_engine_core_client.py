@@ -368,10 +368,12 @@ def test_dplb_finished_requests_release_inflight():
     assert req.request_id not in client.reqs_in_flight
 
 
-def test_apply_ready_response_syncs_block_size():
+@pytest.mark.parametrize("effective_size", [None, 4224])
+def test_apply_ready_response_syncs_block_size(effective_size):
     import msgspec
 
     client = object.__new__(MPClient)
+    client._effective_attention_block_sizes = set()
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
@@ -399,14 +401,24 @@ def test_apply_ready_response_syncs_block_size():
             max_loras=0,
         )
     )
-    client._apply_ready_response(payload)
+    fields = msgspec.msgpack.decode(payload)
+    if effective_size is None:
+        del fields["effective_attention_block_size"]
+    else:
+        fields["effective_attention_block_size"] = effective_size
+    client._apply_ready_response(msgspec.msgpack.encode(fields))
     assert client.vllm_config.cache_config.block_size == 1056
+    assert client.get_effective_attention_block_size() == effective_size
+
+    client._apply_ready_response(b"")
+    assert client.get_effective_attention_block_size() is None
 
 
 def test_apply_ready_response_syncs_mamba_block_size():
     import msgspec
 
     client = object.__new__(MPClient)
+    client._effective_attention_block_sizes = set()
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),

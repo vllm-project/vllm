@@ -37,18 +37,6 @@ pub struct KvEventsConfig {
     pub topic: String,
 }
 
-/// Initialized cache geometry; group_id matches KV event group_idx.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KvCacheGroupMetadata {
-    pub group_id: u32,
-    /// Cache spec kind, or "unknown" for an unrecognized spec.
-    pub kind: String,
-    /// Physical cache block size in tokens.
-    pub block_size: u64,
-    /// Effective full-block size in tokens; partial events carry their own size.
-    pub logical_block_size: u64,
-}
-
 /// Post-initialization configuration sent from each engine on the input socket
 /// registration message, after the handshake completes.
 ///
@@ -116,9 +104,9 @@ pub struct EngineCoreReadyResponse {
     /// Whether the engine has a speculative draft model that can be updated.
     #[serde(default)]
     pub supports_draft_weight_updates: bool,
-    /// None means unavailable; Some([]) means there are no cache groups.
+    /// Full-attention block size in tokens after initialization, or unavailable.
     #[serde(default)]
-    pub kv_cache_group_metadata: Option<Vec<KvCacheGroupMetadata>>,
+    pub effective_attention_block_size: Option<u64>,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

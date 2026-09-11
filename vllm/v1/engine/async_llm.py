@@ -43,7 +43,7 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.v1.engine import EngineCoreRequest, KVCacheGroupMetadata, PauseMode
+from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
@@ -344,8 +344,8 @@ class AsyncLLM(EngineClient):
 
         return self._supported_tasks
 
-    async def get_kv_cache_group_metadata(self) -> list[KVCacheGroupMetadata] | None:
-        return await self.engine_core.get_kv_cache_group_metadata_async()
+    async def get_effective_attention_block_size(self) -> int | None:
+        return await self.engine_core.get_effective_attention_block_size_async()
 
     async def add_request(
         self,

@@ -2845,10 +2845,10 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let ready_response: EngineCoreReadyResponse =
         rmp_serde::from_slice(&hex::decode(ready_response_hex).unwrap()).unwrap();
     let mut legacy_ready = serde_json::to_value(&ready_response).unwrap();
-    legacy_ready.as_object_mut().unwrap().remove("kv_cache_group_metadata");
+    legacy_ready.as_object_mut().unwrap().remove("effective_attention_block_size");
     let legacy_ready: EngineCoreReadyResponse =
         rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy_ready).unwrap()).unwrap();
-    assert!(legacy_ready.kv_cache_group_metadata.is_none());
+    assert!(legacy_ready.effective_attention_block_size.is_none());
     assert!(ready_response.supports_lora);
     assert_eq!(ready_response.max_loras, 8);
     assert_eq!(
@@ -2857,11 +2857,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     );
     assert!(ready_response.enable_sleep_mode);
     assert!(ready_response.supports_draft_weight_updates);
-    assert_eq!(
-        serde_json::to_value(&ready_response.kv_cache_group_metadata).unwrap(),
-        serde_json::from_str::<serde_json::Value>(include_str!("kv_cache_group_metadata.json"))
-            .unwrap(),
-    );
+    assert_eq!(ready_response.effective_attention_block_size, Some(64));
     let kv_events_config = ready_response.kv_events_config.expect("KV events config should decode");
     assert!(kv_events_config.enable_kv_cache_events);
     assert_eq!(kv_events_config.publisher, "zmq");

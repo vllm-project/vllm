@@ -43,7 +43,6 @@ from vllm.v1.engine import (
     EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
-    KVCacheGroupMetadata,
     PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
@@ -175,7 +174,7 @@ class EngineCoreClient(ABC):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         raise NotImplementedError
 
-    def get_kv_cache_group_metadata(self) -> list[KVCacheGroupMetadata] | None:
+    def get_effective_attention_block_size(self) -> int | None:
         raise NotImplementedError
 
     def add_request(self, request: EngineCoreRequest) -> None:
@@ -268,9 +267,7 @@ class EngineCoreClient(ABC):
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         raise NotImplementedError
 
-    async def get_kv_cache_group_metadata_async(
-        self,
-    ) -> list[KVCacheGroupMetadata] | None:
+    async def get_effective_attention_block_size_async(self) -> int | None:
         raise NotImplementedError
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
@@ -375,8 +372,8 @@ class InprocClient(EngineCoreClient):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
 
-    def get_kv_cache_group_metadata(self) -> list[KVCacheGroupMetadata] | None:
-        return self.engine_core.get_kv_cache_group_metadata()
+    def get_effective_attention_block_size(self) -> int | None:
+        return self.engine_core.get_effective_attention_block_size()
 
     def add_request(self, request: EngineCoreRequest) -> None:
         req, request_wave = self.engine_core.preprocess_add_request(request)
@@ -578,6 +575,7 @@ class MPClient(EngineCoreClient):
     ):
         self.vllm_config = vllm_config
         self._renderer: BaseRenderer | None = renderer
+        self._effective_attention_block_sizes: set[int | None] = set()
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -812,13 +810,21 @@ class MPClient(EngineCoreClient):
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
         ).start()
 
+    def get_effective_attention_block_size(self) -> int | None:
+        sizes = self._effective_attention_block_sizes
+        return next(iter(sizes)) if len(sizes) == 1 else None
+
     def _apply_ready_response(self, payload: bytes) -> None:
         """Decode an EngineCoreReadyResponse and sync any post-initialization
         config changes (e.g. auto-fitted max_model_len) back to the frontend."""
         if not payload:
+            self._effective_attention_block_sizes.add(None)
             return
         vllm_config = self.vllm_config
         response = msgspec.msgpack.decode(payload, type=EngineCoreReadyResponse)
+        self._effective_attention_block_sizes.add(
+            response.effective_attention_block_size
+        )
         vllm_config.model_config.max_model_len = min(
             vllm_config.model_config.max_model_len, response.max_model_len
         )
@@ -984,9 +990,6 @@ class SyncMPClient(MPClient):
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.call_utility("get_supported_tasks")
-
-    def get_kv_cache_group_metadata(self) -> list[KVCacheGroupMetadata] | None:
-        return self.call_utility("get_kv_cache_group_metadata")
 
     def add_request(self, request: EngineCoreRequest) -> None:
         if self.is_dp:
@@ -1231,10 +1234,8 @@ class AsyncMPClient(MPClient):
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         return await self.call_utility_async("get_supported_tasks")
 
-    async def get_kv_cache_group_metadata_async(
-        self,
-    ) -> list[KVCacheGroupMetadata] | None:
-        return await self.call_utility_async("get_kv_cache_group_metadata")
+    async def get_effective_attention_block_size_async(self) -> int | None:
+        return self.get_effective_attention_block_size()
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         request.client_index = self.client_index

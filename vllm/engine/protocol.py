@@ -18,7 +18,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.v1.engine import EngineCoreRequest, KVCacheGroupMetadata
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 
@@ -267,12 +267,8 @@ class EngineClient(ABC):
         """Get supported tasks"""
         raise NotImplementedError
 
-    async def get_kv_cache_group_metadata(self) -> list[KVCacheGroupMetadata] | None:
-        """Return physical and logical full-block sizes for each cache group.
-
-        None means unavailable; [] means no cache groups. Partial KV events
-        carry their own actual block size.
-        """
+    async def get_effective_attention_block_size(self) -> int | None:
+        """Return the full-attention block size in tokens, or None if unavailable."""
         return None
 
     async def init_weight_transfer_engine(
