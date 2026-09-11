@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from vllm.config import (
+    CacheConfig,
     DeviceConfig,
     LoRAConfig,
     ModelConfig,
@@ -137,7 +138,7 @@ def test_uno_rejects_sliding_window_attention(uno_config_factory):
         uno_config_factory(target_model_config=target)
 
 
-def _make_vllm_uno_config(uno_config_factory, **scheduler_overrides):
+def _make_vllm_uno_config(uno_config_factory, cache_config=None, **scheduler_overrides):
     scheduler_kwargs = dict(
         max_model_len=2048,
         max_num_seqs=4,
@@ -146,12 +147,15 @@ def _make_vllm_uno_config(uno_config_factory, **scheduler_overrides):
         async_scheduling=None,
     )
     scheduler_kwargs.update(scheduler_overrides)
-    return VllmConfig(
+    kwargs = dict(
         device_config=DeviceConfig(device="cpu"),
         speculative_config=uno_config_factory(),
         lora_config=LoRAConfig(max_loras=2, lora_dtype=torch.bfloat16),
         scheduler_config=SchedulerConfig(**scheduler_kwargs),
     )
+    if cache_config is not None:
+        kwargs["cache_config"] = cache_config
+    return VllmConfig(**kwargs)
 
 
 def test_uno_uses_native_async_v2_and_reserves_k_lookahead(
@@ -207,6 +211,52 @@ def test_uno_rejects_unsupported_v2_scheduler_options(
     monkeypatch.setattr("vllm.config.vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True)
     with pytest.raises(ValueError, match=message):
         _make_vllm_uno_config(uno_config_factory, **scheduler_overrides)
+
+
+def test_uno_rejects_kv_sharing_fast_prefill(uno_config_factory, monkeypatch):
+    """Uno's draft layers are the target's layers, so reject fast prefill.
+
+    Upstream gates ``kv_sharing_fast_prefill`` on ``use_eagle()``; Uno needs the
+    same refusal because the KV-sharing eligibility walk assumes draft layers
+    are a separate model's and would wrap sharing layers incorrectly.
+    """
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    monkeypatch.setattr("vllm.config.vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True)
+    from vllm.platforms import current_platform
+
+    # The CPU platform disables async scheduling, which Uno needs; keep the
+    # config test on CPU by neutralizing the platform hook (as the sibling
+    # async-v2 test does).
+    monkeypatch.setattr(
+        current_platform, "apply_config_platform_defaults", lambda _config: None
+    )
+    monkeypatch.setattr(
+        current_platform, "check_and_update_config", lambda _config: None
+    )
+    with pytest.raises(ValueError, match="KV sharing"):
+        _make_vllm_uno_config(
+            uno_config_factory,
+            cache_config=CacheConfig(kv_sharing_fast_prefill=True),
+        )
+
+
+def test_uno_allows_default_kv_sharing_fast_prefill(uno_config_factory, monkeypatch):
+    """The default (off) flag is not a false positive of the F1 refusal."""
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    monkeypatch.setattr("vllm.config.vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True)
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(
+        current_platform, "apply_config_platform_defaults", lambda _config: None
+    )
+    monkeypatch.setattr(
+        current_platform, "check_and_update_config", lambda _config: None
+    )
+    config = _make_vllm_uno_config(
+        uno_config_factory,
+        cache_config=CacheConfig(kv_sharing_fast_prefill=False),
+    )
+    assert config.cache_config.kv_sharing_fast_prefill is False
 
 
 def test_uno_rejects_forced_v1_runner(uno_config_factory, monkeypatch):

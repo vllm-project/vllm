@@ -1207,6 +1207,14 @@ class VllmConfig:
             or self.cache_config.kv_offloading_size is not None
         ):
             raise ValueError("Uno does not support KV cache transfer")
+        if self.cache_config.kv_sharing_fast_prefill:
+            raise ValueError(
+                "Fast prefill optimization for KV sharing is not compatible "
+                "with Uno: Uno's draft layers are the target's layers, so the "
+                "KV-sharing eligibility walk would wrap sharing layers "
+                "incorrectly, and fast prefill gives incorrect logits for "
+                "prompt tokens that Uno's verification requires."
+            )
         if not self.scheduler_config.async_scheduling:
             raise ValueError("Uno requires asynchronous scheduling")
 
