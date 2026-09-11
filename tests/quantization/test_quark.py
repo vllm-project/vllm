@@ -1730,7 +1730,7 @@ def _glm5_block_fp8(out_dim: int, in_dim: int, block: int = 128):
 
 
 def test_glm5next_gate_up_proj_mapping_is_genuine_fusion():
-    from vllm.models.glm5next.nvidia.model import Glm5NextForConditionalGeneration
+    from vllm.models.glm5next.model import Glm5NextForConditionalGeneration
 
     mapping = Glm5NextForConditionalGeneration.packed_modules_mapping
     assert mapping["gate_up_proj"] == ["gate_proj", "up_proj"]
@@ -1749,7 +1749,7 @@ def test_glm5next_attn_loader_accepts_quark_weight_scale():
     # Regression for KeyError on '...kv_a_proj_with_mqa.weight_scale': the fused
     # q_a/kv_a projection is kept BF16 and dequantized on load; the Quark scale
     # name must be recognized and routed to the correct fused shard.
-    from vllm.models.glm5next.nvidia.model import (
+    from vllm.models.glm5next.model import (
         _dequant_fp8_block,
         _try_load_fp8_attn_proj,
     )
@@ -1790,7 +1790,7 @@ def test_glm5next_attn_loader_accepts_quark_weight_scale():
 
 def test_glm5next_attn_loader_accepts_deepseek_weight_scale_inv():
     # DeepSeek scale name keeps working unchanged.
-    from vllm.models.glm5next.nvidia.model import (
+    from vllm.models.glm5next.model import (
         _dequant_fp8_block,
         _try_load_fp8_attn_proj,
     )

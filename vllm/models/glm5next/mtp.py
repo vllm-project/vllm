@@ -33,7 +33,7 @@ from .model import (
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
-from .ops.fused_eh_norm import fused_eh_norm
+from .nvidia.ops.fused_eh_norm import fused_eh_norm
 
 
 class Glm5NextMultiTokenPredictorLayer(nn.Module):
