@@ -66,9 +66,6 @@ class OffloadingConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         kv_cache_config = self.kv_cache_config
         num_blocks = kv_cache_config.num_blocks
-        mappings = derive_canonical_mappings(
-            self.vllm_config, kv_cache_config, kv_caches
-        )
 
         # layer_name -> (num_blocks, page_size_bytes) tensor
         tensors_per_block: dict[str, tuple[torch.Tensor, ...]] = {}
@@ -149,6 +146,10 @@ class OffloadingConnectorWorker:
                 )
             )
             return
+
+        mappings = derive_canonical_mappings(
+            self.vllm_config, kv_cache_config, kv_caches
+        )
 
         block_tensors: list[CanonicalKVCacheTensor] = []
         block_data_refs: dict[str, list[CanonicalKVCacheRef]] = defaultdict(list)
