@@ -22,6 +22,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MixtureOfExperts
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.models.glm5next.nvidia.ops.fused_eh_norm import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -33,7 +34,6 @@ from .model import (
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
-from .nvidia.ops.fused_eh_norm import fused_eh_norm
 
 
 class Glm5NextMultiTokenPredictorLayer(nn.Module):
