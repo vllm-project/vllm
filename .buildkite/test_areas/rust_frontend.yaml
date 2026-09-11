@@ -82,6 +82,7 @@ steps:
   - tests/entrypoints/serve/instrumentator/test_metrics.py
   # - tests/entrypoints/serve/dev/test_sleep.py
   - tests/entrypoints/serve/tokenize/test_tokenization.py
+  - tests/entrypoints/serve/grpc/test_grpc_services.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -94,6 +95,7 @@ steps:
   # - pytest -v -s entrypoints/serve/dev/test_sleep.py
   # /tokenizer_info is not implemented in the Rust frontend (the CLI flag is accepted as a no-op).
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
+  - pytest -v -s entrypoints/serve/grpc/test_grpc_services.py
   mirror:
     amd:
       label: ":amd: (MI355) Rust Frontend Serve/Admin Coverage"
@@ -113,6 +115,7 @@ steps:
       - tests/entrypoints/serve/instrumentator/test_basic.py
       - tests/entrypoints/serve/instrumentator/test_metrics.py
       - tests/entrypoints/serve/tokenize/test_tokenization.py
+      - tests/entrypoints/serve/grpc/test_grpc_services.py
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Core Correctness"
