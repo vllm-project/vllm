@@ -49,10 +49,11 @@ def _reinit_cpu_group(
     group: "GroupCoordinator", master_ip: str, port: int, rank: int, size: int
 ) -> None:
     """Destroy and rebuild a group's Gloo cpu_group in place."""
-    stateless_destroy_torch_distributed_process_group(group.cpu_group)
-    group.cpu_group = stateless_init_torch_distributed_process_group(
+    new_group = stateless_init_torch_distributed_process_group(
         master_ip, port, rank, size, backend="gloo"
     )
+    stateless_destroy_torch_distributed_process_group(group.cpu_group)
+    group.cpu_group = new_group
 
 
 class WorkerSentinel:
