@@ -27,7 +27,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
 )
 from vllm.model_executor.layers.attention import mla_attention
-from vllm.model_executor.layers.attention.mla_attention import _use_masked_mha
+from vllm.model_executor.layers.attention.mla_attention import (
+    _canonicalize_sparse_mla_kv_cache_dtype,
+    _use_masked_mha,
+)
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
     SparseMLAPrefillMetadata,
@@ -37,26 +40,9 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
-
-# TODO: Integrate ROCMAiterMLASparseBackend for ROCm.
-# The ROCm sparse MLA backend (rocm_aiter_mla_sparse.py) has a compatible
-# forward_mqa interface but needs validation on ROCm hardware.
-if not current_platform.is_cuda():
-    pytest.skip(
-        "Sparse MLA backend tests currently only support CUDA. "
-        "ROCm support requires integrating ROCMAiterMLASparseBackend.",
-        allow_module_level=True,
-    )
-
-from vllm.model_executor.layers.attention.mla_attention import (
-    _canonicalize_sparse_mla_kv_cache_dtype,
-)
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backends.mla import index_group as index_group_module
-from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
-    FlashAttnMLASparseImpl,
-)
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseImpl,
     FlashInferMLASparseMetadataBuilder,
@@ -96,6 +82,21 @@ from vllm.v1.hisparse.runtime import (
 )
 from vllm.v1.hisparse.types import SparseKVRowMirror
 
+# TODO: Integrate ROCMAiterMLASparseBackend for ROCm.
+# The ROCm sparse MLA backend (rocm_aiter_mla_sparse.py) has a compatible
+# forward_mqa interface but needs validation on ROCm hardware.
+#
+# Backend-correctness tests need a CUDA sparse-MLA attention backend and carry
+# this marker. The HiSparse runtime tests do not: `_make_hisparse_runtime`
+# builds on `DEVICE_TYPE = current_platform.device_type` and the cache
+# plumbing is platform-neutral, so they are useful coverage on ROCm as soon as
+# the HiSparse kernels compile there. A module-level skip would hide them.
+requires_cuda_backend = pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="requires a CUDA sparse-MLA attention backend "
+    "(ROCm support needs ROCMAiterMLASparseBackend integration)",
+)
+
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
     for name in [
@@ -117,6 +118,7 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
 DEVICE_TYPE = current_platform.device_type
 
 
+@requires_cuda_backend
 def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
     """Weight absorption must not change the model's attention temperature."""
     model_scale = 256**-0.5
@@ -3051,7 +3053,14 @@ def test_flashinfer_hisparse_decode_runs_batched_attention():
     assert lse is None
 
 
+@requires_cuda_backend
 def test_flashattn_hisparse_decode_uses_index_group():
+    # Imported lazily: vllm.vllm_flash_attn needs the CUDA FA extensions and
+    # raises ImportError on ROCm, which would take the whole module down.
+    from vllm.v1.attention.backends.mla.flashattn_mla_sparse import (
+        FlashAttnMLASparseImpl,
+    )
+
     num_tokens = 4
     q_nope = torch.empty(num_tokens, 2, 3, device=DEVICE_TYPE)
     q_rope = torch.empty(num_tokens, 2, 1, device=DEVICE_TYPE)

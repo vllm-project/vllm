@@ -661,8 +661,6 @@ void concat_and_cache_mla_grouped(torch::stable::Tensor& kv_c,
                                   int64_t block_size, int64_t block_stride,
                                   int64_t entry_stride);
 
-#ifndef USE_ROCM
-// HiSparse kernels use raw PTX in the row copy; CUDA-only.
 void hisparse_resolve_residency(
     torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
     torch::stable::Tensor const& hot_block_table,
@@ -706,8 +704,6 @@ void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
                              torch::stable::Tensor const& miss_global_indices,
                              torch::stable::Tensor const& miss_hot_indices,
                              torch::stable::Tensor const& miss_counts);
-
-#endif  // !USE_ROCM
 
 // NOTE: k_pe and kv_c order is flipped compared to concat_and_cache_mla
 void concat_and_cache_mla_rope_fused(
