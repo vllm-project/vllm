@@ -129,19 +129,23 @@ steps:
       - tests/v1/e2e/spec_decode/
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (B200) Spec Decode Speculators + MTP Nightly"
+- label: ":nvidia: (B200) Spec Decode Speculators + MTP + DFlash2 Nightly"
   key: spec-decode-speculators-mtp-nightly-b200
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   device: b200-k8s
   optional: true
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - vllm/transformers_utils/configs/speculators/
+    - vllm/model_executor/models/qwen3_dflash.py
+    - vllm/model_executor/models/qwen3_dflash2.py
+    - vllm/model_executor/models/qwen3_5.py
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode/speculators/
     - pytest -v -s v1/e2e/spec_decode/mtp/
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash.py -k dflash2
 
 - label: ":nvidia: (H200 MIG 35GB) Spec Decode N-Gram + Suffix"
   key: spec-decode-ngram-suffix
@@ -283,7 +287,7 @@ steps:
     - vllm/model_executor/models/laguna_dflash.py
     - tests/v1/e2e/spec_decode/
   commands:
-    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/
+    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ -k "not dflash2"
   mirror:
     amd:
       label: ":amd: (MI300) Spec Decode AL DFlash Nightly"

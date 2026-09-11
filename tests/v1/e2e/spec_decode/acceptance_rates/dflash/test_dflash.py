@@ -26,6 +26,8 @@ class DFlashCorrectnessConfig:
     use_chat_completions: bool = False
     enforce_eager: bool = False
     disable_flashinfer_sampler: bool = False
+    language_model_only: bool = False
+    chat_template_kwargs: dict[str, object] | None = None
 
 
 QWEN3_DFLASH = DFlashCorrectnessConfig(
@@ -33,6 +35,18 @@ QWEN3_DFLASH = DFlashCorrectnessConfig(
     draft_model="z-lab/Qwen3-8B-DFlash-b16",
     expected_accuracy=0.8,
     expected_acceptance_len=3.5,
+)
+
+QWEN3_8_DFLASH2 = DFlashCorrectnessConfig(
+    model="Qwen/Qwen3.8-27B",
+    draft_model="z-lab/Qwen3.8-27B-DFlash2",
+    expected_accuracy=0.90,
+    expected_acceptance_len=6.19 * 0.95,
+    num_speculative_tokens=7,
+    max_num_seqs=32,
+    use_chat_completions=True,
+    language_model_only=True,
+    chat_template_kwargs={"enable_thinking": False},
 )
 
 LAGUNA_DFLASH_NVFP4 = DFlashCorrectnessConfig(
@@ -104,6 +118,11 @@ def test_dflash_reference_acceptance_lengths(
             True,
             id="laguna-nvfp4-mrv2",
         ),
+        pytest.param(
+            QWEN3_8_DFLASH2,
+            True,
+            id="qwen3.8-dflash2-mrv2",
+        ),
     ],
 )
 def test_dflash_correctness(
@@ -134,12 +153,14 @@ def test_dflash_correctness(
         disable_log_stats=False,
         enable_chunked_prefill=None,
         compilation_config=CompilationConfig(),
+        language_model_only=config.language_model_only,
     ) as spec_runner:
         spec_llm = spec_runner.llm
         results = evaluate_gsm8k_offline(
             spec_llm,
             num_questions=config.num_questions,
             use_chat_completions=config.use_chat_completions,
+            chat_template_kwargs=config.chat_template_kwargs,
         )
         accuracy = results["accuracy"]
         acceptance_len = compute_acceptance_len(spec_llm.get_metrics())
