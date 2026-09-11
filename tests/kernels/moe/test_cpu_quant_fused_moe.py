@@ -197,14 +197,15 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
 
     pw1, pw2 = _prepack_experts(w1), _prepack_experts(w2)
 
-    # Test inplace=False against reference
-    out = ops.fused_experts_cpu(
+    # Test writing into a fresh output buffer against reference
+    out = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        out,
         a.clone(),
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        False,
         ops.CPUQuantMethod.FP8_W8A16,
         w1_s,
         w2_s,
@@ -215,14 +216,16 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
     )
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
 
-    # Test inplace=True produces identical output
-    out_inplace = ops.fused_experts_cpu(
-        a.clone(),
+    # Test writing into the input tensor itself (aliased in-place) produces
+    # an identical result
+    a_inplace = a.clone()
+    ops.fused_experts_cpu(
+        a_inplace,
+        a_inplace,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        True,
         ops.CPUQuantMethod.FP8_W8A16,
         w1_s,
         w2_s,
@@ -231,7 +234,7 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
         BLOCK_SIZE,
         is_vnni=True,
     )
-    torch.testing.assert_close(out_inplace, out, atol=0, rtol=0)
+    torch.testing.assert_close(a_inplace, out, atol=0, rtol=0)
 
 
 def test_w8a16_block_fp8_cpu_fused_moe_small_expert_blocks():
@@ -249,13 +252,14 @@ def test_w8a16_block_fp8_cpu_fused_moe_small_expert_blocks():
         a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, BLOCK_SIZE
     )
     pw1, pw2 = _prepack_experts(w1), _prepack_experts(w2)
-    out = ops.fused_experts_cpu(
+    out = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        out,
         a,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        False,
         ops.CPUQuantMethod.FP8_W8A16,
         w1_s,
         w2_s,
@@ -469,13 +473,15 @@ def test_mxfp4_cpu_fused_moe(M, N, K, E, topk, seed):
     pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
 
     # Kernel
-    out = ops.fused_experts_cpu(
-        a.clone(),
+    a_in = a.clone()
+    out = torch.empty_like(a_in)
+    ops.fused_experts_cpu(
+        out,
+        a_in,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        False,  # inplace
         ops.CPUQuantMethod.MXFP4,
         pw1s,  # w1_scale
         pw2s,  # w2_scale
@@ -511,13 +517,14 @@ def test_mxfp4_cpu_fused_moe_small_expert_blocks():
 
     pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
     pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
-    out = ops.fused_experts_cpu(
+    out = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        out,
         a,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        False,
         ops.CPUQuantMethod.MXFP4,
         pw1s,
         pw2s,
@@ -569,13 +576,14 @@ def test_mxfp4_cpu_zero_codes_stay_zero(zero_byte, e8m0):
 
     pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
     pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
-    out = ops.fused_experts_cpu(
+    out = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        out,
         a,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        False,
         ops.CPUQuantMethod.MXFP4,
         pw1s,
         pw2s,
@@ -630,13 +638,14 @@ def test_mxfp4_cpu_zero_codes_mixed_with_nonzero(e8m0):
 
     pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
     pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
-    out = ops.fused_experts_cpu(
+    out = torch.empty_like(a)
+    ops.fused_experts_cpu(
+        out,
         a,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        False,
         ops.CPUQuantMethod.MXFP4,
         pw1s,
         pw2s,
@@ -689,13 +698,15 @@ def test_mxfp4_cpu_fused_moe_bias_swiglu(M, N, K, E, topk, seed):
     pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
 
     # Kernel
-    out = ops.fused_experts_cpu(
-        a.clone(),
+    a_in = a.clone()
+    out = torch.empty_like(a_in)
+    ops.fused_experts_cpu(
+        out,
+        a_in,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        False,  # inplace
         ops.CPUQuantMethod.MXFP4,
         pw1s,  # w1_scale
         pw2s,  # w2_scale
@@ -944,13 +955,15 @@ def test_int4_w4a16_cpu_fused_moe(M, N, K, E, topk, group_size, quant_algo, seed
         )
     )
 
-    out = ops.fused_experts_cpu(
-        a.clone(),
+    a_in = a.clone()
+    out = torch.empty_like(a_in)
+    ops.fused_experts_cpu(
+        out,
+        a_in,
         blocked_w1,
         blocked_w2,
         topk_weight,
         topk_ids,
-        False,  # inplace
         ops.CPUQuantMethod.INT4_W4A8,
         blocked_s1,
         blocked_s2,
@@ -1051,7 +1064,11 @@ INT8_MOE_CONFIGS = [
 @pytest.mark.parametrize("is_vnni", [False, True])
 @pytest.mark.parametrize("inplace", [False, True])
 def test_int8_w8a8_cpu_fused_moe(M, N, K, E, topk, seed, is_vnni, inplace):
-    """Test fused_experts_cpu INT8 W8A8 against torch reference."""
+    """Test fused_experts_cpu INT8 W8A8 against torch reference.
+
+    ``inplace`` exercises writing into a fresh output buffer vs. aliasing
+    the input tensor as the output buffer.
+    """
     set_random_seed(seed)
 
     a = torch.randn(M, K, dtype=torch.bfloat16) / (0.5 * K**0.5)
@@ -1067,13 +1084,15 @@ def test_int8_w8a8_cpu_fused_moe(M, N, K, E, topk, seed, is_vnni, inplace):
     w1 = _prepack_experts(w1_q) if is_vnni else w1_q
     w2 = _prepack_experts(w2_q) if is_vnni else w2_q
 
-    out = ops.fused_experts_cpu(
-        a.clone(),
+    a_in = a.clone()
+    out = a_in if inplace else torch.empty_like(a_in)
+    ops.fused_experts_cpu(
+        out,
+        a_in,
         w1,
         w2,
         topk_weight,
         topk_ids,
-        inplace,
         ops.CPUQuantMethod.INT8_W8A8,
         w1_s,
         w2_s,

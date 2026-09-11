@@ -201,7 +201,6 @@ def test_dense_kernel_rejects_on_non_gfx1100():
         act_type=torch.float16,
         group_size=128,
         zero_points=False,
-        has_g_idx=False,
     )
     ok, reason = RDNA3W4A16LinearKernel.can_implement(config)
     assert ok is False, f"RDNA3 dense kernel accepted on non-gfx1100: {reason}"
@@ -440,7 +439,6 @@ class TestDenseKernelSelectionMocked:
             act_type=torch.float16,
             group_size=128,
             zero_points=False,
-            has_g_idx=False,
         )
         ok, _ = RDNA3W4A16LinearKernel.can_implement(config)
         assert ok is True
@@ -470,7 +468,6 @@ class TestDenseKernelSelectionMocked:
             act_type=torch.float16,
             group_size=128,
             zero_points=False,
-            has_g_idx=False,
         )
         with (
             patch("vllm.platforms.rocm.on_gfx1100", return_value=False),
