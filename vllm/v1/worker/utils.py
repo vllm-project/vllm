@@ -678,12 +678,22 @@ def copy_kv_cache_blocks_inplace(
 
     indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
     indices: torch.Tensor | None = None
-    seen: set[tuple[torch.device, int]] = set()
+    seen: set[tuple[Any, ...]] = set()
     copied_storages: set[tuple[torch.device, int]] = set()
     for cache in kv_caches:
         # Layers sharing KV (cross-layer sharing) alias the same view; copy it
-        # once. data_ptr distinguishes per-layer views of a shared allocation.
-        key = (cache.device, cache.data_ptr())
+        # once. Hybrid models overlay layers of different kinds on one tensor,
+        # so views at the same address can differ in geometry (a Mamba state
+        # view spans only the leading bytes of a block that an attention view
+        # spans in full); each geometry must be copied, so the key covers the
+        # view's shape and strides and not just its address.
+        key = (
+            cache.device,
+            cache.data_ptr(),
+            tuple(cache.shape),
+            tuple(cache.stride()),
+            cache.element_size(),
+        )
         if key in seen:
             continue
         seen.add(key)
