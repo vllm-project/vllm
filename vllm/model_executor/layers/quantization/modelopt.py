@@ -1075,6 +1075,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         """Build the modular MoE kernel from the (already in-format) weights."""
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None
+        assert self.nvfp4_backend is not None
         self.moe_kernel = make_nvfp4_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
