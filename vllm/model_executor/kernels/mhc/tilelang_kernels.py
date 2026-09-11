@@ -27,12 +27,14 @@ ENABLE_PDL = current_platform.is_arch_support_pdl() and current_platform.is_cuda
 @cache
 def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
     device_props = torch.cuda.get_device_properties(0)
-    split_k = device_props.multi_processor_count // grid_size
+    n_sms = device_props.multi_processor_count
+    split_k = n_sms // grid_size
     if k is not None:
-        num_block_k = cdiv(k, block_k)
         # avoid split_k for small k
+        num_block_k = cdiv(k, block_k)
         split_k = min(split_k, num_block_k // 4)
-    return max(split_k, 1)
+    split_k = max(split_k, 1)
+    return split_k
 
 
 def _mhc_fused_n_splits(num_tokens: int, hidden_size: int) -> int:

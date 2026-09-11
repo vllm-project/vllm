@@ -523,16 +523,14 @@ def mhc_post_tilelang(
     )
 
     out = torch.empty_like(residual)
-    hc_mult = residual.shape[-2]
-    hidden_size = residual.shape[-1]
     _MHC_POST_TILELANG_KERNEL(
         comb_res_mix,
         residual,
         post_layer_mix.squeeze(-1),
         x,
         out,
-        hc_mult,
-        hidden_size,
+        residual.shape[-2],
+        residual.shape[-1],
     )
     return out
 

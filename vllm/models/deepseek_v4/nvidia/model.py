@@ -1458,8 +1458,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
 
             _HC_HEAD_FUSED_TILELANG_KERNEL.register_warmup(
-                hidden_size=int(config.hidden_size),
-                hc_mult=int(self.hc_mult),
+                hidden_size=config.hidden_size,
+                hc_mult=self.hc_mult,
                 rms_eps=float(self.rms_norm_eps),
                 hc_eps=float(self.hc_eps),
             )
