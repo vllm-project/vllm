@@ -8,13 +8,19 @@ chunk never covers a prefill without context (which is why the partial no
 longer needs an empty-span masking pass).
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+import vllm.utils.gpu_sync_debug as gsd
 from vllm.model_executor.layers.attention.mla_attention import (
     build_mla_chunked_context_metadata,
     init_mla_context_partial,
     reorg_kvcache,
+)
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonMetadataBuilder,
 )
 
 BLOCK_SIZE = 16
@@ -45,6 +51,40 @@ def build_chunked_context(
     )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_sparse_context_lengths_do_not_force_gpu_sync(monkeypatch):
+    """Sparse MLA must pin computed context lengths before the H2D copy."""
+    builder = SimpleNamespace(
+        chunked_prefill_workspace=torch.empty((2048, 1)),
+        chunked_prefill_workspace_size=1024,
+        kv_cache_spec=SimpleNamespace(block_size=BLOCK_SIZE),
+        device=torch.device("cuda"),
+        dcp_world_size=1,
+        dcp_local_block_size=1,
+        dcp_virtual_block_size=1,
+        dcp_manager=None,
+    )
+    common_metadata = SimpleNamespace(
+        seq_lens_cpu_upper_bound=torch.tensor([17, 2052, 324], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1, 5, 9], dtype=torch.int32),
+    )
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+    gsd._install_copy_checkers()
+    metadata = gsd.with_gpu_sync_check(
+        SparseMLACommonMetadataBuilder._build_chunked_context_fields
+    )(
+        builder,
+        common_metadata,
+        num_decodes=1,
+        num_prefills=2,
+        prefill_query_lens_cpu=torch.tensor([4, 4], dtype=torch.int32),
+    )
+    assert metadata is not None
+    assert metadata.context_lens.device.type == "cuda"
+    assert metadata.context_lens.tolist() == [2048, 320]
+
+
 @pytest.mark.parametrize(
     "context_lens,workspace_size",
     [
@@ -57,6 +97,9 @@ def build_chunked_context(
         ([1024, 1024, 1024], 1024),
         # Unaligned tails.
         ([37, 1000, 5], 1024),
+        # A zero-context request between active requests must not become an
+        # empty TRTLLM ragged-attention row.
+        ([4, 0, 2], 1024),
         ([1], 1024),
     ],
 )
@@ -74,6 +117,7 @@ def test_chunks_gather_every_context_row_exactly_once(context_lens, workspace_si
     gathered: dict[int, list[tuple[int, int]]] = {}
     previous_request_start = -1
     for chunk in metadata.chunks:
+        assert chunk.all_rows_active
         assert chunk.num_context_tokens <= workspace_size
         assert chunk.num_context_tokens == int(chunk.cu_seq_lens[-1])
         assert chunk.token_to_seq.shape[0] == chunk.num_context_tokens

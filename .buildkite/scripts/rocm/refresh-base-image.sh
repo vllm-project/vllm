@@ -384,6 +384,7 @@ build_base_image() {
     local stable_tag="${BASE_REPO}:base"
     local trusted_content_tag=""
     local scoped_content_tag=""
+    local preview_content_tag=""
     local writable_content_tag=""
     local build_ref=""
     local immutable_ref=""
@@ -431,6 +432,7 @@ build_base_image() {
     dependency_summary="base=${base_image_arg},rocm=${rocm_version},python=${python_version_arg},pytorch=${pytorch_arg},torchvision=${pytorch_vision_arg},torchaudio=${pytorch_audio_arg},triton=${triton_arg},flash-attn=${fa_arg},aiter=${aiter_arg},mori=${mori_arg},pytorch-rocm-arch=${pytorch_rocm_arch_arg}"
     trusted_content_tag=$(trusted_base_content_ref "${base_hash}" "${metadata_version}")
     scoped_content_tag=$(scoped_base_content_ref "${base_hash}" "${metadata_version}")
+    preview_content_tag="${scoped_content_tag}"
     # Preview writes share an exact-content namespace so stacked PRs can reuse
     # identical images. They may import the trusted ref, but never overwrite it.
     if is_trusted_main_build; then
@@ -471,7 +473,8 @@ build_base_image() {
         if [[ "${trusted_content_tag}" == "${scoped_content_tag}" ]]; then
             immutable_ref=$(find_matching_base_content_ref \
                 "${base_hash}" "${metadata_version}" \
-                "${trusted_content_tag}" "${stable_tag}") || reuse_status=$?
+                "${trusted_content_tag}" "${preview_content_tag}" \
+                "${stable_tag}") || reuse_status=$?
         else
             immutable_ref=$(find_matching_base_content_ref \
                 "${base_hash}" "${metadata_version}" \
@@ -490,8 +493,9 @@ build_base_image() {
 
     if [[ ${reuse_status} -eq 0 && -n "${immutable_ref}" ]]; then
         echo "Reusing ROCm base image with matching content: ${immutable_ref}"
-        if [[ "${immutable_ref%@*}" == "${stable_tag}" \
-            && "${writable_content_tag}" != "${stable_tag}" ]]; then
+        if [[ "${immutable_ref%@*}" != "${writable_content_tag}" \
+            && ( "${immutable_ref%@*}" == "${stable_tag}" \
+                || "${immutable_ref%@*}" == "${preview_content_tag}" ) ]]; then
             echo "Backfilling ROCm base content tag: ${writable_content_tag}"
             docker buildx imagetools create --prefer-index=false \
                 -t "${writable_content_tag}" "${immutable_ref}"
