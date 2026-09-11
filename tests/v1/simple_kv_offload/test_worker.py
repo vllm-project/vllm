@@ -43,6 +43,7 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     build_params,
     pin_tensor,
 )
+from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 from vllm.v1.worker.utils import allocate_kv_cache
@@ -519,3 +520,59 @@ def test_mixed_page_byte_placement_is_dcp_invariant():
         )
 
     assert placements[0] == placements[1]
+
+
+@pytest.mark.parametrize(
+    ("block_bytes", "use_page_cache", "expect_ok"),
+    [
+        (4096, True, True),  # aligned control
+        (3 * 512, True, True),  # 512-aligned only: fine for buffered I/O
+        (3 * 512, False, False),  # O_DIRECT keeps enforcing 4096 alignment
+    ],
+)
+def test_disk_backend_alignment_only_required_for_direct_io(
+    tmp_path, monkeypatch, block_bytes: int, use_page_cache: bool, expect_ok: bool
+):
+    """The 4096 stride assert belongs to O_DIRECT; page-cache I/O must not hit it.
+
+    Hybrid models (e.g. 101 per-rank cache tensors) sum to a block stride that
+    is 512- but not 4096-aligned, which previously made disk offload unbootable
+    even with use_page_cache=True.
+    """
+    # Host pinning is a separate lifecycle concern with its own tests; the
+    # alignment gate must not depend on registration state, so stub both ends.
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.disk_backend.pin_tensor", lambda t: None
+    )
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.disk_backend.unpin_tensor",
+        lambda t: None,
+        raising=False,  # harmless on branches without teardown-side unpins
+    )
+    num_blocks = 4
+    gpu = {"k": torch.zeros((num_blocks, block_bytes), dtype=torch.int8, device="cuda")}
+    backend = DiskBackend()
+    disk_path = tmp_path / "kv-offload.bin"
+
+    def _init() -> None:
+        backend.init(
+            gpu,
+            gpu["k"].device,
+            torch.cuda.Stream(),
+            torch.cuda.Stream(),
+            str(disk_path),
+            num_blocks,
+            block_bytes,
+            use_page_cache=use_page_cache,
+        )
+
+    if not expect_ok:
+        with pytest.raises(AssertionError, match="not aligned"):
+            _init()
+        return
+
+    _init()
+    try:
+        assert disk_path.stat().st_size == num_blocks * block_bytes
+    finally:
+        backend.shutdown()
