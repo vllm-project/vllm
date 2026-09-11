@@ -1179,15 +1179,15 @@ def _get_kv_cache_groups_glm5_next(
     tail_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if isinstance(spec, KpoolTailSpec)
+        if isinstance(spec, (KpoolTailSpec, SlidingWindowMLASpec))
     }
     attn_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if not isinstance(spec, (MambaSpec, KpoolTailSpec))
+        if not isinstance(spec, (MambaSpec, KpoolTailSpec, SlidingWindowMLASpec))
     }
     if not mamba_specs or not all(
-        type(spec) is MLAAttentionSpec for spec in attn_specs.values()
+        isinstance(spec, MLAAttentionSpec) for spec in attn_specs.values()
     ):
         return None
 
@@ -1198,7 +1198,17 @@ def _get_kv_cache_groups_glm5_next(
     if not idx_pages:
         return None
 
-    assert all(spec.page_size_padded is None for spec in mla_specs.values())
+    # Ascend's pre-grouping page unification pads MLA/indexer pages to the
+    # mamba page (attn + conv block); that pad is allocation-side metadata
+    # only -- every computation below uses the real page size. The upstream
+    # no-pad premise of this assert does not hold on the Ascend stack.
+    # (Restored invariant: all padded values, when present, must agree.)
+    _pads = {
+        spec.page_size_padded
+        for spec in mla_specs.values()
+        if spec.page_size_padded is not None
+    }
+    assert len(_pads) <= 1, f"inconsistent pre-grouping pads: {_pads}"
     assert len(idx_pages) == 1
     mla_names = [name for name, spec in mla_specs.items() if spec.tokens_per_state == 1]
     mla_pages = {mla_specs[name].page_size_bytes for name in mla_names}
@@ -1276,9 +1286,12 @@ def _glm5_next_tensor_layout(
     tail_group: KVCacheGroupSpec | None = None
     for group in uniform_groups:
         inner = cast(UniformTypeKVCacheSpecs, group.kv_cache_spec).kv_cache_specs
-        if all(type(spec) is MLAAttentionSpec for spec in inner.values()):
+        if all(isinstance(spec, MLAAttentionSpec) for spec in inner.values()):
             attn_group = group
-        elif all(isinstance(spec, KpoolTailSpec) for spec in inner.values()):
+        elif all(
+            isinstance(spec, (KpoolTailSpec, SlidingWindowMLASpec))
+            for spec in inner.values()
+        ):
             tail_group = group
     if attn_group is None or not mamba_groups:
         return None
@@ -1287,10 +1300,17 @@ def _glm5_next_tensor_layout(
 
     attn_uniform = cast(UniformTypeKVCacheSpecs, attn_group.kv_cache_spec)
     mla_inner = cast(dict[str, MLAAttentionSpec], attn_uniform.kv_cache_specs)
-    if not all(
-        type(spec) is MLAAttentionSpec and spec.page_size_padded is None
+    # Ascend's pre-grouping page unification may pad MLA/indexer pages
+    # (allocation-side metadata only); the page math below uses the real
+    # page_size_bytes, so a uniform pad does not invalidate the layout.
+    _layout_pads = {
+        spec.page_size_padded
         for spec in mla_inner.values()
-    ):
+        if spec.page_size_padded is not None
+    }
+    if not all(
+        isinstance(spec, MLAAttentionSpec) for spec in mla_inner.values()
+    ) or len(_layout_pads) > 1:
         return None
     mla_names = [
         name for name in attn_group.layer_names if mla_inner[name].tokens_per_state == 1
@@ -2382,7 +2402,6 @@ def _max_memory_usage_bytes_from_groups(
                 spec.max_memory_usage_bytes(vllm_config),
                 spec.page_size_bytes,
             )
-
     return bytes_per_block * total_blocks
 
 
