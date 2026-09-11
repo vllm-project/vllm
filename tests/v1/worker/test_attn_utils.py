@@ -7,6 +7,8 @@ while keeping per-block content compact, so padding bytes at the end of each pag
 never addressed by the logical view.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -22,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     compute_layout_strides,
 )
+from vllm.v1.worker.gpu import attn_utils
 from vllm.v1.worker.gpu.attn_utils import (
     get_attn_cg_support,
     get_query_lens_mismatch_unsupported_backend,
@@ -116,6 +119,67 @@ def test_attention_checks_preserve_global_and_target_scoped_support():
         )
         == "_DraftBackend"
     )
+
+
+def test_get_kv_sharing_fast_prefill_eligible_layers(monkeypatch: pytest.MonkeyPatch):
+    """Fast prefill applies to the contiguous suffix of KV-sharing layers.
+
+    Draft-model layers register after the target model's and may share KV, so
+    they must not extend (or break) the target's eligible suffix.
+    """
+
+    def check(
+        layer_names: list[str],
+        shared: dict[str, str],
+        draft_layer_names: set[str] | None = None,
+    ) -> set[str]:
+        monkeypatch.setattr(
+            attn_utils,
+            "get_layers_from_vllm_config",
+            lambda *a, **k: {name: None for name in layer_names},
+        )
+        monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda *a: shared)
+        vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(kv_sharing_fast_prefill=True)
+        )
+        return attn_utils.get_kv_sharing_fast_prefill_eligible_layers(
+            vllm_config, draft_layer_names
+        )
+
+    # No KV sharing: nothing is eligible.
+    assert check(["t0", "t1"], {}) == set()
+
+    # Trailing run of sharing layers (YOCO-style second half).
+    assert check(["t0", "t1", "t2", "t3"], {"t2": "t1", "t3": "t1"}) == {"t2", "t3"}
+
+    # A non-sharing layer after a sharing one breaks the suffix.
+    assert check(["t0", "t1", "t2", "t3"], {"t1": "t0", "t3": "t0"}) == {"t3"}
+
+    # KV-sharing draft layers at the end are collected without an exclusion...
+    assert check(
+        ["t0", "t1", "t2", "t3", "d0", "d1"],
+        {"t2": "t1", "t3": "t1", "d0": "t1", "d1": "t1"},
+    ) == {"t2", "t3", "d0", "d1"}
+
+    # ...so the runner excludes them: skipped, not collected, and they do not
+    # break the target's trailing run.
+    assert check(
+        ["t0", "t1", "t2", "t3", "d0", "d1"],
+        {"t2": "t1", "t3": "t1", "d0": "t1", "d1": "t1"},
+        draft_layer_names={"d0", "d1"},
+    ) == {"t2", "t3"}
+
+    # Feature flag off: nothing is eligible even with sharing layers.
+    monkeypatch.setattr(
+        attn_utils, "get_layers_from_vllm_config", lambda *a, **k: {"t0": None}
+    )
+    monkeypatch.setattr(
+        attn_utils, "get_shared_kv_cache_layers", lambda *a: {"t0": "t0"}
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False)
+    )
+    assert attn_utils.get_kv_sharing_fast_prefill_eligible_layers(vllm_config) == set()
 
 
 def test_reshape_padded_kv_cache_strides_by_padded_page():
