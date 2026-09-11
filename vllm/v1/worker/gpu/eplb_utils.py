@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from functools import wraps
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -14,6 +15,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     get_mixture_of_experts_model,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -153,3 +157,23 @@ class EPLBController:
         # over a group the other ranks have already left.
         assert self.state is not None
         self.state.update_mapping(model_config, expanded_physical_to_logical)
+
+    @contextmanager
+    def preserve_serving_state(self, runner: "GPUModelRunner") -> Iterator[None]:
+        """Keep the elastic EP warmup out of the EPLB stats and the KV cache."""
+        req_states = runner.req_states
+        assert not req_states.req_id_to_index, (
+            "MRV2 warmup requires an empty request pool, found "
+            f"{len(req_states.req_id_to_index)} live requests"
+        )
+        runner.block_tables.redirect_writes_to_null_block = True
+        self.suppressed = True
+        try:
+            yield
+        finally:
+            for req_id in list(req_states.req_id_to_index):
+                runner._remove_request(req_id)
+            runner.block_tables.redirect_writes_to_null_block = False
+            self.suppressed = False
+            if runner.kv_block_zeroer is not None:
+                runner.kv_block_zeroer.zero_block_ids([0])

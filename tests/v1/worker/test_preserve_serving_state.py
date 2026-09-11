@@ -7,7 +7,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.serving_state import preserve_serving_state
+from vllm.v1.worker.gpu.eplb_utils import EPLBController
 from vllm.v1.worker.gpu.states import RequestState
 
 BLOCK_SIZE = 16
@@ -37,7 +37,9 @@ class _Runner:
             device=torch.device("cuda"),
             kernel_block_sizes=[BLOCK_SIZE],
         )
-        self.eep_eplb_suppressed = False
+        self.eplb = EPLBController(
+            SimpleNamespace(enable_eplb=False), torch.device("cuda")
+        )
         self.zeroed: list[list[int]] = []
         self.kv_block_zeroer = SimpleNamespace(zero_block_ids=self.zeroed.append)
         self.removed: list[str] = []
@@ -45,6 +47,9 @@ class _Runner:
     def _remove_request(self, req_id: str) -> None:
         self.removed.append(req_id)
         self.req_states.remove_request(req_id)
+
+    def preserve_serving_state(self):
+        return self.eplb.preserve_serving_state(self)
 
 
 def _add_request(runner: _Runner, req_id: str) -> int:
@@ -71,7 +76,7 @@ def test_warmup_uses_full_pool_and_null_blocks():
     pool_before = _pool_state(runner)
     blocks_before = runner.block_tables.block_tables[0].gpu.clone()
 
-    with preserve_serving_state(runner):
+    with runner.preserve_serving_state():
         assert len(runner.req_states.free_indices) == MAX_NUM_REQS
         idx = _add_request(runner, "_warmup")
         runner.block_tables.append_block_ids(idx, ([5, 6, 7],), overwrite=True)
@@ -82,7 +87,7 @@ def test_warmup_uses_full_pool_and_null_blocks():
     assert _pool_state(runner) == pool_before
     assert torch.equal(runner.block_tables.block_tables[0].gpu, blocks_before)
     assert runner.removed == ["_warmup"]
-    assert not runner.eep_eplb_suppressed
+    assert not runner.eplb.suppressed
     assert not runner.block_tables.redirect_writes_to_null_block
     assert runner.zeroed == [[0]]
 
@@ -91,7 +96,7 @@ def test_warmup_restores_state_on_error():
     runner = _Runner()
     pool_before = _pool_state(runner)
 
-    with pytest.raises(RuntimeError), preserve_serving_state(runner):
+    with pytest.raises(RuntimeError), runner.preserve_serving_state():
         _add_request(runner, "_warmup")
         raise RuntimeError
 
@@ -106,6 +111,6 @@ def test_warmup_rejects_live_requests():
 
     with (
         pytest.raises(AssertionError, match="empty request pool"),
-        preserve_serving_state(runner),
+        runner.preserve_serving_state(),
     ):
         pass
