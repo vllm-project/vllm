@@ -772,14 +772,17 @@ def _FUSED_MOE_TRITON_KERNEL(
     HAS_BIAS: bool,
     SWAP_AB: bool,
     USE_TD: bool = False,
-    num_warps: int,
-    num_stages: int,
+    num_warps: int = 4,
+    num_stages: int = 3,
+    waves_per_eu: int | None = None,
+    matrix_instr_nonkdim: int | None = None,
+    kpack: int | None = None,
 ) -> DispatchSpec:
     grid: Any = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"])
         * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
     )
-    return grid, dict(
+    launch_kwargs = dict(
         a_ptr=A,
         b_ptr=B,
         c_ptr=C,
@@ -789,6 +792,13 @@ def _FUSED_MOE_TRITON_KERNEL(
         num_warps=num_warps,
         num_stages=num_stages,
     )
+    if waves_per_eu is not None:
+        launch_kwargs["waves_per_eu"] = waves_per_eu
+    if matrix_instr_nonkdim is not None:
+        launch_kwargs["matrix_instr_nonkdim"] = matrix_instr_nonkdim
+    if kpack is not None:
+        launch_kwargs["kpack"] = kpack
+    return grid, launch_kwargs
 
 
 def invoke_fused_moe_wna16_cuda_kernel(
@@ -1231,17 +1241,16 @@ def compute_identity_kernel(
 def _compute_identity_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     hidden_dim = vllm_config.model_config.hf_config.hidden_size
     top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+    dtype = vllm_config.model_config.dtype
     num_tokens: Any = WarmupIntRange(
         1, min(vllm_config.scheduler_config.max_num_batched_tokens, 16) + 1
     )
     return dict(
         top_k=top_k,
-        hidden_states=TritonWarmupTensor(
-            torch.bfloat16, shape=(num_tokens, hidden_dim)
-        ),
+        hidden_states=TritonWarmupTensor(dtype, shape=(num_tokens, hidden_dim)),
         expert_scales=TritonWarmupTensor(torch.float32, shape=(num_tokens, top_k)),
         num_tokens=num_tokens,
-        output=TritonWarmupTensor(torch.bfloat16, shape=(num_tokens, hidden_dim)),
+        output=TritonWarmupTensor(dtype, shape=(num_tokens, hidden_dim)),
         hidden_dim=hidden_dim,
         scales_stride=top_k,
     )
