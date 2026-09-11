@@ -11,7 +11,6 @@ from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
 from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
-from vllm.v1.worker.gpu.states import RequestState
 
 
 def _copy_to_cpu(value, out=None, device=None):
@@ -125,6 +124,7 @@ def _make_global_decode_batch(
 
     base = InputBatch.make_dummy(num_reqs, num_tokens, buffers)
     buffers.seq_lens[:num_reqs] = torch.from_numpy(seq_lens_np).to(device)
+    buffers.positions[:num_reqs] = torch.tensor(num_computed_tokens, device=device)
     query_start_loc_np = np.arange(num_reqs + 1, dtype=np.int32)
     buffers.query_start_loc[: num_reqs + 1] = torch.from_numpy(query_start_loc_np).to(
         device
@@ -166,19 +166,10 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
     the field afterwards from the PCP-owned buffers.
     """
     device = torch.device("cuda:0")
-    req_states = RequestState(
-        max_num_reqs=4,
-        max_model_len=64,
-        max_num_batched_tokens=8,
-        num_speculative_steps=1,
-        vocab_size=8,
-        device=device,
-    )
     manager = PCPManager(
         pcp_world_size=2,
         pcp_rank=0,
         device=device,
-        req_states=req_states,
         max_num_reqs=4,
         max_num_tokens=8,
         dcp_world_size=2,
