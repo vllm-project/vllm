@@ -593,7 +593,9 @@ class ModelConfig:
         )
 
         # The config can live in another repo, which `self.revision` does not pin.
-        self._hf_config_revision = self.revision
+        # It stays `None` if the config comes from `self.model`, so that call sites
+        # fall back to `self.revision` the same way they fall back to `self.model`.
+        self._hf_config_revision = None
         if self.hf_config_path and self.hf_config_path != self.model:
             self._hf_config_revision = resolve_revision(
                 self.hf_config_path,
@@ -630,7 +632,7 @@ class ModelConfig:
         hf_config = get_config(
             self.hf_config_path or self.model,
             self.trust_remote_code,
-            self._hf_config_revision,
+            self._hf_config_revision or self.revision,
             self.code_revision,
             self.config_format,
             hf_overrides_kw=hf_overrides_kw,
@@ -1706,7 +1708,7 @@ class ModelConfig:
             config = try_get_generation_config(
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
-                revision=self._hf_config_revision,
+                revision=self._hf_config_revision or self.revision,
                 code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
