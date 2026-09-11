@@ -279,7 +279,7 @@ def test_fused_gdn_decode_post_conv_mtp_head_ratios(
     output_gate_activation: str,
     padding_tokens: int,
 ) -> None:
-    """Live outputs match the reference and padding is zero, even after empty requests."""
+    """Live outputs match the reference and padding is zero."""
     if torch.cuda.get_device_capability() < (8, 0):
         pytest.skip("fused GDN decode MTP requires compute capability 8.0+")
     if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
