@@ -17,7 +17,7 @@ class Mxfp8LinearLayerConfig:
     uint8 (E8M0) per-block scales at block size 32.
     """
 
-    pass
+    bmm_batch_size: int | None = None
 
 
 class Mxfp8LinearKernel(ABC):
