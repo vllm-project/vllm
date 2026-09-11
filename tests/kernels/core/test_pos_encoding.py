@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Callable
 from itertools import product
 
@@ -191,3 +192,99 @@ def test_rope_module_cache(default_vllm_config):
         )
         # check if cache take effect
         assert id(rope) == rope_setting_id_map[str(setting)]
+
+
+def _get_yarn_rope(factor: float, **rope_parameter_overrides):
+    rope_parameters = {
+        "rope_type": "yarn",
+        "rope_theta": 10000,
+        "factor": factor,
+        "original_max_position_embeddings": 512,
+    }
+    rope_parameters.update(rope_parameter_overrides)
+    return get_rope(
+        head_size=64,
+        max_position=int(512 * factor),
+        is_neox_style=True,
+        rope_parameters=rope_parameters,
+        dtype=torch.float32,
+    )
+
+
+def _yarn_output_at_position_zero(rope) -> torch.Tensor:
+    positions = torch.zeros(1, dtype=torch.long)
+    query = torch.ones(1, 64, dtype=torch.float32)
+    out_query, _ = rope.forward_native(positions, query)
+    return out_query
+
+
+def _assert_yarn_magnitude(expected: float, **rope_parameter_overrides) -> None:
+    rope = _get_yarn_rope(factor=16.0, **rope_parameter_overrides)
+    actual = _yarn_output_at_position_zero(rope)
+    torch.testing.assert_close(actual, torch.full_like(actual, expected))
+
+
+@pytest.mark.parametrize("attention_factor", [1.0, 0.5])
+@torch.inference_mode()
+def test_yarn_explicit_attention_factor(default_vllm_config, attention_factor):
+    _assert_yarn_magnitude(attention_factor, attention_factor=attention_factor)
+
+
+@torch.inference_mode()
+def test_yarn_default_mscale(default_vllm_config):
+    _assert_yarn_magnitude(0.1 * math.log(16.0) + 1.0)
+
+
+@torch.inference_mode()
+def test_yarn_mscale_ratio(default_vllm_config):
+    expected = (0.2 * math.log(16.0) + 1.0) / (0.1 * math.log(16.0) + 1.0)
+    _assert_yarn_magnitude(expected, mscale=2.0, mscale_all_dim=1.0)
+
+
+@torch.inference_mode()
+def test_yarn_equal_mscale_ratio(default_vllm_config):
+    _assert_yarn_magnitude(1.0, mscale=1.0, mscale_all_dim=1.0)
+
+
+@torch.inference_mode()
+def test_yarn_mscale_ratio_preserves_attn_factor(default_vllm_config):
+    _assert_yarn_magnitude(
+        0.5,
+        mscale=1.0,
+        mscale_all_dim=1.0,
+        attn_factor=0.5,
+    )
+
+
+@torch.inference_mode()
+def test_yarn_attention_factor_takes_precedence(default_vllm_config):
+    _assert_yarn_magnitude(
+        0.5,
+        attention_factor=0.5,
+        mscale=2.0,
+        mscale_all_dim=1.0,
+        attn_factor=0.25,
+    )
+
+
+@torch.inference_mode()
+def test_yarn_disabled_scaling_ignores_mscale_ratio(default_vllm_config):
+    _assert_yarn_magnitude(
+        0.5,
+        apply_yarn_scaling=False,
+        mscale=2.0,
+        mscale_all_dim=1.0,
+        attn_factor=0.5,
+    )
+
+
+@torch.inference_mode()
+def test_yarn_explicit_attention_factor_overrides_disabled_scaling(
+    default_vllm_config,
+):
+    _assert_yarn_magnitude(
+        0.25,
+        attention_factor=0.25,
+        apply_yarn_scaling=False,
+        attn_factor=0.5,
+    )
