@@ -65,3 +65,57 @@ def test_snapshot_rejects_invalid_physical_blocks():
 def test_restore_rejects_different_cache_layouts(blocks):
     with pytest.raises(ValueError, match="different block layout"):
         restore_cache_blocks(torch.ones(2, 3, 4), torch.tensor([0]), blocks)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.bfloat16])
+@pytest.mark.parametrize("empty", [False, True])
+def test_host_block_plan_restores_cuda_prefix_without_device_readback(dtype, empty):
+    """Keep packed prefix bytes exact while host IDs avoid CUDA scalar reads."""
+    source = (
+        torch.arange(6 * 2 * 3 * 4, device="cuda").reshape(6, 2, 3, 4).to(dtype)[:, 0]
+    )
+    replica = torch.full((6, 2, 3, 4), 17, device="cuda", dtype=dtype)[:, 0]
+    table = (
+        torch.tensor([[-1, -1]]) if empty else torch.tensor([[4, 1, -1], [1, 4, -1]])
+    )
+    expected = source.clone()
+    # Initialize lazy CUDA facilities before enabling the synchronization guard.
+    warm_ids, warm_blocks = snapshot_cache_blocks(source, [table], max_bytes=1024)
+    restore_cache_blocks(replica, warm_ids, warm_blocks)
+    replica.fill_(17)
+    torch.accelerator.synchronize()
+    previous = torch.cuda.get_sync_debug_mode()
+    try:
+        torch.cuda.set_sync_debug_mode("error")
+        ids, blocks = snapshot_cache_blocks(source, [table], max_bytes=1024)
+        restore_cache_blocks(replica, ids, blocks)
+    finally:
+        torch.cuda.set_sync_debug_mode(previous)
+    assert ids.device.type == "cpu"
+    selected = [] if empty else [1, 4]
+    assert ids.tolist() == selected
+    torch.testing.assert_close(replica[selected], expected[selected], rtol=0, atol=0)
+    untouched = [i for i in range(6) if i not in selected]
+    assert torch.all(replica[untouched] == 17)
+
+
+def test_unpadding_preserves_the_matching_host_block_table():
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+
+    table = torch.tensor([[3, 7], [4, 9]], dtype=torch.int32)
+    metadata = CommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, 1, 2]),
+        query_start_loc_cpu=torch.tensor([0, 1, 2]),
+        seq_lens=torch.tensor([1, 1]),
+        num_reqs=2,
+        num_actual_tokens=2,
+        max_query_len=1,
+        max_seq_len=1,
+        block_table_tensor=table,
+        slot_mapping=torch.tensor([0, 1]),
+        block_table_cpu=table.clone(),
+    )
+    actual = metadata.unpadded(1, 1)
+    torch.testing.assert_close(actual.block_table_cpu, table[:1])
+    assert actual.block_table_cpu.shape == actual.block_table_tensor.shape
