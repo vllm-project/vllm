@@ -394,8 +394,8 @@ Encoding a running/waiting counts for multiple adapters in a
 comma-separated string seems quite misguided - we could use labels to
 distinguish between per-adapter counts. This should be revisited.
 
-Note that `multiprocess_mode="livemostrecent"` is used - the most
-recent metric is used, but only from currently running processes.
+Note that `multiprocess_mode="sum"` is used - the samples from all
+processes are added together.
 
 This was added in <https://github.com/vllm-project/vllm/pull/9477> and there is
 [at least one known user](https://github.com/kubernetes-sigs/gateway-api-inference-extension/pull/54).
