@@ -5,21 +5,13 @@ import torch
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.k2_horizon import (
-    K2HorizonRMSNorm,
     _rope_weight_perm,
+    apply_partial_rope,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type
-
-
-def split_to_interleaved(x: torch.Tensor) -> torch.Tensor:
-    return x.reshape(*x.shape[:-1], 2, -1).transpose(-1, -2).reshape(*x.shape[:-1], -1)
-
-
-def interleaved_to_split(x: torch.Tensor) -> torch.Tensor:
-    return x.reshape(*x.shape[:-1], -1, 2).transpose(-1, -2).reshape(*x.shape[:-1], -1)
 
 
 def get_gptj_rope(
@@ -41,37 +33,17 @@ def get_gptj_rope(
         rope_parameters={"rope_theta": base},
         dtype=dtype,
     )
-
-    if rope_head_dim == head_dim:
-        return rotary_emb(positions, q, k)
-
-    q = q.reshape(*q.shape[:-1], num_heads, head_dim)
-    k = k.reshape(*k.shape[:-1], num_kv_heads, head_dim)
-
-    q_rope, q_nope = torch.split(
-        split_to_interleaved(q),
-        split_size_or_sections=[rope_head_dim, head_dim - rope_head_dim],
-        dim=-1,
-    )
-    k_rope, k_nope = torch.split(
-        split_to_interleaved(k),
-        split_size_or_sections=[rope_head_dim, head_dim - rope_head_dim],
-        dim=-1,
-    )
-
-    q_rope, k_rope = rotary_emb(
+    return apply_partial_rope(
+        rotary_emb,
         positions,
-        interleaved_to_split(q_rope).contiguous(),
-        interleaved_to_split(k_rope).contiguous(),
+        q,
+        k,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        rope_head_dim,
+        fold_rope_weights=False,
     )
-
-    q = interleaved_to_split(
-        torch.cat([split_to_interleaved(q_rope), q_nope], dim=-1)
-    ).reshape(*q.shape[:-2], -1)
-    k = interleaved_to_split(
-        torch.cat([split_to_interleaved(k_rope), k_nope], dim=-1)
-    ).reshape(*k.shape[:-2], -1)
-    return q, k
 
 
 def _apply_head_perm(
@@ -88,8 +60,10 @@ def get_neox_rope(
     positions: torch.Tensor,
     q: torch.Tensor,
     k: torch.Tensor,
-    rope_head_dim: int,
+    num_heads: int,
+    num_kv_heads: int,
     head_dim: int,
+    rope_head_dim: int,
     max_position: int,
     base: float,
     dtype: torch.dtype,
@@ -101,7 +75,17 @@ def get_neox_rope(
         rope_parameters={"rope_theta": base, "rope_dim": rope_head_dim},
         dtype=dtype,
     )
-    return rotary_emb(positions, q, k)
+    return apply_partial_rope(
+        rotary_emb,
+        positions,
+        q,
+        k,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        rope_head_dim,
+        fold_rope_weights=True,
+    )
 
 
 def fold_qk_proj_weight(
@@ -111,12 +95,6 @@ def fold_qk_proj_weight(
     return (
         weight.view(-1, head_dim, hidden)[:, idx, :].reshape(-1, hidden).contiguous()
     )
-
-
-def fold_qk_norm_weight(
-    weight: torch.Tensor, head_dim: int, idx: torch.Tensor
-) -> torch.Tensor:
-    return weight.view(-1, head_dim)[:, idx].reshape(-1).contiguous()
 
 
 SHAPES = [
@@ -179,8 +157,10 @@ def test_rope_fold_matches_permute_then_rope(
         positions,
         q_folded,
         k_folded,
-        rope_head_dim,
+        num_heads,
+        num_kv_heads,
         head_dim,
+        rope_head_dim,
         max_position,
         base,
         dtype,
