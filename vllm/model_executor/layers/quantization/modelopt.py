@@ -977,7 +977,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
         if is_weights_pre_processed():
-            self._setup_kernel_from_pre_processed(layer)
+            if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
+                raise RuntimeError(
+                    "pre-processed weights require FLASHINFER_TRTLLM backend, "
+                    f"moe backend, got {self.nvfp4_backend}"
+                )
+            self._restore_padded_moe_dims(layer)
+            self._build_moe_kernel(layer)
             return
 
         # Use a single gscale for w13.
@@ -1038,34 +1044,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
-    def _setup_kernel_from_pre_processed(self, layer: RoutedExperts) -> None:
-        """Rebuild kernel state when weights arrive already post-processed.
-
-        The weight cache IPC loader imports tensors that already went through a
-        full ``process_weights_after_loading`` (block scales shuffled/padded,
-        ``w13_weight_scale_2`` collapsed to a single column). Only the
-        non-tensor state that tensor export cannot carry is rebuilt here: the
-        padded ``moe_config`` dims and the modular kernel objects.
-        """
-        if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
-            raise RuntimeError(
-                "weight cache IPC for NVFP4 MoE is only verified with the "
-                f"FLASHINFER_TRTLLM backend, got {self.nvfp4_backend}"
-            )
-        self._restore_padded_moe_dims(layer)
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.experts_cls is not None
-        self.moe_kernel = make_nvfp4_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-            experts_cls=self.experts_cls,
-            backend=self.nvfp4_backend,
-            routing_tables=layer._expert_routing_tables(),
-        )
-        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
-
     def _restore_padded_moe_dims(self, layer: RoutedExperts) -> None:
-        """Recover the padded `moe_config` dims from the exported weights."""
+        """Recover the padded ``moe_config`` dims from the exported weights."""
         mc = layer.moe_config
         padded_hidden = layer.w2_weight.shape[1]
         if padded_hidden != mc.hidden_dim:
@@ -2466,13 +2446,6 @@ class ModelOptLinearMethod(LinearMethodBase):
         format_scheme=None,
     ) -> None:
         self.spec = spec
-        # Only NVFP4 weights are verified to round-trip via weight cache IPC:
-        # their post-load swizzle/pad is reproduced from the exported tensors.
-        # fp8/mxfp8 ModelOpt kernels transpose/repack and are unverified.
-        w = spec.weight
-        self.supports_pre_processed_weights = (
-            isinstance(w, QuantKey) and w.dtype == FP4_DTYPE
-        )
         self.ctx = ctx
         self.fmt = format_scheme or FormatScheme()
         self.wkey = SCHEME_FOR[spec.weight]
@@ -2539,14 +2512,6 @@ class ModelOptLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer) -> None:
         if is_weights_pre_processed():
-            # Tensors already carry the runtime (swizzled/padded) layout; only
-            # rebuild the kernel's non-tensor padding metadata.
-            if not getattr(self.kernel, "ipc_pre_processed_safe", False):
-                raise RuntimeError(
-                    "weight cache IPC for NVFP4 linear is not verified with "
-                    f"{type(self.kernel).__name__}"
-                )
-            self.kernel.process_weights_after_loading(layer)
             return
         self.fmt.pre_process(layer)
         self.wkey.process(layer, WEIGHT)
