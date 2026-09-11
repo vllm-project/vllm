@@ -151,6 +151,8 @@ impl pb::control_server::Control for ControlServiceImpl {
             max_running_requests: ready.max_num_seqs,
             max_batched_tokens: ready.max_num_batched_tokens,
             rl_capabilities: Some(self.rl_capabilities()),
+            supports_native_sampling_params_json: true,
+            supports_preprocessed_media_features: true,
         }))
     }
 
