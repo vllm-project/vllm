@@ -13,7 +13,7 @@ import torch.multiprocessing as mp
 from vllm.models.deepseek_v4_1.common.engram_parallel import exchange_heads_for_tokens
 
 
-def _exchange_worker(rank: int, world_size: int, rendezvous: str):
+def _exchange_worker(rank: int, world_size: int, prepad: bool, rendezvous: str):
     dist.init_process_group(
         "gloo",
         init_method=rendezvous,
@@ -22,7 +22,7 @@ def _exchange_worker(rank: int, world_size: int, rendezvous: str):
         timeout=timedelta(seconds=30),
     )
     try:
-        for tokens, heads in [(0, 23), (1, 1), (3, 7), (64, 24), (65, 23)]:
+        for tokens, heads in [(0, 23), (1, 1), (3, 7), (4, 24), (64, 24), (65, 23)]:
             dim = 5
             local_heads = (heads + world_size - 1) // world_size
             chunk = (tokens + world_size - 1) // world_size
@@ -33,8 +33,16 @@ def _exchange_worker(rank: int, world_size: int, rendezvous: str):
                 full, (0, 0, 0, local_heads * world_size - heads)
             )
             local = padded[:, rank * local_heads : (rank + 1) * local_heads]
+            if prepad:
+                local = torch.nn.functional.pad(
+                    local, (0, 0, 0, 0, 0, chunk * world_size - tokens)
+                ).contiguous()
 
-            def exchange(rows):
+            def exchange(rows, local=local):
+                if prepad:
+                    # Lookup already emitted the communication buffer. A tail
+                    # batch must not allocate and copy that buffer again.
+                    assert rows.data_ptr() == local.data_ptr()
                 received = torch.empty_like(rows)
                 dist.all_to_all_single(received, rows.contiguous())
                 return received
@@ -49,10 +57,11 @@ def _exchange_worker(rank: int, world_size: int, rendezvous: str):
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
-def test_all_to_all_preserves_token_and_head_order(world_size, tmp_path):
+@pytest.mark.parametrize("prepad", [False, True])
+def test_all_to_all_preserves_token_and_head_order(world_size, prepad, tmp_path):
     mp.spawn(
         _exchange_worker,
-        args=(world_size, (tmp_path / "rendezvous").as_uri()),
+        args=(world_size, prepad, (tmp_path / "rendezvous").as_uri()),
         nprocs=world_size,
         join=True,
     )
