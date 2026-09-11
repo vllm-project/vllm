@@ -616,7 +616,7 @@ def test_dummy_maverick(
 ) -> None:
     # Disable multiprocessing allows us to access model executor from LLM engine
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    # This test itself is forked; workers need a fresh CUDA runtime.
+    # The forked test process may inherit CUDA state from test collection.
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     model_path = create_reduced_maverick_model(
