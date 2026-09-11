@@ -10,7 +10,9 @@ identically; the constraint is purely about which kernel exists.
 """
 
 import pytest
+import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     AITER_MAX_EXPERTS_PER_GROUP as MAX_EXPERTS_PER_GROUP,
 )
@@ -20,6 +22,9 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     _aiter_can_use_biased_grouped_topk,
     _aiter_get_num_expert_group,
+)
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
+    grouped_topk,
 )
 from vllm.platforms import current_platform
 
@@ -146,3 +151,69 @@ def test_rounding_only_moves_to_supported_values(num_experts):
     assert naive not in SUPPORTED_NUM_GRP
 
     assert _aiter_get_num_expert_group(num_experts) in SUPPORTED_NUM_GRP
+
+
+@pytest.mark.parametrize(
+    "num_experts",
+    [
+        64,  # g == 2, not rounded -- covers the no-op claim itself
+        128,  # g == 4, not rounded
+        256,  # g == 8, not rounded
+        96,  # naive 3 -> rounded to 8
+        192,  # naive 6 -> rounded to 8
+    ],
+)
+@pytest.mark.parametrize("topk", [8])
+def test_rounded_group_count_routes_like_the_reference(num_experts, topk):
+    """The rounded group count must route identically.
+
+    Reference is ``grouped_topk``, which falls back to pure torch here.
+    Gating is continuous random so exact score ties, the one place the
+    two may legitimately differ, have measure zero.
+    """
+    torch.manual_seed(num_experts)
+    device = "cuda"
+    num_tokens = 83  # not a multiple of any warp/tile size
+    g = _aiter_get_num_expert_group(num_experts)
+    assert _aiter_can_use_biased_grouped_topk(num_experts, topk)
+
+    gating = torch.randn(num_tokens, num_experts, dtype=torch.float32, device=device)
+    bias = torch.randn(num_experts, dtype=torch.float32, device=device)
+
+    ref_weights, ref_ids = grouped_topk(
+        hidden_states=torch.empty(num_tokens, 1, device=device),
+        gating_output=gating,
+        topk=topk,
+        renormalize=True,
+        num_expert_group=g,
+        topk_group=g,
+        scoring_func="sigmoid",
+        e_score_correction_bias=bias,
+    )
+
+    weights = torch.empty(num_tokens, topk, dtype=torch.float32, device=device)
+    ids = torch.empty(num_tokens, topk, dtype=torch.int32, device=device)
+    rocm_aiter_ops.biased_grouped_topk(
+        gating,
+        bias,
+        weights,
+        ids,
+        num_expert_group=g,
+        topk_group=g,
+        need_renorm=True,
+    )
+
+    # Neither side promises an order within a token's top-k, so sort by expert
+    # id and carry the weights through the same permutation -- sorting the two
+    # independently would not catch a weight attached to the wrong expert.
+    order = ids.argsort(dim=-1)
+    ref_order = ref_ids.argsort(dim=-1)
+    torch.testing.assert_close(
+        ids.gather(1, order), ref_ids.to(torch.int32).gather(1, ref_order)
+    )
+    torch.testing.assert_close(
+        weights.gather(1, order),
+        ref_weights.gather(1, ref_order),
+        atol=1e-4,
+        rtol=1e-4,
+    )
