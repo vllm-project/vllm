@@ -160,21 +160,53 @@ def test_missing_causal_arg_fails_closed(monkeypatch):
         AiterMLABackend.supports_non_causal()
 
 
+def test_supports_non_causal_requires_gfx950_kernels(monkeypatch):
+    """causal= on gfx942 is not a kernel; the backend must fall through."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.backends.mla import rocm_aiter_mla
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLABackend
+
+    _install_fake_aiter_modules(monkeypatch, supports_fp8=True, supports_causal=True)
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_non_causal_asm_kernels", lambda: False
+    )
+    assert rocm_aiter_ops.mla_decode_supports_non_causal() is True
+    assert AiterMLABackend.supports_non_causal() is False
+
+
+def test_supports_non_causal_accepts_gfx950_with_causal(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.backends.mla import rocm_aiter_mla
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLABackend
+
+    _install_fake_aiter_modules(monkeypatch, supports_fp8=True, supports_causal=True)
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_non_causal_asm_kernels", lambda: True
+    )
+    assert rocm_aiter_ops.mla_decode_supports_non_causal() is True
+    assert AiterMLABackend.supports_non_causal() is True
+
+
 @pytest.mark.skipif(
     _SKIP_UNSUPPORTED_AITER_HARDWARE,
     reason="Installed AITER MLA causal= check requires CDNA 3 or newer",
 )
 def test_installed_aiter_mla_decode_accepts_causal():
-    """Supported ROCm CI must ship an aiter whose MLA decode takes causal=."""
+    """Supported ROCm CI must ship an aiter whose MLA decode takes causal=.
+
+    Non-causal backend selection also needs the gfx950 ASM kernels; gfx942
+    still has the Python argument but no causal=0 decode entries.
+    """
     from vllm._aiter_ops import (
         is_aiter_found_and_supported,
         rocm_aiter_ops,
     )
+    from vllm.platforms.rocm import on_gfx950
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLABackend
 
     assert is_aiter_found_and_supported()
     assert rocm_aiter_ops.mla_decode_supports_non_causal() is True
-    assert AiterMLABackend.supports_non_causal() is True
+    assert AiterMLABackend.supports_non_causal() is on_gfx950()
 
 
 @pytest.mark.parametrize("causal", [True, False])

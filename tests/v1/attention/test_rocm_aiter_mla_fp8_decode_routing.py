@@ -195,3 +195,12 @@ def test_a_non_causal_block_never_routes_to_gluon(
 def test_a_causal_small_head_bf16_block_still_uses_gluon(gluon_available):
     """The routing this backend already had must not move."""
     assert AiterMLAHelper.use_gluon_verify(12, 8, "auto", causal=True)
+
+
+@pytest.mark.parametrize(
+    "num_heads, expected",
+    [(16, False), (32, True), (96, True)],
+)
+def test_fp8_qlen2_fold_matches_pinned_aiter_kernel_table(num_heads, expected):
+    """16-head qlen 2 has no non-causal fp8 kernel; 32+ heads fold to 16/4."""
+    assert AiterMLAHelper.has_fp8_non_causal_qlen2_kernel(num_heads) is expected

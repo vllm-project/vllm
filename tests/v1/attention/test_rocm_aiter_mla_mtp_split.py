@@ -999,12 +999,31 @@ def test_a_bf16_padded_rank_past_qlen4_keeps_the_schedule_when_non_causal(monkey
     assert metadata.has_persistent_metadata
 
 
-def test_a_two_token_fp8_block_is_refused(monkeypatch):
-    """aiter's fp8 dispatch has no non-causal fold for qlen 2."""
+@pytest.mark.parametrize("num_heads", [8, 12, 16])
+def test_a_two_token_fp8_block_is_refused_without_a_fold(monkeypatch, num_heads):
+    """16-head (and padded-to-16) qlen-2 fp8 has no non-causal kernel."""
     with pytest.raises(ValueError, match="2-token"):
         _build_non_causal(
-            monkeypatch, num_heads=12, kv_cache_dtype="fp8", qlen=2, mtp_qlen=8
+            monkeypatch,
+            num_heads=num_heads,
+            kv_cache_dtype="fp8",
+            qlen=2,
+            mtp_qlen=8,
         )
+
+
+@pytest.mark.parametrize("num_heads", [32, 64, 96, 128])
+def test_a_two_token_fp8_block_is_allowed_when_folded(monkeypatch, num_heads):
+    """32/64/96/128 heads at qlen 2 fold onto the 16-head / 4-token kernel."""
+    metadata, get_mla_metadata_v1 = _build_non_causal(
+        monkeypatch,
+        num_heads=num_heads,
+        kv_cache_dtype="fp8",
+        qlen=2,
+        mtp_qlen=8,
+    )
+    assert metadata.has_persistent_metadata
+    assert get_mla_metadata_v1.called
 
 
 def test_a_two_token_bf16_block_is_allowed(monkeypatch):

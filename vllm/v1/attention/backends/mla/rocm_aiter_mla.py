@@ -143,6 +143,20 @@ def _aiter_mla_native_h24_supported() -> bool:
     )
 
 
+def _aiter_mla_non_causal_asm_kernels() -> bool:
+    """Whether this arch ships non-causal MLA decode ASM kernels.
+
+    The Python `causal=` probe cannot see the per-arch manifest. gfx950 has
+    the kernels; gfx942 and everything else must fall through to another
+    backend.
+    """
+    try:
+        from vllm.platforms.rocm import on_gfx950
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(on_gfx950())
+
+
 @functools.lru_cache(maxsize=1)
 def _gluon_mla_decode_supported() -> bool:
     """The small-head Gluon MLA decode kernel only has a gfx950 (CDNA4) build.
@@ -253,7 +267,14 @@ class AiterMLABackend(MLACommonBackend):
 
     @classmethod
     def supports_non_causal(cls) -> bool:
-        return bool(rocm_aiter_ops.mla_decode_supports_non_causal())
+        # causal= on mla_decode_fwd is necessary but not sufficient: pinned
+        # AITER v0.1.21.post2 still exports that argument on gfx942, whose ASM
+        # manifest has no non-causal decode kernels. Selecting this backend
+        # there reaches `cannot get heuristic kernel!` instead of TRITON_MLA.
+        return bool(
+            rocm_aiter_ops.mla_decode_supports_non_causal()
+            and _aiter_mla_non_causal_asm_kernels()
+        )
 
     @staticmethod
     def get_impl_cls() -> type["AiterMLAImpl"]:
@@ -1070,15 +1091,19 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             not causal
             and max_qo_len == 2
             and is_quantized_kv_cache(self._kv_cache_dtype_str)
+            and not AiterMLAHelper.has_fp8_non_causal_qlen2_kernel(
+                self._decode_num_heads
+            )
         ):
             # AITER's fp8 dispatch folds (gqa 16, qlen 3 or 4) onto the
-            # qseqlen-4 kernel but never lists 2, so the lookup would land on a
-            # causal-only entry -- and a missing kernel aborts the process
-            # rather than raising. The bf16 fold has no such hole. Drop this
-            # once the pinned AITER folds that length.
+            # qseqlen-4 kernel but never lists 2. 32/64/96/128 heads at
+            # qlen 2 fold onto that 16-head / 4-token non-causal kernel;
+            # native 16-head qlen 2 has no entry and aborts the process
+            # rather than raising. The bf16 fold has no such hole.
             raise ValueError(
-                "AITER has no non-causal fp8 MLA kernel for a 2-token query "
-                "block. Pin the draft to TRITON_MLA for this speculative config."
+                "AITER has no non-causal fp8 MLA kernel for this 2-token "
+                "query block. Pin the draft to TRITON_MLA for this "
+                "speculative config."
             )
         if use_persistent_metadata:
             from aiter import get_mla_metadata_v1
@@ -1287,6 +1312,17 @@ class AiterMLAHelper:
                 or num_heads % AiterMLAHelper._AITER_MIN_MLA_HEADS == 0
             )
         )
+
+    @staticmethod
+    def has_fp8_non_causal_qlen2_kernel(num_heads: int) -> bool:
+        """Whether fp8 (num_heads, qlen=2) folds onto a non-causal ASM kernel.
+
+        Pinned AITER v0.1.21.post2 folds 32/64/96/128 heads at qlen 2 onto the
+        non-causal 16-head / 4-token kernel. A 16-head (or padded-to-16) qlen-2
+        block has no matching entry.
+        """
+        kernel_heads = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
+        return kernel_heads >= 2 * AiterMLAHelper._AITER_MIN_MLA_HEADS
 
     @staticmethod
     def get_actual_mla_num_heads(num_heads: int) -> int:
