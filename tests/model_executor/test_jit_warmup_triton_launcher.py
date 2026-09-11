@@ -248,9 +248,7 @@ def test_triton_kernel_decorator_propagates_dispatch_assertions(
 
     _patch_key_deriver(
         monkeypatch,
-        lambda kernel, kwargs: {
-            TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])
-        },
+        lambda kernel, kwargs: {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])},
     )
 
     with pytest.raises(AssertionError, match="broken dispatch"):
@@ -277,9 +275,7 @@ def test_triton_kernel_dispatch_uses_cuda_fake_tensors(
 
     _patch_key_deriver(
         monkeypatch,
-        lambda kernel, kwargs: {
-            TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])
-        },
+        lambda kernel, kwargs: {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])},
     )
 
     keys = dispatch.get_warmup_keys()

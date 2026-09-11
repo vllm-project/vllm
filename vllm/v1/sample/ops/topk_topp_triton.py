@@ -881,9 +881,7 @@ def _topk_topp_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     split_enabled = current_platform.is_cuda_alike()
     mode: Any = WarmupChoices((True, False), (True, True), (False, True))
     logits_stride: Any = WarmupChoices(16, 2)
-    batch_size: Any = WarmupIntRange(
-        1, vllm_config.scheduler_config.max_num_seqs + 1
-    )
+    batch_size: Any = WarmupIntRange(1, vllm_config.scheduler_config.max_num_seqs + 1)
     topk_enabled = mode[0]
     topp_enabled = mode[1]
     _when(topk_enabled or not (split_enabled and batch_size <= _SPLIT_MAX_BATCH))

@@ -853,9 +853,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
             )
             case_body.append(
                 ast.If(
-                    test=ast.UnaryOp(
-                        op=ast.Not(), operand=cast(ast.expr, predicate)
-                    ),
+                    test=ast.UnaryOp(op=ast.Not(), operand=cast(ast.expr, predicate)),
                     body=[ast.Return(value=ast.Constant(value=None))],
                     orelse=[],
                 )
