@@ -3565,6 +3565,142 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary():
     assert len(computed_blocks.blocks[1]) == 0
 
 
+def _make_decode_checkpoint_manager(monkeypatch):
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS", "1")
+    block_size = 4
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba_align"]),
+        max_model_len=1024,
+        enable_caching=True,
+        retention_interval=0,
+        hash_block_size=block_size,
+    )
+    return manager, block_size
+
+
+def _materialize_checkpoint_test_request(manager, block_size, num_decode_blocks=3):
+    request = make_request("producer", list(range(2 * block_size)), block_size, sha256)
+
+    def compute(num_tokens):
+        manager.new_step_starts()
+        blocks = manager.allocate_slots(request, num_tokens)
+        assert blocks is not None
+        request.num_computed_tokens += num_tokens
+        manager.update_decode_checkpoint_candidates(request)
+
+    compute(block_size)
+    compute(block_size)
+    for block_idx in range(num_decode_blocks):
+        start = request.num_tokens
+        request.append_output_token_ids(list(range(start, start + block_size)))
+        compute(block_size)
+    return request
+
+
+@pytest.mark.parametrize("keep", [True, False])
+def test_mamba_decode_checkpoints_publish_latest_on_finish(monkeypatch, keep):
+    """The latest materialized decode state becomes reusable after finish."""
+    manager, block_size = _make_decode_checkpoint_manager(monkeypatch)
+    request = _materialize_checkpoint_test_request(manager, block_size)
+
+    assert manager.block_pool.get_cached_block(request.block_hashes[4], [1]) is None
+    manager.finalize_decode_checkpoints(request, keep=keep)
+    manager.free(request)
+
+    # Only a kept checkpoint extends reuse beyond the prompt replay boundary.
+    full_replay = make_request(
+        "full-replay",
+        list(request.all_token_ids) + [100, 101, 102, 103],
+        block_size,
+        sha256,
+    )
+    _, full_hit, _ = manager.get_computed_blocks(full_replay)
+    assert full_hit == (20 if keep else 4)
+
+
+def test_mamba_decode_checkpoint_pin_survives_state_rotation(monkeypatch):
+    """A private pin keeps an old state out of the allocator after rotation."""
+    manager, block_size = _make_decode_checkpoint_manager(monkeypatch)
+    request = _materialize_checkpoint_test_request(
+        manager, block_size, num_decode_blocks=2
+    )
+    mamba_manager = manager.coordinator.single_type_managers[1]
+    candidate = mamba_manager._decode_checkpoint_candidates[request.request_id]
+    assert candidate.num_tokens == 16
+    assert candidate.block.ref_cnt == 2  # request owner + private pin
+
+    # Two subsequent running-state rotations remove boundary 16 from the
+    # request table. Do not update the candidate: this isolates the private
+    # pin that must keep its physical block resident.
+    new_blocks = []
+    for _ in range(2):
+        start = request.num_tokens
+        request.append_output_token_ids(list(range(start, start + block_size)))
+        manager.new_step_starts()
+        allocated = manager.allocate_slots(request, block_size)
+        assert allocated is not None
+        new_blocks.extend(allocated.blocks[1])
+        request.num_computed_tokens += block_size
+
+    assert candidate.block.ref_cnt == 1
+    assert all(block is not candidate.block for block in new_blocks)
+
+    manager.free(request)
+    assert candidate.block.ref_cnt == 0
+
+
+def test_mamba_decode_checkpoints_exclude_unmaterialized_boundary(monkeypatch):
+    """Allocated/in-flight tokens and a sampled EOS cannot form a candidate."""
+    manager, block_size = _make_decode_checkpoint_manager(monkeypatch)
+    request = _materialize_checkpoint_test_request(
+        manager, block_size, num_decode_blocks=2
+    )
+
+    # Materialize only three tokens of the next block.
+    start = request.num_tokens
+    request.append_output_token_ids(list(range(start, start + block_size - 1)))
+    blocks = manager.allocate_slots(request, block_size - 1)
+    assert blocks is not None
+    request.num_computed_tokens += block_size - 1
+
+    # Sampling EOS makes request.num_tokens reach the aligned boundary, but EOS
+    # has not entered a forward. Even if its slot is optimistically in flight,
+    # processed_end remains 19 and boundary 20 is ineligible.
+    request.append_output_token_ids(999)
+    request.num_computed_tokens += 1
+    request.num_in_flight_tokens = 1
+    manager.update_decode_checkpoint_candidates(request)
+
+    mamba_manager = manager.coordinator.single_type_managers[1]
+    candidate = mamba_manager._decode_checkpoint_candidates[request.request_id]
+    assert candidate.num_tokens == 16
+    manager.free(request)
+
+
+@pytest.mark.parametrize(
+    ("retention_interval", "enable_caching", "use_eagle", "expected_match"),
+    [
+        (None, True, False, "prefix_cache_retention_interval=0"),
+        (64, True, False, "prefix_cache_retention_interval=0"),
+        (0, False, False, "prefix caching"),
+        (0, True, True, "hidden-state speculative decoding"),
+    ],
+)
+def test_decode_checkpoints_reject_unsupported_config(
+    monkeypatch, retention_interval, enable_caching, use_eagle, expected_match
+):
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETAIN_DECODE_CHECKPOINTS", "1")
+    with pytest.raises(ValueError, match=expected_match):
+        make_kv_cache_manager(
+            _make_hybrid_kv_cache_config(4, 100, ["full", "mamba_align"]),
+            max_model_len=1024,
+            enable_caching=enable_caching,
+            retention_interval=retention_interval,
+            use_eagle=use_eagle,
+            hash_block_size=4,
+        )
+
+
 def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
     """Verify MTP/EAGLE SWA retention keeps the extra proof block.
 
