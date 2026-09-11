@@ -60,7 +60,7 @@ class DraftWatermarker:
 
 def create_speculative_target_watermarker(watermarker: Watermarker) -> Watermarker:
     if isinstance(watermarker, SupportsSpeculativeDecoding):
-        return watermarker.create_target_watermarker()
+        return watermarker.target_watermarker
     return watermarker
 
 
@@ -71,9 +71,7 @@ def create_speculative_draft_watermarker(
     allow_target_only: bool,
 ) -> DraftWatermarker | None:
     if isinstance(watermarker, SupportsSpeculativeDecoding):
-        return DraftWatermarker(
-            watermarker.create_draft_watermarker(), max_num_reqs, device
-        )
+        return DraftWatermarker(watermarker.draft_watermarker, max_num_reqs, device)
     if allow_target_only:
         return None
     raise ValueError(
@@ -102,17 +100,13 @@ def _resolve_watermark_key(watermarker: Watermarker) -> int:
         ValueError: if a role-splitting watermarker is passed instead of its
             target role, which would key the recovery draw with the draft key.
     """
-    key = _philox_key(watermarker)
-    if (
-        isinstance(watermarker, SupportsSpeculativeDecoding)
-        and _philox_key(watermarker.create_target_watermarker()) != key
-    ):
+    if isinstance(watermarker, SupportsSpeculativeDecoding):
         raise ValueError(
             f"{type(watermarker).__name__} keys the target role separately from "
             "the draft. Pass create_speculative_target_watermarker(watermarker) "
             "so the recovery draw carries the target's key."
         )
-    return key
+    return _philox_key(watermarker)
 
 
 def speculative_target_watermark_key(

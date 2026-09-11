@@ -110,12 +110,11 @@ def test_dual_key_watermarker_uses_domain_separated_keys():
 
     watermarker = create_watermarker(config)
     assert isinstance(watermarker, SupportsSpeculativeDecoding)
-    draft = watermarker.create_draft_watermarker()
-    target = watermarker.create_target_watermarker()
+    draft = watermarker.draft_watermarker
+    target = watermarker.target_watermarker
 
     assert isinstance(watermarker, DualKeyGumbelWatermarker)
     assert watermarker.alpha == 0.1
-    assert watermarker.prf.key == derive_watermark_key(42, b"key_a")
     assert draft.prf.key == derive_watermark_key(42, b"key_a")
     assert target.prf.key == derive_watermark_key(42, b"key_b")
     assert target.prf.key != draft.prf.key
@@ -125,12 +124,8 @@ def test_dual_key_watermarker_routes_tokens_with_alpha():
     watermarker = DualKeyGumbelWatermarker(key=42, context_width=2, alpha=0.25)
     logits = torch.zeros(2, 16)
     contexts = torch.tensor([[1, 2], [3, 4]])
-    key_a = watermarker.create_draft_watermarker().sample(
-        logits, contexts, lambda _: None
-    )
-    key_b = watermarker.create_target_watermarker().sample(
-        logits, contexts, lambda _: None
-    )
+    key_a = watermarker.draft_watermarker.sample(logits, contexts, lambda _: None)
+    key_b = watermarker.target_watermarker.sample(logits, contexts, lambda _: None)
 
     def route(routing_logits):
         torch.testing.assert_close(

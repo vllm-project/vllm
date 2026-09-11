@@ -98,7 +98,7 @@ class GumbelWatermarker(Watermarker):
         return WatermarkSample(token_ids, logits)
 
 
-class DualKeyGumbelWatermarker(GumbelWatermarker, SupportsSpeculativeDecoding):
+class DualKeyGumbelWatermarker(Watermarker, SupportsSpeculativeDecoding):
     def __init__(
         self,
         key: int,
@@ -108,13 +108,17 @@ class DualKeyGumbelWatermarker(GumbelWatermarker, SupportsSpeculativeDecoding):
     ) -> None:
         if not 0 <= alpha <= 1:
             raise ValueError("alpha must be between 0 and 1")
-        self.master_key = key
-        self.prf_name = prf
         self.alpha = alpha
-        super().__init__(derive_watermark_key(key, b"key_a"), context_width, prf)
-        self.key_b_watermarker = GumbelWatermarker(
+        self.draft_watermarker = GumbelWatermarker(
+            derive_watermark_key(key, b"key_a"), context_width, prf
+        )
+        self.target_watermarker = GumbelWatermarker(
             derive_watermark_key(key, b"key_b"), context_width, prf
         )
+
+    @property
+    def context_width(self) -> int:
+        return self.draft_watermarker.context_width
 
     def sample(
         self,
@@ -123,12 +127,12 @@ class DualKeyGumbelWatermarker(GumbelWatermarker, SupportsSpeculativeDecoding):
         random_sample: RandomSampler,
     ) -> WatermarkSample:
         if self.alpha == 0:
-            return super().sample(logits, contexts, random_sample)
+            return self.draft_watermarker.sample(logits, contexts, random_sample)
         if self.alpha == 1:
-            return self.key_b_watermarker.sample(logits, contexts, random_sample)
+            return self.target_watermarker.sample(logits, contexts, random_sample)
 
-        key_a_sample = super().sample(logits, contexts, random_sample)
-        key_b_sample = self.key_b_watermarker.sample(logits, contexts, random_sample)
+        key_a_sample = self.draft_watermarker.sample(logits, contexts, random_sample)
+        key_b_sample = self.target_watermarker.sample(logits, contexts, random_sample)
         routing_logits = torch.tensor(
             [1 - self.alpha, self.alpha],
             dtype=torch.float32,
@@ -143,20 +147,6 @@ class DualKeyGumbelWatermarker(GumbelWatermarker, SupportsSpeculativeDecoding):
                 key_b_sample.token_ids,
             ),
             logits,
-        )
-
-    def create_draft_watermarker(self) -> Watermarker:
-        return GumbelWatermarker(
-            derive_watermark_key(self.master_key, b"key_a"),
-            self.context_width,
-            self.prf_name,
-        )
-
-    def create_target_watermarker(self) -> Watermarker:
-        return GumbelWatermarker(
-            derive_watermark_key(self.master_key, b"key_b"),
-            self.context_width,
-            self.prf_name,
         )
 
 

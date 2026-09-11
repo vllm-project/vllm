@@ -92,6 +92,5 @@ class Watermarker(ABC):
 class SupportsSpeculativeDecoding(Protocol):
     """A watermarker compatible with standard speculative rejection sampling."""
 
-    def create_draft_watermarker(self) -> Watermarker: ...
-
-    def create_target_watermarker(self) -> Watermarker: ...
+    draft_watermarker: Watermarker
+    target_watermarker: Watermarker
