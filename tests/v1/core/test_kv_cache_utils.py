@@ -54,8 +54,8 @@ from vllm.v1.core.kv_cache_utils import (
     tensor_data,
 )
 from vllm.v1.hisparse.layout import (
-    create_hisparse_layout,
     get_hisparse_gpu_memory_usage,
+    get_hisparse_kv_cache_config,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
@@ -232,12 +232,18 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=512)),
-        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+        cache_config=SimpleNamespace(
+            num_gpu_blocks_override=7,
+            prefix_cache_retention_interval=None,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC,
+        ),
     )
 
-    layout = create_hisparse_layout(config, groups, host_budget=2**30)
-    cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
-        config, [layout.source_group, *layout.device_groups], available_memory=2**30
+    cache_config = get_hisparse_kv_cache_config(
+        config,
+        groups,
+        available_memory=2**30,
+        host_budget=2**30,
     )
 
     host_layers = {
