@@ -190,3 +190,119 @@ def _check(m3_weights, m, out_mode):
         err_ours,
         err_theirs,
     )
+
+
+def test_a8w8_fast_path_gate():
+    from vllm.models.minimax_m3.amd.ops.moe_a8w8_mid import MIN_MID_TOKENS
+    from vllm.models.minimax_m3.amd.ops.moe_a8w8_prefill import (
+        MAX_PREFILL_TOKENS,
+        supports_batch,
+        supports_shapes,
+    )
+
+    device = torch.device("cuda")
+    assert supports_shapes(6144, 768)
+    assert not supports_shapes(6144, 1536)  # gemm2 pipeline is written for K = 768
+    assert not supports_shapes(6144 + 128, 768)  # gemm1 unroll: (K/128 - 4) % 4
+    ok = torch.empty((MIN_MID_TOKENS, HIDDEN), dtype=torch.bfloat16, device=device)
+    assert supports_batch(ok)
+    assert not supports_batch(ok[: MIN_MID_TOKENS - 1])  # the decode package's
+    assert not supports_batch(ok.float())
+    assert not supports_batch(ok.t())
+    assert not supports_batch(
+        torch.empty(
+            (MAX_PREFILL_TOKENS + 1, HIDDEN), dtype=torch.bfloat16, device="meta"
+        )
+    )
+
+
+def test_a8w8_fast_path_routes_by_batch(m3_weights, monkeypatch):
+    """``install_prefill_fast_path`` wraps ``quant_method.apply``: 257..3071 go
+    to the mid chain, 3072 and up to the prefill chain, the first prefill-range
+    call also warms up the other kernel configurations, and everything else
+    (the decode range, unfused shared experts) stays with the wrapped apply."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.models.minimax_m3.amd.ops import moe_a8w8_prefill
+
+    raw, shuffled = m3_weights
+    w13, w2, w13_s, w2_s = shuffled
+    device = w13.device
+    calls: list[tuple[str, int]] = []
+
+    def record(name, fn):
+        def wrapped(x, *args, **kwargs):
+            calls.append((name, x.shape[0]))
+            return fn(x, *args, **kwargs)
+
+        return wrapped
+
+    monkeypatch.setattr(
+        moe_a8w8_prefill, "a8w8_mid_moe", record("mid", moe_a8w8_prefill.a8w8_mid_moe)
+    )
+    monkeypatch.setattr(
+        moe_a8w8_prefill,
+        "a8w8_prefill_moe",
+        record("prefill", moe_a8w8_prefill.a8w8_prefill_moe),
+    )
+    monkeypatch.setattr(moe_a8w8_prefill, "_warmed", False)
+
+    class ModelOptMxFp8FusedMoE:  # the gate keys on the class name + backend
+        mxfp8_backend = SimpleNamespace(value="AITER_MXFP8")
+
+        def apply(self, layer, x, topk_weights, topk_ids, *args, **kwargs):
+            calls.append(("aiter", x.shape[0]))
+            return torch.zeros_like(x)
+
+    layer = SimpleNamespace(
+        quant_method=ModelOptMxFp8FusedMoE(),
+        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        swiglu_alpha=SWIGLU_ALPHA,
+        swiglu_limit=SWIGLU_LIMIT,
+        swiglu_beta=None,
+        apply_router_weight_on_input=False,
+        expert_map=None,
+        moe_config=SimpleNamespace(
+            use_ep=False,
+            has_bias=False,
+            hidden_dim=HIDDEN,
+            intermediate_size_per_partition=INTER,
+            hidden_dim_unpadded=None,
+            intermediate_size_per_partition_unpadded=None,
+        ),
+        w13_weight=w13,
+        w13_weight_scale=w13_s,
+        w2_weight=w2,
+        w2_weight_scale=w2_s,
+    )
+    assert moe_a8w8_prefill.install_prefill_fast_path(layer, prefix="t")
+    assert moe_a8w8_prefill.install_prefill_fast_path(layer)  # idempotent
+    apply = layer.quant_method.apply
+
+    torch.manual_seed(0)
+    x = torch.randn((4096, HIDDEN), dtype=torch.bfloat16, device=device)
+    topk_ids, topk_weights = _routing(4096, device)
+    apply(layer, x[:256], topk_weights[:256], topk_ids[:256])
+    assert calls == [("aiter", 256)]
+    calls.clear()
+    out = apply(layer, x[:512], topk_weights[:512], topk_ids[:512])
+    assert calls == [("mid", 512)] and out.shape == (512, HIDDEN)
+    calls.clear()
+    out = apply(layer, x, topk_weights, topk_ids)
+    assert calls == [
+        ("mid", 512),
+        ("mid", 768),
+        ("mid", 1536),
+        ("prefill", 3072),
+        ("prefill", 4096),
+    ]
+    assert out.shape == (4096, HIDDEN) and out.dtype == torch.bfloat16
+    ref = _run_aiter(shuffled, x, topk_ids, topk_weights)
+    assert _cos(out, ref) > 0.9999
+    calls.clear()
+    apply(layer, x, topk_weights, topk_ids)
+    assert calls == [("prefill", 4096)]
+    calls.clear()
+    apply(layer, x[:512], topk_weights[:512], topk_ids[:512], shared_experts=object())
+    assert calls == [("aiter", 512)]

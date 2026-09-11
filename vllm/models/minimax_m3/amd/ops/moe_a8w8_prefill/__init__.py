@@ -24,6 +24,11 @@ gate_up=True)``), ``w13_scale`` (``shuffle_scale(..., True, True)``), ``w2``
 ``[E, H, I]`` (``shuffle_weight``), ``w2_scale`` (``shuffle_scale``): the tensors
 ``convert_to_fp8_moe_kernel_format`` leaves on the layer. Only their data
 pointers are used.
+
+``install_prefill_fast_path`` (``VLLM_ROCM_USE_M3_FLYDSL_PREFILL_MOE``) wraps
+the layer's ``quant_method.apply`` and routes every batch above the decode cap
+to FlyDSL: ``moe_a8w8_mid`` for ``MIN_MID_TOKENS <= M < MIN_PREFILL_TOKENS``,
+this chain from ``MIN_PREFILL_TOKENS`` up.
 """
 
 from __future__ import annotations
@@ -33,6 +38,8 @@ import os
 
 import torch
 
+from vllm.logger import init_logger
+from vllm.models.minimax_m3.amd.ops.moe_a8w8_mid import MIN_MID_TOKENS, a8w8_mid_moe
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.prefill import (
     MAX_PREFILL_TOKENS,
     MIN_PREFILL_TOKENS,
@@ -42,6 +49,8 @@ from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.prefill import (
     _run_compiled,
     block_m_for,
 )
+
+logger = init_logger(__name__)
 
 GEMM1_SWIGLU_ALPHA = 1.702
 GEMM1_SWIGLU_LIMIT = 7.0
@@ -88,6 +97,17 @@ def supports_shapes(hidden_size: int, intermediate_size: int) -> bool:
         and k_iters >= 8
         and (k_iters - 4) % 4 == 0
         and intermediate_size == _GEMM2_INTERMEDIATE
+    )
+
+
+def supports_batch(x: torch.Tensor) -> bool:
+    """Runtime gate for one call of the installed fast path: every batch above
+    the decode cap, ``MIN_MID_TOKENS <= M <= MAX_PREFILL_TOKENS``."""
+    return (
+        x.dim() == 2
+        and MIN_MID_TOKENS <= x.shape[0] <= MAX_PREFILL_TOKENS
+        and x.dtype == torch.bfloat16
+        and x.is_contiguous()
     )
 
 
@@ -308,3 +328,126 @@ def a8w8_prefill_stage1(
         stream,
     )
     return bufs, a_q, a_s, h_q, h_s, num_m_blocks
+
+
+def _unsupported_reason(layer) -> str | None:
+    """Static checks on a RoutedExperts layer; None when the fast path applies."""
+    from vllm.models.minimax_m3.amd.ops.moe_a8w8_decode import (
+        _unsupported_reason as decode_unsupported_reason,
+    )
+
+    reason = decode_unsupported_reason(layer)
+    if reason is not None and not reason.startswith("shapes "):
+        return reason
+    if (
+        float(layer.swiglu_alpha) != GEMM1_SWIGLU_ALPHA
+        or float(layer.swiglu_limit) != GEMM1_SWIGLU_LIMIT
+    ):
+        return (
+            f"swiglu alpha/limit {layer.swiglu_alpha}/{layer.swiglu_limit} != 1.702/7"
+        )
+    hidden = layer.moe_config.hidden_dim
+    inter = layer.moe_config.intermediate_size_per_partition
+    if not supports_shapes(hidden, inter):
+        return f"shapes hidden={hidden} intermediate={inter} not tiled by the kernels"
+    return None
+
+
+def _fast_path(layer, x, topk_weights, topk_ids, hidden: int, inter: int):
+    chain = a8w8_mid_moe if x.shape[0] < MIN_PREFILL_TOKENS else a8w8_prefill_moe
+    return chain(
+        x,
+        layer.w13_weight,
+        layer.w13_weight_scale,
+        layer.w2_weight,
+        layer.w2_weight_scale,
+        topk_weights,
+        topk_ids,
+        hidden_size=hidden,
+        intermediate_size=inter,
+        num_experts=layer.w13_weight.shape[0],
+    )
+
+
+# One batch size per kernel configuration the profile batch does not compile
+# itself (mid sort blocks of 32 / 64 / 128 rows, prefill blocks of 128 / 256
+# rows with gemm2's small-batch n-split): run once on prefixes of the first
+# batch that reaches the prefill range, i.e. the model runner's profile run,
+# so no request waits on a compile.
+_WARM_UP_TOKENS = (512, 768, 1536, 3072, 16384)
+_warmed = False
+
+
+def _warm_up(layer, x, topk_weights, topk_ids, hidden: int, inter: int) -> None:
+    for m in _WARM_UP_TOKENS:
+        if m < x.shape[0]:
+            logger.debug("M3 FlyDSL a8w8 MoE warm-up: %d tokens", m)
+            _fast_path(layer, x[:m], topk_weights[:m], topk_ids[:m], hidden, inter)
+
+
+def install_prefill_fast_path(experts, prefix: str = "") -> bool:
+    """Route every ``MIN_MID_TOKENS <= M <= MAX_PREFILL_TOKENS`` call of a
+    MiniMax-M3 MXFP8 MoE layer to the FlyDSL a8w8 chains: ``moe_a8w8_mid``
+    below ``MIN_PREFILL_TOKENS``, this package from there up.
+
+    ``experts`` is what ``FusedMoEFactory`` returned or the RoutedExperts layer
+    itself. Wraps the layer's ``quant_method.apply`` (on top of the decode
+    package's wrapper when that is installed, so that no batch size is left to
+    aiter); a call outside the gate (unfused shared experts, an unexpected
+    dtype or layout) goes to the wrapped implementation unchanged. Returns
+    True when installed.
+    """
+    layer = getattr(experts, "routed_experts", experts)
+    try:
+        reason = _unsupported_reason(layer)
+    except Exception as exc:  # a layer/config shape this gate does not know
+        reason = f"{type(exc).__name__}: {exc}"
+    if reason is not None:
+        logger.info_once(
+            "M3 FlyDSL a8w8 mid/prefill MoE not used for %s: %s",
+            prefix or "experts",
+            reason,
+        )
+        return False
+    qm = layer.quant_method
+    if getattr(qm, "_m3_prefill_fast_path", False):
+        return True
+
+    orig_apply = qm.apply
+    hidden = layer.moe_config.hidden_dim
+    inter = layer.moe_config.intermediate_size_per_partition
+
+    def apply(
+        layer,
+        x,
+        topk_weights,
+        topk_ids,
+        shared_experts=None,
+        shared_experts_input=None,
+        **kwargs,
+    ):
+        global _warmed
+        if shared_experts is not None or kwargs or not supports_batch(x):
+            return orig_apply(
+                layer,
+                x,
+                topk_weights,
+                topk_ids,
+                shared_experts,
+                shared_experts_input,
+                **kwargs,
+            )
+        if not _warmed and x.shape[0] >= MIN_PREFILL_TOKENS:
+            _warmed = True
+            _warm_up(layer, x, topk_weights, topk_ids, hidden, inter)
+        return _fast_path(layer, x, topk_weights, topk_ids, hidden, inter)
+
+    qm.apply = apply
+    qm._m3_prefill_fast_path = True
+    logger.info_once(
+        "M3 FlyDSL a8w8 mid/prefill MoE installed (MXFP8, %d <= M <= %d)",
+        MIN_MID_TOKENS,
+        MAX_PREFILL_TOKENS,
+    )
+    logger.debug("M3 FlyDSL a8w8 mid/prefill MoE installed for %s", prefix or "experts")
+    return True
