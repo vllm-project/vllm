@@ -105,8 +105,13 @@ class SingleTypeKVCacheManager(ABC):
         # consume them and this manager holds a spec type that gets zeroed.
         self._record_new_block_ids = (
             needs_kv_cache_zeroing
-            and isinstance(kv_cache_spec, AttentionSpec)
-            and not isinstance(kv_cache_spec, CircularBufferSpec)
+            and (
+                (
+                    isinstance(kv_cache_spec, AttentionSpec)
+                    and not isinstance(kv_cache_spec, CircularBufferSpec)
+                )
+                or isinstance(kv_cache_spec, MambaSpec)
+            )
         )
         self.new_block_ids: list[int] = []
 
@@ -1876,6 +1881,8 @@ class MambaManager(SingleTypeKVCacheManager):
                     max_new_blocks += self.num_speculative_blocks
                 assert num_new_blocks <= max_new_blocks
                 new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+                if self._record_new_block_ids:
+                    self.new_block_ids.extend(b.block_id for b in new_blocks)
                 returned_blocks = req_blocks[prev_block_len:]
                 if partial_hit is not None:
                     block_idx, source_block = partial_hit
