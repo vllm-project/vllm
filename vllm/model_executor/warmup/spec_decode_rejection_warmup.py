@@ -59,9 +59,9 @@ def spec_decode_rejection_warmup(worker: Worker) -> None:
 
     # ``WATERMARK`` and ``CONTEXT_WIDTH`` are constexprs of ``_resample_kernel``,
     # so a watermarked engine launches a different specialization than the stock
-    # one. Warm the variant the runtime will actually use: WatermarkedRejection-
-    # Sampler always passes the watermark triple, so when a watermark config is
-    # present the unwatermarked variant is never launched.
+    # one. Warm the variant the runtime will actually use: RejectionSampler
+    # passes the watermark triple when a watermark config is present, so
+    # the unwatermarked variant is never launched in that case.
     watermark_config = worker.vllm_config.watermark_config
     watermark_kwargs: dict[str, Any] = {}
     if watermark_config is not None:

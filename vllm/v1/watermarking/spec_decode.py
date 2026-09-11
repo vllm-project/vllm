@@ -1,21 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, cast
-
 import torch
 
-from vllm.config import SpeculativeConfig
 from vllm.config.watermarking import WatermarkConfig
 from vllm.v1.watermarking.factory import create_watermarker
-from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
 from vllm.v1.watermarking.prfs import PhiloxPRF
 from vllm.v1.watermarking.watermarker import (
     SupportsSpeculativeDecoding,
     Watermarker,
 )
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import rejection_sample
 
 
@@ -120,13 +115,18 @@ def _resolve_watermark_key(watermarker: Watermarker) -> int:
     return key
 
 
-def speculative_target_watermark_key(watermark_config: WatermarkConfig) -> int:
+def speculative_target_watermark_key(
+    watermark_config: WatermarkConfig | None,
+) -> int | None:
     """Philox key the resample kernel is launched with for ``watermark_config``.
 
     Mirrors how the model runner builds the sampler's watermarker, so callers
     that never construct a sampler (the JIT warmup) can reproduce the exact
     kernel argument the engine will use.
     """
+    if watermark_config is None:
+        return None
+
     return _resolve_watermark_key(
         create_speculative_target_watermarker(create_watermarker(watermark_config))
     )
@@ -174,33 +174,3 @@ def watermarked_rejection_sample(
         watermarking=watermarking,
         watermark_key=_resolve_watermark_key(watermarker),
     )
-
-
-class WatermarkedRejectionSampler(RejectionSampler):
-    def __init__(
-        self,
-        sampler: GPUWatermarkSampler,
-        spec_config: SpeculativeConfig,
-        device: torch.device,
-        watermarker: Watermarker,
-    ) -> None:
-        super().__init__(sampler, spec_config, device)
-        self.watermarker = watermarker
-        self._watermark_key = _resolve_watermark_key(watermarker)
-
-    def _extra_rejection_sample_kwargs(
-        self,
-        draft_sampled: torch.Tensor,
-        expanded_idx_mapping: torch.Tensor,
-        expanded_local_pos: torch.Tensor,
-    ) -> dict[str, Any]:
-        sampler = cast("GPUWatermarkSampler", self.sampler)
-        return {
-            "contexts": sampler._get_contexts(
-                expanded_idx_mapping,
-                expanded_local_pos,
-                draft_sampled,
-            ),
-            "watermarking": sampler.watermarking.gpu,
-            "watermark_key": self._watermark_key,
-        }

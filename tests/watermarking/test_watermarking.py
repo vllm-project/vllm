@@ -193,6 +193,10 @@ def test_config_key_resolution_matches_the_model_runner(algorithm: str):
     assert speculative_target_watermark_key(config) == runtime_key
 
 
+def test_config_key_resolution_returns_none_when_watermarking_is_disabled():
+    assert speculative_target_watermark_key(None) is None
+
+
 def test_target_only_speculative_watermarking_skips_draft_watermarker():
     watermarker = create_watermarker(WatermarkConfig(algorithm="gumbel", key=42))
 

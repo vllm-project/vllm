@@ -81,8 +81,8 @@ from vllm.v1.outputs import (
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import (
-    WatermarkedRejectionSampler,
     create_speculative_target_watermarker,
+    speculative_target_watermark_key,
 )
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
@@ -495,19 +495,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config._check_watermarking_unsupported(custom_sampler=True)
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
-                if self.vllm_config.watermark_config is None:
-                    self.rejection_sampler = RejectionSampler(
-                        self.sampler, self.speculative_config, self.device
-                    )
-                else:
-                    assert isinstance(self.sampler, GPUWatermarkSampler)
-                    watermarker = self.sampler.watermarker
-                    self.rejection_sampler = WatermarkedRejectionSampler(
-                        self.sampler,
-                        self.speculative_config,
-                        self.device,
-                        watermarker,
-                    )
+                self.rejection_sampler = RejectionSampler(
+                    self.sampler,
+                    self.speculative_config,
+                    self.device,
+                    watermark_key=speculative_target_watermark_key(
+                        self.vllm_config.watermark_config
+                    ),
+                )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 logprobs_mode=self.model_config.logprobs_mode,
