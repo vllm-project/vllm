@@ -13,8 +13,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
@@ -43,8 +44,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s distributed/test_sharded_rdt_plan.py
   - pytest -v -s distributed/test_sharded_rdt_producer.py
@@ -63,7 +65,7 @@ steps:
     pytest -v -s distributed/test_sharded_rdt_trainer.py || true'
 - label: ':nvidia: (L4) Distributed DP Basic'
   device: intel_gpu
-  timeout_in_minutes: 35
+  timeout_in_minutes: 45
   num_devices: 2
   working_dir: .
   no_plugin: true
@@ -72,14 +74,17 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
   - DP_SIZE=2 pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py
+  - pytest -v -s v1/e2e/general/test_sharded_sampling.py
+  - pytest -v -s v1/e2e/spec_decode/test_sharded_sampling.py
   source_file_dependencies:
   - vllm/distributed/
   - '!vllm/distributed/kv_transfer/'
@@ -90,6 +95,9 @@ steps:
   - vllm/v1/worker/
   - tests/v1/distributed
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
+  - tests/v1/e2e/general/test_sharded_sampling.py
+  - tests/v1/e2e/spec_decode/test_sharded_sampling.py
+  - tests/v1/e2e/spec_decode/utils.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -98,7 +106,9 @@ steps:
     TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py || true &&
     TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py || true &&
     TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py || true &&
-    DP_SIZE=2 pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py || true'
+    DP_SIZE=2 pytest -v -s entrypoints/launchers/api_server/test_multi_api_servers.py || true &&
+    pytest -v -s v1/e2e/general/test_sharded_sampling.py || true &&
+    pytest -v -s v1/e2e/spec_decode/test_sharded_sampling.py || true'
 - label: ':nvidia: (L4) Distributed Compile + RPC'
   device: intel_gpu
   timeout_in_minutes: 65
@@ -110,8 +120,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
@@ -145,8 +156,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
@@ -184,8 +196,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 16+
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
@@ -215,7 +228,8 @@ steps:
     TP_SIZE=4 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
     PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
     DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
-    TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true'
+    TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
+    bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true'
 - label: ':nvidia: (L4) Distributed DP Extended'
   device: intel_gpu
   timeout_in_minutes: 45
@@ -227,8 +241,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 16+
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
@@ -269,8 +284,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 16+
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
   # skip test_pyccl.py due to xpu will not support it.
@@ -304,8 +320,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 16+
   _raw_old_commands:
   # skip cases due to ray issue for test_custom_all_reduce
   - pytest -v -s distributed/test_custom_all_reduce.py
@@ -334,8 +351,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s tests/distributed/test_context_parallel.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
@@ -361,14 +379,13 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s tests/distributed/test_custom_all_gather_reduce_scatter.py
   - pytest -v -s tests/distributed/test_context_parallel.py
   - pytest -v -s tests/distributed/test_nccl_symm_mem.py
-  # remove test_kimi_k3_gemm_rs.py due to the test is for cuda and it is kernel case
-  - pytest -v -s tests/kernels/test_kimi_k3_gemm_rs.py
   - pytest -v -s tests/v1/distributed/test_dbo.py
   - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
   commands:
@@ -390,8 +407,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s tests/kernels/test_kimi_k3_gemm_rs_ar.py
   source_file_dependencies:
@@ -412,11 +430,13 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
+  - pytest -v -s v1/distributed/test_pp_dp_v2.py
   source_file_dependencies:
   - vllm/distributed/
   - '!vllm/distributed/kv_transfer/'
@@ -424,12 +444,14 @@ steps:
   - vllm/executor/
   - vllm/model_executor/models/
   - tests/distributed/
+  - tests/v1/distributed/test_pp_dp_v2.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s distributed/test_pp_cudagraph.py || true &&
-    pytest -v -s distributed/test_pipeline_parallel.py || true'
+    pytest -v -s distributed/test_pipeline_parallel.py || true &&
+    pytest -v -s v1/distributed/test_pp_dp_v2.py || true'
 - label: ':nvidia: (L4) RayExecutorV2'
   device: intel_gpu
   timeout_in_minutes: 45
@@ -441,8 +463,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 16+
   _raw_old_commands:
   - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
   - export NCCL_CUMEM_HOST_ENABLE=0

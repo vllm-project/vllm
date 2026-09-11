@@ -12,8 +12,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - VLLM_USE_FLASHINFER_SAMPLER=0 pytest -v -s samplers
   - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
