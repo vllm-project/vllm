@@ -12,8 +12,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s cuda/test_cuda_context.py
   - pytest -v -s cuda/test_platform_no_cuda_init.py
@@ -42,8 +43,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s v1/cudagraph/test_cudagraph_dispatch.py
   - pytest -v -s v1/cudagraph/test_cudagraph_mode.py

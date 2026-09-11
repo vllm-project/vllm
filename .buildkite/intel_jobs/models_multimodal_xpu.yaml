@@ -12,8 +12,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"
   - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
@@ -38,8 +39,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
   - pytest -v -s models/multimodal/generation/test_mm_prefix_lm.py -m core_model
@@ -65,8 +67,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma"
   - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
@@ -90,8 +93,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
   - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
@@ -120,8 +124,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -v -s models/multimodal/processing/test_tensor_schema.py
   source_file_dependencies:
@@ -146,8 +151,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
   source_file_dependencies:
@@ -169,8 +175,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
   - pytest -v -s models/multimodal/test_mapping.py
@@ -196,8 +203,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -v -s models/multimodal/generation_ppl_test/
   source_file_dependencies:
@@ -220,8 +228,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   source_file_dependencies:
@@ -243,8 +252,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
   source_file_dependencies:
@@ -266,8 +276,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -v -s models/multimodal/pooling -m 'not core_model'
   source_file_dependencies:
