@@ -75,7 +75,7 @@ class CompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
-    watermarking: bool = True
+    watermarking: bool | None = None
     length_penalty: float = 1.0
     stop_token_ids: list[int] | None = []
     include_stop_str_in_output: bool = False
@@ -301,6 +301,7 @@ class CompletionRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             ignore_eos=self.ignore_eos,
             temperature=temperature,
+            watermarking=self.watermarking,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
             skip_special_tokens=self.skip_special_tokens,
@@ -405,6 +406,17 @@ class CompletionRequest(OpenAIBaseModel):
             thinking_token_budget=self.thinking_token_budget,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_best_of(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("best_of") is not None:
+            raise VLLMValidationError(
+                "`best_of` is not supported.",
+                parameter="best_of",
+                value=data["best_of"],
+            )
+        return data
 
     @model_validator(mode="before")
     @classmethod
