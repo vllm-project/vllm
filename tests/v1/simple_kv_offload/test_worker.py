@@ -531,7 +531,7 @@ def test_mixed_page_byte_placement_is_dcp_invariant():
     ],
 )
 def test_disk_backend_alignment_only_required_for_direct_io(
-    tmp_path, block_bytes: int, use_page_cache: bool, expect_ok: bool
+    tmp_path, monkeypatch, block_bytes: int, use_page_cache: bool, expect_ok: bool
 ):
     """The 4096 stride assert belongs to O_DIRECT; page-cache I/O must not hit it.
 
@@ -539,6 +539,16 @@ def test_disk_backend_alignment_only_required_for_direct_io(
     is 512- but not 4096-aligned, which previously made disk offload unbootable
     even with use_page_cache=True.
     """
+    # Host pinning is a separate lifecycle concern with its own tests; the
+    # alignment gate must not depend on registration state, so stub both ends.
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.disk_backend.pin_tensor", lambda t: None
+    )
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.disk_backend.unpin_tensor",
+        lambda t: None,
+        raising=False,  # harmless on branches without teardown-side unpins
+    )
     num_blocks = 4
     gpu = {"k": torch.zeros((num_blocks, block_bytes), dtype=torch.int8, device="cuda")}
     backend = DiskBackend()
