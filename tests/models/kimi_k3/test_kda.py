@@ -1421,14 +1421,21 @@ def test_flashinfer_kda_prefill_breakable_graph_cross_stream():
     torch.testing.assert_close(graph_value, torch.full_like(graph_value, 2))
 
 
+@pytest.mark.parametrize(
+    ("state_dtype", "tolerance"),
+    [
+        pytest.param(torch.bfloat16, 0.03, id="bf16"),
+        pytest.param(torch.float32, 0.01, id="fp32"),
+    ],
+)
 @torch.inference_mode()
-def test_flashkda_checkpoint_correctness():
+def test_flashkda_checkpoint_correctness(state_dtype: torch.dtype, tolerance: float):
     lower_bound = -3.0
-    _require_kda_prefill_backend("flashkda", torch.float32, lower_bound)
+    _require_kda_prefill_backend("flashkda", state_dtype, lower_bound)
 
     import vllm._flashkda_C  # noqa: F401
 
-    inputs = _make_kda_prefill_inputs(torch.float32, lower_bound=lower_bound)
+    inputs = _make_kda_prefill_inputs(state_dtype, lower_bound=lower_bound)
     q, k, v = inputs.q, inputs.k, inputs.v
     raw_g, raw_beta = inputs.raw_g, inputs.raw_beta
     A_log, dt_bias = inputs.A_log, inputs.dt_bias
@@ -1480,12 +1487,12 @@ def test_flashkda_checkpoint_correctness():
         checkpoint_offsets=checkpoint_offsets,
     )
 
-    assert_close("checkpoint_o", expected_out, checkpoint_out, 0.01)
-    assert_close("checkpoint_ht", expected_state, checkpoint_final_state, 0.01)
-    assert_close("checkpoint", expected_checkpoint, checkpoint_state[:1], 0.01)
+    assert_close("checkpoint_o", expected_out, checkpoint_out, tolerance)
+    assert_close("checkpoint_ht", expected_state, checkpoint_final_state, tolerance)
+    assert_close("checkpoint", expected_checkpoint, checkpoint_state[:1], tolerance)
 
     conv_state = torch.zeros(2, H * D, 3, dtype=q.dtype, device=DEVICE)
-    recurrent_storage = torch.zeros(2, H * D * D + 8, device=DEVICE)
+    recurrent_storage = torch.zeros(2, H * D * D + 8, dtype=state_dtype, device=DEVICE)
     recurrent_state = recurrent_storage[:, : H * D * D].view(2, H, D, D)
     conv_input = q[0].flatten(1)
     checkpoint_state_indices = torch.tensor(
