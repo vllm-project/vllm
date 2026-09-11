@@ -58,6 +58,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True || true &&
+    pip install tensorizer || true &&
     cd tests &&
     pytest -v -s -x lora/test_chatglm3_tp.py --deselect="tests/lora/test_chatglm3_tp.py::test_chatglm3_lora_tp4" || true &&
     pytest -v -s -x lora/test_llama_tp.py --deselect="tests/lora/test_llama_tp.py::test_llama_lora_tp4_fully_sharded_loras" --deselect="tests/lora/test_llama_tp.py::test_llama_lora_tp4" || true &&
