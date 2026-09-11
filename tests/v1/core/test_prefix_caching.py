@@ -1187,6 +1187,48 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     manager.free(req_2)
 
 
+@pytest.mark.parametrize("block_size", [16, 32])
+@pytest.mark.parametrize("draft_first", [False, True])
+@pytest.mark.parametrize("checkpoint_blocks", [4, 5])
+def test_hybrid_mamba_shared_prefix_is_bounded_by_draft_hit(
+    block_size, draft_first, checkpoint_blocks
+):
+    """Only a missing Mamba state within both dense prefixes is a junction."""
+    checkpoint = checkpoint_blocks * block_size
+    config = _make_hybrid_kv_cache_config(
+        block_size, 100, ["full", "full", "mamba_align"]
+    )
+    draft = config.kv_cache_groups[1]
+    # Distinct specs keep target and draft in separate lookup groups.
+    draft.kv_cache_spec = replace(draft.kv_cache_spec, head_size=8)
+    draft.is_eagle_group = True
+    if draft_first:
+        config.kv_cache_groups.reverse()
+    manager = make_kv_cache_manager(
+        config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+        retention_interval=0,
+    )
+    token_ids = list(range(6 * block_size + 11))
+    cold = make_request("cold", token_ids, block_size, sha256)
+    cold.shared_prefix_boundary = checkpoint
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(cold)
+    assert num_computed == 0
+    assert manager.allocate_slots(cold, checkpoint, 0, computed_blocks) is not None
+    cold.num_computed_tokens = checkpoint
+    manager.new_step_starts()
+    assert manager.allocate_slots(cold, len(token_ids) - checkpoint) is not None
+    manager.free(cold)
+
+    warm = make_request("warm", token_ids, block_size, sha256)
+    _, num_computed, shared_prefix_boundary = manager.get_computed_blocks(warm)
+    assert num_computed == checkpoint
+    assert shared_prefix_boundary == (5 * block_size if checkpoint_blocks < 5 else 0)
+
+
 def test_hybrid_model_mamba_align_with_dynamic_draft_tokens():
     """Regression test for https://github.com/vllm-project/vllm/issues/39271.
 
