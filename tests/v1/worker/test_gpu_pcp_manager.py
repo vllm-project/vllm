@@ -218,11 +218,18 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
         ([1], [True]),
     ],
 )
-@pytest.mark.parametrize("dense", [False, True])
-def test_sampling_matches_global_rows(monkeypatch, world, queries, prefilling, dense):
+@pytest.mark.parametrize("consumer", ["sampling", "full", "prompt_logprobs"])
+def test_sampling_matches_global_rows(
+    monkeypatch, world, queries, prefilling, consumer
+):
     """Preserve sampled order and dense prompt rows across ragged/padded PCP batches."""
     monkeypatch.setattr(pcp_manager_module, "async_copy_to_gpu", _copy_to_cpu)
     q = np.array(queries, dtype=np.int32)
+    dense = consumer != "sampling"
+    prompt_logprobs_worker = PromptLogprobsWorker(max_num_reqs=len(q))
+    if consumer == "prompt_logprobs":
+        prompt_logprobs_worker.uses_prompt_logprobs[0] = True
+        prompt_logprobs_worker.in_progress_prompt_logprobs["req0"] = []
     prefilling = np.array(prefilling)
     starts = np.concatenate(([0], np.cumsum(q))).astype(np.int32)
     global_hidden = torch.arange(int(starts[-1]) * 3).reshape(-1, 3).float()
@@ -247,6 +254,9 @@ def test_sampling_matches_global_rows(monkeypatch, world, queries, prefilling, d
             num_reqs=len(q),
             num_scheduled_tokens=q,
             has_prefill=bool(np.any(prefilling)),
+            idx_mapping_np=np.arange(len(q)),
+            num_computed_prefill_tokens_np=np.zeros_like(q),
+            prefill_len_np=q,
         )
         managers.append(manager)
         local.append(hidden)
@@ -276,10 +286,15 @@ def test_sampling_matches_global_rows(monkeypatch, world, queries, prefilling, d
         monkeypatch.setattr(
             pcp_manager_module, "get_pcp_group", lambda: NS(all_gather=gather)
         )
-        restored, sampled, _ = manager.restore_for_sampling(
+        restored, sampled, batch = pcp_manager_module.maybe_restore_pcp_for_sampling(
+            manager,
             hidden,
-            needs_full_hidden_states=dense,
+            NS(),
+            needs_full_hidden_states=consumer == "full",
+            prompt_logprobs_worker=prompt_logprobs_worker,
+            prompt_lens=q,
         )
+        assert batch is manager._global_batch
         torch.testing.assert_close(
             sampled, global_hidden[manager._global_batch.logits_indices]
         )

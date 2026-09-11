@@ -16,6 +16,7 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
 )
+from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 
 logger = init_logger(__name__)
 
@@ -751,23 +752,23 @@ def maybe_restore_pcp_for_sampling(
     input_batch: InputBatch,
     *,
     needs_full_hidden_states: bool,
+    prompt_logprobs_worker: PromptLogprobsWorker | None,
+    prompt_lens: np.ndarray,
 ) -> tuple[torch.Tensor, torch.Tensor | None, InputBatch]:
     assert hidden_states is not None
     if manager is None:
         return hidden_states, None, input_batch
+    assert manager._global_batch is not None
     return manager.restore_for_sampling(
         hidden_states,
-        needs_full_hidden_states=needs_full_hidden_states,
+        needs_full_hidden_states=(
+            needs_full_hidden_states
+            or prompt_logprobs_worker is None
+            or prompt_logprobs_worker.needs_prompt_hidden_states(
+                manager._global_batch, prompt_lens
+            )
+        ),
     )
-
-
-def maybe_get_pcp_global_batch(
-    manager: PCPManager | None, input_batch: InputBatch
-) -> InputBatch:
-    if manager is None:
-        return input_batch
-    assert manager._global_batch is not None
-    return manager._global_batch
 
 
 def maybe_build_pcp_manager(
