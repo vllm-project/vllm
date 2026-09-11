@@ -12,11 +12,11 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
-  # need split test_config.py as it need VLLM_XPU_ENABLE_XPU_GRAPH=1
   source_file_dependencies:
   - vllm/compilation/
   - vllm/config/
@@ -41,7 +41,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     VLLM_XPU_ENABLE_XPU_GRAPH=1 pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py || true'
-- label: Engine (1 GPU)
+- label: ':nvidia: (L4) V1 Engine'
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 1
@@ -52,8 +52,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s v1/engine/test_preprocess_error_handling.py
   - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
@@ -79,8 +80,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s v1/e2e/general/test_async_scheduling.py
   source_file_dependencies:
@@ -93,7 +95,7 @@ steps:
     pytest -v -s v1/e2e/general/test_async_scheduling.py || true'
 - label: ':nvidia: (H200 MIG 35GB) E2E Core'
   device: intel_gpu
-  timeout_in_minutes: 40
+  timeout_in_minutes: 50
   working_dir: .
   no_plugin: true
   env:
@@ -101,8 +103,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
   source_file_dependencies:
@@ -125,8 +128,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism
   source_file_dependencies:
@@ -166,8 +170,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s v1/e2e/test_hybrid_chunked_prefill.py
   source_file_dependencies:
