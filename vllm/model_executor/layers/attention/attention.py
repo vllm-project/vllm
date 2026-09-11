@@ -8,7 +8,11 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -97,6 +101,7 @@ def should_load_quant_weights(quant_method: QuantizeMethodBase | None) -> bool:
 
 def _largest_kernel_block_within(
     attn_backend: "type[AttentionBackend]",
+    vllm_config: VllmConfig,
     per_token_bytes: int,
     page_budget: int,
     fallback: int,
@@ -111,7 +116,8 @@ def _largest_kernel_block_within(
     """
     from vllm.v1.attention.backend import MultipleOf
 
-    sizes = attn_backend.get_supported_kernel_block_sizes()
+    with set_current_vllm_config(vllm_config):
+        sizes = attn_backend.get_supported_kernel_block_sizes()
     max_block_size = page_budget // per_token_bytes
     candidates = [s for s in sizes if isinstance(s, int)]
     candidates.extend(
@@ -647,7 +653,11 @@ class Attention(nn.Module, AttentionLayerBase):
             ).real_page_size_bytes
             page_budget = shared_page or sw_per_token * block_size
             sw_block_size = _largest_kernel_block_within(
-                self.attn_backend, sw_per_token, page_budget, block_size
+                self.attn_backend,
+                vllm_config,
+                sw_per_token,
+                page_budget,
+                block_size,
             )
             return SlidingWindowSpec(
                 block_size=sw_block_size,

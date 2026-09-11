@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for per-KV-group attention backend selection (backend_per_kind)."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from vllm.config.attention import AttentionConfig
+from vllm.config.vllm import get_current_vllm_config
 from vllm.model_executor.layers.attention.attention import (
     _largest_kernel_block_within,
 )
@@ -24,12 +27,18 @@ from vllm.v1.kv_cache_interface import KVCacheSpecKind
     ],
 )
 def test_largest_kernel_block_within(supported_sizes, expected):
+    vllm_config = MagicMock()
+
     class Backend:
         @staticmethod
         def get_supported_kernel_block_sizes():
+            assert get_current_vllm_config() is vllm_config
             return supported_sizes
 
-    assert _largest_kernel_block_within(Backend, 1024, 1024 * 1536, 2048) == expected
+    assert (
+        _largest_kernel_block_within(Backend, vllm_config, 1024, 1024 * 1536, 2048)
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
