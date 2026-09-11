@@ -5,7 +5,7 @@
     h[row, :] = swiglu_oai( x[tok] @ W_gate[e]^T , x[tok] @ W_up[e]^T )
     out_q[row, :], out_scale[row, :] = mxfp8_quant(h[row, :])      (per 32 cols)
 
-Why not ``moe_a8w8_prefill/gemm1.py`` here: with random routing every routed
+Why not ``gemm1_prefill.py`` here: with random routing every routed
 expert holds 16..64 rows at these batch sizes, i.e. one 128-row block, so the
 prefill tile (128 rows x 256 W columns, one CTA per CU) runs 792..864
 workgroups = three full rounds plus a tail round almost as long: 257 us at
@@ -27,14 +27,14 @@ columns (``NI`` 16-column tiles of gate and of up each).
 * W: per K-step and 16-column tile the two 1 KB preshuffled blocks ``2kt``,
   ``2kt+1`` (16 B per lane each), ``PREFETCH`` steps in flight, non-temporal.
 * MFMA: ``v_mfma_scale_f32_16x16x128_f8f6f4`` with fp8 operands, the per-lane
-  operand and scale layout of ``moe_a8w8_prefill/gemm1.py`` (operands fed
+  operand and scale layout of ``gemm1_prefill.py`` (operands fed
   swapped so a lane holds a row's 4 consecutive columns; accumulators in
   AGPR; scale bytes row-half + 2 x step parity / gate-up + 2 x step parity).
 * epilogue: per (row, 32-column group) amax over the 4 lanes of the row,
   e8m0 = ceil_pow2(amax / 448), ``v_cvt_scalef32_pk_fp8_f32``, permlane16 swap
   -> 8 B per lane; scale pairs in the e8m0-shuffled sorted layout gemm2 reads.
 
-Layouts (bytes), those of ``moe_a8w8_prefill/gemm1.py``:
+Layouts (bytes), those of ``gemm1_prefill.py``:
   A         [n_tokens, H]                   per-token fp8 (aiter per_1x32 quant)
   A_scale   [pad32(max_sorted), H/32]       sorted rows, e8m0-shuffled
   W13       [E, I/16, 2, H/64, 4, 16, 16]   shuffle_weight(is_guinterleave, gate_up)
@@ -55,12 +55,6 @@ from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
-from vllm.models.minimax_m3.amd.ops.moe_a8w8_prefill.gemm1 import (
-    Mfma16x16x128Fp8,
-    _e8m0_roundup_fp8,
-    _fmax,
-    _pack8,
-)
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.epilogue import (
     _cvt_pk_fp8,
     _maxf_nn,
@@ -73,6 +67,12 @@ from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.loaders import (
     _swiglu_oai,
 )
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.utils import _lds_ptr3, _raw
+from vllm.models.minimax_m3.amd.ops.moe_mxfp8.gemm1_prefill import (
+    Mfma16x16x128Fp8,
+    _e8m0_roundup_fp8,
+    _fmax,
+    _pack8,
+)
 
 # output columns per workgroup (64: a 0.79 MB W13 slice; 128: the prefill tile's)
 TN = 64

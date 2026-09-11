@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlyDSL mid-batch MoE for MiniMax-M3 MXFP8 weights on gfx950 (fp8 x fp8),
-``MIN_MID_TOKENS <= M <= MAX_MID_TOKENS``: between the decode package
-(``moe_a8w8_decode``, M <= 256) and the prefill one (``moe_a8w8_prefill``,
-M >= 3072).
+``MIN_MID_TOKENS <= M <= MAX_MID_TOKENS``: between the decode chain
+(``decode.py``, M <= 256) and the prefill one (``prefill.py``, M >= 3072).
 
 Chain: ``moe_flydsl_common.sort`` with ``block_m_for(M)``-row blocks, aiter's
 fused per-token fp8 quant (``fused_dynamic_mx_quant_moe_sort``), ``gemm1``
@@ -52,7 +51,7 @@ def _u8_flat(t: torch.Tensor) -> torch.Tensor:
 def _get_gemm1(
     hidden_size: int, intermediate_size: int, num_experts: int, block_m: int
 ):
-    from .gemm1 import compile_moe_gemm1_mid
+    from .gemm1_mid import compile_moe_gemm1_mid
 
     return compile_moe_gemm1_mid(
         H=hidden_size, I=intermediate_size, E=num_experts, BM=block_m
@@ -67,7 +66,7 @@ def _get_gemm2(
     tile_m: int,
     block_m: int,
 ):
-    from .gemm2 import compile_moe_gemm2_mid
+    from .gemm2_mid import compile_moe_gemm2_mid
 
     return compile_moe_gemm2_mid(
         H=hidden_size,
@@ -91,9 +90,11 @@ def a8w8_mid_moe(
     intermediate_size: int,
     num_experts: int,
     block_m: int | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """One MoE layer for ``MIN_MID_TOKENS <= M <= MAX_MID_TOKENS`` (``block_m``
-    overrides ``block_m_for`` for the lab). Returns ``[M, hidden_size]`` bf16."""
+    overrides ``block_m_for`` for the lab). Returns ``[M, hidden_size]`` bf16
+    (``out`` when given: contiguous, zeroed and accumulated into here)."""
     from aiter import dtypes
     from aiter.ops.quant import fused_dynamic_mx_quant_moe_sort
 
@@ -126,7 +127,10 @@ def a8w8_mid_moe(
     rows = num_m_blocks * bm
     h_q = torch.empty((rows, inter), dtype=torch.uint8, device=device)
     h_s = torch.empty((rows * (inter // 32),), dtype=torch.uint8, device=device)
-    out = torch.empty((n_tokens, hidden_size), dtype=torch.bfloat16, device=device)
+    if out is None:
+        out = torch.empty((n_tokens, hidden_size), dtype=torch.bfloat16, device=device)
+    assert out.shape == (n_tokens, hidden_size) and out.dtype == torch.bfloat16
+    assert out.is_contiguous()
     gemm1 = _get_gemm1(hidden_size, inter, num_experts, bm)
     _run_compiled(
         gemm1,

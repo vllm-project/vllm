@@ -458,26 +458,6 @@ class MiniMaxM3MoE(nn.Module):
             prefix=f"{prefix}.experts",
         )
 
-        if (
-            envs.VLLM_ROCM_USE_M3_FLYDSL_DECODE_MOE
-            or envs.VLLM_ROCM_USE_M3_FLYDSL_PREFILL_MOE
-        ):
-            from vllm.models.minimax_m3.amd.ops.moe_a8w8_decode import (
-                install_decode_fast_path,
-                is_mxfp8_aiter_layer,
-            )
-            from vllm.models.minimax_m3.amd.ops.moe_a8w8_prefill import (
-                install_prefill_fast_path,
-            )
-
-            if is_mxfp8_aiter_layer(
-                getattr(self.experts, "routed_experts", self.experts)
-            ):
-                if envs.VLLM_ROCM_USE_M3_FLYDSL_DECODE_MOE:
-                    install_decode_fast_path(self.experts, prefix=f"{prefix}.experts")
-                if envs.VLLM_ROCM_USE_M3_FLYDSL_PREFILL_MOE:
-                    install_prefill_fast_path(self.experts, prefix=f"{prefix}.experts")
-
     @staticmethod
     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
         assert param.size() == loaded_weight.size()

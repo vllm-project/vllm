@@ -139,8 +139,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: bool = False
-    VLLM_ROCM_USE_M3_FLYDSL_DECODE_MOE: bool = False
-    VLLM_ROCM_USE_M3_FLYDSL_PREFILL_MOE: bool = False
+    VLLM_ROCM_USE_M3_FLYDSL_MOE: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
@@ -1288,14 +1287,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "0").lower() in ("true", "1")
     ),
-    # MiniMax-M3 MXFP8 decode on gfx950, bf16 activations, up to 256 tokens.
-    "VLLM_ROCM_USE_M3_FLYDSL_DECODE_MOE": lambda: (
-        os.getenv("VLLM_ROCM_USE_M3_FLYDSL_DECODE_MOE", "0").lower() in ("true", "1")
-    ),
-    # MiniMax-M3 MXFP8 on gfx950, fp8 activations: 257..3071 tokens on the
-    # mid-batch chain, 3072..65536 on the prefill chain.
-    "VLLM_ROCM_USE_M3_FLYDSL_PREFILL_MOE": lambda: (
-        os.getenv("VLLM_ROCM_USE_M3_FLYDSL_PREFILL_MOE", "0").lower() in ("true", "1")
+    # MiniMax-M3 MXFP8 MoE on gfx950 (aiter backend, TP4 layer shapes): the
+    # FlyDSL kernels under vllm/models/minimax_m3/amd/ops/moe_mxfp8 for every
+    # batch size (default). Set to 0 to keep aiter's MXFP8 kernels.
+    "VLLM_ROCM_USE_M3_FLYDSL_MOE": lambda: (
+        os.getenv("VLLM_ROCM_USE_M3_FLYDSL_MOE", "1").lower() in ("true", "1")
     ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass

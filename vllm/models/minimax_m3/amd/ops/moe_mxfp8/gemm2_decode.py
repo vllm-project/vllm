@@ -49,7 +49,7 @@ from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.utils import (
     inline_sort_table,
 )
 
-from .utils import _fp8x8_to_bf16
+from .gemm1_decode import _fp8x8_to_bf16
 
 BM = 16  # default rows per m-block; compile_gemm2(BM=32) runs two 16-row tiles
 # Tiles: 128 output columns x 256 K per workgroup (MI355X 09-09 sweep: twice the

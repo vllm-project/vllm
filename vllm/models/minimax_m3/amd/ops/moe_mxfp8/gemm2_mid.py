@@ -20,7 +20,7 @@ intrinsic form (accumulators in VGPR, MFMA C layout), the epilogue is
 ``moe_flydsl_common.atomic._atomic_bf16_epilog`` (LDS [BM, TN] f32, aliasing
 the A region, then packed bf16 atomic adds).
 
-Layouts (bytes), those of ``moe_a8w8_prefill/gemm2.py``:
+Layouts (bytes), those of ``gemm2_prefill.py``:
   A        [num_m_blocks*BM, I]            gemm1's sorted fp8 intermediate
   A_scale  [num_m_blocks*BM, I/32]         sorted rows, e8m0-shuffled
   W2       [E, H/16, I/64, 4, 16, 16]      shuffled weights, gate_up=False
@@ -38,9 +38,9 @@ from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
-from vllm.models.minimax_m3.amd.ops.moe_a8w8_prefill.gemm1 import _pack8
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.atomic import _atomic_bf16_epilog
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.utils import _lds_ptr3, _raw
+from vllm.models.minimax_m3.amd.ops.moe_mxfp8.gemm1_prefill import _pack8
 
 TN = 128  # output columns per workgroup (98 KB of W2: twice the CTAs of a 256-col tile)
 PREFETCH = (

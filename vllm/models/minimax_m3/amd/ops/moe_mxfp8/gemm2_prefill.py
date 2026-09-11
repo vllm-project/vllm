@@ -82,7 +82,7 @@ from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.loaders import (
     wait_barrier,
 )
 
-from .gemm1 import BLOCK_K, Mfma16x16x128Fp8, _e8m0_roundup_fp8, _fmax
+from .gemm1_prefill import BLOCK_K, Mfma16x16x128Fp8, _e8m0_roundup_fp8, _fmax
 
 OUT_MODES = ("bf16", "fp8")
 
@@ -117,7 +117,7 @@ def compile_moe_gemm2(
     bf16 atomics into the output (aiter's own stage 2) were measured and dropped:
     812 vs 643 us at 4096 tokens even with line-coalesced pk_add; the L2 atomic
     throughput costs more than the partial round trip. Atomics pay off only at
-    decode sizes (``moe_a8w8_decode``).
+    decode sizes (``decode.py``).
     """
     assert out_mode in OUT_MODES, out_mode
     MODE = out_mode

@@ -11,23 +11,21 @@ and its two quant passes are dropped.
 
 Weights are the tensors ``ModelOptMxFp8FusedMoE`` stores on the layer for the
 AITER_MXFP8 backend (``shuffle_mxfp8_moe_weights``: gate/up-interleaved
-``shuffle_weight`` + ``shuffle_scale``). The install hook wraps that method's
-``apply`` and routes every ``M <= 256`` call to these kernels (the layer's
-unfused shared experts, which vLLM keeps separate for ModelOpt MXFP8, stay with
-the runner); everything else stays on aiter.
+``shuffle_weight`` + ``shuffle_scale``). ``mxfp8_moe`` (the package entry point)
+sends every ``M <= MAX_DECODE_TOKENS`` batch here.
 """
+
+import functools
 
 import torch
 
-from vllm.logger import init_logger
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.decode import (
     MAX_DECODE_TOKENS,
-    supports_batch,
-    supports_shapes,
 )
-from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.hook import (
-    maybe_run_shared_experts,
-)
+from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.launch import _get, _run_compiled
+
+from .gemm1_decode import BM, compile_gemm1
+from .gemm2_decode import compile_gemm2
 
 # Sort row block: 16 (one MFMA tile per block) below BM32_MIN_TOKENS, 32 from
 # there (two tiles per unpacked W fragment: an expert with more than 16 rows,
@@ -60,11 +58,11 @@ def _intermediate_workspace(
     sort-free path, by sorted row on the sorted one; sized for the largest of
     the layouts of either block size at ``MAX_DECODE_TOKENS`` and allocated once
     per (device, topk, I, E) so HIP-graph capture records no allocation."""
-    from vllm.models.minimax_m3.amd.ops.moe_a8w8_decode.gemm1 import WIDE_BM
     from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.sort_decode import (
         max_sorted_rows,
         wide_layout_rows,
     )
+    from vllm.models.minimax_m3.amd.ops.moe_mxfp8.gemm1_decode import WIDE_BM
 
     key = (
         device.index if device.index is not None else -1,
@@ -90,9 +88,6 @@ def _intermediate_workspace(
     return ws
 
 
-logger = init_logger(__name__)
-
-
 def a16w8_decode_moe(
     x: torch.Tensor,
     w13: torch.Tensor,
@@ -108,6 +103,7 @@ def a16w8_decode_moe(
     swiglu_alpha: float,
     swiglu_limit: float,
     fused_shared_expert: bool = True,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """One MoE layer for ``M <= 256`` tokens on the FlyDSL a16w8 kernels.
 
@@ -116,12 +112,9 @@ def a16w8_decode_moe(
     ``topk_ids`` / ``topk_weights`` are ``[M, topk]``. ``fused_shared_expert``
     says that the last expert is the fused shared one, routed by every token:
     the wide-first sort layout (``WIDE_MIN_TOKENS``) budgets its blocks from
-    ``M`` and is only used then. Returns ``[M, hidden_size]`` bf16.
+    ``M`` and is only used then. Returns ``[M, hidden_size]`` bf16 (``out`` when
+    given: contiguous, zeroed and accumulated into here).
     """
-    from vllm.models.minimax_m3.amd.ops.moe_a8w8_decode.host import (
-        a16w8_gemm1,
-        a16w8_gemm2,
-    )
     from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.sort_decode import (
         moe_sort_decode,
     )
@@ -134,14 +127,19 @@ def a16w8_decode_moe(
     topk_weights = topk_weights.to(torch.float32).contiguous()
 
     inter = _intermediate_workspace(x.device, topk, intermediate_size, num_experts)
-    out = torch.empty((n_tokens, hidden_size), dtype=torch.bfloat16, device=x.device)
+    if out is None:
+        out = torch.empty(
+            (n_tokens, hidden_size), dtype=torch.bfloat16, device=x.device
+        )
+    assert out.shape == (n_tokens, hidden_size) and out.dtype == torch.bfloat16
+    assert out.is_contiguous()
     bm = block_m_for(n_tokens)
     inline = n_tokens <= bm
     wide = fused_shared_expert and wide_for(n_tokens)
     if inline:
         sorted_ids = sorted_w = sorted_eids = num_valid = None
     else:
-        from vllm.models.minimax_m3.amd.ops.moe_a8w8_decode.gemm1 import WIDE_BM
+        from vllm.models.minimax_m3.amd.ops.moe_mxfp8.gemm1_decode import WIDE_BM
 
         sorted_ids, sorted_w, sorted_eids, num_valid = moe_sort_decode(
             topk_ids,
@@ -196,146 +194,153 @@ def a16w8_decode_moe(
     return out
 
 
-def is_mxfp8_aiter_layer(layer) -> bool:
-    """True for a RoutedExperts layer on the ModelOpt MXFP8 method with the aiter
-    (FlyDSL a8w8) backend, i.e. weights in the layout these kernels read."""
-    qm = getattr(layer, "quant_method", None)
-    backend = getattr(qm, "mxfp8_backend", None)
-    return type(qm).__name__ == "ModelOptMxFp8FusedMoE" and (
-        getattr(backend, "value", None) == "AITER_MXFP8"
+def get_gemm1(**kw):
+    return _get(compile_gemm1, **kw)
+
+
+@functools.cache
+def get_gemm2(**kw):
+    return _get(compile_gemm2, **kw)
+
+
+def a16w8_gemm1(
+    *,
+    x_bf16,
+    w1_fp8,
+    w1_scale_u8,
+    inter_sorted_bf16,
+    n_tokens,
+    NE,
+    D_HIDDEN,
+    D_INTER,
+    topk,
+    alpha=1.702,
+    swiglu_limit=7.0,
+    sorted_expert_ids=None,
+    num_valid_ids=None,
+    sorted_token_ids=None,
+    inline_sort=False,
+    topk_ids=None,
+    zero_out=None,
+    BM=BM,
+    wide=False,
+):
+    """Stage 1: gate/up GEMM + swiglu-OAI -> bf16 ``[sorted rows, D_INTER]``;
+    ``BM`` is the sort's row block (16 or 32), ``wide`` the sort's wide-first
+    layout of the shared expert (sorted mode)."""
+    launch = get_gemm1(
+        D_HIDDEN=D_HIDDEN,
+        D_INTER=D_INTER,
+        NE=NE,
+        TOPK=topk,
+        n_tokens=int(n_tokens),
+        inline_sort=inline_sort,
+        BM=BM,
+        wide=wide,
     )
-
-
-def _unsupported_reason(layer) -> str | None:
-    """Static checks on a RoutedExperts layer; None when the fast path applies."""
-    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-    from vllm.platforms.rocm import on_gfx950
-
-    if not on_gfx950():
-        return "requires gfx950"
-    if not is_mxfp8_aiter_layer(layer):
-        qm = getattr(layer, "quant_method", None)
-        return (
-            f"quant method {type(qm).__name__} (backend "
-            f"{getattr(qm, 'mxfp8_backend', None)}) "
-            "is not ModelOpt MXFP8 on AITER_MXFP8"
+    if inline_sort:
+        assert int(n_tokens) <= BM and topk_ids is not None and zero_out is not None
+        max_m_blocks = int(n_tokens) * int(topk)
+        eids_ptr, cumsum_ptr, mind_ptr = 0, 0, topk_ids.data_ptr()
+        zero_ptr = zero_out.data_ptr()
+        zero_dw = (zero_out.numel() * zero_out.element_size()) // 4
+    else:
+        max_m_blocks = int(sorted_expert_ids.numel())
+        eids_ptr, cumsum_ptr, mind_ptr = (
+            sorted_expert_ids.data_ptr(),
+            num_valid_ids.data_ptr(),
+            sorted_token_ids.data_ptr(),
         )
-    if layer.activation != MoEActivation.SWIGLUOAI_UNINTERLEAVE:
-        return f"activation is {layer.activation}"
-    if layer.swiglu_alpha is None or layer.swiglu_limit is None:
-        return "swiglu_alpha / swiglu_limit not set"
-    if layer.swiglu_beta not in (None, 1.0):
-        return f"swiglu_beta {layer.swiglu_beta} != 1"
-    if layer.apply_router_weight_on_input:
-        return "apply_router_weight_on_input"
-    if layer.expert_map is not None or layer.moe_config.use_ep:
-        return "expert parallelism"
-    if layer.moe_config.has_bias:
-        return "expert bias"
-    hidden = layer.moe_config.hidden_dim
-    inter = layer.moe_config.intermediate_size_per_partition
-    if not supports_shapes(hidden, inter):
-        return f"shapes hidden={hidden} intermediate={inter} not tiled by the kernels"
-    if layer.moe_config.hidden_dim_unpadded not in (None, hidden):
-        return "padded hidden size"
-    if layer.moe_config.intermediate_size_per_partition_unpadded not in (None, inter):
-        return "padded intermediate size"
-    if layer.w13_weight.dtype != torch.float8_e4m3fn:
-        return f"w13 dtype {layer.w13_weight.dtype}"
-    return None
-
-
-def _fused_shared_expert(experts) -> bool:
-    """True when the router appends the model's shared expert to every
-    token's top-k as the last expert (aiter's fused shared experts), the
-    routing the wide-first sort layout is built for. vLLM keeps the shared
-    expert a separate module for ModelOpt MXFP8, so this is False there."""
-    router = getattr(experts, "router", None)
-    return getattr(router, "num_fused_shared_experts", 0) > 0
-
-
-def install_decode_fast_path(experts, prefix: str = "") -> bool:
-    """Route ``M <= 256`` calls of a MiniMax-M3 MXFP8 MoE layer to the FlyDSL
-    a16w8 kernels. Returns True
-    when installed."""
-    layer = getattr(experts, "routed_experts", experts)
-    try:
-        reason = _unsupported_reason(layer)
-    except Exception as exc:  # a layer/config shape this gate does not know
-        reason = f"{type(exc).__name__}: {exc}"
-    if reason is not None:
-        logger.info_once(
-            "M3 FlyDSL a16w8 decode MoE not used for %s: %s",
-            prefix or "experts",
-            reason,
+        zero_ptr, zero_dw = 0, 0
+    if wide:
+        n_wide = (int(n_tokens) + launch.wide_bm - 1) // launch.wide_bm
+        grid = n_wide * launch.wide_n_blocks + (max_m_blocks - n_wide) * (
+            D_INTER // launch.tile_n
         )
-        return False
-    qm = layer.quant_method
-    if getattr(qm, "_m3_decode_fast_path", False):
-        return True
-
-    orig_apply = qm.apply
-    hidden = layer.moe_config.hidden_dim
-    inter = layer.moe_config.intermediate_size_per_partition
-    alpha = float(layer.swiglu_alpha)
-    limit = float(layer.swiglu_limit)
-    fused_shared = _fused_shared_expert(experts)
-
-    def apply(
-        layer,
-        x,
-        topk_weights,
-        topk_ids,
-        shared_experts=None,
-        shared_experts_input=None,
-        **kwargs,
-    ):
-        if kwargs or not supports_batch(x):
-            return orig_apply(
-                layer,
-                x,
-                topk_weights,
-                topk_ids,
-                shared_experts,
-                shared_experts_input,
-                **kwargs,
-            )
-        maybe_run_shared_experts(shared_experts, shared_experts_input)
-        return a16w8_decode_moe(
-            x,
-            layer.w13_weight,
-            layer.w13_weight_scale,
-            layer.w2_weight,
-            layer.w2_weight_scale,
-            topk_weights,
-            topk_ids,
-            hidden_size=hidden,
-            intermediate_size=inter,
-            num_experts=layer.w13_weight.shape[0],
-            swiglu_alpha=alpha,
-            swiglu_limit=limit,
-            fused_shared_expert=fused_shared,
-        )
-
-    qm.apply = apply
-    qm._m3_decode_fast_path = True
-    logger.info_once(
-        "M3 FlyDSL a16w8 decode MoE installed (MXFP8, M <= %d, shared expert %s)",
-        MAX_DECODE_TOKENS,
-        "fused" if fused_shared else "separate",
+    else:
+        grid = max_m_blocks * (D_INTER // launch.tile_n)
+    _run_compiled(
+        launch,
+        x_bf16.data_ptr(),
+        w1_fp8.data_ptr(),
+        w1_scale_u8.data_ptr(),
+        eids_ptr,
+        cumsum_ptr,
+        mind_ptr,
+        int(n_tokens),
+        int(grid),
+        float(alpha),
+        float(swiglu_limit),
+        inter_sorted_bf16.data_ptr(),
+        int(zero_ptr),
+        int(zero_dw),
+        torch.cuda.current_stream(),
     )
-    logger.debug("M3 FlyDSL a16w8 decode MoE installed for %s", prefix or "experts")
-    return True
+    return inter_sorted_bf16
 
 
-__all__ = [
-    "BM32_MIN_TOKENS",
-    "MAX_DECODE_TOKENS",
-    "WIDE_MIN_TOKENS",
-    "a16w8_decode_moe",
-    "block_m_for",
-    "install_decode_fast_path",
-    "is_mxfp8_aiter_layer",
-    "supports_batch",
-    "supports_shapes",
-]
+def a16w8_gemm2(
+    *,
+    inter_sorted_bf16,
+    w2_fp8,
+    w2_scale_u8,
+    out_bf16,
+    n_tokens,
+    NE,
+    D_HIDDEN,
+    D_INTER,
+    sorted_expert_ids=None,
+    num_valid_ids=None,
+    sorted_token_ids=None,
+    sorted_weights=None,
+    inline_sort=False,
+    topk=None,
+    topk_ids=None,
+    topk_weights=None,
+    BM=BM,
+    wide=False,
+):
+    """Stage 2: down GEMM, routing-weighted bf16 atomic add into ``out_bf16``
+    ``[n_tokens, D_HIDDEN]`` (zeroed beforehand); ``BM`` / ``wide`` as for gemm1."""
+    launch = get_gemm2(
+        NE=NE,
+        N_OUT=D_HIDDEN,
+        D_INTER=D_INTER,
+        n_tokens=int(n_tokens),
+        inline_sort=inline_sort,
+        TOPK=topk if inline_sort else None,
+        BM=BM,
+        wide=wide,
+    )
+    if inline_sort:
+        assert int(n_tokens) <= BM and topk_ids is not None and topk_weights is not None
+        assert topk_weights.dtype == torch.float32 and topk_weights.is_contiguous()
+        max_m_blocks = int(n_tokens) * int(topk)
+        eids_ptr, cumsum_ptr = 0, 0
+        stids_ptr, sw_ptr = topk_ids.data_ptr(), topk_weights.data_ptr()
+    else:
+        max_m_blocks = int(sorted_expert_ids.numel())
+        eids_ptr, cumsum_ptr = sorted_expert_ids.data_ptr(), num_valid_ids.data_ptr()
+        stids_ptr, sw_ptr = sorted_token_ids.data_ptr(), sorted_weights.data_ptr()
+    nnb = D_HIDDEN // launch.tile_n
+    if wide:
+        n_sort_wide = (int(n_tokens) + launch.wide_sort_bm - 1) // launch.wide_sort_bm
+        n_wide = n_sort_wide * (launch.wide_sort_bm // launch.wide_bm)
+        grid = (n_wide + (max_m_blocks - n_sort_wide)) * nnb * launch.ksplit
+    else:
+        grid = max_m_blocks * nnb * launch.ksplit
+    _run_compiled(
+        launch,
+        inter_sorted_bf16.data_ptr(),
+        w2_fp8.data_ptr(),
+        w2_scale_u8.data_ptr(),
+        eids_ptr,
+        cumsum_ptr,
+        stids_ptr,
+        sw_ptr,
+        int(n_tokens),
+        int(grid),
+        out_bf16.data_ptr(),
+        torch.cuda.current_stream(),
+    )
+    return out_bf16

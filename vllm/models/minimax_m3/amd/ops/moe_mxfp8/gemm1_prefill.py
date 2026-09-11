@@ -15,7 +15,7 @@ interleaving, expert-major XCD tile map -- is the a4w4 kernel):
   * ``v_mfma_scale_f32_16x16x128_f8f6f4`` with fp8 operands (cbsz/blgp 0) wants
     per lane the K bytes ``[16*klane, +16)`` and ``[64 + 16*klane, +16)`` of the
     128-K step (two 16 B pieces, not 32 consecutive K; see
-    ``moe_a8w8_decode`` notes / aiter's a8w8 kernels) -- exactly the two
+    ``decode.py`` notes / aiter's a8w8 kernels) -- exactly the two
     ``step 0 / step 1`` reads of the a4w4 S2R loader, concatenated into one
     8-VGPR operand. The per-lane e8m0 is the lane's own 32-K group, as for fp4.
   * one 256-B scale block covers 256 K = two steps: the gather runs on odd
