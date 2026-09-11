@@ -97,6 +97,11 @@ class DiskBackend:
             "DiskBackend.init() called on a live backend; call shutdown() first"
         )
         self._shutdown = False
+        # Fresh queues per lifecycle: a thread that died before shutdown can
+        # leave an unconsumed stop sentinel behind, which a re-init's fresh
+        # threads would otherwise eat on arrival.
+        self._store_queue = queue.SimpleQueue()
+        self._load_queue = queue.SimpleQueue()
         self._load_stream = load_stream
         self._store_stream = store_stream
         self._total_block_bytes = total_block_bytes
@@ -169,6 +174,8 @@ class DiskBackend:
             os.ftruncate(self._fd, num_disk_slots * total_block_bytes)
         except Exception:
             self._unpin_staging_buffers()
+            self._store_slot_views.clear()
+            self._load_slot_views.clear()
             if self._fd >= 0:
                 with contextlib.suppress(OSError):
                     os.unlink(self._disk_path)
@@ -229,13 +236,8 @@ class DiskBackend:
         if self._shutdown:
             return
         self._shutdown = True
-        # Signal only threads that exist: a queued sentinel with no consumer
-        # (init failed before thread creation) would be eaten by a later
-        # re-init's fresh threads, killing them on arrival.
-        if self._store_thread is not None:
-            self._store_queue.put(None)
-        if self._load_thread is not None:
-            self._load_queue.put(None)
+        self._store_queue.put(None)
+        self._load_queue.put(None)
         if self._store_thread is not None:
             self._store_thread.join(timeout=10.0)
         if self._load_thread is not None:
@@ -262,6 +264,8 @@ class DiskBackend:
             )
             return
         self._unpin_staging_buffers()
+        self._store_slot_views.clear()
+        self._load_slot_views.clear()
         if self._fd < 0:
             return
         os.close(self._fd)

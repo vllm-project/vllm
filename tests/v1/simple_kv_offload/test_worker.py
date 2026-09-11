@@ -561,6 +561,7 @@ def test_disk_backend_teardown_releases_pins_for_reinit(tmp_path):
         backend.shutdown()
     assert backend._fd == -1
     assert not backend._store_buffer_caches and not backend._load_buffer_caches
+    assert not backend._store_slot_views and not backend._load_slot_views
     for thread in (backend._store_thread, backend._load_thread):
         assert thread is not None
         assert not thread.is_alive()
@@ -587,13 +588,38 @@ def test_disk_backend_init_pin_failure_unwinds_registrations(tmp_path, monkeypat
     backend.shutdown()  # must be safe after a failed init
 
 
-def test_disk_backend_live_after_failed_init_shutdown_reinit(tmp_path, monkeypatch):
-    """init fail -> shutdown -> re-init must leave a working backend.
+def test_disk_backend_init_failure_after_views_unwinds(tmp_path, monkeypatch):
+    """Failure after slot views are built must release buffers and views."""
 
-    shutdown() after a pre-thread init failure still queued None sentinels
-    once; without the thread-existence guard those stale sentinels are eaten
-    immediately by the re-init's fresh threads, silently killing them.
+    def fail_build_params(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("induced")
+
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.disk_backend.build_params", fail_build_params
+    )
+    gpu = {"k": torch.zeros((4, 4096), dtype=torch.int8, device="cuda")}
+    backend = DiskBackend()
+    with pytest.raises(RuntimeError, match="induced"):
+        _init_disk_backend(backend, gpu, str(tmp_path / "kv-offload.bin"))
+    assert not backend._store_buffer_caches and not backend._load_buffer_caches
+    assert not backend._store_slot_views and not backend._load_slot_views
+    assert backend._fd == -1
+    backend.shutdown()
+
+
+def test_disk_backend_live_after_failed_init_shutdown_reinit(tmp_path, monkeypatch):
+    """Failed init after a clean cycle must not poison the next re-init.
+
+    A shutdown that follows a failed init sees leftover thread refs from the
+    earlier cycle; if it still queues stop sentinels for those dead threads,
+    the next re-init's fresh threads eat the stale sentinels and exit.
     """
+    gpu = {"k": torch.zeros((4, 4096), dtype=torch.int8, device="cuda")}
+    backend = DiskBackend()
+    disk_path = str(tmp_path / "kv-offload.bin")
+    _init_disk_backend(backend, gpu, disk_path)
+    backend.shutdown()
+
     pins = {"n": 0}
 
     def fail_second_pin(buf: torch.Tensor) -> None:
@@ -605,9 +631,6 @@ def test_disk_backend_live_after_failed_init_shutdown_reinit(tmp_path, monkeypat
     monkeypatch.setattr(
         "vllm.v1.simple_kv_offload.disk_backend.pin_tensor", fail_second_pin
     )
-    gpu = {"k": torch.zeros((4, 4096), dtype=torch.int8, device="cuda")}
-    backend = DiskBackend()
-    disk_path = str(tmp_path / "kv-offload.bin")
     with pytest.raises(RuntimeError, match="induced"):
         _init_disk_backend(backend, gpu, disk_path)
     backend.shutdown()
@@ -616,6 +639,37 @@ def test_disk_backend_live_after_failed_init_shutdown_reinit(tmp_path, monkeypat
     _init_disk_backend(backend, gpu, disk_path)
     events: list[tuple[int, torch.Event]] = []
     backend.launch_copy([], [], is_store=True, event_idx=0, events_list=events)
+    deadline = time.time() + 10.0
+    while not events and time.time() < deadline:
+        time.sleep(0.0005)
+    assert events, "store thread consumed a stale shutdown sentinel and exited"
+    backend.shutdown()
+
+
+def test_disk_backend_reinit_after_early_store_thread_exit(tmp_path, monkeypatch):
+    """A store thread that died before shutdown must not poison re-init.
+
+    init() starts each lifecycle with fresh queues, so a stop sentinel that a
+    dead thread never consumed cannot reach the re-init's fresh threads.
+    """
+
+    def stub_store_loop(*args: object, **kwargs: object) -> None:
+        return
+
+    monkeypatch.setattr(DiskBackend, "_store_loop", stub_store_loop)
+    gpu = {"k": torch.zeros((4, 4096), dtype=torch.int8, device="cuda")}
+    backend = DiskBackend()
+    disk_path = str(tmp_path / "kv-offload.bin")
+    _init_disk_backend(backend, gpu, disk_path)
+    assert backend._store_thread is not None
+    backend._store_thread.join(timeout=10.0)
+    assert not backend._store_thread.is_alive()
+    monkeypatch.undo()
+    backend.shutdown()
+
+    _init_disk_backend(backend, gpu, disk_path)
+    events: list[tuple[int, torch.Event]] = []
+    backend.launch_copy([], [], is_store=True, event_idx=1, events_list=events)
     deadline = time.time() + 10.0
     while not events and time.time() < deadline:
         time.sleep(0.0005)
