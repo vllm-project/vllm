@@ -18,8 +18,14 @@ vllm serve MODEL \
 ```
 
 Watermarking is disabled when `--watermark-config` is omitted. Gumbel-max (see
-`gumbel`) is the default algorithm within an enabled `WatermarkConfig`. When
-watermarking is configured, it is enabled for requests by default.
+`gumbel`) is the default algorithm within an enabled `WatermarkConfig`.
+
+The request-level `watermarking` option has three states:
+
+- Omitted (`None` in Python) inherits the engine configuration.
+- `true` explicitly requires watermarking and is rejected if the engine cannot
+  watermark the request.
+- `false` explicitly opts out.
 
 Requests can opt out without changing the engine-level algorithm or key:
 
@@ -29,10 +35,8 @@ from vllm import SamplingParams
 sampling_params = SamplingParams(watermarking=False)
 ```
 
-The OpenAI-compatible APIs accept the same `watermarking: false` request field.
-Deployments that require watermarking must restrict this field to trusted
-callers, or strip and validate it at the ingress boundary, so untrusted clients
-cannot opt out.
+Deployments that require watermarking must restrict explicit opt-out to trusted
+callers, or strip and validate the field at the ingress boundary.
 
 `context_width` controls how many prior tokens seed each watermark decision
 and defaults to 4. Larger values make the watermark less robust to
@@ -57,6 +61,31 @@ Detection is separate from generation. vLLM provides detector primitives for
 the reference algorithms. `WatermarkDetector` consumes token IDs, so callers
 remain responsible for using the tokenizer and watermark profile that match
 generation.
+
+## Interactions with generation features
+
+- Greedy decoding (`temperature=0`) cannot apply a Gumbel watermark. An
+  inherited request emits a server-side warning once and uses ordinary greedy
+  sampling without a watermark. An explicit `watermarking=true` request is
+  rejected instead. This includes transcription, translation, and realtime
+  transcription, which default to greedy decoding. Transcription and
+  translation can use a nonzero temperature to apply the configured watermark.
+- Beam search is rejected when it inherits watermarking from a configured
+  engine or explicitly requests it. It is allowed on an unconfigured engine,
+  or with `watermarking=false`.
+- Trace replay is rejected when watermarking is enabled because it replaces the
+  sampled token. Set `watermarking=false` to use it.
+- Parallel sampling (`n > 1`) is supported, but plain Gumbel candidates can be
+  identical while their contexts remain identical.
+- Structured outputs and tool grammars are applied before watermark sampling.
+  Restrictive constraints can reduce the statistical evidence available to a
+  detector.
+- Automatic language detection and generative scoring use unwatermarked
+  auxiliary generations. Language-detection tokens are not part of the returned
+  transcription, and generative scoring returns scores rather than generated
+  text.
+- Speculative decoding has additional requirements and partial-watermarking
+  modes described in [Speculative decoding](#speculative-decoding).
 
 ## Speculative decoding
 
@@ -88,8 +117,9 @@ context, and every candidate token, then uses the resulting Gumbel noise for
 categorical sampling. See
 [Aaronson's original presentation](https://simons.berkeley.edu/sites/default/files/2024-10/LLM24-2%20Slides%20-%20Scott%20Aaronson.pdf).
 
-Gumbel-max requires stochastic sampling. Greedy requests (`temperature=0`)
-bypass watermarking and emit a warning once per worker.
+Gumbel-max requires stochastic sampling. See
+[Interactions with generation features](#interactions-with-generation-features)
+for behavior with other generation modes.
 
 When a token context is repeated, generation can use ordinary sampling for that
 occurrence. Reusing the repeated context leads to a bias over the sequence, as
@@ -241,7 +271,7 @@ watermarked output or to modify watermarked text so it is no longer detected.
 
 - Watermarking is currently available only with Model Runner V2.
 - Not all watermarking algorithms have native speculative-decoding support.
-- Beam search expands candidates from model log probabilities and does not apply
-  Gumbel-max watermarking.
 - Models that replace the vLLM sampler with a custom sampler cannot use
   configured watermarking.
+- Global custom logits processors are unavailable because Model Runner V2 does
+  not support them.

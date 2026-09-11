@@ -154,6 +154,35 @@ async def client(server):
         yield async_client
 
 
+@pytest.fixture(scope="module")
+def watermarked_server():
+    args = [
+        "--dtype",
+        "half",
+        "--enable-auto-tool-choice",
+        "--structured-outputs-config.backend",
+        "xgrammar",
+        "--tool-call-parser",
+        "hermes",
+        "--reasoning-parser",
+        "qwen3",
+        "--gpu-memory-utilization",
+        "0.4",
+        "--enforce-eager",
+        "--watermark-config",
+        '{"algorithm":"gumbel","key":42}',
+    ] + ROCM_EXTRA_ARGS
+
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def watermarked_client(watermarked_server):
+    async with watermarked_server.get_async_client() as async_client:
+        yield async_client
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("stream", [True, False])
@@ -166,13 +195,16 @@ async def client(server):
     ],
 )
 @pytest.mark.parametrize("enable_thinking", [True, False])
+@pytest.mark.parametrize("client_fixture", ["client", "watermarked_client"])
 async def test_function_tool_use(
-    client: openai.AsyncOpenAI,
+    request: pytest.FixtureRequest,
+    client_fixture: str,
     model_name: str,
     stream: bool,
     tool_choice: str | dict,
     enable_thinking: bool,
 ):
+    client: openai.AsyncOpenAI = request.getfixturevalue(client_fixture)
     if not stream:
         # Non-streaming test
         chat_completion = await client.chat.completions.create(

@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
+from unittest.mock import MagicMock
 
-from vllm import CompletionOutput, RequestOutput
+import pytest
+import torch
+
+from vllm import CompletionOutput, RequestOutput, SamplingParams
+from vllm.config import VllmConfig
+from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
+from vllm.entrypoints.generate.beam_search.utils import BeamSearchSequence
 from vllm.logprobs import Logprob
 from vllm.sampling_params import BeamSearchParams
 
@@ -26,8 +32,21 @@ class _Renderer:
         return _Tokenizer()
 
 
+class _VllmConfig:
+    watermark_config = object()
+    speculative_config = None
+    _check_supports_watermarking = VllmConfig._check_supports_watermarking
+
+
 class _EngineClient:
+    vllm_config = _VllmConfig()
+
+    def resolve_watermarking(self, params):
+        params.watermarking = self.vllm_config._check_supports_watermarking(params)
+        return params.watermarking
+
     async def generate(self, prompt, *args, **kwargs):
+        assert not args[0].watermarking
         yield RequestOutput(
             request_id=kwargs.get("request_id", "test-request"),
             prompt=prompt.get("prompt"),
@@ -55,9 +74,24 @@ class _EngineClient:
         )
 
 
-class _Serving(BeamSearchOnlineMixin):
+class _AsyncServing(BeamSearchOnlineMixin):
     renderer = _Renderer()
     engine_client = _EngineClient()
+
+
+class _OfflineServing(BeamSearchOfflineMixin):
+    renderer = _Renderer()
+    llm_engine = _EngineClient()
+
+    def _preprocess_cmpl(self, prompts):
+        return prompts
+
+    def _lora_request_to_seq(self, lora_request, num_requests):
+        return [None] * num_requests
+
+    def _beam_search_step(self, **kwargs):
+        assert not kwargs["base_sampling_params"].watermarking
+        return True
 
 
 @pytest.mark.asyncio
@@ -67,10 +101,11 @@ async def test_beam_search_handles_extra_logprob_candidates() -> None:
         "prompt": "prompt",
         "prompt_token_ids": [1],
     }
-    params = BeamSearchParams(beam_width=2, max_tokens=1)
+    params = BeamSearchParams(beam_width=2, max_tokens=1, watermarking=False)
 
     outputs = [
-        output async for output in _Serving().beam_search(prompt, "request", params)
+        output
+        async for output in _AsyncServing().beam_search(prompt, "request", params)
     ]
 
     assert len(outputs) == 1
@@ -100,11 +135,80 @@ async def test_beam_search_respects_skip_special_tokens(
         max_tokens=1,
         ignore_eos=True,
         skip_special_tokens=skip_special_tokens,
+        watermarking=False,
     )
 
     outputs = [
-        output async for output in _Serving().beam_search(prompt, "request", params)
+        output
+        async for output in _AsyncServing().beam_search(prompt, "request", params)
     ]
 
     assert outputs[0].outputs[0].text == expected_text
     assert outputs[0].outputs[0].token_ids == [_Tokenizer.special_token_id]
+
+
+@pytest.mark.asyncio
+async def test_beam_search_rejects_watermarking() -> None:
+    prompt = {
+        "type": "token",
+        "prompt": "prompt",
+        "prompt_token_ids": [1],
+    }
+    params = BeamSearchParams(beam_width=2, max_tokens=1)
+
+    with pytest.raises(ValueError, match="Beam search is not supported"):
+        await anext(_AsyncServing().beam_search(prompt, "request", params))
+
+
+def test_offline_beam_search_rejects_watermarking() -> None:
+    with pytest.raises(ValueError, match="Beam search is not supported"):
+        _OfflineServing().beam_search(
+            [{"type": "token", "prompt_token_ids": [1]}],
+            BeamSearchParams(beam_width=2, max_tokens=1),
+        )
+
+
+def test_offline_beam_search_disables_internal_watermarking() -> None:
+    outputs = _OfflineServing().beam_search(
+        [{"type": "token", "prompt_token_ids": [1]}],
+        BeamSearchParams(beam_width=2, max_tokens=1, watermarking=False),
+    )
+
+    assert len(outputs) == 1
+
+
+def test_offline_structured_beam_search_disables_internal_watermarking() -> None:
+    grammar = MagicMock()
+    grammar.is_terminated.return_value = False
+    grammar.fill_bitmask.side_effect = lambda bitmask, index: bitmask[index].fill_(1)
+    backend = MagicMock()
+    backend.compile_grammar.return_value = grammar
+    serving = _OfflineServing()
+    serving.model_config = MagicMock()
+    serving.model_config.get_vocab_size.return_value = 32
+    beam = BeamSearchSequence(
+        orig_prompt={"type": "token", "prompt_token_ids": [1]},
+        tokens=[1],
+        logprobs=[],
+    )
+
+    base_params = SamplingParams(
+        logprobs=2,
+        watermarking=False,
+        skip_clone=True,
+    )
+    entries = serving._build_beam_sampling_params(
+        [beam],
+        base_params,
+        backend,
+        ("regex", ".*"),
+        torch.zeros((1, 1), dtype=torch.int32),
+    )
+
+    assert entries[0] is not None
+    beam_params = entries[0][0]
+    assert beam_params is not base_params
+    assert beam_params.logprobs == base_params.logprobs
+    assert not beam_params.watermarking
+    assert beam_params.allowed_token_ids == [0]
+    assert base_params.allowed_token_ids is None
