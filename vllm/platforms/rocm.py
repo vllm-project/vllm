@@ -21,6 +21,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
     from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
@@ -504,7 +505,7 @@ class RocmPlatform(Platform):
     dist_backend: str = "nccl"
     # rocm shares the same device control env var as CUDA
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
-    # Set in check_and_update_config, so it exists only on the driver; Ray
+    # Set in pre_register_and_update, so it exists only on the driver; Ray
     # workers are separate processes and copy env vars by allowlist.
     additional_env_vars: list[str] = ["GPU_PINNED_MIN_XFER_SIZE"]
     ray_noset_device_env_vars: list[str] = [
@@ -881,6 +882,16 @@ class RocmPlatform(Platform):
         return torch.cuda.get_device_properties(device_id).total_memory
 
     @classmethod
+    def pre_register_and_update(
+        cls, parser: "FlexibleArgumentParser | None" = None
+    ) -> None:
+        # Keep mmap'd weight pages on the HIP staging path: above this
+        # threshold the runtime registers the pageable source instead, and each
+        # registration's MMU notifier makes KFD suspend our queues. In KB, so
+        # 4 GiB.
+        os.environ.setdefault("GPU_PINNED_MIN_XFER_SIZE", str(4 * 1024 * 1024))
+
+    @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
         from vllm._aiter_ops import rocm_aiter_ops
 
@@ -917,12 +928,6 @@ class RocmPlatform(Platform):
 
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
-
-        # Keep mmap'd weight pages on the HIP staging path: above this
-        # threshold the HIP runtime registers the pageable source with the GPU
-        # instead of staging it, and each registration's MMU notifier makes KFD
-        # suspend our queues. The value is in KB, so this is 4 GiB.
-        os.environ.setdefault("GPU_PINNED_MIN_XFER_SIZE", str(4 * 1024 * 1024))
 
         if (
             parallel_config.prefill_context_parallel_size > 1
