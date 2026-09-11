@@ -27,7 +27,6 @@ from vllm.model_executor.warmup.jit_warmup import (
     kernel_launcher,
     zip_inputs,
 )
-from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonPointerInputVariant,
