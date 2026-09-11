@@ -41,7 +41,7 @@ class Watermarker(ABC):
         sampling_state: RandomSamplingState | None = None,
     ) -> WatermarkSample:
         if skip_mask is not None:
-            mixed = self._sample_mixed(logits, contexts, skip_mask, sampling_state)
+            mixed = self._try_sample_mixed(logits, contexts, skip_mask, sampling_state)
             if mixed is not None:
                 return mixed
 
@@ -63,7 +63,7 @@ class Watermarker(ABC):
     ) -> WatermarkSample:
         raise NotImplementedError
 
-    def _sample_mixed(
+    def _try_sample_mixed(
         self,
         logits: torch.Tensor,
         contexts: torch.Tensor,
