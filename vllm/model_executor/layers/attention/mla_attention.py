@@ -2156,7 +2156,11 @@ def build_mla_chunked_context_metadata(
         local_token_offset += num_local_tokens
 
     seq_lens_cpu = _flat_int32(seq_lens_flat)
-    starts = _flat_int32(starts_flat).to(device, non_blocking=True)
+    starts_and_context_lens = _flat_int32(starts_flat + context_lens).to(
+        device, non_blocking=True
+    )
+    starts = starts_and_context_lens[: len(starts_flat)]
+    context_lens_gpu = starts_and_context_lens[len(starts_flat) :]
     cu_seq_lens = _flat_int32(cu_seq_lens_flat).to(device, non_blocking=True)
     cu_seqlens_q = _flat_int32(cu_seqlens_q_flat).to(device, non_blocking=True)
     token_to_seq = _flat_int32(np.concatenate(token_to_seq_parts)).to(
@@ -2211,7 +2215,7 @@ def build_mla_chunked_context_metadata(
         chunks.append(chunk)
 
     return MLACommonPrefillMetadata.ChunkedContextMetadata(
-        context_lens=context_lens_cpu.to(device, non_blocking=True),
+        context_lens=context_lens_gpu,
         workspace=chunked_prefill_workspace,
         chunks=chunks,
         context_lens_list=context_lens,

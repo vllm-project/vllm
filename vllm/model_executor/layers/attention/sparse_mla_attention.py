@@ -32,7 +32,6 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.torch_utils import (
-    PIN_MEMORY,
     is_quantized_kv_cache,
     np_to_pinned_tensor,
 )
@@ -183,6 +182,11 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dtype=torch.int32,
             device=device,
         )
+        self._context_lens_cpu = torch.empty(
+            vllm_config.scheduler_config.max_num_seqs,
+            dtype=torch.int32,
+            device="cpu",
+        )
         parallel_config = vllm_config.parallel_config
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         try:
@@ -306,9 +310,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
 
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         assert seq_lens_cpu is not None
-        context_lens_cpu = torch.empty(
-            num_prefills, dtype=seq_lens_cpu.dtype, pin_memory=PIN_MEMORY
-        )
+        context_lens_cpu = self._context_lens_cpu[:num_prefills]
         torch.subtract(
             seq_lens_cpu[num_decodes : num_decodes + num_prefills],
             prefill_query_lens_cpu,
