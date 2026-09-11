@@ -401,8 +401,8 @@ def _decode_index_score_kernel(
 
 
 # ---------------------------------------------------------------------------
-# Decode top-k (split-K): per-chunk partial top-k + merge. Forced init/local
-# blocks are already encoded in the scores.
+# Decode top-k: per-chunk selection with a last-arriving-CTA merge.
+# Forced init/local blocks are already encoded in the scores.
 # ---------------------------------------------------------------------------
 @triton.heuristics(
     {
@@ -423,7 +423,7 @@ def _decode_index_score_kernel(
     key=["topk"],
 )
 @triton.jit(do_not_specialize=["chunk_blocks", "decode_query_len"])
-def _topk_index_partial_kernel(
+def _decode_topk_fused_kernel(
     s_ptr,  # score: [num_idx_heads, total_q, max_block]
     ts_partial_ptr,  # partial scores out: [NUM_TOPK_CHUNKS, num_idx_heads, total_q, T]
     ti_partial_ptr,  # partial idx out (1-indexed global, 0=invalid): same shape
@@ -891,8 +891,8 @@ def minimax_m3_index_decode(
     pdl_kwargs: dict[str, bool | int] = {}
     if use_pdl:
         pdl_kwargs.update({"launch_pdl": True})
-    # Call-owned scratch is stream-ordered by the allocator and graph-private
-    # during capture. The score kernel initializes it without a fill launch.
+    # Keep scratch local to this call; the score kernel initializes it
+    # without a separate fill launch.
     topk_counter = torch.empty(
         (total_q, num_idx_heads), dtype=torch.int32, device=idx_q.device
     )
@@ -945,7 +945,7 @@ def minimax_m3_index_decode(
         dtype=torch.int32,
         device=idx_q.device,
     )
-    _topk_index_partial_kernel[(batch, num_idx_heads, num_topk_chunks)](
+    _decode_topk_fused_kernel[(batch, num_idx_heads, num_topk_chunks)](
         score,
         topk_score_partial,
         topk_idx_partial,

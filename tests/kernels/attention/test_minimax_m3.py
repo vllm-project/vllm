@@ -1027,7 +1027,7 @@ def _decode_topk_boundary_inputs(
     idx_q[..., 0] = 1
     scores = torch.arange(max_blocks, device="cuda", dtype=torch.float32)
     if tied:
-        scores = scores // 4
+        scores = scores // 5
     cache = torch.zeros(3, max_blocks, BLOCK_SIZE, 16, device="cuda")
     cache[..., 0] = score_sign * scores[None, :, None]
     cache[:, 14, :, 0] = float("nan")
@@ -1096,12 +1096,21 @@ def test_decode_index_topk_nan_forced_blocks_and_strides(
 
 @pytest.mark.parametrize("use_graph", [False, True])
 def test_decode_index_topk_concurrent_calls_and_replay(use_graph: bool):
-    """Independent calls preserve exact tied-ID ordering on separate streams."""
+    """Calls preserve valid tied-cutoff selections and ordering across streams."""
     inputs = [
         _decode_topk_boundary_inputs(4, tied=True, score_sign=sign)[0]
         for sign in (1, -1)
     ]
     expected = [minimax_m3_index_decode(**kwargs).clone() for kwargs in inputs]
+    for actual, tied_ids in zip(expected, ((10, 11, 12, 13), (2, 3, 4))):
+        full = actual[:, :4]
+        allowed = torch.tensor(
+            (0, 1, *tied_ids, 15, 16), dtype=full.dtype, device=full.device
+        )
+        assert torch.isin(full, allowed).all()
+        assert (full.sort(dim=-1).values.diff(dim=-1) > 0).all()
+        for forced in (0, 1, 15, 16):
+            assert (full == forced).any(dim=-1).all()
     torch.accelerator.synchronize()
     streams = [torch.cuda.Stream(), torch.cuda.Stream()]
     graphs = []
