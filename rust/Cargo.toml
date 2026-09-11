@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "proto",
     "src/bench",
     "src/build-info",
     "src/chat",
@@ -146,6 +147,7 @@ vllm-llm = { path = "src/llm" }
 vllm-managed-engine = { path = "src/managed-engine" }
 vllm-metrics = { path = "src/metrics" }
 vllm-parser = { path = "src/parser" }
+vllm-proto = { version = "0.1.0", path = "proto" }
 vllm-server = { path = "src/server" }
 vllm-text = { path = "src/text" }
 vllm-tokenizer = { path = "src/tokenizer" }
