@@ -726,12 +726,10 @@ async fn scale_out_generate_route_follows_api_server_options() {
     )
     .await;
     let state = Arc::new(
-        AppState::new(vec!["model".to_string()], chat).with_api_server_options(
-            ApiServerOptions {
-                enable_scale_out: true,
-                ..Default::default()
-            },
-        ),
+        AppState::new(vec!["model".to_string()], chat).with_api_server_options(ApiServerOptions {
+            enable_scale_out: true,
+            ..Default::default()
+        }),
     );
     let mut app = build_router(state);
 
