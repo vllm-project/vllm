@@ -26,6 +26,10 @@ description: Write or review Triton kernels for vLLM, with practical guidance fo
   unimportant runtime integer scalars in `do_not_specialize`, especially those
   that may alternate between values such as 0 and 1, which can produce
   different specialization keys.
+- For new warmable kernels, follow the
+  [JIT Kernel Warmup guide](../../../docs/contributing/jit_kernel_warmup.md)
+  to define the warmup wrapper and call its `register_warmup(...)` where the
+  runtime implementation is selected during runner setup.
 - The Triton compiler does not guarantee safe ordering when a kernel writes to
   a pointer and subsequently reads from the same pointer. This pattern must
   have a `tl.debug_barrier()` between the write and read. The barrier
