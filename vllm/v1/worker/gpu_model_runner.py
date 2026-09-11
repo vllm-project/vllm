@@ -2456,6 +2456,21 @@ class GPUModelRunner(
                 self.input_batch.replayssm_decode_base_cpu_tensor[:num_reqs_padded]
             )
 
+        engram_config = self.vllm_config.engram_config
+        engram_lookup_overlap = False
+        if (
+            engram_config is not None
+            and engram_config.lookup_overlap
+            and self.model_config.enforce_eager
+            and not for_cudagraph_capture
+        ):
+            max_prompt_len = int(
+                self.input_batch.num_prompt_tokens[:num_reqs].max(initial=0)
+            )
+            engram_lookup_overlap = engram_config.allows_lookup_overlap(
+                max_seq_len, max_prompt_len
+            )
+
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
@@ -2466,6 +2481,7 @@ class GPUModelRunner(
             num_actual_tokens=num_tokens_padded,
             max_query_len=max_query_len,
             max_seq_len=max_seq_len,
+            engram_lookup_overlap=engram_lookup_overlap,
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
             causal=True,

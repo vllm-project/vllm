@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import bisect
+from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -659,6 +661,61 @@ def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
     assert torch.equal(out, expected)
 
 
+@pytest.mark.parametrize("capture", ["eager", "full", "breakable"])
+def test_engram_lookup_fallback_does_not_wait_on_previous_batch(monkeypatch, capture):
+    """Changing the route must not wait on an event from a previous batch."""
+    current = Mock()
+    streams, events = [Mock(), Mock()], [Mock(), Mock()]
+    stream_iter, event_iter = iter(streams), iter(events)
+    slot = [0]
+    monkeypatch.setattr(torch.cuda, "Stream", lambda **kwargs: next(stream_iter))
+    monkeypatch.setattr(torch.cuda, "Event", lambda: next(event_iter))
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: current)
+    monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
+    monkeypatch.setattr(
+        torch.cuda, "is_current_stream_capturing", lambda: capture == "full"
+    )
+    monkeypatch.setattr(
+        engram_ops.BreakableCUDAGraphCapture,
+        "is_active",
+        lambda: capture == "breakable",
+    )
+    monkeypatch.setattr(engram_ops, "dbo_current_ubatch_id", lambda: slot[0])
+    module = Engram.__new__(Engram)
+    torch.nn.Module.__init__(module)
+    module.staged_rows = torch.empty(2, 1, 1)
+    module._init_lookup_staging(2, True)
+    lookup = Mock(side_effect=lambda ids, out, **kwargs: out.copy_(ids.unsqueeze(-1)))
+    module.embed_tokens = SimpleNamespace(lookup=lookup)
+
+    for i, (slot_id, allowed) in enumerate(
+        [(0, True), (1, True), (0, False), (1, False), (0, True)]
+    ):
+        slot[0] = slot_id
+        current.reset_mock()
+        ids = torch.full((2, 1), i, dtype=torch.int32)
+        rows = module.prepare_embeddings(ids, allow_overlap=allowed)
+        module.wait_for_embeddings()
+        background = allowed and capture == "eager"
+        assert lookup.call_args.kwargs.get("background", False) is background
+        torch.testing.assert_close(rows.squeeze(-1), ids.float())
+        if background:
+            current.wait_event.assert_called_once_with(events[slot[0]])
+        else:
+            current.wait_event.assert_not_called()
+        if i == 2 and capture == "eager":
+            # Falling back in slot 0 must preserve slot 1's outstanding event.
+            slot[0] = 1
+            module.wait_for_embeddings()
+            current.wait_event.assert_called_once_with(events[1])
+
+    current.reset_mock()
+    module.prepare_embeddings(ids)
+    module.wait_for_embeddings()
+    assert "background" not in lookup.call_args.kwargs
+    current.wait_event.assert_not_called()
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("capture", ["eager", "full", "breakable"])
@@ -711,7 +768,7 @@ def _run_engram_prepared_rows(
         embed = torch.compile(embed, backend="eager", fullgraph=True, dynamic=True)
 
     def step(cap=None):
-        engram.prepare_embeddings(src)
+        engram.prepare_embeddings(src, allow_overlap=overlap)
         if cap is not None:
             cap.add_eager(lambda: None)
         out.copy_(embed(src))

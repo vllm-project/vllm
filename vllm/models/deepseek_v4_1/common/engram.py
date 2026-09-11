@@ -908,7 +908,8 @@ class Engram(nn.Module):
         # Named ``embed_tokens`` so the checkpoint's ``engram.embed.weight``
         # survives the mapper's ``embed.weight`` -> ``embed_tokens.weight``
         # suffix rule.
-        engram_config = get_current_vllm_config().engram_config
+        vllm_config = get_current_vllm_config()
+        engram_config = vllm_config.engram_config
         self.embed_tokens = ParallelEngramEmbedding(
             layout.num_embeddings[layer_hash_index],
             layout.head_dim,
@@ -933,7 +934,7 @@ class Engram(nn.Module):
             requires_grad=False,
         )
 
-        max_tokens = get_current_vllm_config().scheduler_config.max_num_batched_tokens
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         # Keep lookup results alive across breakable graph segments.
         self.staged_rows = torch.empty(
             max_tokens,
@@ -941,10 +942,15 @@ class Engram(nn.Module):
             layout.head_dim,
             dtype=torch.bfloat16,
         )
-        parallel_config = get_current_vllm_config().parallel_config
+        parallel_config = vllm_config.parallel_config
         self._init_lookup_staging(
             parallel_config.num_ubatches if parallel_config.use_ubatching else 1,
-            engram_config.lookup_overlap if engram_config else False,
+            engram_config is not None
+            and engram_config.lookup_overlap
+            and engram_config.cpu_offload
+            and engram_config.lookup_overlap_max_seq_len > 0
+            and vllm_config.model_config.enforce_eager
+            and not vllm_config.use_v2_model_runner,
         )
 
     def _init_lookup_staging(self, num_slots: int, overlap: bool) -> None:
@@ -960,6 +966,7 @@ class Engram(nn.Module):
             else []
         )
         self._lookup_ready = [torch.cuda.Event() for _ in self._lookup_streams]
+        self._lookup_pending = [False] * num_slots
 
     def _lookup_slot(self) -> int:
         rows = getattr(self, "_lookup_rows", None)
@@ -967,14 +974,17 @@ class Engram(nn.Module):
 
     def wait_for_embeddings(self) -> None:
         if (
-            getattr(self, "_lookup_streams", None)
+            getattr(self, "_lookup_pending", None)
+            and self._lookup_pending[self._lookup_slot()]
             and not BreakableCUDAGraphCapture.is_active()
         ):
             torch.cuda.current_stream().wait_event(
                 self._lookup_ready[self._lookup_slot()]
             )
 
-    def prepare_embeddings(self, hash_ids: torch.Tensor) -> torch.Tensor:
+    def prepare_embeddings(
+        self, hash_ids: torch.Tensor, *, allow_overlap: bool = False
+    ) -> torch.Tensor:
         """Stage local heads after hashing, optionally overlapping decoder compute."""
         slot = self._lookup_slot()
         buffers = getattr(self, "_lookup_rows", None)
@@ -982,7 +992,17 @@ class Engram(nn.Module):
             : hash_ids.shape[0]
         ]
         streams = getattr(self, "_lookup_streams", None)
-        if streams and not BreakableCUDAGraphCapture.is_active():
+        overlap = bool(
+            streams
+            and allow_overlap
+            and not BreakableCUDAGraphCapture.is_active()
+            and not torch.cuda.is_current_stream_capturing()
+        )
+        pending = getattr(self, "_lookup_pending", None)
+        if pending is not None:
+            pending[slot] = overlap
+        if overlap:
+            assert streams is not None
             stream = streams[slot]
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):

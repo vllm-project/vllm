@@ -1090,6 +1090,38 @@ def test_engram_tensor_parallel_size(dp_size: int, across_dp: bool, expected: in
     assert config.get_parallel_size(parallel) == expected
 
 
+@pytest.mark.parametrize(
+    "enabled, offload, limit, context, prompt, expected",
+    [
+        (False, True, 640, 512, 512, False),
+        (True, False, 640, 512, 512, False),
+        (True, True, 0, 512, 512, False),
+        (True, True, 640, 512, 512, True),
+        (True, True, 640, 640, 512, True),
+        (True, True, 640, 641, 512, False),
+        (True, True, 640, 32, 2048, False),
+        (True, True, 640, 2049, 2048, False),
+        (True, True, 640, 0, 512, False),
+        (True, True, 640, 512, 0, False),
+    ],
+)
+def test_engram_overlap_respects_full_request_lengths(
+    enabled, offload, limit, context, prompt, expected
+):
+    """A short chunk or decode step must not opt a long request into overlap."""
+    config = EngramConfig(
+        lookup_overlap=enabled,
+        cpu_offload=offload,
+        lookup_overlap_max_seq_len=limit,
+    )
+    assert config.allows_lookup_overlap(context, prompt) is expected
+
+
+def test_engram_overlap_rejects_negative_limit():
+    with pytest.raises(ValidationError, match="lookup_overlap_max_seq_len"):
+        EngramConfig(lookup_overlap_max_seq_len=-1)
+
+
 def test_engram_rejects_elastic_cross_dp():
     parallel = ParallelConfig(
         tensor_parallel_size=4,
