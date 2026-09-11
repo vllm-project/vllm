@@ -34,6 +34,20 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
+def _get_profile_num_reqs(
+    num_reqs: int,
+    max_num_tokens: int,
+    num_query_per_req: int,
+) -> int:
+    profile_num_reqs = min(num_reqs, max_num_tokens // num_query_per_req)
+    if profile_num_reqs == 0:
+        raise ValueError(
+            "max_num_batched_tokens must be at least the speculator query "
+            f"length ({num_query_per_req}) for profiling."
+        )
+    return profile_num_reqs
+
+
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
 
@@ -357,6 +371,21 @@ class DFlashSpeculator(DraftModelSpeculator):
         num_reqs = input_batch.num_reqs
         num_target_tokens = input_batch.num_tokens
         num_query_tokens = num_reqs * self.num_query_per_req
+        profile_num_reqs = num_reqs
+        profile_num_query_tokens = num_query_tokens
+        if num_query_tokens > self.max_num_tokens:
+            if dummy_run and skip_attn_for_dummy_run:
+                profile_num_reqs = _get_profile_num_reqs(
+                    num_reqs, self.max_num_tokens, self.num_query_per_req
+                )
+                profile_num_query_tokens = profile_num_reqs * self.num_query_per_req
+            else:
+                raise ValueError(
+                    "Speculative decoding query batch exceeds max_num_batched_tokens: "
+                    f"{num_reqs} requests with query length "
+                    f"{self.num_query_per_req} need {num_query_tokens} tokens, "
+                    f"but only {self.max_num_tokens} are available."
+                )
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
         self.draft_max_seq_len = min(
             max_seq_len + self.num_query_per_req, self.max_model_len
@@ -382,12 +411,13 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.hidden_states[:num_target_tokens],
                 self.context_positions[:num_target_tokens],
             )
-            # DFlash processes all speculative tokens in one forward pass,
-            # so the real token count is num_query_tokens.
-            self._prepare_eplb_forward(num_query_tokens)
+            # DFlash processes all speculative tokens in one forward pass.
+            # Profiling can hand-build more requests than the speculator input
+            # buffer can hold, so cap this draft-only pass to full query blocks.
+            self._prepare_eplb_forward(profile_num_query_tokens)
             self._generate_draft(
-                num_reqs,
-                num_query_tokens,
+                profile_num_reqs,
+                profile_num_query_tokens,
                 attn_metadata=None,
                 slot_mappings=None,
                 num_tokens_across_dp=None,
