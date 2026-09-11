@@ -243,7 +243,10 @@ class DeepGemmMegaMoEExperts(nn.Module):
             get_scheme_dict = getattr(quant_config, "get_scheme_dict", None)
             if get_scheme_dict is None:
                 return False
-            scheme_dict = get_scheme_dict(layer, prefix)
+            expert_prefix = (
+                prefix if prefix.endswith(".experts") else f"{prefix}.experts"
+            )
+            scheme_dict = get_scheme_dict(layer, expert_prefix)
             if scheme_dict is None:
                 return False
             source_format = scheme_dict.get("format") or source_format

@@ -5,6 +5,9 @@ from types import SimpleNamespace
 
 import torch
 
+from vllm.model_executor.layers.quantization.compressed_tensors import (
+    compressed_tensors,
+)
 from vllm.model_executor.models.deepseek_v2 import (
     _is_deep_gemm_mega_moe_requested,
     _scale_mega_moe_output_for_deferred_reduce,
@@ -97,6 +100,46 @@ def test_nvfp4_expert_quantization_is_detected():
     assert DeepGemmMegaMoEExperts.source_is_nvfp4(quant_config)
     assert (
         DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(quant_config)
+        is None
+    )
+
+
+def test_mixed_precision_nvfp4_expert_quantization_is_detected():
+    quant_config = compressed_tensors.CompressedTensorsConfig.from_config(
+        {
+            "format": "mixed-precision",
+            "config_groups": {
+                "group_1": {
+                    "format": "nvfp4-pack-quantized",
+                    "targets": [r"re:.*mlp\..*"],
+                    "weights": {
+                        "num_bits": 4,
+                        "type": "float",
+                        "strategy": "tensor_group",
+                        "group_size": 16,
+                        "symmetric": True,
+                        "dynamic": False,
+                    },
+                    "input_activations": {
+                        "num_bits": 4,
+                        "type": "float",
+                        "strategy": "tensor_group",
+                        "group_size": 16,
+                        "symmetric": True,
+                        "dynamic": "local",
+                    },
+                }
+            },
+        }
+    )
+    layer = torch.nn.Identity()
+    prefix = "model.layers.3.mlp"
+
+    assert DeepGemmMegaMoEExperts.source_is_nvfp4(quant_config, layer, prefix)
+    assert (
+        DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(
+            quant_config, layer, prefix
+        )
         is None
     )
 
