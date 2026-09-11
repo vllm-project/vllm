@@ -9,20 +9,17 @@ from vllm._custom_ops import (
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
+    nvfp4_weight_padding_bytes,
     pad_nvfp4_weight_for_cutlass,
-    restore_nvfp4_cutlass_padding_cols,
     slice_nvfp4_output,
     swizzle_blockscale,
 )
-from vllm.model_executor.utils import is_weights_pre_processed
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
 class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via the vLLM CUTLASS kernel."""
-
-    ipc_pre_processed_safe = True
 
     @classmethod
     def is_supported(
@@ -37,17 +34,11 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if is_weights_pre_processed():
-            restore_nvfp4_cutlass_padding_cols(layer)
-            return
         layer.weight_scale = torch.nn.Parameter(
             swizzle_blockscale(layer.weight_scale.data), requires_grad=False
         )
-        padded_weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(
-            layer.weight.data
-        )
+        padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
         layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
-        layer.weights_padding_cols = weights_padding_cols
 
     def apply_weights(
         self,
@@ -58,7 +49,7 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype
         output_shape = [*x.shape[:-1], output_size]
-        weights_padding_bytes = getattr(layer, "weights_padding_cols", 0)
+        weights_padding_bytes = nvfp4_weight_padding_bytes(layer)
 
         x_fp4, x_blockscale = scaled_fp4_quant(
             x,

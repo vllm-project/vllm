@@ -48,6 +48,7 @@ def _make_fake_speculator(
     )
     return SimpleNamespace(
         arange=torch.arange(max_num_reqs + 1, dtype=torch.int32, device="cpu"),
+        draft_is_prefilling=torch.zeros(max_num_reqs, dtype=torch.bool),
         block_tables=fake_block_tables,
         input_buffers=fake_input_buffers,
         attn_groups=[],
@@ -144,8 +145,11 @@ def test_build_draft_attn_metadata_recomputes_dcp_local_seq_lens():
         assert (num_reqs, dcp_size, dcp_rank, cp_interleave) == (3, 2, 1, 4)
         out[:num_reqs].copy_(torch.tensor([1, 4, 8], dtype=torch.int32))
         out[num_reqs:].zero_()
+        return out
 
-    with patch.object(base_speculator, "prepare_dcp_local_seq_lens", fake_prepare):
+    with patch.object(
+        base_speculator, "maybe_prepare_dcp_local_seq_lens", fake_prepare
+    ):
         captured = _run_build(
             fake,
             num_reqs=3,

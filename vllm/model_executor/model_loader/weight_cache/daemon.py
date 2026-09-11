@@ -17,11 +17,13 @@ Engines then load from the daemons with:
     vllm serve /path/to/model --tensor-parallel-size 4 \\
         --load-format ipc_cache
 
-Only tensor parallelism is supported; pipeline, data, and expert parallelism
-are rejected at launch.
+Tensor and pipeline parallelism are supported; data and expert parallelism
+are rejected at launch. The daemon launches one rank per TP×PP worker, using
+the same TP-inner rank layout as the engine.
 """
 
 import contextlib
+import fcntl
 import multiprocessing
 import os
 import queue
@@ -29,19 +31,20 @@ import signal
 import socket
 import sys
 from collections.abc import Callable
-from contextlib import AbstractContextManager
 
 import torch
 
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
-    CacheConfig,
     TensorEntry,
+    WeightCacheKey,
+    WeightCacheUnavailableError,
+    check_ipc_platform_support,
     check_ipc_quant_support,
     ensure_private_socket_dir,
     get_physical_device_id,
@@ -52,23 +55,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
 )
 from vllm.platforms import current_platform
 
-logger = init_logger(__name__)
-
-
-def _report_ready(message: str) -> None:
-    """Write a readiness message straight to the original stderr descriptor.
-
-    Loading the model pulls in FlashInfer's CuTeDSL JIT compiler, which swaps
-    ``sys.stdout``/``sys.stderr`` for in-memory buffers while compiling kernels
-    across worker threads. That save/restore races on the interpreter-global
-    streams and can leave them (and vLLM's logging handler, which caches the
-    original stream object) detached, silently swallowing everything logged
-    afterwards -- including the daemon's readiness announcement. Since operators
-    rely on that line to know the daemon is serving, write it directly to file
-    descriptor 2 so it bypasses the logging machinery entirely.
-    """
-    with contextlib.suppress(OSError):
-        os.write(2, (message + "\n").encode())
+logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
 
 
 def export_entries(
@@ -113,17 +100,24 @@ def export_entries(
 
 
 class WeightCacheDaemon:
-    """Per-GPU process that loads one TP shard and serves CUDA IPC handles."""
+    """Per-GPU process that loads one TP/PP shard and serves CUDA IPC handles."""
 
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tp_rank: int,
+        global_rank: int,
+        local_rank: int,
         distributed_init_method: str,
         socket_dir: str | None = None,
     ):
+        parallel_config = vllm_config.parallel_config
+        tp_size = parallel_config.tensor_parallel_size
+        pp_size = parallel_config.pipeline_parallel_size
         self.vllm_config = vllm_config
-        self.tp_rank = tp_rank
+        self.global_rank = global_rank
+        self.local_rank = local_rank
+        self.tp_rank = global_rank % tp_size
+        self.pp_rank = global_rank // tp_size
         self.distributed_init_method = distributed_init_method
         self.socket_dir = socket_dir
         self.model: torch.nn.Module | None = None
@@ -131,38 +125,34 @@ class WeightCacheDaemon:
         self.aliases: dict[str, str] = {}
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
-        self.cache_config = CacheConfig.from_model_config(
+        self.cache_config = WeightCacheKey.from_model_config(
             vllm_config.model_config,
-            tp_size=vllm_config.parallel_config.tensor_parallel_size,
-            tp_rank=tp_rank,
+            tp_size=tp_size,
+            tp_rank=self.tp_rank,
+            pp_size=pp_size,
+            pp_rank=self.pp_rank,
         )
 
-    def load_model(self, load_gate: AbstractContextManager | None = None) -> None:
+    def load_model(self) -> None:
         from vllm.model_executor.model_loader import get_model
 
         tp_size = self.cache_config.tp_size
-        torch.cuda.set_device(self.tp_rank)
+        pp_size = self.cache_config.pp_size
+        torch.accelerator.set_device_index(self.local_rank)
         init_distributed_environment(
-            world_size=tp_size,
-            rank=self.tp_rank,
+            world_size=tp_size * pp_size,
+            rank=self.global_rank,
             distributed_init_method=self.distributed_init_method,
-            local_rank=self.tp_rank,
+            local_rank=self.local_rank,
             backend=current_platform.dist_backend,
         )
         with set_current_vllm_config(self.vllm_config):
-            ensure_model_parallel_initialized(tp_size, 1)
-            # Gate only the disk-load phase to cap peak host RAM: very large
-            # checkpoints on network filesystems can OOM the host if every TP
-            # rank streams weights at once. The distributed init above is a
-            # collective and must run on every rank first, and vLLM's per-rank
-            # weight loading does no cross-rank collectives, so bounding the
-            # number of concurrent loaders here cannot deadlock.
-            with load_gate or contextlib.nullcontext():
-                self.model = get_model(vllm_config=self.vllm_config)
+            ensure_model_parallel_initialized(tp_size, pp_size)
+            self.model = get_model(vllm_config=self.vllm_config)
         self._export_entries()
         logger.info(
             "Weight cache daemon rank %d cached %d tensors",
-            self.tp_rank,
+            self.global_rank,
             len(self.entries),
         )
 
@@ -185,6 +175,9 @@ class WeightCacheDaemon:
         ensure_private_socket_dir(
             os.path.dirname(socket_path), strict_perms=self.socket_dir is None
         )
+        # Hold an exclusive per-GPU lock for the daemon's lifetime so a second
+        # daemon cannot remove this daemon's live socket and hijack the path.
+        lock_fd = self._acquire_gpu_lock(socket_path)
         if os.path.exists(socket_path):
             os.unlink(socket_path)
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -192,10 +185,7 @@ class WeightCacheDaemon:
         os.chmod(socket_path, 0o600)
         server.listen()
         logger.info(
-            "Weight cache daemon rank %d serving on %s", self.tp_rank, socket_path
-        )
-        print(
-            f"Weight cache daemon rank {self.tp_rank} ready: serving on {socket_path}"
+            "Weight cache daemon rank %d serving on %s", self.global_rank, socket_path
         )
         if ready_callback is not None:
             ready_callback()
@@ -208,19 +198,40 @@ class WeightCacheDaemon:
                         self._handle_connection(conn)
                     except (ConnectionError, EOFError):
                         logger.warning("Client disconnected mid-request")
-                    except Exception:
-                        # A single malformed or malicious request must not take
-                        # down the daemon for every other engine on this GPU.
+                    except Exception as e:
+                        # Report the error back instead of just closing the
+                        # socket, but don't let it take the daemon down.
                         logger.exception(
                             "Error handling weight cache client; continuing"
                         )
+                        with contextlib.suppress(OSError):
+                            send_msg(conn, {"status": "error", "message": str(e)})
         finally:
             server.close()
             if os.path.exists(socket_path):
                 os.unlink(socket_path)
+            os.close(lock_fd)
+
+    def _acquire_gpu_lock(self, socket_path: str) -> int:
+        """Take an exclusive lock guarding this GPU's socket path.
+
+        The lock is advisory and released automatically when the daemon exits
+        (or crashes), so a stale socket is only ever removed by whoever owns
+        the lock. A running daemon holding it makes a second daemon fail fast
+        instead of clobbering the live socket.
+        """
+        lock_fd = os.open(f"{socket_path}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            os.close(lock_fd)
+            raise WeightCacheUnavailableError(
+                f"Another weight cache daemon already owns {socket_path}"
+            ) from e
+        return lock_fd
 
     def _socket_path(self) -> str:
-        device_index = torch.cuda.current_device()
+        device_index = torch.accelerator.current_device_index()
         gpu_id = get_physical_device_id(device_index)
         if gpu_id is None:
             gpu_id = device_index
@@ -229,16 +240,7 @@ class WeightCacheDaemon:
     def _handle_connection(self, conn: socket.socket) -> None:
         request = recv_msg(conn)
         cmd = request.get("cmd")
-        if cmd == "ping":
-            send_msg(
-                conn,
-                {
-                    "status": "ok",
-                    "cache_config": self.cache_config,
-                    "gpu_uuid": self._gpu_uuid(),
-                },
-            )
-        elif cmd == "get_state":
+        if cmd == "get_state":
             self._handle_get_state(conn, request)
         elif cmd == "release":
             self._handle_release(conn)
@@ -247,12 +249,12 @@ class WeightCacheDaemon:
 
     def _handle_get_state(self, conn: socket.socket, request: dict) -> None:
         client_config = request.get("cache_config")
-        if not isinstance(client_config, CacheConfig):
+        if not isinstance(client_config, WeightCacheKey):
             send_msg(conn, {"status": "error", "message": "Missing cache_config"})
             return
         mismatched = self.cache_config.mismatched_fields(client_config)
         if mismatched:
-            logger.warning("CacheConfig mismatch on fields: %s", mismatched)
+            logger.warning("WeightCacheKey mismatch on fields: %s", mismatched)
             send_msg(conn, {"status": "mismatch", "fields": mismatched})
             return
         if not self.entries:
@@ -267,33 +269,55 @@ class WeightCacheDaemon:
                 "gpu_uuid": self._gpu_uuid(),
             },
         )
+        logger.info_once(
+            "Weight cache daemon rank %d sent %d tensors (+%d aliases) to engine",
+            self.tp_rank,
+            len(self.entries),
+            len(self.aliases),
+        )
 
     def _handle_release(self, conn: socket.socket) -> None:
         self.entries.clear()
         self.aliases.clear()
         self.model = None
-        torch.cuda.empty_cache()
-        logger.info("Weight cache daemon rank %d released cached weights", self.tp_rank)
+        torch.accelerator.empty_cache()
+        logger.info("Weight cache daemon rank %d released cached weights", self.global_rank)
         send_msg(conn, {"status": "ok"})
 
     def _gpu_uuid(self) -> str:
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        props = torch.cuda.get_device_properties(
+            torch.accelerator.current_device_index()
+        )
         return str(props.uuid)
 
 
 def _run_daemon(
-    tp_rank: int,
+    global_rank: int,
+    local_rank: int,
     vllm_config: VllmConfig,
     distributed_init_method: str,
     socket_dir: str | None,
     ready_queue: "multiprocessing.Queue[int]",
-    load_gate: AbstractContextManager | None = None,
 ) -> None:
     daemon = WeightCacheDaemon(
-        vllm_config, tp_rank, distributed_init_method, socket_dir
+        vllm_config, global_rank, local_rank, distributed_init_method, socket_dir
     )
-    daemon.load_model(load_gate)
-    daemon.serve_forever(ready_callback=lambda: ready_queue.put(tp_rank))
+    daemon.load_model()
+    daemon.serve_forever(ready_callback=lambda: ready_queue.put(global_rank))
+
+
+def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
+    """Reject parallelism modes other than tensor/pipeline parallelism."""
+    unsupported = {
+        "data parallelism": parallel_config.data_parallel_size > 1,
+        "expert parallelism": parallel_config.enable_expert_parallel,
+    }
+    for name, enabled in unsupported.items():
+        if enabled:
+            raise ValueError(
+                f"The weight cache daemon only supports tensor and pipeline "
+                f"parallelism; {name} is not supported"
+            )
 
 
 def main() -> None:
@@ -302,7 +326,7 @@ def main() -> None:
     from vllm.utils.network_utils import get_distributed_init_method, get_open_port
 
     parser = FlexibleArgumentParser(
-        description="Launch weight cache daemons (one per TP rank)."
+        description="Launch weight cache daemons (one per TP/PP rank)."
     )
     EngineArgs.add_cli_args(parser)
     parser.add_argument(
@@ -321,24 +345,13 @@ def main() -> None:
         )
     # Checked before loading anything: an unsupported quantization method would
     # otherwise only surface in the engine, after a full load.
+    check_ipc_platform_support(where="daemon")
     check_ipc_quant_support(vllm_config.model_config, where="daemon")
     parallel_config = vllm_config.parallel_config
-    if parallel_config.pipeline_parallel_size > 1:
-        raise ValueError(
-            "The weight cache daemon only supports tensor parallelism; "
-            "pipeline parallelism is not supported"
-        )
-    if parallel_config.data_parallel_size > 1:
-        raise ValueError(
-            "The weight cache daemon only supports tensor parallelism; "
-            "data parallelism is not supported"
-        )
-    if getattr(parallel_config, "enable_expert_parallel", False):
-        raise ValueError(
-            "The weight cache daemon only supports tensor parallelism; "
-            "expert parallelism is not supported"
-        )
+    _reject_unsupported_parallelism(parallel_config)
     tp_size = parallel_config.tensor_parallel_size
+    pp_size = parallel_config.pipeline_parallel_size
+    world_size = tp_size * pp_size
 
     distributed_init_method = get_distributed_init_method("127.0.0.1", get_open_port())
     ctx = multiprocessing.get_context("spawn")
@@ -348,6 +361,7 @@ def main() -> None:
             target=_run_daemon,
             args=(
                 rank,
+                rank,
                 vllm_config,
                 distributed_init_method,
                 args.weight_cache_socket_dir,
@@ -355,7 +369,7 @@ def main() -> None:
             ),
             name=f"vllm-weight-cache-daemon-{rank}",
         )
-        for rank in range(tp_size)
+        for rank in range(world_size)
     ]
     for proc in procs:
         proc.start()
@@ -368,7 +382,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _shutdown)
 
     ready_ranks: set[int] = set()
-    while len(ready_ranks) < tp_size:
+    while len(ready_ranks) < world_size:
         try:
             ready_ranks.add(ready_queue.get(timeout=1.0))
         except queue.Empty:
@@ -385,15 +399,10 @@ def main() -> None:
                     proc.join()
                 sys.exit(max((p.exitcode or 0) for p in procs))
     logger.info(
-        "===== Weight cache daemon READY: all %d ranks serving in %s =====",
-        tp_size,
+        "Weight cache daemon ready: all %d ranks serving in %s",
+        world_size,
         args.weight_cache_socket_dir or "the default socket dir",
     )
-    _report_ready(
-        f"===== Weight cache daemon READY: all {tp_size} rank(s) serving in "
-        f"{args.weight_cache_socket_dir or 'the default socket dir'} ====="
-    )
-
     for proc in procs:
         proc.join()
     sys.exit(max(proc.exitcode or 0 for proc in procs))

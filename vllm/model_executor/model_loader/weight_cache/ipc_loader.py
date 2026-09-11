@@ -25,6 +25,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     UnsupportedQuantForIPCError,
     WeightCacheKey,
     WeightCacheUnavailableError,
+    check_ipc_platform_support,
     check_ipc_quant_support,
     get_physical_device_id,
     get_socket_path,
@@ -198,6 +199,7 @@ class IpcModelLoader(BaseModelLoader):
 
     @staticmethod
     def _check_supported(vllm_config: VllmConfig, model_config: ModelConfig) -> None:
+        check_ipc_platform_support(where="engine")
         check_ipc_quant_support(model_config, where="engine")
         cache_dtype = vllm_config.cache_config.cache_dtype
         if cache_dtype != "auto" and not str(cache_dtype).startswith("fp8"):
