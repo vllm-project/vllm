@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use super::DeepSeekV41ChatRenderer;
 use crate::ChatRenderer;
-use crate::event::AssistantContentBlock;
+use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ReasoningEffort};
 
@@ -81,6 +81,80 @@ fn inlines_image_placeholder_at_image_part_positions() {
         rendered.contains("<｜User｜><｜deepseek_image｜>\n\nwhat is in the image?"),
         "unexpected prompt: {rendered:?}"
     );
+}
+
+#[test]
+fn media_order_follows_reordered_tool_results() {
+    let renderer = DeepSeekV41ChatRenderer::new();
+    let request = ChatRequest {
+        messages: vec![
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::ToolCall(AssistantToolCall {
+                    id: "call-a".to_string(),
+                    name: "tool-a".to_string(),
+                    arguments: "{}".to_string(),
+                }),
+                AssistantContentBlock::ToolCall(AssistantToolCall {
+                    id: "call-b".to_string(),
+                    name: "tool-b".to_string(),
+                    arguments: "{}".to_string(),
+                }),
+            ]),
+            ChatMessage::tool_response(
+                vec![ChatContentPart::text("result-b"), image_part("image-b")],
+                "call-b",
+            ),
+            ChatMessage::tool_response(
+                vec![ChatContentPart::text("result-a"), image_part("image-a")],
+                "call-a",
+            ),
+        ],
+        ..ChatRequest::for_test()
+    };
+
+    let (rendered, media_order) = renderer.render_with_media_order(&request).unwrap();
+    let prompt = rendered.prompt.into_text().unwrap();
+
+    assert!(prompt.find("result-a").unwrap() < prompt.find("result-b").unwrap());
+    expect![[r#"
+        [
+            MediaPartSource {
+                message_index: 2,
+                content_part_index: 1,
+            },
+            MediaPartSource {
+                message_index: 1,
+                content_part_index: 1,
+            },
+        ]
+    "#]]
+    .assert_debug_eq(&media_order);
+}
+
+#[test]
+fn media_order_excludes_dropped_historical_developer_content() {
+    let renderer = DeepSeekV41ChatRenderer::new();
+    let request = ChatRequest {
+        messages: vec![
+            ChatMessage::developer(vec![image_part("historical-image")], None),
+            ChatMessage::user("question"),
+        ],
+        ..ChatRequest::for_test()
+    };
+
+    let (rendered, media_order) = renderer.render_with_media_order(&request).unwrap();
+    let prompt = rendered.prompt.into_text().unwrap();
+
+    assert!(!prompt.contains("<｜deepseek_image｜>"));
+    assert!(media_order.is_empty());
+}
+
+fn image_part(uuid: &str) -> ChatContentPart {
+    ChatContentPart::ImageUrl {
+        image_url: format!("data:image/png;base64,{uuid}"),
+        detail: None,
+        uuid: Some(uuid.to_string()),
+    }
 }
 
 #[test]

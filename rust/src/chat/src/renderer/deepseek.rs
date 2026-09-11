@@ -16,6 +16,7 @@ use serde_json_fmt::JsonFormat;
 
 use llm_multimodal::DEEPSEEK_V41_IMAGE_PLACEHOLDER;
 
+use super::MediaPartSource;
 use crate::error::{Error, Result};
 use crate::request::{
     ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool, ReasoningEffort,
@@ -87,6 +88,14 @@ struct RenderedToolSchema<'a> {
 
 /// Render one chat request into the final prompt string.
 pub(super) fn render_request(request: &ChatRequest, dialect: DsDialect) -> Result<String> {
+    render_request_with_media_order(request, dialect).map(|(prompt, _)| prompt)
+}
+
+/// Render one chat request and record media in placeholder order.
+pub(super) fn render_request_with_media_order(
+    request: &ChatRequest,
+    dialect: DsDialect,
+) -> Result<(String, Vec<MediaPartSource>)> {
     let (thinking_mode, reasoning_effort_prompt) = match dialect {
         DsDialect::V4 => {
             resolve_thinking_options(request).map(|(mode, prompt)| (mode, Cow::Borrowed(prompt)))?
@@ -112,6 +121,7 @@ pub(super) fn render_request(request: &ChatRequest, dialect: DsDialect) -> Resul
         dialect,
     );
     let mut out = String::from(BOS_TOKEN);
+    let mut media_order = Vec::new();
     if dialect == DsDialect::V41
         && (thinking_mode == ThinkingMode::Thinking
             || synthetic_tool_system
@@ -126,7 +136,7 @@ pub(super) fn render_request(request: &ChatRequest, dialect: DsDialect) -> Resul
     let mut request_tools_attached = false;
     let mut render_index = 0isize;
     if synthetic_tool_system {
-        render_system_message(&mut out, None, request_tools, dialect)?;
+        render_system_message(&mut out, None, request_tools, dialect, &mut media_order)?;
         request_tools_attached = true;
         render_index += 1;
     }
@@ -157,14 +167,22 @@ pub(super) fn render_request(request: &ChatRequest, dialect: DsDialect) -> Resul
                 } else {
                     &[]
                 };
-                render_system_message(&mut out, Some(content), tools, dialect)?;
+                render_system_message(
+                    &mut out,
+                    Some((message_index, content)),
+                    tools,
+                    dialect,
+                    &mut media_order,
+                )?;
             }
             ChatMessage::Developer { content, tools } => {
                 render_developer_message(
                     &mut out,
+                    message_index,
                     content,
                     tools.as_deref().unwrap_or(&[]),
                     dialect,
+                    &mut media_order,
                 )?;
             }
             ChatMessage::User { .. } | ChatMessage::ToolResponse { .. } => {
@@ -174,6 +192,7 @@ pub(super) fn render_request(request: &ChatRequest, dialect: DsDialect) -> Resul
                     message_index,
                     &last_tool_call_order,
                     dialect,
+                    &mut media_order,
                 )?;
             }
             ChatMessage::Assistant { content } => {
@@ -223,7 +242,7 @@ pub(super) fn render_request(request: &ChatRequest, dialect: DsDialect) -> Resul
         }
     }
 
-    Ok(out)
+    Ok((out, media_order))
 }
 
 /// Resolve DeepSeek V4's thinking controls. Unlike the Python tokenizer
@@ -488,12 +507,13 @@ fn render_tool_schema(out: &mut String, tool: &ChatTool) -> Result<()> {
 /// Render a system turn, optionally followed by the V4 tool preamble.
 fn render_system_message(
     out: &mut String,
-    content: Option<&ChatContent>,
+    content: Option<(usize, &ChatContent)>,
     tools: &[ChatTool],
     dialect: DsDialect,
+    media_order: &mut Vec<MediaPartSource>,
 ) -> Result<()> {
-    if let Some(content) = content {
-        write_chat_content(out, content, dialect)?;
+    if let Some((message_index, content)) = content {
+        write_chat_content(out, content, dialect, message_index, media_order)?;
     }
     if !tools.is_empty() {
         out.push_str("\n\n");
@@ -505,9 +525,11 @@ fn render_system_message(
 /// Developer messages are rendered as user-like turns with optional tools.
 fn render_developer_message(
     out: &mut String,
+    message_index: usize,
     content: &ChatContent,
     tools: &[ChatTool],
     dialect: DsDialect,
+    media_order: &mut Vec<MediaPartSource>,
 ) -> Result<()> {
     if content.is_empty() {
         return Err(Error::ChatTemplate(
@@ -516,7 +538,7 @@ fn render_developer_message(
     }
 
     out.push_str(USER_SP_TOKEN);
-    write_chat_content(out, content, dialect)?;
+    write_chat_content(out, content, dialect, message_index, media_order)?;
     if !tools.is_empty() {
         out.push_str("\n\n");
         render_tools(out, tools, dialect)?;
@@ -531,6 +553,7 @@ fn render_user_content_block(
     message_index: usize,
     tool_call_order: &HashMap<String, usize>,
     dialect: DsDialect,
+    media_order: &mut Vec<MediaPartSource>,
 ) -> Result<()> {
     let (block_start, block_end) = user_content_block_bounds(messages, message_index);
     let mut sorted_tool_indices =
@@ -542,7 +565,9 @@ fn render_user_content_block(
             out.push_str("\n\n");
         }
         match &messages[message_index] {
-            ChatMessage::User { content } => write_chat_content(out, content, dialect)?,
+            ChatMessage::User { content } => {
+                write_chat_content(out, content, dialect, message_index, media_order)?;
+            }
             ChatMessage::ToolResponse { .. } => {
                 let sorted_index = sorted_tool_indices
                     .next()
@@ -550,7 +575,7 @@ fn render_user_content_block(
                 let ChatMessage::ToolResponse { content, .. } = &messages[sorted_index] else {
                     unreachable!("sorted tool response index should reference a tool message");
                 };
-                write_tool_result(out, content, dialect)?;
+                write_tool_result(out, content, dialect, sorted_index, media_order)?;
             }
             _ => unreachable!("user content block should only contain user content messages"),
         }
@@ -597,9 +622,15 @@ fn sorted_tool_response_indices(
 }
 
 /// Render one tool response payload inside a V4 `<tool_result>` block.
-fn write_tool_result(out: &mut String, content: &ChatContent, dialect: DsDialect) -> Result<()> {
+fn write_tool_result(
+    out: &mut String,
+    content: &ChatContent,
+    dialect: DsDialect,
+    message_index: usize,
+    media_order: &mut Vec<MediaPartSource>,
+) -> Result<()> {
     out.push_str("<tool_result>");
-    write_chat_content(out, content, dialect)?;
+    write_chat_content(out, content, dialect, message_index, media_order)?;
     out.push_str("</tool_result>");
     Ok(())
 }
@@ -728,7 +759,13 @@ fn encode_arguments_to_dsml(
 /// The V4.1 dialect inlines the image placeholder at each image part's
 /// position unconditionally (matching the Python encoding's
 /// `IMAGE_PLACEHOLDER`); other dialects reject multimodal parts.
-fn write_chat_content(out: &mut String, content: &ChatContent, dialect: DsDialect) -> Result<()> {
+fn write_chat_content(
+    out: &mut String,
+    content: &ChatContent,
+    dialect: DsDialect,
+    message_index: usize,
+    media_order: &mut Vec<MediaPartSource>,
+) -> Result<()> {
     match content {
         ChatContent::Text(text) => out.push_str(text),
         ChatContent::Parts(parts) => {
@@ -739,6 +776,7 @@ fn write_chat_content(out: &mut String, content: &ChatContent, dialect: DsDialec
                 match part {
                     ChatContentPart::ImageUrl { .. } if dialect == DsDialect::V41 => {
                         out.push_str(DEEPSEEK_V41_IMAGE_PLACEHOLDER);
+                        media_order.push(MediaPartSource::new(message_index, index));
                     }
                     _ => out.push_str(part.as_text()?),
                 }

@@ -34,8 +34,8 @@ pub use parser::{ParserSelection, validate_parser_overrides};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
     ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer,
-    DynChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, RenderedPrompt,
-    RendererSelection,
+    DynChatRenderer, HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, MediaPartSource,
+    RenderedPrompt, RendererSelection,
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
@@ -111,18 +111,20 @@ impl ChatRequestProcessor {
         &self,
         request: &ChatRequest,
         rendered: RenderedPrompt,
+        media_order: Vec<MediaPartSource>,
     ) -> Result<(Prompt, Option<MmFeatures>)> {
         match self.model_dtype {
             Some(model_dtype) => {
                 multimodal::finalize_rendered_prompt(
                     request,
                     rendered,
+                    media_order,
                     self.backend.multimodal_model_info(),
                     model_dtype,
                 )
                 .await
             }
-            None if !request.has_multimodal() => Ok((rendered.prompt, None)),
+            None if media_order.is_empty() => Ok((rendered.prompt, None)),
             None => Err(Error::UnsupportedMultimodalRenderer),
         }
     }
@@ -148,7 +150,8 @@ impl ChatRequestProcessor {
     async fn prepare_text_request(&self, request: ChatRequest) -> Result<TextRequest> {
         // Stamp before rendering so render and tokenize count toward TTFT/e2e.
         let arrival_time = vllm_llm::current_unix_timestamp_secs();
-        let rendered = self.backend.chat_renderer().render(&request)?;
+        let (rendered, media_order) =
+            self.backend.chat_renderer().render_with_media_order(&request)?;
         let reasoning_parser_kwargs =
             request
                 .sampling_params
@@ -157,7 +160,8 @@ impl ChatRequestProcessor {
                 .then(|| ReasoningParserKwargs {
                     chat_template_kwargs: rendered.effective_template_kwargs.clone(),
                 });
-        let (prompt, mm_features) = self.finalize_rendered_prompt(&request, rendered).await?;
+        let (prompt, mm_features) =
+            self.finalize_rendered_prompt(&request, rendered, media_order).await?;
         Ok(TextRequest {
             request_id: request.request_id,
             prompt,
