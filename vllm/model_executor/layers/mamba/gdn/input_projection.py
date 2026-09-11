@@ -5,6 +5,8 @@ from functools import cache
 
 import torch
 
+from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
+
 
 @cache
 def _resources(device: torch.device, parent_stream: int):
@@ -12,11 +14,12 @@ def _resources(device: torch.device, parent_stream: int):
 
     with torch.accelerator.device_index(device.index):
         stream = torch.cuda.Stream()
+        events = (torch.cuda.Event(), torch.cuda.Event())
         workspaces = [
             torch.empty(DEFAULT_WORKSPACE_SIZE, dtype=torch.uint8, device=device)
             for _ in range(2)
         ]
-    return stream, workspaces
+    return stream, events, workspaces
 
 
 @torch.library.custom_op("vllm::gdn_input_gemms", mutates_args=(), device_types="cuda")
@@ -34,25 +37,24 @@ def gdn_input_gemms(
     from flashinfer.gemm.gemm_base import fp8_gemm_sm100
 
     parent = torch.cuda.current_stream(x.device)
-    side, workspaces = _resources(x.device, parent.cuda_stream)
+    side, events, workspaces = _resources(x.device, parent.cuda_stream)
     qkvz = torch.empty(
         (x.shape[0], qkvz_weight.shape[1]), dtype=torch.bfloat16, device=x.device
     )
     ba = torch.empty(
         (x.shape[0], ba_weight.shape[1]), dtype=torch.bfloat16, device=x.device
     )
-    side.wait_stream(parent)
-    fp8_gemm_sm100(
-        x.unsqueeze(0),
-        qkvz_weight.unsqueeze(0),
-        input_scale,
-        qkvz_scale,
-        qkvz.unsqueeze(0),
-        workspaces[0],
-        ["cublas"],
-    )
-    with torch.cuda.stream(side):
-        fp8_gemm_sm100(
+    maybe_execute_in_parallel(
+        lambda: fp8_gemm_sm100(
+            x.unsqueeze(0),
+            qkvz_weight.unsqueeze(0),
+            input_scale,
+            qkvz_scale,
+            qkvz.unsqueeze(0),
+            workspaces[0],
+            ["cublas"],
+        ),
+        lambda: fp8_gemm_sm100(
             x.unsqueeze(0),
             ba_weight.unsqueeze(0),
             input_scale,
@@ -60,8 +62,11 @@ def gdn_input_gemms(
             ba.unsqueeze(0),
             workspaces[1],
             ["cublas"],
-        )
-    parent.wait_stream(side)
+        ),
+        events[0],
+        events[1],
+        side,
+    )
     return qkvz, ba
 
 

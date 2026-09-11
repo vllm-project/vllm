@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 from vllm.model_executor.layers.mamba.gdn.input_projection import gdn_input_gemms
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm
@@ -74,11 +75,14 @@ def test_flashinfer_fp8_gemm(
     torch.testing.assert_close(out, expected_out, atol=1e-2, rtol=1e-2)
 
 
-@pytest.mark.parametrize("m", [1, 2, 4, 8, 16, 32, 64, 128, 256])
+@pytest.mark.parametrize(
+    "m, breakable",
+    [(m, False) for m in [1, 2, 4, 8, 16, 32, 64, 128, 256]] + [(8, True)],
+)
 @pytest.mark.parametrize("scalar_shape", [(), (1,)])
 @torch.inference_mode()
-def test_gdn_concurrent_fp8_pair_graph_replay(m, scalar_shape):
-    """Check independent weight scales, stream joins, and scratch reuse."""
+def test_gdn_concurrent_fp8_pair_graph_replay(m, breakable, scalar_shape):
+    """Check scratch reuse and replay with concurrent and breakable captures."""
     device = "cuda:0"
     set_random_seed(42)
     x = torch.randn(m, 512, device=device).to(torch.float8_e4m3fn)
@@ -97,8 +101,9 @@ def test_gdn_concurrent_fp8_pair_graph_replay(m, scalar_shape):
         gdn_input_gemms(*args)
     torch.accelerator.synchronize()
 
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph, stream=stream):
+    graph = BreakableCUDAGraphCapture() if breakable else torch.cuda.CUDAGraph()
+    capture = graph if breakable else torch.cuda.graph(graph, stream=stream)
+    with torch.cuda.stream(stream), capture:
         first = gdn_input_gemms(*args)
         second = gdn_input_gemms(*args)
 
