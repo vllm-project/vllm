@@ -63,7 +63,6 @@ def _make_async_llm(
         max_num_queued_reqs=max_num_queued_reqs,
         max_num_queued_tokens=max_num_queued_tokens,
     )
-    llm._admission_lock = asyncio.Lock()
     llm.output_processor = MagicMock()
     llm.output_processor.get_num_unfinished_requests.return_value = num_unfinished
     llm.output_processor.get_num_queued_tokens.return_value = num_queued_tokens
@@ -291,7 +290,7 @@ async def test_concurrent_single_request_admission_respects_limit():
     ]
     results = await asyncio.gather(
         *(
-            llm._enqueue_request(request, None, None, 0, MagicMock())
+            llm._add_request(request, None, None, 0, MagicMock())
             for request in requests
         ),
         return_exceptions=True,
@@ -387,7 +386,6 @@ def test_human_readable_int_rejects_invalid(invalid: str):
 
 def _make_scaling_llm() -> AsyncLLM:
     llm = AsyncLLM.__new__(AsyncLLM)
-    llm._admission_lock = asyncio.Lock()
     llm.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(data_parallel_size=2),
         use_v2_model_runner=True,
@@ -404,7 +402,7 @@ def _make_scaling_llm() -> AsyncLLM:
 
 
 @pytest.mark.asyncio
-async def test_enqueue_rechecks_admission_after_middleware_passes():
+async def test_add_request_rechecks_admission_after_middleware_passes():
     llm = _make_async_llm()
     llm.output_processor.has_request.return_value = False
     llm.engine_core = SimpleNamespace(
@@ -421,7 +419,7 @@ async def test_enqueue_rechecks_admission_after_middleware_passes():
     set_scaling_elastic_ep(True)
     try:
         with pytest.raises(GracefulHTTPError) as exc_info:
-            await llm._enqueue_request(request, None, None, 0, MagicMock())
+            await llm._add_request(request, None, None, 0, MagicMock())
         assert exc_info.value.http_status == HTTPStatus.SERVICE_UNAVAILABLE
         llm.engine_core.add_request_async.assert_not_awaited()
     finally:
@@ -429,7 +427,7 @@ async def test_enqueue_rechecks_admission_after_middleware_passes():
 
 
 @pytest.mark.asyncio
-async def test_existing_request_can_enqueue_after_admission_closes():
+async def test_existing_request_can_add_after_admission_closes():
     llm = _make_async_llm()
     llm.output_processor.has_request.return_value = True
     llm.engine_core = SimpleNamespace(
@@ -444,7 +442,7 @@ async def test_existing_request_can_enqueue_after_admission_closes():
 
     set_scaling_elastic_ep(True)
     try:
-        await llm._enqueue_request(request, None, None, 0, MagicMock())
+        await llm._add_request(request, None, None, 0, MagicMock())
         llm.engine_core.add_request_async.assert_awaited_once_with(request)
     finally:
         set_scaling_elastic_ep(False)
@@ -493,57 +491,54 @@ async def test_drain_waits_for_frontend_streaming_request(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_scaling_waits_for_inflight_admission():
-    llm = _make_scaling_llm()
-    llm.scheduler_config = SimpleNamespace(
-        max_num_queued_reqs=None,
-        max_num_queued_tokens=None,
+async def test_parallel_sampling_registers_all_children_before_first_send(
+    monkeypatch,
+):
+    """A drain that starts mid fan-out must see every child of the parent."""
+    llm = _make_async_llm()
+    llm.output_handler = None
+    llm.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False)
     )
-    llm.output_processor = MagicMock()
-    llm.output_processor.has_request.return_value = False
-    enqueue_started = asyncio.Event()
-    release_enqueue = asyncio.Event()
-    prepare_finished = asyncio.Event()
+    llm.model_config = MagicMock()
+    llm.log_requests = False
+    llm._run_output_handler = MagicMock()
+    llm.get_supported_tasks = AsyncMock(return_value=())
+    params = SamplingParams(n=3)
+    request = SimpleNamespace(
+        request_id="parent",
+        external_req_id="parent",
+        params=params,
+        sampling_params=params,
+    )
+    llm.input_processor = MagicMock()
+    llm.input_processor.process_inputs_async = AsyncMock(return_value=request)
+    monkeypatch.setattr(
+        "vllm.v1.engine.async_llm.extract_prompt_components",
+        lambda *_: ("hi", None, None),
+    )
+    first_send_started = asyncio.Event()
+    release_first_send = asyncio.Event()
 
     async def add_request_async(_request):
-        enqueue_started.set()
-        await release_enqueue.wait()
+        first_send_started.set()
+        await release_first_send.wait()
 
-    async def prepare(_: int):
-        prepare_finished.set()
-
-    llm.engine_core.add_request_async = AsyncMock(side_effect=add_request_async)
-    llm.engine_core.prepare_elastic_ep = AsyncMock(side_effect=prepare)
-    llm._drain_requests_for_elastic_ep = AsyncMock()
-    llm.log_requests = False
-    request = SimpleNamespace(request_id="in-flight")
-
-    from vllm.entrypoints.serve.elastic_ep.middleware import (
-        get_scaling_elastic_ep,
-        set_scaling_elastic_ep,
+    llm.engine_core = SimpleNamespace(
+        resources=SimpleNamespace(engine_dead=False),
+        add_request_async=AsyncMock(side_effect=add_request_async),
+        shutdown=MagicMock(),
     )
 
-    set_scaling_elastic_ep(False)
-    enqueue_task = asyncio.create_task(
-        llm._enqueue_request(request, None, None, 0, MagicMock())
-    )
-    scaling_task = asyncio.create_task(llm._scale_elastic_ep(4, 30))
+    add_task = asyncio.create_task(llm.add_request("parent", "hi", params))
     try:
-        await enqueue_started.wait()
-        await prepare_finished.wait()
-        await asyncio.sleep(0)
-        assert not get_scaling_elastic_ep()
-
-        release_enqueue.set()
-        await enqueue_task
-        await scaling_task
-        assert get_scaling_elastic_ep() is False
-        llm._drain_requests_for_elastic_ep.assert_awaited_once_with(30)
+        await first_send_started.wait()
+        assert llm.output_processor.add_request.call_count == 3
+        assert llm.engine_core.add_request_async.await_count == 1
     finally:
-        set_scaling_elastic_ep(False)
-        if not enqueue_task.done():
-            release_enqueue.set()
-        await asyncio.gather(enqueue_task, scaling_task, return_exceptions=True)
+        release_first_send.set()
+        await add_task
+    assert llm.engine_core.add_request_async.await_count == 3
 
 
 @pytest.mark.asyncio

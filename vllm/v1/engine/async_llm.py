@@ -121,7 +121,6 @@ class AsyncLLM(EngineClient):
 
         self.vllm_config = vllm_config
         self._elastic_ep_lock = asyncio.Lock()
-        self._admission_lock = asyncio.Lock()
         self.model_config = vllm_config.model_config
         self.scheduler_config = vllm_config.scheduler_config
         self.observability_config = vllm_config.observability_config
@@ -490,7 +489,7 @@ class AsyncLLM(EngineClient):
         params = request.params
 
         if is_pooling or params.n == 1:
-            await self._enqueue_request(request, prompt_text, None, 0, queue)
+            await self._add_request(request, prompt_text, None, 0, queue)
             return queue
 
         parent_params = params
@@ -498,32 +497,23 @@ class AsyncLLM(EngineClient):
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request)
-        async with self._admission_lock:
-            self.check_admission(parent_params.n, request.request_id)
-            for idx in range(parent_params.n):
-                request_id, child_params = parent_request.get_child_info(idx)
-                child_request = request if idx == parent_params.n - 1 else copy(request)
-                child_request.request_id = request_id
-                child_request.sampling_params = child_params
-                await self._add_request(
-                    child_request, prompt_text, parent_request, idx, queue
-                )
+        self._check_elastic_ep_admission(request.request_id)
+        child_requests = []
+        for idx in range(parent_params.n):
+            request_id, child_params = parent_request.get_child_info(idx)
+            child_request = request if idx == parent_params.n - 1 else copy(request)
+            child_request.request_id = request_id
+            child_request.sampling_params = child_params
+            # Register every child before the first await so a drain sees all of them.
+            self.output_processor.add_request(
+                child_request, prompt_text, parent_request, idx, queue
+            )
+            child_requests.append(child_request)
+        for child_request in child_requests:
+            await self.engine_core.add_request_async(child_request)
+            if self.log_requests:
+                logger.info("Added request %s.", child_request.request_id)
         return queue
-
-    async def _enqueue_request(
-        self,
-        request: EngineCoreRequest,
-        prompt: str | None,
-        parent_req: ParentRequest | None,
-        index: int,
-        queue: RequestOutputCollector,
-    ) -> None:
-        async with self._admission_lock:
-            if parent_req is None and not self.output_processor.has_request(
-                request.request_id
-            ):
-                self.check_admission(request_id=request.request_id)
-            await self._add_request(request, prompt, parent_req, index, queue)
 
     async def _add_request(
         self,
@@ -533,6 +523,11 @@ class AsyncLLM(EngineClient):
         index: int,
         queue: RequestOutputCollector,
     ):
+        if parent_req is None and not self.output_processor.has_request(
+            request.request_id
+        ):
+            self.check_admission(request_id=request.request_id)
+
         # Register locally before the first await so concurrent tasks see this request.
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
@@ -610,7 +605,7 @@ class AsyncLLM(EngineClient):
                     prompt_text, _, _ = extract_prompt_components(
                         self.model_config, input_chunk.prompt
                     )
-                    await self._enqueue_request(req, prompt_text, None, 0, queue)
+                    await self._add_request(req, prompt_text, None, 0, queue)
             except (asyncio.CancelledError, GeneratorExit):
                 cancelled = True
             except Exception as error:
@@ -622,7 +617,7 @@ class AsyncLLM(EngineClient):
                 if not cancelled:
                     # Send empty final request to indicate that inputs have
                     # finished. Don't send if cancelled (session was aborted).
-                    await self._enqueue_request(final_req, None, None, 0, queue)
+                    await self._add_request(final_req, None, None, 0, queue)
 
         # Ensure output handler is running.
         self._run_output_handler()
@@ -1143,11 +1138,8 @@ class AsyncLLM(EngineClient):
         """Wait for all requests to be drained."""
         start_time = time.time()
         while time.time() - start_time < drain_timeout:
-            async with self._admission_lock:
-                dp_engines_running = self.engine_core.dp_engines_running()
-                has_unfinished_requests = (
-                    self.output_processor.has_unfinished_requests()
-                )
+            dp_engines_running = self.engine_core.dp_engines_running()
+            has_unfinished_requests = self.output_processor.has_unfinished_requests()
             if not dp_engines_running and not has_unfinished_requests:
                 logger.info("Engines are idle, requests have been drained")
                 return
@@ -1192,6 +1184,7 @@ class AsyncLLM(EngineClient):
             return
 
         await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
+
         # recreate stat loggers
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
             # TODO(rob): fix this after talking with Ray team.
@@ -1209,9 +1202,7 @@ class AsyncLLM(EngineClient):
                 self._logger_ref[0] = self.logger_manager
             self.logger_manager.log_engine_initialized()
 
-        async with self._admission_lock:
-            set_scaling_elastic_ep(True)
-
+        set_scaling_elastic_ep(True)
         if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS or self.vllm_config.use_v2_model_runner:
             await self._drain_requests_for_elastic_ep(drain_timeout)
 
