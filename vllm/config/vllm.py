@@ -1239,11 +1239,6 @@ class VllmConfig:
                     "PD with decode_context_parallel_size > 1 is only "
                     "supported for MLA models."
                 )
-                assert not (self.model_config.is_hybrid and dcp_size > 1), (
-                    "PD with decode_context_parallel_size > 1 is not "
-                    "supported for hybrid Mamba/SSM models."
-                )
-
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
 
@@ -2676,10 +2671,6 @@ class VllmConfig:
         ):
             unsupported.append("custom logits processors")
 
-        if self.cache_config.kv_sharing_fast_prefill:
-            # Will be added by https://github.com/vllm-project/vllm/pull/35045
-            unsupported.append("KV sharing fast prefill")
-
         if self.cache_config.mamba_cache_mode == "all":
             unsupported.append("mamba cache mode 'all'")
 
@@ -2888,6 +2879,8 @@ class VllmConfig:
         if self.kv_transfer_config is None or not self.kv_transfer_config.has_connector(
             "NixlConnector"
         ):
+            return
+        if not self.parallel_config._allow_auto_resolve_cp_interleave_size:
             return
 
         # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid

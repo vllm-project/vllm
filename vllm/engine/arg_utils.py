@@ -487,7 +487,7 @@ class EngineArgs:
     dcp_comm_backend: DCPCommBackend | None = ParallelConfig.dcp_comm_backend
     dcp_q_replicate: bool | None = ParallelConfig.dcp_q_replicate
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
-    cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
+    cp_kv_cache_interleave_size: int | None = None
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: int | None = None
     data_parallel_start_rank: int | None = None
@@ -778,9 +778,9 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
-    kda_prefill_backend: Literal["auto", "triton", "flashkda", "flashinfer"] | None = (
-        None
-    )
+    kda_prefill_backend: (
+        Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
+    ) = None
     kda_decode_backend: Literal["auto", "native", "flashinfer", "triton"] | None = None
 
     def __post_init__(self):
@@ -1104,7 +1104,10 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--cp-kv-cache-interleave-size",
-            **parallel_kwargs["cp_kv_cache_interleave_size"],
+            **{
+                **parallel_kwargs["cp_kv_cache_interleave_size"],
+                "default": None,
+            },
         )
         parallel_group.add_argument(
             "--prefill-context-parallel-size",
@@ -1761,9 +1764,10 @@ class EngineArgs:
         parser.add_argument(
             "--kda-prefill-backend",
             dest="kda_prefill_backend",
-            choices=["auto", "triton", "flashkda", "flashinfer"],
+            choices=["auto", "triton", "flashkda", "flashinfer", "fused"],
             default=None,
-            help="Select KDA prefill backend.",
+            help="Select KDA prefill backend. 'flashkda' is CUDA-only and "
+            "'fused' is ROCm-only; 'auto' picks a supported backend.",
         )
         parser.add_argument(
             "--kda-decode-backend",
@@ -2363,7 +2367,14 @@ class EngineArgs:
             dcp_comm_backend=self.dcp_comm_backend,
             dcp_q_replicate=self.dcp_q_replicate,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
-            cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+            cp_kv_cache_interleave_size=(
+                self.cp_kv_cache_interleave_size
+                if self.cp_kv_cache_interleave_size is not None
+                else ParallelConfig.cp_kv_cache_interleave_size
+            ),
+            _allow_auto_resolve_cp_interleave_size=(
+                self.cp_kv_cache_interleave_size is None
+            ),
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
             assigned_physical_gpu_ids=self._resolve_device_ids(),
@@ -2598,6 +2609,17 @@ class EngineArgs:
         if self.gdn_prefill_backend is not None:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
         if self.kda_prefill_backend is not None:
+            if (
+                self.kda_prefill_backend == "flashkda"
+                and not current_platform.is_cuda()
+            ):
+                raise ValueError(
+                    "--kda-prefill-backend=flashkda is only available on CUDA."
+                )
+            if self.kda_prefill_backend == "fused" and not current_platform.is_rocm():
+                raise ValueError(
+                    "--kda-prefill-backend=fused is only available on ROCm."
+                )
             self.additional_config["kda_prefill_backend"] = self.kda_prefill_backend
         if self.kda_decode_backend is not None:
             self.additional_config["kda_decode_backend"] = self.kda_decode_backend
