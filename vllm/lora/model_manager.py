@@ -364,6 +364,7 @@ class LoRAModelManager:
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
         )
         self.lora_index_to_id[index] = lora_model.id
+        num_lora_weights_applied = 0
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
@@ -377,6 +378,7 @@ class LoRAModelManager:
                     module_lora.lora_a,
                     module_lora.lora_b,
                 )
+                num_lora_weights_applied += 1
                 logger.debug(
                     "Successfully loaded LoRA weights for module %s.", module_name
                 )
@@ -390,6 +392,14 @@ class LoRAModelManager:
                     module.set_trainable_tokens(
                         index, token_weights.token_indices, token_weights.weights
                     )
+                    num_lora_weights_applied += 1
+        if num_lora_weights_applied == 0:
+            logger.debug_once(
+                "No LoRA weights were applied for adapter %s on this worker. "
+                "Requests may use the base model; check --lora-target-modules. "
+                "This may be expected with pipeline or expert parallelism.",
+                lora_model.id,
+            )
         return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -585,16 +595,14 @@ class LoRAModelManager:
             if isinstance(module, PPMissingLayer):
                 continue
 
-            target_modules = self.lora_config.target_modules
-            is_configured_target = target_modules is not None and is_in_target_modules(
-                module_name,
-                target_modules,
-                self.packed_modules_mapping,
-            )
-            if (
-                not self._match_target_modules(module_name, module)
-                and not is_configured_target
-            ):
+            if self.lora_config.target_modules is None:
+                if not is_supported_lora_module(
+                    module_name,
+                    module,
+                    self.supported_lora_modules,
+                ):
+                    continue
+            elif not self._match_target_modules(module_name):
                 continue
 
             punica_wrapper = self._get_punica_wrapper(module_name)
@@ -741,7 +749,12 @@ class LoRAModelManager:
         model = LoRAModel(lora_id, rank, {})
         for module_name, module in self.model.named_modules():
             if (
-                not self._match_target_modules(module_name, module)
+                not is_supported_lora_module(
+                    module_name,
+                    module,
+                    self.supported_lora_modules,
+                )
+                or not self._match_target_modules(module_name)
                 or not isinstance(module, BaseLayerWithLoRA)
                 or self._get_punica_wrapper(module_name) is None
             ):
@@ -877,27 +890,16 @@ class LoRAModelManager:
             )
         return adjusted_rank
 
-    def _match_target_modules(self, module_name: str, module: nn.Module) -> bool:
-        """Check if a module should have LoRA applied.
-
-        This method first checks if the module is in vLLM's supported LoRA
-        modules, then applies deployment-time restrictions based on
-        LoRAConfig.target_modules.
+    def _match_target_modules(self, module_name: str) -> bool:
+        """Check if a module passes the deployment-time target filter.
 
         Args:
             module_name: Full dot-separated module name (e.g.,
                 "model.layers.0.self_attn.o_proj")
-            module: Runtime module associated with ``module_name``.
 
         Returns:
-            True if LoRA should be applied to this module, False otherwise.
+            True if the module passes the filter, False otherwise.
         """
-        if not is_supported_lora_module(
-            module_name,
-            module,
-            self.supported_lora_modules,
-        ):
-            return False
         return is_in_target_modules(
             module_name,
             self.lora_config.target_modules,

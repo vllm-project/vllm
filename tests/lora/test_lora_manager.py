@@ -3,6 +3,7 @@
 
 import json
 import os
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -199,8 +200,9 @@ def test_trainable_tokens_invalid_adapter_preserves_active_slot(
 
 
 @pytest.mark.parametrize("ensure_weight_tying", [False, True])
+@patch("vllm.lora.model_manager.logger.debug_once")
 def test_trainable_tokens_tied_head_and_slot_reuse(
-    default_vllm_config, dist_init, dummy_model, ensure_weight_tying
+    debug_once, default_vllm_config, dist_init, dummy_model, ensure_weight_tying
 ):
     """PEFT omits tied output rows; both wrappers must reset on ordinary reuse."""
     manager, ordinary = _trainable_tokens_manager(dummy_model, default_vllm_config)
@@ -215,6 +217,7 @@ def test_trainable_tokens_tied_head_and_slot_reuse(
     )
     manager.add_adapter(selected)
     manager.activate_adapter(selected.id)
+    debug_once.assert_not_called()
     assert (
         selected.trainable_tokens["lm_head"]
         is selected.trainable_tokens["embed_tokens"]
@@ -229,9 +232,17 @@ def test_trainable_tokens_tied_head_and_slot_reuse(
     # A full LRU cache forces the ordinary adapter to reuse the selected slot.
     manager.add_adapter(ordinary)
     manager.activate_adapter(ordinary.id)
+    debug_once.assert_not_called()
     assert manager.lora_index_to_id == [ordinary.id]
     for name in ("embed_tokens", "lm_head"):
         assert torch.all(manager.modules[name].trainable_tokens.token_ids[0] == -1)
+
+    empty = LoRAModel(3, 8, {})
+    manager.add_adapter(empty)
+    manager.activate_adapter(empty.id)
+    debug_once.assert_called_once()
+    assert "No LoRA weights were applied" in debug_once.call_args.args[0]
+    assert debug_once.call_args.args[1] == empty.id
 
 
 def test_trainable_tokens_ensure_tying_rejects_conflicting_rows(
