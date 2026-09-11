@@ -319,7 +319,9 @@ class DraftModelSpeculator(BaseSpeculator):
             ],
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
-            seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
+            # build_attn_metadata re-applies this exact bound as its first
+            # statement, so pre-slicing here only builds a throwaway view.
+            seq_lens=self.input_buffers.seq_lens,
             dcp_local_seq_lens=(
                 None
                 if dcp_local_seq_lens is None

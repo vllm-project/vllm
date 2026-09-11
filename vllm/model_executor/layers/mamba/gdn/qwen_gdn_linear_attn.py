@@ -1331,9 +1331,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         a = a[:num_actual_tokens]
 
         # 1. Convolution sequence transformation
-        conv_weights = self.conv1d.weight.view(
-            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-        )
+        w = self.conv1d.weight
+        conv_weights = w.view(w.size(0), w.size(2))
 
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
@@ -1609,9 +1608,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ssm_state = self_kv_cache[1]
 
         # 1. Convolution sequence transformation
-        conv_weights = self.conv1d.weight.view(
-            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-        )
+        w = self.conv1d.weight
+        conv_weights = w.view(w.size(0), w.size(2))
 
         mixed_qkv_non_spec, b, a = (
             gdn_aiter_fused_reshape_causal_conv1d_update_single_token(
@@ -1681,9 +1679,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
 
-        conv_weights = self.conv1d.weight.view(
-            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-        )
+        w = self.conv1d.weight
+        conv_weights = w.view(w.size(0), w.size(2))
         mixed_qkv_non_spec = causal_conv1d_update(
             mixed_qkv,
             conv_state,
@@ -1731,9 +1728,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             if is_conv_state_dim_first()
             else self.kv_cache[0].transpose(-1, -2)
         )
-        conv_weights = self.conv1d.weight.view(
-            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-        )
+        w = self.conv1d.weight
+        conv_weights = w.view(w.size(0), w.size(2))
         mixed_qkv = causal_conv1d_update(
             mixed_qkv[:num_actual_tokens],
             conv_state,
