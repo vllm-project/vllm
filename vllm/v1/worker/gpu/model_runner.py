@@ -1702,8 +1702,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.input_buffers,
                 max_query_len=batch_desc.max_query_len,
             )
-            if self.pcp_manager is not None:
-                pcp.set_replicated_pcp_schedule(input_batch)
             if not skip_attn_for_dummy_run:
                 block_tables, slot_mappings = self.prepare_dummy_attn(
                     input_batch, valid_dummy_state_slots

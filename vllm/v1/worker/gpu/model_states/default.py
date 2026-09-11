@@ -225,6 +225,7 @@ class DefaultModelState(ModelState):
             mm_req_doc_ranges=req_doc_ranges,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
+            req_idx=input_batch.idx_mapping_np,
             ubatch_idx=ubatch_idx,
             fast_prefill=input_batch.fast_prefill,
         )

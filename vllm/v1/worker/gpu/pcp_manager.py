@@ -21,38 +21,6 @@ logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
-class PCPSchedule:
-    """PCP-invariant view of the current batch, for building DCP schedules.
-
-    Every field is computed identically on every PCP rank - they all run over
-    the same ``segments_by_rank`` - so any schedule derived from this is
-    guaranteed to agree across ranks without communicating.
-    """
-
-    # [num_global_reqs] full KV extent (num_computed + total query len).
-    seq_lens_np: np.ndarray
-    # [num_global_reqs] rank-invariant UPPER BOUND on the query length of one of
-    # this request's PCP chunks: ceil(query_len / 2*pcp) for a prefill, the full
-    # query length for a decode.
-    nominal_chunk_query_lens_np: np.ndarray
-    # [num_local_rows] global request index for each of THIS rank's local rows,
-    # in local row order.
-    local_to_global_req_idx_np: np.ndarray
-
-
-_current_pcp_schedule: PCPSchedule | None = None
-
-
-def set_current_pcp_schedule(schedule: PCPSchedule | None) -> None:
-    global _current_pcp_schedule
-    _current_pcp_schedule = schedule
-
-
-def get_current_pcp_schedule() -> PCPSchedule | None:
-    return _current_pcp_schedule
-
-
-@dataclass(frozen=True)
 class RankSegment:
     global_batch_req_idx: int
     global_batch_slice: slice
@@ -187,21 +155,26 @@ class PCPManager:
                     "speculative decoding."
                 )
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+        if (
+            is_sparse_mla
+            and parallel_config.decode_context_parallel_size == 1
+            and cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            raise NotImplementedError(
+                "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
+                "Set -cc.cudagraph_mode=NONE."
+            )
         if cudagraph_mode.has_full_cudagraphs():
             raise NotImplementedError("MRV2 PCP supports PIECEWISE CUDA graphs only.")
-        if parallel_config.decode_context_parallel_size > 1:
-            if parallel_config.dcp_comm_backend != "ag_rs":
-                raise NotImplementedError(
-                    "MRV2 PCP + DCP requires dcp_comm_backend='ag_rs'; got "
-                    f"'{parallel_config.dcp_comm_backend}'."
-                )
-        else:
-            is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
-            if is_sparse_mla and cudagraph_mode != CUDAGraphMode.NONE:
-                raise NotImplementedError(
-                    "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
-                    "Set -cc.cudagraph_mode=NONE."
-                )
+        if (
+            parallel_config.decode_context_parallel_size > 1
+            and parallel_config.dcp_comm_backend != "ag_rs"
+        ):
+            raise NotImplementedError(
+                "MRV2 PCP + DCP requires dcp_comm_backend='ag_rs'; got "
+                f"'{parallel_config.dcp_comm_backend}'."
+            )
 
     @staticmethod
     def _reorder_segments(
@@ -308,29 +281,6 @@ class PCPManager:
             rank_offset += chunk_len
         return self._reorder_segments(rank_segments, is_prefilling)
 
-    @staticmethod
-    def _compute_schedule_seq_lens(
-        num_computed_tokens: np.ndarray,
-        query_start_loc_np: np.ndarray,
-    ) -> np.ndarray:
-        query_lens = np.diff(query_start_loc_np)
-        assert len(query_lens) == len(num_computed_tokens), (
-            f"query_start_loc_np implies {len(query_lens)} requests but "
-            f"num_computed_tokens has {len(num_computed_tokens)}"
-        )
-        return (num_computed_tokens + query_lens).astype(np.int32)
-
-    def _nominal_chunk_query_lens(
-        self,
-        num_scheduled_tokens: np.ndarray,
-        replicated: np.ndarray,
-    ) -> np.ndarray:
-        """Upper bound on one PCP chunk's query length."""
-        num_chunks = 2 * self.pcp_world_size
-        query_lens = np.asarray(num_scheduled_tokens, dtype=np.int64)
-        chunked = (query_lens + num_chunks - 1) // num_chunks  # ceil
-        return np.where(replicated, query_lens, chunked).astype(np.int32)
-
     def _build_batch_layout(
         self,
         num_scheduled_tokens: np.ndarray,
@@ -339,9 +289,6 @@ class PCPManager:
         query_start_loc_np: np.ndarray,
         padded_num_tokens: int | None = None,
     ) -> tuple[list[list[RankSegment]], list[int]]:
-        num_reqs = len(num_computed_tokens)
-        query_start_loc_np = query_start_loc_np[: num_reqs + 1]
-
         replicated = self.replicated_requests(num_scheduled_tokens, is_prefilling)
         segments_by_rank = []
         per_rank_num_tokens = []
@@ -355,27 +302,6 @@ class PCPManager:
             num_rank_tokens = sum(segment.num_tokens for segment in segments)
             segments_by_rank.append(segments)
             per_rank_num_tokens.append(num_rank_tokens)
-
-        schedule_seq_lens_np = self._compute_schedule_seq_lens(
-            num_computed_tokens,
-            query_start_loc_np,
-        )
-
-        local_segments = segments_by_rank[self.pcp_rank]
-        # Publish for the attention metadata builders, which run after this and
-        # must size their DCP collectives PCP-invariantly.
-        set_current_pcp_schedule(
-            PCPSchedule(
-                seq_lens_np=schedule_seq_lens_np,
-                nominal_chunk_query_lens_np=self._nominal_chunk_query_lens(
-                    num_scheduled_tokens, replicated
-                ),
-                local_to_global_req_idx_np=np.fromiter(
-                    (segment.global_batch_req_idx for segment in local_segments),
-                    dtype=np.int32,
-                ),
-            )
-        )
 
         # PCP=2 example:
         #   global batch:       [A B C D E F G]
@@ -456,8 +382,6 @@ class PCPManager:
         padded_num_tokens: int | None = None,
     ) -> InputBatch:
         assert self._input_buffers is not None
-        # Drop the previous step's schedule up front.
-        set_current_pcp_schedule(None)
         input_buffers = self._input_buffers
 
         global_batch = input_batch
@@ -629,6 +553,12 @@ class PCPManager:
         )
         seq_lens_cpu_upper_bound_np = np.zeros(num_local_reqs, dtype=np.int32)
         seq_lens_cpu_upper_bound_np[:] = local_start_pos_np + local_num_scheduled_tokens
+        if self.dcp_world_size > 1:
+            # Every PCP rank sees the whole request's extent on each of its
+            # rows, so the sparse backends size DCP collectives identically.
+            seq_lens_cpu_upper_bound_np = (num_computed_tokens + num_scheduled_tokens)[
+                local_to_global_batch_req_idx_np
+            ].astype(np.int32)
 
         self._local_batch = replace(
             input_batch,
@@ -781,19 +711,6 @@ class PCPManager:
     ) -> tuple[torch.Tensor, InputBatch]:
         assert self._global_batch is not None
         return self.restore_hidden_states(hidden_states), self._global_batch
-
-
-def set_replicated_pcp_schedule(input_batch: InputBatch) -> None:
-    """Publish a PCP schedule for a batch that is identical on every PCP rank."""
-    num_reqs = len(input_batch.num_scheduled_tokens)
-    query_lens = np.asarray(input_batch.num_scheduled_tokens, dtype=np.int32)
-    set_current_pcp_schedule(
-        PCPSchedule(
-            seq_lens_np=query_lens,
-            nominal_chunk_query_lens_np=query_lens,
-            local_to_global_req_idx_np=np.arange(num_reqs, dtype=np.int32),
-        )
-    )
 
 
 def maybe_partition_pcp_batch(
