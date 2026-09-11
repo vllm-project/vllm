@@ -147,6 +147,7 @@ from vllm.v1.worker.gpu.sample.batch_shard import (
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.serving_state import preserve_serving_state
 from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
@@ -311,6 +312,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.vocab_size,
             device=self.device,
             num_prefill_lookahead=num_prefill_lookahead,
+            num_reserved_slots=self.scheduler_config.num_reserved_warmup_seqs,
         )
         self.adaptive_verification: AdaptiveVerificationManager | None = None
         self.input_buffers = InputBuffers(
@@ -2195,6 +2197,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @eep_eplb_suppressed.setter
     def eep_eplb_suppressed(self, suppressed: bool) -> None:
         self.eplb.suppressed = suppressed
+
+    def preserve_serving_state(
+        self, *, full_pool: bool = False
+    ) -> AbstractContextManager[None]:
+        return preserve_serving_state(self, full_pool=full_pool)
+
+    def warm_up_workspace(self) -> None:
+        self._dummy_run(self.max_num_tokens, is_profile=True, skip_eplb=True)
 
     def setup_eplb_from_mapping(
         self,

@@ -82,6 +82,8 @@ class BlockTables:
             device=self.device,
         )
 
+        self.redirect_writes_to_null_block = False
+
         self.init_block_table_layout_tensors()
 
     def _make_ptr_tensor(self, x: Iterable[torch.Tensor]) -> torch.Tensor:
@@ -122,6 +124,8 @@ class BlockTables:
             bpk = self.blocks_per_kv_block[i]
             if bpk > 1:
                 block_ids = [b * bpk + k for b in block_ids for k in range(bpk)]
+            if self.redirect_writes_to_null_block:
+                block_ids = [0] * len(block_ids)
             end = start + len(block_ids)
             row_capacity = self.block_tables[i].gpu.shape[1]
             if end > row_capacity:

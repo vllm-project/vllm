@@ -759,11 +759,7 @@ class Worker(WorkerBase):
             self.model_runner._init_kv_zero_meta()
 
     @instrument(span_name="Warmup (GPU)")
-    def compile_or_warm_up_model(
-        self,
-        warmup_max_num_reqs: int | None = None,
-        warmup_null_blocks: bool = False,
-    ) -> CompilationTimes:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
@@ -805,8 +801,6 @@ class Worker(WorkerBase):
                 self.model_runner,
                 self.execute_model,
                 self.sample_tokens,
-                max_num_reqs=warmup_max_num_reqs,
-                use_null_blocks=warmup_null_blocks,
             )
 
         cuda_graph_memory_bytes = 0

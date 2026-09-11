@@ -4874,6 +4874,30 @@ class GPUModelRunner(
             self.input_batch.num_tokens_no_spec[i] = pos + 1
         self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
+    @contextmanager
+    def preserve_serving_state(self, *, full_pool: bool = False):
+        del full_pool
+        multi_block_table = self.input_batch.block_table
+        saved = [
+            (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())
+            for bt in multi_block_table.block_tables
+        ]
+        multi_block_table.clear()
+        saved_eplb_suppressed = self.eep_eplb_suppressed
+        self.eep_eplb_suppressed = True
+        try:
+            yield
+        finally:
+            self.eep_eplb_suppressed = saved_eplb_suppressed
+            for bt, (saved_gpu, saved_cpu) in zip(
+                multi_block_table.block_tables, saved
+            ):
+                bt.block_table.gpu.copy_(saved_gpu)
+                bt.block_table.cpu.copy_(saved_cpu)
+
+    def warm_up_workspace(self) -> None:
+        self._dummy_run(self.max_num_tokens, is_profile=True, skip_eplb=True)
+
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
             return None

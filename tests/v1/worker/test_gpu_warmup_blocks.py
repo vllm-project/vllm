@@ -106,6 +106,8 @@ def _make_runner(
         ),
         kv_block_zeroer=None,
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
+        req_states=SimpleNamespace(free_indices=list(range(4))),
+        block_tables=None,
     )
 
 
