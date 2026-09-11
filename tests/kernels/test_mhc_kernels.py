@@ -746,11 +746,14 @@ def test_mhc_pre_delayed_rocm_aiter(num_tokens, carried):
     not (current_platform.is_rocm() and HAS_AITER_MHC),
     reason="AITER mHC required",
 )
-def test_mhc_pre_delayed_rocm_aiter_declines_unsupported():
+def test_mhc_pre_delayed_rocm_aiter_declines_unsupported(monkeypatch):
     """The broadcast seam and a fused norm must not take the AITER path.
 
-    Neither is expressible with AITER's pre kernels, so forward_hip has to
-    hand them to TileLang or the reference instead of silently mismatching.
+    Neither is expressible with AITER's pre kernels: the broadcast projects a
+    narrower ``x``, and ``mhc_pre_gemm_sqrsum`` folds no RMSNorm. What is
+    asserted here is the routing decision, which is what this gate owns; the
+    numerics of whichever fallback it lands on are covered by
+    ``test_deepseek_v41_mhc_pre_delayed``.
     """
     set_random_seed(0)
     hc_mult, hidden_size = 4, 5120
@@ -760,18 +763,33 @@ def test_mhc_pre_delayed_rocm_aiter_declines_unsupported():
     args = (residual, fn, hc_scale, hc_base, 1e-6, 1e-6, 1e-6, 1.0, 20)
     op = object.__new__(MHCPreDelayedOp)
 
+    aiter_op = torch.ops.vllm.mhc_pre_delayed_aiter
+    took_aiter = False
+
+    def spy(*spy_args, **spy_kwargs):
+        nonlocal took_aiter
+        took_aiter = True
+        return aiter_op(*spy_args, **spy_kwargs)
+
+    monkeypatch.setattr(torch.ops.vllm, "mhc_pre_delayed_aiter", spy)
+
     x = residual[:, 0].contiguous()
     broadcast_fn = fn.view(-1, hc_mult, hidden_size).sum(1)
     broadcast_residual = x.unsqueeze(1).expand(-1, hc_mult, -1).contiguous()
     expected = mhc_pre_delayed_torch(broadcast_residual, broadcast_fn, *args[2:], x=x)
     actual = op.forward_hip(broadcast_residual, broadcast_fn, *args[2:], x=x)
+    assert not took_aiter, "the broadcast seam must not reach AITER"
     for i in range(4):
         torch.testing.assert_close(actual[i], expected[i], atol=1e-4, rtol=1e-3)
 
-    ref = mhc_pre_delayed_torch(*args)
-    normed = F.rms_norm(ref[2], (hidden_size,), norm_weight, 1e-6)
-    fused = op.forward_hip(*args, norm_weight=norm_weight, norm_eps=1e-6)
-    torch.testing.assert_close(fused[2], normed, atol=5e-2, rtol=1e-2)
+    op.forward_hip(*args, norm_weight=norm_weight, norm_eps=1e-6)
+    assert not took_aiter, "a fused norm must not reach AITER"
+
+    # Positive control: the same inputs without a norm do take the AITER path,
+    # so the two declines above are the gate discriminating rather than the
+    # path being unavailable in this environment.
+    op.forward_hip(*args)
+    assert took_aiter
 
 
 @pytest.mark.skipif(
