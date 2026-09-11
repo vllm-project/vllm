@@ -9,7 +9,12 @@ from vllm.model_executor.kernels.linear import (
     _POSSIBLE_FP8_BLOCK_KERNELS,
     _POSSIBLE_FP8_KERNELS,
     _POSSIBLE_INT8_KERNELS,
+    _POSSIBLE_MXFP8_KERNELS,
     _POSSIBLE_NVFP4_KERNELS,
+)
+from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+    FlashInferCutedslMxfp8LinearKernel,
+    FlashInferCutlassMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.base import (
     NvFp4LinearKernel,
@@ -50,6 +55,8 @@ SUPPORTING = {
     FlashInferFP8ScaledMMLinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
+    FlashInferCutedslMxfp8LinearKernel,
+    FlashInferCutlassMxfp8LinearKernel,
 }
 
 
@@ -60,6 +67,7 @@ def _all_kernel_classes() -> list[type]:
         _POSSIBLE_FP8_BLOCK_KERNELS,
         _POSSIBLE_INT8_KERNELS,
         _POSSIBLE_NVFP4_KERNELS,
+        _POSSIBLE_MXFP8_KERNELS,
     ):
         for kernels in registry.values():
             for cls in kernels:

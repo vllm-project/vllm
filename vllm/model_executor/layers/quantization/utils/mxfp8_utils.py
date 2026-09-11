@@ -126,8 +126,14 @@ def _mxfp8_quant_triton_kernel():
         amax = tl.maximum(tl.max(tl.abs(x), axis=1), TINY)  # [BLOCK_M]
         sb = tl.ceil(tl.log2(amax / FP8_MAX)) + 127.0
         sb = tl.minimum(tl.maximum(sb, 0.0), 254.0)
-        descale = tl.exp2(sb - 127.0)
-        xq = (x / descale[:, None]).to(xq_ptr.dtype.element_ty)
+        # Scale by the reciprocal rather than dividing by ``exp2(sb - 127)``:
+        # sb == 0 (an all-zero / denormal block) makes that divisor 2**-127,
+        # which is subnormal in fp32 and flushes to zero on CDNA, turning the
+        # block's zeros into 0/0 == NaN. The reciprocal is normal for every
+        # reachable sb, and both forms are exact powers of two, so nothing
+        # else changes.
+        rescale = tl.exp2(127.0 - sb)
+        xq = (x * rescale[:, None]).to(xq_ptr.dtype.element_ty)
         tl.store(
             xq_ptr + offs_m[:, None] * sqm + offs_k[None, :] * sqk,
             xq,
