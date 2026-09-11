@@ -516,15 +516,17 @@ def test_sparse_mla_builder_initializes_dcp_manager(monkeypatch):
         "get_dcp_group",
         lambda: MagicMock(world_size=2),
     )
-    monkeypatch.setattr(
-        sparse_mla,
-        "get_mla_dims",
-        lambda _: MagicMock(kv_lora_rank=8, qk_rope_head_dim=4),
-    )
 
     manager = object.__new__(dcp.MLADCPManager)
     manager.init_kv_gather = MagicMock()
-    layer = MagicMock(dcp_manager=manager)
+    layer = MagicMock(
+        dcp_manager=manager,
+        q_lora_rank=None,
+        kv_lora_rank=8,
+        qk_nope_head_dim=4,
+        qk_rope_head_dim=4,
+        v_head_dim=4,
+    )
     config = MagicMock()
     config.model_config.dtype = torch.bfloat16
     config.model_config.max_model_len = 64

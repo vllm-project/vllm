@@ -7,6 +7,7 @@ import torch
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.attention.mla_attention import nope_zero_rope_pad
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.platforms import current_platform
@@ -215,6 +216,16 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         if self.dcp_q_replicate:
             heads *= q_proj_layer.group_size
         q = q.view(-1, heads, self.qk_head_dim)
+
+        # Rope-free NoPE riding the zero-padded 576/656B DS-MLA envelope: the
+        # MLA attention layer below has promoted its rope dim (see
+        # MLAAttention.__init__), so pad q with zero q_pe [T, H, 64] and swap
+        # in the persistent zero k_pe [T, 1, 64] here, ahead of the
+        # concat_and_cache_mla path. rope_dim > 0 models never enter this.
+        if self.qk_rope_head_dim == 0 and (
+            self.mla_attn.qk_rope_head_dim != self.qk_rope_head_dim
+        ):
+            q, kv_c_normed, k_pe = nope_zero_rope_pad(q, kv_c_normed, k_pe)
 
         if self.rotary_emb is not None:
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(

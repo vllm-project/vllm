@@ -13,6 +13,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mla_attention import (
+    needs_nope_zero_rope_pad,
+)
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -582,6 +585,22 @@ class Glm5NextMLAAttention(nn.Module):
             skip_topk=False,
             fuse_qkv_rmsnorm=True,
         )
+
+        # NoPE (rope_dim == 0) on a quantized DS-MLA cache rides the
+        # zero-padded 576/656B envelope: MLAAttention promotes its rope dims
+        # and the wrapper's forward injects zero q_pe/k_pe
+        # (nope_zero_rope_pad in mla_attention.py) ahead of
+        # concat_and_cache_mla, so the csrc asserts (kv_lora_rank == 512,
+        # pe_dim == 64, 656B row) pass unchanged. rope_dim > 0 checkpoints
+        # never activate this.
+        if needs_nope_zero_rope_pad(
+            self.qk_rope_head_dim,
+            cache_config.cache_dtype if cache_config is not None else None,
+        ):
+            logger.info_once(
+                "GLM-5.3-Flash NoPE MLA using zero-padded 576/656B "
+                "DS-MLA envelope (rope bytes [640:768] are bf16 zeros)."
+            )
 
     def forward(
         self, hidden_states: torch.Tensor, positions: torch.Tensor

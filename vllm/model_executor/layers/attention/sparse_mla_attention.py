@@ -19,10 +19,10 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBaseImpl,
     MLACommonMetadata,
     MLACommonPrefillMetadata,
+    MLADims,
     accumulate_mla_context_chunk,
     align_mla_chunked_context_workspace_size,
     build_mla_chunked_context_metadata,
-    get_mla_dims,
     init_mla_context_partial,
 )
 from vllm.platforms import current_platform
@@ -120,6 +120,29 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
     metadata_cls: type[T]
     require_uniform_decodes: ClassVar[bool] = False
 
+    @staticmethod
+    def _get_mla_dims_from_layers(
+        vllm_config: "VllmConfig", layer_names: list[str]
+    ) -> MLADims:
+        """MLA dims as the runtime attention layers see them.
+
+        Reads the instantiated layers from the static forward context rather
+        than the raw HF config: the NoPE zero-padded-rope shim promotes the
+        rope dim on the MLAAttention layer (see MLAAttention.__init__ /
+        nope_zero_rope_pad), so consumers like the chunked-prefill workspace
+        must size from the promoted (576) geometry, not the config's raw
+        rope-free 512 -- cp_gather_and_upconvert_fp8_kv_cache asserts the
+        workspace is 576 wide. Mirrors MLACommonMetadataBuilder.
+        """
+        layer = vllm_config.compilation_config.static_forward_context[layer_names[0]]
+        return MLADims(
+            q_lora_rank=layer.q_lora_rank,
+            kv_lora_rank=layer.kv_lora_rank,
+            qk_nope_head_dim=layer.qk_nope_head_dim,
+            qk_rope_head_dim=layer.qk_rope_head_dim,
+            v_head_dim=layer.v_head_dim,
+        )
+
     def __init__(
         self,
         kv_cache_spec: "AttentionSpec",
@@ -131,7 +154,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self.vllm_config = vllm_config
         self.device = device
         self.model_config = vllm_config.model_config
-        self.mla_dims = get_mla_dims(self.model_config)
+        self.mla_dims = self._get_mla_dims_from_layers(vllm_config, layer_names)
         self.topk_tokens: int = vllm_config.model_config.hf_config.index_topk
         self.req_id_per_token_buffer = torch.empty(
             (vllm_config.scheduler_config.max_num_batched_tokens,),

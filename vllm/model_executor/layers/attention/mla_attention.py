@@ -370,6 +370,81 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
     return kv_cache_dtype
 
 
+# Rope bytes carried by the zero-padded envelope NoPE models use to ride the
+# fixed 576/656B DS-MLA cache geometry (see flashmla_sparse.py).
+_NOPE_ZERO_ROPE_PAD_DIM = 64
+
+# Persistent bf16-zero k_pe buffer for the zero-padded envelope. Allocated
+# workspace-style (see FlashMLASparseImpl's q_concat_buffer) so CUDA-graph
+# capture is allocation-stable; the slice is re-zeroed each step, which the
+# capture records as a graph node, so replays keep the rope bytes zero.
+_NOPE_K_PE_ZERO_BUFFER_MAX_TOKENS = 16384
+_nope_k_pe_zero_buffer: torch.Tensor | None = None
+
+
+def needs_nope_zero_rope_pad(qk_rope_head_dim: int, kv_cache_dtype: str | None) -> bool:
+    """Whether the zero-padded-rope envelope shim should be active.
+
+    Active only for rope-free MLA (qk_rope_head_dim == 0) whose effective KV
+    cache is a quantized DS-MLA packed format; the padded 576/656B envelope
+    only exists for those. bf16/auto NoPE models are unaffected.
+    """
+    return qk_rope_head_dim == 0 and kv_cache_dtype in (
+        "fp8_ds_mla",
+        "nvfp4_ds_mla",
+    )
+
+
+def _get_nope_k_pe_zero(num_tokens: int, device: torch.device) -> torch.Tensor:
+    """Zero k_pe [num_tokens, 1, 64] view of the persistent bf16 zero buffer."""
+    global _nope_k_pe_zero_buffer
+    if (
+        _nope_k_pe_zero_buffer is None
+        or _nope_k_pe_zero_buffer.device != device
+        or _nope_k_pe_zero_buffer.shape[0] < num_tokens
+    ):
+        max_tokens = max(num_tokens, _NOPE_K_PE_ZERO_BUFFER_MAX_TOKENS)
+        _nope_k_pe_zero_buffer = torch.zeros(
+            (max_tokens, 1, _NOPE_ZERO_ROPE_PAD_DIM),
+            dtype=torch.bfloat16,
+            device=device,
+        )
+    assert _nope_k_pe_zero_buffer is not None
+    buf = _nope_k_pe_zero_buffer[:num_tokens]
+    # The buffer is only ever written with zeros, but re-affirm in case a
+    # foreign writer touched it (defense in depth for the csrc 656B-row
+    # contract: rope bytes [640:768] must be bf16 zero). Recorded as a graph
+    # node under capture, so replays keep the rope bytes zero.
+    buf.zero_()
+    return buf
+
+
+def nope_zero_rope_pad(
+    q: torch.Tensor,
+    kv_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Zero-pad rope-free NoPE MLA onto the fixed 576/656B DS-MLA envelope.
+
+    RoPE is baked at cache-write time, so a zero q_pe/k_pe contributes
+    ``q_pe . 0 = 0`` exactly: the padded query is ``cat(q, zeros [T, H, 64])``
+    and k_pe becomes a persistent bf16-zero ``[T, 1, 64]`` buffer. The
+    downstream ``concat_and_cache_mla`` asserts (kv_lora_rank == 512,
+    pe_dim == 64, 656B row) then pass unchanged.
+
+    Returns:
+        (q_padded, kv_c_normed, k_pe_zero) with q padded to
+        ``qk_nope_head_dim + 64`` per head and k_pe shaped [T, 1, 64].
+    """
+    num_tokens = q.shape[0]
+    zero_pe = _get_nope_k_pe_zero(num_tokens, q.device)
+    q_pe = zero_pe.expand(num_tokens, q.shape[1], _NOPE_ZERO_ROPE_PAD_DIM).to(q.dtype)
+    q_padded = torch.cat([q, q_pe], dim=-1)
+    # k_pe: reuse the same [T, 1, 64] bf16 zeros (MQA single KV head).
+    k_pe_zero = zero_pe if k_pe.shape[-1] == 0 else k_pe
+    return q_padded, kv_c_normed, k_pe_zero
+
+
 def _get_kv_b_proj_input_dtype(
     kv_b_proj: ColumnParallelLinear, use_fp8_prefill: bool
 ) -> torch.dtype | None:
@@ -518,6 +593,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # Initialize KV cache quantization attributes
         self.kv_cache_dtype = kv_cache_dtype
         _init_kv_cache_quant(self, quant_config, prefix)
+
+        # Zero-padded-rope envelope for rope-free NoPE on a quantized DS-MLA
+        # cache: promote the rope dims so the fixed 576/656B geometry holds.
+        # The wrapper layer pads q with zero q_pe and swaps in zero k_pe
+        # (nope_zero_rope_pad) before calling forward, so the csrc
+        # concat_and_cache_mla asserts (kv_lora_rank == 512, pe_dim == 64,
+        # 656B row) pass unchanged. bf16/auto NoPE and rope>0 models are
+        # untouched (needs_nope_zero_rope_pad gates on the quantized formats).
+        if (
+            needs_nope_zero_rope_pad(qk_rope_head_dim, self.kv_cache_dtype)
+            and self.attn_backend.get_name() == "FLASHMLA_SPARSE"
+        ):
+            self.qk_rope_head_dim = _NOPE_ZERO_ROPE_PAD_DIM
+            self.qk_head_dim = self.qk_nope_head_dim + _NOPE_ZERO_ROPE_PAD_DIM
+            self.head_size = self.kv_lora_rank + _NOPE_ZERO_ROPE_PAD_DIM
 
         if (
             cache_config is not None
