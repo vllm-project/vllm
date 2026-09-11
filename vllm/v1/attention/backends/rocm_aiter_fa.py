@@ -188,8 +188,8 @@ if current_platform.is_rocm():
             k_reg = tl.load(key_cache_ptr_offset + k_reg_offset)
             v_reg = tl.load(value_cache_ptr_offset + v_reg_offset)
             if DEQUANT:
-                k_scale = 1.0
-                v_scale = 1.0
+                k_scale = tl.load(k_scale_ptr)
+                v_scale = tl.load(v_scale_ptr)
                 k_reg = k_reg.to(tl.float32) * k_scale
                 v_reg = v_reg.to(tl.float32) * v_scale
             tl.store(key_ptr_offset + col_offsets, k_reg)
@@ -306,8 +306,8 @@ if current_platform.is_rocm():
         k_val = tl.load(key_ptr + src_offset_k + offset)
         v_val = tl.load(value_ptr + src_offset_v + offset)
         if QUANT:
-            k_scale = 1.0
-            v_scale = 1.0
+            k_scale = tl.load(k_scale_ptr)
+            v_scale = tl.load(v_scale_ptr)
             k_dtype = key_cache_ptr.type.element_ty
             v_dtype = value_cache_ptr.type.element_ty
             k_val = (k_val.to(tl.float32) / k_scale).to(k_dtype)
@@ -506,7 +506,8 @@ class AiterFlashAttentionMetadataBuilder(
             dtype=self.model_config.dtype,
             device=device,
         )
-        self.scale = torch.tensor([1.0], dtype=torch.float, device=self.device)
+        self.k_scale: dict[str, torch.Tensor] | None = None
+        self.v_scale: dict[str, torch.Tensor] | None = None
         self.kv_sharing_workspace = (
             torch.empty(
                 (
@@ -528,6 +529,37 @@ class AiterFlashAttentionMetadataBuilder(
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
         )
 
+    def _ensure_kv_scale_buffers(self) -> None:
+        # Only for fp8 shuffle kv cache: the asm decode kernel indexes a dense
+        # [num_blocks, num_kv_heads, block_size] scale buffer per layer, so fill
+        # one per distinct per-tensor scale, once the KV cache is bound.
+        if (
+            self.k_scale is not None
+            or not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+            or not is_quantized_kv_cache(self.vllm_config.cache_config.cache_dtype)
+        ):
+            return
+        layers = self.vllm_config.compilation_config.static_forward_context
+        dense: dict[tuple[int, float], torch.Tensor] = {}
+        k_scales: dict[str, torch.Tensor] = {}
+        v_scales: dict[str, torch.Tensor] = {}
+        for name in self.layer_names:
+            layer = layers[name]
+            num_blocks = layer.kv_cache.shape[0]
+            for scales, value in (
+                (k_scales, layer._k_scale_float),
+                (v_scales, layer._v_scale_float),
+            ):
+                if (num_blocks, value) not in dense:
+                    dense[num_blocks, value] = torch.full(
+                        (num_blocks, self.num_heads_kv, self.block_size),
+                        value,
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+                scales[name] = dense[num_blocks, value]
+        self.k_scale, self.v_scale = k_scales, v_scales
+
     def build(
         self,
         common_prefix_len: int,
@@ -539,24 +571,7 @@ class AiterFlashAttentionMetadataBuilder(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold,
         )
-        # Allocate scales for fp8 shuffle kv cache with shuffle_kv_cache enabled
-        if (
-            rocm_aiter_ops.is_shuffle_kv_cache_enabled()
-            and self.scale.numel() == 1
-            and is_quantized_kv_cache(self.vllm_config.cache_config.cache_dtype)
-        ):
-            # Size the scales from a layer this builder owns. The draft model
-            # runs its own builder over its own KV cache, so the first layer of
-            # the whole config can carry an unrelated block count.
-            kv_cache_shape = self.vllm_config.compilation_config.static_forward_context[
-                self.layer_names[0]
-            ].kv_cache.shape
-            num_blocks = kv_cache_shape[0]
-            self.scale = torch.ones(
-                [num_blocks, self.num_heads_kv, self.block_size],
-                dtype=torch.float32,
-                device=self.device,
-            )
+        self._ensure_kv_scale_buffers()
         (
             num_decodes,
             num_extends,
@@ -759,8 +774,8 @@ class AiterFlashAttentionMetadataBuilder(
             prefill_metadata=prefill_metadata,
             extend_metadata=extend_metadata,
             use_cascade=use_cascade,
-            k_scale=self.scale,
-            v_scale=self.scale,
+            k_scale=self.k_scale,
+            v_scale=self.v_scale,
             kv_sharing_metadata=kv_sharing_metadata,
         )
         return attn_metadata
@@ -777,6 +792,7 @@ class AiterFlashAttentionMetadataBuilder(
         skip split_decodes_prefills_and_extends() and avoid all .cpu() /
         .item() calls that would otherwise break CUDA graph capture.
         """
+        self._ensure_kv_scale_buffers()
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -819,8 +835,8 @@ class AiterFlashAttentionMetadataBuilder(
             prefill_metadata=None,
             extend_metadata=None,
             use_cascade=False,
-            k_scale=self.scale,
-            v_scale=self.scale,
+            k_scale=self.k_scale,
+            v_scale=self.v_scale,
         )
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
@@ -1308,9 +1324,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 extend_outputs = output[extend_tokens_slice]
                 k_scale = layer._k_scale
                 v_scale = layer._v_scale
-                if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
-                    k_scale = attn_metadata.k_scale
-                    v_scale = attn_metadata.v_scale
                 self.extend_forward(
                     attn_metadata=attn_metadata,
                     query=extend_queries,
@@ -1595,16 +1608,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
                             device=query.device,
                         )
                         max_logits = torch.empty_like(exp_sums)
-                        k_qscale = (
-                            layer._k_scale
-                            if attn_metadata.k_scale is None
-                            else attn_metadata.k_scale
-                        )
-                        v_qscale = (
-                            layer._v_scale
-                            if attn_metadata.v_scale is None
-                            else attn_metadata.v_scale
-                        )
+                        # asm indexes this layer's dense scale buffer from build();
+                        # the HIP kernel reads the per-tensor scale directly.
+                        k_qscale_asm = v_qscale_asm = None
+                        if attn_metadata.k_scale is not None:
+                            assert attn_metadata.v_scale is not None
+                            k_qscale_asm = attn_metadata.k_scale[layer.layer_name]
+                            v_qscale_asm = attn_metadata.v_scale[layer.layer_name]
                         rocm_aiter_ops.paged_attention_common(
                             Q=query[:num_decode_tokens],
                             K=new_key_cache,
@@ -1619,10 +1629,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
                                 :num_decodes
                             ].stride(0),
                             scale=self.scale,
-                            K_QScale_hip=k_qscale,
-                            V_QScale_hip=v_qscale,
-                            K_QScale_asm=k_qscale,
-                            V_QScale_asm=v_qscale,
+                            K_QScale_hip=layer._k_scale,
+                            V_QScale_hip=layer._v_scale,
+                            K_QScale_asm=k_qscale_asm,
+                            V_QScale_asm=v_qscale_asm,
                             out_=output[:num_decode_tokens],
                             kv_cache_dtype=self.kv_cache_dtype,
                         )
@@ -1713,9 +1723,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         # the reshape_and_cache_flash op uses the slot_mapping's shape
         # to determine the number of actual tokens.
         if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
-            # We may calculate per token quant scale in
-            # reshape_and_cache_shuffle_triton which might differ from
-            # vllm's style when shuffle layout is used.
             k_scale = layer._k_scale
             v_scale = layer._v_scale
             assert k_scale is not None and v_scale is not None, (
@@ -1752,12 +1759,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         )
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        # Only fuse when shuffle layout is off; the shuffle write path uses a
-        # dedicated cache update, mirroring fused_rope_kvcache_supported.
-        return (
-            rocm_aiter_ops.is_enabled()
-            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
-        )
+        return rocm_aiter_ops.is_enabled()
 
     def do_qk_norm_rope_kvcache_update(
         self,

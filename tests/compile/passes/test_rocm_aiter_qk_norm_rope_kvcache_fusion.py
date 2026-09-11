@@ -143,10 +143,17 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         )
 
         if self.kv_cache_dtype != self.dtype:
-            self.attn._k_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
-            self.attn._v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
-            self.attn._k_scale_float = 1.0
-            self.attn._v_scale_float = 1.0
+            # Non-unit scales so the fused and unfused writers must agree on them.
+            self.attn._k_scale = torch.tensor(0.5, dtype=torch.float32, device=device)
+            self.attn._v_scale = torch.tensor(0.25, dtype=torch.float32, device=device)
+            self.attn._k_scale_cpu = torch.tensor(
+                0.5, dtype=torch.float32, device="cpu"
+            )
+            self.attn._v_scale_cpu = torch.tensor(
+                0.25, dtype=torch.float32, device="cpu"
+            )
+            self.attn._k_scale_float = 0.5
+            self.attn._v_scale_float = 0.25
         else:
             self.attn._k_scale = self.attn._k_scale.to(device)
             self.attn._v_scale = self.attn._v_scale.to(device)
@@ -431,21 +438,52 @@ _FUSION_CONFIGS = [
     _FUSION_CONFIGS,
 )
 @pytest.mark.parametrize(
-    "attn_backend",
+    "attn_backend, use_shuffle_kv_layout, kv_layout",
     [
-        AttentionBackendEnum.ROCM_ATTN,
-        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
-        AttentionBackendEnum.ROCM_AITER_FA,
+        # ROCM_ATTN always writes the shuffled, interleaved-V layout and needs each
+        # K/V side contiguous per block, so head-major only.
+        pytest.param(
+            AttentionBackendEnum.ROCM_ATTN,
+            "0",
+            KVCacheLayout.LBHNC,
+            id="rocm_attn",
+        ),
+        # Unified never reads the shuffle env; its strided views take any layout.
+        pytest.param(
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+            "0",
+            KVCacheLayout.LBHNC,
+            id="unified-head_major",
+        ),
+        pytest.param(
+            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+            "0",
+            KVCacheLayout.LBNHC,
+            id="unified-token_major",
+        ),
+        # FA takes any layout unshuffled; its shuffle writer needs each K/V side
+        # contiguous per block, so head-major only.
+        pytest.param(
+            AttentionBackendEnum.ROCM_AITER_FA,
+            "0",
+            KVCacheLayout.LBHNC,
+            id="fa-head_major",
+        ),
+        pytest.param(
+            AttentionBackendEnum.ROCM_AITER_FA,
+            "0",
+            KVCacheLayout.LBNHC,
+            id="fa-token_major",
+        ),
+        pytest.param(
+            AttentionBackendEnum.ROCM_AITER_FA,
+            "1",
+            KVCacheLayout.LBHNC,
+            id="fa-shuffle",
+        ),
     ],
 )
 @pytest.mark.parametrize("num_tokens", [5, 2048])
-@pytest.mark.parametrize(
-    "kv_layout",
-    [
-        pytest.param(KVCacheLayout.LBHNC, id="head_major"),
-        pytest.param(KVCacheLayout.LBNHC, id="token_major"),
-    ],
-)
 @pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
 @pytest.mark.parametrize("block_size", [16, 32, 64])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
@@ -477,15 +515,9 @@ def test_qk_norm_rope_kvcache_fusion(
     kv_cache_dtype: str,
     rms_norm_eps: float,
     custom_op: str,
+    use_shuffle_kv_layout: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    layouts = attn_backend.get_class().supported_kv_cache_layouts()
-    if (
-        attn_backend == AttentionBackendEnum.ROCM_ATTN
-        and layouts is not None
-        and kv_layout not in layouts
-    ):
-        pytest.skip(f"ROCM_ATTN kernels do not consume the {kv_layout.name} layout")
     _run_qk_norm_rope_kvcache_fusion_test(
         attn_backend=attn_backend,
         enable_aiter_triton_rope=enable_aiter_triton_rope,
@@ -496,7 +528,7 @@ def test_qk_norm_rope_kvcache_fusion(
         rotary_dim=rotary_dim,
         block_size=block_size,
         is_neox=is_neox,
-        use_shuffle_kv_layout="0",
+        use_shuffle_kv_layout=use_shuffle_kv_layout,
         kv_layout=kv_layout,
         dtype=dtype,
         kv_cache_dtype=kv_cache_dtype,

@@ -3454,8 +3454,8 @@ class rocm_aiter_ops:
         scale: float,
         K_QScale_hip: torch.Tensor,
         V_QScale_hip: torch.Tensor,
-        K_QScale_asm: torch.Tensor,
-        V_QScale_asm: torch.Tensor,
+        K_QScale_asm: torch.Tensor | None,
+        V_QScale_asm: torch.Tensor | None,
         out_: torch.Tensor,
         kv_cache_dtype: str,
     ):
