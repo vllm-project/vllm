@@ -377,6 +377,7 @@ def build_attn_metadata(
     kv_cache_config: KVCacheConfig,
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     dcp_local_seq_lens: torch.Tensor | None = None,
+    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     positions: torch.Tensor | None = None,
     is_prefilling: torch.Tensor | None = None,
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None,
@@ -391,6 +392,10 @@ def build_attn_metadata(
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
+    if dcp_local_seq_lens_cpu_upper_bound is not None:
+        dcp_local_seq_lens_cpu_upper_bound = dcp_local_seq_lens_cpu_upper_bound[
+            :num_reqs
+        ]
     if seq_lens_cpu_upper_bound is not None:
         seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound[:num_reqs]
 
@@ -433,6 +438,7 @@ def build_attn_metadata(
             slot_mapping=slot_mapping,
             causal=group_causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
             positions=positions,
             is_prefilling=group_is_prefilling,
             mm_req_doc_ranges=mm_req_doc_ranges,

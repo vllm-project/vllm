@@ -3,10 +3,17 @@
 
 import numpy as np
 import pytest
+import torch
 
 from vllm.v1.attention.backends.mla.flashmla_sparse import gathered_prefill_shards
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
 BLOCK_SIZE = 64
+
+
+def _shard_rows(extents: list[int], world: int) -> np.ndarray:
+    """What the PCP manager publishes: rank 0's shard of each extent."""
+    return get_dcp_local_seq_lens(torch.tensor(extents), world, 0, 1).numpy()
 
 
 def _shard_of_position(
@@ -64,7 +71,7 @@ def _simulate_gathered_kv(
 def test_gathered_workspace_round_trips_every_token(world, extents):
     """Every global token must be readable back from the gathered buffer."""
     _, rows_per_rank = gathered_prefill_shards(
-        np.arange(len(extents)), np.array(extents, dtype=np.int64), world
+        np.arange(len(extents)), _shard_rows(extents, world)
     )
     # The builder lays entries out back to back, as on the non-DCP path.
     starts = np.concatenate([[0], np.cumsum(rows_per_rank[:-1])])
@@ -83,11 +90,10 @@ def test_gathered_workspace_round_trips_every_token(world, extents):
 
 @pytest.mark.parametrize("world", [2, 3, 8])
 @pytest.mark.parametrize("extent", [1, 63, 64, 65, 127, 128, 129, 1000])
-def test_rows_per_rank_is_the_per_rank_maximum(world, extent):
-    """ceil(extent / W) has to cover the busiest rank, and waste at most a row."""
-    _, rows_per_rank = gathered_prefill_shards(
-        np.arange(1), np.array([extent], dtype=np.int64), world
-    )
+def test_rank0_shard_is_the_per_rank_maximum(world, extent):
+    """The PCP manager publishes rank 0's shard as the gather size, so it has
+    to cover the busiest rank and waste at most a row."""
+    rows_per_rank = get_dcp_local_seq_lens(torch.tensor([extent]), world, 0, 1)
     highest_local_slot = max(
         _shard_of_position(position, world)[1] for position in range(extent)
     )
@@ -97,9 +103,9 @@ def test_rows_per_rank_is_the_per_rank_maximum(world, extent):
 def test_rows_of_one_request_share_an_entry():
     """PCP gives a rank several chunks of one request; they share one context."""
     rows = np.array([7, 7, 3, 3, 9])
-    extents = np.array([128, 128, 256, 256, 64], dtype=np.int64)
+    shard_rows = np.array([64, 64, 128, 128, 32], dtype=np.int32)
 
-    row_bounds, rows_per_rank = gathered_prefill_shards(rows, extents, 2)
+    row_bounds, rows_per_rank = gathered_prefill_shards(rows, shard_rows)
 
     assert row_bounds.tolist() == [0, 2, 4, 5]
     assert rows_per_rank.tolist() == [64, 128, 32]
@@ -108,9 +114,7 @@ def test_rows_of_one_request_share_an_entry():
 def test_rows_of_one_request_must_be_adjacent():
     """An entry is one contiguous run; an interleaved request has no entry."""
     with pytest.raises(AssertionError, match="adjacent"):
-        gathered_prefill_shards(
-            np.array([0, 1, 0]), np.array([64, 64, 64], dtype=np.int64), 2
-        )
+        gathered_prefill_shards(np.array([0, 1, 0]), np.array([32, 32, 32]))
 
 
 @pytest.mark.parametrize("query_len", [5328, 5332, 16, 17, 100, 4095])

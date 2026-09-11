@@ -972,13 +972,13 @@ def test_pcp_plan_deinterleave_restores_global_order(dcp_world_size, req_lens):
     from vllm.v1.attention.backends.mla.indexer import build_pcp_global_chunk_plan
 
     scheduled = np.array(req_lens, dtype=np.int64)
+    shard_rows = -(-scheduled // dcp_world_size)
     rows = np.arange(len(scheduled))
     plan = build_pcp_global_chunk_plan(
-        rows, scheduled, dcp_world_size, torch.device("cpu")
+        rows, shard_rows, dcp_world_size, torch.device("cpu")
     )
 
     starts = np.concatenate([[0], np.cumsum(scheduled)])
-    expected = torch.arange(plan.total, dtype=torch.float32).unsqueeze(1)
 
     # Build each rank's padded shard exactly as the cache gather would.
     padded_cu = plan.padded_local_cu.tolist()
@@ -989,20 +989,66 @@ def test_pcp_plan_deinterleave_restores_global_order(dcp_world_size, req_lens):
                 shards[r, padded_cu[i] + t // dcp_world_size, 0] = starts[i] + t
 
     gathered = shards.reshape(dcp_world_size * plan.padded_local_total, 1)
-    torch.testing.assert_close(gathered[plan.deinterleave_idx], expected)
+    restored = gathered[plan.deinterleave_idx]
+    # The layout is padded per request; only the real positions are read.
+    row_start = plan.row_start_cu.tolist()
+    for i, g in enumerate(req_lens):
+        torch.testing.assert_close(
+            restored[row_start[i] : row_start[i] + g, 0],
+            torch.arange(starts[i], starts[i] + g, dtype=torch.float32),
+        )
 
 
 def test_pcp_plan_pads_each_request_independently():
     """Per-request padding is what makes every PCP rank's layout identical."""
     from vllm.v1.attention.backends.mla.indexer import build_pcp_global_chunk_plan
 
+    # Shard rows ceil(5/4), ceil(8/4), ceil(1/4) = 2, 2, 1.
     plan = build_pcp_global_chunk_plan(
-        np.arange(3), np.array([5, 8, 1]), 4, torch.device("cpu")
+        np.arange(3), np.array([2, 2, 1]), 4, torch.device("cpu")
     )
-    # ceil(5/4), ceil(8/4), ceil(1/4) = 2, 2, 1 -> cumsum 0, 2, 4, 5.
     assert plan.padded_local_cu.tolist() == [0, 2, 4, 5]
     assert plan.padded_local_total == 5
-    assert plan.total == 14
+    # The global layout is padded to whole shards: (2 + 2 + 1) x 4.
+    assert plan.total == 20
+
+
+def test_pcp_dcp_chunk_plan_does_not_depend_on_which_row_is_the_tail():
+    """Each chunk issues a DCP all-gather, so rank 0, whose second row of a
+    split request is the short tail, must plan exactly like the other ranks."""
+    from types import SimpleNamespace
+
+    from vllm.v1.attention.backends.mla.indexer import (
+        DeepseekV32IndexerMetadataBuilder as Builder,
+    )
+
+    builder = SimpleNamespace(
+        dcp_world_size=2,
+        max_prefill_buffer_size=1 << 20,
+        _split_indexer_prefill_chunks=Builder._split_indexer_prefill_chunks,
+    )
+    req_idx = np.array([0, 0, 1])
+    # Shard rows of extents 65 and 3 at DCP=2.
+    shard_rows = np.array([33, 33, 2], dtype=np.int32)
+    # Rank 0: full chunk then tail; rank 1: two full chunks; a replicated req 1.
+    rank0_rows = torch.tensor([16, 7, 3], dtype=torch.int32)
+    rank1_rows = torch.tensor([16, 16, 3], dtype=torch.int32)
+    tail_first = torch.tensor([7, 16, 3], dtype=torch.int32)
+
+    def plan(row_query_lens, max_logits_bytes):
+        return Builder._split_pcp_dcp_prefill_chunks(
+            builder, req_idx, shard_rows, row_query_lens, max_logits_bytes, 4
+        )
+
+    for budget in (1 << 30, 16 * 66 * 4):
+        assert plan(rank0_rows, budget) == plan(rank1_rows, budget)
+        assert plan(tail_first, budget) == plan(rank1_rows, budget)
+    # A 16 x 66 logits budget splits the 32 planned query tokens in two.
+    assert plan(rank1_rows, 16 * 66 * 4) == [
+        (slice(4, 6), slice(0, 16)),
+        (slice(4, 6), slice(16, 32)),
+        (slice(6, 7), slice(0, 3)),
+    ]
 
 
 def _rank_prefill_rows(

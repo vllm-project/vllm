@@ -265,12 +265,13 @@ class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
 class PCPGlobalChunkPlan:
     """PCP packing for one indexer prefill chunk under PCP + DCP."""
 
-    # [num_reqs+1] cumsum of scheduled per-request context: the global layout.
+    # [num_reqs+1] cumsum of the padded per-request context (shard rows x W):
+    # the global layout.
     row_start_cu: torch.Tensor
     # [num_reqs+1] like row_start_cu, but only a region's FIRST row carries its
     # extent.
     global_cu: torch.Tensor
-    # [num_reqs+1] cumsum of ceil(scheduled_i / W): this rank's padded layout.
+    # [num_reqs+1] cumsum of shard rows: this rank's padded layout.
     padded_local_cu: torch.Tensor
     padded_local_total: int
     total: int
@@ -280,24 +281,29 @@ class PCPGlobalChunkPlan:
 
 def build_pcp_global_chunk_plan(
     row_req_idx: np.ndarray,
-    scheduled_lens: np.ndarray,
+    row_shard_rows: np.ndarray,
     dcp_world_size: int,
     device: torch.device,
 ) -> PCPGlobalChunkPlan:
-    """Plan the PCP packing for one chunk from its scheduled contexts."""
-    scheduled = np.ascontiguousarray(scheduled_lens, dtype=np.int64)
-    assert row_req_idx.shape == scheduled.shape
-    num_rows = len(scheduled)
+    """Plan the PCP packing for one chunk from its requests' KV shard rows.
+
+    The global layout is padded to ``shard rows x W`` per request. Positions
+    past a request's true extent lie beyond every token's causal bound, so
+    the kernel never reads them.
+    """
+    shard_rows = np.ascontiguousarray(row_shard_rows, dtype=np.int64)
+    assert row_req_idx.shape == shard_rows.shape
+    num_rows = len(shard_rows)
 
     row_bounds = request_row_bounds(row_req_idx)
     region_first_row = row_bounds[:-1]
     region_of_row = np.repeat(np.arange(len(region_first_row)), np.diff(row_bounds))
 
-    region_extent = scheduled[region_first_row]
-    assert np.all(region_extent > 0), (
-        f"PCP+DCP prefill got an empty scheduled context: {region_extent.tolist()}"
+    region_padded = shard_rows[region_first_row]
+    assert np.all(region_padded > 0), (
+        f"PCP+DCP prefill got an empty context: {region_padded.tolist()}"
     )
-    region_padded = (region_extent + dcp_world_size - 1) // dcp_world_size
+    region_extent = region_padded * dcp_world_size
     region_start = np.zeros(len(region_first_row) + 1, dtype=np.int64)
     np.cumsum(region_extent, out=region_start[1:])
     region_padded_cu = np.zeros(len(region_first_row) + 1, dtype=np.int64)
@@ -1063,7 +1069,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     def _split_pcp_dcp_prefill_chunks(
         self,
         row_req_idx: np.ndarray,
-        row_seq_lens_cpu: torch.Tensor,
+        row_shard_rows: np.ndarray,
         row_query_lens_cpu: torch.Tensor,
         max_logits_bytes: int,
         request_offset: int,
@@ -1071,23 +1077,19 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         """Chunk by request rather than by row, so a split prefill's two rows
         charge their shared context once, then widen each chunk back to rows.
 
-        ``row_seq_lens_cpu`` holds the whole request's extent on every row.
+        ``row_shard_rows`` holds the whole request's largest DCP shard on
+        every row, so the plan is identical on every PCP rank.
         """
         row_bounds = request_row_bounds(row_req_idx)
         first_rows = row_bounds[:-1]
-        world = self.dcp_world_size
-        # Each request's context, rounded up to whole DCP shards.
-        seq_lens = -(-row_seq_lens_cpu.numpy()[first_rows] // world) * world
-        # Rank 0 holds the short tail chunk as a request's LAST row; the first
-        # row is always a full chunk, so this query length matches on every rank.
+        # Each request's context, padded to whole DCP shards.
+        seq_lens = row_shard_rows[first_rows] * self.dcp_world_size
+        # Every rank holds a full-size chunk of a split request (shorter ones
+        # are replicated), so rows x longest row is the same on every rank,
+        # whichever row holds the short tail.
         row_query_lens = row_query_lens_cpu.numpy()
-        query_lens = np.diff(row_bounds) * row_query_lens[first_rows]
-        assert np.array_equal(
-            row_query_lens[first_rows], np.maximum.reduceat(row_query_lens, first_rows)
-        ), (
-            "PCP row layout broke the full-first-chunk invariant: first-row "
-            f"query lens {row_query_lens[first_rows].tolist()} vs per-request "
-            f"maxima {np.maximum.reduceat(row_query_lens, first_rows).tolist()}"
+        query_lens = np.diff(row_bounds) * np.maximum.reduceat(
+            row_query_lens, first_rows
         )
         chunk_specs = self._split_indexer_prefill_chunks(
             torch.from_numpy(seq_lens.astype(np.int32)),
@@ -1241,16 +1243,27 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             req_idx = None
+            shard_rows = None
             if self.use_pcp and self.dcp_world_size > 1:
                 # The gathered KV must be packed identically on every PCP rank:
-                # chunk by request, whose whole extent the upper bound holds on
-                # every rank. A dummy batch has one row per request.
+                # chunk by request from its DCP shard rows, which every rank
+                # holds. A dummy batch bypasses the PCP manager and has one
+                # row per request, so its own extent is the request's.
                 req_idx = common_attn_metadata.req_idx
                 if req_idx is None:
-                    req_idx = np.arange(common_attn_metadata.num_reqs)
+                    req_idx = np.arange(num_reqs)
+                shard_rows_cpu = common_attn_metadata.dcp_local_seq_lens_cpu_upper_bound
+                if shard_rows_cpu is None:
+                    shard_rows_cpu = get_dcp_local_seq_lens(
+                        seq_lens_cpu,
+                        self.dcp_world_size,
+                        0,
+                        self.cp_kv_cache_interleave_size,
+                    )
+                shard_rows = shard_rows_cpu.numpy()
                 chunk_specs = self._split_pcp_dcp_prefill_chunks(
                     req_idx[num_decodes:],
-                    seq_lens_cpu[num_decodes:],
+                    shard_rows[num_decodes:],
                     prefill_query_lens_cpu,
                     max_logits_bytes,
                     request_offset=num_decodes,
@@ -1268,9 +1281,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             for req_slice, query_slice in chunk_specs:
                 pcp_plan = None
                 if req_idx is not None:
+                    assert shard_rows is not None
                     pcp_plan = build_pcp_global_chunk_plan(
                         req_idx[req_slice],
-                        seq_lens_cpu[req_slice].numpy(),
+                        shard_rows[req_slice],
                         self.dcp_world_size,
                         self.device,
                     )

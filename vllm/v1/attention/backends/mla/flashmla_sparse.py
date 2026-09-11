@@ -36,6 +36,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_filter_and_convert_dcp_index,
 )
 from vllm.v1.attention.backends.utils import (
+    get_dcp_local_seq_lens,
     reshape_attn_output_for_spec_decode,
     reshape_query_for_spec_decode,
     split_prefill_chunks,
@@ -177,24 +178,25 @@ class FlashMLASparseBackend(AttentionBackend):
 
 
 def gathered_prefill_shards(
-    row_req_idx: np.ndarray, row_seq_lens: np.ndarray, dcp_world_size: int
+    row_req_idx: np.ndarray, row_shard_rows: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Under PCP+DCP, group this rank's prefill rows by request and size each
+    """Under PCP+DCP, group this rank's prefill rows by request and take each
     request's slice of this rank's KV shard.
 
     PCP gives a rank two adjacent chunk rows of a split prefill; they share
-    one context, so the workspace holds it once. ``row_seq_lens`` carries the
-    whole request's extent on every row, identical on every PCP rank, so the
-    all-gather is shaped the same everywhere.
+    one context, so the workspace holds it once. ``row_shard_rows`` is
+    ``CommonAttentionMetadata.dcp_local_seq_lens_cpu_upper_bound``: the
+    largest DCP shard of the whole request on every row, identical on every
+    PCP rank, so the all-gather is shaped the same everywhere.
 
-    Returns the request row bounds and, per request, ``ceil(extent / W)``.
+    Returns the request row bounds and, per request, its shard rows.
     """
     row_bounds = request_row_bounds(row_req_idx)
-    extents = row_seq_lens[row_bounds[:-1]].astype(np.int64)
-    assert np.all(extents > 0), (
-        f"PCP+DCP prefill got an empty context: {extents.tolist()}"
+    shard_rows = row_shard_rows[row_bounds[:-1]].astype(np.int64)
+    assert np.all(shard_rows > 0), (
+        f"PCP+DCP prefill got an empty context: {shard_rows.tolist()}"
     )
-    return row_bounds, (extents + dcp_world_size - 1) // dcp_world_size
+    return row_bounds, shard_rows
 
 
 @dataclass
@@ -515,13 +517,21 @@ class FlashMLASparseMetadataBuilder(
             if self.pcp_dcp_kv_gather:
                 # One entry per request, holding this rank's KV shard: the
                 # all-gather of every rank's shard is the whole context.
+                # A dummy batch bypasses the PCP manager: one row per request,
+                # so the row's own extent is the request's.
                 row_req_idx = common_attn_metadata.req_idx
                 if row_req_idx is None:
                     row_req_idx = np.arange(common_attn_metadata.num_reqs)
+                shard_rows_cpu = common_attn_metadata.dcp_local_seq_lens_cpu_upper_bound
+                if shard_rows_cpu is None:
+                    shard_rows_cpu = get_dcp_local_seq_lens(
+                        seq_lens_cpu,
+                        self.dcp_world_size,
+                        0,
+                        self.cp_kv_cache_interleave_size,
+                    )
                 row_bounds, rows_per_rank = gathered_prefill_shards(
-                    row_req_idx[num_decodes:],
-                    prefill_seq_lens_cpu.numpy(),
-                    self.dcp_world_size,
+                    row_req_idx[num_decodes:], shard_rows_cpu[num_decodes:].numpy()
                 )
                 workspace_rows = torch.from_numpy(rows_per_rank.astype(np.int32))
                 max_prefill_buffer_size //= self.dcp_world_size
