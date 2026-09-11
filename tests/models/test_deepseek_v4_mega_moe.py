@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.models.deepseek_v4.nvidia.dspark import DSparkDeepseekV4ForCausalLM
 from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4ForCausalLM,
+    DeepseekV4Model,
     DeepseekV4MegaMoEExperts,
     DeepseekV4MoE,
     make_deepseek_v4_expert_params_mapping,
@@ -24,6 +25,22 @@ pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(),
     reason="DeepSeek V4 MegaMoE requires CUDA",
 )
+
+
+def test_deepseek_v4_pp_intermediate_tensors_include_input_ids():
+    model = DeepseekV4Model.__new__(DeepseekV4Model)
+    model.hc_mult = 4
+    model.config = SimpleNamespace(hidden_size=16)
+
+    tensors = model.make_empty_intermediate_tensors(
+        batch_size=8,
+        dtype=torch.bfloat16,
+        device=torch.device("cpu"),
+    )
+
+    assert tensors["hidden_states"].shape == (8, 4, 16)
+    assert tensors["input_ids"].shape == (8,)
+    assert tensors["input_ids"].dtype == torch.int64
 
 
 def test_deepseek_v4_mega_moe_expert_mapping():
