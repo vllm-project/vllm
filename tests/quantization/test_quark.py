@@ -22,7 +22,7 @@ from packaging import version
 from tests.quantization.utils import load_model_without_vllm_runner
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.config import set_current_vllm_config
-from vllm.config.cache import CacheConfig
+from vllm.config.cache import CacheConfig, CacheDType
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -1097,7 +1097,7 @@ def test_quark_w8a8_fp8_moe_per_block_rejects_misaligned_partition():
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 def test_quark_fp8_w_per_tensor_a_per_tensor(
-    kv_cache_dtype: str, monkeypatch, dist_init, workspace_init
+    kv_cache_dtype: CacheDType, monkeypatch, dist_init, workspace_init
 ):
     model_path = "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test"
     checkpoint_scales = {}

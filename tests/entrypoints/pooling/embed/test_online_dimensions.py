@@ -97,7 +97,10 @@ async def test_matryoshka(
         if dimensions is not None:
             assert len(embeddings.data[0].embedding) == dimensions
 
-        vllm_outputs = [d.embedding for d in embeddings.data]
+        vllm_outputs = []
+        for d in embeddings.data:
+            assert isinstance(d.embedding, list)
+            vllm_outputs.append(d.embedding)
         run_embedding_correctness_test(hf_model, prompts, vllm_outputs, dimensions)
 
     if model_info.is_matryoshka:

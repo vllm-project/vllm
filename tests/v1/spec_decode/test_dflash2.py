@@ -100,7 +100,7 @@ def test_selector_leaves_greedy_drafting_without_proposal_logits(monkeypatch):
     allocating one here would claim a proposal the walk never sampled from.
     """
     _stub_base(monkeypatch, None)
-    speculator = DFlash2Speculator(None, torch.device("cpu"))
+    speculator = DFlash2Speculator(None, torch.device("cpu"))  # type: ignore[arg-type]  # Base initialization is stubbed.
 
     assert speculator.draft_logits is None
 
@@ -112,7 +112,7 @@ def test_selector_asks_for_fp32_proposal_logits():
     candidate row often enough that the walk and the rejection sampler checking it
     would no longer read the same distribution.
     """
-    dtype, fill = DFlash2Speculator.draft_logits_spec(None, None)
+    dtype, fill = DFlash2Speculator.draft_logits_spec(None, None)  # type: ignore[arg-type]  # Constant spec ignores self/config.
 
     assert dtype is torch.float32
     assert fill == float("-inf")
@@ -225,8 +225,8 @@ def test_dflash2_model_decoder_layer_cls(monkeypatch):
     vllm_config.compilation_config = mock_current_vllm_config.compilation_config
 
     # 3. Instantiate the model under meta device to avoid parameter allocation issues
-    with set_current_vllm_config(mock_current_vllm_config), torch.device("meta"):
-        model = DFlash2Qwen3Model(vllm_config=vllm_config)
+    with set_current_vllm_config(mock_current_vllm_config), torch.device("meta"):  # type: ignore[arg-type]
+        model = DFlash2Qwen3Model(vllm_config=vllm_config)  # type: ignore[arg-type]
 
     # 4. Assert that the layers are DFlash2Qwen3DecoderLayer (the subclass)
     assert len(model.layers) == 2

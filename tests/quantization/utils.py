@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import (
     CompilationConfig,
+    CompilationMode,
     ModelConfig,
     VllmConfig,
     set_current_vllm_config,
@@ -59,7 +60,9 @@ def load_model_without_vllm_runner(
         **(model_config_kwargs or {}),
     )
     vllm_config_args = dict(vllm_config_kwargs or {})
-    vllm_config_args.setdefault("compilation_config", CompilationConfig(mode=0))
+    vllm_config_args.setdefault(
+        "compilation_config", CompilationConfig(mode=CompilationMode.NONE)
+    )
     vllm_config = VllmConfig(model_config=model_config, **vllm_config_args)
     hf_overrides = (model_config_kwargs or {}).get("hf_overrides") or {}
     num_hidden_layers = hf_overrides.get("num_hidden_layers")

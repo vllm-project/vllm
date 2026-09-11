@@ -740,7 +740,7 @@ def test_rocm_capture_metadata_sets_adaptive_marker(monkeypatch) -> None:
     )
     builder = object.__new__(rocm_mod.DeepseekV4ROCMAiterMLASparseMetadataBuilder)
 
-    actual = builder.build_for_cudagraph_capture(SimpleNamespace())
+    actual = builder.build_for_cudagraph_capture(SimpleNamespace())  # type: ignore[arg-type]  # Patched base method ignores metadata.
 
     assert actual is metadata
     assert actual.for_cudagraph_capture is _on_gfx950()

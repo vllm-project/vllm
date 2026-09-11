@@ -128,9 +128,9 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
     monkeypatch,
 ) -> None:
     method = object.__new__(Nvfp4OnlineMoEMethod)
-    method.moe = SimpleNamespace(is_act_and_mul=True)
-    method.nvfp4_backend = object()
-    method.experts_cls = object
+    method.moe = SimpleNamespace(is_act_and_mul=True)  # type: ignore[assignment]
+    method.nvfp4_backend = object()  # type: ignore[assignment]  # Opaque mocked-backend sentinel.
+    method.experts_cls = object  # type: ignore[assignment]  # Opaque mocked-expert sentinel.
     method.moe_quant_config = None
     method.moe_kernel = None
 
@@ -145,7 +145,7 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
     )
     make_kernel = Mock(return_value=kernel)
     get_quant_config = Mock(return_value=object())
-    method.get_fused_moe_quant_config = get_quant_config
+    monkeypatch.setattr(method, "get_fused_moe_quant_config", get_quant_config)
 
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.online.nvfp4."
@@ -253,7 +253,7 @@ def test_online_prequantized_compatibility(
     checkpoint_config = checkpoint_config_factory()
 
     checkpoint_config.online_quantization_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(linear="mxfp8")
+        QuantizationConfigArgs(linear="mxfp8")  # type: ignore[arg-type]
     )
     config = checkpoint_config
 
@@ -306,7 +306,7 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
     quant_config = _fully_quantized_quark_config()
     prefix = "model.layers.0.self_attn.o_proj"
     quant_config.online_quantization_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(linear="mxfp8", ignore=[prefix])
+        QuantizationConfigArgs(linear="mxfp8", ignore=[prefix])  # type: ignore[arg-type]
     )
     monkeypatch.setattr(
         quant_config.online_quantization_config,
@@ -335,7 +335,7 @@ def test_online_quantization_rejects_prequantized_moe(
     prefix = "model.layers.0.mlp.experts"
     quant_config = _fully_quantized_quark_config()
     quant_config.online_quantization_config = OnlineQuantizationConfig(
-        QuantizationConfigArgs(linear="mxfp4", moe="mxfp4")
+        QuantizationConfigArgs(linear="mxfp4", moe="mxfp4")  # type: ignore[arg-type]
     )
 
     with pytest.raises(ValueError, match="pre-quantized layer"):
@@ -358,7 +358,7 @@ def test_activation_only_override_applies_to_checkpoint_method(
     model_config = ModelConfig(
         model=str(tmp_path),
         quantization="compressed-tensors",
-        quantization_config=QuantizationConfigArgs(moe={"activation": "mxfp8"}),
+        quantization_config=QuantizationConfigArgs(moe={"activation": "mxfp8"}),  # type: ignore[arg-type]
         hf_overrides={
             "quantization_config": {
                 "quant_method": "compressed-tensors",
@@ -412,7 +412,7 @@ def test_online_overlay_loads_checkpoint_config_file(tmp_path) -> None:
     model_config = ModelConfig(
         model=str(tmp_path),
         quantization="awq",
-        quantization_config=QuantizationConfigArgs(linear="mxfp8"),
+        quantization_config=QuantizationConfigArgs(linear="mxfp8"),  # type: ignore[arg-type]
     )
 
     result = weight_utils.get_quant_config(model_config, LoadConfig())
@@ -473,7 +473,7 @@ def test_online_shorthand_selects_checkpoint_or_online_config(
 
 def test_log_online_quantization_for_composable_config(monkeypatch) -> None:
     """Composable configs log their nested online quantization results."""
-    online_config = OnlineQuantizationConfig(QuantizationConfigArgs(linear="mxfp8"))
+    online_config = OnlineQuantizationConfig(QuantizationConfigArgs(linear="mxfp8"))  # type: ignore[arg-type]
     online_config.quantized_layers = {
         "model.layers.0.self_attn.o_proj": ("linear", "mxfp8", None),
         "model.layers.1.self_attn.o_proj": ("linear", "mxfp8", None),
@@ -891,7 +891,7 @@ def test_online_quantization_records_global_config(
     default_vllm_config, dist_init
 ) -> None:
     default_vllm_config.model_config = ModelConfig()
-    config = OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_block"))
+    config = OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_block"))  # type: ignore[arg-type]
     prefix = "model.layers.0.self_attn.o_proj"
     layer = ColumnParallelLinear(
         input_size=1,
@@ -945,7 +945,7 @@ def test_online_quantization_targets_reject_unsupported_layer() -> None:
 
 
 def test_log_online_quantization(default_vllm_config, monkeypatch) -> None:
-    config = OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_tensor"))
+    config = OnlineQuantizationConfig(QuantizationConfigArgs(linear="fp8_per_tensor"))  # type: ignore[arg-type]
     config.quantized_layers = {
         "model.layers.0.mlp.down_proj": ("linear", "fp8_per_tensor", None),
         "model.layers.1.mlp.down_proj": ("linear", "fp8_per_tensor", None),
@@ -1158,7 +1158,7 @@ def test_online_int8_moe_w2_scale_matches_unsharded(monkeypatch) -> None:
         layer.w2_weight = torch.nn.Parameter(w2_in, requires_grad=False)
         layer.num_experts = layer.local_num_experts = w13.shape[0]
         method = SimpleNamespace(moe=SimpleNamespace(tp_size=moe_tp_size))
-        Int8OnlineMoEMethod._quantize_weights(method, layer)
+        Int8OnlineMoEMethod._quantize_weights(method, layer)  # type: ignore[arg-type]
         return layer.w2_weight, layer.w2_scale
 
     full_weight, full_scale = quantize(w2, 1)

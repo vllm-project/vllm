@@ -7,6 +7,7 @@ fp32, which is required for RL training-inference consistency.
 """
 
 import math
+from typing import cast
 
 import pytest
 import torch
@@ -16,6 +17,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
+    VocabParallelEmbedding,
 )
 
 
@@ -32,10 +34,17 @@ class _FakeLmHead:
         self.tp_size = 1
 
 
+def _fake_lm_head(
+    weight: torch.Tensor, quantized: bool = False, shard_indices: object | None = None
+) -> VocabParallelEmbedding:
+    # The dtype tests only need the projection fields, not distributed setup.
+    return cast(VocabParallelEmbedding, _FakeLmHead(weight, quantized, shard_indices))
+
+
 def _build_processor(vocab_size: int) -> LogitsProcessor:
     lp = LogitsProcessor(vocab_size)
     # The TP gather is orthogonal to the dtype behavior under test.
-    lp._gather_logits = lambda logits: logits
+    lp._gather_logits = lambda logits: logits  # type: ignore[method-assign]
     return lp
 
 
@@ -47,8 +56,9 @@ def test_fp32_head_runs_projection_in_fp32(default_vllm_config):
     hidden_states = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16)
     weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
 
-    logits = lp._get_logits(hidden_states, _FakeLmHead(weight), None)
+    logits = lp._get_logits(hidden_states, _fake_lm_head(weight), None)
 
+    assert logits is not None
     assert logits.dtype == torch.float32
     assert torch.isfinite(logits).all()
     expected = torch.nn.functional.linear(hidden_states.float(), weight.float())
@@ -66,8 +76,9 @@ def test_non_fp32_head_dtype_uses_cast_path(default_vllm_config):
     hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16)
     weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
 
-    logits = lp._get_logits(hidden_states, _FakeLmHead(weight), None)
+    logits = lp._get_logits(hidden_states, _fake_lm_head(weight), None)
 
+    assert logits is not None
     assert logits.dtype == torch.float16
     expected = torch.nn.functional.linear(hidden_states.half(), weight.half())
     torch.testing.assert_close(logits, expected)
@@ -82,7 +93,7 @@ def test_head_dtype_equal_to_model_dtype_uses_quant_method(default_vllm_config):
 
     hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16)
     weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
-    lm_head = _FakeLmHead(weight)
+    lm_head = _fake_lm_head(weight)
 
     with mock.patch.object(
         lm_head.quant_method,
@@ -94,6 +105,7 @@ def test_head_dtype_equal_to_model_dtype_uses_quant_method(default_vllm_config):
         logits = lp._get_logits(hidden_states, lm_head, None)
 
     apply_mock.assert_called_once()
+    assert logits is not None
     assert logits.dtype == torch.bfloat16
 
 
@@ -120,9 +132,10 @@ def test_fp32_head_uses_mm_fast_path_on_device(default_vllm_config):
     with mock.patch(
         "vllm.model_executor.layers.logits_processor.F.linear"
     ) as linear_mock:
-        logits = lp._get_logits(hidden_states, _FakeLmHead(weight), None)
+        logits = lp._get_logits(hidden_states, _fake_lm_head(weight), None)
 
     linear_mock.assert_not_called()
+    assert logits is not None
     assert logits.dtype == torch.float32
     expected = torch.nn.functional.linear(hidden_states.float(), weight.float())
     torch.testing.assert_close(logits, expected)
@@ -131,7 +144,7 @@ def test_fp32_head_uses_mm_fast_path_on_device(default_vllm_config):
 def test_fp32_head_rejects_quantized_lm_head(default_vllm_config):
     lp = _build_processor(64)
     lp.head_dtype = torch.float32
-    lm_head = _FakeLmHead(torch.randn(64, 16, dtype=torch.bfloat16), quantized=True)
+    lm_head = _fake_lm_head(torch.randn(64, 16, dtype=torch.bfloat16), quantized=True)
 
     with pytest.raises(ValueError, match="unquantized"):
         lp._get_logits(torch.randn(4, 16, dtype=torch.bfloat16), lm_head, None)
@@ -197,7 +210,7 @@ def test_get_top_tokens_honors_head_dtype(default_vllm_config):
 
     hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16)
     weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
-    lm_head = _FakeLmHead(
+    lm_head = _fake_lm_head(
         weight,
         shard_indices=types.SimpleNamespace(
             num_org_vocab_padding=0, org_vocab_start_index=0
@@ -236,7 +249,9 @@ def test_fp32_head_e2e_no_nan():
 
     for output in outputs:
         for completion in output.outputs:
+            assert completion.logprobs is not None
             for token_id, position in zip(completion.token_ids, completion.logprobs):
+                assert position is not None
                 # The sampled token survived filtering, so its logprob is finite.
                 assert math.isfinite(position[token_id].logprob)
                 # No returned logprob is NaN.

@@ -44,12 +44,16 @@ def test_token_type_ids_stay_aligned_with_a_truncated_padded_prompt():
         truncation_side="left",
     )
 
-    prompt = tok_params.apply_post_tokenization(tokenizer, prompt)
+    processed_prompt = tok_params.apply_post_tokenization(
+        tokenizer,  # type: ignore[arg-type]
+        prompt,
+    )
+    assert "prompt_token_ids" in processed_prompt
     token_type_ids = _apply_post_tokenization_to_token_type_ids(
         tokenizer, tok_params, token_type_ids
     )
 
-    prompt_token_ids = prompt["prompt_token_ids"]
+    prompt_token_ids = processed_prompt["prompt_token_ids"]
     assert len(token_type_ids) == len(prompt_token_ids)
 
     # Keeping the last 40 tokens drops the first 10 query tokens, so 10 query

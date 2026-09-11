@@ -276,6 +276,7 @@ async def test_long_text_embedding_1500_chars(
 
     # Verify embedding vector validity
     embedding_vector = embeddings.data[0].embedding
+    assert isinstance(embedding_vector, list)
     assert all(isinstance(x, float) for x in embedding_vector), (
         "Embedding vector should contain floats"
     )
@@ -325,6 +326,7 @@ async def test_long_text_embedding_2500_chars(
 
     # Verify embedding vector validity
     embedding_vector = embeddings.data[0].embedding
+    assert isinstance(embedding_vector, list)
     assert all(isinstance(x, float) for x in embedding_vector), (
         "Embedding vector should contain floats"
     )
@@ -414,6 +416,7 @@ async def test_chunked_vs_normal_consistency(
 
     # 验证embedding向量的有效性
     embedding_vector = embeddings.data[0].embedding
+    assert isinstance(embedding_vector, list)
     assert all(isinstance(x, float) for x in embedding_vector)
     assert not all(x == 0 for x in embedding_vector)
 
@@ -444,6 +447,7 @@ async def test_chunked_processing_response_format(
 
     # Verify embedding vector properties
     embedding_vector = embeddings.data[0].embedding
+    assert isinstance(embedding_vector, list)
     import math
 
     vector_norm = math.sqrt(sum(x * x for x in embedding_vector))

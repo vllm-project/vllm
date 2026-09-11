@@ -281,7 +281,7 @@ def test_mha_attn_varlen_forward_flashinfer(
     # Override vllm config so get_vit_attn_backend returns FLASHINFER (simulates
     # --mm-encoder-attn-backend=FLASHINFER).
     vllm_config = get_current_vllm_config()
-    old_model_config = getattr(vllm_config, "model_config", None)
+    old_model_config = vllm_config.model_config
     minimal_model_config = type(
         "MinimalModelConfig",
         (),
@@ -380,7 +380,7 @@ def test_mha_attn_varlen_forward_aiter_fp8(
     torch.set_default_dtype(dtype)
 
     vllm_config = get_current_vllm_config()
-    old_model_config = getattr(vllm_config, "model_config", None)
+    old_model_config = vllm_config.model_config
     minimal_model_config = type(
         "MinimalModelConfig",
         (),
@@ -446,7 +446,7 @@ def test_mha_attn_varlen_forward_aiter_fp8(
 )
 def test_mha_attn_aiter_fp8_rejects_unsupported_arch(default_vllm_config):
     vllm_config = get_current_vllm_config()
-    old_model_config = getattr(vllm_config, "model_config", None)
+    old_model_config = vllm_config.model_config
     vllm_config.model_config = type(
         "MinimalModelConfig",
         (),
@@ -472,7 +472,7 @@ def test_mha_attn_aiter_fp8_rejects_unsupported_arch(default_vllm_config):
 )
 def test_mha_attn_fp8_rejects_wrong_backend(default_vllm_config):
     vllm_config = get_current_vllm_config()
-    old_model_config = getattr(vllm_config, "model_config", None)
+    old_model_config = vllm_config.model_config
     vllm_config.model_config = type(
         "MinimalModelConfig",
         (),

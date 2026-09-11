@@ -51,7 +51,7 @@ def _create_proposer(
         target_parallel_config=ParallelConfig(),
         method="extract_hidden_states",
         num_speculative_tokens=num_speculative_tokens,
-        draft_model_config={
+        draft_model_config={  # type: ignore[arg-type]
             "hf_config": {
                 "eagle_aux_hidden_state_layer_ids": layer_ids,
             }
@@ -103,7 +103,7 @@ def test_proposer_initialization_missing_layer_ids():
         target_parallel_config=ParallelConfig(),
         method="extract_hidden_states",
         num_speculative_tokens=1,
-        draft_model_config={
+        draft_model_config={  # type: ignore[arg-type]
             "hf_config": {}  # Missing eagle_aux_hidden_state_layer_ids
         },
     )
@@ -147,7 +147,7 @@ def test_prepare_next_token_ids_padded():
     mock_input_batch.vocab_size = 100
     mock_input_batch.num_tokens_no_spec = np.array([5] * num_requests)
 
-    mock_requests = {}
+    mock_requests: dict[str, CachedRequestState] = {}
     for req_id in req_ids:
         mock_request = mock.MagicMock(spec=CachedRequestState)
         # Each request will have a backup next token id of 10, 20, 30, 40
@@ -365,7 +365,7 @@ def test_extract_hidden_states_text_only_config_regression():
         target_parallel_config=ParallelConfig(),
         method="extract_hidden_states",
         num_speculative_tokens=1,
-        draft_model_config={
+        draft_model_config={  # type: ignore[arg-type]
             "hf_config": {
                 "eagle_aux_hidden_state_layer_ids": [1, 2, 3, 4],
             }
@@ -452,7 +452,7 @@ def test_extract_hidden_states_speculative_config_vlm():
         target_parallel_config=ParallelConfig(),
         method="extract_hidden_states",
         num_speculative_tokens=1,
-        draft_model_config={
+        draft_model_config={  # type: ignore[arg-type]
             "hf_config": {
                 "eagle_aux_hidden_state_layer_ids": [1, 2],
             }
