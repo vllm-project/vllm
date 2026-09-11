@@ -304,8 +304,7 @@ class HiSparseCoordinator:
     def _can_read_from_host(self, request_id: str) -> bool:
         """Whether resident pages may be dropped under the request."""
         return bool(self.hot_managers) and all(
-            manager.has_hot(request_id) or request_id in manager.hot_required
-            for manager in self.hot_managers
+            manager.has_hot(request_id) for manager in self.hot_managers
         )
 
     def _resident_page_blocks(
@@ -379,8 +378,8 @@ class HiSparseCoordinator:
 
         A request that can read from host releases every clean sealed page to
         the pool. One that cannot keeps its pages pinned until the shared pool
-        runs low, then asks for a hot region and releases them; the region is
-        allocated on its next scheduling pass, before the block table is used.
+        runs low, then asks for a hot region. Pages remain pinned until that region
+        is allocated on a subsequent scheduling pass.
         """
         if not self.resident_managers:
             return
@@ -391,6 +390,7 @@ class HiSparseCoordinator:
                 return
             for manager in self.hot_managers:
                 manager.require_hot(request_id)
+            return
         self._unpin_clean_pages(request_id, state)
 
     # ------------------------------------------------------------------
@@ -477,16 +477,10 @@ class HiSparseCoordinator:
         """Note a prefix an external load is populating in host pages."""
         self._pending_imports[request_id] = num_tokens
 
-    def complete_pending_host_import(self, request_id: str, num_tokens: int) -> None:
-        """Publish a recorded import once its whole prefix is accounted for.
-
-        A load that failed part-way leaves the request short of the recorded
-        prefix, so nothing is published and the pages stay dirty.
-        """
-        pending = self._pending_imports.get(request_id)
-        if pending is not None and num_tokens >= pending:
-            del self._pending_imports[request_id]
-            self.complete_host_import(request_id, pending)
+    def finish_host_import(self, request_id: str, *, failed: bool) -> None:
+        num_tokens = self._pending_imports.pop(request_id, None)
+        if num_tokens is not None and not failed:
+            self.complete_host_import(request_id, num_tokens)
 
     def complete_host_import(self, request_id: str, num_computed_tokens: int) -> None:
         """Publish externally populated host pages after connector completion."""
@@ -652,7 +646,7 @@ class HiSparseCoordinator:
         )
 
     def has_pending_work(self) -> bool:
-        return bool(self.spills_to_send or self.pending_spills)
+        return bool(self.spills_to_send or self.pending_spills or self._retained_copies)
 
     def update_spills(
         self,

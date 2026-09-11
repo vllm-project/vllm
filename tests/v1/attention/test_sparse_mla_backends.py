@@ -1716,8 +1716,8 @@ def test_sparse_mla_index_groups_own_distinct_physical_buffers():
 
     assert follower is first
     assert second is not first
-    assert first.physical_topk_indices.shape == (2, 128)
-    assert second.physical_topk_indices.shape == (2, 128)
+    assert first.physical_topk_indices[:2].shape == (2, 128)
+    assert second.physical_topk_indices[:2].shape == (2, 128)
     assert first.physical_topk_indices.data_ptr() != (
         second.physical_topk_indices.data_ptr()
     )

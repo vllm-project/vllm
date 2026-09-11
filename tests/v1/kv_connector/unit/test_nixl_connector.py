@@ -1975,6 +1975,7 @@ def test_mixed_memory_read_failure_does_not_notify_producer():
     worker._recving_metadata = {"request": MagicMock()}
     worker._recving_transfers = {"request": [101, 102]}
     worker._pending_recv_notifs = {"request": [("prefill", b"request:1")]}
+    worker._failed_inflight_recvs = set()
     worker._is_hma_required = True
     worker._failed_recv_reqs = MagicMock()
     worker._log_failure = MagicMock()  # type: ignore[method-assign]
@@ -3117,19 +3118,7 @@ def test_failed_request_skips_kv_postprocessing(
 def test_handles_failing_in_separate_polls_do_not_kill_the_engine(
     default_vllm_config, dist_init
 ):
-    """A request whose handles fail in different polls must not crash the engine.
-
-    One transfer handle is created per remote rank, and when a peer goes away
-    they do not all fail in the same poll: one errors while another is still
-    PROC. The first failure reports the request via _failed_recv_reqs and
-    get_finished() pops its metadata; when the remaining handles fail in a
-    later poll, the request must be cleaned up without being reported again.
-
-    Reporting twice kills the EngineCore: the scheduler's assert in
-    _update_from_kv_xfer_finished only expects a finished recv for a request
-    still waiting for KVs, having moved this one out of
-    WAITING_FOR_REMOTE_KVS to recompute locally after the first report.
-    """
+    """Failures across polls report once, after the last writer is terminal."""
     vllm_config = create_vllm_config()
     connector = NixlConnector(
         vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
@@ -3175,20 +3164,21 @@ def test_handles_failing_in_separate_polls_do_not_kill_the_engine(
     ):
         _, done_recving = connector.get_finished(finished_req_ids=set())
 
-    assert request_id in done_recving
-    assert request_id not in worker._recving_metadata
+    assert request_id not in done_recving
+    assert request_id in worker._recving_metadata
     assert worker._recving_transfers[request_id] == [second]
+    assert connector.get_block_ids_with_load_errors() == set()
 
-    # Poll 2: the second handle fails too. The request was already reported,
-    # so it must not be reported a second time: the scheduler has since moved
-    # it out of WAITING_FOR_REMOTE_KVS to recompute locally, and asserts on a
-    # finished recv for a request in that state. Its remaining handles are
-    # still released and the transfer entry removed.
+    # Only the last terminal handle permits the scheduler to reuse the blocks.
     with patch.object(worker.nixl_wrapper, "check_xfer_state", return_value="ERR"):
         _, done_recving = connector.get_finished(finished_req_ids=set())
 
-    assert request_id not in done_recving
+    assert done_recving == {request_id}
     assert request_id not in worker._recving_transfers
+    assert request_id not in worker._recving_metadata
+    assert connector.get_block_ids_with_load_errors() == {1, 2, 3}
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert done_recving == set()
 
 
 def _set_test_speculative_config(

@@ -350,6 +350,8 @@ class _StubWriterWorker(NixlPushConnectorWorker):
 
         # Base worker fields touched by start_load_kv / _get_new_notifs.
         w._recving_metadata = {}
+        w._pending_recv_notifs = {}
+        w._failed_inflight_recvs = set()
         w._recving_transfers = defaultdict(list)
         w._reqs_to_process = set()
         w._reqs_to_send = {}

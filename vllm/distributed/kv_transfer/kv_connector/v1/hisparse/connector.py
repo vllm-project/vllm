@@ -161,6 +161,10 @@ class HiSparseConnectorScheduler:
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         assert self.coordinator is not None
+        for request_id in connector_output.finished_recving or ():
+            self.coordinator.finish_host_import(
+                request_id, failed=request_id in connector_output.failed_recving
+            )
         metadata = connector_output.kv_connector_worker_meta
         if metadata is None:
             return

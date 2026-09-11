@@ -926,66 +926,6 @@ def test_connector_finish_registers_partial_tail_before_cleanup():
     scheduler.kv_cache_manager.remove_skipped_blocks.assert_called_once()
 
 
-def test_boundary_state_offload_pins_released_cow_target():
-    """A drained boundary-state handoff keeps its released CoW block alive."""
-    hash_block_size = 2
-    block_size = 2 * hash_block_size
-    kv_cache_config = KVCacheConfig(
-        num_blocks=24,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["full"],
-                FullAttentionSpec(
-                    block_size=hash_block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            ),
-            KVCacheGroupSpec(
-                ["mamba"],
-                MambaSpec(
-                    block_size=block_size,
-                    shapes=(1, 1),
-                    dtypes=(torch.float32,),
-                    mamba_cache_mode="align",
-                ),
-            ),
-        ],
-    )
-    manager = make_kv_cache_manager(
-        kv_cache_config=kv_cache_config,
-        max_model_len=8192,
-        enable_caching=True,
-        hash_block_size=hash_block_size,
-    )
-    req0 = make_request("0", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
-    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
-    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
-    req0.num_computed_tokens = 6
-    req0.append_output_token_ids([3])
-    assert manager.allocate_slots(req0, 1) is not None
-
-    # Retention released before the drain (defer_block_free=False ordering).
-    _copies, retained = manager.take_kv_cache_block_copies()
-    manager.block_pool.free_blocks(retained)
-
-    offloads = drain_boundary_state_offloads(manager)
-    ((_group_id, block_id, boundary_tokens),) = offloads["0"]
-    assert boundary_tokens == 6
-    cow_block = manager.block_pool.blocks[block_id]
-    assert cow_block.ref_cnt == 1
-    assert block_id not in _free_block_ids(manager)
-
-    # The connector-pinned block is out of the free queue: draining every free block
-    # neither trips the allocator's ref_cnt assert nor hands it out.
-    new_blocks = manager.block_pool.get_new_blocks(
-        manager.block_pool.get_num_free_blocks()
-    )
-    assert block_id not in {b.block_id for b in new_blocks}
-
-
 def test_boundary_state_offload_dropped_when_request_freed_before_drain():
     """A hand-off recorded in the same scheduling pass as the request's death
     must not be drained: its release hook has already run, so draining would

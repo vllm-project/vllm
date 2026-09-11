@@ -682,6 +682,7 @@ class NixlBaseConnectorWorker:
         # Uses Queue for thread-safe cross-thread coordination with the
         # background handshake thread, matching the _ready_requests pattern.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
+        self._failed_inflight_recvs: set[ReqId] = set()
         self._pending_recv_notifs: dict[ReqId, list[tuple[str, bytes]]] = {}
 
         # Handshake metadata of this worker for NIXL transfers.
@@ -2808,14 +2809,13 @@ class NixlBaseConnectorWorker:
                     self._handle_failed_transfer(req_id, handle)
 
             if not in_progress:
-                # Only report request as completed when all transfers are done.
-                # A request failed in an earlier poll was already reported via
-                # _failed_recv_reqs and its metadata popped by get_finished();
-                # don't report it again, just drop the remaining handles.
-                if req_id in self._recving_metadata:
-                    done_req_ids.add(req_id)
-                    self._send_pending_recv_notifs(req_id)
                 del transfers[req_id]
+                done_req_ids.add(req_id)
+                if req_id in self._failed_inflight_recvs:
+                    self._failed_inflight_recvs.remove(req_id)
+                    self._report_failed_recv(req_id)
+                else:
+                    self._send_pending_recv_notifs(req_id)
             else:
                 transfers[req_id] = in_progress
         return done_req_ids
@@ -2829,20 +2829,22 @@ class NixlBaseConnectorWorker:
             req_id: The request ID.
             handle: The transfer handle.
         """
-        # (multi-read) One handle is created per remote rank, and they do not
-        # all fail in the same _pop_done_transfers poll. The request is
-        # reported failed on the first one, which pops its metadata in
-        # get_finished(); on the later failures only the handle cleanup is left.
-        # TODO (NickLucche) handle failed transfer for HMA.
-        # A split READ's notification is sent only after every handle succeeds.
+        # A sibling READ may still be writing these blocks. Retain metadata
+        # and defer invalidation until every handle is terminal.
         self._pending_recv_notifs.pop(req_id, None)
+        if req_id in self._recving_transfers:
+            self._failed_inflight_recvs.add(req_id)
+        else:
+            self._report_failed_recv(req_id)
+        if handle is not None:
+            self.nixl_wrapper.release_xfer_handle(handle)
+        self.xfer_stats.record_failed_transfer()
+
+    def _report_failed_recv(self, req_id: str) -> None:
         if (meta := self._recving_metadata.get(req_id)) is not None:
             if not self._is_hma_required:
                 self._invalid_block_ids.put(set(meta.local_block_ids[0]))
             self._failed_recv_reqs.put(req_id)
-        if handle is not None:
-            self.nixl_wrapper.release_xfer_handle(handle)
-        self.xfer_stats.record_failed_transfer()
 
     def _send_pending_recv_notifs(self, req_id: str) -> None:
         """Send notifications deferred by split DRAM/VRAM reads."""

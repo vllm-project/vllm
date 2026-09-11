@@ -2232,28 +2232,43 @@ class HiSparseSourceManager(FullAttentionManager):
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
-        # Host blocks come from the private pool and are never a device cost.
+        if (
+            total_computed_tokens > num_local_computed_tokens
+            or self._has_partial_local_hit(
+                new_computed_blocks, num_local_computed_tokens
+            )
+        ):
+            # External loads need real destinations; future GPU-computed pages
+            # remain best effort. Use the same admission sentinel as Mamba.
+            required = super().get_num_blocks_to_allocate(
+                request_id,
+                total_computed_tokens,
+                new_computed_blocks,
+                total_computed_tokens,
+                num_local_computed_tokens,
+                total_computed_tokens,
+            )
+            if required > self.block_pool.get_num_free_blocks():
+                assert self.coordinator is not None
+                assert self.coordinator.gpu_pool is not None
+                return self.coordinator.gpu_pool.num_gpu_blocks + 1
         return 0
 
     def allocate_new_blocks(
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
         req_blocks = self.req_to_blocks[request_id]
-        num_new_blocks = cdiv(num_tokens, self.block_size) - len(req_blocks)
+        num_required = cdiv(num_tokens, self.block_size)
         num_free = self.block_pool.get_num_free_blocks()
-        if num_new_blocks <= num_free:
-            return super().allocate_new_blocks(
-                request_id, num_tokens, num_tokens_main_model
-            )
-        # Host exhaustion: take what fits and leave the rest without a host
-        # page, so those GPU pages are never written back and stay pinned.
-        new_blocks: list[KVCacheBlock] = []
-        if num_free:
-            fit_tokens = (len(req_blocks) + num_free) * self.block_size
-            new_blocks = super().allocate_new_blocks(
-                request_id, fit_tokens, min(num_tokens_main_model, fit_tokens)
-            )
-        req_blocks.extend([self._null_block] * (num_new_blocks - len(new_blocks)))
+        if request_id in self._partial_hit_reqs:
+            num_free -= 1
+        fit_blocks = min(num_required, len(req_blocks) + max(0, num_free))
+        new_blocks = super().allocate_new_blocks(
+            request_id,
+            fit_blocks * self.block_size,
+            min(num_tokens_main_model, fit_blocks * self.block_size),
+        )
+        req_blocks.extend([self._null_block] * (num_required - len(req_blocks)))
         return new_blocks
 
     def allocate_external_computed_blocks(
@@ -2262,8 +2277,10 @@ class HiSparseSourceManager(FullAttentionManager):
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
     ) -> None:
-        # The connector writes these host pages directly; they only become
-        # readable once the request is committed at that prefix length.
+        if num_external_computed_tokens <= 0:
+            return
+        # The connector writes these pages; only a successful receive makes
+        # them readable, not advancing the request's computed-token count.
         assert self.coordinator is not None
         self.coordinator.record_pending_host_import(
             request_id, num_local_computed_tokens + num_external_computed_tokens
@@ -2281,7 +2298,6 @@ class HiSparseSourceManager(FullAttentionManager):
         replay_boundaries: Sequence[int],
     ) -> None:
         assert self.coordinator is not None
-        self.coordinator.complete_pending_host_import(request.request_id, num_tokens)
         self.coordinator.publish_when_ready(
             request,
             num_tokens,

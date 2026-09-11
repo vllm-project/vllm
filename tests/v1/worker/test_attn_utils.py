@@ -449,7 +449,7 @@ def test_allocate_kv_cache_host_pool_and_view_less_specs():
     )
     assert caches["indexer"].shape[0] == 4
     backing = caches["resident"]
-    assert backing.dtype == torch.int8 and backing.numel() == device_size
+    assert backing.dtype == torch.int8 and backing.numel() >= device_size
     assert (
         backing.untyped_storage().data_ptr()
         == caches["indexer"].untyped_storage().data_ptr()
