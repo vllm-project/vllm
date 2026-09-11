@@ -349,7 +349,7 @@ def _triton_key_deriver(
     knobs = triton.knobs
     Autotuner = triton.runtime.autotuner.Autotuner
     Heuristics = triton.runtime.autotuner.Heuristics
-    driver = triton.runtime.driver.driver
+    driver = triton.runtime.driver
     JITFunction = triton.runtime.jit.JITFunction
     compute_cache_key = triton.runtime.jit.compute_cache_key
 
