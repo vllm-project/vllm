@@ -256,7 +256,13 @@ class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        if current_platform.is_device_capability_family(90) or current_platform.is_device_capability_family(120):
+        # Support SM90 (Hopper), SM120/GB10, and SM121 (Blackwell variants).
+        # DeepGEMM kernel on these architectures requires block_size 64 for ratio-1 layers.
+        if (
+            current_platform.is_device_capability_family(90)
+            or current_platform.is_device_capability_family(120)
+            or current_platform.is_device_capability_family(121)
+        ):
             return [64]
         return [128]
 
