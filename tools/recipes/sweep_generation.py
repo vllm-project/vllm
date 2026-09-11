@@ -537,8 +537,29 @@ the corresponding key is removed from `recommended-config.yml`, allowing
     path.write_text(content, encoding="utf-8")
 
 
-def _write_post_benchmark_analysis_files(directory: Path) -> list[Path]:
-    """Copy standalone visualization helpers into a generated sweep package."""
+def _write_report_script(path: Path, *, workload: WorkloadHints) -> None:
+    template_path = Path(__file__).with_name("sweep_html_report.py")
+    source = template_path.read_text(encoding="utf-8")
+    replacements = {
+        "DEFAULT_TTFT_SLA_MS: float | None = None": (
+            f"DEFAULT_TTFT_SLA_MS: float | None = {workload.ttft_sla_ms!r}"
+        ),
+        "DEFAULT_TPOT_SLA_MS: float | None = None": (
+            f"DEFAULT_TPOT_SLA_MS: float | None = {workload.tpot_sla_ms!r}"
+        ),
+    }
+    for marker, replacement in replacements.items():
+        if marker not in source:
+            raise ValueError(f"HTML report template marker not found: {marker}")
+        source = source.replace(marker, replacement, 1)
+    path.write_text(source, encoding="utf-8")
+    path.chmod(path.stat().st_mode | 0o111)
+
+
+def _write_post_benchmark_analysis_files(
+    directory: Path, *, workload: WorkloadHints
+) -> list[Path]:
+    """Copy standalone reporting helpers into a generated sweep package."""
     source_dir = Path(__file__).resolve().parent
     generated: list[Path] = []
     for source_name, target_name, executable in (
@@ -552,6 +573,9 @@ def _write_post_benchmark_analysis_files(directory: Path) -> list[Path]:
         if executable:
             target.chmod(target.stat().st_mode | 0o111)
         generated.append(target)
+    report = directory / "report.py"
+    _write_report_script(report, workload=workload)
+    generated.append(report)
     return generated
 
 
@@ -599,7 +623,9 @@ def write_sweep_files(
         workload=workload,
     )
     _write_guide(guide, workload)
-    analysis_files = _write_post_benchmark_analysis_files(directory)
+    analysis_files = _write_post_benchmark_analysis_files(
+        directory, workload=workload
+    )
 
     return [
         sweep_config,
@@ -697,7 +723,9 @@ concurrency and scheduler tuning should follow automatically.
 """,
         encoding="utf-8",
     )
-    analysis_files = _write_post_benchmark_analysis_files(directory)
+    analysis_files = _write_post_benchmark_analysis_files(
+        directory, workload=workload
+    )
 
     return [
         parallel_params,
@@ -880,19 +908,34 @@ exec "${{SCRIPT_DIR}}/run_sweep.sh" "$@"
     path.chmod(path.stat().st_mode | 0o111)
 
 
-def _write_full_run_script(path: Path) -> None:
-    script = """#!/usr/bin/env bash
+def _recommend_sla_args(workload: WorkloadHints) -> list[str]:
+    args = []
+    if workload.ttft_sla_ms is not None:
+        args.append(f"--ttft-sla-ms {workload.ttft_sla_ms:g}")
+    if workload.tpot_sla_ms is not None:
+        args.append(f"--tpot-sla-ms {workload.tpot_sla_ms:g}")
+    return args
+
+
+def _write_full_run_script(path: Path, *, workload: WorkloadHints) -> None:
+    recommend_sla_args = " ".join(_recommend_sla_args(workload))
+    script = f"""#!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${{BASH_SOURCE[0]}}")" && pwd)"
 RUN_ARGS=("$@")
+RECOMMEND_SLA_ARGS=({recommend_sla_args})
 
-"${SCRIPT_DIR}/run_parallel_layout_sweep.sh" "${RUN_ARGS[@]}"
-"${SCRIPT_DIR}/recommend_parallel_layout.py"
-"${SCRIPT_DIR}/run_concurrency_sweep.sh" "${RUN_ARGS[@]}"
-"${SCRIPT_DIR}/recommend_concurrency.py"
-"${SCRIPT_DIR}/run_scheduler_sweep.sh" "${RUN_ARGS[@]}"
-"${SCRIPT_DIR}/recommend.py"
+"${{SCRIPT_DIR}}/run_parallel_layout_sweep.sh" "${{RUN_ARGS[@]}}"
+"${{SCRIPT_DIR}}/recommend_parallel_layout.py" "${{RECOMMEND_SLA_ARGS[@]}}"
+"${{SCRIPT_DIR}}/run_concurrency_sweep.sh" "${{RUN_ARGS[@]}}"
+"${{SCRIPT_DIR}}/recommend_concurrency.py" "${{RECOMMEND_SLA_ARGS[@]}}"
+"${{SCRIPT_DIR}}/run_scheduler_sweep.sh" "${{RUN_ARGS[@]}}"
+"${{SCRIPT_DIR}}/recommend.py" "${{RECOMMEND_SLA_ARGS[@]}}"
+
+if ! "${{SCRIPT_DIR}}/report.py" "${{RECOMMEND_SLA_ARGS[@]}}"; then
+  echo "Warning: sweep completed, but HTML report generation failed." >&2
+fi
 """
     path.write_text(script, encoding="utf-8")
     path.chmod(path.stat().st_mode | 0o111)
@@ -917,6 +960,9 @@ Run all stages:
 ```bash
 ./run_full_sweep.sh
 ```
+
+After the final recommendation, the full runner writes `sweep-report.html`.
+Report-generation failures are warnings and do not change sweep success.
 
 Or run each stage explicitly:
 
@@ -967,7 +1013,9 @@ def write_concurrency_sweep_files(
         workload=workload,
     )
     _write_concurrency_recommend_script(recommend_script, workload=workload)
-    analysis_files = _write_post_benchmark_analysis_files(directory)
+    analysis_files = _write_post_benchmark_analysis_files(
+        directory, workload=workload
+    )
     return [bench_params, run_script, recommend_script, *analysis_files]
 
 
@@ -1034,7 +1082,7 @@ def write_full_sweep_files(
     )
     _write_scheduler_wrapper(run_scheduler, workload=workload)
 
-    _write_full_run_script(run_full)
+    _write_full_run_script(run_full, workload=workload)
     _write_full_guide(guide, workload)
 
     return [

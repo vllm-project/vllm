@@ -128,6 +128,7 @@ concurrency and finishes with:
 ```text
 /output/sweep/recommended-config.yml
 /output/sweep/recommendation.json
+/output/sweep/sweep-report.html
 ```
 
 Inspect the final recommendation:
@@ -445,7 +446,34 @@ If no configuration is SLA-feasible, the recommendation JSON records a
 best-effort candidate. A deployable final configuration is produced only when
 the required recommendation stages succeed.
 
-## 7. Post-Benchmark Visualization
+## 7. Post-Benchmark Reporting
+
+After Tune All finishes, `run_full_sweep.sh` automatically runs `report.py` and
+writes a self-contained summary:
+
+```text
+/output/sweep/sweep-report.html
+```
+
+The HTML report includes the selected configuration, a stage summary, SLA
+metrics, candidate tables, and automatic coverage observations. It uses only
+Python's standard library. A report-generation error is printed as a warning
+and does not change the success of the completed sweep.
+
+The TTFT and TPOT objectives supplied to `recipe_json_to_vllm_config.py` are
+embedded in every generated recommender and in `report.py`.
+`run_full_sweep.sh` also passes those values explicitly to every recommendation
+stage and the report. Report generation stops with an error if a stale or
+manually generated recommendation JSON contains different SLA values.
+
+Regenerate the report manually when recommendation files change:
+
+```bash
+cd /output/sweep
+./report.py
+```
+
+### Optional figures
 
 Every generated sweep package includes a standalone analysis helper. It is not
 called by `run_full_sweep.sh` or any stage runner, so figure generation cannot
