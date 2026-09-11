@@ -239,7 +239,8 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
 
 
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
-    """ROCm keeps the DSA models on MRV1 and off breakable graphs by default."""
+    """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
+    MRV1 paths and off breakable cudagraphs by default."""
     from vllm.config.vllm import (
         ROCM_DEFAULT_MRV1_ARCHITECTURES,
         default_breakable_cudagraph_architectures,
@@ -268,6 +269,44 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
         assert VllmConfig.use_v2_model_runner.fget(config) is False
     finally:
         default_breakable_cudagraph_architectures.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("architecture", "use_v2", "mode", "expected"),
+    [
+        ("DeepseekV4ForCausalLM", True, None, CUDAGraphMode.NONE),
+        ("DeepseekV4ForConditionalGeneration", True, None, CUDAGraphMode.NONE),
+        ("DeepseekV4ForCausalLM", False, None, None),
+        ("LlamaForCausalLM", True, None, None),
+        (
+            "DeepseekV4ForCausalLM",
+            True,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+        ),
+    ],
+)
+def test_rocm_gfx950_deepseek_v4_cudagraph_default(
+    monkeypatch, architecture, use_v2, mode, expected
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.platforms import rocm
+
+    monkeypatch.setattr(rocm, "on_gfx950", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "is_fused_moe_enabled", lambda: False)
+    monkeypatch.setattr(rocm_aiter_ops, "is_linear_fp8_enabled", lambda: False)
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_fusion_moe_shared_experts_enabled", lambda: False
+    )
+    config = SimpleNamespace(
+        compilation_config=CompilationConfig(cudagraph_mode=mode),
+        model_config=SimpleNamespace(architecture=architecture),
+        use_v2_model_runner=use_v2,
+    )
+
+    rocm.RocmPlatform.apply_config_platform_defaults(config)
+
+    assert config.compilation_config.cudagraph_mode == expected
 
 
 @pytest.mark.parametrize(
@@ -328,63 +367,6 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
         default_breakable_cudagraph_architectures.cache_clear()
 
 
-class _CudagraphConfigStub(SimpleNamespace):
-    _uses_breakable_cudagraph_by_default = (
-        VllmConfig._uses_breakable_cudagraph_by_default
-    )
-    _uses_noncompiled_cudagraph_path = VllmConfig._uses_noncompiled_cudagraph_path
-    _piecewise_cudagraph_provider_available = (
-        VllmConfig._piecewise_cudagraph_provider_available
-    )
-
-
-@pytest.fixture
-def make_cudagraph_config(monkeypatch):
-    from vllm.config.vllm import default_breakable_cudagraph_architectures
-
-    def make(
-        architecture="DeepseekV4ForConditionalGeneration",
-        *,
-        rocm=True,
-        gfx950=False,
-        breakable=False,
-        optimization_level=OptimizationLevel.O2,
-        compilation_mode=None,
-        cudagraph_mode=None,
-        use_v2=True,
-        compilation_config=None,
-    ):
-        if breakable is None:
-            monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
-        else:
-            monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", str(int(breakable)))
-        monkeypatch.setattr(current_platform, "is_cuda", lambda: not rocm)
-        monkeypatch.setattr(current_platform, "is_rocm", lambda: rocm)
-        monkeypatch.setattr(
-            current_platform,
-            "is_device_capability",
-            lambda value: gfx950 and value == 95,
-        )
-        default_breakable_cudagraph_architectures.cache_clear()
-        resolved_compilation_config = (
-            compilation_config
-            if compilation_config is not None
-            else CompilationConfig(mode=compilation_mode, cudagraph_mode=cudagraph_mode)
-        )
-        return _CudagraphConfigStub(
-            model_config=SimpleNamespace(
-                architecture=architecture, architectures=[architecture]
-            ),
-            compilation_config=resolved_compilation_config,
-            optimization_level=optimization_level,
-            use_v2_model_runner=use_v2,
-        )
-
-    yield make
-    os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
-    default_breakable_cudagraph_architectures.cache_clear()
-
-
 @pytest.mark.parametrize(
     ("architecture", "is_rocm", "expected"),
     [
@@ -392,8 +374,6 @@ def make_cudagraph_config(monkeypatch):
         ("DeepseekV32ForCausalLM", True, False),
         ("DeepseekV32MTPModel", False, True),
         ("DeepseekV32MTPModel", True, False),
-        ("DeepseekV4ForCausalLM", False, True),
-        ("DeepseekV4ForCausalLM", True, False),
         ("GlmMoeDsaForCausalLM", False, True),
         ("GlmMoeDsaForCausalLM", True, False),
         ("Qwen4ExpForCausalLM", False, True),
@@ -405,378 +385,29 @@ def make_cudagraph_config(monkeypatch):
     ],
 )
 def test_breakable_cudagraph_platform_default(
-    make_cudagraph_config, architecture, is_rocm, expected
+    monkeypatch, architecture, is_rocm, expected
 ):
-    config = make_cudagraph_config(
-        architecture,
-        rocm=is_rocm,
-        breakable=None,
-        use_v2=not is_rocm,
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
+    from vllm.platforms import current_platform
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
+    default_breakable_cudagraph_architectures.cache_clear()
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architectures=[architecture]),
+        compilation_config=CompilationConfig(),
+    )
+    config._uses_breakable_cudagraph_by_default = lambda: (
+        VllmConfig._uses_breakable_cudagraph_by_default(config)
     )
 
-    assert VllmConfig._maybe_enable_breakable_cudagraph(config) is expected
-    if expected:
-        assert config.compilation_config.mode == CompilationMode.NONE
-    else:
-        assert config.compilation_config.mode is None
-        assert config.compilation_config.cudagraph_mode is None
-
-
-@pytest.mark.parametrize(
-    "architecture",
-    sorted(vllm_config_module.NON_COMPILED_CUDAGRAPH_FALLBACK_ARCHITECTURES),
-)
-def test_noncompiled_architectures_fall_back_when_breakable_disabled(
-    make_cudagraph_config, architecture
-):
-    config = make_cudagraph_config(architecture, rocm=False)
-
-    assert not VllmConfig._maybe_enable_breakable_cudagraph(config)
-    assert config.compilation_config.mode is None
-    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-
-
-@pytest.mark.parametrize(
-    ("optimization_level", "expected_cudagraph_mode"),
-    [
-        (OptimizationLevel.O0, CUDAGraphMode.NONE),
-        (OptimizationLevel.O1, CUDAGraphMode.NONE),
-        (OptimizationLevel.O2, CUDAGraphMode.FULL_DECODE_ONLY),
-        (OptimizationLevel.O3, CUDAGraphMode.FULL_DECODE_ONLY),
-    ],
-)
-def test_noncompiled_cudagraph_fallback_respects_optimization_level(
-    make_cudagraph_config, optimization_level, expected_cudagraph_mode
-):
-    config = make_cudagraph_config(
-        optimization_level=optimization_level,
-    )
-
-    assert not VllmConfig._maybe_enable_breakable_cudagraph(config)
-    assert config.compilation_config.mode is None
-    assert config.compilation_config.cudagraph_mode == expected_cudagraph_mode
-
-
-@pytest.mark.parametrize(
-    ("architecture", "expected_cudagraph_mode"),
-    [
-        ("DeepseekV4ForCausalLM", CUDAGraphMode.FULL_DECODE_ONLY),
-        ("DeepseekV32MTPModel", None),
-        ("DeepseekV32ForCausalLM", None),
-        ("GlmMoeDsaForCausalLM", None),
-    ],
-)
-def test_rocm_forced_v2_only_falls_back_for_noncompiled_dsa_model(
-    make_cudagraph_config, architecture, expected_cudagraph_mode
-):
-    config = make_cudagraph_config(architecture)
-
-    assert not VllmConfig._maybe_enable_breakable_cudagraph(config)
-    assert config.compilation_config.mode is None
-    assert config.compilation_config.cudagraph_mode == expected_cudagraph_mode
-
-
-@pytest.mark.parametrize(
-    ("architecture", "use_v2", "input_mode", "expected_compile", "expected_graph"),
-    [
-        ("DeepseekV4ForCausalLM", True, None, None, CUDAGraphMode.NONE),
-        (
-            "DeepseekV4ForConditionalGeneration",
-            True,
-            None,
-            None,
-            CUDAGraphMode.NONE,
-        ),
-        (
-            "DeepseekV4ForConditionalGeneration",
-            True,
-            CUDAGraphMode.FULL,
-            None,
-            CUDAGraphMode.FULL,
-        ),
-        (
-            "DeepseekV4ForConditionalGeneration",
-            True,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-            None,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        ),
-        (
-            "DeepseekV4ForConditionalGeneration",
-            True,
-            CUDAGraphMode.FULL_AND_PIECEWISE,
-            None,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        ),
-        (
-            "KimiK3ForConditionalGeneration",
-            True,
-            None,
-            None,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-        ),
-    ],
-)
-def test_rocm_gfx950_noncompiled_cudagraph_policy(
-    make_cudagraph_config,
-    architecture,
-    use_v2,
-    input_mode,
-    expected_compile,
-    expected_graph,
-):
-    config = make_cudagraph_config(
-        architecture, gfx950=True, cudagraph_mode=input_mode, use_v2=use_v2
-    )
-
-    breakable_enabled = VllmConfig._maybe_enable_breakable_cudagraph(config)
-    VllmConfig._normalize_unavailable_piecewise_cudagraphs(
-        config, breakable_cudagraph_enabled=breakable_enabled
-    )
-
-    assert not breakable_enabled
-    assert config.compilation_config.mode == expected_compile
-    assert config.compilation_config.cudagraph_mode == expected_graph
-
-
-@pytest.mark.parametrize(
-    ("compile_mode", "graph_mode", "expected_graph", "should_raise"),
-    [
-        (None, CUDAGraphMode.NONE, CUDAGraphMode.NONE, False),
-        (None, CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE, False),
-        (None, CUDAGraphMode.FULL, CUDAGraphMode.FULL, False),
-        (None, CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_DECODE_ONLY, False),
-        (
-            None,
-            CUDAGraphMode.FULL_AND_PIECEWISE,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-            False,
-        ),
-        (
-            CompilationMode.VLLM_COMPILE,
-            None,
-            None,
-            True,
-        ),
-        pytest.param(
-            CompilationMode.VLLM_COMPILE,
-            CUDAGraphMode.NONE,
-            CUDAGraphMode.NONE,
-            False,
-            id="ngram-gpu-auxiliary-config",
-        ),
-        (
-            CompilationMode.VLLM_COMPILE,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-            False,
-        ),
-        (CompilationMode.VLLM_COMPILE, CUDAGraphMode.PIECEWISE, None, True),
-        (
-            CompilationMode.VLLM_COMPILE,
-            CUDAGraphMode.FULL,
-            CUDAGraphMode.FULL,
-            False,
-        ),
-        (
-            CompilationMode.VLLM_COMPILE,
-            CUDAGraphMode.FULL_AND_PIECEWISE,
-            None,
-            True,
-        ),
-    ],
-)
-def test_noncompiled_cudagraph_fallback_validates_explicit_modes(
-    make_cudagraph_config,
-    compile_mode,
-    graph_mode,
-    expected_graph,
-    should_raise,
-):
-    config = make_cudagraph_config(
-        compilation_mode=compile_mode, cudagraph_mode=graph_mode
-    )
-    if should_raise:
-        with pytest.raises(ValueError, match="unavailable piecewise capture"):
-            VllmConfig._maybe_enable_breakable_cudagraph(config)
-        return
-
-    breakable_enabled = VllmConfig._maybe_enable_breakable_cudagraph(config)
-    VllmConfig._normalize_unavailable_piecewise_cudagraphs(
-        config, breakable_cudagraph_enabled=breakable_enabled
-    )
-
-    assert not breakable_enabled
-    assert config.compilation_config.mode == compile_mode
-    assert config.compilation_config.cudagraph_mode == expected_graph
-
-
-@pytest.mark.parametrize(
-    "architecture",
-    ["Qwen4ExpForCausalLM", "Qwen4ExpForConditionalGeneration", "Qwen4ExpMTP"],
-)
-@pytest.mark.parametrize("use_v2", [False, True])
-@pytest.mark.parametrize(
-    "graph_mode", [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE]
-)
-def test_rocm_qwen_preserves_compiled_piecewise_cudagraphs(
-    make_cudagraph_config, architecture, use_v2, graph_mode
-):
-    config = make_cudagraph_config(
-        architecture,
-        use_v2=use_v2,
-        compilation_mode=CompilationMode.VLLM_COMPILE,
-        cudagraph_mode=graph_mode,
-    )
-
-    breakable_enabled = VllmConfig._maybe_enable_breakable_cudagraph(config)
-    assert not breakable_enabled
-    assert config._piecewise_cudagraph_provider_available(
-        breakable_cudagraph_enabled=breakable_enabled
-    )
-    VllmConfig._normalize_unavailable_piecewise_cudagraphs(
-        config, breakable_cudagraph_enabled=breakable_enabled
-    )
-
-    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
-    assert config.compilation_config.cudagraph_mode == graph_mode
-
-
-@pytest.mark.parametrize(
-    ("architecture", "breakable", "expected_enabled", "expected_compile"),
-    [
-        ("LlamaForCausalLM", False, False, None),
-        (
-            "DeepseekV4ForConditionalGeneration",
-            True,
-            True,
-            CompilationMode.NONE,
-        ),
-    ],
-)
-def test_noncompiled_cudagraph_fallback_controls(
-    make_cudagraph_config,
-    architecture,
-    breakable,
-    expected_enabled,
-    expected_compile,
-):
-    config = make_cudagraph_config(architecture, breakable=breakable)
-
-    assert VllmConfig._maybe_enable_breakable_cudagraph(config) is expected_enabled
-    assert config.compilation_config.mode == expected_compile
-    assert config.compilation_config.cudagraph_mode is None
-
-
-@pytest.mark.parametrize(
-    (
-        "architecture",
-        "compile_mode",
-        "graph_mode",
-        "breakable",
-        "expected_graph",
-        "expected_sizes",
-    ),
-    [
-        (
-            "DeepseekV4ForConditionalGeneration",
-            CompilationMode.NONE,
-            CUDAGraphMode.NONE,
-            False,
-            CUDAGraphMode.NONE,
-            [],
-        ),
-        (
-            "DeepseekV4ForConditionalGeneration",
-            CompilationMode.NONE,
-            CUDAGraphMode.PIECEWISE,
-            False,
-            CUDAGraphMode.NONE,
-            [],
-        ),
-        (
-            "DeepseekV4ForConditionalGeneration",
-            CompilationMode.NONE,
-            CUDAGraphMode.FULL_AND_PIECEWISE,
-            False,
-            CUDAGraphMode.FULL_DECODE_ONLY,
-            [1, 2, 4],
-        ),
-        (
-            "DeepseekV4ForConditionalGeneration",
-            CompilationMode.NONE,
-            CUDAGraphMode.PIECEWISE,
-            True,
-            CUDAGraphMode.PIECEWISE,
-            [1, 2, 4],
-        ),
-        (
-            "LlamaForCausalLM",
-            CompilationMode.VLLM_COMPILE,
-            CUDAGraphMode.PIECEWISE,
-            False,
-            CUDAGraphMode.PIECEWISE,
-            [1, 2, 4],
-        ),
-    ],
-)
-def test_late_piecewise_override_is_normalized_by_available_provider(
-    make_cudagraph_config,
-    architecture,
-    compile_mode,
-    graph_mode,
-    breakable,
-    expected_graph,
-    expected_sizes,
-):
-    compilation_config = CompilationConfig(
-        mode=compile_mode,
-        cudagraph_mode=graph_mode,
-        cudagraph_capture_sizes=[1, 2, 4],
-        max_cudagraph_capture_size=4,
-    )
-    config = make_cudagraph_config(
-        architecture,
-        breakable=breakable,
-        compilation_config=compilation_config,
-    )
-
-    VllmConfig._normalize_unavailable_piecewise_cudagraphs(
-        config, breakable_cudagraph_enabled=breakable
-    )
-
-    assert compilation_config.cudagraph_mode == expected_graph
-    assert compilation_config.cudagraph_capture_sizes == expected_sizes
-    expected_max_size = 0 if expected_graph == CUDAGraphMode.NONE else 4
-    assert compilation_config.max_cudagraph_capture_size == expected_max_size
-
-
-@pytest.mark.parametrize(
-    ("mode", "graph_mode", "should_raise"),
-    [
-        (CompilationMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY, False),
-        (CompilationMode.VLLM_COMPILE, CUDAGraphMode.FULL_AND_PIECEWISE, False),
-        (CompilationMode.NONE, CUDAGraphMode.NONE, True),
-        (CompilationMode.VLLM_COMPILE, CUDAGraphMode.PIECEWISE, True),
-    ],
-)
-def test_adaptive_verification_requires_full_cudagraphs(
-    make_cudagraph_config, mode, graph_mode, should_raise
-):
-    config = make_cudagraph_config(
-        compilation_mode=mode,
-        cudagraph_mode=graph_mode,
-    )
-    config.speculative_config = SimpleNamespace(enable_adaptive_verification=True)
-    config.lora_config = None
-    config.parallel_config = SimpleNamespace(pipeline_parallel_size=1)
-
-    validate = lambda: VllmConfig._validate_adaptive_verification(config)
-    if should_raise:
-        with pytest.raises(ValueError, match="requires full CUDA graphs"):
-            validate()
-    else:
-        validate()
+    try:
+        assert VllmConfig._maybe_enable_breakable_cudagraph(config) is expected
+        if expected:
+            assert config.compilation_config.mode == CompilationMode.NONE
+    finally:
+        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        default_breakable_cudagraph_architectures.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -868,6 +499,66 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
     assert compilation_config.cudagraph_capture_sizes == expected_capture_sizes
 
 
+@pytest.mark.parametrize(
+    ("mode", "piecewise_capture_available", "attention_support", "expected"),
+    [
+        ("PIECEWISE", False, "ALWAYS", "NONE"),
+        ("FULL_AND_PIECEWISE", False, "ALWAYS", "FULL_DECODE_ONLY"),
+        ("FULL_DECODE_ONLY", False, "ALWAYS", "FULL_DECODE_ONLY"),
+        ("FULL_DECODE_ONLY", False, "NEVER", "NONE"),
+    ],
+)
+def test_resolve_cudagraph_mode_uses_loaded_piecewise_provider(
+    mode, piecewise_capture_available, attention_support, expected
+):
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=CUDAGraphMode[mode],
+        use_inductor_graph_partition=True,
+    )
+
+    resolved = compilation_config.resolve_cudagraph_mode_and_sizes(
+        AttentionCGSupport[attention_support],
+        "FakeAttentionBackend",
+        piecewise_capture_available=piecewise_capture_available,
+    )
+
+    assert resolved.name == expected
+    assert compilation_config.cudagraph_mode == resolved
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA graph support"
+)
+@pytest.mark.parametrize(
+    "engine_kwargs",
+    [
+        {"runner": "pooling", "convert": "embed"},
+        pytest.param(
+            {"prefill_context_parallel_size": 2, "tensor_parallel_size": 2},
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(), reason="ROCm PCP graph restriction"
+            ),
+        ),
+    ],
+)
+def test_late_piecewise_restrictions_without_compilation(monkeypatch, engine_kwargs):
+    """Late compatibility overrides must not restore unavailable piecewise graphs."""
+    from vllm.engine.arg_utils import EngineArgs
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    config = EngineArgs(
+        model="facebook/opt-125m",
+        compilation_config=CompilationConfig(mode=CompilationMode.NONE),
+        **engine_kwargs,
+    ).create_engine_config()
+
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    assert config.compilation_config.cudagraph_capture_sizes == []
+    assert config.compilation_config.max_cudagraph_capture_size == 0
+
+
 def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
     """Cudagraph memory profiling uses a minimal KV cache, so the Mamba
     block-count guard must only fire for the real cache sizing."""
@@ -901,6 +592,30 @@ def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
         is_profiling=True,
     )
     assert cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+
+@pytest.mark.parametrize(
+    ("graph_mode", "should_raise"),
+    [
+        (CUDAGraphMode.FULL_DECODE_ONLY, False),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, False),
+        (CUDAGraphMode.NONE, True),
+        (CUDAGraphMode.PIECEWISE, True),
+    ],
+)
+def test_adaptive_verification_requires_full_cudagraphs(graph_mode, should_raise):
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(enable_adaptive_verification=True),
+        lora_config=None,
+        compilation_config=CompilationConfig(cudagraph_mode=graph_mode),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+    )
+
+    if should_raise:
+        with pytest.raises(ValueError, match="requires full CUDA graphs"):
+            VllmConfig._validate_adaptive_verification(config)
+    else:
+        VllmConfig._validate_adaptive_verification(config)
 
 
 @pytest.mark.parametrize(

@@ -865,8 +865,25 @@ class RocmPlatform(Platform):
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
         from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.config.compilation import CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
+        model_config = vllm_config.model_config
+        if (
+            compilation_config.cudagraph_mode is None
+            and model_config is not None
+            and on_gfx950()
+            and vllm_config.use_v2_model_runner
+            and model_config.architecture
+            in {
+                "DeepseekV4ForCausalLM",
+                "DeepseekV4ForConditionalGeneration",
+            }
+        ):
+            # Default to eager after reported gfx950/MRV2 accuracy regressions:
+            # https://github.com/vllm-project/vllm/issues/52644
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         use_aiter_fused_moe = rocm_aiter_ops.is_fused_moe_enabled()
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
         use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()

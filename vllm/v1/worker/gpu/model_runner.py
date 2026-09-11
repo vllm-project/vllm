@@ -661,13 +661,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config,
             use_replayssm=self.vllm_config.cache_config.use_replayssm,
         )
+        piecewise_capture_available = bool(
+            envs.VLLM_USE_BREAKABLE_CUDAGRAPH or has_compiled_submodule(self.model)
+        )
         if self.adaptive_verification is not None:
             self.compilation_config.cudagraph_mode = resolve_adaptive_cudagraph_mode(
                 self.compilation_config.cudagraph_mode,
-                piecewise_capture_available=(
-                    envs.VLLM_USE_BREAKABLE_CUDAGRAPH
-                    or has_compiled_submodule(self.model)
-                ),
+                piecewise_capture_available=piecewise_capture_available,
             )
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,
@@ -678,6 +678,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_config=self.kv_cache_config,
             max_num_reqs=self.max_num_reqs,
             is_profiling=is_profiling,
+            piecewise_capture_available=piecewise_capture_available,
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
