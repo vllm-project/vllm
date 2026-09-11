@@ -9,6 +9,7 @@ use serde_json::Value;
 use super::DeepSeekV4ChatRenderer;
 use crate::ChatRenderer;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
+use crate::renderer::deepseek_v41::DeepSeekV41ChatRenderer;
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
 use crate::request::{ChatMessage, ChatRequest, ChatTool, GenerationPromptMode, ReasoningEffort};
 
@@ -397,6 +398,51 @@ fn reasoning_effort_template_kwarg_is_ignored() {
 
     assert!(rendered.starts_with("<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"));
     assert!(rendered.ends_with("<｜Assistant｜><think>"));
+}
+
+#[test]
+fn tool_call_arguments_preserve_non_objects_like_recipe() {
+    let renderers: [(&dyn ChatRenderer, &str); 2] = [
+        (&DeepSeekV4ChatRenderer::new(), "parameter"),
+        (&DeepSeekV41ChatRenderer::new(), " parameter"),
+    ];
+    for arguments in [
+        "not json",
+        "[1, 2]",
+        "null",
+        "42",
+        "true",
+        "",
+        r#""text""#,
+        r#""{\"query\":\"double\"}""#,
+    ] {
+        let request = ChatRequest {
+            messages: vec![
+                ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
+                    AssistantToolCall {
+                        id: "call".to_string(),
+                        name: "search".to_string(),
+                        arguments: arguments.to_string(),
+                    },
+                )]),
+                ChatMessage::tool_response("result", "call"),
+            ],
+            ..ChatRequest::for_test()
+        };
+
+        for (renderer, tag) in renderers {
+            let prompt = renderer.render(&request).unwrap().prompt.into_text().unwrap();
+            let parameters: Vec<_> =
+                prompt.lines().filter(|line| line.contains("parameter name=")).collect();
+            assert_eq!(
+                parameters,
+                [format!(
+                    "<｜DSML｜{tag} name=\"arguments\" string=\"true\">{arguments}</｜DSML｜{tag}>"
+                )],
+                "arguments: {arguments:?}, tag: {tag:?}",
+            );
+        }
+    }
 }
 
 #[test]
