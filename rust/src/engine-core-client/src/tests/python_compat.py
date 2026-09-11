@@ -100,6 +100,14 @@ class EngineCoreOutput(
     num_nans_in_logits: int = 0
     mm_cache_miss_hashes: list[str] | None = None
     new_sampling_mask: object | None = None
+    spec_decode_metrics: object | None = None
+
+
+class ExtendedEngineCoreOutput(EngineCoreOutput):
+    # Match Omni's append-only schema without requiring Omni or torch.
+    multimodal_output: dict[str, object] | None = None
+    is_segment_finished: bool = False
+    new_prompt_len_snapshot: int | None = None
 
 
 class EngineCoreOutputs(
@@ -204,6 +212,21 @@ outputs = EngineCoreOutputs(
     ],
     finished_requests={"req-1"},
 )
+
+extended_outputs = EngineCoreOutputs(
+    outputs=[
+        ExtendedEngineCoreOutput(
+            **msgspec.structs.asdict(outputs.outputs[0]),
+            multimodal_output={"audio": b"\x00\x01"},
+            is_segment_finished=True,
+            new_prompt_len_snapshot=12,
+        )
+    ],
+    finished_requests=outputs.finished_requests,
+)
+extended_outputs_bytes = msgspec.msgpack.encode(extended_outputs)
+# The ordinary frontend's schema ignores even non-default extension values.
+assert msgspec.msgpack.decode(extended_outputs_bytes, type=EngineCoreOutputs) == outputs
 
 sampling_mask_wire = [
     [
@@ -505,3 +528,4 @@ print(msgspec.msgpack.encode(nixl_stats).hex())
 print(msgspec.msgpack.encode(mooncake_stats).hex())
 print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())
+print(extended_outputs_bytes.hex())
