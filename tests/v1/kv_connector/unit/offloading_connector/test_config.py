@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for translating vLLM cache metadata to native offloading config."""
 
+import mmap
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -334,6 +335,16 @@ def test_worker_kv_bytes_preserves_tensor_layout(packed: bool):
     assert offloading_config.worker_kv_bytes_per_block == 16
     assert offloading_config.parallel.world_size == 6
     assert offloading_config.cache.blocks_per_chunk == 2
+
+
+def test_parallel_config_preserves_local_world_size():
+    config = _make_vllm_config(tensor_parallel_size=8)
+    config.parallel_config.nnodes = 2
+
+    offloading_config = build_offloading_config(config, _make_kv_cache_config())
+
+    assert offloading_config.parallel.world_size == 8
+    assert offloading_config.parallel.local_world_size == 4
 
 
 def test_zero_blocks_skips_tensor_layout_validation():
@@ -848,3 +859,42 @@ def test_blocks_per_chunk_must_be_positive():
 
     with pytest.raises(ValueError, match="greater than 0"):
         build_offloading_config(config, _make_kv_cache_config())
+
+
+@pytest.mark.parametrize(
+    "tp,dp,dp_local,nnodes,expected_local,expected_chunks",
+    [(4, 2, 2, 1, 4, 4), (4, 2, 1, 2, 4, 4), (8, 2, 1, 4, 4, 4), (1, 4, 2, 2, 1, 16)],
+)
+def test_native_cpu_capacity_is_per_node_per_dp_replica(
+    tp, dp, dp_local, nnodes, expected_local, expected_chunks
+):
+    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+
+    config = _make_vllm_config(
+        tensor_parallel_size=tp, extra_config={"cpu_bytes_to_use": 16 * mmap.PAGESIZE}
+    )
+    parallel = config.parallel_config
+    parallel.distributed_executor_backend = "mp"
+    parallel.data_parallel_size = dp
+    parallel.data_parallel_size_local = dp_local
+    parallel.nnodes = nnodes
+    kv_config = _make_kv_cache_config()
+    kv_config.kv_cache_tensors[0].size = mmap.PAGESIZE * kv_config.num_blocks
+    normalized = build_offloading_config(config, kv_config)
+    spec = CPUOffloadingSpec(normalized)
+    assert spec.local_world_size == expected_local
+    assert spec.num_chunks == expected_chunks
+    assert spec.cpu_page_size_per_worker == mmap.PAGESIZE
+
+
+@pytest.mark.parametrize("backend", ["ray", "external_launcher"])
+def test_native_spec_rejects_unsupported_launcher_after_config_translation(backend):
+    from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+
+    config = _make_vllm_config(
+        tensor_parallel_size=4, extra_config={"cpu_bytes_to_use": 65536}
+    )
+    config.parallel_config.distributed_executor_backend = backend
+    normalized = build_offloading_config(config, _make_kv_cache_config())
+    with pytest.raises(ValueError, match="topology"):
+        CPUOffloadingSpec(normalized)

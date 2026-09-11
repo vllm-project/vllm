@@ -58,6 +58,11 @@ class OffloadingParallelConfig:
     # under any topology; for the canonical layout, the canonical page itself
     # is topology-free.
     is_parallelism_agnostic: bool
+    # Number of workers sharing one node-local offload region. Falls back to
+    # world_size for legacy configs and single-node deployments.
+    local_world_size: int | None = None
+    # Launcher used to establish worker ordering and node membership.
+    executor_backend: str | None = None
 
 
 @dataclass(frozen=True)

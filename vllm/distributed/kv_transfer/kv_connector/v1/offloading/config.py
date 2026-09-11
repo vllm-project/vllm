@@ -43,6 +43,7 @@ def build_offloading_config(
     engine_id = kv_transfer_config.engine_id
 
     parallel_config = vllm_config.parallel_config
+    backend = parallel_config.distributed_executor_backend
     groups = tuple(
         OffloadingGroupConfig(
             tokens_per_block=resolve_dcp_kv_block_size(
@@ -226,6 +227,12 @@ def build_offloading_config(
             data_parallel_size=parallel_config.data_parallel_size,
             data_parallel_rank_local=parallel_config.data_parallel_rank_local,
             is_parallelism_agnostic=is_parallelism_agnostic,
+            local_world_size=parallel_config.local_world_size,
+            executor_backend=(
+                backend
+                if isinstance(backend, str) or backend is None
+                else backend.__name__
+            ),
         ),
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
