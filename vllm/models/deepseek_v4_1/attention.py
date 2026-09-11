@@ -147,6 +147,28 @@ def _resolve_dsv4_kv_cache_dtype(
     return kv_cache_dtype, torch.bfloat16
 
 
+def _compressed_cache_spec(
+    vllm_config: VllmConfig,
+    head_dim: int,
+    compress_ratio: int,
+    cache_dtype: str,
+    cache_torch_dtype: torch.dtype,
+) -> MLAAttentionSpec:
+    uses_fp8_ds_mla_layout = cache_dtype == "fp8_ds_mla"
+    return MLAAttentionSpec(
+        block_size=vllm_config.cache_config.block_size,
+        num_kv_heads=1,
+        head_size=head_dim,
+        dtype=torch.uint8 if uses_fp8_ds_mla_layout else cache_torch_dtype,
+        tokens_per_state=compress_ratio,
+        cache_dtype_str=cache_dtype,
+        alignment=576 if uses_fp8_ds_mla_layout else 512,
+        model_version="deepseek_v4",
+        kv_quant_mode=get_kv_quant_mode(cache_dtype),
+        state_content_bytes=584 if uses_fp8_ds_mla_layout else None,
+    )
+
+
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     """DeepseekV4 MLA attention layer.
 
@@ -937,20 +959,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # fp8_ds_mla is a UE8M0 block-scaled uint8 layout and needs 576B
         # alignment; plain bf16 / per-tensor fp8 rows use natural element-size
         # pages.
-        uses_fp8_ds_mla_layout = self.kv_cache_dtype == "fp8_ds_mla"
-        return MLAAttentionSpec(
-            block_size=vllm_config.cache_config.block_size,
-            num_kv_heads=1,
-            head_size=self.head_dim,
-            dtype=torch.uint8 if uses_fp8_ds_mla_layout else self.kv_cache_torch_dtype,
-            tokens_per_state=self.compress_ratio,
-            cache_dtype_str=self.kv_cache_dtype,
-            alignment=576 if uses_fp8_ds_mla_layout else 512,
-            model_version="deepseek_v4",
-            kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
-            # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token;
-            # head_size stays semantic (512).
-            state_content_bytes=584 if uses_fp8_ds_mla_layout else None,
+        return _compressed_cache_spec(
+            vllm_config,
+            self.head_dim,
+            self.compress_ratio,
+            self.kv_cache_dtype,
+            self.kv_cache_torch_dtype,
         )
 
     def _compressed_kv_cache(self) -> torch.Tensor:
@@ -1006,6 +1020,76 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return DeepseekV4IndexerBackend
+
+
+class DeepseekV4PipelineCache(nn.Module, AttentionLayerBase):
+    """Weight-free replica registered under the original KV source's layer name."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str,
+        source_layer: int,
+        attn_cls: type[DeepseekV4Attention],
+    ) -> None:
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        self.head_dim = config.head_dim
+        self.compress_ratio = config.compress_ratios[source_layer]
+        self.kv_cache_dtype, self.kv_cache_torch_dtype = _resolve_dsv4_kv_cache_dtype(
+            attn_cls.use_fp8_ds_mla_layout, cache_config.cache_dtype, cache_config
+        )
+        self.backend_cls = attn_cls.backend_cls
+        self.prefix = prefix
+        self.kv_cache = torch.tensor([])
+        context = vllm_config.compilation_config.static_forward_context
+        if prefix in context:
+            raise ValueError(f"Duplicate pipeline cache name: {prefix}")
+        context[prefix] = self
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        self.kv_cache = kv_cache.squeeze(1)
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return self.backend_cls
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        return _compressed_cache_spec(
+            vllm_config,
+            self.head_dim,
+            self.compress_ratio,
+            self.kv_cache_dtype,
+            self.kv_cache_torch_dtype,
+        )
+
+    def forward(self):
+        raise RuntimeError("Pipeline cache replicas do not execute attention")
+
+
+def make_pipeline_cache_replica(
+    vllm_config: VllmConfig,
+    source_prefix: str,
+    source_layer: int,
+    kind: str,
+    attn_cls: type[DeepseekV4Attention],
+) -> DeepseekV4PipelineCache | DeepseekV4IndexerCache:
+    if kind == "kv":
+        return DeepseekV4PipelineCache(
+            vllm_config, source_prefix, source_layer, attn_cls
+        )
+    if kind != "index_k":
+        raise ValueError(f"Unsupported pipeline cache kind: {kind}")
+    config = vllm_config.model_config.hf_config
+    return DeepseekV4IndexerCache(
+        head_dim=_indexer_k_cache_head_dim(
+            config.index_head_dim, dsa_indexer_uses_fp4(vllm_config)
+        ),
+        dtype=torch.uint8,
+        prefix=f"{source_prefix}.indexer.k_cache",
+        cache_config=vllm_config.cache_config,
+        compress_ratio=config.compress_ratios[source_layer],
+    )
 
 
 class DeepseekV4Indexer(nn.Module):
