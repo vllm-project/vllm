@@ -1340,13 +1340,13 @@ class CompilationConfig:
             # check if op name exists in model
             op_name = op[1:]
             if op_name not in all_ops_in_model:
-                from vllm.model_executor.custom_op import op_registry
+                from vllm.model_executor.custom_op import get_known_op_names
 
-                # Does op exist at all or is it just not present in this model?
-                # Note: Only imported op classes appear in the registry.
+                known_op_names = get_known_op_names()
+
                 missing_str = (
                     "doesn't exist (or wasn't imported/registered)"
-                    if op_name not in op_registry
+                    if op_name not in known_op_names
                     else "not present in model"
                 )
 
