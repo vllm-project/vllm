@@ -76,6 +76,8 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.engram import Engram, EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
+from ..common.pipeline import get_sharing_dependencies, validate_local_sharing
+from ..common.pipeline_sharing import PipelineSharing
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -391,6 +393,33 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        from vllm.distributed.utils import get_pp_indices
+
+        pp_size = get_pp_group().world_size
+        stage_ranges = [
+            get_pp_indices(config.num_hidden_layers, rank, pp_size)
+            for rank in range(pp_size)
+        ]
+        self.sharing_dependencies = get_sharing_dependencies(config, stage_ranges)
+        additional_config = vllm_config.additional_config
+        sharing_enabled = isinstance(additional_config, dict) and additional_config.get(
+            "deepseek_v41_pp_sharing", False
+        )
+        self.pipeline_sharing: PipelineSharing | None = None
+        self.pipeline_payload_keys: frozenset[str] = frozenset()
+        if sharing_enabled:
+            assert isinstance(additional_config, dict)
+            self.pipeline_sharing = PipelineSharing(
+                vllm_config,
+                prefix,
+                get_pp_group().rank_in_group,
+                self.sharing_dependencies,
+                _select_dsv4_attn_cls(vllm_config),
+                additional_config.get("deepseek_v41_pp_share_max_bytes", 512 * 1024**2),
+            )
+            self.pipeline_payload_keys = self.pipeline_sharing.payload_keys
+        else:
+            validate_local_sharing(self.sharing_dependencies)
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
@@ -547,6 +576,26 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
+        pipeline_metadata = None
+        if self.pipeline_sharing is not None and is_forward_context_available():
+            context = get_forward_context()
+            if context.attn_metadata is not None and not context.additional_kwargs.get(
+                "is_dummy_run", False
+            ):
+                if not isinstance(context.attn_metadata, dict):
+                    raise ValueError(
+                        "Pipeline sharing requires unsliced attention metadata"
+                    )
+                pipeline_metadata = context.attn_metadata
+                if not get_pp_group().is_first_rank:
+                    assert intermediate_tensors is not None
+                    self.pipeline_sharing.receive(
+                        intermediate_tensors.tensors,
+                        self.topk_indices_buffer,
+                        self.candidate_block_buffer,
+                        positions.shape[0],
+                    )
+
         if self.use_mega_moe:
             input_ids = input_ids.to(torch.int64)
 
@@ -654,9 +703,17 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 )
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "pre_mix": pre_mix}
-            )
+            tensors = {"hidden_states": hidden_states, "pre_mix": pre_mix}
+            if self.pipeline_sharing is not None and pipeline_metadata is not None:
+                tensors.update(
+                    self.pipeline_sharing.send(
+                        pipeline_metadata,
+                        self.topk_indices_buffer,
+                        self.candidate_block_buffer,
+                        full_num_tokens,
+                    )
+                )
+            return IntermediateTensors(tensors)
 
         # MTP needs full HC states; otherwise collapse and normalize locally
         # before gathering to reduce communication.
@@ -1023,6 +1080,7 @@ class DeepseekV41LLMForCausalLM(
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
+        self.pipeline_payload_keys = self.model.pipeline_payload_keys
 
         self.set_moe_parameters()
 

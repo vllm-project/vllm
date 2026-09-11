@@ -1165,6 +1165,12 @@ class Worker(WorkerBase):
                 )
             }
 
+        all_gather_tensors.update(
+            {
+                key: False
+                for key in getattr(self.model_runner, "pipeline_payload_keys", ())
+            }
+        )
         if forward_pass and not get_pp_group().is_first_rank:
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
