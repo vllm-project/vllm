@@ -7,6 +7,7 @@ from typing import Any, TypeAlias, cast
 import torch.nn.functional as F
 
 from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
+from vllm.logger import init_logger
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import safe_apply_chat_template
 from vllm.renderers.inputs.preprocess import (
@@ -46,6 +47,8 @@ from .utils import (
     truncate_text_to_tokens,
     validate_score_input,
 )
+
+logger = init_logger(__name__)
 
 ScoringServeContext: TypeAlias = PoolingServeContext[ScoringRequest]
 
@@ -424,6 +427,25 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         self.supports_score_template = supports_score_template(model)
         self.model = model if self.supports_score_template else None
         self.use_sep_token = self.model_config.use_sep_token
+
+        if (
+            getattr(self.model_config.hf_config, "is_original_qwen3_reranker", False)
+            and self.chat_template is None
+        ):
+            is_vl = "VL" in (self.model_config.architecture or "")
+            suggested_template = (
+                "examples/pooling/score/template/qwen3_vl_reranker.jinja"
+                if is_vl
+                else "examples/pooling/score/template/qwen3_reranker.jinja"
+            )
+            logger.warning(
+                "Serving an original Qwen3 reranker (%s) without a "
+                "--chat-template. The model was trained with a specific prompt "
+                "template; running without it may produce inaccurate relevance "
+                "scores. Consider specifying `--chat-template %s`.",
+                self.model_config.model,
+                suggested_template,
+            )
 
     #######################################
     # online APIs
