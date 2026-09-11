@@ -57,6 +57,25 @@ python3 tools/recipes/recipe_json_to_vllm_config.py \
 python3 tools/recipes/recipe_json_to_vllm_config.py recipe.json
 ```
 
+### Test New or Modified Recipes from a Preview
+
+A Recipes pull request can expose the same JSON API through its Vercel preview.
+Use that preview as the recipe source with `--api-base` to validate new or
+modified recipes before they are available at `https://recipes.vllm.ai`.
+
+```bash
+PREVIEW=https://vllm-recipes-git-fork-intel-ai-tce-dockerin-f4c148-inferact-inc.vercel.app
+
+python3 tools/recipes/recipe_json_to_vllm_config.py \
+  --api-base "$PREVIEW" \
+  --model meta-llama/Llama-3.2-1B-Instruct \
+  --hardware xeon6
+```
+
+Replace `PREVIEW` with the Vercel preview URL for the Recipes PR being tested.
+Preview URLs are temporary and intended for development and validation; the
+production Recipes API remains the default source.
+
 All paths generate `config.yml` and `env.sh`. See
 [REFERENCE.md](REFERENCE.md) for recipe discovery, strategy selection, direct
 JSON input, custom output files, and deployment scope.

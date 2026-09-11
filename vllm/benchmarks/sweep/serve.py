@@ -229,7 +229,7 @@ def run_comb(
 
     comb_data = list[dict[str, object]]()
 
-    def run_one(
+    def run_benchmark_with_error_handling(
         *,
         bench_overrides: ParameterSweepItem,
         run_number: int,
@@ -273,14 +273,14 @@ def run_comb(
 
     if warmup_num_prompts > 0:
         warmup_overrides = bench_comb | {"num_prompts": warmup_num_prompts}
-        run_one(
+        run_benchmark_with_error_handling(
             bench_overrides=warmup_overrides,
             run_number=-1,
             output_path=base_path / "warmup.json",
         )
 
     for run_number in range(num_runs):
-        run_data = run_one(
+        run_data = run_benchmark_with_error_handling(
             bench_overrides=bench_comb,
             run_number=run_number,
             output_path=_get_comb_run_path(base_path, run_number),
