@@ -79,10 +79,15 @@ def test_hc_collapse_preserves_weighted_residual_sum(
     expected = (pre.unsqueeze(-1) * x.float()).sum(dim=1).to(x.dtype)
     actual = hc_collapse_triton(x, pre)
     assert actual.is_contiguous()
-    atol, rtol = (0, 0) if (hc_mult, hidden_size) == (4, 5120) else (1.6e-2, 1e-2)
-    torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
+    # BF16 rounding only: ptxas <13.1 contracts the FP32 mix into FFMA despite
+    # enable_fp_fusion=False, so compare within a ULP and pin the exact cases below.
+    torch.testing.assert_close(actual, expected, atol=1.6e-2, rtol=1e-2)
     if num_tokens:
         torch.testing.assert_close(actual[0], x[0, -1], atol=0, rtol=0)
+    if num_tokens > 1 and hc_mult == 4:
+        torch.testing.assert_close(
+            actual[1], torch.zeros_like(actual[1]), atol=0, rtol=0
+        )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -130,7 +135,9 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
     expected = (streams.float() * mixes[-1].unsqueeze(-1)).sum(dim=1)
     assert carried_mixes[0] is None
     assert carried_mixes[1] is mixes[0]
-    torch.testing.assert_close(actual, expected.to(streams.dtype), atol=0, rtol=0)
+    torch.testing.assert_close(
+        actual, expected.to(streams.dtype), atol=1.6e-2, rtol=1e-2
+    )
 
 
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
