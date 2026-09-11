@@ -46,6 +46,11 @@ _fi_ar_workspace = None
 # available on the current topology.
 _fi_ar_quant_workspace = None
 _fi_ar_workspace_groups: dict[int, ProcessGroup] = {}
+# Configurations for which workspace creation has already been attempted and
+# found unsupported on this topology. Creation is a real CUDA/fabric allocation,
+# so an uncached failure is retried on every call -- including from inside a
+# CUDA graph capture, where the failing driver call invalidates the capture.
+_fi_ar_workspace_unsupported: set[tuple] = set()
 
 
 def _get_tuned_standalone_max_size(
@@ -160,6 +165,27 @@ def _resolve_fi_ar_backend() -> tuple[str, bool]:
     return backend, allow_trtllm_fallback
 
 
+def _fi_ar_unsupported_key(
+    world_size: int,
+    max_token_num: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    group: ProcessGroup,
+) -> tuple:
+    """Identity of a workspace request, for caching an unsupported result.
+
+    Keyed on the process group as well as the shape/dtype so that a later,
+    differently configured or re-created group is still allowed to try.
+    """
+    return (
+        world_size,
+        max_token_num,
+        hidden_dim,
+        str(dtype),
+        getattr(group, "group_name", None) or id(group),
+    )
+
+
 def get_fi_ar_workspace(
     world_size: int,
     rank: int,
@@ -178,6 +204,23 @@ def get_fi_ar_workspace(
     global _fi_ar_workspace
     if _fi_ar_workspace is not None:
         return _fi_ar_workspace
+
+    unsupported_key = _fi_ar_unsupported_key(
+        world_size, max_token_num, hidden_dim, dtype, group
+    )
+    if unsupported_key in _fi_ar_workspace_unsupported:
+        return None
+
+    if torch.cuda.is_current_stream_capturing():
+        # Creating (or failing to create) the workspace issues driver calls on
+        # the capturing stream; a failure invalidates the capture and the next
+        # allocation aborts with an invalid-capture-status assertion. Callers
+        # treat None as "fused path unavailable" and use a plain collective.
+        logger.warning_once(
+            "Skipping FlashInfer all-reduce workspace creation during CUDA "
+            "graph capture; initialize it before capture to use the fused path."
+        )
+        return None
 
     backend, allow_trtllm_fallback = _resolve_fi_ar_backend()
 
@@ -218,6 +261,7 @@ def get_fi_ar_workspace(
             f"with backend={backend}"
         )
     else:
+        _fi_ar_workspace_unsupported.add(unsupported_key)
         logger.warning_once(
             "Failed to initialize FlashInfer Allreduce norm fusion workspace "
             f"with backend={backend}"
@@ -315,6 +359,7 @@ def destroy_fi_ar_workspace():
 
         _fi_ar_workspace = _fi_ar_quant_workspace = None
         _fi_ar_workspace_groups.clear()
+        _fi_ar_workspace_unsupported.clear()
 
 
 def _fi_ar_workspaces_for_group(group: ProcessGroup) -> list[Any]:
