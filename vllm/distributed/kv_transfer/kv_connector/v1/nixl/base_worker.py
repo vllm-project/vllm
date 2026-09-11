@@ -431,7 +431,8 @@ class NixlBaseConnectorWorker:
         transfer_block_sizes = [
             group.kv_cache_spec.block_size
             for group in kv_cache_config.transfer_groups
-            if not isinstance(group.kv_cache_spec, MambaSpec)
+            if get_representative_spec_type(group.kv_cache_spec)
+            not in (MambaSpec, CircularBufferSpec)
         ]
         self.block_size = (
             math.lcm(*transfer_block_sizes)

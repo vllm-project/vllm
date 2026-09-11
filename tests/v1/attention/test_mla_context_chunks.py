@@ -55,6 +55,7 @@ def build_chunked_context(
 def test_sparse_context_lengths_do_not_force_gpu_sync(monkeypatch):
     """Sparse MLA must pin computed context lengths before the H2D copy."""
     builder = SimpleNamespace(
+        _context_lens_cpu=torch.empty(2, dtype=torch.int32, pin_memory=True),
         chunked_prefill_workspace=torch.empty((2048, 1)),
         chunked_prefill_workspace_size=1024,
         kv_cache_spec=SimpleNamespace(block_size=BLOCK_SIZE),
