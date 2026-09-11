@@ -1572,12 +1572,6 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.float32)
 
-        import os
-
-        # TODO: Remove this once AITER is fixed
-        # Necessary for AITER side from crashing
-        os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
-
         if activation == MoEActivation.SITU:
             from aiter.utility.fp4_utils import e8m0_shuffle
 
@@ -1604,6 +1598,14 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13.is_shuffled = True
             w2.is_shuffled = True
             return (w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
+
+        import os
+
+        # Interleaved a16w4 only (DeepSeekV4 etc.). AITER uses this bound to
+        # pick bf16 vs fp8 activations when gate_mode is INTERLEAVE. SiTUv2
+        # a4w4 is separated and selects q_dtype_a independently, so the bound
+        # is unused on that path.
+        os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
 
         from aiter.ops.shuffle import shuffle_scale as _shuf_s
         from aiter.ops.shuffle import shuffle_weight as _shuf_w
