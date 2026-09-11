@@ -414,6 +414,9 @@ class DeepseekV2MoE(nn.Module):
             source_nvfp4 = DeepGemmMegaMoEExperts.source_is_nvfp4(
                 quant_config, self, prefix
             )
+            source_mxfp4 = DeepGemmMegaMoEExperts.source_is_mxfp4(
+                quant_config, self, prefix
+            )
 
             if self.n_physical_experts % self.ep_size != 0:
                 raise ValueError(
@@ -432,9 +435,10 @@ class DeepseekV2MoE(nn.Module):
                 top_k=config.num_experts_per_tok,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size,
-                mma_type="fp8xfp4" if source_nvfp4 else "bf16xbf16",
+                mma_type=("fp8xfp4" if source_nvfp4 or source_mxfp4 else "bf16xbf16"),
                 source_weight_block_size=source_weight_block_size,
                 source_nvfp4=source_nvfp4,
+                source_mxfp4=source_mxfp4,
                 prefix=f"{prefix}.experts",
             )
         else:
