@@ -406,7 +406,7 @@ def test_create_next_worker_view_multiprocess_slots(iid):
         rank=0,
         kv_bytes_per_chunk=num_workers * PAGE_SIZE,
         cpu_page_size=PAGE_SIZE,
-        unlink_owner=True,
+        unlink_owner=False,
     )
     try:
         child = ctx.Process(
@@ -712,6 +712,7 @@ def test_multiprocess_race_construct_and_write(iid):
     for p in procs:
         p.join(timeout=10)
         assert p.exitcode == 0
+    _cleanup_file(mmap_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1101,7 +1102,7 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid, replicated):
             p.join(timeout=10)
 
     assert not os.path.exists(path), "SIGKILL must not leak the file"
-    with _region(iid) as restarted:
+    with _region(iid, unlink_owner=False) as restarted:
         assert os.path.exists(restarted.mmap_path), "restart must create a new file"
 
 
