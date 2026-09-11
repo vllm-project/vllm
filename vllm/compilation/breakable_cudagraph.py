@@ -42,6 +42,7 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import weak_ref_tensor, weak_ref_tensors
@@ -54,6 +55,12 @@ def is_breakable_cudagraph_enabled() -> bool:
 
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+def _weak_ref_capture_arg(arg: Any) -> Any:
+    if isinstance(arg, QuantizedActivation):
+        return arg.weak_ref()
+    return weak_ref_tensor(arg)
 
 
 def eager_break_during_capture(fn: F) -> F:
@@ -105,13 +112,8 @@ def eager_break_during_capture(fn: F) -> F:
         # Weak-ref args: strong refs in the replay lambda pin cudagraph-pool
         # slots across batch descriptors. cudagraph owns the slot, so the
         # weak_ref is safe to deref on replay.
-        weak_args = tuple(
-            weak_ref_tensor(a) if isinstance(a, torch.Tensor) else a for a in args
-        )
-        weak_kwargs = {
-            k: weak_ref_tensor(v) if isinstance(v, torch.Tensor) else v
-            for k, v in kwargs.items()
-        }
+        weak_args = tuple(_weak_ref_capture_arg(a) for a in args)
+        weak_kwargs = {k: _weak_ref_capture_arg(v) for k, v in kwargs.items()}
         return capture.add_eager(lambda: fn(*weak_args, **weak_kwargs))
 
     return wrapper  # type: ignore[return-value]
@@ -365,15 +367,13 @@ class BreakableCUDAGraphWrapper:
         else:
             set_graph_pool_id(current_platform.graph_pool_handle())
 
-        # Match torch.cuda.graph()'s pre-capture cleanup once per descriptor.
-        # We drive capture_begin/end directly and bypass torch.cuda.graph(),
-        # so its built-in gc + empty_cache never fire. Run them here once
-        # per _capture call -- NOT inside _begin_segment, since this capture
-        # session may issue many begin/end pairs (one per layer's break),
-        # and repeated gc would tank capture time the way it did for the
-        # pre-`gc_disable` piecewise path.
-        gc.collect()
-        torch.accelerator.empty_cache()
+        # Match torch.cuda.graph()'s pre-capture cleanup, which we bypass.
+        # Skip it when gc is disabled: bulk capture runs under
+        # freeze_gc_for_cudagraph_capture, which already did this cleanup,
+        # and repeating it per descriptor dominates capture time.
+        if gc.isenabled():
+            gc.collect()
+            torch.accelerator.empty_cache()
         # Sync the offloader's copy stream before capture so any in-flight
         # pre-capture prefetches are complete and don't leak into the graph.
         get_offloader().sync_prev_onload()

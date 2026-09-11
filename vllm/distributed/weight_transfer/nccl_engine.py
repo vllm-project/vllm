@@ -26,6 +26,7 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLWeightTransferInitInfo,
+    worker_init_payload,
     worker_init_process_group,
 )
 from vllm.distributed.weight_transfer.nccl_common import (
@@ -56,6 +57,13 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     The sender opens its endpoint as NCCL rank 0, so it needs no `rank_offset`.
     `world_size` is the full trainer+worker NCCL group size. `rank` (from
     `TrainerInitInfo`) identifies this trainer process; rank 0 is the sender.
+
+    The trainer joins over a TCPStore rendezvous (`master_address` +
+    `master_port`). Torch-free trainers (e.g. JAX) that cannot join a TCPStore
+    mint an `ncclUniqueId` themselves and drive rank 0 out of band; they ship a
+    `nccl_unique_id_b64` payload straight to the inference workers'
+    `init_weight_transfer_engine` (see `NCCLWeightTransferInitInfo`) rather than
+    going through this engine.
 
     `packed` / buffer sizes are the transfer's wire params. The trainer
     propagates them to the worker at `trainer_init` so the two sides cannot
@@ -301,7 +309,8 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         # open the trainer endpoint (rank 0); both sides must rendezvous together.
         with ThreadPoolExecutor(max_workers=1) as exe:
             future = exe.submit(
-                engine.client.init_weight_transfer_engine, asdict(worker_init_info)
+                engine.client.init_weight_transfer_engine,
+                worker_init_payload(worker_init_info),
             )
             engine.model_update_group = open_trainer_endpoint(init_info)
             future.result()  # surface any inference-side init error

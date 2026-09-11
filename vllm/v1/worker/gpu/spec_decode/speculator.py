@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -21,13 +22,30 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.utils import AttentionGroup
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
+
 logger = init_logger(__name__)
+
+
+def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
+    """Whether the target replaces the drafter's input with its HC residual.
+
+    Keyed on the same hook the model runner calls to perform that swap. It is
+    resolved from the target model class because speculators are built before
+    the target model is instantiated.
+    """
+    from vllm.model_executor.model_loader.utils import get_model_cls
+
+    target_cls = get_model_cls(vllm_config.model_config)
+    return hasattr(target_cls, "get_mtp_target_hidden_states")
 
 
 class BaseSpeculator(ABC):
@@ -90,11 +108,16 @@ class DraftModelSpeculator(BaseSpeculator):
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
-        # Widen for HC-multiplexed residuals (e.g. DeepSeek V4 feeds the MTP
-        # draft the target's pre-hc_head (T, hc_mult * hidden_size) residual).
-        # Non-HC models default to hc_mult=1 and are unaffected.
-        hc_mult = getattr(self.draft_model_config.hf_config, "hc_mult", 1)
-        self.hidden_size = self.hidden_size * hc_mult
+        # Widen for HC-multiplexed residuals: a target that implements
+        # get_mtp_target_hidden_states() (e.g. DeepSeek V4) hands the drafter
+        # its pre-hc_head (T, hc_mult * hidden_size) residual in place of the
+        # collapsed hidden states, so the drafter's buffers must match. Key off
+        # that hook rather than hc_mult alone -- HY V4 runs iHC in its backbone
+        # (hc_mult=4) but its MTP head consumes the collapsed states, so
+        # widening it feeds propose() a 4x-too-wide buffer.
+        if _target_feeds_hc_residual(vllm_config):
+            hc_mult = getattr(self.draft_model_config.hf_config, "hc_mult", 1)
+            self.hidden_size = self.hidden_size * hc_mult
         self.vocab_size = self.draft_model_config.get_vocab_size()
         self.dtype = vllm_config.model_config.dtype
         self.use_fp64_gumbel = vllm_config.model_config.use_fp64_gumbel
@@ -129,6 +152,7 @@ class DraftModelSpeculator(BaseSpeculator):
         self.arange = torch.arange(
             self.max_num_reqs + 1, dtype=torch.int32, device="cpu"
         )
+        self.draft_is_prefilling = torch.zeros(self.max_num_reqs, dtype=torch.bool)
 
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
@@ -146,6 +170,7 @@ class DraftModelSpeculator(BaseSpeculator):
             )
 
         self.supports_mm_inputs = False
+        self.pcp_manager: PCPManager | None = None
 
     @abstractmethod
     def load_draft_model(
@@ -274,6 +299,17 @@ class DraftModelSpeculator(BaseSpeculator):
             out=draft_seq_lens_cpu_upper_bound[:num_reqs],
         )
         draft_seq_lens_cpu_upper_bound[:num_reqs].clamp_(max=self.max_model_len)
+        if dcp_local_seq_lens is None and self.block_tables.cp_size > 1:
+            # Draft steps advance and rewind their own global sequence lengths,
+            # so the target model's DCP-local lengths may already be stale.
+            dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
+                self.input_buffers.dcp_local_seq_lens,
+                self.input_buffers.seq_lens,
+                num_reqs,
+                self.block_tables.cp_size,
+                self.block_tables.cp_rank,
+                self.block_tables.cp_interleave,
+            )
         attn_metadata = build_attn_metadata(
             attn_groups=self.attn_groups,
             num_reqs=num_reqs_padded,
@@ -295,6 +331,7 @@ class DraftModelSpeculator(BaseSpeculator):
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
+            is_prefilling=self.draft_is_prefilling[:num_reqs],
         )
         return attn_metadata
 
@@ -333,7 +370,7 @@ class DraftModelSpeculator(BaseSpeculator):
     def sample_draft(
         self,
         hidden_states: torch.Tensor,
-        positions: torch.Tensor,
+        sample_src_positions: torch.Tensor,
         idx_mapping: torch.Tensor,
         temperature: torch.Tensor,
         seeds: torch.Tensor,
@@ -342,15 +379,14 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         if draft_logits is not None:
             logits = self.model.compute_logits(hidden_states)
-            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
-            # used for draft and target sampling.
             return gumbel_sample(
                 logits,
                 idx_mapping,
                 temperature,
                 seeds,
-                positions + 1,
+                sample_src_positions,
                 apply_temperature=True,
+                is_drafting=True,
                 logits_cache=draft_logits,
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
@@ -379,3 +415,22 @@ class DraftModelSpeculator(BaseSpeculator):
         # idx_mapping for CG padded requests points to -1, which is ignored
         # during sampling to prevent writing stale values to draft logits.
         self.idx_mapping[num_reqs:].fill_(-1)
+
+    def _build_uniform_batch_dp_sync(
+        self,
+        target_dp_sync: DPSyncState,
+        num_reqs: int,
+        num_query_per_req: int = 1,
+    ) -> tuple[DPSyncState, int]:
+        num_batch_tokens = target_dp_sync.num_reqs * num_query_per_req
+        assert num_reqs * num_query_per_req <= num_batch_tokens, (
+            "reusing a DP sync that does not cover this batch's requests"
+        )
+        return replace(
+            target_dp_sync,
+            num_tokens_across_dp=torch.full_like(
+                target_dp_sync.num_tokens_across_dp, num_batch_tokens
+            ),
+            uniform_token_count=num_query_per_req,
+            eager=False,
+        ), num_batch_tokens

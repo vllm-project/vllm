@@ -682,9 +682,24 @@ class RocmPlatform(Platform):
             f"{config_str}. Reasons: {reasons_str}."
         )
         if len(valid_backends_priorities) == 0:
+            # If a backend rejected the requested kv-cache dtype, list the
+            # dtypes it does accept so the limitation is discoverable.
+            supported = sorted(
+                {
+                    dt
+                    for backend, reasons in invalid_reasons.items()
+                    if any("kv_cache_dtype" in r for r in reasons)
+                    for dt in backend.get_class().supported_kv_cache_dtypes
+                }
+            )
+            hint = (
+                f" Supported kv_cache_dtype values: {', '.join(supported)}."
+                if supported
+                else ""
+            )
             raise ValueError(
                 f"No valid attention backend found for {cls.device_name} "
-                f"with {config_str}. Reasons: {reasons_str}."
+                f"with {config_str}. Reasons: {reasons_str}.{hint}"
             )
 
         # We have found some valid backends. Select the one with the
@@ -865,8 +880,25 @@ class RocmPlatform(Platform):
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
         from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.config.compilation import CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
+        model_config = vllm_config.model_config
+        if (
+            compilation_config.cudagraph_mode is None
+            and model_config is not None
+            and on_gfx950()
+            and vllm_config.use_v2_model_runner
+            and model_config.architecture
+            in {
+                "DeepseekV4ForCausalLM",
+                "DeepseekV4ForConditionalGeneration",
+            }
+        ):
+            # Default to eager after reported gfx950/MRV2 accuracy regressions:
+            # https://github.com/vllm-project/vllm/issues/52644
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         use_aiter_fused_moe = rocm_aiter_ops.is_fused_moe_enabled()
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
         use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
@@ -900,23 +932,23 @@ class RocmPlatform(Platform):
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
 
-        if compilation_config.cudagraph_mode.has_full_cudagraphs():
-            # decode context parallel does not support full cudagraphs
-            if parallel_config.decode_context_parallel_size > 1:
-                logger.warning_once(
-                    "Decode context parallel (DCP) is enabled, which is "
-                    "incompatible with full CUDA graphs. "
-                    "Overriding cudagraph_mode to PIECEWISE."
-                )
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        if (
+            parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.data_parallel_size > 1
+        ):
+            raise ValueError("PCP does not support data parallelism on ROCm yet.")
+
+        if (
+            compilation_config.cudagraph_mode.has_full_cudagraphs()
+            and parallel_config.prefill_context_parallel_size > 1
+        ):
             # prefill context parallel do not support full cudagraphs
-            elif parallel_config.prefill_context_parallel_size > 1:
-                logger.warning_once(
-                    "Prefill context parallel (PCP) is enabled, which is "
-                    "incompatible with full CUDA graphs. "
-                    "Overriding cudagraph_mode to PIECEWISE."
-                )
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            logger.warning_once(
+                "Prefill context parallel (PCP) is enabled, which is "
+                "incompatible with full CUDA graphs. "
+                "Overriding cudagraph_mode to PIECEWISE."
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
