@@ -1081,13 +1081,13 @@ def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
 
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
-        "select_packed_mxfp4_moe_backend",
-        lambda moe, method_name: (mxfp4_backend, expected_experts_cls),
+        "select_mxfp4_moe_backend",
+        lambda moe, candidates: (mxfp4_backend, expected_experts_cls),
     )
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.utils.marlin_utils_fp4."
-        "prepare_moe_fp4_layer_for_marlin",
-        lambda layer: pytest.fail("packed backends must not use Marlin packing"),
+        "prepare_moe_mxfp4_layer_for_marlin",
+        lambda *args: pytest.fail("packed backends must not use Marlin packing"),
     )
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."

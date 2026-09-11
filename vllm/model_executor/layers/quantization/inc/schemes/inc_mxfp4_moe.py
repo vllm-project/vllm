@@ -15,12 +15,13 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-    convert_packed_weight_to_mxfp4_moe_kernel_format,
+    PACKED_MXFP4_CANDIDATE_BACKENDS,
+    convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
-    select_packed_mxfp4_moe_backend,
+    select_mxfp4_moe_backend,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 
 class INCMxfp4MoEMethod(FusedMoEMethodBase):
@@ -37,8 +38,8 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe) -> None:
         super().__init__(moe)
         self.group_size = 32
-        self.mxfp4_backend, self.experts_cls = select_packed_mxfp4_moe_backend(
-            moe, "AutoRound"
+        self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+            moe, candidates=PACKED_MXFP4_CANDIDATE_BACKENDS
         )
 
     def create_weights(
@@ -118,7 +119,32 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        convert_packed_weight_to_mxfp4_moe_kernel_format(self.mxfp4_backend, layer)
+        # NOTE(rob): wN_weight_packed -> wN_weight is because ModularKernelMethod
+        # requires this naming convention. However, the name change breaks
+        # reloading because the state dict no longer matches disk. Once we
+        # remove MKM, we should revert this change to ensure compatibility.
+        layer.w13_weight = torch.nn.Parameter(
+            layer.w13_weight_packed.data, requires_grad=False
+        )
+        delattr(layer, "w13_weight_packed")
+
+        layer.w2_weight = torch.nn.Parameter(
+            layer.w2_weight_packed.data, requires_grad=False
+        )
+        delattr(layer, "w2_weight_packed")
+
+        w13, w2, w13_scale, w2_scale, _, _ = convert_weight_to_mxfp4_moe_kernel_format(
+            mxfp4_backend=self.mxfp4_backend,
+            layer=layer,
+            w13_weight=layer.w13_weight,
+            w2_weight=layer.w2_weight,
+            w13_weight_scale=layer.w13_weight_scale,
+            w2_weight_scale=layer.w2_weight_scale,
+        )
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, "w13_weight_scale", w13_scale)
+        replace_parameter(layer, "w2_weight_scale", w2_scale)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
