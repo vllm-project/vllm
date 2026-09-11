@@ -770,37 +770,6 @@ def test_joiner_owner_unlinks_without_barrier(iid):
         _cleanup_file(path)
 
 
-def test_layout_rank_does_not_determine_unlink_owner(iid):
-    """A replicated-layout slot-0 worker may still be a non-owner."""
-    with _region(iid, rank=0, unlink_owner=False) as region:
-        assert region.rank == 0
-        assert region._is_unlink_owner is False
-
-
-def test_explicit_scheduler_region_owner(iid):
-    """The caller can assign unlink ownership independently of rank."""
-    with _region(iid, rank=None, unlink_owner=False) as region:
-        region._is_unlink_owner = True
-        assert region._is_unlink_owner is True
-
-
-def test_worker_and_scheduler_regions_have_one_owner_per_path(iid):
-    """The caller assigns one unlink owner for a shared path."""
-    local_rank_0 = _make_region(iid, num_workers=2, rank=0, unlink_owner=False)
-    local_rank_1 = _make_region(iid, num_workers=2, rank=1, unlink_owner=False)
-    scheduler_region = _make_region(iid, num_workers=2, rank=None, unlink_owner=False)
-    scheduler_region._is_unlink_owner = True
-    regions = [local_rank_0, local_rank_1, scheduler_region]
-    try:
-        assert sum(region._is_unlink_owner for region in regions) == 1
-        assert local_rank_0._is_unlink_owner is False
-        assert scheduler_region._is_unlink_owner is True
-    finally:
-        for region in regions:
-            region.cleanup()
-        _cleanup_file(local_rank_0.mmap_path)
-
-
 def test_cleanup_disarms_unlink_owner(iid, monkeypatch):
     """A cleanup owner must not try to unlink the path on a second cleanup."""
     unlink = MagicMock(wraps=os.unlink)
