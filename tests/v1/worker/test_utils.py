@@ -265,11 +265,10 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         "_hisparse_registration_ranges",
         registration_ranges,
     )
-    pinned: list[tuple[torch.Tensor, int | None]] = []
+    pinned: list[torch.Tensor] = []
 
-    def pin_tensor(tensor, *, max_chunk_bytes=None):
-        pinned.append((tensor, max_chunk_bytes))
-        return []
+    def pin_tensor(tensor):
+        pinned.append(tensor)
 
     monkeypatch.setattr(hisparse_runtime_module, "pin_tensor", pin_tensor)
     config = SimpleNamespace(
@@ -304,10 +303,59 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     assert [pool.shape for pool in pools] == [(24,), (40,)]
     registration_ranges.assert_called_once_with([24, 40], 4, page)
     assert [
-        (tensor.data_ptr() - region.base_tensor.data_ptr(), tensor.nbytes, chunk_bytes)
-        for tensor, chunk_bytes in pinned
-    ] == [(0, page, None), (page, 3 * page, None)]
+        (tensor.data_ptr() - region.base_tensor.data_ptr(), tensor.nbytes)
+        for tensor in pinned
+    ] == [(0, page), (page, 3 * page)]
     assert region.is_pinned
+
+
+@pytest.mark.parametrize("fail_registration", [None, 1, 2])
+def test_shared_host_pool_tracks_successful_registrations(
+    monkeypatch, fail_registration
+):
+    """Only successful registrations may be unregistered on allocation failure."""
+    page = mmap.PAGESIZE
+    backing = torch.empty(3 * page, dtype=torch.uint8)
+    region = MagicMock(base_tensor=backing, pinned_addresses=[], is_pinned=False)
+    monkeypatch.setattr(
+        hisparse_runtime_module, "SharedOffloadRegion", lambda **kw: region
+    )
+    monkeypatch.setattr(
+        hisparse_runtime_module,
+        "_hisparse_registration_ranges",
+        lambda *args: ((0, page), (page, 3 * page)),
+    )
+    cudart = MagicMock()
+    cudart.cudaHostRegister.side_effect = [
+        SimpleNamespace(value=int(fail_registration == i)) for i in (1, 2)
+    ]
+    monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
+    config = SimpleNamespace(
+        instance_id="test", parallel_config=SimpleNamespace(data_parallel_index=0)
+    )
+    context = (
+        pytest.raises(RuntimeError, match="cudaHostRegister failed")
+        if fail_registration
+        else nullcontext()
+    )
+    with context:
+        hisparse_runtime_module.allocate_hisparse_host_pools(
+            config, [3 * page], 3, page, use_shared_host_pool=True
+        )
+    successful = 2 if fail_registration is None else fail_registration - 1
+    assert region.pinned_addresses == [
+        backing.data_ptr() + i * page for i in range(successful)
+    ]
+    assert region.is_pinned == bool(successful)
+    assert region.cleanup.call_count == int(fail_registration is not None)
+    attempts = 2 if fail_registration is None else fail_registration
+    assert (
+        cudart.cudaHostRegister.call_args_list
+        == [
+            call(backing.data_ptr(), page, 0),
+            call(backing.data_ptr() + page, 2 * page, 0),
+        ][:attempts]
+    )
 
 
 def test_shared_host_pool_registers_layer_spans_in_one_backing(monkeypatch):
