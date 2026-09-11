@@ -67,7 +67,7 @@ from vllm.utils.torch_utils import (
     startup_omp_num_threads,
 )
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.executor.abstract import Executor, FailureCallback
+from vllm.v1.executor.abstract import Executor, FailureCallback, ForwardPassTimingPoll
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
@@ -446,6 +446,33 @@ class MultiprocExecutor(Executor):
         )
 
         return future if non_block else future.result()
+
+    def start_forward_pass_timing_poll(self) -> ForwardPassTimingPoll | None:
+        # Only issue this idle query with an empty RPC queue and a writable
+        # broadcast slot. Ordinary inference RPCs keep their existing path.
+        assert self.rpc_broadcast_mq is not None
+        if self.futures_queue or not self.rpc_broadcast_mq.can_enqueue():
+            return None
+        future = self.collective_rpc(
+            "poll_forward_pass_timing",
+            non_block=True,
+            unique_reply_rank=self.output_rank,
+        )
+        response_mq = self.response_mqs[self.output_rank]
+
+        def poll() -> tuple[tuple[int, float], ...] | None:
+            if not future.done():
+                # A later model RPC may already have consumed this response.
+                # Otherwise, consume only at the head of the ordered queue.
+                if not self.futures_queue or self.futures_queue[-1] is not future:
+                    return None
+                if not response_mq.can_dequeue():
+                    return None
+                self.futures_queue.pop()
+                future._wait_for_response()
+            return future.result()
+
+        return poll
 
     @staticmethod
     def _ensure_worker_termination(worker_procs: list[BaseProcess]):

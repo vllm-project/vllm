@@ -820,6 +820,33 @@ class MessageQueue:
                         self._spin_condition.record_read()
                 break
 
+    def can_enqueue(self) -> bool:
+        """Check the next write slot without spinning, from the sole writer."""
+        assert self._is_writer
+        if self.n_local_reader == 0:
+            return True
+        with self.buffer.get_metadata(self.current_idx) as metadata:
+            memory_fence()
+            return not metadata[0] or sum(metadata[1:]) == self.buffer.n_reader
+
+    def can_dequeue(self) -> bool:
+        """Check the next message without consuming it or spinning.
+
+        Only the owning reader may call this. A ready SHM slot cannot be
+        overwritten until that reader consumes it. Overflow messages also
+        need their socket payload before ``dequeue`` can return without waiting.
+        """
+        if self._is_local_reader:
+            with self.buffer.get_metadata(self.current_idx) as metadata:
+                memory_fence()
+                if not metadata[0] or metadata[self.local_reader_rank + 1]:
+                    return False
+            with self.buffer.get_data(self.current_idx) as buf:
+                overflow = buf[0] == 1
+            return not overflow or bool(self.local_socket.poll(timeout=0))
+        assert self._is_remote_reader
+        return bool(self.remote_socket.poll(timeout=0))
+
     def enqueue(self, obj, timeout: float | None = None):
         """Write to message queue with optional timeout (in seconds)"""
         assert self._is_writer, "Only writers can enqueue"

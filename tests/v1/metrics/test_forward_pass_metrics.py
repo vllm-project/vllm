@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+from collections import deque
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import msgspec
@@ -196,9 +198,13 @@ def test_timer_hot_drain_never_synchronizes_pending_event():
 
     timer.start(scheduler_output)
     timer.finish()
-    assert timer.drain_samples(wait=True) == ((4, 0.007),)
-    assert events[-1].synchronize_calls == 1
-    assert len(events) == 2  # Event pair is recycled, including on the cold flush.
+    with timer._drain_lock:
+        assert timer.drain_samples() == ()
+    with timer._pending_lock:
+        assert timer.drain_samples() == ()
+    assert timer.drain_samples() == ((4, 0.007),)
+    assert sum(event.synchronize_calls for event in events) == 0
+    assert len(events) == 2  # Completed event pair is recycled.
 
 
 def test_sampling_finishes_existing_timing_after_draft_without_waiting():
@@ -248,6 +254,173 @@ def test_timer_is_disabled_off_and_on_non_output_ranks():
 
     assert make_forward_pass_metrics_timer(disabled, is_output_rank=True) is None
     assert make_forward_pass_metrics_timer(enabled, is_output_rank=False) is None
+
+
+def test_idle_poll_retries_without_new_outputs_and_keeps_one_rpc(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(fpm_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    publisher = _FakeMetricsPublisher()
+    emitter = ForwardPassMetricsEmitter("worker", 0, publisher)
+    scheduler = _FakeScheduler()
+    output = _make_scheduler_output("decode", computed_tokens=64)
+    emitter.begin_iteration(scheduler, output)
+    emitter.complete_iteration(scheduler, output, ModelRunnerOutput([], {}))
+    response: list[tuple[tuple[int, float], ...] | None] = [None]
+    calls = []
+
+    def start_poll():
+        calls.append(clock[0])
+        return lambda: response[0]
+
+    executor = SimpleNamespace(start_forward_pass_timing_poll=start_poll)
+    emitter.poll_timing(executor)
+    for _ in range(3):
+        emitter.poll_timing(executor)
+    assert len(calls) == 1  # Outstanding response: do not issue duplicate RPCs.
+    response[0] = ()  # GPU event was not ready when the worker queried it.
+    emitter.poll_timing(executor)
+    assert len(calls) == 1  # Rate limit applies even to empty responses.
+    clock[0] += fpm_module.FPM_IDLE_POLL_INTERVAL_SECONDS
+    response[0] = ((output.forward_pass_metrics_iteration_id, 0.012),)
+    emitter.poll_timing(executor)
+    assert len(calls) == 2
+    assert len(publisher.published) == 1
+    assert publisher.published[0].wall_time == 0.012
+    assert not emitter.has_pending_timing()
+    emitter.poll_timing(executor)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_idle_input_arrival_does_not_wait_for_timing(enabled):
+    from vllm.v1.engine.core import EngineCoreProc
+
+    handled: list[tuple[str, str]] = []
+    kwargs_seen = []
+    queue_calls = []
+
+    def receive(**kwargs):
+        kwargs_seen.append(kwargs)
+        return ("request", "new")
+
+    def start_poll():
+        queue_calls.append("poll")
+        return lambda: None  # The RPC never becomes ready in this test.
+
+    publisher = _FakeMetricsPublisher()
+    emitter = ForwardPassMetricsEmitter("worker", 0, publisher) if enabled else None
+    if emitter is not None:
+        emitter.begin_iteration(_FakeScheduler(), _make_scheduler_output("decode"))
+    core = SimpleNamespace(
+        has_work=lambda: bool(handled),
+        is_running=lambda: True,
+        forward_pass_metrics_emitter=emitter,
+        model_executor=SimpleNamespace(start_forward_pass_timing_poll=start_poll),
+        input_queue=SimpleNamespace(empty=lambda: True, get=receive),
+        process_input_queue_block=True,
+        aborts_queue=SimpleNamespace(mutex=nullcontext(), queue=[]),
+        _notify_idle_state_callbacks=lambda: None,
+        _handle_client_request=lambda *request: handled.append(request),
+    )
+    EngineCoreProc._process_input_queue(core)
+    assert handled == [("request", "new")]
+    assert kwargs_seen == (
+        [{"timeout": fpm_module.FPM_IDLE_POLL_INTERVAL_SECONDS}]
+        if enabled
+        else [{"block": True}]
+    )
+    assert queue_calls == (["poll"] if enabled else [])
+
+
+@pytest.mark.parametrize("model_consumes_first", [False, True])
+def test_timing_rpc_poll_preserves_model_response_order(model_consumes_first):
+    from vllm.v1.executor.multiproc_executor import MultiprocExecutor, WorkerProc
+
+    executor = object.__new__(MultiprocExecutor)
+    sent: list = []
+    responses: deque = deque()
+    writable = [False]
+
+    def receive(**kwargs):
+        assert responses, "Would block waiting for an RPC response"
+        return WorkerProc.ResponseStatus.SUCCESS, responses.popleft()
+
+    executor.is_failed = False
+    executor.output_rank = 0
+    executor.futures_queue = deque()
+    executor.rpc_broadcast_mq = SimpleNamespace(
+        can_enqueue=lambda: writable[0], enqueue=sent.append
+    )
+    executor.response_mqs = [
+        SimpleNamespace(can_dequeue=lambda: bool(responses), dequeue=receive)
+    ]
+    assert executor.start_forward_pass_timing_poll() is None
+    assert not sent
+    writable[0] = True
+    poll = executor.start_forward_pass_timing_poll()
+    assert poll is not None and poll() is None
+    assert executor.start_forward_pass_timing_poll() is None
+    assert len(sent) == 1
+    later = executor.collective_rpc(
+        "execute_model", non_block=True, unique_reply_rank=0
+    )
+    responses.extend([((7, 0.01),), "model-output"])
+    if model_consumes_first:
+        assert later.result() == "model-output"
+        assert poll() == ((7, 0.01),)
+    else:
+        assert poll() == ((7, 0.01),)
+        assert later.result() == "model-output"
+    assert not responses
+    assert not executor.futures_queue
+
+
+def test_ray_timing_poll_checks_refs_before_get(monkeypatch):
+    from vllm.v1.executor import ray_executor
+
+    ready = [False]
+    reads = []
+
+    def wait(refs, *, num_returns, timeout):
+        assert timeout == 0 and num_returns == len(refs)
+        return (refs, []) if ready[0] else ([], refs)
+
+    def result():
+        reads.append(True)
+        return [((3, 0.01),)]
+
+    monkeypatch.setattr(ray_executor, "ray", SimpleNamespace(wait=wait))
+    future = SimpleNamespace(ref_or_refs=["ref"], result=result)
+    executor = SimpleNamespace(collective_rpc=lambda *a, **k: future)
+    poll = ray_executor.RayDistributedExecutor.start_forward_pass_timing_poll(executor)
+    assert poll() is None and not reads
+    ready[0] = True
+    assert poll() == ((3, 0.01),)
+    assert reads == [True]
+
+
+def test_shutdown_timing_grace_is_bounded(monkeypatch):
+    from vllm.v1.engine import core as core_module
+
+    times = iter((0.0, 0.5, 1.1))
+    polls = []
+    monkeypatch.setattr(
+        core_module,
+        "time",
+        SimpleNamespace(
+            monotonic=lambda: next(times),
+            sleep=lambda _: None,
+        ),
+    )
+    core = SimpleNamespace(
+        forward_pass_metrics_emitter=SimpleNamespace(
+            has_pending_timing=lambda: True,
+            poll_timing=lambda _: polls.append(True),
+        ),
+        model_executor=None,
+    )
+    core_module.EngineCore._flush_forward_pass_metrics(core)
+    assert len(polls) == 2
 
 
 def test_fpm_requires_model_config():

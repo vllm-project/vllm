@@ -33,6 +33,7 @@ logger = init_logger(__name__)
 _R = TypeVar("_R")
 
 FailureCallback = Callable[[], None]
+ForwardPassTimingPoll = Callable[[], tuple[tuple[int, float], ...] | None]
 
 
 class Executor(ABC):
@@ -263,13 +264,22 @@ class Executor(ABC):
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
 
-    def drain_forward_pass_timing(self) -> tuple[tuple[int, float], ...]:
-        """Wait for remaining timings at idle or shutdown."""
+    def start_forward_pass_timing_poll(self) -> ForwardPassTimingPoll | None:
+        """Start one nonblocking timing query; return a nonblocking result poller.
 
-        worker_samples: list[tuple[tuple[int, float], ...]] = self.collective_rpc(
-            "drain_forward_pass_timing"
+        Executors with lazy futures must override this to advance their response
+        transport without waiting. None means submission should be retried later.
+        """
+        future: Future[list[tuple[tuple[int, float], ...]]] = self.collective_rpc(
+            "poll_forward_pass_timing", non_block=True
         )
-        return tuple(sample for samples in worker_samples for sample in samples)
+
+        def poll() -> tuple[tuple[int, float], ...] | None:
+            if not future.done():
+                return None
+            return tuple(sample for samples in future.result() for sample in samples)
+
+        return poll
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.collective_rpc("profile", args=(is_start, profile_prefix))

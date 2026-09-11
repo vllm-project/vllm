@@ -38,12 +38,15 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.sched.interface import SchedulerInterface
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.executor.abstract import Executor, ForwardPassTimingPoll
     from vllm.v1.outputs import ModelRunnerOutput
 
 logger = init_logger(__name__)
 
 FPM_VERSION = 1
 FPM_HEARTBEAT_INTERVAL_SECONDS = 1.0
+FPM_IDLE_POLL_INTERVAL_SECONDS = 0.005
+FPM_SHUTDOWN_TIMEOUT_SECONDS = 1.0
 FPM_MAX_QUEUE_SIZE = 10_000
 FPM_TIMING_SCOPE_MODEL_STEP_CUDA = "model_step_cuda"
 
@@ -135,9 +138,8 @@ class _PendingTiming:
 class ForwardPassMetricsTimer:
     """Non-blocking CUDA event timer used by both GPU model runners.
 
-    Timing events are preallocated and pooled. Hot-path drains only read elapsed
-    time after ``query`` reports completion. The engine uses ``wait=True`` only
-    on the cold transition to idle so the final iteration cannot be lost.
+    Timing events are pooled. Drains read elapsed time only after ``query``
+    reports completion and skip a contended drain instead of waiting for it.
     """
 
     def __init__(
@@ -188,38 +190,37 @@ class ForwardPassMetricsTimer:
             self._pending.append(pending)
 
     def cancel(self) -> None:
-        # Exception paths are cold. Wait before recycling the recorded start
-        # event so a later interval cannot re-record it while it is in flight.
-        if self._active is not None:
-            self._active.start_event.synchronize()
-            self._event_pool.put((self._active.start_event, self._active.end_event))
+        # Discard this pair instead of recycling an event still in flight.
         self._active = None
 
-    def drain_samples(self, wait: bool = False) -> tuple[tuple[int, float], ...]:
-        """Return completed timing samples without blocking unless requested.
-
-        CUDA driver calls run outside ``_pending_lock``. The inference thread
-        therefore never waits behind ``query``/``elapsed_time``/``synchronize``.
-        """
-
+    def drain_samples(self) -> tuple[tuple[int, float], ...]:
+        """Return ready timings without waiting for GPU work or another drain."""
+        if not self._drain_lock.acquire(blocking=False):
+            return ()
         ready: list[tuple[int, float]] = []
-        with self._drain_lock:
+        try:
             while True:
-                with self._pending_lock:
-                    pending = self._pending[0] if self._pending else None
-                if pending is None:
+                if not self._pending_lock.acquire(blocking=False):
                     break
-                if wait:
-                    pending.end_event.synchronize()
-                elif not pending.end_event.query():
+                try:
+                    pending = self._pending[0] if self._pending else None
+                finally:
+                    self._pending_lock.release()
+                if pending is None or not pending.end_event.query():
                     break
 
                 elapsed_ms = pending.start_event.elapsed_time(pending.end_event)
-                with self._pending_lock:
+                if not self._pending_lock.acquire(blocking=False):
+                    break
+                try:
                     completed = self._pending.popleft()
+                finally:
+                    self._pending_lock.release()
                 assert completed is pending
                 ready.append((pending.iteration_id, elapsed_ms * 1e-3))
                 self._event_pool.put((pending.start_event, pending.end_event))
+        finally:
+            self._drain_lock.release()
         return tuple(ready)
 
     def drain_into(self, output: Any) -> Any:
@@ -416,6 +417,8 @@ class ForwardPassMetricsEmitter:
         self._correct_async_spec_lengths = correct_async_spec_lengths
         self._spec_requests: dict[int, dict[str, tuple[Any, int]]] = {}
         self._pending: OrderedDict[int, _PendingIteration] = OrderedDict()
+        self._timing_poll: ForwardPassTimingPoll | None = None
+        self._next_timing_poll = 0.0
 
     @classmethod
     def from_vllm_config(
@@ -537,6 +540,7 @@ class ForwardPassMetricsEmitter:
         scheduler_output: SchedulerOutput,
         model_output: ModelRunnerOutput,
     ) -> None:
+        self._receive_ready_timing()
         self._spec_requests.pop(id(scheduler_output), None)
         self.complete_timing_samples(model_output.forward_pass_timing_samples)
 
@@ -592,9 +596,31 @@ class ForwardPassMetricsEmitter:
         )
 
     def has_pending_timing(self) -> bool:
-        return bool(self._pending)
+        return bool(self._pending) or self._timing_poll is not None
+
+    def _receive_ready_timing(self) -> None:
+        if self._timing_poll is not None:
+            samples = self._timing_poll()
+            if samples is not None:
+                self._timing_poll = None
+                self.complete_timing_samples(samples)
+
+    def poll_timing(self, executor: Executor) -> None:
+        """Advance at most one timing RPC while idle; rate-limit retries."""
+        self._receive_ready_timing()
+        if self._timing_poll is not None or not self._pending:
+            return
+        now = time.monotonic()
+        if now < self._next_timing_poll:
+            return
+        self._next_timing_poll = now + FPM_IDLE_POLL_INTERVAL_SECONDS
+        self._timing_poll = executor.start_forward_pass_timing_poll()
+        self._receive_ready_timing()
 
     def shutdown(self) -> None:
+        self._timing_poll = None
+        self._pending.clear()
+        self._spec_requests.clear()
         self._publisher.shutdown()
 
 

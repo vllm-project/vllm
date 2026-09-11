@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
 
@@ -21,7 +21,7 @@ from vllm.utils.network_utils import (
 )
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.abstract import Executor, ForwardPassTimingPoll
 from vllm.v1.executor.ray_env_utils import (
     update_runtime_env_for_worker_import,
 )
@@ -510,6 +510,21 @@ class RayDistributedExecutor(Executor):
             return FutureWrapper(ray_worker_outputs)
 
         return ray.get(ray_worker_outputs, timeout=timeout)
+
+    def start_forward_pass_timing_poll(self) -> ForwardPassTimingPoll:
+        future = cast(
+            FutureWrapper,
+            self.collective_rpc("poll_forward_pass_timing", non_block=True),
+        )
+        refs = future.ref_or_refs
+
+        def poll() -> tuple[tuple[int, float], ...] | None:
+            _, pending = ray.wait(refs, num_returns=len(refs), timeout=0)
+            if pending:
+                return None
+            return tuple(sample for samples in future.result() for sample in samples)
+
+        return poll
 
     def _check_ray_cgraph_installation(self):
         import importlib.metadata

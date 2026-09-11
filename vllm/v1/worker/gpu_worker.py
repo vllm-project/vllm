@@ -1250,11 +1250,11 @@ class Worker(WorkerBase):
 
         return None
 
-    def drain_forward_pass_timing(self) -> tuple[tuple[int, float], ...]:
-        """Wait for output-rank timings at idle or shutdown."""
+    def poll_forward_pass_timing(self) -> tuple[tuple[int, float], ...]:
+        """Return ready output-rank timings without waiting for GPU work."""
 
         timer = self.model_runner.forward_pass_metrics_timer
-        return () if timer is None else timer.drain_samples(wait=True)
+        return () if timer is None else timer.drain_samples()
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()

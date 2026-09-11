@@ -86,7 +86,11 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
     fault_tolerant_wrapper,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.metrics.forward_pass_metrics import ForwardPassMetricsEmitter
+from vllm.v1.metrics.forward_pass_metrics import (
+    FPM_IDLE_POLL_INTERVAL_SECONDS,
+    FPM_SHUTDOWN_TIMEOUT_SECONDS,
+    ForwardPassMetricsEmitter,
+)
 from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -600,7 +604,7 @@ class EngineCore:
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
-            self._flush_forward_pass_metrics()
+            self._poll_forward_pass_metrics()
             return {}, False
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
         if self.forward_pass_metrics_emitter is not None:
@@ -716,7 +720,7 @@ class EngineCore:
             # Queue is empty. We should not reach here since this method should
             # only be called when the scheduler contains requests or the queue
             # is non-empty.
-            self._flush_forward_pass_metrics()
+            self._poll_forward_pass_metrics()
             return None, False
 
         # Block until the next result is available.
@@ -773,14 +777,31 @@ class EngineCore:
 
         return engine_core_outputs, model_executed
 
+    def _poll_forward_pass_metrics(self) -> None:
+        """Collect ready tail timings without delaying a new request."""
+        emitter = self.forward_pass_metrics_emitter
+        if emitter is not None:
+            emitter.poll_timing(self.model_executor)
+
     def _flush_forward_pass_metrics(self) -> None:
-        """Finish the final timing before EngineCore enters its idle wait."""
+        """Allow a bounded shutdown grace for timing responses."""
 
         emitter = self.forward_pass_metrics_emitter
         if emitter is None or not emitter.has_pending_timing():
             return
-        samples = self.model_executor.drain_forward_pass_timing()
-        emitter.complete_timing_samples(samples)
+        deadline = time.monotonic() + FPM_SHUTDOWN_TIMEOUT_SECONDS
+        while emitter.has_pending_timing():
+            try:
+                emitter.poll_timing(self.model_executor)
+            except Exception:
+                logger.warning("Failed to collect final FPM timings", exc_info=True)
+                break
+            if not emitter.has_pending_timing():
+                break
+            if time.monotonic() >= deadline:
+                logger.warning("Dropping unfinished FPM samples during shutdown")
+                break
+            time.sleep(FPM_IDLE_POLL_INTERVAL_SECONDS)
 
     def _process_aborts_queue(self):
         if not self.aborts_queue.empty():
@@ -1473,10 +1494,9 @@ class EngineCoreProc(EngineCore):
 
         waited = False
         while not self.has_work() and self.is_running():
-            # This is the actual transition to the blocking idle state. Finish
-            # any CUDA timing that could not ride back on the final model
-            # output before waiting indefinitely for the next request.
-            self._flush_forward_pass_metrics()
+            emitter = self.forward_pass_metrics_emitter
+            if emitter is not None and self.input_queue.empty():
+                emitter.poll_timing(self.model_executor)
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
             if self.input_queue.empty():
@@ -1487,10 +1507,16 @@ class EngineCoreProc(EngineCore):
                     logger.debug("EngineCore waiting for work.")
                     waited = True
             block = self.process_input_queue_block
+            poll_timing = block and emitter is not None and emitter.has_pending_timing()
             try:
-                req = self.input_queue.get(block=block)
+                if poll_timing:
+                    req = self.input_queue.get(timeout=FPM_IDLE_POLL_INTERVAL_SECONDS)
+                else:
+                    req = self.input_queue.get(block=block)
                 self._handle_client_request(*req)
             except queue.Empty:
+                if poll_timing:
+                    continue
                 break
             if not block:
                 break
