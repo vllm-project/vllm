@@ -1216,7 +1216,13 @@ class Worker(WorkerBase):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
         # Check if profiling is enabled
         if self.profiler_config is None or self.profiler_config.profiler is None:
             raise RuntimeError(
@@ -1227,6 +1233,27 @@ class Worker(WorkerBase):
             )
 
         if is_start:
+            from vllm.config.profiler import validate_profile_prefix
+            from vllm.config.utils import replace
+
+            if profile_prefix is not None:
+                validate_profile_prefix(profile_prefix)
+
+            if self.profiler is not None and self.profiler.is_active:
+                self.profiler.start()
+                return
+
+            overrides = {}
+            if delay_iterations is not None:
+                overrides["delay_iterations"] = delay_iterations
+            if max_iterations is not None:
+                overrides["max_iterations"] = max_iterations
+            session_config = (
+                replace(self.profiler_config, **overrides)
+                if overrides
+                else self.profiler_config
+            )
+
             profiler_type = self.profiler_config.profiler
             # Generate the trace name by combining prefix with comprehensive rank suffix
             from vllm.distributed.utils import get_worker_rank_suffix
@@ -1239,33 +1266,25 @@ class Worker(WorkerBase):
             else:
                 trace_name = rank_suffix
 
-            # Create the profiler wrapper only on the first start call
-            if self.profiler is None:
-                if profiler_type == "torch":
-                    self.profiler = TorchProfilerWrapper(
-                        self.profiler_config,
-                        worker_name=trace_name,
-                        local_rank=self.local_rank,
-                        activities=["CPU", "CUDA"],
-                    )
-                    logger.debug(
-                        "Starting torch profiler with trace name: %s", trace_name
-                    )
-                elif profiler_type == "cuda":
-                    self.profiler = CudaProfilerWrapper(self.profiler_config)
-                    logger.debug("Starting CUDA profiler")
-                elif profiler_type == "proton":
-                    self.profiler = ProtonProfilerWrapper(
-                        self.profiler_config, worker_name=trace_name
-                    )
-                    logger.debug(
-                        "Starting Proton profiler with trace name: %s", trace_name
-                    )
-                else:
-                    # Config validation should prevent this code being reached
-                    raise ValueError(
-                        f"Invalid profiler value of {self.profiler_config.profiler}"
-                    )
+            if profiler_type == "torch":
+                self.profiler = TorchProfilerWrapper(
+                    session_config,
+                    worker_name=trace_name,
+                    local_rank=self.local_rank,
+                    activities=session_config.torch_profiler_activities,
+                )
+                logger.debug("Starting torch profiler with trace name: %s", trace_name)
+            elif profiler_type == "cuda":
+                self.profiler = CudaProfilerWrapper(session_config)
+                logger.debug("Starting CUDA profiler")
+            elif profiler_type == "proton":
+                self.profiler = ProtonProfilerWrapper(
+                    session_config, worker_name=trace_name
+                )
+                logger.debug("Starting Proton profiler with trace name: %s", trace_name)
+            else:
+                # Config validation should prevent this code being reached
+                raise ValueError(f"Invalid profiler value of {session_config.profiler}")
 
             self.profiler.start()
         else:
@@ -1275,10 +1294,9 @@ class Worker(WorkerBase):
             try:
                 self.profiler.stop()
             finally:
-                if self.profiler_config.profiler == "proton":
-                    # Proton output names are fixed when the wrapper is constructed.
-                    # Recreate it so the next profile_prefix is honored.
-                    self.profiler = None
+                # Torch profilers are one-shot, and every profiler type needs
+                # a fresh wrapper to honor the next session's bounds and prefix.
+                self.profiler = None
 
     def execute_dummy_batch(self) -> None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)

@@ -285,9 +285,20 @@ class CPUWorker(Worker):
             encoder=self.compilation_config.encoder_compilation_time,
         )
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
+        if delay_iterations is not None or max_iterations is not None:
+            raise ValueError(
+                "Per-session delay_iterations and max_iterations are only "
+                "supported by GPU workers."
+            )
         if is_start:
             self.profiler.start()
         else:

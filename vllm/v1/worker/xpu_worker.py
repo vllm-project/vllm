@@ -197,7 +197,13 @@ class XPUWorker(Worker):
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
         if self.profiler_config is None or self.profiler_config.profiler is None:
             raise RuntimeError(
                 "Profiling is not enabled. Please set --profiler-config to enable "
@@ -222,7 +228,12 @@ class XPUWorker(Worker):
             )
             logger.debug("Starting torch profiler with trace name: %s", trace_name)
 
-        super().profile(is_start=is_start, profile_prefix=profile_prefix)
+        super().profile(
+            is_start=is_start,
+            profile_prefix=profile_prefix,
+            delay_iterations=delay_iterations,
+            max_iterations=max_iterations,
+        )
 
     def shutdown(self) -> None:
         logger.info(

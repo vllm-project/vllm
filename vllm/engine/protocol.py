@@ -153,8 +153,13 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def start_profile(self) -> None:
-        """Start profiling the engine"""
+    async def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Start profiling the engine with optional per-session overrides."""
         ...
 
     @abstractmethod

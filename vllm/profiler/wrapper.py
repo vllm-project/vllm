@@ -6,7 +6,7 @@ import inspect
 import json
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from typing import Literal
 from uuid import uuid4
@@ -54,6 +54,11 @@ class WorkerProfiler(ABC):
     def is_running(self) -> bool:
         """Whether the underlying profiler is currently collecting data."""
         return self._running
+
+    @property
+    def is_active(self) -> bool:
+        """Whether a profiling session is active, including its delay."""
+        return self._active
 
     @abstractmethod
     def _start(self) -> None:
@@ -179,7 +184,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         profiler_config: ProfilerConfig,
         worker_name: str,
         local_rank: int,
-        activities: list[TorchProfilerActivity],
+        activities: Sequence[TorchProfilerActivity],
         on_trace_ready: Callable[[torch.profiler.profile], None] | None = None,
     ) -> None:
         super().__init__(profiler_config)
@@ -212,7 +217,11 @@ class TorchProfilerWrapper(WorkerProfiler):
                 use_gzip=profiler_config.torch_profiler_use_gzip,
             )
 
-        self.dump_cpu_time_total = "CPU" in activities and len(activities) == 1
+        self._records_cpu_activity = "CPU" in activities
+        self.dump_cuda_time_total = (
+            "CUDA" in activities and profiler_config.torch_profiler_dump_cuda_time_total
+        )
+        self.dump_cpu_time_total = self._records_cpu_activity and len(activities) == 1
 
         # Create profiler schedule if warmup or wait iterations are configured
         profiler_schedule = None
@@ -311,9 +320,8 @@ class TorchProfilerWrapper(WorkerProfiler):
     def _stop(self) -> None:
         self.profiler.stop()
 
-        profiler_config = self.profiler_config
         rank = self.local_rank
-        if profiler_config.torch_profiler_dump_cuda_time_total:
+        if self.dump_cuda_time_total:
             table = self._build_profiler_table(sort_key="self_cuda_time_total")
             self._write_profiler_table(rank, table)
 
@@ -351,6 +359,8 @@ class TorchProfilerWrapper(WorkerProfiler):
 
     @override
     def annotate_context_manager(self, name: str):
+        if not self._records_cpu_activity:
+            return nullcontext()
         return torch.profiler.record_function(name)
 
 

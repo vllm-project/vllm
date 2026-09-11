@@ -4,6 +4,7 @@
 import os
 from typing import Any, Literal
 
+import regex as re
 from pydantic import Field, model_validator
 from typing_extensions import Self
 
@@ -14,11 +15,28 @@ from vllm.utils.hashing import safe_hash
 logger = init_logger(__name__)
 
 ProfilerKind = Literal["torch", "cuda", "proton"]
+TorchProfilerActivity = Literal["CPU", "CUDA"]
 ProtonBackend = Literal["cupti"]
 ProtonContext = Literal["shadow", "python"]
 ProtonData = Literal["tree", "trace"]
 ProtonHook = Literal["triton"]
 ProtonOutputFormat = Literal["hatchet", "hatchet_msgpack", "chrome_trace"]
+
+_PROFILE_PREFIX_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def _default_torch_profiler_activities() -> list[TorchProfilerActivity]:
+    return ["CPU", "CUDA"]
+
+
+def validate_profile_prefix(profile_prefix: str) -> str:
+    """Validate a profile prefix used in local trace file names."""
+    if _PROFILE_PREFIX_PATTERN.fullmatch(profile_prefix) is None:
+        raise ValueError(
+            "profile_prefix must be 1-128 characters, start with a letter or "
+            "number, and contain only letters, numbers, '.', '_', or '-'"
+        )
+    return profile_prefix
 
 
 def _is_uri_path(path: str) -> bool:
@@ -50,6 +68,13 @@ class ProfilerConfig:
     """Directory to save torch profiler traces. Both AsyncLLM's CPU traces and
     worker's traces (CPU & GPU) will be saved under this directory. Note that
     it must be an absolute path."""
+
+    torch_profiler_activities: list[TorchProfilerActivity] = Field(
+        default_factory=_default_torch_profiler_activities,
+        min_length=1,
+    )
+    """Activities recorded by GPU workers using the torch profiler. Defaults
+    to CPU and CUDA for backwards compatibility."""
 
     proton_profiler_dir: str = ""
     """Directory to save Triton Proton profiles. Each worker writes a
@@ -167,7 +192,12 @@ class ProfilerConfig:
     @model_validator(mode="after")
     def _validate_profiler_config(self) -> Self:
         has_delay_or_limit = self.delay_iterations > 0 or self.max_iterations > 0
-        if self.profiler == "torch" and has_delay_or_limit and not self.ignore_frontend:
+        if (
+            self.profiler == "torch"
+            and has_delay_or_limit
+            and not self.ignore_frontend
+            and "CPU" in self.torch_profiler_activities
+        ):
             logger.warning_once(
                 "Using 'torch' profiler with delay_iterations or max_iterations "
                 "while ignore_frontend is False may result in high overhead."

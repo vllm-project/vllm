@@ -17,7 +17,11 @@ from vllm.config import (
 )
 from vllm.config.profiler import _is_uri_path
 from vllm.platforms import current_platform
-from vllm.profiler.wrapper import ProtonProfilerWrapper, WorkerProfiler
+from vllm.profiler.wrapper import (
+    ProtonProfilerWrapper,
+    TorchProfilerWrapper,
+    WorkerProfiler,
+)
 from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
@@ -247,6 +251,33 @@ def test_mixed_delay_and_stop(default_profiler_config):
     profiler.step()
 
     assert profiler.start_call_count == 0
+
+
+def test_torch_profiler_activities_default_to_cpu_and_cuda():
+    config = ProfilerConfig(profiler="torch", torch_profiler_dir="/tmp/mock")
+
+    assert config.torch_profiler_activities == ["CPU", "CUDA"]
+
+
+def test_cuda_only_torch_profiler_skips_cpu_annotations(
+    default_profiler_config, monkeypatch
+):
+    profiler = MagicMock()
+    monkeypatch.setattr(
+        "vllm.profiler.wrapper.torch.profiler.profile", Mock(return_value=profiler)
+    )
+    monkeypatch.setattr(
+        "vllm.profiler.wrapper.torch.profiler.tensorboard_trace_handler", Mock()
+    )
+
+    wrapper = TorchProfilerWrapper(
+        default_profiler_config,
+        worker_name="rank0",
+        local_rank=0,
+        activities=["CUDA"],
+    )
+
+    assert isinstance(wrapper.annotate_context_manager("iteration"), nullcontext)
 
 
 class TestIsUriPath:
@@ -647,3 +678,44 @@ def test_gpu_worker_recreates_proton_profiler_for_each_run():
         call(worker.profiler_config, worker_name="second_rank1"),
     ]
     assert wrapper.return_value.start.call_count == 2
+
+
+def test_gpu_worker_applies_per_session_torch_overrides():
+    worker = MagicMock()
+    worker.rank = 1
+    worker.local_rank = 0
+    worker.profiler = None
+    worker.profiler_config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir="/tmp/mock",
+        torch_profiler_activities=["CUDA"],
+        delay_iterations=1,
+        max_iterations=2,
+    )
+
+    with (
+        patch(
+            "vllm.distributed.utils.get_worker_rank_suffix",
+            return_value="rank1",
+        ),
+        patch("vllm.v1.worker.gpu_worker.TorchProfilerWrapper") as wrapper,
+    ):
+        Worker.profile(
+            worker,
+            profile_prefix="benchmark",
+            delay_iterations=10,
+            max_iterations=20,
+        )
+
+    session_config = wrapper.call_args.args[0]
+    assert session_config.delay_iterations == 10
+    assert session_config.max_iterations == 20
+    assert worker.profiler_config.delay_iterations == 1
+    assert worker.profiler_config.max_iterations == 2
+    wrapper.assert_called_once_with(
+        session_config,
+        worker_name="benchmark_rank1",
+        local_rank=0,
+        activities=["CUDA"],
+    )
+    wrapper.return_value.start.assert_called_once_with()

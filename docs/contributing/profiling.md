@@ -22,6 +22,9 @@ To use the `torch.profiler` module, set the `profiler` entry to `'torch'` and `t
 - `torch_profiler_with_flops` to enable recording FLOPs, off by default
 - `torch_profiler_use_gzip` to control gzip-compressing profiling files, on by default
 - `torch_profiler_dump_cuda_time_total` to control dumping and printing the aggregated CUDA self time table, on by default
+- `torch_profiler_activities` to select worker activities (`["CPU", "CUDA"]` by
+  default). Use `["CUDA"]` for lower-overhead GPU-only traces; omitting `CPU`
+  also disables the frontend CPU profiler.
 
 When using `vllm bench serve`, you can enable profiling by passing the `--profile` flag.
 
@@ -83,6 +86,24 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 # After need call /stop_profile api to stop profile.
 $ curl -X POST http://localhost:8000/stop_profile
 ```
+
+`/start_profile` also accepts an optional JSON body with per-session settings.
+`profile_prefix` identifies the generated trace files, `delay_iterations`
+skips worker iterations before collection starts, and `max_iterations` limits
+the number of collected iterations (`0` means no limit):
+
+```shell
+curl -X POST http://localhost:8000/start_profile \
+    -H "Content-Type: application/json" \
+    -d '{
+        "profile_prefix": "sharegpt_run_1",
+        "delay_iterations": 5000,
+        "max_iterations": 20
+    }'
+```
+
+The Python and Rust API frontends accept the same request body. Per-session
+iteration bounds are currently supported by GPU workers.
 
 ## Profile with Triton Proton
 
