@@ -767,6 +767,68 @@ class TestPushWriterNotifs:
         assert evicted == ["req-done"]
         assert w._push_writer_wake.is_set()
 
+    @staticmethod
+    def _pollable_worker() -> _StubWriterWorker:
+        """Stub worker with the extra base-worker state the real
+        ``get_finished`` needs to poll ``_sending_transfers``."""
+        w = _StubWriterWorker.fresh()
+        w.transfer_topo = MagicMock()
+        w.nixl_wrapper = MagicMock()
+        w.xfer_stats = MagicMock()
+        w._log_failure = MagicMock()  # type: ignore[method-assign]
+        w._failed_recv_reqs = queue.Queue()
+        w._recv_failures = set()
+        w._invalid_block_ids = queue.Queue()
+        w._pending_recv_notifs = {}
+        w._replicated_pcp_done_sending = set()
+        return w
+
+    def _make_sending_req(self, w: _StubWriterWorker) -> str:
+        request_id = "req-send-1"
+        w._sending_transfers[request_id] = [101, 102]
+        w._reqs_to_send[request_id] = time.perf_counter() + 60
+        w._reqs_to_process.add(request_id)
+        return request_id
+
+    def test_failed_push_send_is_not_reported_done_sending(self):
+        """A failed P-side WRITE must not surface as finished sending.
+
+        Reporting it would free P-side blocks as if the KV had been
+        delivered while D still waits for the data; the request must be
+        left to the lease / watchdog instead.
+        """
+        w = self._pollable_worker()
+        request_id = self._make_sending_req(w)
+        w.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "DONE"]
+
+        done_sending, _ = w.get_finished()
+
+        assert request_id not in done_sending
+        # Lease tracking is preserved so the watchdog can reschedule.
+        assert request_id in w._reqs_to_send
+        assert request_id in w._reqs_to_process
+        # Both handles were still cleaned up.
+        assert request_id not in w._sending_transfers
+
+    def test_completed_push_send_waits_for_consumer_notif(self):
+        """P-side sends are completed by consumer notifs / lease expiry,
+        not by local WRITE-handle completion."""
+        w = self._pollable_worker()
+        request_id = self._make_sending_req(w)
+        w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+
+        done_sending, _ = w.get_finished()
+
+        assert request_id not in done_sending
+        assert request_id in w._reqs_to_send
+        assert request_id not in w._sending_transfers
+
+        # The consumer notif is what completes the send.
+        w._pending_completion_notifs.put(f"{request_id}:1".encode())
+        done_sending, _ = w.get_finished()
+        assert request_id in done_sending
+        assert request_id not in w._reqs_to_send
+
 
 # ----------------------------------------------------------------- #
 #  Negative / error-path tests                                       #

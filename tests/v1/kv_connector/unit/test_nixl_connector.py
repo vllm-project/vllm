@@ -1929,6 +1929,7 @@ def recv_worker():
     worker._invalid_block_ids = queue.Queue()
     worker._pending_recv_notifs = {}
     worker._reqs_to_send = {}
+    worker._replicated_pcp_done_sending = set()
     worker._is_hma_required = False
     worker._has_mamba = False
     worker.use_host_buffer = False

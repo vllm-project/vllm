@@ -2792,10 +2792,7 @@ class NixlBaseConnectorWorker:
         return True
 
     def _handle_failed_transfer(
-        self,
-        req_id: str,
-        handle: int | None,
-        failed_req_ids: set[str] | None = None,
+        self, req_id: str, handle: int | None, failed_req_ids: set[str] | None = None
     ) -> bool:
         """Record a failure and release its handle, returning False to retain it."""
         self.xfer_stats.record_failed_transfer()

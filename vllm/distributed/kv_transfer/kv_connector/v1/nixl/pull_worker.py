@@ -488,10 +488,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 dst_engine_id=dst_engine_id,
                 remote_rank=remote_rank,
             )
-            if not self._handle_failed_transfer(
+            if handle is not None and not self._handle_failed_transfer(
                 request_id, handle, self._recv_failures
             ):
-                assert handle is not None
                 self._recving_transfers[request_id].append(handle)
             return False
 
