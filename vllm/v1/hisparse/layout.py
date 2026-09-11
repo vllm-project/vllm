@@ -9,7 +9,6 @@ from vllm.config import VllmConfig
 from vllm.config.kv_transfer import hisparse_host_pool_gib
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backend import select_common_block_size_from_constraints
 from vllm.v1.hisparse.runtime import ResolvedHiSparseConfig
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
@@ -126,24 +125,12 @@ def create_hisparse_layout(
     host_budget: int,
 ) -> HiSparseLayout:
     source_specs, indexer_specs = _partition_hisparse_specs(groups)
-    scheduler_block_sizes = {spec.block_size for spec in source_specs.values()}
-    scheduler_block_sizes.update(spec.block_size for spec in indexer_specs.values())
-    if len(scheduler_block_sizes) != 1:
-        raise ValueError("HiSparse requires one scheduler block size.")
-    scheduler_block_size = scheduler_block_sizes.pop()
-    constraints = [
-        spec.supported_kernel_block_sizes
-        for spec in (*source_specs.values(), *indexer_specs.values())
-    ]
-    try:
-        gpu_block_size = select_common_block_size_from_constraints(
-            scheduler_block_size, constraints
-        )
-    except ValueError as error:
-        raise ValueError(
-            "HiSparse requires a GPU block size supported by every sparse "
-            f"attention and indexer backend: {error}"
-        ) from error
+    block_sizes = {
+        spec.block_size for spec in (*source_specs.values(), *indexer_specs.values())
+    }
+    if len(block_sizes) != 1:
+        raise ValueError("HiSparse requires one resolved GPU block size.")
+    gpu_block_size = block_sizes.pop()
 
     config = ResolvedHiSparseConfig.from_vllm_config(
         vllm_config,
@@ -151,15 +138,6 @@ def create_hisparse_layout(
         gpu_block_size,
     )
     assert config is not None
-    source_specs = {
-        name: spec.copy_with_new_block_size(gpu_block_size)
-        for name, spec in source_specs.items()
-    }
-    indexer_specs = {
-        name: spec.copy_with_new_block_size(gpu_block_size)
-        for name, spec in indexer_specs.items()
-    }
-
     indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(
         cast(dict[str, KVCacheSpec], indexer_specs)
     )

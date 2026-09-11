@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
-from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheTensor,
     MLAAttentionSpec,
+    SparseCacheRole,
     compute_layout_strides,
 )
 from vllm.v1.worker.gpu import attn_utils
@@ -35,6 +36,60 @@ from vllm.v1.worker.utils import (
     allocate_kv_cache,
     copy_kv_cache_blocks_inplace,
 )
+
+
+@pytest.mark.parametrize(
+    ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected"),
+    [
+        (True, 256, [64], [64], 64),
+        (True, 64, [32, 64], [16, 32], 32),
+        (True, 64, [MultipleOf(16)], [32], 32),
+        (True, 64, [64], [32], None),
+        (False, 256, [64], [64], 256),
+    ],
+)
+def test_get_kv_cache_spec_resolves_hisparse_block_size(
+    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, expected
+):
+    """Resolve shared MLA geometry before planning; leave other specs alone."""
+    specs = {
+        "main": MLAAttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+        ),
+        "indexer": MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        ),
+        "dense": FullAttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+        ),
+    }
+    layers = {}
+    for name, sizes in zip(specs, [main_sizes, indexer_sizes, [block_size]]):
+        backend = SimpleNamespace(
+            customize_spec=AttentionBackend.customize_spec,
+            get_supported_kernel_block_sizes=lambda sizes=sizes: sizes,
+        )
+        layers[name] = SimpleNamespace(
+            get_kv_cache_spec=lambda _, spec=specs[name]: spec,
+            get_attn_backend=lambda backend=backend: backend,
+        )
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=object() if enabled else None)
+    )
+    if expected is None:
+        with pytest.raises(ValueError, match="supported by every sparse"):
+            attn_utils.get_kv_cache_spec(config)
+        return
+
+    resolved = attn_utils.get_kv_cache_spec(config)
+    assert resolved["main"].block_size == resolved["indexer"].block_size == expected
+    assert resolved["dense"] is specs["dense"]
+    assert all(spec.block_size == block_size for spec in specs.values())
 
 
 class _FakeMetadataBuilder:
