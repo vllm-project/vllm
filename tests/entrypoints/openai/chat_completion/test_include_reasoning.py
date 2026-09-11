@@ -5,7 +5,7 @@
 
 Verifies that reasoning content is included by default and suppressed
 when ``include_reasoning=False``, for both streaming and non-streaming
-Chat Completions.
+Chat Completions, while reasoning tokens remain represented in usage.
 """
 
 import openai
@@ -75,6 +75,22 @@ async def test_include_reasoning_false_non_streaming(client: openai.AsyncOpenAI)
         f"Expected no reasoning when include_reasoning=False, got: {reasoning}"
     )
     assert msg.content, "Expected content in response even without reasoning"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_tokens_in_usage(client: openai.AsyncOpenAI):
+    """Hidden reasoning still contributes to terminal usage details."""
+    response = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=MESSAGES,
+        max_tokens=64,
+        extra_body={"include_reasoning": False},
+    )
+
+    assert response.usage is not None
+    details = response.usage.completion_tokens_details
+    assert details is not None
+    assert details.reasoning_tokens > 0
 
 
 @pytest.mark.asyncio
