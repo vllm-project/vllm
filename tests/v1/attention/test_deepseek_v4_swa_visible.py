@@ -373,6 +373,34 @@ COMBINE_CASES = [
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_v41_combine_topk_swa_clears_reused_workspace_padding():
+    from vllm.models.deepseek_v4_1.common.ops.cache_utils import (
+        combine_topk_swa_indices as combine_v41,
+    )
+
+    device = torch.device("cuda")
+    args = (
+        torch.zeros((3, 512), dtype=torch.int32, device=device),
+        torch.tensor([0, 3], dtype=torch.int32, device=device),
+        torch.tensor([3], dtype=torch.int32, device=device),
+        torch.tensor([3], dtype=torch.int32, device=device),
+        128,
+        2,
+        512,
+        1024,
+        512,
+    )
+    expected, expected_lens = combine_v41(*args)
+    # Reused buffers must not expose stale indices beyond the active lengths.
+    workspace = torch.full_like(expected, 2113501039)
+    lens = torch.full_like(expected_lens, -99)
+    actual, actual_lens = combine_v41(*args, out=(workspace, lens))
+    assert actual is workspace and actual_lens is lens
+    torch.testing.assert_close(actual_lens, expected_lens)
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 @pytest.mark.parametrize("cfg", COMBINE_CASES)
 def test_combine_topk_swa_with_image_spans(cfg):
     case = CASES[0]
