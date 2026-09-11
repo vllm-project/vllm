@@ -701,16 +701,29 @@ def test_requires_kv_delivery_defaults_to_producer_role():
         assert scheduler.requires_kv_delivery is expected, role
 
 
-@pytest.mark.parametrize("kv_role", ["kv_producer", "kv_consumer"])
-def test_kv_pressure_preempt_mid_handoff(kv_role: str):
-    """P/D race: a request is KV-pressure preempted while the output of its
-    final prefill chunk -- the hand-off token that would finish it -- is in
-    flight.
+@pytest.mark.parametrize(
+    ("kv_role", "defer_free"),
+    [
+        ("kv_producer", False),
+        ("kv_consumer", False),
+        ("kv_consumer", True),
+    ],
+)
+def test_kv_pressure_preempt_mid_handoff(kv_role: str, defer_free: bool):
+    """P/D race: KV pressure hits while the output of a request's final
+    prefill chunk -- the hand-off token that would finish it -- is in flight.
 
-    On a producer, that output must be dropped so the request recomputes;
-    delivering it would finish the request and hand off blocks the preemption
-    already freed, so the consumer pulls garbage. A consumer hands nothing off,
-    so it keeps the lossless deliver-stale path.
+    When the victim's blocks free immediately, the request is preempted. On a
+    producer, that output must be dropped so the request recomputes; delivering
+    it would finish the request and hand off blocks the preemption already
+    freed, so the consumer pulls garbage. A consumer hands nothing off, so it
+    keeps the lossless deliver-stale path.
+
+    A consumer with overlapping batches (async scheduling or PP) instead fences
+    the victim's free behind its in-flight output, so the allocation retry
+    stops instead of preempting; the request then finishes from that output
+    once it lands. The gate depends on the platform (async scheduling is
+    force-disabled on CPU), so force the flag to cover both paths everywhere.
     """
     is_producer = kv_role == "kv_producer"
     scheduler = create_scheduler(
@@ -722,10 +735,13 @@ def test_kv_pressure_preempt_mid_handoff(kv_role: str):
         max_num_batched_tokens=512,
     )
     assert scheduler.requires_kv_delivery is is_producer
+    # The production gate requires overlapping batches, which async
+    # scheduling only provides off-CPU.
+    scheduler.defer_block_free = defer_free
 
     # 32-token prompts fill 2 blocks each, exhausting the usable pool, so the
-    # next decode allocation preempts the tail of the running queue (the handoff
-    # request) while its prefill output is still in flight.
+    # next decode allocation targets the tail of the running queue (the
+    # handoff request) while its prefill output is still in flight.
     decoder = create_requests(
         num_requests=1, num_tokens=32, max_tokens=8, req_ids=["decoder"]
     )[0]
@@ -739,9 +755,17 @@ def test_kv_pressure_preempt_mid_handoff(kv_role: str):
     assert handoff.num_output_placeholders == 1
 
     scheduler.schedule()
-    assert handoff.status == RequestStatus.PREEMPTED
-    assert handoff.num_stale_output_tokens == handoff.num_prompt_tokens
-    assert handoff.drop_stale_output is is_producer
+    if defer_free:
+        # The victim's blocks are fenced behind its in-flight output, so
+        # preempting it could not satisfy the allocation; the retry stops
+        # instead of preempting.
+        assert handoff.status == RequestStatus.RUNNING
+        assert handoff.num_stale_output_tokens == 0
+    else:
+        # Blocks free immediately, so the handoff request is preempted.
+        assert handoff.status == RequestStatus.PREEMPTED
+        assert handoff.num_stale_output_tokens == handoff.num_prompt_tokens
+        assert handoff.drop_stale_output is is_producer
 
     scheduler.update_from_output(sched_output, _make_model_runner_output(sched_output))
 
