@@ -115,6 +115,8 @@ datasets==5.0.1
     #   mteb
 decorator==5.3.1
     # via librosa
+decord==0.6.0
+    # via -r requirements/test/xpu.in
 defusedxml==0.7.1
     # via nltk
 depyf==0.20.0
@@ -442,6 +444,7 @@ numpy==2.3.5
     #   albumentations
     #   bm25s
     #   datasets
+    #   decord
     #   evaluate
     #   librosa
     #   lm-eval
@@ -910,7 +913,7 @@ tiktoken==0.14.0
     #   mistral-common
 timm==1.0.28
     # via -r requirements/test/xpu.in
-tokenizers==0.22.2
+tokenizers==0.23.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -948,7 +951,7 @@ traitlets==5.16.1
     # via
     #   jupyter-client
     #   jupyter-core
-transformers==5.15.0
+transformers==5.16.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
