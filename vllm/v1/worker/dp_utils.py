@@ -132,6 +132,8 @@ def _synchronize_dp_ranks(
         num_tokens_after_padding: A tensor containing the total number of
         tokens per-microbatch for each DP rank including any DP padding.
         synced_cudagraph_mode: The synchronized cudagraph mode (min across ranks)
+        synced_profiler_ready: Whether all DP ranks have armed synchronized
+            profiler stepping, or None when readiness was not included.
     ]
 
     """

@@ -63,6 +63,8 @@ def sync_cudagraph_and_dp_padding(
 
     `parallel_config` is only needed to decide whether to microbatch, so callers
     that never do (`allow_ubatching=False`) can leave it out.
+    When `profiler_ready` is set, its readiness bit is carried by the same
+    all-reduce and returned in `DPSyncState`.
 
     Returns (synced_batch_desc, sync). `sync` is None when no rank has work.
     """

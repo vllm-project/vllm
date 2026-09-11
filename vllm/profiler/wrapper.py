@@ -56,7 +56,7 @@ class WorkerProfiler(ABC):
         return self._running
 
     @property
-    def is_active(self) -> bool:
+    def is_armed(self) -> bool:
         """Whether a start request is active, including a delayed start."""
         return self._active
 

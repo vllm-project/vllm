@@ -233,6 +233,19 @@ readiness field to the existing coordination only while the option is enabled;
 it does not add a profiling-only collective. Independent data-parallel replicas
 without a shared forward cadence retain rank-local iteration counting.
 
+All model-runner dummy forwards that occur while the session is armed count as
+execution boundaries, not only dummy work caused by an idle DP rank. Startup
+warmup and graph-capture runs occur before the session is armed and do not
+count. The first captured synchronized boundary may not include the outer
+worker-level iteration annotation because readiness is agreed inside the model
+runner; subsequent captured boundaries retain their annotations. This does not
+affect the iteration window itself.
+
+For a DP-aligned bounded stop, use `max_iterations`. An explicit stop remains
+immediate on the worker receiving it; peers observe the de-armed state before
+their next shared forward. As a result, trailing non-forward activity can differ
+between ranks after an explicit stop.
+
 #### Analysis
 
 You can view these profiles either as summaries in the CLI, using `nsys stats [profile-file]`, or in the GUI by installing Nsight [locally following the directions here](https://developer.nvidia.com/nsight-systems/get-started).

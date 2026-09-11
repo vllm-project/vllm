@@ -514,8 +514,8 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
-        self.dp_profiler_state: Callable[[], bool] | None = None
-        self.dp_profiler_step: Callable[[bool], None] | None = None
+        self.dp_profiler_is_ready: Callable[[], bool] | None = None
+        self.dp_profiler_advance: Callable[[bool], None] | None = None
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         model_config = self.model_config
@@ -4041,7 +4041,7 @@ class GPUModelRunner(
                 uniform_decode=uniform_decode,
                 cudagraph_mode=cudagraph_mode.value,
                 profiler_ready=(
-                    self.dp_profiler_state() if self.dp_profiler_state else None
+                    self.dp_profiler_is_ready() if self.dp_profiler_is_ready else None
                 ),
             )
 
@@ -4310,9 +4310,11 @@ class GPUModelRunner(
                 ),
             )
 
-            if self.dp_profiler_step is not None:
+            if self.dp_profiler_advance is not None:
+                # All-rank idle polls return above. V1 reaches this agreement
+                # only for nonempty real or dummy forwards.
                 assert profiler_ready is not None
-                self.dp_profiler_step(profiler_ready)
+                self.dp_profiler_advance(profiler_ready)
 
             logger.debug(
                 "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
@@ -5988,9 +5990,11 @@ class GPUModelRunner(
             # need to capture graphs for specific num_active_loras counts
             force_num_active_loras=num_active_loras,
         )
-        if self.dp_profiler_step is not None:
+        if self.dp_profiler_advance is not None:
+            # Dummy runs always contain at least one token, so this is a shared
+            # execution boundary rather than an all-rank idle poll.
             assert profiler_ready is not None
-            self.dp_profiler_step(profiler_ready)
+            self.dp_profiler_advance(profiler_ready)
 
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = _cudagraph_mode

@@ -487,8 +487,10 @@ class Worker(WorkerBase):
             self.model_runner = GPUModelRunnerV1(self.vllm_config, self.device)
 
         if self._use_dp_synchronized_profiler_iterations():
-            self.model_runner.dp_profiler_state = self._dp_profiler_is_ready
-            self.model_runner.dp_profiler_step = self._advance_dp_synchronized_profiler
+            self.model_runner.dp_profiler_is_ready = self._dp_profiler_is_ready
+            self.model_runner.dp_profiler_advance = (
+                self._advance_dp_synchronized_profiler
+            )
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
@@ -1029,7 +1031,7 @@ class Worker(WorkerBase):
             self._dp_profiler_session_started = True
 
         profiler.step()
-        if not profiler.is_active:
+        if not profiler.is_armed:
             self._dp_profiler_session_started = False
             self._dp_profiler_requested = False
 
@@ -1040,7 +1042,7 @@ class Worker(WorkerBase):
         if not self.profiler:
             return nullcontext()
 
-        if not Worker._use_dp_synchronized_profiler_iterations(self):
+        if not self._use_dp_synchronized_profiler_iterations():
             self.profiler.step()
         if not self.profiler.is_running:
             return nullcontext()
@@ -1304,7 +1306,7 @@ class Worker(WorkerBase):
                         f"Invalid profiler value of {self.profiler_config.profiler}"
                     )
 
-            if Worker._use_dp_synchronized_profiler_iterations(self):
+            if self._use_dp_synchronized_profiler_iterations():
                 self._dp_profiler_requested = True
                 logger.info(
                     "DP-synchronized profiler armed; capture will follow the "
@@ -1316,6 +1318,8 @@ class Worker(WorkerBase):
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
                 return
+            # Keep the explicit stop synchronous. Other DP ranks observe the
+            # de-armed state at their next existing execution agreement.
             self._dp_profiler_requested = False
             self._dp_profiler_session_started = False
             try:
