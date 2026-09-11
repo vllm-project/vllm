@@ -9,9 +9,8 @@ import torch
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
-from vllm.v1.watermarking.watermarker import RandomSamplingState, Watermarker
+from vllm.v1.watermarking.watermarker import RandomSampler, Watermarker
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
 
@@ -85,22 +84,10 @@ class GPUWatermarkSampler(Sampler):
                 expanded_idx_mapping, contexts
             )
 
-        def random_sample(sample_logits: torch.Tensor) -> torch.Tensor:
-            return gumbel_sample(
-                sample_logits,
-                expanded_idx_mapping,
-                self.sampling_states.temperature.gpu,
-                self.sampling_states.seeds.gpu,
-                pos,
-                apply_temperature=False,
-                is_drafting=False,
-                use_fp64=self.use_fp64_gumbel,
-            )
-
         temperatures = self.sampling_states.temperature.gpu[expanded_idx_mapping]
         needs_mixed_sampling = repeated_contexts is not None or not np.all(enabled)
         skip_mask = None
-        sampling_state = None
+        random_sampler = None
         if needs_mixed_sampling:
             watermarking = self.watermarking.gpu[expanded_idx_mapping] & (
                 temperatures != 0
@@ -108,7 +95,8 @@ class GPUWatermarkSampler(Sampler):
             if repeated_contexts is not None:
                 watermarking &= ~repeated_contexts
             skip_mask = ~watermarking
-            sampling_state = RandomSamplingState(
+
+            random_sampler = RandomSampler(
                 expanded_idx_mapping=expanded_idx_mapping,
                 temperatures=self.sampling_states.temperature.gpu,
                 seeds=self.sampling_states.seeds.gpu,
@@ -118,9 +106,8 @@ class GPUWatermarkSampler(Sampler):
         output = self.watermarker.sample(
             processed_logits,
             contexts,
-            random_sample,
+            random_sampler,
             skip_mask=skip_mask,
-            sampling_state=sampling_state,
         )
         sampled = output.token_ids
         output_logits = output.logits

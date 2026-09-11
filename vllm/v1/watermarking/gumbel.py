@@ -14,7 +14,7 @@ from vllm.v1.watermarking.detector import (
 )
 from vllm.v1.watermarking.prfs import PhiloxPRF, WatermarkPRF, create_prf
 from vllm.v1.watermarking.watermarker import (
-    RandomSamplingState,
+    RandomSampler,
     Watermarker,
     WatermarkSample,
 )
@@ -76,13 +76,9 @@ class GumbelWatermarker(Watermarker):
         logits: torch.Tensor,
         contexts: torch.Tensor,
         skip_mask: torch.Tensor,
-        sampling_state: RandomSamplingState | None,
+        random_sampler: RandomSampler,
     ) -> WatermarkSample | None:
-        if (
-            type(self.prf) is not PhiloxPRF
-            or logits.device.type != "cuda"
-            or sampling_state is None
-        ):
+        if type(self.prf) is not PhiloxPRF or logits.device.type != "cuda":
             return None
 
         from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
@@ -92,11 +88,11 @@ class GumbelWatermarker(Watermarker):
             contexts,
             self.prf.key,
             skip_mask=skip_mask,
-            expanded_idx_mapping=sampling_state.expanded_idx_mapping,
-            temperatures=sampling_state.temperatures,
-            seeds=sampling_state.seeds,
-            positions=sampling_state.positions,
-            use_fp64=sampling_state.use_fp64,
+            expanded_idx_mapping=random_sampler.expanded_idx_mapping,
+            temperatures=random_sampler.temperatures,
+            seeds=random_sampler.seeds,
+            positions=random_sampler.positions,
+            use_fp64=random_sampler.use_fp64,
         )
         return WatermarkSample(token_ids, logits)
 
