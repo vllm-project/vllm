@@ -1,0 +1,8 @@
+[build][misc] remove nvidia runtime docker base image
+
+Fixes vllm-project/vllm#5635 (and PR #5646).
+
+Replaces `nvidia/cuda` docker base image with raw `ubuntu` image. This reduces the dependency on nvidia base images.
+To ensure GPU compatibility is retained out-of-the-box, the required `NVIDIA_VISIBLE_DEVICES` and `NVIDIA_DRIVER_CAPABILITIES` environment variables are explicitly added so the NVIDIA container toolkit can still automatically mount the GPU drivers.
+
+cc @simon-mo @youkaichao
