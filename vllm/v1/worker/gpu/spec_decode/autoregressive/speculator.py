@@ -941,7 +941,8 @@ def _prepare_decode_inputs_warmup_inputs(
 ) -> dict[str, Any]:
     return dict(
         draft_tokens=TritonWarmupTensor(
-            torch.int32, strides=(speculator.num_speculative_steps,)
+            speculator.draft_tokens.dtype,
+            strides=(speculator.draft_tokens.stride(0),),
         ),
         target_seq_lens=TritonWarmupTensor(torch.int32),
         num_rejected=TritonWarmupTensor(torch.int32),
@@ -1090,14 +1091,16 @@ def _update_draft_inputs_warmup_inputs(
     steps = speculator.num_speculative_steps
     return dict(
         output_draft_tokens=TritonWarmupTensor(
-            torch.int32, shape=(1, steps), strides=(steps, 1)
+            speculator.draft_tokens.dtype,
+            shape=(1, steps),
+            strides=tuple(speculator.draft_tokens.stride()),
         ),
         next_input_hidden_states=hidden,
         input_ids=TritonWarmupTensor(torch.int32),
         positions=TritonWarmupTensor(torch.int64),
         sample_src_positions=TritonWarmupTensor(torch.int64),
         seq_lens=TritonWarmupTensor(torch.int32),
-        draft_tokens=TritonWarmupTensor(torch.int32),
+        draft_tokens=TritonWarmupTensor(speculator.draft_tokens.dtype),
         current_draft_step=TritonWarmupTensor(torch.int64),
         hidden_states=hidden,
         max_model_len=speculator.max_model_len,

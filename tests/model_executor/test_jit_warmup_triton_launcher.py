@@ -352,8 +352,8 @@ def test_triton_warmup_inputs_expands_explicit_pointer_dtypes() -> None:
 def test_triton_key_derivation_applies_wrappers_and_runtime_options(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from triton import knobs
-    from triton.runtime.driver import driver
+    knobs = triton.knobs
+    driver = triton.runtime.driver.driver
 
     device = "test-device"
     monkeypatch.setattr(driver.active, "get_current_device", lambda: device)
@@ -389,7 +389,7 @@ def test_triton_key_derivation_applies_wrappers_and_runtime_options(
 def test_triton_key_derivation_covers_autotune_configs_and_jit_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from triton.runtime.driver import driver
+    driver = triton.runtime.driver.driver
 
     device = "test-device"
     monkeypatch.setattr(driver.active, "get_current_device", lambda: device)
