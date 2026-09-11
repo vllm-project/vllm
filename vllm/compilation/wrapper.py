@@ -95,6 +95,17 @@ class TorchCompileWithNoGuardsWrapper:
         if isinstance(backend, str) and backend == "inductor":
             options = vllm_config.compilation_config.inductor_compile_config
 
+        debug_dump_path = vllm_config.compile_debug_dump_path()
+        if debug_dump_path is not None and mode in (
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CompilationMode.DYNAMO_TRACE_ONCE,
+        ):
+            from vllm.compilation.fx_graph_dump import wrap_backend_with_fx_dump
+
+            backend = wrap_backend_with_fx_dump(
+                backend, debug_dump_path / "fx_graphs", compile_prefix
+            )
+
         self.first_compile = True
         self.evaluate_guards = (
             vllm_config.compilation_config.dynamic_shapes_config.evaluate_guards

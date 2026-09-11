@@ -1090,9 +1090,14 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
-        if self.compilation_config.backend == "eager" or (
-            self.compilation_config.mode is not None
-            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+        if (
+            self.compilation_config.backend == "eager"
+            or self.compilation_config.mode == CompilationMode.NONE
+            or (
+                self.compilation_config.backend != "inductor"
+                and self.compilation_config.mode is not None
+                and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
+            )
         ):
             logger.warning(
                 "Inductor compilation was disabled by user settings, "

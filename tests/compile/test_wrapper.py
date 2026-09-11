@@ -3,10 +3,13 @@
 
 
 import os
+import sys
+import types
 
 import pytest
 import torch
 
+from vllm.compilation.fx_graph_dump import wrap_backend_with_fx_dump
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import (
     CompilationConfig,
@@ -32,6 +35,50 @@ class MyWrapper(TorchCompileWithNoGuardsWrapper):
     def forward(self, x: torch.Tensor):  # type: ignore[override]
         # this is the function to be compiled
         return self.model(x)
+
+
+def test_fx_graph_inferrt_backend_tracks_dynamo_recompilation(tmp_path, monkeypatch):
+    class ShapeBranch(torch.nn.Module):
+        def forward(self, x):
+            if x.shape[0] == 2:
+                return x + 1
+            return x * 2
+
+    calls = []
+
+    def inferrt_backend(gm, example_inputs):
+        calls.append(gm)
+        return gm.forward
+
+    # Simulate the optional external InferRT package without importing its
+    # NPU runtime in the unit-test process.
+    ms_inferrt = types.ModuleType("ms_inferrt")
+    ms_inferrt_torch = types.ModuleType("ms_inferrt.torch")
+    ms_inferrt_fx = types.ModuleType("ms_inferrt.torch.fx_backend")
+    ms_inferrt_fx.backend = inferrt_backend
+    monkeypatch.setitem(sys.modules, "ms_inferrt", ms_inferrt)
+    monkeypatch.setitem(sys.modules, "ms_inferrt.torch", ms_inferrt_torch)
+    monkeypatch.setitem(sys.modules, "ms_inferrt.torch.fx_backend", ms_inferrt_fx)
+
+    torch._dynamo.reset()
+    backend = wrap_backend_with_fx_dump("inductor", tmp_path, "test/model")
+    compiled = torch.compile(
+        ShapeBranch(), backend=backend, fullgraph=True, dynamic=False
+    )
+
+    assert torch.equal(compiled(torch.ones(2)), torch.full((2,), 2.0))
+    assert torch.equal(compiled(torch.ones(2)), torch.full((2,), 2.0))
+    assert len(list(tmp_path.glob("fx_graph_test_model_pid*.txt"))) == 1
+    assert len(calls) == 1
+
+    assert torch.equal(compiled(torch.ones(3)), torch.full((3,), 2.0))
+    dumped = list(tmp_path.glob("fx_graph_test_model_pid*.txt"))
+    assert len(dumped) == 2
+    assert len(calls) == 2
+    assert all(
+        "==== raw graph ====" in path.read_text(encoding="utf-8") for path in dumped
+    )
+    torch._dynamo.reset()
 
 
 @pytest.mark.parametrize("use_bytecode_hook", [True, False])
