@@ -38,11 +38,11 @@ from vllm.transformers_utils.config import (
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
     is_rope_parameters_nested,
+    mrope_num_dims,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_tokenizer_config,
     uses_mrope,
-    uses_xdrope_dim,
 )
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
@@ -152,6 +152,7 @@ class ModelConfig:
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
+    - "deepseek_v41" will use the DeepSeek V4.1 prompt encoder.
     - "kimi_k3" will always use the "hf" tokenizer but render chat prompts
       with Kimi K3's Python XTML encoding instead of a Jinja template.
     - "cohere" uses the standard HF tokenizer but renders the chat template
@@ -242,7 +243,10 @@ class ModelConfig:
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
-    flexibility."""
+    flexibility.
+
+    NOTE: This disables both `torch.compile` and CUDA graphs, and is
+    equivalent to setting `-cc.mode=none -cc.cudagraph_mode=none`."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
     return_sampling_mask: bool = False
@@ -697,8 +701,13 @@ class ModelConfig:
                 self.tokenizer_mode = "kimi_k3"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
-            elif arch == "DeepseekV4ForCausalLM":
+            elif arch in (
+                "DeepseekV4ForCausalLM",
+                "DeepseekV4ForConditionalGeneration",
+            ):
                 self.tokenizer_mode = "deepseek_v4"
+            elif arch == "DeepseekV41ForCausalLM":
+                self.tokenizer_mode = "deepseek_v41"
             elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
                 self.tokenizer_mode = "inkling"
 
@@ -1844,12 +1853,8 @@ class ModelConfig:
         return uses_mrope(self.hf_config)
 
     @property
-    def uses_xdrope_dim(self) -> int:
-        return uses_xdrope_dim(self.hf_config)
-
-    @property
-    def uses_xdrope(self) -> bool:
-        return self.uses_xdrope_dim > 0
+    def mrope_num_dims(self) -> int:
+        return mrope_num_dims(self.hf_config)
 
     @property
     def is_multimodal_model(self) -> bool:
@@ -2443,6 +2448,13 @@ def _get_and_verify_max_len(
     rope_parameters = getattr(hf_config, "rope_parameters", None)
     if rope_parameters and not is_rope_parameters_nested(rope_parameters):
         rope_parameters = {"": rope_parameters}
+    if rope_parameters is not None:
+        # Layers without RoPE do not contribute to context length scaling.
+        rope_parameters = {
+            layer_type: rp
+            for layer_type, rp in rope_parameters.items()
+            if rp is not None
+        }
 
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
     # scaling, so we skip applying the scaling factor again.
