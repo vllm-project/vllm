@@ -24,6 +24,7 @@ from vllm.multimodal.video import (
     GLM46VVideoBackend,
     GLMGAVideoBackend,
     Molmo2VideoBackend,
+    OpenCVDynamicOpenPanguVideoBackend,
     Qwen2VLVideoBackend,
     Qwen3VLVideoBackend,
     VideoBackend,
@@ -1435,6 +1436,27 @@ def test_glm46v_dynamic_fps_thresholds(
 
     # Indices must be sorted and deduplicated
     assert indices == sorted(set(indices)), "Indices must be sorted and deduplicated"
+
+
+@pytest.mark.parametrize("fps", [2, -1])
+def test_openpangu_num_frames_sentinel(fps):
+    """`num_frames=-1` (the default / "no cap" sentinel) must sample frames
+    instead of raising `ValueError` from `np.linspace(..., -1)`."""
+    source = VideoSourceMetadata(
+        total_frames_num=100, original_fps=30, duration=100 / 30
+    )
+    target = VideoTargetMetadata(num_frames=-1, fps=fps, max_duration=300)
+
+    indices = OpenCVDynamicOpenPanguVideoBackend.compute_frames_index_to_sample(
+        source, target
+    )
+
+    assert len(indices) > 0
+    assert indices == sorted(indices)
+    assert all(0 <= idx < source.total_frames_num for idx in indices)
+    # fps=-1 means "no fps limit" -> sample every frame.
+    if fps == -1:
+        assert len(indices) == source.total_frames_num
 
 
 def test_glm46v_even_frame_count_enforcement():

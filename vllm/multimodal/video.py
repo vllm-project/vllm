@@ -1220,14 +1220,20 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader):
         # `fps` is the FPS parameter passed in for sampling,
         # -1 indicates that sampling can be performed directly without FPS limitation.
         if fps > 0:
-            # Num_frames is the maximum number of frames to sample.
+            # Num_frames is the maximum number of frames to sample; `num_frames < 0`
+            # means "no cap" and defers entirely to the fps-derived count.
             # If fewer frames are sampled at this sample_fps, the update duration will be longer. # noqa: E501
-            if num_frames >= int(total_duration * fps) + 1:
-                num_frames = int(total_duration * fps) + 1
+            max_num_frames = int(total_duration * fps) + 1
+            if num_frames < 0 or num_frames >= max_num_frames:
+                num_frames = max_num_frames
                 # Under the new maximum frame rate, the video duration of the rightmost frame, # noqa: E501
                 # cannot be calculated for frame 0.
                 total_duration = min(total_duration, (num_frames - 1) / fps)
-        elif fps != -1:
+        elif fps == -1:
+            # No fps limit: `num_frames < 0` means sample every frame.
+            if num_frames < 0:
+                num_frames = total_frames_num
+        else:
             raise ValueError(
                 f"requires dataset fps is -1 or greater than 0 but got {fps}"
             )
