@@ -13,6 +13,10 @@ StructuredOutputsBackend = Literal[
     "auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"
 ]
 
+XGrammarBitmaskBackend = Literal[
+    "auto", "cpu", "cuda", "triton", "torch_compile", "torch_native"
+]
+
 
 @config
 class StructuredOutputsConfig:
@@ -23,6 +27,10 @@ class StructuredOutputsConfig:
     regex, etc) by default. With "auto", we will make opinionated choices
     based on request contents and what the backend libraries currently support,
     so the behavior is subject to change in each release."""
+    bitmask_backend: XGrammarBitmaskBackend = "auto"
+    """Backend for applying XGrammar token bitmasks. With "auto", vLLM uses
+    its default optimized path. Set an explicit XGrammar backend to work around
+    a backend-specific issue or evaluate an alternative implementation."""
     disable_any_whitespace: bool = False
     """If `True`, json output will always be compact without any whitespace.
     If `False`, the model may generate whitespace between JSON fields,

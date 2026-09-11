@@ -6,6 +6,7 @@ import pytest
 
 from vllm.config import StructuredOutputsConfig
 from vllm.exceptions import VLLMClientError, VLLMValidationError
+from vllm.platforms.cpu import CpuPlatform
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 pytestmark = pytest.mark.cpu_test
@@ -160,3 +161,19 @@ def test_auto_backend_falls_back_on_unsupported_schema(schema, expected_backend)
         tokenizer=object(),
     )
     assert params.structured_outputs._backend == expected_backend
+
+
+@pytest.mark.parametrize(
+    "backend",
+    ["auto", "cpu", "cuda", "triton", "torch_compile", "torch_native"],
+)
+def test_xgrammar_bitmask_backend_choices(backend: str):
+    config = StructuredOutputsConfig(bitmask_backend=backend)
+
+    assert config.bitmask_backend == backend
+    assert CpuPlatform.get_xgrammar_bitmask_backend(config.bitmask_backend) == backend
+
+
+def test_invalid_xgrammar_bitmask_backend_rejected():
+    with pytest.raises(ValueError, match="bitmask_backend"):
+        StructuredOutputsConfig(bitmask_backend="invalid")
