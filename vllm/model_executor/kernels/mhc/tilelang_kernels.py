@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 from functools import cache
 
@@ -13,6 +14,26 @@ from vllm.tilelang_utils import T, tilelang, tilelang_jit
 from vllm.utils.math_utils import cdiv
 
 ENABLE_PDL = current_platform.is_arch_support_pdl() and current_platform.is_cuda()
+
+
+# The mHC pre kernels split the block: the mix phase on warp 0, the weighted sum
+# and fused RMSNorm on the rest. `tid < 32` is warp-uniform only at 32 lanes; on
+# a 64-wide wavefront it splits a wave, TileLang hoists the barrier out of the
+# branch, and the fused RMSNorm's cross-lane reduction then covers only part of
+# the lanes. The two phases are launched separately there, each with the whole
+# block, by rebinding the kernels below. Callers and CUDA are untouched.
+_MHC_PRE_SPLIT_BLOCK = current_platform.is_cuda()
+
+
+def _mhc_pre_split_phases(kernel):
+    """Wrap a mHC pre kernel to run its two phases as separate launches."""
+
+    @functools.wraps(kernel)
+    def launch(*tensors, **fields):
+        kernel(*tensors, n_thr=64, mix_lanes=64, **fields)
+        return kernel(*tensors, n_thr=64, mix_lanes=0, **fields)
+
+    return launch
 
 
 @cache
@@ -51,6 +72,8 @@ def mhc_pre_big_fuse_tilelang(
     use_pre_mix_in: bool = False,
     save_pre_mix: bool = False,
     rms_numel: int = 0,
+    n_thr: int = 96,
+    mix_lanes: int = 32,
 ):
     """Fuse coefficient generation and residual collapse after the projection.
 
@@ -76,7 +99,7 @@ def mhc_pre_big_fuse_tilelang(
     pre_mix_in: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
     pre_mix_out: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
 
-    with T.Kernel(num_tokens, threads=96) as i:
+    with T.Kernel(num_tokens, threads=n_thr) as i:
         if ENABLE_PDL:
             T.pdl_sync()
         ##################################################################
@@ -96,7 +119,7 @@ def mhc_pre_big_fuse_tilelang(
         mixes_shared = T.alloc_shared(hc_mult3, T.float32)
         T.copy(mixes, mixes_shared)
 
-        if T.get_thread_binding() < 32:
+        if T.get_thread_binding() < mix_lanes:
             ##################################################################
             # _pre_split_mixes_fwd (post & comb)
             cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
@@ -216,6 +239,8 @@ def mhc_pre_big_fuse_with_norm_tilelang(
     use_pre_mix_in: bool = False,
     save_pre_mix: bool = False,
     rms_numel: int = 0,
+    n_thr: int = 96,
+    mix_lanes: int = 32,
 ):
     num_tokens = T.dynamic("num_tokens")
     hc_mult3 = hc_mult * (2 + hc_mult)
@@ -238,7 +263,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
     pre_mix_in: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
     pre_mix_out: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
 
-    with T.Kernel(num_tokens, threads=96) as i:
+    with T.Kernel(num_tokens, threads=n_thr) as i:
         rms = T.alloc_fragment(1, T.float32)
         mixes = T.alloc_fragment(hc_mult3, T.float32)
         T.clear(mixes)
@@ -258,7 +283,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
         mixes_shared = T.alloc_shared(hc_mult3, T.float32)
         T.copy(mixes, mixes_shared)
 
-        if T.get_thread_binding() < 32:
+        if T.get_thread_binding() < mix_lanes:
             cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
             for j in T.Parallel(hc_mult):
                 if save_pre_mix:
@@ -399,6 +424,8 @@ def mhc_pre_big_fuse_broadcast_with_norm_tilelang(
     n_splits: int = 1,
     hc_mult: int = 4,
     gemm_last_dim: int = -1,
+    n_thr: int = 96,
+    mix_lanes: int = 32,
 ):
     num_tokens = T.dynamic("num_tokens")
     hc_mult3 = hc_mult * (2 + hc_mult)
@@ -417,7 +444,7 @@ def mhc_pre_big_fuse_broadcast_with_norm_tilelang(
     layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
     norm_weight: T.Tensor[[hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
 
-    with T.Kernel(num_tokens, threads=96) as i:
+    with T.Kernel(num_tokens, threads=n_thr) as i:
         rms = T.alloc_fragment(1, T.float32)
         mixes = T.alloc_fragment(hc_mult3, T.float32)
         T.clear(mixes)
@@ -438,7 +465,7 @@ def mhc_pre_big_fuse_broadcast_with_norm_tilelang(
         mixes_shared = T.alloc_shared(hc_mult3, T.float32)
         T.copy(mixes, mixes_shared)
 
-        if T.get_thread_binding() < 32:
+        if T.get_thread_binding() < mix_lanes:
             cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
             for j in T.Parallel(hc_mult):
                 post_mix[i, j] = (
@@ -537,6 +564,16 @@ def mhc_pre_big_fuse_broadcast_with_norm_tilelang(
 
         if ENABLE_PDL:
             T.pdl_trigger()
+
+
+if not _MHC_PRE_SPLIT_BLOCK:
+    mhc_pre_big_fuse_tilelang = _mhc_pre_split_phases(mhc_pre_big_fuse_tilelang)
+    mhc_pre_big_fuse_with_norm_tilelang = _mhc_pre_split_phases(
+        mhc_pre_big_fuse_with_norm_tilelang
+    )
+    mhc_pre_big_fuse_broadcast_with_norm_tilelang = _mhc_pre_split_phases(
+        mhc_pre_big_fuse_broadcast_with_norm_tilelang
+    )
 
 
 @tilelang_jit

@@ -24,7 +24,6 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.mhc.torch import mhc_post_torch
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -50,7 +49,9 @@ from vllm.models.common.ops.sequence_parallel import (
 from .model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
+    _fuse_mhc,
     _linear_scale_param_name,
+    _mhc_impls,
     _use_sequence_parallel,
 )
 
@@ -74,6 +75,9 @@ class DSparkDeepseekV4Model(nn.Module):
         self.num_hidden_layers = config.num_hidden_layers
         self.target_layer_ids = tuple(config.dspark_target_layer_ids)
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
+        _, self._mhc_post = _mhc_impls(
+            _fuse_mhc(vllm_config.speculative_config.draft_model_config.dtype)
+        )
 
         self.num_dspark_layers = (
             getattr(config, "n_mtp_layers", None)
@@ -212,7 +216,7 @@ class DSparkDeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
-        hidden_states = mhc_post_torch(hidden_states, residual, post_mix, res_mix)
+        hidden_states = self._mhc_post(hidden_states, residual, post_mix, res_mix)
         if self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
             pre_mix = sp_all_gather(pre_mix)[:full_num_tokens]
