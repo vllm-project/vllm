@@ -2977,7 +2977,6 @@ class NixlBaseConnectorWorker:
             done_req_ids.add(req_id)
         return done_req_ids
 
-
     def _send_pending_recv_notifs(self, req_id: str) -> None:
         """Send notifications deferred by split DRAM/VRAM reads."""
         for agent_name, notif_id in self._pending_recv_notifs.pop(req_id, []):
