@@ -205,6 +205,11 @@ class GumbelWatermarkDetector(WatermarkDetector):
 
 
 class DualKeyGumbelWatermarkDetector(GumbelWatermarkDetector):
+    """Detect a dual-key watermark with weighted early fusion.
+
+    ``alpha`` is the weight assigned to key B; key A receives ``1 - alpha``.
+    """
+
     def __init__(
         self,
         key: int,
@@ -212,7 +217,10 @@ class DualKeyGumbelWatermarkDetector(GumbelWatermarkDetector):
         p_value_threshold: float = 0.01,
         prf: WatermarkPRFName = "philox",
         deduplicate_contexts: bool = True,
+        alpha: float = 0.2,
     ) -> None:
+        if not 0 <= alpha <= 1:
+            raise ValueError("alpha must be between 0 and 1")
         super().__init__(
             derive_watermark_key(key, b"key_a"),
             context_width,
@@ -221,11 +229,12 @@ class DualKeyGumbelWatermarkDetector(GumbelWatermarkDetector):
             deduplicate_contexts,
         )
         self.key_b_prf = create_prf(prf, derive_watermark_key(key, b"key_b"))
+        self.alpha = alpha
 
     def _score_tokens(
         self, contexts: torch.Tensor, targets: torch.Tensor
     ) -> torch.Tensor:
-        return torch.stack(
+        scores = torch.stack(
             [
                 -torch.log1p(
                     -prf.uniform(contexts, targets.unsqueeze(-1))
@@ -236,12 +245,18 @@ class DualKeyGumbelWatermarkDetector(GumbelWatermarkDetector):
             ],
             dim=-1,
         )
+        weights = scores.new_tensor([1 - self.alpha, self.alpha])
+        return scores @ weights
 
     def _get_p_value(self, score: float, num_scored_tokens: int) -> float:
-        return _gamma_survival_integer_shape(score * 2, num_scored_tokens * 2)
-
-    def _aggregate_scores(self, token_scores: torch.Tensor) -> float:
-        return token_scores.mean(dim=-1).sum().item()
+        variance = (1 - self.alpha) ** 2 + self.alpha**2
+        if self.alpha in (0, 0.5, 1):
+            return _gamma_survival_integer_shape(
+                score / variance, round(num_scored_tokens / variance)
+            )
+        shape = torch.tensor(num_scored_tokens / variance, dtype=torch.float64)
+        scaled_score = torch.tensor(score / variance, dtype=torch.float64)
+        return torch.special.gammaincc(shape, scaled_score).item()
 
 
 def _validate_context_width(context_width: int) -> None:

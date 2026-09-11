@@ -57,6 +57,7 @@ def test_dual_key_detector_scores_each_token_against_both_keys():
         key=42,
         context_width=1,
         deduplicate_contexts=False,
+        alpha=0.5,
     )
 
     key_a = key_a_detector.detect(token_ids)
@@ -67,6 +68,38 @@ def test_dual_key_detector_scores_each_token_against_both_keys():
     assert dual.p_value == pytest.approx(
         _gamma_survival_integer_shape(dual.score * 2, dual.num_scored_tokens * 2)
     )
+
+
+@pytest.mark.parametrize("alpha", [0.2, 0.7])
+def test_dual_key_detector_weights_and_recalibrates_scores(alpha: float):
+    token_ids = [1, 2, 3, 4, 5]
+    key_a = GumbelWatermarkDetector(
+        key=derive_watermark_key(42, b"key_a"), deduplicate_contexts=False
+    ).detect(token_ids)
+    key_b = GumbelWatermarkDetector(
+        key=derive_watermark_key(42, b"key_b"), deduplicate_contexts=False
+    ).detect(token_ids)
+    dual = DualKeyGumbelWatermarkDetector(
+        key=42, deduplicate_contexts=False, alpha=alpha
+    ).detect(token_ids)
+
+    variance = (1 - alpha) ** 2 + alpha**2
+    expected_p_value = torch.special.gammaincc(
+        torch.tensor(dual.num_scored_tokens / variance, dtype=torch.float64),
+        torch.tensor(dual.score / variance, dtype=torch.float64),
+    ).item()
+
+    assert dual.score == pytest.approx((1 - alpha) * key_a.score + alpha * key_b.score)
+    assert dual.p_value == pytest.approx(expected_p_value)
+
+
+def test_dual_key_detector_rejects_invalid_alpha():
+    with pytest.raises(ValueError, match="alpha must be between 0 and 1"):
+        DualKeyGumbelWatermarkDetector(key=42, alpha=1.1)
+
+
+def test_dual_key_detector_default_alpha():
+    assert DualKeyGumbelWatermarkDetector(key=42).alpha == 0.2
 
 
 @pytest.mark.skipif(
