@@ -3992,3 +3992,57 @@ def test_deepseek_v4_annotation_requires_model_type():
     )
 
     assert not any(g.is_eagle_group for g in groups)
+
+
+@pytest.mark.parametrize(
+    "num_full,num_sw,expected_group_size,expected_groups",
+    [
+        (20, 30, 10, 5),  # Chen's FIXME (gcd=10)
+        (10, 16, 2, 13),  # Issue #46462 (gcd=2)
+        (4, 10, 2, 7),  # Hybrid drafter (gcd=2)
+        (12, 18, 6, 5),  # DeepSeek hybrid (gcd=6)
+    ],
+)
+def test_group_layers_gcd_eliminates_padding(
+    caplog_vllm, num_full, num_sw, expected_group_size, expected_groups
+):
+    specs = {f"full.{i}": new_kv_cache_spec() for i in range(num_full)}
+    specs.update({f"sw.{i}": new_sliding_window_spec() for i in range(num_sw)})
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    assert len(groups) == expected_groups
+    for group in groups:
+        assert len(group.layer_names) == expected_group_size
+    assert "padding layers" not in caplog_vllm.text
+
+
+def test_group_layers_coprime_fallback(caplog_vllm):
+    # 12 sw + 13 full: gcd=1, falls back to max_num_layers=13
+    specs = {f"sw.{i}": new_sliding_window_spec() for i in range(12)}
+    specs.update({f"full.{i}": new_kv_cache_spec() for i in range(13)})
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    assert len(groups) == 2
+    assert "Add 1 padding layers" in caplog_vllm.text
+
+
+def test_group_layers_three_buckets_gcd_eliminates_padding(caplog_vllm):
+    # Setup matching Issue #46462 with 3 buckets: 10 full, 30 sw, 16 draft sw.
+    # gcd(10, 30, 16) = 2, resulting in (10/2) + (30/2) + (16/2) = 28 groups
+    # of size 2 with zero padding layers added.
+    full_spec = new_kv_cache_spec()
+    sw1_spec = new_sliding_window_spec(sliding_window=1024)
+    sw2_spec = new_sliding_window_spec(sliding_window=512)
+
+    specs = {f"full.{i}": full_spec for i in range(10)}
+    specs.update({f"sw1.{i}": sw1_spec for i in range(30)})
+    specs.update({f"sw2.{i}": sw2_spec for i in range(16)})
+
+    groups = get_kv_cache_groups(_grouping_config(), specs)
+
+    assert len(groups) == 28
+    for group in groups:
+        assert len(group.layer_names) == 2
+    assert "padding layers" not in caplog_vllm.text

@@ -1503,25 +1503,27 @@ def _get_kv_cache_groups_uniform_page_size(
     # E.g., (full.0, full.1), (sw.0, sw.1, sw.2)
     # split to 3 groups with 2 layers each:
     # (full.0, full.1), (sw.0, sw.2), (sw.1, padding).
-    # FIXME(Chen): At the moment of writing this code (2025-06-02), all
-    # open-source hybrid model follows a n:1 pattern between different attention
-    # types (e.g., Gemma3 5:1 between sw and full, LLaMA4 3:1 between local and
-    # full), so we can use the "1" in the n:1 pattern as the group size, which
-    # is the minimum number of layers among all attention types. Need a better
-    # strategy if we want to support more complex patterns (e.g., 20 full + 30
-    # sw, where the group size should be 10).
-    min_num_layers = min([len(layers) for layers in layer_buckets])
-    group_size = min_num_layers
-    max_num_layers = max([len(layers) for layers in layer_buckets])
-    if max_num_layers < min_num_layers * 1.5:
-        # If the number of layers is not much larger than the minimum number of
+    # Use the Greatest Common Divisor (GCD) of layer counts as the group size
+    # to eliminate dummy padding layers across hybrid attention types (fixes #46462).
+    # E.g., for 20 full + 30 sw, gcd(20, 30) = 10 yields 0 padding layers.
+    layer_counts = [len(layers) for layers in layer_buckets]
+    common_divisor = math.gcd(*layer_counts)
+    if common_divisor >= 2:
+        group_size = common_divisor
+    else:
+        # For coprime layer counts, fall back to the existing heuristic:
+        # if the number of layers is not much larger than the minimum number of
         # layers, use the maximum number of layers as the group size to avoid
         # too many padding layers. A typical example is gpt-oss-20b + eagle,
         # with 12 sw + 13 full. We pad it to (13 sw, 13 full) instead of
         # (12 sw, 24 full). 1.5 is a heuristic to avoid too many padding
         # layers while accommodating speculative decoding drafters that add
         # extra layers to one attention type.
-        group_size = max_num_layers
+        min_num_layers = min(layer_counts)
+        max_num_layers = max(layer_counts)
+        group_size = min_num_layers
+        if max_num_layers < min_num_layers * 1.5:
+            group_size = max_num_layers
     grouped_layers = []
     for layers in layer_buckets:
         num_padding_layers = group_size - len(layers) % group_size
