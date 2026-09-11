@@ -454,10 +454,6 @@ def main() -> None:
         local_world_size,
         socket_dir_msg,
     )
-    _report_ready(
-        f"===== Weight cache daemon READY: node {node_rank}/{nnodes} serving "
-        f"{local_world_size} local rank(s) in {socket_dir_msg} ====="
-    )
 
     for proc in procs:
         proc.join()
