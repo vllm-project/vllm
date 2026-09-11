@@ -392,19 +392,20 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # Fold the global physical device index into the replica-local
             # [0, world_size) slot range.
             rank = torch.accelerator.current_device_index() % world_size
-        worker_mmap = SharedOffloadRegion(
-            engine_id=self._engine_id,
-            num_chunks=self.num_chunks,
-            rank=rank,
-            kv_bytes_per_chunk=self.kv_bytes_per_chunk,
-            cpu_page_size=self.cpu_page_size_per_worker,
-            # All workers must have mapped the file before a failed worker
-            # aborts startup and removes its name.  On success the scheduler
-            # remains the final opener and unlink owner.
-            barrier=_all_workers_barrier,
-            unlink_owner=False,
-        )
+        worker_mmap: SharedOffloadRegion | None = None
         try:
+            worker_mmap = SharedOffloadRegion(
+                engine_id=self._engine_id,
+                num_chunks=self.num_chunks,
+                rank=rank,
+                kv_bytes_per_chunk=self.kv_bytes_per_chunk,
+                cpu_page_size=self.cpu_page_size_per_worker,
+                # All workers must have mapped the file before a failed worker
+                # aborts startup and removes its name.  On success the
+                # scheduler remains the final opener and unlink owner.
+                barrier=_all_workers_barrier,
+                unlink_owner=False,
+            )
             if self.config.canonical_layout:
                 self._validate_canonical_refs(kv_caches)
             return CPUOffloadingWorker(
@@ -418,7 +419,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # The constructor barrier above guarantees that every worker has
             # finished opening/mapping before this abort cleanup runs.  Thus
             # removing the name cannot make a peer create a second inode.
-            worker_mmap.cleanup(unlink_shared_path=True)
+            if worker_mmap is not None:
+                worker_mmap.abort_startup_cleanup()
             raise
 
     def _validate_canonical_refs(self, kv_caches: CanonicalKVCaches) -> None:

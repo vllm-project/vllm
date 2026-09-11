@@ -195,7 +195,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
         except Exception:
             if mmap_region is not None:
-                mmap_region.cleanup()
+                mmap_region.abort_startup_cleanup()
             raise
 
     @override

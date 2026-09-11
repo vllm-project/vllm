@@ -294,7 +294,7 @@ def test_tiering_spec_aborts_region_when_worker_creation_fails(monkeypatch):
     with pytest.raises(RuntimeError, match="worker setup failed"):
         spec.create_worker(MagicMock())
 
-    region.cleanup.assert_called_once_with(unlink_shared_path=True)
+    region.abort_startup_cleanup.assert_called_once_with()
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])
@@ -408,6 +408,32 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda_alike(monkeypatch):
     assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block * 4
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
+
+
+def test_cpu_spec_aborts_region_when_worker_creation_fails(monkeypatch):
+    import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
+
+    worker_kv_bytes_per_block = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    spec = _create_spec(
+        cpu_bytes_to_use=worker_kv_bytes_per_block * 8,
+        worker_kv_bytes_per_block=worker_kv_bytes_per_block,
+        world_size=2,
+    )
+    assert isinstance(spec, CPUOffloadingSpec)
+
+    region = MagicMock()
+    monkeypatch.setattr(cpu_spec_module.current_platform, "is_cuda_alike", lambda: True)
+    monkeypatch.setattr(cpu_spec_module, "SharedOffloadRegion", lambda **_: region)
+    monkeypatch.setattr(
+        cpu_spec_module,
+        "CPUOffloadingWorker",
+        MagicMock(side_effect=RuntimeError("worker setup failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="worker setup failed"):
+        spec.create_worker(MagicMock())
+
+    region.abort_startup_cleanup.assert_called_once_with()
 
 
 def test_cpu_spec_create_worker_uses_tensor_path_off_cuda_alike(monkeypatch):
