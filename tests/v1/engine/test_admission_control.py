@@ -283,7 +283,6 @@ async def test_concurrent_single_request_admission_respects_limit():
         add_request_async=AsyncMock(side_effect=add_request_async),
         shutdown=MagicMock(),
     )
-    llm._admission_lock = asyncio.Lock()
     llm.log_requests = False
 
     requests = [

@@ -1215,14 +1215,7 @@ class AsyncLLM(EngineClient):
         if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS or self.vllm_config.use_v2_model_runner:
             await self._drain_requests_for_elastic_ep(drain_timeout)
 
-        try:
-            await self.engine_core.commit_elastic_ep()
-        except BaseException:
-            logger.exception(
-                "Elastic EP commit failed; admission remains closed because "
-                "the distributed topology may be partially mutated"
-            )
-            raise
+        await self.engine_core.commit_elastic_ep()
         self.vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
         set_scaling_elastic_ep(False)
 

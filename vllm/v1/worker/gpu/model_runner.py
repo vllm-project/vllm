@@ -516,13 +516,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         get_offloader().post_init()
 
-    # Not cached: elastic EP rewrites parallel_config in place on reconfigure.
     @property
     def dp_size(self) -> int:
+        # Not cached: elastic EP rewrites parallel_config in place on reconfigure.
         return self.parallel_config.data_parallel_size
 
     @property
     def dp_rank(self) -> int:
+        # Not cached: elastic EP rewrites parallel_config in place on reconfigure.
         return self.parallel_config.data_parallel_rank
 
     def get_model(self) -> nn.Module:
