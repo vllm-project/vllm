@@ -420,14 +420,14 @@ class Glm5NextDecoderLayer(nn.Module):
                     use_norm_weight=True,
                     include_pre_gemm_splits=include_pre_gemm_splits,
                     include_broadcast_splits=False,
-                    rms_eps=float(self.rms_norm_eps),
-                    hc_pre_eps=float(self.hc_eps),
-                    hc_sinkhorn_eps=float(self.hc_eps),
-                    hc_post_mult_value=float(self.mhc_post_mult_value),
-                    sinkhorn_repeat=int(self.mhc_sinkhorn_iterations),
+                    rms_eps=self.rms_norm_eps,
+                    hc_pre_eps=self.hc_eps,
+                    hc_sinkhorn_eps=self.hc_eps,
+                    hc_post_mult_value=self.mhc_post_mult_value,
+                    sinkhorn_repeat=self.mhc_sinkhorn_iterations,
                     norm_eps=(
-                        float(self.input_layernorm.variance_epsilon),
-                        float(self.post_attention_layernorm.variance_epsilon),
+                        self.input_layernorm.variance_epsilon,
+                        self.post_attention_layernorm.variance_epsilon,
                     ),
                 )
                 if not include_pre_gemm_splits:

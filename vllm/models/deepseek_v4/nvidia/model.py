@@ -1229,16 +1229,16 @@ class DeepseekV4DecoderLayer(nn.Module):
                 include_broadcast_splits=(
                     get_pp_group().is_first_rank and extract_layer_index(prefix) == 0
                 ),
-                rms_eps=float(self.rms_norm_eps),
-                hc_pre_eps=float(self.hc_eps),
-                hc_sinkhorn_eps=float(self.hc_eps),
-                hc_post_mult_value=float(self.hc_post_alpha),
-                sinkhorn_repeat=int(self.hc_sinkhorn_iters),
+                rms_eps=self.rms_norm_eps,
+                hc_pre_eps=self.hc_eps,
+                hc_sinkhorn_eps=self.hc_eps,
+                hc_post_mult_value=self.hc_post_alpha,
+                sinkhorn_repeat=self.hc_sinkhorn_iters,
                 norm_eps=(
-                    float(self.attn_norm.variance_epsilon),
-                    float(self.ffn_norm.variance_epsilon),
+                    self.attn_norm.variance_epsilon,
+                    self.ffn_norm.variance_epsilon,
                 ),
-                broadcast_norm_eps=float(self.attn_norm.variance_epsilon),
+                broadcast_norm_eps=self.attn_norm.variance_epsilon,
             )
             if not include_pre_gemm_splits:
                 _HC_PRENORM_GEMM_TILELANG_KERNEL.register_warmup(
@@ -1460,8 +1460,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             _HC_HEAD_FUSED_TILELANG_KERNEL.register_warmup(
                 hidden_size=config.hidden_size,
                 hc_mult=self.hc_mult,
-                rms_eps=float(self.rms_norm_eps),
-                hc_eps=float(self.hc_eps),
+                rms_eps=self.rms_norm_eps,
+                hc_eps=self.hc_eps,
             )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
