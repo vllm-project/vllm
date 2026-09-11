@@ -362,6 +362,7 @@ class AsyncLLM(EngineClient):
         prompt_text: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        operation_name: str | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -401,6 +402,7 @@ class AsyncLLM(EngineClient):
                 priority,
                 data_parallel_rank,
                 session_id,
+                operation_name=operation_name,
             )
 
         # Convert Input --> Request.
@@ -434,6 +436,7 @@ class AsyncLLM(EngineClient):
                     priority=priority,
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
+                    operation_name=operation_name,
                 )
             else:
                 # Raw prompts require tokenization and possibly multimodal
@@ -450,9 +453,12 @@ class AsyncLLM(EngineClient):
                     priority=priority,
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
+                    operation_name=operation_name,
                 )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
+        if operation_name is not None:
+            request.operation_name = operation_name
         if reasoning_ended is not None:
             request.reasoning_ended = reasoning_ended
         if reasoning_parser_kwargs is not None:
@@ -524,6 +530,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         session_id: str | None = None,
+        operation_name: str | None = None,
     ) -> RequestOutputCollector:
         self._validate_streaming_input_sampling_params(sampling_params)
 
@@ -536,6 +543,7 @@ class AsyncLLM(EngineClient):
             priority=priority,
             data_parallel_rank=data_parallel_rank,
             session_id=session_id,
+            operation_name=operation_name,
         )
 
         if not sampling_params.skip_clone:
@@ -639,6 +647,7 @@ class AsyncLLM(EngineClient):
         session_id: str | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        operation_name: str | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -681,6 +690,7 @@ class AsyncLLM(EngineClient):
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                operation_name=operation_name,
             )
 
             # The output_handler task pushes items into the queue.
@@ -935,6 +945,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         tokenization_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
+        operation_name: str | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -961,6 +972,7 @@ class AsyncLLM(EngineClient):
                 trace_headers=trace_headers,
                 priority=priority,
                 reasoning_ended=reasoning_ended,
+                operation_name=operation_name,
             )
 
             # The output_handler task pushes items into the queue.

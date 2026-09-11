@@ -200,6 +200,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     session_id=session_id,
+                    operation_name="text_completion",
                 )
             else:
                 generator = self.engine_client.generate(
@@ -211,6 +212,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
+                    operation_name="text_completion",
                 )
 
             generators.append(generator)
