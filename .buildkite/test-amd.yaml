@@ -591,7 +591,6 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - rocm-smi
   - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
 - label: ":amd: (MI300) Fusion E2E Quick" # TBD
@@ -610,7 +609,6 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - rocm-smi
   # Run all models and attn backends but only Inductor partition and native custom ops
   - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
   # Different from CUDA, Qwen requires +rms_norm and +quant_fp8 as rms+quant fusion is only supported on AITER
@@ -1560,7 +1558,6 @@ steps:
   - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
   - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
   commands:
-  - rocm-smi
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
@@ -1575,16 +1572,18 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/attention/backends/mla/
+  - vllm/v1/attention/backends/fa_utils.py
+  - vllm/model_executor/layers/attention/
   - vllm/platforms/rocm.py
   - vllm/_aiter_ops.py
   - vllm/envs.py
   - tests/v1/attention/test_mla_backends.py
+  - tests/v1/attention/utils.py
   commands:
   # AiterFlashAttnPrefillBackend.is_available() is gated on VLLM_ROCM_USE_AITER,
   # evaluated at collection time, so the ROCM_AITER_FA prefill cases skip on every
   # other AMD job. Enable AITER here to actually exercise that backend; the
   # FLASH_ATTN prefill fallback stays covered by the default V1 Attention Shard job.
-  - rocm-smi
   - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_mla_backends.py -k "backend_correctness and ROCM_AITER_FA"
 
 - label: ":amd: (MI300) Attention Kernels Shard %N" # TBD
@@ -2782,7 +2781,7 @@ steps:
   - pytest -v -s tests/v1/kv_connector/extract_hidden_states_integration
 
 - label: ":amd: (MI300) V1 Attention Shard %N" # TBD
-  timeout_in_minutes: 35
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
@@ -3536,7 +3535,6 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/_aiter_ops.py
   commands:
-  - rocm-smi
   - python3 examples/basic/offline_inference/chat.py --attention-backend TRITON_ATTN
   - pytest -v -s tests/kernels/attention/test_attention_selector.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
@@ -3557,7 +3555,6 @@ steps:
   - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
   - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
   commands:
-  - rocm-smi
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
@@ -3572,16 +3569,18 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/attention/backends/mla/
+  - vllm/v1/attention/backends/fa_utils.py
+  - vllm/model_executor/layers/attention/
   - vllm/platforms/rocm.py
   - vllm/_aiter_ops.py
   - vllm/envs.py
   - tests/v1/attention/test_mla_backends.py
+  - tests/v1/attention/utils.py
   commands:
   # AiterFlashAttnPrefillBackend.is_available() is gated on VLLM_ROCM_USE_AITER,
   # evaluated at collection time, so the ROCM_AITER_FA prefill cases skip on every
   # other AMD job. Enable AITER here to actually exercise that backend; the
   # FLASH_ATTN prefill fallback stays covered by the default V1 Attention Shard job.
-  - rocm-smi
   - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/attention/test_mla_backends.py -k "backend_correctness and ROCM_AITER_FA"
 
 - label: ":amd: (MI355) Attention Kernels Shard %N" # TBD
@@ -3935,7 +3934,7 @@ steps:
 #------------------------------------------------------------  mi355 · v1  -------------------------------------------------------------#
 
 - label: ":amd: (MI355) V1 Attention Shard %N" # TBD
-  timeout_in_minutes: 35
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_1
