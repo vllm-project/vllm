@@ -31,17 +31,11 @@ Usage:
           Set to 0 for constant values, >0 for random sampling
 
 Limitations:
-    The dummy fill is a once-per-request event executed synchronously inside the
-    scheduler step, so it shows up in tail latency. Median ITL is unaffected (a
-    request emitting N output tokens has ~N inter-token gaps and only one of them
-    carries the fill), but ITL p99 is not comparable to a real disaggregated
-    decode instance. The fill scales with the number of block-indexed KV layers
-    while the real prefill it replaces scales with model FLOPs, so the sign of
-    the throughput difference is model-dependent: a model with many
-    cheap-to-prefill attention layers can measure *slower* here than when
-    actually running prefill. Use this connector to compare decode
-    configurations against each other, not to estimate absolute disaggregated
-    decode performance.
+    The fill is a once-per-request event issued synchronously inside the
+    scheduler step, so its cost lands in tail latency. Median ITL is unaffected,
+    but ITL p99 is not comparable to a real disaggregated decode instance. Use
+    this connector to compare decode configurations against each other rather
+    than to estimate absolute decode performance.
 """
 
 from dataclasses import dataclass
@@ -392,20 +386,17 @@ class DecodeBenchConnectorWorker:
             )
         }
 
-        # Reusable scratch buffers for scattered random fills, keyed by
-        # (block_shape, dtype, device). Avoids one allocation per layer per request.
+        # Scratch buffers for scattered random fills, keyed by
+        # (block_shape, dtype, device)
         self._fill_buffers: dict[tuple, torch.Tensor] = {}
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Store references to the KV cache tensors."""
         self.kv_caches = kv_caches
 
-        # Linear-attention layers (e.g. Mamba, Kimi Delta Attention) keep their
-        # state in tensors with no num_blocks dimension, so there is no
-        # per-request region to fill: one buffer is shared by every slot. Fill
-        # them once here rather than on every request. Re-filling per request
-        # costs time proportional to max_num_seqs and also overwrites the state
-        # of the other in-flight sequences, and the values are dummy either way.
+        # Linear-attention state tensors have no num_blocks dimension, so one
+        # buffer is shared by every slot and there is nothing to fill per
+        # request. Fill them once here instead.
         num_state_tensors = 0
         for group_idx, layer_names in self.group_to_layers.items():
             fill_mean, fill_std = self._group_fill_params(group_idx)
@@ -498,10 +489,8 @@ class DecodeBenchConnectorWorker:
             # Attention layers store KV as a single block-indexed tensor whose
             # first dim is num_blocks; fill the requested block rows.
             # Linear-attention layers (e.g. Mamba, Kimi Delta Attention) store
-            # their state as a list/tuple of tensors that are NOT block-indexed
-            # (each tensor is a single state buffer with no num_blocks
-            # dimension), and those were already filled once in
-            # register_kv_caches.
+            # their state as a list/tuple of tensors that are NOT block-indexed,
+            # and those were filled once in register_kv_caches.
             if isinstance(kv_cache, torch.Tensor):
                 self._fill_block_tensor(kv_cache, block_ids, fill_mean, fill_std)
             elif isinstance(kv_cache, (list, tuple)) and all(
@@ -548,16 +537,13 @@ class DecodeBenchConnectorWorker:
         if not valid:
             return
 
-        # Allocated block ids are usually one contiguous run, and a slice write is
-        # both allocation-free and cheaper than advanced indexing.
+        # Allocated block ids are usually one contiguous run, which a slice
+        # write handles without a temporary
         lo, hi = valid[0], valid[-1] + 1
         is_run = len(valid) == hi - lo and valid == list(range(lo, hi))
 
         if fill_std <= 0:
-            # A constant fill needs no temporary at all. Building a full-size
-            # `torch.full` tensor and scattering it costs one allocation plus two
-            # kernels per layer per request, which lands in the tail latency this
-            # connector is used to measure.
+            # A constant fill needs no temporary
             if is_run:
                 kv_cache[lo:hi].fill_(fill_mean)
             else:
@@ -565,8 +551,8 @@ class DecodeBenchConnectorWorker:
                 kv_cache.index_fill_(0, index, fill_mean)
             return
 
-        # Random fill: generate in place where possible, otherwise reuse one
-        # scratch buffer per layer shape instead of allocating on every call.
+        # Random fill: generate in place when contiguous, otherwise reuse one
+        # scratch buffer per layer shape
         if is_run:
             kv_cache[lo:hi].normal_(mean=fill_mean, std=fill_std)
             return
@@ -577,11 +563,7 @@ class DecodeBenchConnectorWorker:
         kv_cache.index_copy_(0, index, buffer)
 
     def _get_fill_buffer(self, kv_cache: torch.Tensor, num_rows: int) -> torch.Tensor:
-        """Return a reusable scratch buffer for scattered random block fills.
-
-        Keyed by block shape, dtype and device, so repeated fills of the same
-        layer shape share one allocation.
-        """
+        """Return a scratch buffer for scattered random fills of this layer shape."""
         key = (tuple(kv_cache.shape[1:]), kv_cache.dtype, kv_cache.device)
         buffer = self._fill_buffers.get(key)
         if buffer is None or buffer.shape[0] < num_rows:

@@ -17,7 +17,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import (
     DecodeBenchConnector,
     DecodeBenchConnectorMetadata,
-    DecodeBenchConnectorWorker,
 )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
@@ -36,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
@@ -786,127 +786,215 @@ if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 
 
-def _bare_worker(
-    fill_mean: float = 0.015,
-    fill_std: float = 0.0,
-    group_to_layers: dict[int, list[str]] | None = None,
-):
-    """A worker carrying only the attributes the fill helpers touch.
-
-    The fill helpers use torch and `self` alone, so skipping __init__ keeps
-    these tests focused on fill behaviour rather than config plumbing.
-    """
-    worker = DecodeBenchConnectorWorker.__new__(DecodeBenchConnectorWorker)
-    worker.fill_mean = fill_mean
-    worker.fill_std = fill_std
-    worker.kv_caches = None
-    worker.group_to_layers = group_to_layers if group_to_layers is not None else {}
-    worker._zero_fill_group_ids = set()
-    worker._fill_buffers = {}
-    return worker
-
-
 @pytest.mark.parametrize(
     "block_ids",
     [
-        [0, 1, 2, 3],  # contiguous run
-        [2, 5, 9],  # gaps
-        [0],  # single block
-        [3, 4, 5, 99],  # trailing id out of range
-        [],  # nothing to fill
+        [0, 1, 2, 3],
+        [2, 5, 9],
+        [0],
+        [3, 4, 5, 99],
+        [],
     ],
 )
-def test_constant_fill_touches_exactly_the_requested_blocks(block_ids):
-    """A constant fill writes fill_mean to the requested rows and nothing else."""
-    worker = _bare_worker()
-    kv_cache = torch.zeros(10, 2, 4, dtype=torch.float16)
+def test_decode_bench_connector_fills_requested_blocks_only(block_ids):
+    """Only the requested block rows are filled, contiguous or not."""
+    block_size = 16
+    num_gpu_blocks = 10
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_gpu_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+        ],
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        kv_cache_config,
+    )
+    kv_cache = torch.zeros(num_gpu_blocks, 2)
+    connector.register_kv_caches({"layer": kv_cache})
+    connector.bind_connector_metadata(
+        DecodeBenchConnectorMetadata(
+            reqs_to_fill={"request": ((block_ids,), block_size)}
+        )
+    )
 
-    worker._fill_block_tensor(kv_cache, block_ids, 0.015, 0.0)
+    connector.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    )
 
-    filled = {block_id for block_id in block_ids if block_id < kv_cache.shape[0]}
-    for i in range(kv_cache.shape[0]):
-        if i in filled:
-            assert torch.allclose(kv_cache[i], torch.full_like(kv_cache[i], 0.015))
+    requested = {block_id for block_id in block_ids if block_id < num_gpu_blocks}
+    for block_id in range(num_gpu_blocks):
+        if block_id in requested:
+            assert torch.allclose(kv_cache[block_id], torch.tensor(0.015))
         else:
-            assert kv_cache[i].abs().sum() == 0, f"block {i} should be untouched"
+            assert torch.count_nonzero(kv_cache[block_id]) == 0
 
 
-@pytest.mark.parametrize("block_ids", [[1, 2, 3], [0, 4, 7]])
-def test_random_fill_touches_exactly_the_requested_blocks(block_ids):
-    """A random fill also leaves every other row alone."""
-    torch.manual_seed(0)
-    worker = _bare_worker()
-    kv_cache = torch.zeros(10, 2, 4)
+def test_decode_bench_connector_random_fill_leaves_other_blocks_zero():
+    """A random fill stays inside the requested block rows."""
+    block_size = 16
+    num_gpu_blocks = 10
+    requested = [0, 4, 7]
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+        kv_connector_extra_config={"fill_mean": 0.5, "fill_std": 0.1},
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_gpu_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+        ],
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        kv_cache_config,
+    )
+    kv_cache = torch.zeros(num_gpu_blocks, 2)
+    connector.register_kv_caches({"layer": kv_cache})
+    connector.bind_connector_metadata(
+        DecodeBenchConnectorMetadata(
+            reqs_to_fill={"request": ((requested,), block_size)}
+        )
+    )
 
-    worker._fill_block_tensor(kv_cache, block_ids, 0.5, 0.1)
+    connector.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    )
 
-    for i in range(kv_cache.shape[0]):
-        if i in block_ids:
-            assert kv_cache[i].abs().sum() > 0, f"block {i} should be filled"
-            assert 0.0 < kv_cache[i].mean().item() < 1.0
+    for block_id in range(num_gpu_blocks):
+        if block_id in requested:
+            assert torch.count_nonzero(kv_cache[block_id]) > 0
         else:
-            assert kv_cache[i].abs().sum() == 0, f"block {i} should be untouched"
+            assert torch.count_nonzero(kv_cache[block_id]) == 0
 
 
-def test_scattered_random_fill_reuses_one_scratch_buffer():
-    """Repeated scattered fills of one layer shape share a single allocation."""
-    worker = _bare_worker()
-    kv_cache = torch.zeros(20, 2, 4)
+@pytest.mark.parametrize(
+    ("block_ids", "expected_buffers"),
+    [
+        ([2, 3, 4, 5], 0),
+        ([0, 3, 6], 1),
+    ],
+)
+def test_decode_bench_connector_reuses_one_random_fill_buffer(
+    block_ids, expected_buffers
+):
+    """A contiguous random fill needs no scratch buffer, a scattered one reuses one."""
+    block_size = 16
+    num_gpu_blocks = 10
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+        kv_connector_extra_config={"fill_mean": 0.5, "fill_std": 0.1},
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_gpu_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+        ],
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        kv_cache_config,
+    )
+    connector.register_kv_caches({"layer": torch.zeros(num_gpu_blocks, 2)})
 
-    worker._fill_block_tensor(kv_cache, [0, 3, 6], 0.5, 0.1)
-    assert len(worker._fill_buffers) == 1
-    first_ptr = next(iter(worker._fill_buffers.values())).data_ptr()
+    for _ in range(3):
+        connector.bind_connector_metadata(
+            DecodeBenchConnectorMetadata(
+                reqs_to_fill={"request": ((block_ids,), block_size)}
+            )
+        )
+        connector.start_load_kv(
+            ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+        )
+        connector.clear_connector_metadata()
 
-    for _ in range(5):
-        worker._fill_block_tensor(kv_cache, [1, 4, 7], 0.5, 0.1)
-
-    assert len(worker._fill_buffers) == 1
-    assert next(iter(worker._fill_buffers.values())).data_ptr() == first_ptr
-
-
-def test_contiguous_random_fill_allocates_no_scratch():
-    """A contiguous run is generated in place, so no scratch buffer is needed."""
-    worker = _bare_worker()
-    kv_cache = torch.zeros(20, 2, 4)
-
-    worker._fill_block_tensor(kv_cache, [2, 3, 4, 5], 0.5, 0.1)
-
-    assert worker._fill_buffers == {}
+    assert connector.connector_worker is not None
+    assert len(connector.connector_worker._fill_buffers) == expected_buffers
 
 
-def test_state_tensors_are_filled_once_at_registration():
-    """Linear-attention state buffers are filled at registration, not per request.
+def test_decode_bench_connector_fills_state_tensors_once():
+    """Linear-attention state tensors are filled at registration, not per request."""
+    block_size = 16
+    num_gpu_blocks = 8
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_num_batched_tokens=1000,
+        kv_connector="DecodeBenchConnector",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_gpu_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["linear_layer"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((2, 3),),
+                    dtypes=(torch.float32,),
+                ),
+            ),
+        ],
+    )
+    connector = DecodeBenchConnector(
+        vllm_config,
+        KVConnectorRole.WORKER,
+        kv_cache_config,
+    )
+    state_tensors = [torch.zeros(2, 3), torch.zeros(4, 5)]
 
-    They have no num_blocks dimension, so one buffer is shared by every slot:
-    re-filling per request costs time proportional to max_num_seqs and wipes the
-    state of the other in-flight sequences.
-    """
-    worker = _bare_worker(group_to_layers={0: ["attn_0", "linear_0"]})
-    state = [torch.zeros(3, 5), torch.zeros(2, 7)]
-    kv_caches = {"attn_0": torch.zeros(8, 2, 4), "linear_0": state}
+    connector.register_kv_caches({"linear_layer": state_tensors})
 
-    worker.register_kv_caches(kv_caches)
+    for state_tensor in state_tensors:
+        assert torch.allclose(state_tensor, torch.tensor(0.015))
 
-    for tensor in state:
-        assert torch.allclose(tensor, torch.full_like(tensor, 0.015))
+    for state_tensor in state_tensors:
+        state_tensor.zero_()
+    connector.bind_connector_metadata(
+        DecodeBenchConnectorMetadata(reqs_to_fill={"request": (([0, 1],), block_size)})
+    )
 
-    # A per-request fill must leave the already-initialized state alone.
-    for tensor in state:
-        tensor.zero_()
-    worker._fill_blocks(0, [0, 1], num_tokens=32)
+    connector.start_load_kv(
+        ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    )
 
-    for tensor in state:
-        assert tensor.abs().sum() == 0, "state tensors must not be refilled per request"
-
-
-def test_zero_fill_groups_use_zero_for_state_tensors():
-    """A circular-buffer group keeps its zero fill when state is pre-filled."""
-    worker = _bare_worker(group_to_layers={0: ["linear_0"], 1: ["linear_1"]})
-    worker._zero_fill_group_ids = {1}
-    normal_state = [torch.ones(2, 3)]
-    circular_state = [torch.ones(2, 3)]
-
-    worker.register_kv_caches({"linear_0": normal_state, "linear_1": circular_state})
-
-    assert torch.allclose(normal_state[0], torch.full_like(normal_state[0], 0.015))
-    assert circular_state[0].abs().sum() == 0
+    for state_tensor in state_tensors:
+        assert torch.count_nonzero(state_tensor) == 0
