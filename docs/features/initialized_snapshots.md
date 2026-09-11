@@ -119,6 +119,13 @@ The restored API server continues to run as a detached process.
 The pre-release port probe is best-effort only. It neither reserves the port
 nor authenticates the listener that appears afterward.
 
+Rollback terminates and waits for the restored tree after process identity
+verification succeeds. If verification fails, vLLM writes an abort marker for
+the snapshot server instead of signaling unverified PIDs. If that server has
+already exited, surviving engine processes can require operator cleanup.
+Verify that the previous tree has stopped before retrying; do not kill a process
+solely because its PID appears in the manifest, since PIDs can be reused.
+
 The artifact is reusable after its previous restored tree stops. Only one
 snapshot or external CRIU operation may use a shared `/dev/shm` mount at a time.
 
@@ -126,6 +133,9 @@ snapshot or external CRIU operation may use a shared `/dev/shm` mount at a time.
 
 - Creation has its own latency and briefly requires the full engine. Artifact
   size can approach the captured process and GPU memory.
+- Artifacts are not guaranteed to survive a power loss. The manifest is
+  fsynced, but publication does not explicitly flush all captured payload files
+  and directories. Recreate the artifact after an unclean host shutdown.
 - Restore currently requires the same host, GPU, driver, kernel, Python,
   PyTorch, installed vLLM version, model revision, engine arguments,
   selected environment variables, and CRIU plugin binaries.
