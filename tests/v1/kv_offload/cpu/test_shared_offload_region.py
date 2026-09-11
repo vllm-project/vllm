@@ -190,9 +190,9 @@ def _mp_read_replicated_slot(engine_id: str, result_queue) -> None:
     try:
         region = SharedOffloadRegion(
             engine_id=engine_id,
-            num_blocks=3,
+            num_chunks=3,
             rank=0,
-            kv_bytes_per_block=PAGE_SIZE,
+            kv_bytes_per_chunk=PAGE_SIZE,
             cpu_page_size=PAGE_SIZE,
         )
         view = region.create_next_canonical_view(PAGE_SIZE)
@@ -675,7 +675,7 @@ def test_multi_worker_race_shared_memory_visible(iid):
 @pytest.mark.skip_global_cleanup
 @pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="requires /dev/shm")
 def test_replicated_workers_share_the_same_slot_across_processes(iid):
-    creator = _make_region(iid, num_blocks=3, rank=0)
+    creator = _make_region(iid, num_chunks=3, rank=0)
     creator_view = creator.create_next_canonical_view(PAGE_SIZE)
     creator_view[2].fill_(37)
     assert creator.fd is not None
@@ -914,9 +914,9 @@ def test_creator_memory_check_runs_only_for_creator(iid):
     checked_sizes: list[int] = []
     creator = SharedOffloadRegion(
         engine_id=iid,
-        num_blocks=4,
+        num_chunks=4,
         rank=0,
-        kv_bytes_per_block=PAGE_SIZE,
+        kv_bytes_per_chunk=PAGE_SIZE,
         cpu_page_size=PAGE_SIZE,
         creator_memory_check=checked_sizes.append,
     )
@@ -924,9 +924,9 @@ def test_creator_memory_check_runs_only_for_creator(iid):
     try:
         joiner = SharedOffloadRegion(
             engine_id=iid,
-            num_blocks=4,
+            num_chunks=4,
             rank=0,
-            kv_bytes_per_block=PAGE_SIZE,
+            kv_bytes_per_chunk=PAGE_SIZE,
             cpu_page_size=PAGE_SIZE,
             creator_memory_check=checked_sizes.append,
         )

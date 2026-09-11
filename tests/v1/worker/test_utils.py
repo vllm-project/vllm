@@ -235,7 +235,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
 
         def __init__(self, **kwargs):
             self.kwargs = kwargs
-            self.total_size_bytes = kwargs["num_blocks"] * kwargs["kv_bytes_per_block"]
+            self.total_size_bytes = kwargs["num_chunks"] * kwargs["kv_bytes_per_chunk"]
             self.base_tensor = torch.empty(self.total_size_bytes, dtype=torch.int8)
             self.is_pinned = False
             self.pinned_addresses = []
@@ -246,8 +246,8 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
             self.view_sizes.append(size)
             view = torch.as_strided(
                 self.base_tensor,
-                size=(self.kwargs["num_blocks"], size),
-                stride=(self.kwargs["kv_bytes_per_block"], 1),
+                size=(self.kwargs["num_chunks"], size),
+                stride=(self.kwargs["kv_bytes_per_chunk"], 1),
                 storage_offset=self.offset,
             )
             self.offset += size
@@ -293,9 +293,9 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     assert private_pools == []
     assert region.kwargs == {
         "engine_id": "hisparse_instance_dp3",
-        "num_blocks": 1,
+        "num_chunks": 1,
         "rank": 0,
-        "kv_bytes_per_block": 4 * page,
+        "kv_bytes_per_chunk": 4 * page,
         "cpu_page_size": 64,
         "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
         "populate_only_on_creator": True,
@@ -308,6 +308,41 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         for tensor, chunk_bytes in pinned
     ] == [(0, page, None), (page, 3 * page, None)]
     assert region.is_pinned
+
+
+def test_shared_host_pool_registers_layer_spans_in_one_backing(monkeypatch):
+    """Aliased tensor configs must not count the shared backing once per view."""
+    region = SimpleNamespace(base_tensor=torch.empty(64, dtype=torch.int8))
+    allocate = MagicMock(return_value=([], [], region))
+    monkeypatch.setattr(
+        hisparse_runtime_module, "allocate_hisparse_host_pools", allocate
+    )
+    config = SimpleNamespace(
+        hisparse_shared_host_pool=True,
+        hisparse_host_num_blocks=4,
+        hisparse_host_block_stride=16,
+        kv_cache_tensors=[
+            SimpleNamespace(
+                host_resident=True,
+                layers=["a", "b"],
+                offset=0,
+                layer_stride=12,
+                size=44,
+            ),
+            SimpleNamespace(
+                host_resident=True, layers=["c"], offset=24, layer_stride=20, size=44
+            ),
+        ],
+    )
+    vllm_config = SimpleNamespace()
+    pool = hisparse_runtime_module.HiSparseHostPool(vllm_config, config)
+    backing = pool.allocate(44)
+    allocate.assert_called_once_with(
+        vllm_config, [12, 12, 20], 4, 16, use_shared_host_pool=True
+    )
+    assert backing.numel() == 44
+    assert backing.data_ptr() == region.base_tensor.data_ptr()
+    assert pool.registered is region.base_tensor
 
 
 def test_hisparse_registration_chunks_end_between_host_blocks():

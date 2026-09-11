@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import importlib
+import mmap
 import subprocess
 import sys
 from collections.abc import Callable
@@ -92,8 +93,12 @@ pytestmark = pytest.mark.cpu_test
 
 @pytest.mark.parametrize("gpu_block_size", [32, 64])
 @pytest.mark.parametrize("shared_host_pool", [False, True])
-def test_hisparse_hma_uses_resolved_gpu_block_size(monkeypatch, gpu_block_size, shared_host_pool):
-    monkeypatch.setattr(hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True)
+def test_hisparse_hma_uses_resolved_gpu_block_size(
+    monkeypatch, gpu_block_size, shared_host_pool
+):
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
     specs = {
         "model.layers.0.self_attn": MLAAttentionSpec(
             block_size=gpu_block_size,
@@ -121,9 +126,12 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(monkeypatch, gpu_block_size, 
         ),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=2 if shared_host_pool else 1,
-            pipeline_parallel_size=1, prefill_context_parallel_size=1,
-            decode_context_parallel_size=1, world_size=2 if shared_host_pool else 1,
-            distributed_executor_backend="mp", nnodes_within_dp=1,
+            pipeline_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=1,
+            world_size=2 if shared_host_pool else 1,
+            distributed_executor_backend="mp",
+            nnodes_within_dp=1,
         ),
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=7,
@@ -147,7 +155,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(monkeypatch, gpu_block_size, 
     host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
     assert cache_config.hisparse_shared_host_pool is shared_host_pool
     host_page = host_group.kv_cache_spec.page_size_bytes
-    alignment = 4096 if shared_host_pool else 1
+    alignment = mmap.PAGESIZE if shared_host_pool else 1
     expected_host_stride = (host_page + alignment - 1) // alignment * alignment
     assert cache_config.hisparse_host_block_stride == expected_host_stride
     assert cache_config.hisparse_host_num_blocks == 2**30 // expected_host_stride
