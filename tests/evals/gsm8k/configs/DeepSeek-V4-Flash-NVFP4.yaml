@@ -10,7 +10,6 @@ server_args: >-
   --kv-cache-dtype fp8
   --tokenizer-mode deepseek_v4
   --compilation-config '{"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY"}'
-  --jit-monitor-mode error
 env:
   VLLM_ROCM_USE_AITER: "1"
   VLLM_ROCM_USE_AITER_MOE: "1"

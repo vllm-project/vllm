@@ -17,7 +17,6 @@ server_args: >-
   --attention_config.indexer_kv_dtype=fp8
   --max-num-batched-tokens 16384
   --max-num-seqs 128
-  --jit-monitor-mode error
   --moe-backend aiter
   --speculative-config '{"method":"dspark",
   "model":"deepseek-ai/DeepSeek-V4-Flash-DSpark",
