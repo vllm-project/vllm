@@ -91,6 +91,7 @@ class MooncakeStoreCoordinator:
         assert all(
             scheduler_block_size % g.kv_cache_spec.block_size == 0
             for g in kv_cache_groups
+            if g.kv_cache_spec.prefix_cacheable
         ), "scheduler_block_size must be a multiple of each group's block_size"
         self.kv_cache_groups = kv_cache_groups
         self.mamba_group_ids = {
