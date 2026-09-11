@@ -881,7 +881,9 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
                 )
             )
         case_body.append(ast.Return(value=cast(ast.expr, return_expr)))
-        case_function = ast.FunctionDef(
+        # FunctionDef fields vary across the supported Python versions, so no
+        # single constructor overload matches every mypy target.
+        case_function = ast.FunctionDef(  # type: ignore[call-overload]
             name="__vllm_warmup_case",
             args=ast.arguments(
                 posonlyargs=[],
@@ -892,6 +894,8 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
             ),
             body=case_body,
             decorator_list=[],
+            returns=None,
+            type_comment=None,
         )
         case_globals = dict(globals_)
         case_globals.update(static_values)
