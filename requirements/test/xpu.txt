@@ -115,6 +115,8 @@ datasets==5.0.1
     #   mteb
 decorator==5.3.1
     # via librosa
+decord==0.6.0
+    # via -r requirements/test/xpu.in
 defusedxml==0.7.1
     # via nltk
 depyf==0.20.0
@@ -230,7 +232,7 @@ httpx2==2.10.0
     # via
     #   mcp
     #   openai
-huggingface-hub==1.28.0
+huggingface-hub==1.31.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -442,6 +444,7 @@ numpy==2.3.5
     #   albumentations
     #   bm25s
     #   datasets
+    #   decord
     #   evaluate
     #   librosa
     #   lm-eval
