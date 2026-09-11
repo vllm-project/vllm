@@ -84,3 +84,16 @@ def test_no_retie_without_checkpoint_override():
     maybe_retie_word_embeddings(model, make_model_config())
 
     assert model.lm_head.weight is not model.embed_tokens.weight
+
+
+@pytest.mark.cpu_test
+@pytest.mark.usefixtures("dist_init")
+def test_cpu_test_dist_init_avoids_nccl():
+    """A cpu_test gets a gloo group so the CUDA driver stays untouched.
+
+    An NCCL group initializes the driver without setting
+    torch.cuda.is_initialized(), so vLLM's fork/spawn guard still selects fork
+    and the next test to launch an EngineCore subprocess fails with
+    cudaErrorInitializationError.
+    """
+    assert torch.distributed.get_backend() == "gloo"
