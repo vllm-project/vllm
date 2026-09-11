@@ -106,11 +106,10 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         invalid_reasons = super().validate_configuration(
             device_capability, selector_config
         )
-        if selector_config.cache_dtype not in ("fp8", "fp8_e4m3", "fp8_e5m2"):
+        if selector_config.cache_dtype not in ("fp8", "fp8_e4m3"):
             invalid_reasons.append(
                 f"cache_dtype {selector_config.cache_dtype!r} is unsupported "
-                "(AITER_ASM requires plain per-tensor FP8: fp8, fp8_e4m3, or "
-                "fp8_e5m2; per-token-head and nvfp4 variants are not supported)"
+                "(AITER_ASM requires plain per-tensor E4M3: fp8 or fp8_e4m3)."
             )
         if selector_config.dcp_world_size > 1:
             invalid_reasons.append(
