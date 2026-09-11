@@ -42,6 +42,7 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import weak_ref_tensor, weak_ref_tensors
@@ -54,6 +55,12 @@ def is_breakable_cudagraph_enabled() -> bool:
 
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+def _weak_ref_capture_arg(arg: Any) -> Any:
+    if isinstance(arg, QuantizedActivation):
+        return arg.weak_ref()
+    return weak_ref_tensor(arg)
 
 
 def eager_break_during_capture(fn: F) -> F:
@@ -105,13 +112,8 @@ def eager_break_during_capture(fn: F) -> F:
         # Weak-ref args: strong refs in the replay lambda pin cudagraph-pool
         # slots across batch descriptors. cudagraph owns the slot, so the
         # weak_ref is safe to deref on replay.
-        weak_args = tuple(
-            weak_ref_tensor(a) if isinstance(a, torch.Tensor) else a for a in args
-        )
-        weak_kwargs = {
-            k: weak_ref_tensor(v) if isinstance(v, torch.Tensor) else v
-            for k, v in kwargs.items()
-        }
+        weak_args = tuple(_weak_ref_capture_arg(a) for a in args)
+        weak_kwargs = {k: _weak_ref_capture_arg(v) for k, v in kwargs.items()}
         return capture.add_eager(lambda: fn(*weak_args, **weak_kwargs))
 
     return wrapper  # type: ignore[return-value]
