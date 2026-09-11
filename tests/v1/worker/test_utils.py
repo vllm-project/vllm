@@ -48,8 +48,45 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker.dma_stream = None
     worker.shared_host_region = None
     worker._completed_host_copy_dst_ids = []
-    worker._slot_mapping_staging = None
+    worker._metrics_calls = 0
+    worker._metrics_event = MagicMock()
+    worker._metrics_pending = False
+    worker.leader_runtimes = []
     return worker
+
+
+def test_hisparse_worker_get_kv_connector_stats_reads_completed_snapshot(monkeypatch):
+    worker = _make_hisparse_worker()
+    worker._metrics_calls = hisparse_worker_module._METRICS_INTERVAL - 1
+    worker._metrics_pending = False
+    worker._metrics_event = MagicMock()
+    worker._metrics_event.query.return_value = True
+    compute_stream = MagicMock()
+    group = SimpleNamespace(
+        swap_stats=torch.tensor([12, 4], dtype=torch.uint64),
+        swap_stats_host=torch.empty(2, dtype=torch.uint64),
+        stats_row_bytes=16,
+        copy_stream=MagicMock(),
+    )
+    worker.leader_runtimes = [SimpleNamespace(index_group=group)]
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(
+        hisparse_worker_module, "current_stream", lambda: compute_stream
+    )
+
+    assert worker.get_kv_connector_stats() is None
+    compute_stream.wait_stream.assert_called_once_with(group.copy_stream)
+    group.copy_stream.wait_stream.assert_called_once_with(compute_stream)
+    worker._metrics_event.record.assert_called_once_with()
+    assert group.swap_stats.tolist() == [0, 0]
+
+    stats = worker.get_kv_connector_stats()
+    assert stats is not None
+    assert stats.data == {
+        "cache_hits": [12],
+        "cache_misses": [4],
+        "host_to_device_bytes": [64],
+    }
 
 
 def test_hisparse_row_mirrors_follow_runner_request_order():
