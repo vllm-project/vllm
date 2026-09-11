@@ -46,8 +46,6 @@ class HardwareInfo:
         return asdict(self)
 
 
-
-
 def _compress_cpu_ids(cpu_ids: list[int] | tuple[int, ...]) -> str:
     """Return a compact Linux CPU-list string while preserving CPU IDs."""
     values = sorted(set(cpu_ids))
@@ -110,8 +108,7 @@ def build_numa_omp_threads_bind(
         # Match vLLM's x86 auto-binding selector: for SMT siblings on a physical
         # core, use the highest logical CPU ID.
         selected_cpu_ids = sorted(
-            max(logical_ids)
-            for _, logical_ids in sorted(core_to_logical_ids.items())
+            max(logical_ids) for _, logical_ids in sorted(core_to_logical_ids.items())
         )
 
         if len(selected_cpu_ids) <= reserved_cores_per_numa:

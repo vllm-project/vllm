@@ -202,16 +202,13 @@ def parse_args() -> argparse.Namespace:
     sweep.add_argument(
         "--generate-scheduler-sweep",
         action="store_true",
-        help=(
-            "Generate the max-num-seqs/max-num-batched-tokens scheduler sweep."
-        ),
+        help=("Generate the max-num-seqs/max-num-batched-tokens scheduler sweep."),
     )
     sweep.add_argument(
         "--generate-parallel-layout-sweep",
         action="store_true",
         help=(
-            "Generate a standalone NUMA-aware TP/DP sweep. Requires "
-            "--detect-hardware."
+            "Generate a standalone NUMA-aware TP/DP sweep. Requires --detect-hardware."
         ),
     )
     sweep.add_argument(
@@ -831,9 +828,7 @@ def write_env(
     ]
 
     if overrides:
-        lines.append(
-            "# Temporary runtime overrides derived from detected hardware."
-        )
+        lines.append("# Temporary runtime overrides derived from detected hardware.")
 
     if env:
         for key, value in env.items():
@@ -844,6 +839,7 @@ def write_env(
     lines.append("")
     Path(path).write_text("\n".join(lines), encoding="utf-8")
     Path(path).chmod(Path(path).stat().st_mode | 0o111)
+
 
 def main() -> int:
     args = parse_args()
@@ -946,8 +942,7 @@ def main() -> int:
                     args.tp_dp_numa_bind_workaround
                     and str(recipe_hardware).lower() == "xeon6"
                     and (
-                        args.generate_parallel_layout_sweep
-                        or args.generate_full_sweep
+                        args.generate_parallel_layout_sweep or args.generate_full_sweep
                     )
                 ):
                     recipe_env = recipe.get("env") or {}

@@ -264,10 +264,7 @@ def run_comb(
                 + "\n",
                 encoding="utf-8",
             )
-            print(
-                "[FAILED BENCHMARK] "
-                f"run={run_number}: {type(exc).__name__}: {exc}"
-            )
+            print(f"[FAILED BENCHMARK] run={run_number}: {type(exc).__name__}: {exc}")
             print(f"Failure details: {failure_path}")
             if server is not None:
                 with contextlib.suppress(Exception):

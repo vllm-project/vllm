@@ -52,9 +52,7 @@ def _percentile_summary(
     return mean(numbers), median(numbers), max(numbers)
 
 
-def _scheduler_value(
-    row: dict[str, Any], key: str
-) -> tuple[bool, int | None]:
+def _scheduler_value(row: dict[str, Any], key: str) -> tuple[bool, int | None]:
     if key not in row:
         # Default-reference sweep candidates omit scheduler keys entirely.
         return True, None
@@ -66,9 +64,7 @@ def _scheduler_value(
     return True, value
 
 
-def _parallel_value(
-    row: dict[str, Any], key: str, default: int
-) -> tuple[bool, int]:
+def _parallel_value(row: dict[str, Any], key: str, default: int) -> tuple[bool, int]:
     if key not in row:
         return True, default
     value = row[key]
@@ -108,9 +104,7 @@ def _select_near_equivalent_scheduler_candidate(
     best_throughput = max(
         candidate["mean_output_throughput"] for candidate in candidates
     )
-    throughput_floor = best_throughput * (
-        1.0 - throughput_equivalence_percent / 100.0
-    )
+    throughput_floor = best_throughput * (1.0 - throughput_equivalence_percent / 100.0)
     near_equivalent = [
         candidate
         for candidate in candidates
@@ -160,9 +154,9 @@ def _aggregate_candidates(
     tpot_sla_ms: float | None = None,
     minimum_compliance: float = DEFAULT_MINIMUM_COMPLIANCE,
 ) -> list[dict[str, Any]]:
-    grouped: dict[
-        tuple[int, int, int | None, int | None], list[dict[str, Any]]
-    ] = defaultdict(list)
+    grouped: dict[tuple[int, int, int | None, int | None], list[dict[str, Any]]] = (
+        defaultdict(list)
+    )
 
     for row in rows:
         seqs_valid, seqs = _scheduler_value(row, "max_num_seqs")
@@ -291,9 +285,7 @@ def _select_candidate(
     candidates: list[dict[str, Any]],
     *,
     use_goodput: bool,
-    throughput_equivalence_percent: float = (
-        DEFAULT_THROUGHPUT_EQUIVALENCE_PERCENT
-    ),
+    throughput_equivalence_percent: float = (DEFAULT_THROUGHPUT_EQUIVALENCE_PERCENT),
 ) -> tuple[dict[str, Any] | None, dict[str, Any], str]:
     valid = [candidate for candidate in candidates if candidate["valid"]]
     if not valid:
@@ -337,9 +329,7 @@ def _select_candidate(
                         candidate["mean_request_goodput"],
                         -candidate["data_parallel_size"],
                         -candidate["tensor_parallel_size"],
-                        _scheduler_preference_key(
-                            candidate["max_num_batched_tokens"]
-                        ),
+                        _scheduler_preference_key(candidate["max_num_batched_tokens"]),
                         _scheduler_preference_key(candidate["max_num_seqs"]),
                     ),
                 )
@@ -360,9 +350,7 @@ def _select_candidate(
                     candidate["mean_output_throughput"],
                     -candidate["data_parallel_size"],
                     -candidate["tensor_parallel_size"],
-                    _scheduler_preference_key(
-                        candidate["max_num_batched_tokens"]
-                    ),
+                    _scheduler_preference_key(candidate["max_num_batched_tokens"]),
                     _scheduler_preference_key(candidate["max_num_seqs"]),
                 ),
             )
@@ -626,8 +614,7 @@ def main() -> int:
     print(f"  tensor-parallel-size:   {winner['tensor_parallel_size']}")
     print(f"  data-parallel-size:     {winner['data_parallel_size']}")
     print(
-        "  max-num-seqs:           "
-        + _format_scheduler_value(winner["max_num_seqs"])
+        "  max-num-seqs:           " + _format_scheduler_value(winner["max_num_seqs"])
     )
     print(
         "  max-num-batched-tokens: "
