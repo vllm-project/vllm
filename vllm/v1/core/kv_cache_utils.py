@@ -729,6 +729,9 @@ def resolve_kv_cache_block_sizes(
     ]
     scheduler_block_size = math.lcm(*group_block_sizes)
 
+    logger.info("kv cache group sizes %s", group_block_sizes)
+    logger.info("kv lcm block sizes %s", scheduler_block_size)
+
     # Block hashes are only consumed by prefix caching and KV connectors
     # (P/D, offloading); when neither is active, keep hash_block_size equal
     # to the scheduler block size.

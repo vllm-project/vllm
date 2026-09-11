@@ -1744,7 +1744,7 @@ def postprocess_mamba_gpu(
         if ctx.replayssm.materialize_prefixes:
             ctx.replayssm.materialize()
 
-    if num_accepted_tokens_cpu_tensor is not None:
+    if num_accepted_tokens_cpu_tensor is not None and ctx.replayssm is None:
         # CPU consumers need the normalized live counts for the next step, not
         # the original snapshot retained for ReplaySSM.
         num_accepted_tokens_cpu_tensor[:num_reqs].copy_(

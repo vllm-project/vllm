@@ -195,6 +195,12 @@ class CacheConfig:
       when the token is at position i * block_size. This is the default when prefix
       caching is enabled.
     """
+    enable_mamba_fine_grained_prefix_cache: bool = False
+    """Also register a Mamba "align" checkpoint at the shared-prefix junction --
+    where an EAGLE/MTP sibling was observed to resume -- instead of only at the
+    prompt tail. Off by default; only takes effect with `mamba_cache_mode`
+    "align", EAGLE on the Mamba group, and a prefix match unit smaller than the
+    Mamba block size."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B for Mamba2. Triton uses B physical
     rows and FlashInfer uses B+T, where T is the target verification length.
@@ -229,7 +235,6 @@ class CacheConfig:
     some layers can skip tokens corresponding to prefill. This flag enables
     attention metadata for eligible layers to be overridden with metadata
     necessary for implementing this optimization in some models (e.g. Gemma3n)
-    NOTE: KV cache sharing is not supported for MRv2 (v2 model runner).
     """
 
     kv_cache_memory_bytes: int | None = None
@@ -275,6 +280,7 @@ class CacheConfig:
             "prefix_cache_retention_interval",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
+            "enable_mamba_fine_grained_prefix_cache",
             "mamba_page_size_padded",
             "skip_page_size_padded",
             "user_specified_block_size",

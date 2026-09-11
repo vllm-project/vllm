@@ -77,7 +77,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) E2E Core"
   device: h200_35gb
   key: e2e-core-1-gpu
-  timeout_in_minutes: 40
+  timeout_in_minutes: 50
   source_file_dependencies:
     - vllm/v1/
     - tests/v1/e2e/general/
@@ -103,6 +103,12 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
     - tests/v1/e2e/test_replayssm_decode.py
+    - tests/kernels/mamba/test_ssu_dispatch.py
+    - tests/model_executor/test_replayssm_warmup.py
+    - tests/v1/worker/test_kv_cache_allocation_scope.py
+    - vllm/v1/worker/utils.py
+    - vllm/v1/core/kv_cache_coordinator.py
+    - vllm/v1/core/single_type_kv_cache_manager.py
     - vllm/config/cache.py
     - vllm/config/vllm.py
     - vllm/model_executor/layers/mamba/
@@ -115,7 +121,11 @@ steps:
     - vllm/v1/worker/gpu_model_runner.py
     - vllm/v1/worker/gpu_worker.py
   commands:
-    - pytest -v -s v1/e2e/test_replayssm_decode.py
+    - uv pip install --system flashinfer-python==0.7.0 --index-url https://pypi.org/simple
+    - uv pip install --system flashinfer-cubin==0.7.0 --index-url https://flashinfer.ai/whl/
+    - VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v -s v1/e2e/test_replayssm_decode.py
+    - pytest -v kernels/mamba/test_ssu_dispatch.py -k replayssm
+    - pytest -v model_executor/test_replayssm_warmup.py v1/worker/test_kv_cache_allocation_scope.py
 
 - label: ":nvidia: (L4) V1 E2E"
   key: v1-e2e-2-gpus

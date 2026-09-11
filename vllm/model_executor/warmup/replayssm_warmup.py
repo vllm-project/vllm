@@ -77,21 +77,20 @@ def _temporary_replayssm_autotune_state(
     from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 
     reset_tensors: dict[int, torch.Tensor] = {}
+    reset_trackers: dict[int, torch.Tensor] = {}
     for module in runner.get_model().modules():
         if not isinstance(module, MambaMixer2) or not module.use_replayssm:
             continue
         assert module.replayssm_buffer_len is not None
         ring_start = module._replayssm_ring_start
         prev_num_accepted = module._replayssm_prev_num_accepted
-        tensors = (
-            *module.kv_cache,
-            *module.replayssm_cache,
-            ring_start,
-            prev_num_accepted,
-        )
+        tensors = (*module.kv_cache, *module.replayssm_cache)
         for tensor in tensors:
             if tensor.numel():
                 reset_tensors.setdefault(tensor.data_ptr(), tensor)
+        for tensor in (ring_start, prev_num_accepted):
+            if tensor.numel():
+                reset_trackers.setdefault(tensor.data_ptr(), tensor)
 
     v2_runner: Any = runner
     block_tables = saved_block_ids = None
@@ -118,6 +117,8 @@ def _temporary_replayssm_autotune_state(
             runner.input_batch.block_table.commit_block_table(max_num_reqs)
         for tensor in reset_tensors.values():
             tensor[1 : max_num_reqs + 1].zero_()
+        for tensor in reset_trackers.values():
+            tensor.zero_()
 
 
 def replayssm_autotune_warmup(runner: "GPUModelRunner") -> None:

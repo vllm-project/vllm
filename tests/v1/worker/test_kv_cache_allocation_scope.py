@@ -35,7 +35,8 @@ def test_mrv2_kv_pool_wraps_all_cache_allocations(monkeypatch) -> None:
         return kv_caches
 
     def bind(*args, **kwargs):
-        assert not scope.active
+        # bind_kv_cache allocates shared ReplaySSM tracker tensors.
+        assert scope.active
 
     def allocate_replayssm(*args, **kwargs):
         assert scope.active
@@ -73,7 +74,7 @@ def test_mrv1_kv_pool_wraps_all_cache_allocations(monkeypatch) -> None:
         return kv_caches
 
     def bind(*args, **kwargs):
-        assert not scope.active
+        assert scope.active
 
     def allocate_replayssm(*args, **kwargs):
         assert scope.active

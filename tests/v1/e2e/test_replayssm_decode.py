@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engine-level parity: ReplaySSM standard decode vs the baseline SSM kernel."""
 
+import os
 from inspect import signature
 
 import pytest
@@ -30,6 +31,14 @@ try:
     )
 except ImportError:
     HAS_FLASHINFER_REPLAYSSM_MATERIALIZE = False
+
+if os.environ.get("VLLM_TEST_REQUIRE_REPLAYSSM") == "1" and not (
+    HAS_FLASHINFER_CHECKPOINTING_SSU and HAS_FLASHINFER_REPLAYSSM_MATERIALIZE
+):
+    raise RuntimeError(
+        "Dedicated ReplaySSM CI requires FlashInfer 0.7.0 checkpointing and "
+        "materialization APIs, including active_request_indices"
+    )
 
 # Mamba2 (Nemotron-3) hybrid.
 MAMBA2_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
@@ -289,6 +298,7 @@ def _check_replayssm_prefix_caching(
             llm.generate_greedy_logprobs(
                 PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
             )
+            baseline_hits_before = _prefix_cache_hits(llm)
             baseline = llm.generate_greedy_logprobs(
                 PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
             )
@@ -309,13 +319,24 @@ def _check_replayssm_prefix_caching(
             llm.generate_greedy_logprobs(
                 PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
             )
+            replay_hits_before = _prefix_cache_hits(llm)
             replay = llm.generate_greedy_logprobs(
                 PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
             )
             replay_hits = _prefix_cache_hits(llm)
+            if use_ngram:
+                assert (
+                    sum(
+                        metric.value
+                        for metric in llm.llm.get_metrics()
+                        if isinstance(metric, Counter)
+                        and metric.name == "vllm:spec_decode_num_drafts"
+                    )
+                    > 0
+                )
 
-        assert baseline_hits > 0
-        assert replay_hits > 0, (
+        assert baseline_hits > baseline_hits_before
+        assert replay_hits > replay_hits_before, (
             f"ReplaySSM {mamba_cache_mode}-mode run produced no prefix-cache hits; "
             "the shared prefix may be shorter than one mamba block, so prefix "
             "caching is inert"
@@ -397,28 +418,47 @@ def test_flashinfer_replayssm_all_prefix_cache(vllm_runner, monkeypatch, use_v2:
 
 @requires_flashinfer_replayssm_materialization
 @large_gpu_mark(min_gb=40)
-def test_flashinfer_replayssm_all_prefix_cache_mtp_v2(vllm_runner, monkeypatch):
+@pytest.mark.parametrize(
+    ("use_v2", "mode"),
+    [(False, "align"), (True, "align"), (True, "all")],
+    ids=["v1-align", "v2-align", "v2-all"],
+)
+def test_flashinfer_replayssm_prefix_cache_mtp(vllm_runner, monkeypatch, use_v2, mode):
     common = dict(
         max_model_len=12288,
+        max_num_seqs=4,
         trust_remote_code=True,
         enable_prefix_caching=True,
         enable_chunked_prefill=True,
-        mamba_cache_mode="all",
+        mamba_cache_mode=mode,
         mamba_backend="flashinfer",
+        dtype="bfloat16",
         disable_log_stats=False,
         speculative_config={"method": "mtp", "num_speculative_tokens": 3},
     )
     try:
         with monkeypatch.context() as patch:
-            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+            patch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2)))
             envs.disable_envs_cache()
+            # Generic V2 all mode remains unsupported. Align materializes the
+            # same canonical boundary and is the supported numerical reference.
+            reference_common = {**common, "mamba_cache_mode": "align"}
+            with vllm_runner(MAMBA2_MTP_MODEL, **reference_common) as llm:
+                llm.generate_greedy_logprobs(
+                    MTP_PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
+                )
+                baseline_hits_before = _prefix_cache_hits(llm)
+                baseline = llm.generate_greedy_logprobs(
+                    MTP_PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
+                )
+                assert _prefix_cache_hits(llm) > baseline_hits_before
             with vllm_runner(
                 MAMBA2_MTP_MODEL,
                 use_replayssm=True,
                 replayssm_buffer_len=16,
                 **common,
             ) as llm:
-                assert llm.llm.llm_engine.vllm_config.use_v2_model_runner
+                assert llm.llm.llm_engine.vllm_config.use_v2_model_runner is use_v2
                 first_pass = llm.generate_greedy_logprobs(
                     MTP_PREFIX_CACHING_PROMPTS, max_tokens=32, num_logprobs=5
                 )
@@ -438,9 +478,19 @@ def test_flashinfer_replayssm_all_prefix_cache_mtp_v2(vllm_runner, monkeypatch):
 
     assert cached_hits > first_pass_hits
     assert draft_count > 0
+    print(
+        f"ReplaySSM v{2 if use_v2 else 1} {mode}: "
+        f"prefix_hit_delta={cached_hits - first_pass_hits}, drafts={draft_count}"
+    )
+    check_logprobs_close(
+        outputs_0_lst=baseline,
+        outputs_1_lst=cached,
+        name_0=f"baseline_{mode}_mtp_v{2 if use_v2 else 1}_cached",
+        name_1=f"replayssm_{mode}_mtp_v{2 if use_v2 else 1}_cached",
+    )
     check_logprobs_close(
         outputs_0_lst=first_pass,
         outputs_1_lst=cached,
-        name_0="replayssm_all_mtp_v2_first_pass",
-        name_1="replayssm_all_mtp_v2_cached",
+        name_0=f"replayssm_{mode}_mtp_v{2 if use_v2 else 1}_first_pass",
+        name_1=f"replayssm_{mode}_mtp_v{2 if use_v2 else 1}_cached",
     )

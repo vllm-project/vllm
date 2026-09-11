@@ -71,10 +71,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByTy
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
-from vllm.model_executor.layers.rotary_embedding import (
-    MRotaryEmbedding,
-    XDRotaryEmbedding,
-)
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
@@ -85,14 +82,12 @@ from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMRoPE,
     SupportsMultiModal,
-    SupportsXDRoPE,
     get_mixture_of_experts_model,
     supports_eagle3,
     supports_mrope,
     supports_multimodal_pruning,
     supports_realtime,
     supports_transcription,
-    supports_xdrope,
 )
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling,
@@ -581,7 +576,7 @@ class GPUModelRunner(
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-        self.uses_xdrope_dim = model_config.uses_xdrope_dim
+        self.mrope_num_dims = model_config.mrope_num_dims
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
@@ -878,20 +873,11 @@ class GPUModelRunner(
             # with torch compile.
             # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
 
-            # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
-            # the modality of inputs. For text-only inputs, each dimension has
-            # identical position IDs, making M-RoPE functionally equivalent to
-            # 1D-RoPE.
+            # NOTE: For text-only inputs, each dimension has identical position
+            # IDs, making M-RoPE functionally equivalent to 1D-RoPE.
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = self._make_buffer(
-                (3, self.max_num_tokens + 1), dtype=torch.int64
-            )
-
-        # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-        if self.uses_xdrope_dim > 0:
-            # Similar to mrope but use assigned dimension number for RoPE, 4 as default.
-            self.xdrope_positions = self._make_buffer(
-                (self.uses_xdrope_dim, self.max_num_tokens + 1), dtype=torch.int64
+                (self.mrope_num_dims, self.max_num_tokens + 1), dtype=torch.int64
             )
 
         # None in the first PP rank. The rest are set after load_model.
@@ -978,7 +964,11 @@ class GPUModelRunner(
         self.num_accepted_tokens_event: torch.Event | None = None
         if self.num_spec_tokens:
             self.draft_token_ids_event = torch.Event()
-            self.num_accepted_tokens_event = torch.Event()
+            if not (
+                self.cache_config.use_replayssm
+                and self.vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+            ):
+                self.num_accepted_tokens_event = torch.Event()
             self.draft_token_ids_copy_stream = torch.cuda.Stream()
             self.draft_token_ids_cpu = torch.empty(
                 (self.max_num_reqs, self.num_spec_tokens),
@@ -1010,6 +1000,18 @@ class GPUModelRunner(
             self.cache_config.use_replayssm
             and self.vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
         )
+        self._replayssm_prev_req_indices: dict[str, int] = {}
+        self._replayssm_paused_accepted_tokens: dict[str, torch.Tensor] = {}
+        self._replayssm_accepted_tokens: torch.Tensor | None = None
+        self._replayssm_acceptance_indices: CpuGpuBuffer | None = None
+        if self._use_flashinfer_replayssm and self.num_spec_tokens:
+            # The last entry is the neutral count for new/padded requests.
+            self._replayssm_accepted_tokens = torch.ones(
+                self.max_num_reqs + 1, dtype=torch.int32, device=self.device
+            )
+            self._replayssm_acceptance_indices = self._make_buffer(
+                self.max_num_reqs, dtype=torch.int64
+            )
         self._needs_prefix_state_migration = (
             self.cache_config.mamba_cache_mode == "align"
             or (
@@ -1060,14 +1062,10 @@ class GPUModelRunner(
         if isinstance(num_tokens, int):
             if self.uses_mrope:
                 return self.mrope_positions.gpu[:, :num_tokens]
-            if self.uses_xdrope_dim > 0:
-                return self.xdrope_positions.gpu[:, :num_tokens]
             return self.positions[:num_tokens]
         else:
             if self.uses_mrope:
                 return self.mrope_positions.gpu[:, num_tokens]
-            if self.uses_xdrope_dim > 0:
-                return self.xdrope_positions.gpu[:, num_tokens]
             return self.positions[num_tokens]
 
     def _make_buffer(
@@ -1251,6 +1249,9 @@ class GPUModelRunner(
         # and handling the second as a new request.
         for req_id in scheduler_output.finished_req_ids:
             self.input_batch.remove_request(req_id)
+            if self._use_flashinfer_replayssm:
+                self._replayssm_prev_req_indices.pop(req_id, None)
+                self._replayssm_paused_accepted_tokens.pop(req_id, None)
 
         # Zero GPU memory for freshly allocated cache blocks to prevent
         # stale NaN/data from corrupting attention or SSM computation.
@@ -1274,6 +1275,12 @@ class GPUModelRunner(
         scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
         cached_req_ids = self.input_batch.req_id_to_index.keys()
         resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
+        if self._use_flashinfer_replayssm:
+            # Preemption reconstructs state from a prefix; its old live offset
+            # cannot be reused. A scheduling pause instead preserves that state.
+            for req_id in resumed_req_ids:
+                self._replayssm_prev_req_indices.pop(req_id, None)
+                self._replayssm_paused_accepted_tokens.pop(req_id, None)
         # NOTE(zhuohan): cached_req_ids and resumed_req_ids are usually disjoint,
         # so `(scheduled_req_ids - resumed_req_ids) == scheduled_req_ids` holds
         # apart from the forced-preemption case in reset_prefix_cache. And in
@@ -1287,6 +1294,8 @@ class GPUModelRunner(
         # sets of requests), this optimization becomes very inefficient.
         for req_id in unscheduled_req_ids:
             self.input_batch.remove_request(req_id)
+            if self._use_flashinfer_replayssm:
+                self._pause_replayssm_accepted_tokens(req_id)
 
         is_ngram_gpu = (
             self.speculative_config is not None
@@ -1355,10 +1364,6 @@ class GPUModelRunner(
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
                 self._init_mrope_positions(req_state)
-
-            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-            if self.uses_xdrope_dim > 0:
-                self._init_xdrope_positions(req_state)
 
             reqs_to_add.append(req_state)
             # Track new requests for ngram_gpu full tensor copy
@@ -1647,7 +1652,7 @@ class GPUModelRunner(
                 num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
                 num_accepted_tokens_cpu_tensor=(
                     self.input_batch.num_accepted_tokens_cpu_tensor
-                    if self.num_spec_tokens
+                    if self.num_spec_tokens and not self._use_flashinfer_replayssm
                     else None
                 ),
                 input_batch=self.input_batch,
@@ -1657,9 +1662,16 @@ class GPUModelRunner(
                 run_prefix_state_migration=self._needs_prefix_state_migration,
             )
 
-            if self._use_flashinfer_replayssm and not self.num_spec_tokens:
-                # STP ReplaySSM has no accepted-count D2H copy or event.
+            if self._use_flashinfer_replayssm:
                 assert self.num_accepted_tokens_event is None
+                if self.num_spec_tokens:
+                    assert self._replayssm_accepted_tokens is not None
+                    self._replayssm_accepted_tokens[:num_reqs].copy_(
+                        self.num_accepted_tokens.gpu[:num_reqs]
+                    )
+                    self._replayssm_prev_req_indices = dict(
+                        self.input_batch.req_id_to_index
+                    )
             else:
                 assert self.num_accepted_tokens_event is not None
                 self.num_accepted_tokens_event.record()
@@ -1670,7 +1682,10 @@ class GPUModelRunner(
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.record()
 
-        if self.cache_config.mamba_cache_mode == "all":
+        if (
+            self.cache_config.mamba_cache_mode == "all"
+            and not self.cache_config.use_replayssm
+        ):
             mamba_utils.postprocess_mamba_all(
                 scheduler_output,
                 self.kv_cache_config,
@@ -1680,6 +1695,38 @@ class GPUModelRunner(
                 self.num_spec_tokens,
                 num_reqs,
             )
+
+    def _pause_replayssm_accepted_tokens(self, req_id: str) -> None:
+        prev_index = self._replayssm_prev_req_indices.pop(req_id, None)
+        if prev_index is not None:
+            assert self._replayssm_accepted_tokens is not None
+            # Keep just this scalar before the next batch reuses its snapshot row.
+            self._replayssm_paused_accepted_tokens[req_id] = (
+                self._replayssm_accepted_tokens[prev_index].clone()
+            )
+
+    def _restore_replayssm_accepted_tokens(self) -> None:
+        """Gather normalized convolution offsets without staging counts on CPU."""
+        indices = self._replayssm_acceptance_indices
+        assert indices is not None
+        assert self._replayssm_accepted_tokens is not None
+        indices.np.fill(self.max_num_reqs)
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            indices.np[i] = self._replayssm_prev_req_indices.get(
+                req_id, self.max_num_reqs
+            )
+        indices.copy_to_gpu()
+        torch.index_select(
+            self._replayssm_accepted_tokens,
+            0,
+            indices.gpu,
+            out=self.num_accepted_tokens.gpu,
+        )
+        if self._replayssm_paused_accepted_tokens:
+            for i, req_id in enumerate(self.input_batch.req_ids):
+                accepted = self._replayssm_paused_accepted_tokens.pop(req_id, None)
+                if accepted is not None:
+                    self.num_accepted_tokens.gpu[i].copy_(accepted)
 
     def _update_streaming_request(
         self, req_id: str, new_req_data: NewRequestData
@@ -1746,19 +1793,6 @@ class GPUModelRunner(
                 input_tokens,
                 mrope_features,
             )
-        )
-
-    def _init_xdrope_positions(self, req_state: CachedRequestState):
-        model = self.get_model()
-        xdrope_model = cast(SupportsXDRoPE, model)
-        assert req_state.prompt_token_ids is not None, (
-            "XD-RoPE requires prompt_token_ids to be available."
-        )
-        assert supports_xdrope(model), "XD-RoPE support is not implemented."
-
-        req_state.xdrope_positions = xdrope_model.get_xdrope_input_positions(
-            req_state.prompt_token_ids,
-            req_state.mm_features,
         )
 
     def _extract_mm_kwargs(
@@ -2063,11 +2097,6 @@ class GPUModelRunner(
         if self.uses_mrope:
             self._calc_mrope_positions(scheduler_output)
 
-        # Calculate XD-RoPE positions.
-        # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-        if self.uses_xdrope_dim > 0:
-            self._calc_xdrope_positions(scheduler_output)
-
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
@@ -2172,8 +2201,10 @@ class GPUModelRunner(
         # _update_states_after_model_execute for hybrid models).
         # Skipped under async scheduling (non-align): the CPU copy races with
         # the in-flight D2H copy and with input-batch row moves.
-        needs_cpu_accepted_counts = self.num_accepted_tokens_event is not None and (
-            not self.use_async_scheduling or self._needs_prefix_state_migration
+        needs_cpu_accepted_counts = (
+            not self._use_flashinfer_replayssm
+            and self.num_accepted_tokens_event is not None
+            and (not self.use_async_scheduling or self._needs_prefix_state_migration)
         )
         if needs_cpu_accepted_counts:
             assert self.num_accepted_tokens_event is not None
@@ -2241,6 +2272,11 @@ class GPUModelRunner(
                 non_blocking=True,
             )
 
+        if self._use_flashinfer_replayssm and self.num_spec_tokens:
+            # Restore normalized convolution offsets after async sequence-length
+            # correction. Counts stay on GPU across batch compaction/reordering.
+            self._restore_replayssm_accepted_tokens()
+
         self.req_indices.np[:total_num_scheduled_tokens] = req_indices
         self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
         req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
@@ -2275,7 +2311,7 @@ class GPUModelRunner(
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             # Copy one row at a time. mrope_positions is allocated as
-            # [3, max_num_tokens + 1] with a dummy trailing column to keep it
+            # [num_dims, max_num_tokens + 1] with a dummy trailing column to keep it
             # non-contiguous for torch.compile, so cpu[:, :N] is a strided view.
             # copy_() cannot express a strided source as a single
             # cudaMemcpyAsync, so it first gathers into a contiguous *pageable*
@@ -2288,20 +2324,7 @@ class GPUModelRunner(
                     self.mrope_positions.cpu[row, :total_num_scheduled_tokens],
                     non_blocking=True,
                 )
-        elif self.uses_xdrope_dim > 0:
-            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL).
-            # xdrope_positions is allocated as [uses_xdrope_dim, max_num_tokens
-            # + 1] with the same trailing-column trick as mrope_positions above,
-            # so cpu[:, :N] is a strided view of the pinned buffer and the
-            # single-slice copy_() runs into the same pageable-fallback silent
-            # sync described in PR #51841. Split into per-row copies for the
-            # same reason.
-            for row in range(self.xdrope_positions.gpu.shape[0]):
-                self.xdrope_positions.gpu[row, :total_num_scheduled_tokens].copy_(
-                    self.xdrope_positions.cpu[row, :total_num_scheduled_tokens],
-                    non_blocking=True,
-                )
-        if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
+        if self.use_async_spec_decode and self.uses_mrope:
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
             ) - async_tensor_h2d(
@@ -2309,8 +2332,7 @@ class GPUModelRunner(
                 device=self.device,
                 dtype=torch.int64,
             )
-            target = self.mrope_positions if self.uses_mrope else self.xdrope_positions
-            target.gpu[:, :total_num_scheduled_tokens] += drift
+            self.mrope_positions.gpu[:, :total_num_scheduled_tokens] += drift
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -2916,53 +2938,6 @@ class GPUModelRunner(
 
                 mrope_pos_ptr += completion_part_len
 
-    def _calc_xdrope_positions(self, scheduler_output: "SchedulerOutput"):
-        xdrope_pos_ptr = 0
-        for index, req_id in enumerate(self.input_batch.req_ids):
-            req = self.requests[req_id]
-            assert req.xdrope_positions is not None
-
-            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[index]
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-                req.prompt_token_ids, req.prompt_embeds
-            )
-
-            if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
-                prompt_part_len = max(0, num_prompt_tokens - num_computed_tokens)
-                completion_part_len = max(0, num_scheduled_tokens - prompt_part_len)
-            else:
-                prompt_part_len = num_scheduled_tokens
-                completion_part_len = 0
-
-            assert num_scheduled_tokens == prompt_part_len + completion_part_len
-
-            if prompt_part_len > 0:
-                # prompt's xdrope_positions are pre-computed
-                dst_start = xdrope_pos_ptr
-                dst_end = xdrope_pos_ptr + prompt_part_len
-                src_start = num_computed_tokens
-                src_end = num_computed_tokens + prompt_part_len
-
-                self.xdrope_positions.cpu[:, dst_start:dst_end] = req.xdrope_positions[
-                    :, src_start:src_end
-                ]
-                xdrope_pos_ptr += prompt_part_len
-
-            if completion_part_len > 0:
-                # compute completion's xdrope_positions on-the-fly
-                dst_start = xdrope_pos_ptr
-                dst_end = xdrope_pos_ptr + completion_part_len
-
-                XDRotaryEmbedding.get_next_input_positions_tensor(
-                    out=self.xdrope_positions.np,
-                    out_offset=dst_start,
-                    context_len=num_computed_tokens + prompt_part_len,
-                    num_new_tokens=completion_part_len,
-                )
-
-                xdrope_pos_ptr += completion_part_len
-
     def _calc_spec_decode_metadata(
         self,
         num_draft_tokens: np.ndarray,
@@ -3357,7 +3332,6 @@ class GPUModelRunner(
 
         req_start_idx = 0
         should_sync_mrope_positions = False
-        should_sync_xdrope_positions = False
 
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
@@ -3449,10 +3423,6 @@ class GPUModelRunner(
         if should_sync_mrope_positions:
             self._calc_mrope_positions(scheduler_output)
             self.mrope_positions.copy_to_gpu(total_num_scheduled_tokens)
-
-        if should_sync_xdrope_positions:
-            self._calc_xdrope_positions(scheduler_output)
-            self.xdrope_positions.copy_to_gpu(total_num_scheduled_tokens)
 
         return mm_embeds, is_mm_embed
 
@@ -3763,8 +3733,6 @@ class GPUModelRunner(
 
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
-        elif self.uses_xdrope_dim > 0:
-            positions = self.xdrope_positions.gpu[:, :num_input_tokens]
         else:
             positions = self.positions[:num_input_tokens]
             if num_input_tokens > num_scheduled_tokens:
@@ -4499,13 +4467,12 @@ class GPUModelRunner(
                     mamba_bufs.preprocess,
                     align_ctx=mamba_bufs.postprocess_align,
                 )
-                # Baseline Mamba may reset an accepted-token offset after
-                # shifting state. ReplaySSM preserves it with the exact live
-                # block copy. Re-sync either result to GPU.
-                self.num_accepted_tokens.np[:num_reqs] = (
-                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                )
-                self.num_accepted_tokens.copy_to_gpu(num_reqs)
+                if not self._use_flashinfer_replayssm:
+                    # Generic Mamba may reset offsets after shifting state.
+                    self.num_accepted_tokens.np[:num_reqs] = (
+                        self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                    )
+                    self.num_accepted_tokens.copy_to_gpu(num_reqs)
 
             elif self._use_flashinfer_replayssm:
                 mamba_bufs = self._get_mamba_bufs()
@@ -6280,8 +6247,6 @@ class GPUModelRunner(
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
-            elif self.uses_xdrope_dim > 0:
-                positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
                 positions = self.positions[:num_tokens_padded]
 
@@ -6745,6 +6710,10 @@ class GPUModelRunner(
 
     def _cleanup_profiling_kv_cache(self) -> None:
         torch.accelerator.synchronize()
+        self._mamba_bufs = None
+        self._mamba_state_copy_funcs = None
+        self._replayssm_prev_req_indices.clear()
+        self._replayssm_paused_accepted_tokens.clear()
         if hasattr(self, "kv_caches") and self.kv_caches:
             for i in range(len(self.kv_caches)):
                 self.kv_caches[i] = None  # type: ignore
@@ -7512,22 +7481,22 @@ class GPUModelRunner(
             )
             replayssm_caches = allocate_replayssm_caches(kv_cache_config, self.device)
 
-        # Set up cross-layer KV cache sharing
-        for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
-            logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
-            kv_caches[layer_name] = kv_caches[target_layer_name]
+            # Binding also allocates group-shared ReplaySSM trackers.
+            for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
+                logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
+                kv_caches[layer_name] = kv_caches[target_layer_name]
 
-        num_attn_module = (
-            2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
-        )
-        bind_kv_cache(
-            kv_caches,
-            self.compilation_config.static_forward_context,
-            self.kv_caches,
-            num_attn_module,
-            kv_cache_groups=kv_cache_config.kv_cache_groups,
-            replayssm_caches=replayssm_caches,
-        )
+            num_attn_module = (
+                2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
+            )
+            bind_kv_cache(
+                kv_caches,
+                self.compilation_config.static_forward_context,
+                self.kv_caches,
+                num_attn_module,
+                kv_cache_groups=kv_cache_config.kv_cache_groups,
+                replayssm_caches=replayssm_caches,
+            )
         # Validate and cache optional ReplaySSM-owned state once cache binding
         # has populated every layer. Block copies are a per-step hot path.
         self.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(

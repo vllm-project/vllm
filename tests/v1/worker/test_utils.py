@@ -11,6 +11,7 @@ from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.worker.utils import (
     bind_kv_cache,
+    clear_layer_kv_caches,
     copy_kv_cache_blocks_inplace,
     get_replayssm_block_copy_tensors,
 )
@@ -55,6 +56,22 @@ class _TestTritonReplaySSMMixer(_TestReplaySSMMixer):
 
     def get_replayssm_state_dtype(self) -> tuple[torch.dtype, ...]:
         return ()
+
+
+def test_clear_layer_kv_caches_releases_shared_replayssm_trackers():
+    mixers = [_TestReplaySSMMixer(), _TestReplaySSMMixer()]
+    tracker = torch.ones(8, dtype=torch.int32)
+    for mixer in mixers:
+        mixer.kv_cache = (torch.ones(8, 2), torch.ones(8, 3))
+        mixer.replayssm_cache = (torch.ones(8, 4),)
+        mixer._replayssm_ring_start = tracker
+        mixer._replayssm_prev_num_accepted = tracker
+    clear_layer_kv_caches(mixers)
+    for mixer in mixers:
+        assert not mixer.kv_cache
+        assert not mixer.replayssm_cache
+        assert mixer._replayssm_ring_start.numel() == 0
+        assert mixer._replayssm_prev_num_accepted.numel() == 0
 
 
 def _packed_replayssm_cache(num_blocks: int) -> torch.Tensor:

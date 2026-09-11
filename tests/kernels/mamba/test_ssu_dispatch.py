@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -12,12 +13,14 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     FlashInferSSUBackend,
     TritonSSUBackend,
     _postprocess_replayssm_kernel,
+    _ReplaySSMGroupContext,
     get_mamba_ssu_backend,
     initialize_mamba_ssu_backend,
     selective_state_update,
 )
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -57,6 +60,84 @@ def _kv_cache_config_with_ssu(
         kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["l0"], kv_cache_spec=spec)],
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("post_step", [False, True], ids=["v1", "v2"])
+def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(post_step):
+    """Publish a boundary without modifying its live or cached-prefix sources."""
+    from flashinfer.mamba.replayssm_materialize import replayssm_materialize
+
+    def ints(values):
+        return torch.tensor(values, dtype=torch.int32, device="cuda")
+
+    set_random_seed(42)
+    slots, heads, dim, dstate, ring_len = 6, 8, 64, 128, 20
+    state = torch.randn(slots, heads, dim, dstate, device="cuda") * 0.1
+    # Slot 1 is an immutable cached prefix, copied to private live slot 3.
+    state[3].copy_(state[1])
+    original = state.clone()
+    x = torch.randn(slots, heads, ring_len, dim, device="cuda", dtype=torch.bfloat16)
+    dt = torch.full((slots, heads, ring_len), 0.01, device="cuda")
+    B = torch.randn(slots, 1, ring_len, dstate, device="cuda", dtype=torch.bfloat16)
+    A = -torch.ones(heads, device="cuda")
+    mixer = SimpleNamespace(
+        kv_cache=(torch.empty(0, device="cuda"), state),
+        replayssm_cache=(x, dt, B),
+        _replayssm_ring_start=ints([0, 0, 0, 7, 0, 2]),
+        _replayssm_prev_num_accepted=ints([0, 0, 0, 2, 0, 1]),
+        replayssm_buffer_len=16,
+        A=A,
+        mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+    )
+    group = _ReplaySSMGroupContext.create(
+        [mixer],
+        ints(
+            [
+                [2, 3],
+                [NULL_BLOCK_ID, 5],
+                [NULL_BLOCK_ID, NULL_BLOCK_ID],
+                [NULL_BLOCK_ID, NULL_BLOCK_ID],
+            ]
+        ),
+        "all",
+        16,
+        4,
+    )
+    # Batch row 0 crosses token 16; row 1 rejects all drafts and stops at 15.
+    # Rows 2 and 3 exercise padded physical slots and padded request indices.
+    mapping = ints([2, 0, 1, -1])
+    group.postprocess(
+        idx_mapping=mapping,
+        query_metadata=ints([0, 4, 8, 12, 16]) if post_step else ints([4] * 4),
+        query_metadata_is_cumulative=post_step,
+        num_computed_tokens=ints([15, 17, 17]) if post_step else ints([14] * 3),
+        num_computed_is_post_step=post_step,
+        num_accepted_tokens=ints([1, 3, 3]),
+        is_prefilling=torch.zeros(4, dtype=torch.bool, device="cuda"),
+        live_cols=ints([1, 1, 1]),
+        num_reqs=4,
+    )
+    assert group.active_request_indices.tolist() == [0, -1, -1, -1]
+    assert group.plan_flush_count.tolist() == [4, -1, -1, -1]
+    group.materialize(replayssm_materialize)
+
+    expected = original[3].clone()
+    for offset in range(4):
+        pos = (7 + offset) % ring_len
+        delta = dt[3, :, pos]
+        expected *= torch.exp(delta * A)[:, None, None]
+        expected += (
+            delta[:, None, None]
+            * x[3, :, pos].float()[:, :, None]
+            * B[3, 0, pos].float()[None, None, :]
+        )
+    torch.testing.assert_close(state[2], expected, atol=2e-3, rtol=2e-3)
+    # The snapshot excludes the accepted tail past 16 and all rejected drafts.
+    for slot in (0, 1, 3, 4, 5):
+        torch.testing.assert_close(state[slot], original[slot], atol=0, rtol=0)
+    assert mixer._replayssm_prev_num_accepted[3].item() == 5
+    assert mixer._replayssm_prev_num_accepted[2].item() == 0
 
 
 def test_default_backend_is_triton():
