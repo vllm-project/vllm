@@ -88,8 +88,16 @@ context, and every candidate token, then uses the resulting Gumbel noise for
 categorical sampling. See
 [Aaronson's original presentation](https://simons.berkeley.edu/sites/default/files/2024-10/LLM24-2%20Slides%20-%20Scott%20Aaronson.pdf).
 
-Gumbel-max requires stochastic sampling. Greedy requests (`temperature=0`)
-bypass watermarking and emit a warning once per worker.
+Gumbel-max requires stochastic sampling. A request with `temperature=0` emits a
+warning and uses ordinary greedy sampling without a watermark. Trace replay is
+rejected when watermarking is enabled because it replaces the sampled token;
+set `watermarking=false` to use it.
+
+Explicit seeds are supported. Plain Gumbel token selection is determined by the
+watermark key and token context, so the request seed affects only ordinary
+fallback positions. Dual-key Gumbel also uses the request seed to route tokens
+between keys. Consequently, `n > 1` is valid, but plain Gumbel candidates can be
+identical while their contexts remain identical.
 
 When a token context is repeated, generation can use ordinary sampling for that
 occurrence. Reusing the repeated context leads to a bias over the sequence, as
@@ -241,7 +249,12 @@ watermarked output or to modify watermarked text so it is no longer detected.
 
 - Watermarking is currently available only with Model Runner V2.
 - Not all watermarking algorithms have native speculative-decoding support.
-- Beam search expands candidates from model log probabilities and does not apply
-  Gumbel-max watermarking.
+- Beam search expands candidates from model log probabilities and requires
+  `watermarking=false` when the engine has watermarking configured.
 - Models that replace the vLLM sampler with a custom sampler cannot use
   configured watermarking.
+- Global custom logits processors are unavailable because Model Runner V2 does
+  not support them.
+- Structured outputs and tool grammars are applied before watermark sampling,
+  but restrictive grammars can reduce the statistical evidence available to a
+  detector.

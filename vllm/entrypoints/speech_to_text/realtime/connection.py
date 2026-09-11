@@ -215,6 +215,7 @@ class RealtimeConnection:
 
             sampling_params = SamplingParams.from_optional(
                 temperature=0.0,
+                watermarking=False,
                 max_tokens=self.serving.model_cls.realtime_max_tokens,
                 output_kind=RequestOutputKind.DELTA,
                 skip_clone=True,

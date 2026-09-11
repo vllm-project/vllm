@@ -523,6 +523,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def reject_best_of(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("best_of") is not None:
+            raise VLLMValidationError(
+                "`best_of` is not supported.",
+                parameter="best_of",
+                value=data["best_of"],
+            )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def check_cache_salt_support(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
@@ -657,6 +668,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             ignore_eos=self.ignore_eos,
             temperature=temperature,
+            watermarking=self.watermarking,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
             skip_special_tokens=self.skip_special_tokens,
@@ -1109,6 +1121,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
+    watermarking: bool = True
     length_penalty: float | None = 1.0
     early_stopping: bool = False
     structured_outputs: StructuredOutputsParams | None = None
@@ -1136,6 +1149,12 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
             data = data.model_dump(exclude_unset=True)
         if not isinstance(data, dict):
             return data
+        if data.get("best_of") is not None:
+            raise VLLMValidationError(
+                "`best_of` is not supported for batch chat completions.",
+                parameter="best_of",
+                value=data["best_of"],
+            )
         if data.get("use_beam_search"):
             raise VLLMValidationError(
                 "Batch chat completions do not support beam search. "
