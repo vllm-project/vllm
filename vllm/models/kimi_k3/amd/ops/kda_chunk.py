@@ -286,9 +286,9 @@ def fused_kda_chunk(
         None if checkpoint_offsets is None else checkpoint_offsets.to(torch.int32),
         None
         if checkpoint_state_indices is None
-        else checkpoint_state_indices.to(torch.int32),
+        else checkpoint_state_indices.to(torch.int32).contiguous(),
         state_cache,
-        None if state_indices is None else state_indices.to(torch.int32),
+        None if state_indices is None else state_indices.to(torch.int32).contiguous(),
         has_initial_state,
     )
     return out, final_state
