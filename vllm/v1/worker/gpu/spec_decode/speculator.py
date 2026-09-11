@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -28,6 +28,9 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.utils import AttentionGroup
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 logger = init_logger(__name__)
 
@@ -149,6 +152,7 @@ class DraftModelSpeculator(BaseSpeculator):
         self.arange = torch.arange(
             self.max_num_reqs + 1, dtype=torch.int32, device="cpu"
         )
+        self.draft_is_prefilling = torch.zeros(self.max_num_reqs, dtype=torch.bool)
 
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
@@ -166,6 +170,7 @@ class DraftModelSpeculator(BaseSpeculator):
             )
 
         self.supports_mm_inputs = False
+        self.pcp_manager: PCPManager | None = None
 
     @abstractmethod
     def load_draft_model(
@@ -326,6 +331,7 @@ class DraftModelSpeculator(BaseSpeculator):
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
+            is_prefilling=self.draft_is_prefilling[:num_reqs],
         )
         return attn_metadata
 
