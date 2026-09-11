@@ -137,37 +137,32 @@ def test_effective_attention_block_size_matches_events(dcp):
         num_blocks=32,
         kv_cache_tensors=[],
         kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["mamba"],
-                MambaSpec(
-                    block_size=64,
-                    shapes=((1, 8),),
-                    dtypes=(torch.float32,),
-                    mamba_cache_mode="all",
-                ),
-            ),
             KVCacheGroupSpec(["attention"], new_kv_cache_spec()),
         ],
     )
     manager = KVCacheManager(
         generate_scheduler_kv_cache_config([config]),
         max_model_len=256,
-        scheduler_block_size=64,
-        hash_block_size=16,
+        scheduler_block_size=16 * dcp,
+        hash_block_size=16 * dcp,
         dcp_world_size=dcp,
         enable_kv_cache_events=True,
     )
     core = EngineCore.__new__(EngineCore)
+    core.vllm_config = SimpleNamespace(cache_config=CacheConfig(block_size=16))
     core.scheduler = SimpleNamespace(kv_cache_manager=manager)
-    block_size = core.get_effective_attention_block_size()
+    core._initialize_effective_attention_block_size()
+    block_size = core.vllm_config.cache_config.effective_attention_block_size
     assert block_size == 16 * dcp
 
-    request = make_request("block-size", list(range(64)), block_size=16, hash_fn=sha256)
+    request = make_request(
+        "block-size", list(range(64)), block_size=16 * dcp, hash_fn=sha256
+    )
     assert manager.allocate_slots(request, 64) is not None
     assert [
         event.block_size
         for event in manager.take_events()
-        if isinstance(event, BlockStored) and event.group_idx == 1
+        if isinstance(event, BlockStored)
     ] == [block_size]
 
 

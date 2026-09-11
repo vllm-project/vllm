@@ -368,8 +368,11 @@ def test_dplb_finished_requests_release_inflight():
     assert req.request_id not in client.reqs_in_flight
 
 
-@pytest.mark.parametrize("effective_size", [None, 4224])
-def test_apply_ready_response_syncs_block_size(effective_size):
+@pytest.mark.parametrize(
+    ("effective_size", "other_size"),
+    [(None, None), (4224, 4224), (4224, 1056), (4224, None)],
+)
+def test_apply_ready_response_syncs_block_size(effective_size, other_size):
     import msgspec
 
     client = object.__new__(MPClient)
@@ -408,10 +411,17 @@ def test_apply_ready_response_syncs_block_size(effective_size):
         fields["effective_attention_block_size"] = effective_size
     client._apply_ready_response(msgspec.msgpack.encode(fields))
     assert client.vllm_config.cache_config.block_size == 1056
-    assert client.get_effective_attention_block_size() == effective_size
+    cache_config = client.vllm_config.cache_config
+    assert cache_config.effective_attention_block_size == effective_size
+
+    fields["effective_attention_block_size"] = other_size
+    client._apply_ready_response(msgspec.msgpack.encode(fields))
+    assert cache_config.effective_attention_block_size == (
+        effective_size if effective_size == other_size else None
+    )
 
     client._apply_ready_response(b"")
-    assert client.get_effective_attention_block_size() is None
+    assert cache_config.effective_attention_block_size is None
 
 
 def test_apply_ready_response_syncs_mamba_block_size():

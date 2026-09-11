@@ -168,6 +168,7 @@ class EngineCore:
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
         )
+        self._initialize_effective_attention_block_size()
         self.use_spec_decode = vllm_config.speculative_config is not None
         self.check_for_draft_tokens = (
             self.use_spec_decode or vllm_config.model_config.is_diffusion
@@ -382,17 +383,20 @@ class EngineCore:
             )
         return scheduler_kv_cache_config
 
-    def get_effective_attention_block_size(self) -> int | None:
-        """Return the common full-attention block size in tokens, if available."""
+    def _initialize_effective_attention_block_size(self) -> None:
+        cache_config = self.vllm_config.cache_config
+        cache_config.effective_attention_block_size = None
         cache_manager = getattr(self.scheduler, "kv_cache_manager", None)
         if cache_manager is None:
-            return None
+            return
         block_sizes = {
             manager.block_size
             for manager in cache_manager.coordinator.single_type_managers
             if is_full_attention_spec(manager.kv_cache_spec)
         }
-        return block_sizes.pop() if len(block_sizes) == 1 else None
+        cache_config.effective_attention_block_size = (
+            block_sizes.pop() if len(block_sizes) == 1 else None
+        )
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         supported_tasks = self.model_executor.supported_tasks
@@ -1661,7 +1665,9 @@ class EngineCoreProc(EngineCore):
             num_gpu_blocks=self.vllm_config.cache_config.num_gpu_blocks or 0,
             block_size=self.vllm_config.cache_config.block_size,
             mamba_block_size=self.vllm_config.cache_config.mamba_block_size,
-            effective_attention_block_size=self.get_effective_attention_block_size(),
+            effective_attention_block_size=(
+                self.vllm_config.cache_config.effective_attention_block_size
+            ),
             dp_stats_address=self.frontend_stats_publish_address,
             dtype=str(self.vllm_config.model_config.dtype).removeprefix("torch."),
             vllm_version=VLLM_VERSION,

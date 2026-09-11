@@ -344,9 +344,6 @@ class AsyncLLM(EngineClient):
 
         return self._supported_tasks
 
-    async def get_effective_attention_block_size(self) -> int | None:
-        return await self.engine_core.get_effective_attention_block_size_async()
-
     async def add_request(
         self,
         request_id: str,

@@ -2,12 +2,8 @@
 
 This directory is the canonical source for vLLM's gRPC schema.
 
-`Control.GetServerInfo.effective_attention_block_size` reports the initialized
-full-attention block size in tokens, including DCP scaling. `kv_block_size` keeps
-its physical-size meaning. The optional field is absent when unavailable or
-when engines disagree; clients can continue using the existing fields.
 See [context parallel deployment](../../docs/serving/context_parallel_deployment.md)
-for Python access and details.
+for effective attention block-size metadata in Python and `Control.GetServerInfo`.
 
 The schema is published to `buf.build/vllm-project/vllm`:
 

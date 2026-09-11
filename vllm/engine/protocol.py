@@ -267,10 +267,6 @@ class EngineClient(ABC):
         """Get supported tasks"""
         raise NotImplementedError
 
-    async def get_effective_attention_block_size(self) -> int | None:
-        """Return the full-attention block size in tokens, or None if unavailable."""
-        return None
-
     async def init_weight_transfer_engine(
         self, init_request: WeightTransferInitRequest
     ) -> None:
