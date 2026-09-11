@@ -73,6 +73,20 @@ pub struct EngineCoreEvent {
     pub timestamp: f64,
 }
 
+/// Compatibility-only engine output value that is decoded without allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DiscardedEngineOutputValue;
+
+impl<'de> Deserialize<'de> for DiscardedEngineOutputValue {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(Self)
+    }
+}
+
 /// Engine-core output for a single request.
 ///
 /// Original Python definition:
@@ -125,6 +139,12 @@ pub struct EngineCoreOutput {
     pub mm_cache_miss_hashes: Option<Vec<String>>,
     #[serde(default)]
     pub new_sampling_mask: Option<OpaqueValue>,
+    /// Per-request speculative-decoding metrics appended by newer v0.28 wheels.
+    #[serde(default)]
+    pub spec_decode_metrics: Option<DiscardedEngineOutputValue>,
+    /// Routed-expert metadata appended by newer v0.28 wheels.
+    #[serde(default)]
+    pub routed_experts_payload: Option<DiscardedEngineOutputValue>,
 }
 
 impl EngineCoreOutput {
@@ -443,6 +463,8 @@ mod tests {
                             num_nans_in_logits: 0,
                             mm_cache_miss_hashes: None,
                             new_sampling_mask: None,
+                            spec_decode_metrics: None,
+                            routed_experts_payload: None,
                         },
                     ],
                     scheduler_stats: None,

@@ -4,12 +4,20 @@
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
+use std::io::Cursor;
+
+use serde::Deserialize as _;
+use sha2::{Digest as _, Sha256};
 use tonic::Status;
 use url::Url;
 use uuid::Uuid;
 use vllm_chat::MediaContentPart;
+use vllm_engine_core_client::protocol::multimodal::{
+    MmFeatureSpec, MmFeatures, MmKwargValue, MmKwargsItem, PlaceholderRange,
+};
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
+use vllm_engine_core_client::protocol::tensor::{WireArrayData, WireTensor};
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, SamplingParams,
     TextDecodeOptions, TextRequest,
@@ -17,10 +25,22 @@ use vllm_text::{
 
 use super::pb;
 
-pub fn media_parts_from_request(
+const MAX_MM_DEPTH: usize = 32;
+const MAX_MM_NODES: usize = 65_536;
+const MAX_MM_TENSOR_RANK: usize = 32;
+const PREPROCESSED_MM_ID_DOMAIN: &[u8] = b"vllm.grpc.preprocessed-mm.v1";
+
+pub enum GrpcMultimodalInput {
+    Raw(Vec<MediaContentPart>),
+    Preprocessed(MmFeatures),
+}
+
+pub fn multimodal_input_from_request(
     media: Vec<pb::MediaItem>,
-) -> Result<Vec<MediaContentPart>, Status> {
-    let mut parts = Vec::with_capacity(media.len());
+) -> Result<GrpcMultimodalInput, Status> {
+    let mut parts = Vec::new();
+    let mut features = Vec::new();
+    let mut wire_nodes = 0usize;
     for (index, item) in media.into_iter().enumerate() {
         match item.modality() {
             pb::Modality::Image => {}
@@ -35,10 +55,23 @@ pub fn media_parts_from_request(
                 )));
             }
         }
+        let source = item.source.ok_or_else(|| {
+            Status::invalid_argument(format!("media[{index}].source is required"))
+        })?;
+        if let pb::media_item::Source::Features(feature) = source {
+            if !parts.is_empty() {
+                return Err(mixed_media_error());
+            }
+            features.push(preprocessed_feature(index, feature, &mut wire_nodes)?);
+            continue;
+        }
+        if !features.is_empty() {
+            return Err(mixed_media_error());
+        }
         let uuid = (!item.uuid.is_empty()).then_some(item.uuid);
         let mime_type = (!item.mime_type.is_empty()).then_some(item.mime_type);
-        let part = match item.source {
-            Some(pb::media_item::Source::Url(url)) => {
+        let part = match source {
+            pb::media_item::Source::Url(url) => {
                 validate_media_uri(index, "url", &url, &["http", "https"])?;
                 MediaContentPart::ImageUrl {
                     url,
@@ -46,7 +79,7 @@ pub fn media_parts_from_request(
                     uuid,
                 }
             }
-            Some(pb::media_item::Source::DataUri(uri)) => {
+            pb::media_item::Source::DataUri(uri) => {
                 validate_media_uri(index, "data_uri", &uri, &["data"])?;
                 MediaContentPart::ImageUrl {
                     url: uri,
@@ -54,21 +87,340 @@ pub fn media_parts_from_request(
                     uuid,
                 }
             }
-            Some(pb::media_item::Source::RawBytes(bytes)) => MediaContentPart::ImageData {
+            pb::media_item::Source::RawBytes(bytes) => MediaContentPart::ImageData {
                 data: bytes,
                 mime_type,
                 uuid,
                 detail: None,
             },
-            None => {
-                return Err(Status::invalid_argument(format!(
-                    "media[{index}].source is required"
-                )));
-            }
+            pb::media_item::Source::Features(_) => unreachable!("handled above"),
         };
         parts.push(part);
     }
-    Ok(parts)
+    if features.is_empty() {
+        return Ok(GrpcMultimodalInput::Raw(parts));
+    }
+
+    features.sort_by_key(|feature| feature.mm_position.offset);
+    for pair in features.windows(2) {
+        let previous_end = pair[0]
+            .mm_position
+            .offset
+            .checked_add(pair[0].mm_position.length)
+            .expect("placeholder range validated above");
+        if previous_end > pair[1].mm_position.offset {
+            return Err(Status::invalid_argument(
+                "preprocessed image feature placeholder ranges overlap",
+            ));
+        }
+    }
+    Ok(GrpcMultimodalInput::Preprocessed(features))
+}
+
+fn mixed_media_error() -> Status {
+    Status::invalid_argument("raw media and preprocessed image features cannot be mixed")
+}
+
+fn preprocessed_feature(
+    index: usize,
+    feature: pb::PreprocessedMediaFeatures,
+    wire_nodes: &mut usize,
+) -> Result<MmFeatureSpec, Status> {
+    let offset = usize::try_from(feature.offset).map_err(|_| {
+        Status::invalid_argument(format!(
+            "media[{index}].features.offset exceeds platform limits"
+        ))
+    })?;
+    let length = usize::try_from(feature.length).map_err(|_| {
+        Status::invalid_argument(format!(
+            "media[{index}].features.length exceeds platform limits"
+        ))
+    })?;
+    if length == 0 {
+        return Err(Status::invalid_argument(format!(
+            "media[{index}].features.length must be positive"
+        )));
+    }
+    offset.checked_add(length).ok_or_else(|| {
+        Status::invalid_argument(format!(
+            "media[{index}].features placeholder range overflows"
+        ))
+    })?;
+    let is_embed = if feature.is_embed.is_empty() {
+        None
+    } else {
+        if feature.is_embed.len() != length {
+            return Err(Status::invalid_argument(format!(
+                "media[{index}].features.is_embed length must equal placeholder length"
+            )));
+        }
+        Some(
+            WireTensor::from_bool(vec![length], feature.is_embed).map_err(|error| {
+                Status::invalid_argument(format!(
+                    "media[{index}].features.is_embed is invalid: {error}"
+                ))
+            })?,
+        )
+    };
+    let raw = feature.kwargs.ok_or_else(|| {
+        Status::invalid_argument(format!(
+            "media[{index}].features.kwargs is required; cache-only features are unsupported"
+        ))
+    })?;
+    let data = decode_mm_kwargs(index, &raw, wire_nodes)?;
+    validate_mm_kwargs(index, &data)?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(PREPROCESSED_MM_ID_DOMAIN);
+    hasher.update(5_u64.to_be_bytes());
+    hasher.update(b"image");
+    hasher.update((raw.len() as u64).to_be_bytes());
+    hasher.update(&raw);
+
+    let fingerprint = format!("{:x}", hasher.finalize());
+
+    Ok(MmFeatureSpec {
+        data: Some(data),
+        modality: "image".to_string(),
+        identifier: format!("grpc-mm:{fingerprint}"),
+        mm_position: PlaceholderRange {
+            offset,
+            length,
+            is_embed,
+        },
+        mm_hash: None,
+    })
+}
+
+fn validate_mm_kwargs(index: usize, kwargs: &MmKwargsItem) -> Result<(), Status> {
+    if kwargs.is_empty() {
+        return Err(Status::invalid_argument(format!(
+            "media[{index}].features.kwargs must not be empty"
+        )));
+    }
+    for element in kwargs.values() {
+        let value = element.data.as_ref().ok_or_else(|| {
+            Status::invalid_argument(format!(
+                "media[{index}].features.kwargs must contain inline data"
+            ))
+        })?;
+        validate_mm_value(index, value, 0)?;
+    }
+    Ok(())
+}
+
+fn validate_mm_value(index: usize, value: &MmKwargValue, depth: usize) -> Result<(), Status> {
+    if depth > MAX_MM_DEPTH {
+        return Err(Status::resource_exhausted(format!(
+            "media[{index}].features.kwargs nesting exceeds {MAX_MM_DEPTH} levels"
+        )));
+    }
+    match value {
+        MmKwargValue::Tensor(tensor) => validate_mm_tensor(index, tensor),
+        MmKwargValue::List(values) => {
+            for value in values {
+                validate_mm_value(index, value, depth + 1)?;
+            }
+            Ok(())
+        }
+        MmKwargValue::Int(_) | MmKwargValue::Float(_) => Ok(()),
+    }
+}
+
+fn validate_mm_tensor(index: usize, tensor: &WireTensor) -> Result<(), Status> {
+    if tensor.shape.len() > MAX_MM_TENSOR_RANK {
+        return Err(Status::invalid_argument(format!(
+            "media[{index}].features.kwargs tensor rank exceeds {MAX_MM_TENSOR_RANK}"
+        )));
+    }
+    let width: usize = match tensor.dtype.as_str() {
+        "bool" | "uint8" | "int8" => 1,
+        "float16" | "bfloat16" | "uint16" | "int16" => 2,
+        "float32" | "uint32" | "int32" => 4,
+        "float64" | "uint64" | "int64" => 8,
+        _ => {
+            return Err(Status::invalid_argument(format!(
+                "media[{index}].features.kwargs has an unsupported tensor dtype"
+            )));
+        }
+    };
+    let expected = tensor
+        .shape
+        .iter()
+        .try_fold(width, |bytes, dim| bytes.checked_mul(*dim))
+        .ok_or_else(|| {
+            Status::invalid_argument(format!(
+                "media[{index}].features.kwargs tensor size overflows"
+            ))
+        })?;
+    match &tensor.data {
+        WireArrayData::RawView(bytes) if bytes.len() == expected => Ok(()),
+        WireArrayData::RawView(bytes) => Err(Status::invalid_argument(format!(
+            "media[{index}].features.kwargs tensor byte length {} does not match expected {expected}",
+            bytes.len()
+        ))),
+        WireArrayData::AuxIndex(aux_index) => Err(Status::invalid_argument(format!(
+            "media[{index}].features.kwargs references auxiliary frame {aux_index}"
+        ))),
+    }
+}
+
+fn decode_mm_kwargs(
+    index: usize,
+    raw: &[u8],
+    wire_nodes: &mut usize,
+) -> Result<MmKwargsItem, Status> {
+    let mut cursor = 0usize;
+    scan_msgpack(raw, &mut cursor, 0, wire_nodes)?;
+    if cursor != raw.len() {
+        return Err(Status::invalid_argument(format!(
+            "media[{index}].features.kwargs contains trailing MessagePack data"
+        )));
+    }
+    let mut deserializer = rmp_serde::Deserializer::new(Cursor::new(raw));
+    deserializer.set_max_depth(MAX_MM_DEPTH);
+    MmKwargsItem::deserialize(&mut deserializer).map_err(|error| {
+        Status::invalid_argument(format!(
+            "media[{index}].features.kwargs is invalid MessagePack: {error}"
+        ))
+    })
+}
+
+fn scan_msgpack(
+    raw: &[u8],
+    cursor: &mut usize,
+    depth: usize,
+    nodes: &mut usize,
+) -> Result<(), Status> {
+    if depth > MAX_MM_DEPTH {
+        return Err(Status::resource_exhausted(
+            "preprocessed image kwargs is nested too deeply",
+        ));
+    }
+    *nodes = nodes
+        .checked_add(1)
+        .ok_or_else(|| Status::resource_exhausted("preprocessed image kwargs is too complex"))?;
+    if *nodes > MAX_MM_NODES {
+        return Err(Status::resource_exhausted(
+            "preprocessed image kwargs contains too many values",
+        ));
+    }
+
+    let marker = take_msgpack(raw, cursor, 1)?[0];
+    match marker {
+        0x00..=0x7f | 0xc0 | 0xc2 | 0xc3 | 0xe0..=0xff => Ok(()),
+        0x80..=0x8f => {
+            scan_msgpack_children(raw, cursor, depth, nodes, usize::from(marker & 0x0f) * 2)
+        }
+        0x90..=0x9f => scan_msgpack_children(raw, cursor, depth, nodes, usize::from(marker & 0x0f)),
+        0xa0..=0xbf => skip_msgpack(raw, cursor, usize::from(marker & 0x1f)),
+        0xc1 => Err(Status::invalid_argument("reserved MessagePack marker")),
+        0xc4 | 0xd9 => {
+            let len = usize::from(read_msgpack_u8(raw, cursor)?);
+            skip_msgpack(raw, cursor, len)
+        }
+        0xc5 | 0xda => {
+            let len = usize::from(read_msgpack_u16(raw, cursor)?);
+            skip_msgpack(raw, cursor, len)
+        }
+        0xc6 | 0xdb => {
+            let len = usize::try_from(read_msgpack_u32(raw, cursor)?)
+                .map_err(|_| Status::resource_exhausted("MessagePack value is too large"))?;
+            skip_msgpack(raw, cursor, len)
+        }
+        0xc7 => {
+            let len = usize::from(read_msgpack_u8(raw, cursor)?);
+            skip_msgpack(raw, cursor, len + 1)
+        }
+        0xc8 => {
+            let len = usize::from(read_msgpack_u16(raw, cursor)?);
+            skip_msgpack(raw, cursor, len + 1)
+        }
+        0xc9 => {
+            let len = usize::try_from(read_msgpack_u32(raw, cursor)?)
+                .map_err(|_| Status::resource_exhausted("MessagePack value is too large"))?;
+            skip_msgpack(raw, cursor, len + 1)
+        }
+        0xca => skip_msgpack(raw, cursor, 4),
+        0xcb => skip_msgpack(raw, cursor, 8),
+        0xcc | 0xd0 => skip_msgpack(raw, cursor, 1),
+        0xcd | 0xd1 => skip_msgpack(raw, cursor, 2),
+        0xce | 0xd2 => skip_msgpack(raw, cursor, 4),
+        0xcf | 0xd3 => skip_msgpack(raw, cursor, 8),
+        0xd4 => skip_msgpack(raw, cursor, 2),
+        0xd5 => skip_msgpack(raw, cursor, 3),
+        0xd6 => skip_msgpack(raw, cursor, 5),
+        0xd7 => skip_msgpack(raw, cursor, 9),
+        0xd8 => skip_msgpack(raw, cursor, 17),
+        0xdc => {
+            let count = usize::from(read_msgpack_u16(raw, cursor)?);
+            scan_msgpack_children(raw, cursor, depth, nodes, count)
+        }
+        0xdd => {
+            let count = usize::try_from(read_msgpack_u32(raw, cursor)?)
+                .map_err(|_| Status::resource_exhausted("MessagePack array is too large"))?;
+            scan_msgpack_children(raw, cursor, depth, nodes, count)
+        }
+        0xde => {
+            let count = usize::from(read_msgpack_u16(raw, cursor)?) * 2;
+            scan_msgpack_children(raw, cursor, depth, nodes, count)
+        }
+        0xdf => {
+            let count = usize::try_from(read_msgpack_u32(raw, cursor)?)
+                .map_err(|_| Status::resource_exhausted("MessagePack map is too large"))?
+                .checked_mul(2)
+                .ok_or_else(|| Status::resource_exhausted("MessagePack map is too large"))?;
+            scan_msgpack_children(raw, cursor, depth, nodes, count)
+        }
+    }
+}
+
+fn scan_msgpack_children(
+    raw: &[u8],
+    cursor: &mut usize,
+    depth: usize,
+    nodes: &mut usize,
+    count: usize,
+) -> Result<(), Status> {
+    if count > MAX_MM_NODES.saturating_sub(*nodes) {
+        return Err(Status::resource_exhausted(
+            "preprocessed image kwargs contains too many values",
+        ));
+    }
+    for _ in 0..count {
+        scan_msgpack(raw, cursor, depth + 1, nodes)?;
+    }
+    Ok(())
+}
+
+fn take_msgpack<'a>(raw: &'a [u8], cursor: &mut usize, len: usize) -> Result<&'a [u8], Status> {
+    let end = cursor
+        .checked_add(len)
+        .filter(|end| *end <= raw.len())
+        .ok_or_else(|| Status::invalid_argument("truncated preprocessed image kwargs"))?;
+    let bytes = &raw[*cursor..end];
+    *cursor = end;
+    Ok(bytes)
+}
+
+fn skip_msgpack(raw: &[u8], cursor: &mut usize, len: usize) -> Result<(), Status> {
+    take_msgpack(raw, cursor, len).map(|_| ())
+}
+
+fn read_msgpack_u8(raw: &[u8], cursor: &mut usize) -> Result<u8, Status> {
+    Ok(take_msgpack(raw, cursor, 1)?[0])
+}
+
+fn read_msgpack_u16(raw: &[u8], cursor: &mut usize) -> Result<u16, Status> {
+    Ok(u16::from_be_bytes(
+        take_msgpack(raw, cursor, 2)?.try_into().expect("fixed two-byte slice"),
+    ))
+}
+
+fn read_msgpack_u32(raw: &[u8], cursor: &mut usize) -> Result<u32, Status> {
+    Ok(u32::from_be_bytes(
+        take_msgpack(raw, cursor, 4)?.try_into().expect("fixed four-byte slice"),
+    ))
 }
 
 fn validate_media_uri(
@@ -135,8 +487,15 @@ pub fn to_text_request(
     let response = req.response.as_ref();
     let kv = req.kv.as_ref();
 
-    let mut sampling_params =
-        build_sampling_params(req.temperature, sampling, decoding, stopping, response)?;
+    let mut sampling_params = if req.native_sampling_params_json.is_empty() {
+        build_sampling_params(req.temperature, sampling, decoding, stopping, response)?
+    } else {
+        serde_json::from_slice::<SamplingParams>(&req.native_sampling_params_json).map_err(
+            |error| {
+                Status::invalid_argument(format!("native_sampling_params_json is invalid: {error}"))
+            },
+        )?
+    };
 
     // Thread KVCacheParameters → SamplingParams fields.
     if let Some(kv) = kv {
@@ -577,11 +936,160 @@ impl ResponseOpts {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use vllm_engine_core_client::protocol::multimodal::{
+        MmBatchedField, MmField, MmFieldElem, MmKwargValue,
+    };
     use vllm_engine_core_client::protocol::output::StopReason;
+    use vllm_engine_core_client::protocol::tensor::{WireArrayData, WireTensor};
     use vllm_text::{FinishReason, Finished, Prompt};
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
-    use super::{ResponseOpts, pb, to_finish_info, to_sequence_output, to_text_request};
+    use super::{
+        GrpcMultimodalInput, ResponseOpts, multimodal_input_from_request, pb, to_finish_info,
+        to_sequence_output, to_text_request,
+    };
+
+    fn encoded_kwargs(data: WireArrayData) -> Vec<u8> {
+        let kwargs = BTreeMap::from([(
+            "pixel_values".to_string(),
+            MmFieldElem {
+                data: Some(MmKwargValue::Tensor(WireTensor {
+                    dtype: "uint8".to_string(),
+                    shape: vec![1],
+                    data,
+                })),
+                field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
+            },
+        )]);
+        rmp_serde::to_vec_named(&kwargs).expect("encode multimodal kwargs")
+    }
+
+    fn preprocessed_image(offset: u64, length: u64, kwargs: Vec<u8>) -> pb::MediaItem {
+        pb::MediaItem {
+            modality: pb::Modality::Image as i32,
+            source: Some(pb::media_item::Source::Features(
+                pb::PreprocessedMediaFeatures {
+                    kwargs: Some(kwargs),
+                    identifier: "producer-id".to_string(),
+                    offset,
+                    length,
+                    mm_hash: Some("image-hash".to_string()),
+                    is_embed: Vec::new(),
+                },
+            )),
+            mime_type: String::new(),
+            uuid: String::new(),
+        }
+    }
+
+    #[test]
+    fn preprocessed_images_decode_and_sort() {
+        let second =
+            preprocessed_image(4, 1, encoded_kwargs(WireArrayData::RawView(vec![2].into())));
+        let first =
+            preprocessed_image(1, 2, encoded_kwargs(WireArrayData::RawView(vec![1].into())));
+
+        let GrpcMultimodalInput::Preprocessed(features) =
+            multimodal_input_from_request(vec![second, first]).expect("valid image features")
+        else {
+            panic!("expected preprocessed features");
+        };
+        assert_eq!(features.len(), 2);
+        assert_eq!(features[0].mm_position.offset, 1);
+        assert_eq!(features[1].mm_position.offset, 4);
+        assert_eq!(features[0].modality, "image");
+        assert!(features[0].identifier.starts_with("grpc-mm:"));
+        assert_ne!(features[0].identifier, features[1].identifier);
+        assert_eq!(features[0].mm_hash, None);
+        assert_eq!(features[1].mm_hash, None);
+    }
+
+    #[test]
+    fn dynamo_msgpack_fixture_decodes() {
+        let kwargs = vec![
+            0x81, 0xac, 0x70, 0x69, 0x78, 0x65, 0x6c, 0x5f, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x73,
+            0x82, 0xa4, 0x64, 0x61, 0x74, 0x61, 0x93, 0xa5, 0x75, 0x69, 0x6e, 0x74, 0x38, 0x91,
+            0x03, 0xc7, 0x03, 0x03, 0x01, 0x02, 0x03, 0xa5, 0x66, 0x69, 0x65, 0x6c, 0x64, 0x92,
+            0xa7, 0x62, 0x61, 0x74, 0x63, 0x68, 0x65, 0x64, 0x81, 0xab, 0x6b, 0x65, 0x65, 0x70,
+            0x5f, 0x6f, 0x6e, 0x5f, 0x63, 0x70, 0x75, 0xc2,
+        ];
+        let GrpcMultimodalInput::Preprocessed(features) =
+            multimodal_input_from_request(vec![preprocessed_image(0, 1, kwargs)])
+                .expect("Dynamo MessagePack fixture")
+        else {
+            panic!("expected preprocessed features");
+        };
+
+        assert_eq!(features.len(), 1);
+        assert!(features[0].data.as_ref().unwrap().contains_key("pixel_values"));
+    }
+
+    #[test]
+    fn preprocessed_images_reject_auxiliary_frames() {
+        let image = preprocessed_image(0, 1, encoded_kwargs(WireArrayData::AuxIndex(1)));
+        let error = match multimodal_input_from_request(vec![image]) {
+            Err(error) => error,
+            Ok(_) => panic!("auxiliary frame must be rejected"),
+        };
+        assert!(error.message().contains("auxiliary frame 1"));
+    }
+
+    #[test]
+    fn preprocessed_images_reject_overlapping_ranges() {
+        let kwargs = || encoded_kwargs(WireArrayData::RawView(vec![1].into()));
+        let error = match multimodal_input_from_request(vec![
+            preprocessed_image(1, 2, kwargs()),
+            preprocessed_image(2, 2, kwargs()),
+        ]) {
+            Err(error) => error,
+            Ok(_) => panic!("overlapping ranges must be rejected"),
+        };
+        assert!(error.message().contains("overlap"));
+    }
+
+    #[test]
+    fn raw_and_preprocessed_images_cannot_be_mixed() {
+        let raw = pb::MediaItem {
+            modality: pb::Modality::Image as i32,
+            source: Some(pb::media_item::Source::RawBytes(vec![1])),
+            mime_type: "image/png".to_string(),
+            uuid: String::new(),
+        };
+        let feature =
+            preprocessed_image(0, 1, encoded_kwargs(WireArrayData::RawView(vec![1].into())));
+        let error = match multimodal_input_from_request(vec![raw, feature]) {
+            Err(error) => error,
+            Ok(_) => panic!("mixed media sources must be rejected"),
+        };
+        assert!(error.message().contains("cannot be mixed"));
+    }
+
+    #[test]
+    fn preprocessed_images_bound_messagepack_depth() {
+        let mut value = MmKwargValue::Int(1);
+        for _ in 0..40 {
+            value = MmKwargValue::List(vec![value]);
+        }
+        let kwargs = BTreeMap::from([(
+            "pixel_values".to_string(),
+            MmFieldElem {
+                data: Some(value),
+                field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
+            },
+        )]);
+        let image = preprocessed_image(
+            0,
+            1,
+            rmp_serde::to_vec_named(&kwargs).expect("encode nested kwargs"),
+        );
+        let error = match multimodal_input_from_request(vec![image]) {
+            Err(error) => error,
+            Ok(_) => panic!("deeply nested kwargs must be rejected"),
+        };
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+    }
 
     fn base_request() -> pb::GenerateRequest {
         pb::GenerateRequest {
@@ -608,6 +1116,60 @@ mod tests {
             .expect("convert ok");
         // The gRPC API defaults to greedy (0.0) when temperature is not specified.
         assert_eq!(text.sampling_params.temperature, Some(0.0));
+    }
+
+    #[test]
+    fn native_sampling_params_preserve_exact_values() {
+        let req = pb::GenerateRequest {
+            temperature: Some(0.7),
+            sampling: Some(pb::RandomSampling {
+                top_k: 7,
+                ..Default::default()
+            }),
+            decoding: Some(pb::DecodingParameters {
+                repetition_penalty: 1.1,
+                ..Default::default()
+            }),
+            response: Some(pb::ResponseOptions {
+                skip_special_tokens: Some(false),
+                ..Default::default()
+            }),
+            native_sampling_params_json: br#"{
+                "temperature": 0.0,
+                "top_k": 0,
+                "repetition_penalty": 2.5,
+                "skip_reading_prefix_cache": false
+            }"#
+            .to_vec(),
+            ..base_request()
+        };
+
+        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        assert_eq!(text.sampling_params.temperature, Some(0.0));
+        assert_eq!(text.sampling_params.top_k, Some(0));
+        assert_eq!(text.sampling_params.repetition_penalty, Some(2.5));
+        assert_eq!(text.sampling_params.skip_reading_prefix_cache, Some(false));
+        assert!(!text.decode_options.skip_special_tokens);
+    }
+
+    #[test]
+    fn native_sampling_params_preserve_omitted_temperature() {
+        let req = pb::GenerateRequest {
+            native_sampling_params_json: br#"{"top_k": 0}"#.to_vec(),
+            ..base_request()
+        };
+
+        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        assert_eq!(text.sampling_params.temperature, None);
+    }
+
+    #[test]
+    fn invalid_native_sampling_params_are_rejected() {
+        let req = pb::GenerateRequest {
+            native_sampling_params_json: b"not-json".to_vec(),
+            ..base_request()
+        };
+        assert!(to_text_request(req, false, &["test-model".to_string()]).is_err());
     }
 
     #[test]

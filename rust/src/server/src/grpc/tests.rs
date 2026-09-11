@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
 use std::io;
@@ -33,11 +34,15 @@ use vllm_engine_core_client::mock_engine::{
 };
 use vllm_engine_core_client::protocol::decode_value;
 use vllm_engine_core_client::protocol::handshake::{EngineCoreReadyResponse, KvEventsConfig};
+use vllm_engine_core_client::protocol::multimodal::{
+    MmBatchedField, MmField, MmFieldElem, MmKwargValue,
+};
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
     UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task_with_ready};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
@@ -237,6 +242,35 @@ impl ChatBackend for FakeMultimodalBackend {
 
 const QWEN_IMAGE_TOKEN_ID: u32 = 151655;
 const TINY_PNG_DATA_URI: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+fn preprocessed_image(offset: u64, length: u64) -> pb::MediaItem {
+    let kwargs = BTreeMap::from([(
+        "pixel_values".to_string(),
+        MmFieldElem {
+            data: Some(MmKwargValue::Tensor(WireTensor::from_raw(
+                "uint8",
+                vec![1],
+                vec![7],
+            ))),
+            field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
+        },
+    )]);
+    pb::MediaItem {
+        modality: pb::Modality::Image as i32,
+        source: Some(pb::media_item::Source::Features(
+            pb::PreprocessedMediaFeatures {
+                kwargs: Some(rmp_serde::to_vec_named(&kwargs).expect("encode image feature")),
+                identifier: "producer-id".to_string(),
+                offset,
+                length,
+                mm_hash: Some("image-hash".to_string()),
+                is_embed: Vec::new(),
+            },
+        )),
+        mime_type: String::new(),
+        uuid: String::new(),
+    }
+}
 
 fn multimodal_backend() -> Arc<dyn ChatTextBackend> {
     let config_path = std::env::temp_dir().join(format!(
@@ -725,6 +759,100 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
         .expect("multimodal generate");
 
     engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_forwards_preprocessed_image_features() {
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_backend(
+            b"engine-grpc-preprocessed-image",
+            default_stream_output_specs(),
+            multimodal_backend(),
+            |request| {
+                let token_ids = request.prompt_token_ids.as_ref().expect("prompt token ids");
+                assert_eq!(
+                    token_ids,
+                    &[11, QWEN_IMAGE_TOKEN_ID, QWEN_IMAGE_TOKEN_ID, 12]
+                );
+                let features = request.mm_features.as_ref().expect("multimodal features");
+                assert_eq!(features.len(), 1);
+                assert_eq!(features[0].modality, "image");
+                assert_eq!(features[0].mm_position.offset, 1);
+                assert_eq!(features[0].mm_position.length, 2);
+                assert!(features[0].identifier.starts_with("grpc-mm:"));
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+
+    client
+        .generate(pb::GenerateRequest {
+            request_id: "test-preprocessed-image".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: vec![11, QWEN_IMAGE_TOKEN_ID, QWEN_IMAGE_TOKEN_ID, 12],
+            })),
+            media: vec![preprocessed_image(1, 2)],
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 10,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("preprocessed image generate");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn preprocessed_image_range_must_fit_prompt() {
+    let (inference_service, control_service, engine_health, _engine_task) =
+        setup_grpc_service_with_backend(
+            b"engine-grpc-preprocessed-image-bounds",
+            default_stream_output_specs(),
+            multimodal_backend(),
+            |_| panic!("invalid request must not reach EngineCore"),
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+
+    let error = client
+        .generate(pb::GenerateRequest {
+            request_id: "test-preprocessed-image-bounds".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: vec![11, QWEN_IMAGE_TOKEN_ID, 12],
+            })),
+            media: vec![preprocessed_image(1, 3)],
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 10,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect_err("out-of-bounds image range must be rejected");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains("exceeds token_ids"));
     server_task.abort();
 }
 
@@ -1529,12 +1657,15 @@ async fn control_reports_server_and_model_info() {
     assert_eq!(server.total_kv_blocks, DEFAULT_MOCK_NUM_GPU_BLOCKS);
     assert_eq!(server.max_running_requests, 256);
     assert_eq!(server.max_batched_tokens, 8_192);
+    assert!(server.supports_native_sampling_params_json);
+    assert!(server.supports_preprocessed_media_features);
     let parallelism = server.parallelism.expect("parallelism metadata");
     assert_eq!(parallelism.tensor_parallel_size, 1);
     assert_eq!(parallelism.pipeline_parallel_size, 1);
     assert_eq!(parallelism.data_parallel_size, 1);
     assert_eq!(parallelism.data_parallel_rank, 0);
     assert_eq!(parallelism.decode_context_parallel_size, 1);
+    assert_eq!(parallelism.world_size, 1);
     let rl = server.rl_capabilities.expect("RL capabilities");
     assert!(!rl.weight_transfer_enabled);
     assert!(rl.weight_transfer_backend.is_empty());

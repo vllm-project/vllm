@@ -76,21 +76,48 @@ impl InferenceServiceImpl {
             text_request.arrival_time = Some(arrival_time);
             text_request.data_parallel_rank = data_parallel_rank;
 
-            let media = convert::media_parts_from_request(media)?;
-            if !media.is_empty() {
-                let Prompt::TokenIds(mut token_ids) = text_request.prompt else {
-                    return Err(Status::invalid_argument(
-                        "multimodal gRPC requests must provide token_ids input",
-                    ));
-                };
-                let mm_features = self
-                    .state
-                    .chat
-                    .prepare_media(media, &mut token_ids)
-                    .await
-                    .map_err(|error| Status::internal(error.to_report_string()))?;
-                text_request.prompt = Prompt::TokenIds(token_ids);
-                text_request.mm_features = mm_features;
+            match convert::multimodal_input_from_request(media)? {
+                convert::GrpcMultimodalInput::Raw(media) if !media.is_empty() => {
+                    let Prompt::TokenIds(mut token_ids) = text_request.prompt else {
+                        return Err(Status::invalid_argument(
+                            "multimodal gRPC requests must provide token_ids input",
+                        ));
+                    };
+                    let mm_features = self
+                        .state
+                        .chat
+                        .prepare_media(media, &mut token_ids)
+                        .await
+                        .map_err(|error| Status::internal(error.to_report_string()))?;
+                    text_request.prompt = Prompt::TokenIds(token_ids);
+                    text_request.mm_features = mm_features;
+                }
+                convert::GrpcMultimodalInput::Raw(_) => {}
+                convert::GrpcMultimodalInput::Preprocessed(features) => {
+                    if !self.state.chat.supports_multimodal() {
+                        return Err(Status::invalid_argument(
+                            "model does not support multimodal input",
+                        ));
+                    }
+                    let Prompt::TokenIds(token_ids) = &text_request.prompt else {
+                        return Err(Status::invalid_argument(
+                            "multimodal gRPC requests must provide token_ids input",
+                        ));
+                    };
+                    for (index, feature) in features.iter().enumerate() {
+                        let in_prompt = feature
+                            .mm_position
+                            .offset
+                            .checked_add(feature.mm_position.length)
+                            .is_some_and(|end| end <= token_ids.len());
+                        if !in_prompt {
+                            return Err(Status::invalid_argument(format!(
+                                "media[{index}].features placeholder range exceeds token_ids"
+                            )));
+                        }
+                    }
+                    text_request.mm_features = Some(features);
+                }
             }
 
             Ok(text_request)

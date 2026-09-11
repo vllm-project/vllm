@@ -46,6 +46,7 @@ impl ControlServiceImpl {
             data_parallel_size: self.state.data_parallel_size().min(u32::MAX as usize) as u32,
             data_parallel_rank: ready.data_parallel_rank,
             decode_context_parallel_size: ready.decode_context_parallel_size,
+            world_size: ready.world_size,
         }
     }
 
@@ -151,6 +152,8 @@ impl pb::control_server::Control for ControlServiceImpl {
             max_running_requests: ready.max_num_seqs,
             max_batched_tokens: ready.max_num_batched_tokens,
             rl_capabilities: Some(self.rl_capabilities()),
+            supports_native_sampling_params_json: true,
+            supports_preprocessed_media_features: true,
         }))
     }
 
