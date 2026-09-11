@@ -182,7 +182,8 @@ class DeepseekV32Model(torch.nn.Module):
         # DSA is always sparse (has index_topk); allocate the shared top-k
         # buffer the indexer writes and the sparse MLA backend reads.
         self.is_v32 = True
-        topk_indices_buffer = torch.empty(
+        # On the model, not a local: the MTP proposer shares it with the draft.
+        self.topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             config.index_topk,
             dtype=torch.int32,
@@ -207,7 +208,7 @@ class DeepseekV32Model(torch.nn.Module):
             lambda prefix: DeepseekV32DecoderLayer(
                 vllm_config=vllm_config,
                 prefix=prefix,
-                topk_indices_buffer=topk_indices_buffer,
+                topk_indices_buffer=self.topk_indices_buffer,
             ),
             prefix=f"{prefix}.layers",
         )
