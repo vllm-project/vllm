@@ -41,4 +41,5 @@ pqdm
 # --- Vision & Multimodal ---
 timm
 albumentations
+decord==0.6.0
 mistral-common[image,audio]
