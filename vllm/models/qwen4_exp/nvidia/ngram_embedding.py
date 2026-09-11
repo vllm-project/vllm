@@ -467,10 +467,21 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
 
         flat_ids = input_ids.reshape(-1).long()
         if flat_ids.numel():
+            # Triton refuses an fp8e4nv pointer on SM 8.x, so the kernel fails
+            # to compile on Ampere even though it does no arithmetic. The
+            # lookup is a masked gather, so pass the raw bytes instead. FP8 is
+            # one byte wide, so a uint8 view keeps the shape and the strides,
+            # and the copy is byte identical. _reduce_etp_embeddings below
+            # views FP8 as int8 for the same reason.
+            weight_arg = self._uva_weight
+            output_arg = output
+            if weight_arg.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+                weight_arg = weight_arg.view(torch.uint8)
+                output_arg = output_arg.view(torch.uint8)
             _lookup_ple_embedding_from_pinned_kernel[(flat_ids.numel(),)](
-                self._uva_weight,
+                weight_arg,
                 flat_ids,
-                output,
+                output_arg,
                 self.embedding_dim,
                 self.shard_indices.org_vocab_start_index,
                 self.shard_indices.org_vocab_end_index,
