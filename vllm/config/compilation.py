@@ -1417,6 +1417,10 @@ class CompilationConfig:
                 cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
             logger.warning(msg)
 
+        # SAGE_ATTN hybrid uses FlashAttn for decode; keep UNIFORM_SINGLE_TOKEN
+        # resolve path (FULL_AND_PIECEWISE when attention splitting is on).
+        # Do not force FULL_DECODE_ONLY.
+
         # check that if we are doing decode full-cudagraphs it is supported
         if (
             cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
@@ -1431,11 +1435,18 @@ class CompilationConfig:
                 self.splitting_ops_contain_attention()
                 or self.use_inductor_graph_partition
             ):
+                # Backends with AttentionCGSupport.NEVER run attention outside
+                # the graph with host syncs / dynamic allocs. Capturing the
+                # surrounding inductor pieces often yields *empty* CUDA graphs
+                # ("captured on wrong device or stream"); replaying them
+                # silently corrupts activations and produces garbled tokens.
+                # Prefer NONE over PIECEWISE for NEVER backends until CG-safe.
                 msg += (
-                    "; setting cudagraph_mode=PIECEWISE because "
-                    "attention is compiled piecewise"
+                    "; setting cudagraph_mode=NONE because "
+                    f"{min_cg_attn_backend} cannot safely use piecewise "
+                    "cudagraphs (empty-graph capture risk)"
                 )
-                cudagraph_mode = CUDAGraphMode.PIECEWISE
+                cudagraph_mode = CUDAGraphMode.NONE
             else:
                 msg += (
                     "; setting cudagraph_mode=NONE because "

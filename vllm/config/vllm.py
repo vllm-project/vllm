@@ -1536,6 +1536,10 @@ class VllmConfig:
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
+        # SAGE_ATTN hybrid: exact sage prefill + FlashAttn decode. Do NOT force
+        # FULL_DECODE_ONLY — UNIFORM_SINGLE_TOKEN_DECODE resolves to
+        # FULL_AND_PIECEWISE when attention splitting is enabled.
+
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE

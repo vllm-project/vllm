@@ -161,6 +161,8 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
                 AttentionBackendEnum.TURBOQUANT,
+                # Explicit opt-in preferred; kept last so auto mode is unchanged.
+                AttentionBackendEnum.SAGE_ATTN,
             ]
         else:
             return [
@@ -169,6 +171,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
                 AttentionBackendEnum.TURBOQUANT,
+                AttentionBackendEnum.SAGE_ATTN,
             ]
 
 
