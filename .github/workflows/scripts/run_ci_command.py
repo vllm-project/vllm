@@ -59,6 +59,7 @@ RETRY_COMMANDS = frozenset({COMMAND_RETRY_FAILED, COMMAND_RETRY_AMD_FAILED})
 CANCEL_COMMANDS = frozenset({COMMAND_CANCEL_CI, COMMAND_CANCEL_AMD_CI})
 ALL_CI_COMMANDS = UPSTREAM_CI_COMMANDS | AMD_CI_COMMANDS
 CI_AUTHORIZED_COMMENT_MARKER = "<!-- vllm-ci-authorized -->"
+MAX_RETRY_COMMITS_BEHIND_BASE = 50
 READY_LABELS = {"ready", "ready-run-all-tests"}
 TRUSTED_PERMISSIONS = {"admin", "maintain", "write"}
 ACTIVE_BUILD_STATES = {
@@ -775,6 +776,8 @@ def notify_authorized(
             "target branch. Merge or rebase onto the latest target branch, then "
             "rerun the command. Append `--allow-stale` to a run command to test "
             "an outdated branch at your own risk.\n"
+            f"- Retries allow at most {MAX_RETRY_COMMITS_BEHIND_BASE} commits "
+            "behind the upstream target branch.\n"
             "- `/ci retry` retries failed jobs in the CI build for the current "
             "PR head. If the current head has no CI build, it starts a new CI "
             "build for the current head containing only jobs that failed in "
@@ -828,7 +831,11 @@ def prepare_pr_for_ci(
     command: str,
 ) -> tuple[dict[str, Any], str]:
     base_ref = pr["base"]["ref"]
-    no_action = "No new CI build was started."
+    no_action = (
+        "No CI build was started or retried."
+        if command in RETRY_COMMANDS
+        else "No new CI build was started."
+    )
     try:
         behind = github.get_commits_behind_base(base_ref, pr["head"]["sha"])
         current_pr = github.get_pr(pr["number"])
@@ -861,13 +868,24 @@ def prepare_pr_for_ci(
             print(warning)
         return current_pr, warning
 
-    if behind:
-        raise CiPreparationError(
-            f"{lag} Your branch must contain every commit currently on upstream "
-            f"`{base_ref}`. {no_action} "
-            f"Merge or rebase onto the latest `{base_ref}`, then rerun `{command}`."
+    max_behind = MAX_RETRY_COMMITS_BEHIND_BASE if command in RETRY_COMMANDS else 0
+    if behind > max_behind:
+        requirement = (
+            f"Retries allow at most {max_behind} commits behind the target branch."
+            if command in RETRY_COMMANDS
+            else f"Your branch must contain every commit currently on upstream "
+            f"`{base_ref}`."
+        )
+        override_hint = (
             " To test this branch at your own risk, "
             f"use `{command}{ALLOW_STALE_SUFFIX}`."
+            if command in RUN_CI_COMMAND_ENV
+            else ""
+        )
+        raise CiPreparationError(
+            f"{lag} {requirement} {no_action} "
+            f"Merge or rebase onto the latest `{base_ref}`, then rerun `{command}`."
+            f"{override_hint}"
         )
     return current_pr, ""
 
@@ -944,6 +962,7 @@ def handle_retry_failed(
                 f"{ci_name} was already requested by this comment: {build['web_url']}"
             )
 
+        prepare_pr_for_ci(github, pr, command)
         retried = buildkite.retry_failed_jobs(build["number"], RETRY_STATES)
         if retried["retried_jobs_count"] == 0:
             return (
@@ -1012,12 +1031,7 @@ def handle_retry_failed(
             f"({source_build['web_url']})."
         )
 
-    current_pr = github.get_pr(pr["number"])
-    if current_pr["state"] != "open" or current_pr["head"]["sha"] != pr["head"]["sha"]:
-        return (
-            "The PR head changed while processing the command. "
-            f"Comment `{retry_command}` again."
-        )
+    current_pr, _ = prepare_pr_for_ci(github, pr, retry_command)
 
     retry_build = buildkite.create_build(
         create_retry_build_payload(

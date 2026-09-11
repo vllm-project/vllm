@@ -678,17 +678,23 @@ class RunCiCommandTest(unittest.TestCase):
                     )
                     self.assertEqual(transport.calls[0]["method"], "GET")
 
-    def test_unknown_lag_or_changed_pr_prevents_runs(self) -> None:
+    def test_unknown_lag_or_changed_pr_prevents_runs_and_retries(self) -> None:
         for command in (
             COMMAND_RUN_CI,
             COMMAND_RUN_AMD_CI,
             f"{COMMAND_RUN_CI} --allow-stale",
             f"{COMMAND_RUN_AMD_CI} --allow-stale",
+            COMMAND_RETRY_FAILED,
+            COMMAND_RETRY_AMD_FAILED,
         ):
             for fault in ("api", "head", "closed", "base"):
                 with self.subTest(command=command, fault=fault):
                     github = FakeGitHub()
-                    buildkite = FakeBuildkite([[], []])
+                    buildkite = FakeBuildkite(
+                        [[{"number": 123, "pull_request": {"id": 42}}]]
+                        if " retry" in command
+                        else [[], []]
+                    )
 
                     def check(
                         base_ref: str,
@@ -716,6 +722,55 @@ class RunCiCommandTest(unittest.TestCase):
                     self.assertEqual(buildkite.retry_calls, [])
                     self.assertTrue(github.comments[0].startswith("❌ "))
                     self.assertNotIn("Triggered", github.comments[0])
+
+    def test_retries_allow_at_most_50_commits_behind_base(self) -> None:
+        source = {
+            "number": 122,
+            "commit": "earlier-head",
+            "pull_request": {"id": 42},
+            "state": "failed",
+            "finished_at": "2026-07-28T02:00:00Z",
+            "web_url": "https://buildkite.example/builds/122",
+        }
+        for command, new_head in (
+            (COMMAND_RETRY_FAILED, False),
+            (COMMAND_RETRY_AMD_FAILED, False),
+            (COMMAND_RETRY_FAILED, True),
+        ):
+            for behind in (0, 50, 51, 100):
+                with self.subTest(command=command, new_head=new_head, behind=behind):
+                    github = FakeGitHub(
+                        behind=behind, pr=make_pr(base={"ref": "release/1.0"})
+                    )
+                    buildkite = FakeBuildkite(
+                        [[], [source]] if new_head else [[source]],
+                        [[{"type": "script", "step_key": "cpu-tests"}]],
+                    )
+                    run(make_event(command), github, buildkite)
+
+                    self.assertEqual(
+                        github.lag_queries,
+                        [("release/1.0", github.pr["head"]["sha"])],
+                    )
+                    if behind <= 50:
+                        if new_head:
+                            self.assertEqual(len(buildkite.created_builds), 1)
+                            self.assertEqual(
+                                buildkite.created_builds[0]["commit"],
+                                github.pr["head"]["sha"],
+                            )
+                        else:
+                            self.assertEqual(
+                                buildkite.retry_calls, [(122, RETRY_STATES)]
+                            )
+                    else:
+                        self.assertEqual(buildkite.created_builds, [])
+                        self.assertEqual(buildkite.retry_calls, [])
+                        self.assertIn(
+                            f"{behind} commits behind upstream `release/1.0`",
+                            github.comments[0],
+                        )
+                        self.assertIn("50", github.comments[0])
 
     def test_amd_run_ignores_blocked_builds(self) -> None:
         for metadata in ({}, {"github-comment-id": "98"}):
@@ -1036,7 +1091,6 @@ class RunCiCommandTest(unittest.TestCase):
 
     def test_ci_retry_retries_failed_jobs_while_build_is_running(self) -> None:
         github = FakeGitHub(
-            behind=100,
             permission="read",
             pr=make_pr(labels=[{"name": "ready"}]),
         )
@@ -1056,12 +1110,11 @@ class RunCiCommandTest(unittest.TestCase):
         run(make_event(COMMAND_RETRY_FAILED, "author"), github, buildkite)
 
         self.assertEqual(buildkite.retry_calls, [(123, RETRY_STATES)])
-        self.assertEqual(github.lag_queries, [])
+        self.assertEqual(github.lag_queries, [("main", "0123456789abcdef")])
         self.assertIn("Queued 3 failed job", github.comments[0])
 
     def test_amd_ci_retry_retries_only_the_current_head_build(self) -> None:
         github = FakeGitHub(
-            behind=100,
             permission="read",
             pr=make_pr(labels=[{"name": "ready"}]),
         )
@@ -1082,7 +1135,7 @@ class RunCiCommandTest(unittest.TestCase):
         run(make_event(COMMAND_RETRY_AMD_FAILED, "author"), github, buildkite)
 
         self.assertEqual(buildkite.retry_calls, [(321, RETRY_STATES)])
-        self.assertEqual(github.lag_queries, [])
+        self.assertEqual(github.lag_queries, [("main", "0123456789abcdef")])
         self.assertIn("Buildkite AMD CI #321", github.comments[0])
 
     def test_amd_ci_retry_requires_a_build_for_the_current_head(self) -> None:
@@ -1104,7 +1157,6 @@ class RunCiCommandTest(unittest.TestCase):
 
     def test_ci_retry_creates_filtered_build_for_new_head(self) -> None:
         github = FakeGitHub(
-            behind=100,
             permission="read",
             pr=make_pr(labels=[{"name": "ready"}]),
         )
@@ -1146,7 +1198,7 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertEqual(len(buildkite.created_builds), 1)
         payload = buildkite.created_builds[0]
         self.assertEqual(payload["commit"], "0123456789abcdef")
-        self.assertEqual(github.lag_queries, [])
+        self.assertEqual(github.lag_queries, [("main", "0123456789abcdef")])
         self.assertEqual(payload["message"], "PR #42 /ci retry by @author")
         self.assertEqual(
             json.loads(payload["env"]["VLLM_CI_ONLY_STEP_KEYS"]),
