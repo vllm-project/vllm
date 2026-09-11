@@ -10,7 +10,10 @@ from torch import nn
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.base_loader import (
+    BaseModelLoader,
+    _has_online_quant,
+)
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig,
     deserialize_tensorizer_model,
@@ -22,7 +25,9 @@ from vllm.model_executor.model_loader.tensorizer import (
 from vllm.model_executor.model_loader.utils import (
     get_model_architecture,
     initialize_model,
+    process_weights_after_loading,
 )
+from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
@@ -84,6 +89,10 @@ class TensorizerLoader(BaseModelLoader):
                 model = initialize_model(vllm_config=vllm_config, prefix=prefix)
 
             model.load_weights(self._get_weights_iterator())
+        target_device = torch.device(device_config.device)
+        if _has_online_quant(model):
+            finalize_layerwise_processing(model, model_config)
+        process_weights_after_loading(model, model_config, target_device)
         return model.eval()
 
     def download_model(self, model_config: ModelConfig) -> None:
@@ -135,7 +144,11 @@ class TensorizerLoader(BaseModelLoader):
                         tensorizer_config=tensorizer_config, vllm_config=vllm_config
                     )
             self.load_weights(model, model_config)
-            return model
+            target_device = torch.device(device_config.device)
+            if _has_online_quant(model):
+                finalize_layerwise_processing(model, model_config)
+            process_weights_after_loading(model, model_config, target_device)
+            return model.eval()
         return self._load_model_serialized_cpu(vllm_config=vllm_config, prefix=prefix)
 
     @staticmethod
