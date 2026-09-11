@@ -34,7 +34,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
-from vllm.v1.attention.backends.mla.sparse_utils import run_length_regions
+from vllm.v1.attention.backends.mla.sparse_utils import request_row_bounds
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
@@ -278,8 +278,8 @@ def plan_pcp_region_packing(
     ``row_seq_lens`` holds the whole request's extent on every row.
     """
     assert row_req_idx.size > 0, "no prefill rows to pack"
-    _, region_first_row = run_length_regions(row_req_idx)
-    row_bounds = np.append(region_first_row, row_req_idx.shape[0])
+    row_bounds = request_row_bounds(row_req_idx)
+    region_first_row = row_bounds[:-1]
     region_seq_lens = row_seq_lens[region_first_row].astype(np.int64)
     gathered_seq_lens = (
         (region_seq_lens + dcp_world_size - 1) // dcp_world_size
@@ -322,7 +322,9 @@ def build_pcp_global_chunk_plan(
     assert row_req_idx.shape == scheduled.shape
     num_rows = len(scheduled)
 
-    region_of_row, region_first_row = run_length_regions(row_req_idx)
+    row_bounds = request_row_bounds(row_req_idx)
+    region_first_row = row_bounds[:-1]
+    region_of_row = np.repeat(np.arange(len(region_first_row)), np.diff(row_bounds))
 
     region_extent = scheduled[region_first_row]
     assert np.all(region_extent > 0), (

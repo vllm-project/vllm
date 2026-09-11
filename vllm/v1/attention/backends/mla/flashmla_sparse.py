@@ -31,7 +31,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
-    run_length_regions,
+    request_row_bounds,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
@@ -204,9 +204,11 @@ def plan_gathered_prefill(
     assert row_seq_lens.ndim == 1 and row_seq_lens.size > 0
     assert row_req_idx.shape == row_seq_lens.shape
 
-    region_of_row, region_first_row = run_length_regions(row_req_idx)
-    region_of_row = region_of_row.astype(np.int32)
-    region_first_row = region_first_row.astype(np.int32)
+    row_bounds = request_row_bounds(row_req_idx)
+    region_first_row = row_bounds[:-1].astype(np.int32)
+    region_of_row = np.repeat(
+        np.arange(len(region_first_row), dtype=np.int32), np.diff(row_bounds)
+    )
 
     extents = row_seq_lens[region_first_row].astype(np.int64)
     assert np.all(extents > 0), (

@@ -25,18 +25,20 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.block_table import get_block_table_width
 
 
-def run_length_regions(req_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Group adjacent rows of one request into regions.
+def request_row_bounds(req_idx: np.ndarray) -> np.ndarray:
+    """Bounds of the runs of adjacent rows that belong to one request: run
+    ``r`` is rows ``[bounds[r], bounds[r + 1])``.
 
-    Returns each row's region and each region's first row.
+    Under PCP a rank holds two adjacent chunk rows of a split prefill; the
+    sparse backends give such a run one KV region.
     """
     assert req_idx.size > 0
-    starts_region = np.ones(req_idx.shape, dtype=bool)
-    np.not_equal(req_idx[1:], req_idx[:-1], out=starts_region[1:])
-    assert starts_region.sum() == len(np.unique(req_idx)), (
+    is_first_row = np.ones(req_idx.shape, dtype=bool)
+    is_first_row[1:] = req_idx[1:] != req_idx[:-1]
+    assert is_first_row.sum() == len(np.unique(req_idx)), (
         "rows of one request must be adjacent"
     )
-    return np.cumsum(starts_region) - 1, np.flatnonzero(starts_region)
+    return np.append(np.flatnonzero(is_first_row), req_idx.size)
 
 
 def flat_kv_row_view(
