@@ -805,6 +805,60 @@ def select_deepseek_v4_mxfp4_moe_backend(
     )
 
 
+# Candidate backends, in preference order, for quant methods that load the
+# packed MXFP4 checkpoint layout (uint8 `w13/w2_weight_packed` plus uint8 E8M0
+# `weight_scale`, group_size=32): compressed-tensors W4A4 and AutoRound/INC.
+# Must stay in sync with `convert_packed_weight_to_mxfp4_moe_kernel_format`:
+# CUTLASS swizzles scales, DeepGEMM packs them, XPU consumes the checkpoint
+# packing, and Marlin repacks weights and scales.
+PACKED_MXFP4_CANDIDATE_BACKENDS = (
+    Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4,
+    Mxfp4MoeBackend.DEEPGEMM_MXFP4,
+    Mxfp4MoeBackend.XPU,
+    Mxfp4MoeBackend.MARLIN,
+)
+
+
+def select_packed_mxfp4_moe_backend(
+    config: FusedMoEConfig,
+    method_name: str,
+) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
+    """Select the backend for a packed-MXFP4-checkpoint MoE method.
+
+    Candidates come from `PACKED_MXFP4_CANDIDATE_BACKENDS`; the oracle drops
+    the ones the deployment cannot use (device, expert parallelism, activation
+    format), which is how DeepEP V2's PaddedStandard dispatch reaches
+    `DeepGemmFP4Experts` instead of a Standard-only kernel.
+
+    Args:
+        config: MoE configuration.
+        method_name: Quant method name used in the error message.
+
+    Returns:
+        The selected backend and the expert class that serves it.
+
+    Raises:
+        ValueError: The requested ``moe_backend`` names no candidate, or no
+            candidate supports the deployment configuration.
+    """
+    if config.moe_backend == "b12x":
+        # b12x has its own precision policy (VLLM_B12X_MOE_FP4_FORCE_A16).
+        backend, experts_cls = select_mxfp4_moe_backend(config)
+        assert experts_cls is not None
+        return backend, experts_cls
+
+    candidates = list(PACKED_MXFP4_CANDIDATE_BACKENDS)
+    if config.moe_backend != "auto":
+        candidates = narrow_mxfp4_candidates(config.moe_backend, candidates)
+        if not candidates:
+            raise ValueError(
+                f"moe_backend={config.moe_backend!r} is not supported for "
+                f"{method_name} MXFP4 MoE; expected one of "
+                f"{[b.value for b in PACKED_MXFP4_CANDIDATE_BACKENDS]}."
+            )
+    return select_mxfp4_moe_backend_from(config, candidates)
+
+
 def mxfp4_round_up_hidden_size_and_intermediate_size(
     backend: Mxfp4MoeBackend,
     hidden_size: int,
@@ -1896,6 +1950,97 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             "Expected TRTLLM, FlashInfer CUTLASS, Triton, AITER, XPU, or "
             "emulation backend."
         )
+
+
+def _process_weights_cutlass(layer: torch.nn.Module) -> None:
+    """Swizzle weight scales from the flat checkpoint layout [E, N, K//32] to
+    the CUTLASS tiled layout [E, numMTiles*numKTiles*512]."""
+    from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+        swizzle_mxfp4_scales,
+    )
+
+    E = layer.w13_weight_scale.shape[0]
+    w13_N = layer.w13_weight_scale.shape[1]
+    w13_scale_K = layer.w13_weight_scale.shape[2]
+    w13_K = w13_scale_K * 32
+
+    w2_M = layer.w2_weight_scale.shape[1]
+    w2_scale_N = layer.w2_weight_scale.shape[2]
+    w2_N = w2_scale_N * 32
+
+    swizzled_w13 = []
+    swizzled_w2 = []
+    for e_idx in range(E):
+        s13 = layer.w13_weight_scale[e_idx]
+        sw13 = swizzle_mxfp4_scales(s13, w13_N, w13_K)
+        swizzled_w13.append(sw13.reshape(w13_N, w13_scale_K))
+        s2 = layer.w2_weight_scale[e_idx]
+        sw2 = swizzle_mxfp4_scales(s2, w2_M, w2_N)
+        swizzled_w2.append(sw2.reshape(w2_M, w2_scale_N))
+
+    layer.w13_weight_scale = torch.nn.Parameter(
+        torch.stack(swizzled_w13), requires_grad=False
+    )
+    layer.w2_weight_scale = torch.nn.Parameter(
+        torch.stack(swizzled_w2), requires_grad=False
+    )
+
+
+def _process_weights_deepgemm(layer: torch.nn.Module) -> None:
+    w13_scale, w2_scale = pack_deepgemm_mxfp4_scales(
+        layer.w13_weight,
+        layer.w2_weight,
+        layer.w13_weight_scale,
+        layer.w2_weight_scale,
+    )
+    layer.w13_weight_scale = torch.nn.Parameter(w13_scale, requires_grad=False)
+    layer.w2_weight_scale = torch.nn.Parameter(w2_scale, requires_grad=False)
+
+
+def convert_packed_weight_to_mxfp4_moe_kernel_format(
+    mxfp4_backend: Mxfp4MoeBackend,
+    layer: torch.nn.Module,
+) -> None:
+    """Convert a packed MXFP4 checkpoint into backend-specific kernel format.
+
+    Renames the ``w13/w2_weight_packed`` parameters registered by the
+    packed-checkpoint quant methods (compressed-tensors W4A4, AutoRound/INC) to
+    the ``w13/w2_weight`` the kernels read, then rewrites the scales in place
+    for ``mxfp4_backend``. Handles every backend in
+    ``PACKED_MXFP4_CANDIDATE_BACKENDS``; XPU consumes the checkpoint layout
+    directly and so needs no scale conversion.
+
+    Args:
+        mxfp4_backend: The selected backend.
+        layer: The layer whose parameters are being prepared, modified in
+            place.
+    """
+    layer.w13_weight = torch.nn.Parameter(
+        layer.w13_weight_packed.data, requires_grad=False
+    )
+    delattr(layer, "w13_weight_packed")
+
+    layer.w2_weight = torch.nn.Parameter(
+        layer.w2_weight_packed.data, requires_grad=False
+    )
+    delattr(layer, "w2_weight_packed")
+
+    if mxfp4_backend == Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4:
+        _process_weights_cutlass(layer)
+    elif mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
+        _process_weights_deepgemm(layer)
+    elif mxfp4_backend in (Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN):
+        from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+            prepare_moe_fp4_layer_for_marlin,
+        )
+
+        logger.warning_once(
+            "Your GPU does not have native support for FP4 computation "
+            "but FP4 quantization is being used. Weight-only FP4 "
+            "compression will be used leveraging the Marlin kernel. "
+            "This may degrade performance for compute-heavy workloads."
+        )
+        prepare_moe_fp4_layer_for_marlin(layer)
 
 
 def make_mxfp4_moe_quant_config(

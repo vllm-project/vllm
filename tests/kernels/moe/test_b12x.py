@@ -501,17 +501,12 @@ def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
     )
 
     monkeypatch.setattr(
-        ct_mxfp4.CutlassExpertsMxfp4,
-        "_supports_current_device",
-        lambda: False,
+        ct_mxfp4,
+        "select_packed_mxfp4_moe_backend",
+        lambda moe, method_name: (Mxfp4MoeBackend.B12X_MXFP4_MXFP8, B12xExperts),
     )
     monkeypatch.setattr(
-        ct_mxfp4,
-        "select_mxfp4_moe_backend",
-        lambda moe: (Mxfp4MoeBackend.B12X_MXFP4_MXFP8, B12xExperts),
-    )
-    monkeypatch.setattr(
-        ct_mxfp4,
+        "vllm.model_executor.layers.quantization.utils.marlin_utils_fp4."
         "prepare_moe_fp4_layer_for_marlin",
         lambda layer: pytest.fail("b12x must not use Marlin packing"),
     )
