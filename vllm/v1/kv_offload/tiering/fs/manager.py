@@ -95,13 +95,14 @@ class FileSystemTierManager(SecondaryTierManager):
     get_finished_jobs() polls job completion and returns completed JobResults.
 
     Cross-process sharing:
-        In order to enable KV cache sharing between multiple vLLM instances
-        using the same ``root_dir`` (e.g., via a shared PVC) the environment
-        variable ``PYTHONHASHSEED`` must be set to the same fixed value
-        (e.g., "0") on all instances. Without this, each process initializes
-        ``NONE_HASH`` (the chain-hash seed for block content hashes) with
-        random bytes, producing different block filenames for identical token
-        content.
+        KV cache sharing between multiple vLLM instances using the same
+        ``root_dir`` (e.g., via a shared PVC) works by default: ``NONE_HASH``
+        (the chain-hash seed for block content hashes) is derived from a fixed
+        default seed, so identical token content produces identical block
+        filenames across instances. Setting the ``PYTHONHASHSEED`` environment
+        variable to the same value on all instances overrides the default seed,
+        and is required to share a cache when using a non-cryptographic
+        prefix-caching hash algorithm, which seeds ``NONE_HASH`` randomly.
     """
 
     medium: ClassVar[Medium] = Medium.STORAGE
@@ -222,7 +223,7 @@ class FileSystemTierManager(SecondaryTierManager):
             batch_store_block,
             [self.file_mapper.get_file_name(key) for key in keys],
             self._primary_kv_view,
-            [int(bid) * self._block_size for bid in job_metadata.block_ids],
+            [int(cid) * self._block_size for cid in job_metadata.chunk_ids],
             self._block_size,
             self._use_o_direct,
         )
@@ -236,7 +237,7 @@ class FileSystemTierManager(SecondaryTierManager):
         keys = list(job_metadata.keys)
         self._load_job_keys[job_id] = keys
         paths = [self.file_mapper.get_file_name(key) for key in keys]
-        offsets = [int(bid) * self._block_size for bid in job_metadata.block_ids]
+        offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
 
         def load_task() -> None:
             try:

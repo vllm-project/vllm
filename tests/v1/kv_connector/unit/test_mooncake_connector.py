@@ -11,6 +11,7 @@ import pytest
 import torch
 import zmq.asyncio
 
+from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import envs
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
@@ -25,6 +26,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
     _align_transfer_regions,
+    _compute_sender_transfer_plan,
+    _validate_asymmetric_region_lengths,
     get_mooncake_bootstrap_addr,
     should_launch_bootstrap_server,
 )
@@ -32,15 +35,102 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
 )
 from vllm.utils.network_utils import get_open_port
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayout,
 )
 from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
+
+
+@pytest.mark.parametrize(
+    ("remote_tp_size", "expected_dst_offsets"),
+    [
+        (1, [0, None, 65536, None, 131072, None, 196608, None]),
+        (2, [0, None, 65536, None, 0, None, 65536, None]),
+    ],
+)
+@pytest.mark.parametrize("local_tp_rank", range(8))
+def test_sender_plan_replicated_gqa_tp8_to_smaller_tp(
+    remote_tp_size,
+    expected_dst_offsets,
+    local_tp_rank,
+):
+    expected_dst_offset = expected_dst_offsets[local_tp_rank]
+    plan = _compute_sender_transfer_plan(
+        local_tp_rank=local_tp_rank,
+        local_tp_size=8,
+        remote_tp_rank=local_tp_rank // (8 // remote_tp_size),
+        remote_tp_size=remote_tp_size,
+        local_kv_block_len=65536,
+        remote_kv_block_len=262144 // remote_tp_size,
+        producer_cache_replicated=True,
+        total_num_kv_heads=4,
+    )
+    if expected_dst_offset is None:
+        assert not plan[0]
+    else:
+        assert plan == (True, 0, expected_dst_offset, 65536)
+
+
+@pytest.mark.parametrize(
+    ("local_tp_size", "expected_src_offsets"),
+    [
+        (1, [0, 0, 65536, 65536, 131072, 131072, 196608, 196608]),
+        (2, [0, 0, 65536, 65536, 0, 0, 65536, 65536]),
+        (4, [0] * 8),
+    ],
+)
+@pytest.mark.parametrize("remote_tp_rank", range(8))
+def test_sender_plan_gqa_to_replicated_tp8(
+    local_tp_size,
+    expected_src_offsets,
+    remote_tp_rank,
+):
+    local_head_count = 4 // local_tp_size
+    plan = _compute_sender_transfer_plan(
+        local_tp_rank=remote_tp_rank // (8 // local_tp_size),
+        local_tp_size=local_tp_size,
+        remote_tp_rank=remote_tp_rank,
+        remote_tp_size=8,
+        local_kv_block_len=local_head_count * 65536,
+        remote_kv_block_len=65536,
+        producer_cache_replicated=False,
+        total_num_kv_heads=4,
+    )
+    assert plan == (True, expected_src_offsets[remote_tp_rank], 0, 65536)
+
+
+@pytest.mark.parametrize(
+    "local_tp,remote_tp,local_len,remote_len,valid",
+    [
+        (1, 8, 262144, 65536, True),
+        (8, 1, 65536, 262144, True),
+        (1, 8, 262144, 131072, False),
+        (8, 1, 131072, 262144, False),
+    ],
+)
+def test_region_length_validation_checks_replicated_gqa_heads(
+    local_tp, remote_tp, local_len, remote_len, valid
+):
+    """Replicated heads must have matching, whole per-head payloads."""
+    local_region = TransferRegion("layer", 0, 0, local_len, local_len)
+    remote_region = TransferRegion("layer", 0, 0, remote_len, remote_len)
+
+    assert (
+        _validate_asymmetric_region_lengths(
+            local_regions=[local_region],
+            remote_regions=[remote_region],
+            local_tp_size=local_tp,
+            remote_tp_size=remote_tp,
+            producer_cache_replicated=local_tp > 4,
+            total_num_kv_heads=4,
+        )
+        is None
+    ) == valid
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
@@ -149,9 +239,13 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
     worker.is_kv_producer = True
     worker.tp_rank = 0
     worker.tp_size = 1
+    worker.use_mla = False
     worker.kv_cache_config = _make_test_kv_cache_config()
     worker._physical_blocks_per_logical_kv_block = 1
-    worker.transfer_topo = SimpleNamespace(local_replicates_kv_cache=False)
+    worker.transfer_topo = SimpleNamespace(
+        local_replicates_kv_cache=False,
+        total_num_kv_heads=4,
+    )
 
     block_len = 256
     remote_regions = [
@@ -1093,7 +1187,19 @@ async def test_worker_get_finished_timeout(monkeypatch):
         assert "tx-active" in prefill_worker.reqs_need_send
 
 
-def test_register_kv_caches():
+@pytest.mark.parametrize(
+    ("layout", "separate_kv_head_groups"),
+    [
+        (KVCacheLayout.LBHNC, False),
+        (KVCacheLayout.BLHNC, False),
+        (KVCacheLayout.BHLNC, False),
+        # LHBNC gives each head group its own region; the K/V split doubles the
+        # head count but the registration shape is driven by the layout.
+        (KVCacheLayout.LHBNC, False),
+        (KVCacheLayout.LHBNC, True),
+    ],
+)
+def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool):
     """Tests the memory registration logic with the underlying Mooncake engine."""
 
     vllm_config = create_vllm_config(
@@ -1118,15 +1224,23 @@ def test_register_kv_caches():
         worker = connector.connector_worker
         mock_thread.return_value.is_alive.return_value = False
 
-        kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-            num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+        spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=4,
+            head_size=64,
+            dtype=torch.float16,
+            num_head_slots=2 if separate_kv_head_groups else None,
+            state_content_bytes=4 * 64 * 2 if separate_kv_head_groups else None,
         )
-        tensor1 = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-        tensor2 = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-        kv_caches = {
-            "model.layers.0.self_attn": tensor1,
-            "model.layers.1.self_attn": tensor2,
-        }
+        layer_names = [
+            "model.layers.0.self_attn",
+            "model.layers.1.self_attn",
+        ]
+        for layer_name in layer_names:
+            worker._layer_specs[layer_name] = spec
+        raw = torch.zeros(2 * 2 * spec.page_size_bytes, dtype=torch.int8)
+        tensor1, tensor2 = dense_kv_cache_views(raw, spec, 2, 2, layout)
+        kv_caches = dict(zip(layer_names, (tensor1, tensor2)))
 
         with patch.object(
             worker.engine, "batch_register_memory", return_value=0
@@ -1135,16 +1249,35 @@ def test_register_kv_caches():
 
             mock_batch_register.assert_called_once()
             registered_ptrs, registered_lens = mock_batch_register.call_args[0]
-            expected_ptrs = {tensor.data_ptr() for tensor in kv_caches.values()}
-            assert set(registered_ptrs) == expected_ptrs
-            assert set(registered_lens) == {tensor1.nbytes}
+            assert registered_ptrs == [raw.data_ptr()]
+            assert registered_lens == [raw.nbytes]
 
-            # Verify block_len_per_layer is set correctly.
-            assert len(worker.block_len_per_layer) == len(registered_ptrs)
-            for bl in worker.block_len_per_layer:
-                assert bl == tensor1.nbytes // tensor1.shape[0]
-            assert worker.registered_layer_names == list(kv_caches)
-            assert worker.registered_layer_indices == [0, 1]
+            if not layout.is_block_compact:
+                expected_addrs = [
+                    cache[:, head_idx].data_ptr()
+                    for cache in (tensor1, tensor2)
+                    for head_idx in range(cache.shape[1])
+                ]
+                head_block_bytes = tensor1.stride(0) * tensor1.element_size()
+                assert worker.kv_caches_base_addr == expected_addrs
+                assert worker.block_len_per_layer == [head_block_bytes] * len(
+                    expected_addrs
+                )
+                assert worker.kv_block_len_per_layer == [head_block_bytes] * len(
+                    expected_addrs
+                )
+                assert worker.registered_layer_names == [
+                    layer_name
+                    for layer_name in layer_names
+                    for _ in range(tensor1.shape[1])
+                ]
+            else:
+                assert len(worker.block_len_per_layer) == len(kv_caches)
+                for bl in worker.block_len_per_layer:
+                    assert bl == tensor1.stride(0) * tensor1.element_size()
+                assert worker.kv_block_len_per_layer == [spec.page_size_bytes] * 2
+                assert worker.registered_layer_names == list(kv_caches)
+                assert worker.registered_layer_indices == [0, 1]
 
 
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
@@ -1175,8 +1308,9 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
         worker.use_mla = True
         worker.transfer_topo.is_mla = True
 
-        # MLA cache tensor: shape[-2] is the block size.
-        mla_cache = torch.zeros((2, 16, 96), dtype=torch.float16)
+        # MLA cache tensor: shape[-2] is the block size and each block's
+        # byte stride matches the cache spec page size.
+        mla_cache = torch.zeros((2, 16, 512), dtype=torch.float16)
         # Eagle3/GQA-like cache tensor: shape[-2] is num_kv_heads, not block size.
         eagle_cache = torch.zeros((2, 16, 8, 64), dtype=torch.float16)
         kv_caches = {
