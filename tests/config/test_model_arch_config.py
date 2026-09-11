@@ -212,6 +212,26 @@ def test_legacy_modelopt_config_without_producer_is_normalized():
     assert convertor.get_quantization_config()["quant_method"] == "modelopt_fp4"
 
 
+def test_modelopt_mixed_precision_config_is_normalized():
+    quantization_config = {
+        "producer": {"name": "modelopt"},
+        "quantization": {
+            "quant_algo": "MIXED_PRECISION",
+            "kv_cache_quant_algo": "MIXED_PRECISION",
+            "kv_cache_schema_version": 1,
+            "kv_cache_quantized_layers": {
+                "model.layers.0.self_attn": {"quant_algo": "FP8"},
+                "model.layers.1.self_attn": {"quant_algo": "NVFP4"},
+            },
+        },
+    }
+    hf_config = PretrainedConfig(quantization_config=quantization_config)
+
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+
+    assert convertor.get_quantization_config()["quant_method"] == "modelopt_mixed"
+
+
 def _layer(**overrides) -> ModelArchitectureConfig:
     fields = dict(
         architectures=["X"],
