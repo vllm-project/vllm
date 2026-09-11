@@ -716,11 +716,12 @@ def rocm_fp8_paged_mqa_logits_triton(
     )
 
     # Memory-bound over the KV range: split each row's keys across programs so
-    # few-row / long-context launches still fill the GPU. All terms are static
-    # at launch, so the grid stays CUDA-graph-safe.
+    # few-row / long-context launches still fill the GPU. Cap splits at the
+    # device CU count (304 on gfx942, 256 on gfx950) rather than a gfx950-sized
+    # constant. All terms are static at launch, so the grid stays CUDA-graph-safe.
     rows = batch_size * next_n
     tiles_cap = (max_model_len + BLOCK_KV - 1) // BLOCK_KV
-    N_SPLITS = max(1, min(256, tiles_cap, 1024 // rows))
+    N_SPLITS = max(1, min(max(1, _decode_cu_count()), tiles_cap, 1024 // rows))
     _fp8_paged_mqa_logits_decode_kernel[(rows, N_SPLITS)](
         q_fp8,
         kv_val,

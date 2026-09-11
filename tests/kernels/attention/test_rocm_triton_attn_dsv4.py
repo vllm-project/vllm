@@ -1310,3 +1310,72 @@ def test_get_cached_wo_a_bf16_fp8_blockscale_caches() -> None:
 
     # Second call returns the same cached object.
     assert _get_cached_wo_a_bf16(wo_a, n_local_groups, o_lora_rank, hidden_dim) is out
+
+
+@requires_split_decode_arch
+@torch.inference_mode()
+def test_fp8_paged_mqa_logits_triton_matches_torch_ref() -> None:
+    """Block-flat Triton decode logits vs the eager torch reference.
+
+    Compare only valid key positions: the kernel skips the -inf pad that
+    the torch ref writes past seq_len.
+    """
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    device = torch.device("cuda")
+    init_workspace_manager(device)
+    torch.manual_seed(0)
+
+    fp8_dtype = current_platform.fp8_dtype()
+    batch_size = 2
+    next_n = 1
+    num_heads = 4
+    head_size = 128
+    block_size = 64
+    max_model_len = 256
+    seq_lens = [180, 64]
+    num_pages = [(seq_len + block_size - 1) // block_size for seq_len in seq_lens]
+    num_blocks = sum(num_pages)
+
+    q = torch.randn(
+        batch_size, next_n, num_heads, head_size, device=device, dtype=torch.bfloat16
+    ).to(fp8_dtype)
+    weights = torch.rand(
+        batch_size * next_n, num_heads, device=device, dtype=torch.float32
+    )
+    context_lens = torch.tensor(seq_lens, device=device, dtype=torch.int32)
+    block_tables = torch.full(
+        (batch_size, max(num_pages)), 0, device=device, dtype=torch.int32
+    )
+    page = 0
+    for i, n_pages in enumerate(num_pages):
+        block_tables[i, :n_pages] = torch.arange(
+            page, page + n_pages, device=device, dtype=torch.int32
+        )
+        page += n_pages
+
+    kv_cache = torch.empty(
+        num_blocks, block_size, 1, head_size + 4, device=device, dtype=torch.uint8
+    )
+    values = torch.randn(
+        num_blocks, block_size, head_size, device=device, dtype=torch.bfloat16
+    ).to(fp8_dtype)
+    scales = torch.rand(
+        num_blocks, block_size, device=device, dtype=torch.float32
+    ).clamp(min=1e-3)
+    kv_flat = kv_cache.view(num_blocks, -1)
+    scale_off = block_size * head_size
+    kv_flat[:, :scale_off] = values.reshape(num_blocks, -1).view(torch.uint8)
+    kv_flat[:, scale_off:] = scales.contiguous().view(torch.uint8).view(num_blocks, -1)
+
+    got = mod.rocm_fp8_paged_mqa_logits_triton(
+        q, kv_cache, weights, context_lens, block_tables, max_model_len
+    )
+    ref = mod.fp8_paged_mqa_logits_torch(
+        q, kv_cache, weights, context_lens, block_tables, max_model_len
+    )
+    for i, seq_len in enumerate(seq_lens):
+        torch.testing.assert_close(
+            got[i, :seq_len], ref[i, :seq_len], atol=2e-3, rtol=2e-3
+        )
