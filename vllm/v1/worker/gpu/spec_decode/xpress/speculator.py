@@ -20,26 +20,29 @@ class XPressSpeculator(DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
         hf = self.draft_model_config.hf_config
-        self.num_query_per_req = 1 + self.num_speculative_steps
-        import os
 
-        env_passes = os.environ.get("XPRESS_NUM_PASSES")
-        self.num_jacobi_passes = (
-            int(env_passes) if env_passes else int(getattr(hf, "xpress_num_passes", 6))
-        )
+        # Same convention as DFlash and DSpark; the parent already rejects the
+        # nested dflash_config form, this covers the top-level key XPress
+        # checkpoints carry. XPress is trained in the fill-in layout -- slot 0
+        # carries the verified anchor and only slots 1..N are predicted -- and
+        # the refiner's kernels bake that layout into their write masks and
+        # readout row count, so shift is rejected rather than run as fill-in.
+        if getattr(hf, "sample_from_anchor", False):
+            raise ValueError(
+                "sample_from_anchor=True is not supported for XPress: the refiner "
+                "is trained and served in the fill-in layout (anchor at slot 0, "
+                "slots 1..N predicted)."
+            )
+        self.sample_from_anchor = False
+        self.num_query_per_req = 1 + self.num_speculative_steps
+
+        self.num_jacobi_passes = int(getattr(hf, "xpress_num_passes", 6))
         logger.info("XPress: K=%d Jacobi passes", self.num_jacobi_passes)
-        # Block slot 0 holds the anchor -- a verified token. Its refined output is
-        # discarded, so only its latent matters, and that reaches the draft slots
-        # through the single mixer column L[:, k, 0].
+        # Query offset 0 of each request is the anchor. Its refined output is
+        # discarded; its latent reaches the draft slots through mixer column 0.
         self._anchor_idx = (
             torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
             * self.num_query_per_req
-        )
-        # XPress consumes the DRAFTER's own hidden width; the base class widens
-        # self.hidden_size for HC-multiplexed models, which this is not.
-        draft_hidden = self.draft_model_config.get_hidden_size()
-        self.hidden_states = torch.zeros(
-            self.max_num_tokens, draft_hidden, dtype=self.dtype, device=device
         )
 
     def load_draft_model(

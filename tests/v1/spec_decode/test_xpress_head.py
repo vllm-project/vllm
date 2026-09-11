@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.model_executor.models.xpress_head import XPressRefinerHead
+from vllm.model_executor.models.qwen3_xpress import XPressRefinerHead
 
 V, H, B, R = 61, 32, 8, 16
 
