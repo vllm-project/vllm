@@ -20,7 +20,8 @@ P = ParamSpec("P")
 # ``(grid, launch_kwargs)`` or ``(grid, launch_kwargs, outputs)`` for
 # self-allocating kernels.
 LaunchSpec = (
-    tuple[tuple[int, ...], dict[str, Any]] | tuple[tuple[int, ...], dict[str, Any], Any]
+    tuple[tuple[int, ...] | None, dict[str, Any]]
+    | tuple[tuple[int, ...] | None, dict[str, Any], Any]
 )
 DispatchSpec = LaunchSpec
 
@@ -312,7 +313,8 @@ def kernel_launcher(
         inputs = {
             name: value for name, value in bound.arguments.items() if name != "self"
         }
-        self.launch(grid, tuple(inputs), tuple(inputs.values()), **launch_kwargs)
+        if grid is not None:
+            self.launch(grid, tuple(inputs), tuple(inputs.values()), **launch_kwargs)
         return outputs
 
     return wrapper
