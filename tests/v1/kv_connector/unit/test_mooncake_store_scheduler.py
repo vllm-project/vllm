@@ -57,8 +57,10 @@ def _make_connector_block_state(
     block_ids: tuple[list[int], ...] | None = None,
     offloads: list[tuple[int, int, int]] | None = None,
 ) -> KVConnectorBlockState:
+    tables = {} if block_ids is None else {"req-0": block_ids}
     return KVConnectorBlockState(
-        block_ids={} if block_ids is None else {"req-0": block_ids},
+        req_ids=set(tables),
+        resolve_block_ids=tables.__getitem__,
         boundary_state_offloads=({} if offloads is None else {"req-0": offloads}),
     )
 
