@@ -185,8 +185,6 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
-    jit_warmup_registry: JitWarmupRegistry
-
     @JitWarmupRegistry.capture
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
@@ -398,7 +396,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logger.info_once("Loading model from scratch...")
 
             # Capture warmup providers selected while constructing the model.
-            with self.jit_warmup_registry.activate():
+            with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
                 self.model = model_loader.load_model(
                     vllm_config=self.vllm_config,
                     model_config=self.vllm_config.model_config,
@@ -460,7 +458,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Initialize samplers. Model states may override via custom_sampler().
         if self.is_last_pp_rank and not self.is_pooling_model:
-            with self.jit_warmup_registry.activate():
+            with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
                 sampler_kwargs: dict[str, Any] = {
                     "max_num_reqs": self.max_num_reqs,
                     "vocab_size": self.vocab_size,
@@ -739,7 +737,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.kv_caches: list[torch.Tensor] = []
         # Capture warmup providers that depend on allocated KV-cache strides.
-        with self.jit_warmup_registry.activate():
+        with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
             kv_caches_dict = init_kv_cache(
                 self.kv_caches,
                 self.compilation_config.static_forward_context,

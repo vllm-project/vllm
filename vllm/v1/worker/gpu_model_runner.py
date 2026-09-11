@@ -498,8 +498,6 @@ class ExecuteModelState(NamedTuple):
 class GPUModelRunner(
     LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ECConnectorModelRunnerMixin
 ):
-    jit_warmup_registry: JitWarmupRegistry
-
     @JitWarmupRegistry.capture
     def __init__(
         self,
@@ -5341,7 +5339,7 @@ class GPUModelRunner(
                     self.load_config.load_format = "dummy"
                 model_loader = get_model_loader(self.load_config)
                 # Capture warmup providers selected while constructing the model.
-                with self.jit_warmup_registry.activate():
+                with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
                     self.model = model_loader.load_model(
                         vllm_config=self.vllm_config, model_config=self.model_config
                     )
@@ -7304,7 +7302,7 @@ class GPUModelRunner(
                 self.parallel_config.cp_kv_cache_interleave_size
             )
             # Capture warmup providers registered after final KV-cache geometry is known
-            with self.jit_warmup_registry.activate():
+            with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
                 self.input_batch = InputBatch(
                     max_num_reqs=self.max_num_reqs,
                     max_model_len=max_model_len,
@@ -7454,7 +7452,7 @@ class GPUModelRunner(
         # Reinitialize need to after initialize_attn_backend
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
         # Capture warmup providers that depend on allocated KV-cache strides.
-        with self.jit_warmup_registry.activate():
+        with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
             kv_caches = self.initialize_kv_cache_tensors(
                 kv_cache_config,
                 kernel_block_sizes,

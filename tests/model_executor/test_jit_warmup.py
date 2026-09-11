@@ -579,8 +579,6 @@ def test_registry_records_only_inside_model_setup_context() -> None:
 
 def test_registry_capture() -> None:
     class Owner:
-        jit_warmup_registry: JitWarmupRegistry
-
         @JitWarmupRegistry.capture
         def __init__(
             self,
@@ -593,9 +591,9 @@ def test_registry_capture() -> None:
     config = _config()
     owner = Owner(config, kernel)
 
-    assert len(owner.jit_warmup_registry) == 1
+    assert len(owner.jit_warmup_registry) == 1  # type: ignore[attr-defined]
     kernel.register_warmup(5, config)
-    assert len(owner.jit_warmup_registry) == 1
+    assert len(owner.jit_warmup_registry) == 1  # type: ignore[attr-defined]
 
 
 def test_registry_expands_requests_and_deduplicates_owner_keys() -> None:
