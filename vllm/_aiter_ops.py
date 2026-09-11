@@ -175,18 +175,26 @@ def is_aiter_found_and_supported_on_rdna4() -> bool:
 
 @functools.cache
 def _load_gemm_tuned_configs(
-    q_dtype_w: torch.dtype, csv_path: str
-) -> set[tuple[int, int, int]]:
+    csv_path: str,
+    filters: tuple[tuple[str, object], ...],
+    key_cols: tuple[str, ...] = ("N", "K", "M"),
+) -> set[tuple[int, ...]]:
     try:
         df = pd.read_csv(csv_path).drop_duplicates()
-        df = df[df["q_dtype_w"] == str(q_dtype_w)]
-        return set(zip(df["N"].astype(int), df["K"].astype(int), df["M"].astype(int)))
+        for col, val in filters:
+            if col not in df.columns:
+                continue
+            if isinstance(val, int):
+                df = df[df[col].astype(int) == val]
+            else:
+                df = df[df[col].astype(str) == str(val)]
+        return set(zip(*(df[c].astype(int) for c in key_cols)))
     except Exception:
         return set()
 
 
 def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -> bool:
-    configs = _load_gemm_tuned_configs(q_dtype_w, csv_path)
+    configs = _load_gemm_tuned_configs(csv_path, (("q_dtype_w", q_dtype_w),))
     l_m = (
         [1, 2, 4]
         + list(range(8, 513, 8))
@@ -2135,13 +2143,15 @@ class rocm_aiter_ops:
             if not current_platform.is_rocm():
                 return
 
-            from vllm.platforms.rocm import on_gfx11
+            from vllm.platforms.rocm import on_gfx11, on_gfx950
 
-            if on_gfx11() and not _OPS_REGISTERED:
+            # This op has self-contained Triton/C++ implementations on gfx11
+            # and gfx950.  Only its optional top-k fast path comes from aiter.
+            if (on_gfx11() or on_gfx950()) and not _OPS_REGISTERED:
                 direct_register_custom_op(
                     op_name="rocm_aiter_sparse_attn_indexer",
                     op_func=rocm_aiter_sparse_attn_indexer,
-                    mutates_args=["topk_indices_buffer"],
+                    mutates_args=["topk_indices_buffer", "candidate_blocks"],
                     fake_impl=rocm_aiter_sparse_attn_indexer_fake,
                     dispatch_key=current_platform.dispatch_key,
                 )
@@ -2319,7 +2329,7 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_sparse_attn_indexer",
                 op_func=rocm_aiter_sparse_attn_indexer,
-                mutates_args=["topk_indices_buffer"],
+                mutates_args=["topk_indices_buffer", "candidate_blocks"],
                 fake_impl=rocm_aiter_sparse_attn_indexer_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
@@ -3199,6 +3209,20 @@ class rocm_aiter_ops:
 
         csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_FILE
         return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
+
+    @staticmethod
+    def is_blockscale_bpreshuffle_tuned(n: int, k: int) -> bool:
+        """Whether (N, K) has a tuned aiter blockscale bpreshuffle config."""
+        if not current_platform.is_rocm():
+            return False
+        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
+
+        csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
+        gfx = aiter_gemm_a8w8_ops.get_gfx()
+        cu_num = aiter_gemm_a8w8_ops.get_cu_num()
+        return (n, k) in _load_gemm_tuned_configs(
+            csv_path, (("gfx", gfx), ("cu_num", cu_num)), key_cols=("N", "K")
+        )
 
     @staticmethod
     def shuffle_weight(
