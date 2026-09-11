@@ -1,4 +1,31 @@
-# Post-Benchmark Visualization
+# Post-Benchmark Reporting
+
+## HTML summary
+
+`run_full_sweep.sh` automatically generates a self-contained HTML report after
+the final recommendation:
+
+```text
+sweep-report.html
+```
+
+The report uses Python's standard library and does not require plotting
+dependencies. It summarizes selected settings, stage results, SLA metrics, and
+all measured candidates. Report-generation failures are warnings and do not
+change sweep success.
+
+The generated `report.py` uses the same TTFT and TPOT objectives supplied when
+the sweep package was created. It displays both objectives and validates them
+against every available recommendation JSON before writing the report.
+
+Regenerate it manually or select a different output path:
+
+```bash
+./report.py
+./report.py --output results/my-sweep-report.html
+```
+
+## Optional figures
 
 Visualization is an independent analysis step. It reads completed sweep
 results and does not start a server, run a benchmark, or change a tuning
