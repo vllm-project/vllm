@@ -60,14 +60,11 @@ class UnsupportedPlatformForIPCError(Exception):
     """Raised when the current platform cannot share CUDA IPC handles."""
 
 
-def check_ipc_platform_support(*, where: str) -> None:
+def check_ipc_platform_support() -> None:
     """Hard-error unless the current platform can share CUDA IPC handles.
 
     Only CUDA/ROCm tensors get a real IPC handle from ``TensorEntry``; other
     platforms (e.g. XPU) would silently ship every tensor by value instead.
-
-    Args:
-        where: Short tag ("daemon"/"engine") used in the error message.
 
     Raises:
         UnsupportedPlatformForIPCError: If the current platform is not
@@ -76,9 +73,9 @@ def check_ipc_platform_support(*, where: str) -> None:
     if current_platform.is_cuda_alike():
         return
     raise UnsupportedPlatformForIPCError(
-        f"[weight_cache:{where}] platform {current_platform.device_name!r} "
-        "does not support CUDA IPC weight sharing; only CUDA and ROCm are "
-        "supported. Use the default --load-format for this platform."
+        f"platform {current_platform.device_name!r} does not support CUDA IPC "
+        "weight sharing; only CUDA and ROCm are supported. Use the default "
+        "--load-format for this platform."
     )
 
 

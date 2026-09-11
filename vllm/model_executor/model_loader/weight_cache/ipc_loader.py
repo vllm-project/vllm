@@ -121,7 +121,7 @@ class IpcModelLoader(BaseModelLoader):
     ) -> nn.Module:
         # An unsupported platform is a permanent misconfiguration rather than
         # a transient daemon outage, so it is raised even when fallback is on.
-        check_ipc_platform_support(where="engine")
+        check_ipc_platform_support()
         state_fetched = False
         try:
             entries, aliases = self._fetch_entries(model_config)

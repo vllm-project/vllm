@@ -358,7 +358,7 @@ def main() -> None:
         )
     # Config-only so it can fail before any model loading; the quant method
     # check needs the created model and runs in get_daemon_model.
-    check_ipc_platform_support(where="daemon")
+    check_ipc_platform_support()
     parallel_config = vllm_config.parallel_config
     _reject_unsupported_parallelism(parallel_config)
     tp_size = parallel_config.tensor_parallel_size
