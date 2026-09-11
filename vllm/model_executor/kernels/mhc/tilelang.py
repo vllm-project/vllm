@@ -111,6 +111,7 @@ def mhc_pre_delayed_tilelang(
         (tokens, hc_mult, hc_mult), (tokens, hidden_size), and (tokens, hc_mult).
     """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+        _HC_PRENORM_GEMM_TILELANG_KERNEL,
         mhc_pre_big_fuse_tilelang,
     )
     from vllm.model_executor.kernels.mhc.warmup import (
@@ -170,7 +171,14 @@ def mhc_pre_delayed_tilelang(
     if use_deep_gemm:
         tf32_hc_prenorm_gemm(x, fn, mixes, sqrsum, n_splits)
     else:
-        _tilelang_hc_prenorm_gemm(x, fn, mixes, sqrsum, input_size, 1)
+        _HC_PRENORM_GEMM_TILELANG_KERNEL(
+            x,
+            fn,
+            mixes,
+            sqrsum,
+            hidden_size,
+            hc_mult,
+        )
     if norm_weight is not None:
         assert norm_weight.shape == (hidden_size,)
         assert norm_weight.dtype == torch.bfloat16 and norm_weight.is_contiguous()
