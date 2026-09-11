@@ -45,7 +45,12 @@ def test_sampling_matches_global_rows(
                 segment.global_batch_slice
             ]
         manager._global_batch = NS(
-            logits_indices=torch.tensor(starts[1:] - 1, dtype=torch.int64),
+            # Dense consumers may request multiple logits per request.
+            logits_indices=(
+                torch.arange(len(global_hidden))
+                if dense
+                else torch.tensor(starts[1:] - 1, dtype=torch.int64)
+            ),
             num_reqs=len(q),
         )
         managers.append(manager)
@@ -86,7 +91,9 @@ def test_sampling_matches_global_rows(
             hidden,
             needs_prompt_hidden_states=dense,
         )
-        torch.testing.assert_close(sampled, global_hidden[starts[1:] - 1])
+        torch.testing.assert_close(
+            sampled, global_hidden[manager._global_batch.logits_indices]
+        )
         if dense:
             torch.testing.assert_close(restored, global_hidden)
         else:
