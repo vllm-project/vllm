@@ -35,6 +35,10 @@ pub struct CollectedTextOutput {
     /// Connector-specific encoder cache transfer parameters for disaggregated
     /// serving.
     pub ec_transfer_params: Option<serde_json::Value>,
+    /// Routing decisions for the returned prompt suffix and generated tokens.
+    pub routed_experts: Option<vllm_engine_core_client::protocol::opaque_data::OpaqueData>,
+    /// Sampling support sets aligned with generated token positions.
+    pub sampling_mask: Option<Vec<Vec<u32>>>,
 }
 
 #[allow(clippy::manual_async_fn, reason = "specify `Send` bound")]
@@ -90,6 +94,8 @@ impl<T: TextOutputStream> T {
                                 usage: vllm_llm::TokenUsage::default(),
                                 kv_transfer_params: None,
                                 ec_transfer_params: None,
+                                routed_experts: None,
+                                sampling_mask: None,
                             })
                         };
 
@@ -99,6 +105,8 @@ impl<T: TextOutputStream> T {
                             collected.usage = finished.usage;
                             collected.kv_transfer_params = finished.kv_transfer_params;
                             collected.ec_transfer_params = finished.ec_transfer_params;
+                            collected.routed_experts = finished.routed_experts;
+                            collected.sampling_mask = finished.sampling_mask;
                             return Ok(collected);
                         }
                     }
@@ -173,6 +181,8 @@ mod tests {
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    routed_experts: None,
+                    sampling_mask: None,
                 })),
             }),
         ]);
@@ -295,6 +305,8 @@ mod tests {
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    routed_experts: None,
+                    sampling_mask: None,
                 })),
             }),
         ]);

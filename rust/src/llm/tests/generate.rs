@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::BTreeSet;
-use std::sync::Once;
+use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -12,12 +12,14 @@ use uuid::Uuid;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
+use vllm_engine_core_client::protocol::opaque_data::OpaqueData;
 use vllm_engine_core_client::protocol::output::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
     EngineCoreOutputs, RequestBatchOutputs,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
+use vllm_engine_core_client::protocol::sampling_mask::{MaybeWireSamplingMask, SamplingMask};
 use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
@@ -326,6 +328,11 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                                     num_local_cached_tokens: 1,
                                     ..Default::default()
                                 }),
+                                new_sampling_mask: Some(MaybeWireSamplingMask::Direct(
+                                    SamplingMask {
+                                        rows: vec![vec![1, 33, 99]],
+                                    },
+                                )),
                                 ..request_output_with_logprobs(
                                     &request.request_id,
                                     vec![33],
@@ -334,15 +341,23 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                                     Some(prompt_logprobs()),
                                 )
                             },
-                            request_output_with_logprobs_and_kv(
-                                &request.request_id,
-                                vec![44],
-                                Some(EngineCoreFinishReason::Stop),
-                                Some(logprobs_for_position(44, -0.3, 1, 88, -0.4)),
-                                None,
-                                Some(serde_json::json!({"connector": "x"})),
-                                None,
-                            ),
+                            EngineCoreOutput {
+                                routed_experts_payload: Some(OpaqueData::new(vec![1, 2, 3, 4])),
+                                new_sampling_mask: Some(MaybeWireSamplingMask::Direct(
+                                    SamplingMask {
+                                        rows: vec![vec![2, 44, 88]],
+                                    },
+                                )),
+                                ..request_output_with_logprobs_and_kv(
+                                    &request.request_id,
+                                    vec![44],
+                                    Some(EngineCoreFinishReason::Stop),
+                                    Some(logprobs_for_position(44, -0.3, 1, 88, -0.4)),
+                                    None,
+                                    Some(serde_json::json!({"connector": "x"})),
+                                    None,
+                                )
+                            },
                         ],
                         ..Default::default()
                     }
@@ -375,6 +390,43 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
         collected.kv_transfer_params,
         Some(serde_json::json!({"connector": "x"}))
     );
+    assert_eq!(
+        collected.routed_experts,
+        Some(OpaqueData::new(vec![1, 2, 3, 4]))
+    );
+    assert_eq!(
+        collected.sampling_mask,
+        Some(vec![vec![1, 33, 99], vec![2, 44, 88]])
+    );
+}
+
+#[tokio::test]
+async fn collect_output_rejects_partial_sampling_mask() {
+    let output = vllm_llm::GenerateOutput {
+        request_id: "req-partial-mask".to_string(),
+        prompt_info: Some(GeneratePromptInfo {
+            prompt_token_ids: Arc::from([11_u32, 22]),
+            prompt_logprobs: None,
+        }),
+        token_ids: vec![33, 44],
+        logprobs: None,
+        finish_reason: Some(FinishReason::Length),
+        cached_token_count: 0,
+        kv_transfer_params: None,
+        ec_transfer_params: None,
+        routed_experts: None,
+        sampling_mask: Some(vec![vec![1, 33, 99]]),
+    };
+
+    let error = futures::stream::iter([Ok(output)]).collect_output().await.unwrap_err();
+    assert!(matches!(
+        error,
+        Error::SamplingMaskTokenCountMismatch {
+            token_count: 2,
+            row_count: 1,
+            ..
+        }
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

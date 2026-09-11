@@ -805,6 +805,8 @@ fn decoded_completion_stream(
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    routed_experts: None,
+                    sampling_mask: None,
                 })),
             }
         });
@@ -816,6 +818,8 @@ fn decoded_completion_stream(
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                routed_experts: None,
+                sampling_mask: None,
             });
             events.push(DecodedTextEvent::TextDelta {
                 decoded: vllm_text::DecodedText::unattributed(chunk.delta),

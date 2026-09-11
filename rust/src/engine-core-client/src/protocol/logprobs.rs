@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-mod array;
+pub(crate) mod array;
 #[cfg(test)]
 mod tests;
 mod wire;
