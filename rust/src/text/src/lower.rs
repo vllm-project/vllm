@@ -318,7 +318,9 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     use serial_test::file_serial;
-    use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, PlaceholderRange};
+    use vllm_engine_core_client::protocol::multimodal::{
+        MmFeatureSpec, MmModality, PlaceholderRange,
+    };
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
@@ -720,7 +722,7 @@ mod tests {
     fn lower_text_request_moves_multimodal_features_to_generate_request() {
         let features = vec![MmFeatureSpec {
             data: None,
-            modality: "image".to_string(),
+            modality: MmModality::Image,
             identifier: "image-1".to_string(),
             mm_position: PlaceholderRange {
                 offset: 2,

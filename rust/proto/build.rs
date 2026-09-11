@@ -3,7 +3,7 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let proto_dir = std::path::PathBuf::from(format!("{manifest_dir}/../../proto"));
+    let proto_dir = std::path::PathBuf::from(manifest_dir);
     let protos = [
         proto_dir.join("control.proto"),
         proto_dir.join("inference.proto"),
