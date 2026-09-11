@@ -1080,7 +1080,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         seq_lens = -(-row_seq_lens_cpu.numpy()[first_rows] // world) * world
         # Rank 0 holds the short tail chunk as a request's LAST row; the first
         # row is always a full chunk, so this query length matches on every rank.
-        query_lens = np.diff(row_bounds) * row_query_lens_cpu.numpy()[first_rows]
+        row_query_lens = row_query_lens_cpu.numpy()
+        query_lens = np.diff(row_bounds) * row_query_lens[first_rows]
+        assert np.array_equal(
+            row_query_lens[first_rows], np.maximum.reduceat(row_query_lens, first_rows)
+        ), (
+            "PCP row layout broke the full-first-chunk invariant: first-row "
+            f"query lens {row_query_lens[first_rows].tolist()} vs per-request "
+            f"maxima {np.maximum.reduceat(row_query_lens, first_rows).tolist()}"
+        )
         chunk_specs = self._split_indexer_prefill_chunks(
             torch.from_numpy(seq_lens.astype(np.int32)),
             torch.from_numpy(query_lens.astype(np.int32)),

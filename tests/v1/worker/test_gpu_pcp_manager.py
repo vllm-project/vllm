@@ -230,6 +230,39 @@ def test_dcp_replicates_prefills_too_short_to_split(query_len):
     assert rows_per_rank[0] == rows_per_rank[1]
 
 
+@pytest.mark.parametrize("pcp_world_size", [2, 4, 8])
+@pytest.mark.parametrize(
+    "query_len", [16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 1000, 4097]
+)
+def test_pcp_first_chunk_row_is_never_short(pcp_world_size, query_len):
+    num_scheduled_tokens = np.array([query_len], dtype=np.int32)
+    is_prefilling = np.ones(1, dtype=np.bool_)
+
+    charged_per_rank = []
+    for rank in range(pcp_world_size):
+        manager = PCPManager(
+            pcp_world_size=pcp_world_size,
+            pcp_rank=rank,
+            device=torch.device("cpu"),
+            dcp_world_size=pcp_world_size,
+        )
+        chunk_lens = [
+            chunk_len
+            for _, _, chunk_len in manager._iter_rank_chunks(
+                rank, num_scheduled_tokens, is_prefilling
+            )
+        ]
+        assert chunk_lens, f"rank {rank} got no rows for {query_len=}"
+        assert chunk_lens[0] == max(chunk_lens), (
+            f"rank {rank} emitted a short first chunk for {query_len=}: {chunk_lens}"
+        )
+        charged_per_rank.append(len(chunk_lens) * chunk_lens[0])
+
+    assert len(set(charged_per_rank)) == 1, (
+        f"ranks would chunk differently for {query_len=}: {charged_per_rank}"
+    )
+
+
 def _make_global_decode_batch(
     num_computed_tokens: list[int], buffers: InputBuffers, device: torch.device
 ) -> InputBatch:

@@ -556,9 +556,15 @@ class PCPManager:
         if self.dcp_world_size > 1:
             # Every PCP rank sees the whole request's extent on each of its
             # rows, so the sparse backends size DCP collectives identically.
-            seq_lens_cpu_upper_bound_np = (num_computed_tokens + num_scheduled_tokens)[
+            pcp_global_seq_lens_np = (num_computed_tokens + num_scheduled_tokens)[
                 local_to_global_batch_req_idx_np
             ].astype(np.int32)
+            assert np.all(pcp_global_seq_lens_np >= seq_lens_cpu_upper_bound_np), (
+                "PCP+DCP whole-request extents must bound this rank's chunk "
+                f"extents, got global {pcp_global_seq_lens_np.tolist()} vs local "
+                f"{seq_lens_cpu_upper_bound_np.tolist()}"
+            )
+            seq_lens_cpu_upper_bound_np = pcp_global_seq_lens_np
 
         self._local_batch = replace(
             input_batch,

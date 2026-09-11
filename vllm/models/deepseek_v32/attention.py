@@ -536,8 +536,9 @@ class DeepseekV32Attention(MLAAttention):
             seq_lens: torch.Tensor | None
             query_start_loc: torch.Tensor | None
             if self.use_pcp:
-                if attn_metadata.decode is not None:
-                    seq_lens = attn_metadata.decode.seq_lens
+                decode_metadata = getattr(attn_metadata, "decode", None)
+                if decode_metadata is not None:
+                    seq_lens = decode_metadata.seq_lens
                 else:
                     all_seq_lens = cast(
                         torch.Tensor,
