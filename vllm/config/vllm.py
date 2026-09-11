@@ -2523,11 +2523,8 @@ class VllmConfig:
             return
 
         if not mm_config.enable_mm_embeds:
-            # A consumer is sent the media as an `*_embeds` reference, which
-            # the frontend rejects outright unless embedding inputs are
-            # enabled at all. Letting the tensor be omitted decides nothing
-            # if the request never gets that far, so enabling one without the
-            # other fails every multimodal request rather than some of them.
+            # Allowing missing tensors still requires enabling embedding inputs
+            # for the frontend to accept metadata-only requests.
             mm_config.enable_mm_embeds = True
             logger.info_once(
                 "EC/KV consumer: accepting pre-computed-embedding inputs, "
