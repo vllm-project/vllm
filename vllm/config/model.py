@@ -19,6 +19,7 @@ from vllm.config.multimodal import (
     MMHasherAlgorithm,
     MMProcessorDevice,
     MMTensorIPC,
+    MooncakeProcessorCacheConfig,
     MultiModalConfig,
 )
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS, PoolerConfig
@@ -399,6 +400,7 @@ class ModelConfig:
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
     mm_processor_cache_gb: InitVar[float | None] = None
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
+    mm_mooncake_cache_config: InitVar[MooncakeProcessorCacheConfig | None] = None
     mm_hasher_algorithm: InitVar[MMHasherAlgorithm | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
     mm_encoder_only: InitVar[bool | None] = None
@@ -459,6 +461,7 @@ class ModelConfig:
             "mm_processor_kwargs",
             "mm_processor_cache_gb",
             "mm_processor_cache_type",
+            "mm_mooncake_cache_config",
             "mm_shm_cache_max_object_size_mb",
             "mm_encoder_tp_mode",
             "interleave_mm_strings",
@@ -532,6 +535,7 @@ class ModelConfig:
         mm_processor_kwargs: dict[str, Any] | None,
         mm_processor_cache_gb: float | None,
         mm_processor_cache_type: MMCacheType | None,
+        mm_mooncake_cache_config: MooncakeProcessorCacheConfig | None,
         mm_hasher_algorithm: MMHasherAlgorithm | None,
         mm_shm_cache_max_object_size_mb: int | None,
         mm_encoder_only: bool | None,
@@ -800,6 +804,7 @@ class ModelConfig:
                 mm_processor_kwargs=mm_processor_kwargs,
                 mm_processor_cache_gb=mm_processor_cache_gb,
                 mm_processor_cache_type=mm_processor_cache_type,
+                mm_mooncake_cache_config=mm_mooncake_cache_config,
                 mm_hasher_algorithm=mm_hasher_algorithm,
                 mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
                 mm_encoder_only=mm_encoder_only,
