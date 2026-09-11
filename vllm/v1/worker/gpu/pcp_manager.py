@@ -156,6 +156,10 @@ class PCPManager:
                 )
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+        if parallel_config.decode_context_parallel_size > 1 and not is_sparse_mla:
+            # Dense MLA prefill sizes its DCP KV gather from each rank's own
+            # chunk rows, so the ranks' collectives diverge (#53573).
+            raise NotImplementedError("MRV2 PCP + DCP supports sparse MLA models only.")
         if (
             is_sparse_mla
             and parallel_config.decode_context_parallel_size == 1
