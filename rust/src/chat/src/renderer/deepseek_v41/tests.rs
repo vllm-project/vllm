@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use super::DeepSeekV41ChatRenderer;
 use crate::ChatRenderer;
-use crate::event::{AssistantContentBlock, AssistantToolCall};
+use crate::event::AssistantContentBlock;
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ReasoningEffort};
 
@@ -81,59 +81,6 @@ fn inlines_image_placeholder_at_image_part_positions() {
         rendered.contains("<｜User｜><｜deepseek_image｜>\n\nwhat is in the image?"),
         "unexpected prompt: {rendered:?}"
     );
-}
-
-#[test]
-fn tool_call_arguments_follow_reference_tolerance() {
-    // The reference encoder decodes JSON strings up to twice and keeps
-    // anything that still is not an object as a single `arguments` parameter.
-    let request = ChatRequest {
-        messages: vec![
-            ChatMessage::assistant_blocks(vec![
-                AssistantContentBlock::ToolCall(AssistantToolCall {
-                    id: "double".to_string(),
-                    name: "search".to_string(),
-                    arguments: r#""{\"query\":\"double\"}""#.to_string(),
-                }),
-                AssistantContentBlock::ToolCall(AssistantToolCall {
-                    id: "text".to_string(),
-                    name: "search".to_string(),
-                    arguments: "not json".to_string(),
-                }),
-                AssistantContentBlock::ToolCall(AssistantToolCall {
-                    id: "array".to_string(),
-                    name: "search".to_string(),
-                    arguments: "[1, 2]".to_string(),
-                }),
-            ]),
-            ChatMessage::tool_response("double result", "double"),
-            ChatMessage::tool_response("text result", "text"),
-            ChatMessage::tool_response("array result", "array"),
-        ],
-        ..ChatRequest::for_test()
-    };
-
-    expect![[r#"
-        <｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)
-
-
-
-        <｜DSML｜ calls>
-        <｜DSML｜ invoke name="search">
-        <｜DSML｜ parameter name="query" string="true">double</｜DSML｜ parameter>
-        </｜DSML｜ invoke>
-        <｜DSML｜ invoke name="search">
-        <｜DSML｜ parameter name="arguments" string="true">not json</｜DSML｜ parameter>
-        </｜DSML｜ invoke>
-        <｜DSML｜ invoke name="search">
-        <｜DSML｜ parameter name="arguments" string="true">[1, 2]</｜DSML｜ parameter>
-        </｜DSML｜ invoke>
-        </｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>double result</tool_result>
-
-        <tool_result>text result</tool_result>
-
-        <tool_result>array result</tool_result><｜Assistant｜><think>"#]]
-    .assert_eq(&render(&request));
 }
 
 #[test]

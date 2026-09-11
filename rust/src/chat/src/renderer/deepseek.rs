@@ -675,44 +675,6 @@ fn render_tool_call(
     Ok(())
 }
 
-/// Decode assistant tool-call arguments into the object the reference
-/// encoder iterates over.
-///
-/// V4 requires a JSON object. V4.1 tolerates JSON strings, including
-/// double-encoded ones, and keeps anything that still is not an object as a
-/// single `arguments` parameter, matching the reference `encoding.py`.
-fn decode_arguments(raw: &str, dialect: DsDialect) -> Result<Map<String, Value>> {
-    match dialect {
-        DsDialect::V4 => {
-            let arguments: Value = serde_json::from_str(raw).map_err(|error| {
-                Error::ChatTemplate(format!(
-                    "assistant tool call has invalid JSON arguments for DeepSeek: {error}"
-                ))
-            })?;
-            match arguments {
-                Value::Object(arguments) => Ok(arguments),
-                _ => Err(Error::ChatTemplate(
-                    "assistant tool call arguments for DeepSeek must be a JSON object".to_string(),
-                )),
-            }
-        }
-        DsDialect::V41 => {
-            let mut value = Value::String(raw.to_owned());
-            for _ in 0..2 {
-                let Value::String(text) = &value else { break };
-                match serde_json::from_str(text) {
-                    Ok(parsed) => value = parsed,
-                    Err(_) => break,
-                }
-            }
-            Ok(match value {
-                Value::Object(arguments) => arguments,
-                _ => Map::from_iter([("arguments".to_owned(), Value::String(raw.to_owned()))]),
-            })
-        }
-    }
-}
-
 /// Convert one assistant tool-call arguments object into DSML parameter form.
 ///
 /// String values are emitted raw with `string="true"`, while all other JSON
@@ -723,7 +685,15 @@ fn encode_arguments_to_dsml(
     dialect: DsDialect,
 ) -> Result<()> {
     let parameter_tag = dialect.parameter_tag();
-    let arguments = decode_arguments(&tool_call.arguments, dialect)?;
+    // Match deepseek-recipe's render_tool_arguments for both V4 and V4.1:
+    // https://github.com/deepseek-ai/deepseek-recipe/blob/8cadfede7063c896b944e7bae05daa3549ae97ea/deepseek-recipe-encoding/src/v4/mod.rs#L48-L58
+    let arguments = serde_json::from_str::<Map<String, Value>>(&tool_call.arguments)
+        .unwrap_or_else(|_| {
+            Map::from_iter([(
+                "arguments".to_owned(),
+                Value::String(tool_call.arguments.clone()),
+            )])
+        });
 
     let mut wrote_parameter = false;
     for (key, value) in &arguments {

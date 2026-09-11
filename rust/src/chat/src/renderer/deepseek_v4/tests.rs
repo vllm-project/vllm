@@ -8,8 +8,8 @@ use serde_json::Value;
 
 use super::DeepSeekV4ChatRenderer;
 use crate::ChatRenderer;
-use crate::error::Error;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
+use crate::renderer::deepseek_v41::DeepSeekV41ChatRenderer;
 use crate::renderer::test_utils::{FixtureRequestOptions, fixture_chat_request};
 use crate::request::{ChatMessage, ChatRequest, ChatTool, GenerationPromptMode, ReasoningEffort};
 
@@ -401,10 +401,20 @@ fn reasoning_effort_template_kwarg_is_ignored() {
 }
 
 #[test]
-fn rejects_tool_call_arguments_that_are_not_a_json_object() {
-    for (arguments, message) in [
-        ("not json", "invalid JSON arguments"),
-        ("[1, 2]", "must be a JSON object"),
+fn tool_call_arguments_preserve_non_objects_like_recipe() {
+    let renderers: [(&dyn ChatRenderer, &str); 2] = [
+        (&DeepSeekV4ChatRenderer::new(), "parameter"),
+        (&DeepSeekV41ChatRenderer::new(), " parameter"),
+    ];
+    for arguments in [
+        "not json",
+        "[1, 2]",
+        "null",
+        "42",
+        "true",
+        "",
+        r#""text""#,
+        r#""{\"query\":\"double\"}""#,
     ] {
         let request = ChatRequest {
             messages: vec![
@@ -420,10 +430,18 @@ fn rejects_tool_call_arguments_that_are_not_a_json_object() {
             ..ChatRequest::for_test()
         };
 
-        assert!(matches!(
-            DeepSeekV4ChatRenderer::new().render(&request),
-            Err(Error::ChatTemplate(error)) if error.contains(message)
-        ));
+        for (renderer, tag) in renderers {
+            let prompt = renderer.render(&request).unwrap().prompt.into_text().unwrap();
+            let parameters: Vec<_> =
+                prompt.lines().filter(|line| line.contains("parameter name=")).collect();
+            assert_eq!(
+                parameters,
+                [format!(
+                    "<｜DSML｜{tag} name=\"arguments\" string=\"true\">{arguments}</｜DSML｜{tag}>"
+                )],
+                "arguments: {arguments:?}, tag: {tag:?}",
+            );
+        }
     }
 }
 
