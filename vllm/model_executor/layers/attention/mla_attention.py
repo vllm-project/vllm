@@ -396,6 +396,9 @@ def _get_kv_b_proj_input_dtype(
             return quant_method.input_dtype
         if not use_fp8_prefill:
             return None
+        # ROCm block-scaled GEMMs quantize their own input.
+        if current_platform.is_rocm():
+            return kv_b_proj.params_dtype
     return weight_dtype
 
 
@@ -2933,16 +2936,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             # Extract kv_c_normed from workspace
             kv_c_normed = workspace[:toks][..., : self.kv_lora_rank]
             if kv_b_proj_input_dtype is not None:
-                input_dtype = kv_b_proj_input_dtype
-                # ROCm BlockScaledMM quantizes input internally, so cast to
-                # model dtype rather than fp8.
-                if (
-                    current_platform.is_rocm()
-                    and input_dtype == current_platform.fp8_dtype()
-                ):
-                    assert prefill_metadata.output_dtype is not None
-                    input_dtype = prefill_metadata.output_dtype
-                kv_c_normed = kv_c_normed.to(input_dtype)
+                kv_c_normed = kv_c_normed.to(kv_b_proj_input_dtype)
 
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
