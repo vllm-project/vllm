@@ -439,7 +439,7 @@ class ProtonProfilerWrapper(WorkerProfiler):
             self._require_triton_version(
                 "hatchet_msgpack output", _TRITON_PROTON_3_7_VERSION
             )
-        if self._mode and self._mode.split(":", 1)[0] == "periodic_flushing":
+        if self._mode and self._mode.split(":", 1)[0].lower() == "periodic_flushing":
             self._require_triton_version(
                 "periodic flushing", _TRITON_PROTON_3_7_VERSION
             )

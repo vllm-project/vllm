@@ -92,10 +92,10 @@ Chrome trace and works through the same vLLM profiling controls as the PyTorch
 and CUDA profilers. Proton currently supports NVIDIA GPUs through CUPTI and
 supports CUDA graph attribution.
 
-Start an MRV2 server with a local output directory and graph attribution:
+Start a server with a local output directory and graph attribution:
 
 ```bash
-VLLM_USE_V2_MODEL_RUNNER=1 vllm serve meta-llama/Llama-3.1-8B-Instruct \
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --profiler-config '{
         "profiler": "proton",
         "proton_profiler_dir": "./proton_profile",
@@ -136,18 +136,21 @@ session active, then deactivates that same session until profiling starts. This
 lets later profiles attribute replayed kernels without retaining model-startup
 activity. Backend-specific modes can be selected with `proton_mode`;
 `pcsampling` synchronizes the CUDA context and therefore requires
-`--enforce-eager`.
+`--enforce-eager`. When CUDA graphs are enabled (including encoder graphs),
+Proton requires `proton_graph_attribution: true` to collect replayed kernels.
+For Chrome traces, disable CUDA graphs with `--enforce-eager`.
 
 CUDA graph-attributed profiles support repeated `start_profile`/`stop_profile`
 runs. Each stop flushes and writes one tree-data phase while preserving the
 graph-aware session. Without `proton_graph_attribution`, each `stop_profile`
 instead finalizes and writes an independent Proton session.
 
-CUDA graph attribution requires the V2 model runner
-(`VLLM_USE_V2_MODEL_RUNNER=1`) and Triton 3.7 or newer. It uses the phase data API
+CUDA graph attribution requires Triton 3.7 or newer. It uses the phase data API
 to discard graph-capture activity and separate profiling runs. The `hatchet_msgpack`
 output format and `periodic_flushing` mode also require Triton 3.7 or newer.
-Ordinary Proton profiling remains available with Triton 3.6.
+`periodic_flushing` cannot be combined with graph attribution because both
+manage the session's data phases. Ordinary Proton profiling remains available
+with Triton 3.6.
 
 Graph attribution retains capture metadata for the worker lifetime. With eager
 execution or no graphs to capture, profiling uses ordinary independent sessions.

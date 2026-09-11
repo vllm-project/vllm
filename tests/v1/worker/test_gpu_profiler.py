@@ -493,21 +493,66 @@ class TestProtonConfig:
                 compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE),
             )
 
-    def test_allows_proton_when_cuda_graphs_are_enabled(self, tmp_path):
-        config = VllmConfig(
-            profiler_config=ProfilerConfig(
-                profiler="proton", proton_profiler_dir=str(tmp_path)
-            ),
-            compilation_config=CompilationConfig(
-                cudagraph_mode=CUDAGraphMode.PIECEWISE
-            ),
+    @pytest.mark.parametrize("encoder_only", [False, True])
+    @pytest.mark.parametrize("attribution", [False, True])
+    def test_cuda_graphs_require_attribution(self, tmp_path, encoder_only, attribution):
+        # Encoder graphs are independent of the decoder's cudagraph_mode.
+        expected = (
+            nullcontext()
+            if attribution
+            else pytest.raises(
+                ValueError, match="requires proton_graph_attribution=True"
+            )
         )
+        with expected:
+            VllmConfig(
+                profiler_config=ProfilerConfig(
+                    profiler="proton",
+                    proton_profiler_dir=str(tmp_path),
+                    proton_graph_attribution=attribution,
+                ),
+                compilation_config=CompilationConfig(
+                    cudagraph_mode=(
+                        CUDAGraphMode.NONE if encoder_only else CUDAGraphMode.FULL
+                    ),
+                    cudagraph_mm_encoder=encoder_only,
+                ),
+            )
 
-        assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+    def test_validates_default_cuda_graph_mode_after_resolution(self, tmp_path):
+        with pytest.raises(ValueError, match="requires proton_graph_attribution=True"):
+            VllmConfig(
+                profiler_config=ProfilerConfig(
+                    profiler="proton", proton_profiler_dir=str(tmp_path)
+                ),
+            )
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            "periodic_flushing",
+            "periodic_flushing:format=hatchet",
+            "PERIODIC_FLUSHING:format=hatchet",
+        ],
+    )
+    def test_graph_attribution_rejects_periodic_flushing(self, tmp_path, mode):
+        # Reject before Proton's native phase manager can abort the worker.
+        with pytest.raises(ValueError, match="incompatible with periodic_flushing"):
+            ProfilerConfig(
+                profiler="proton",
+                proton_profiler_dir=str(tmp_path),
+                proton_graph_attribution=True,
+                proton_mode=mode,
+            )
 
     @pytest.mark.parametrize("attribution", [False, True])
-    @pytest.mark.parametrize("mode", ["pcsampling", "pcsampling:interval=100"])
-    def test_pcsampling_requires_graphs_disabled(self, tmp_path, attribution, mode):
+    @pytest.mark.parametrize(
+        "mode", ["pcsampling", "pcsampling:interval=100", "PcSampling:interval=100"]
+    )
+    @pytest.mark.parametrize("encoder_only", [False, True])
+    def test_pcsampling_requires_graphs_disabled(
+        self, tmp_path, attribution, mode, encoder_only
+    ):
         with pytest.raises(ValueError, match="PC sampling requires CUDA graphs"):
             VllmConfig(
                 profiler_config=ProfilerConfig(
@@ -516,12 +561,17 @@ class TestProtonConfig:
                     proton_graph_attribution=attribution,
                     proton_mode=mode,
                 ),
-                compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL),
+                compilation_config=CompilationConfig(
+                    cudagraph_mode=CUDAGraphMode.NONE
+                    if encoder_only
+                    else CUDAGraphMode.FULL,
+                    cudagraph_mm_encoder=encoder_only,
+                ),
             )
 
     def test_ordinary_proton_keeps_mrv1_graph_restriction(self, tmp_path, monkeypatch):
         monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-        with pytest.raises(ValueError, match="disabled on the V1 model runner"):
+        with pytest.raises(ValueError, match="requires proton_graph_attribution=True"):
             VllmConfig(
                 profiler_config=ProfilerConfig(
                     profiler="proton", proton_profiler_dir=str(tmp_path)
@@ -866,6 +916,7 @@ def test_proton_is_not_initialized_without_cuda_graph_capture(runner):
     worker.vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.NONE if runner == "disabled" else CUDAGraphMode.FULL
     )
+    worker.model_runner.model_state.supports_mm_inputs = False
     worker.use_v2_model_runner = runner != "v1"
     if runner in ("disabled", "no_capture"):
         worker.model_runner.cudagraph_manager.needs_capture.return_value = False
@@ -878,7 +929,10 @@ def test_proton_is_not_initialized_without_cuda_graph_capture(runner):
 
 
 @_requires_cuda_for_proton
-def test_proton_initializes_before_cuda_graph_capture():
+@pytest.mark.parametrize(
+    "capture_encoder,capture_decoder", [(False, True), (True, False), (True, True)]
+)
+def test_proton_initializes_before_cuda_graph_capture(capture_encoder, capture_decoder):
     class FakeProtonProfiler:
         def __init__(self, config, worker_name):
             self.config = config
@@ -895,7 +949,11 @@ def test_proton_initializes_before_cuda_graph_capture():
     worker.profiler_config.proton_graph_attribution = True
     worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
     worker.use_v2_model_runner = True
-    worker.model_runner.cudagraph_manager.needs_capture.return_value = True
+    worker.model_runner.cudagraph_manager.needs_capture.return_value = capture_decoder
+    worker.model_runner.model_state.supports_mm_inputs = capture_encoder
+    worker.model_runner.model_state.encoder_runner.has_cudagraph.return_value = (
+        capture_encoder
+    )
 
     with (
         patch(
@@ -917,7 +975,10 @@ def test_proton_initializes_before_cuda_graph_capture():
 @_requires_cuda_for_proton
 @pytest.mark.parametrize("context", ["shadow", "python"])
 @pytest.mark.parametrize("output_format", ["hatchet", "hatchet_msgpack"])
-def test_proton_cuda_graph_replay_attribution_on_gpu(tmp_path, context, output_format):
+@pytest.mark.parametrize("encoder_only", [False, True])
+def test_proton_cuda_graph_replay_attribution_on_gpu(
+    tmp_path, context, output_format, encoder_only
+):
     """Both intervals contain replay kernels, without capture-only activity."""
     import json
 
@@ -939,6 +1000,17 @@ def test_proton_cuda_graph_replay_attribution_on_gpu(tmp_path, context, output_f
         ),
         worker_name="gpu",
     )
+    worker = SimpleNamespace(
+        profiler=wrapper,
+        use_v2_model_runner=True,
+        model_runner=SimpleNamespace(
+            cudagraph_manager=SimpleNamespace(needs_capture=lambda: not encoder_only),
+            model_state=SimpleNamespace(
+                supports_mm_inputs=encoder_only,
+                encoder_runner=SimpleNamespace(has_cudagraph=lambda: encoder_only),
+            ),
+        ),
+    )
     x = torch.ones(1024, device="cuda")
     graph = torch.cuda.CUDAGraph()
 
@@ -959,7 +1031,7 @@ def test_proton_cuda_graph_replay_attribution_on_gpu(tmp_path, context, output_f
         return []
 
     try:
-        with wrapper.capture_cuda_graphs():
+        with Worker._get_cudagraph_capture_context(worker):
             with proton.scope("capture_only"):
                 capture_only()
             torch.accelerator.synchronize()

@@ -952,7 +952,13 @@ class Worker(WorkerBase):
             return nullcontext()
         cudagraph_manager = getattr(self.model_runner, "cudagraph_manager", None)
         assert cudagraph_manager is not None
-        if not cudagraph_manager.needs_capture():
+        model_state = getattr(self.model_runner, "model_state", None)
+        assert model_state is not None
+        capture_encoder = (
+            model_state.supports_mm_inputs
+            and model_state.encoder_runner.has_cudagraph()
+        )
+        if not capture_encoder and not cudagraph_manager.needs_capture():
             return nullcontext()
 
         if self.profiler is None:
