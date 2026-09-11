@@ -918,7 +918,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and self.norm.weight.dtype in (torch.bfloat16, torch.float32)
         )
         if use_fused_gdn_decode:
-            # The core op clears this unless it selects the padding-aware kernel.
+            # Padding slots are guaranteed to be cleared to avoid NaN
+            # Either with .zero_() or inlined within the GDN kernel 
             core_attn_out = torch.empty(
                 (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
                 dtype=hidden_states.dtype,
