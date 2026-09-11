@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm.config.attention import AttentionConfig
+from vllm.config.vllm import get_current_vllm_config
 from vllm.model_executor.layers.attention.attention import (
     _largest_kernel_block_within,
 )
@@ -30,8 +31,8 @@ def test_largest_kernel_block_within(supported_sizes, expected):
 
     class Backend:
         @staticmethod
-        def get_supported_kernel_block_sizes_for_config(config):
-            assert config is vllm_config
+        def get_supported_kernel_block_sizes():
+            assert get_current_vllm_config() is vllm_config
             return supported_sizes
 
     assert (

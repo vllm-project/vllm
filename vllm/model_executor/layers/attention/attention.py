@@ -11,6 +11,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CacheConfig,
     get_current_vllm_config,
+    set_current_vllm_config,
 )
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -115,7 +116,8 @@ def _largest_kernel_block_within(
     """
     from vllm.v1.attention.backend import MultipleOf
 
-    sizes = attn_backend.get_supported_kernel_block_sizes_for_config(vllm_config)
+    with set_current_vllm_config(vllm_config):
+        sizes = attn_backend.get_supported_kernel_block_sizes()
     max_block_size = page_budget // per_token_bytes
     candidates = [s for s in sizes if isinstance(s, int)]
     candidates.extend(

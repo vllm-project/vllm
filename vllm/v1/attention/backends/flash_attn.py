@@ -143,16 +143,6 @@ class FlashAttentionBackend(AttentionBackend):
             return [block_size]
         return [MultipleOf(16)]
 
-    @classmethod
-    def get_supported_kernel_block_sizes_for_config(
-        cls, vllm_config: VllmConfig
-    ) -> list[int | MultipleOf]:
-        if block_size := cls._get_sm90_fa4_fp8_kv_block_size(vllm_config):
-            return [block_size]
-        if block_size := cls._get_fa4_hd256_block_size(vllm_config):
-            return [block_size]
-        return [MultipleOf(16)]
-
     forward_includes_kv_cache_update: bool = False
 
     @classmethod
@@ -160,18 +150,6 @@ class FlashAttentionBackend(AttentionBackend):
         if block_size := cls._get_sm90_fa4_fp8_kv_block_size():
             return max(default_block_size, block_size)
         if block_size := cls._get_fa4_hd256_block_size():
-            return max(default_block_size, block_size)
-        if current_platform.is_xpu():
-            return max(default_block_size, 64)
-        return super().get_preferred_block_size(default_block_size)
-
-    @classmethod
-    def get_preferred_block_size_for_config(
-        cls, default_block_size: int, vllm_config: VllmConfig
-    ) -> int:
-        if block_size := cls._get_sm90_fa4_fp8_kv_block_size(vllm_config):
-            return max(default_block_size, block_size)
-        if block_size := cls._get_fa4_hd256_block_size(vllm_config):
             return max(default_block_size, block_size)
         if current_platform.is_xpu():
             return max(default_block_size, 64)
