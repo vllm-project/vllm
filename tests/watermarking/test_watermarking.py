@@ -49,7 +49,7 @@ def test_watermarker_contract(algorithm: str):
     "config_overrides",
     [
         {"deduplicate_contexts": "none"},
-        {"deduplicate_contexts_max_history": 255},
+        {"deduplicate_contexts_max_history": 1023},
     ],
 )
 def test_gumbel_config_warns_when_context_deduplication_is_weak(
@@ -62,17 +62,17 @@ def test_gumbel_config_warns_when_context_deduplication_is_weak(
     )
 
     WatermarkConfig(key=42)
-    WatermarkConfig(key=42, deduplicate_contexts_max_history=256)
+    WatermarkConfig(key=42, deduplicate_contexts_max_history=1024)
     WatermarkConfig(key=42, deduplicate_contexts_max_history=None)
     WatermarkConfig(key=42, **config_overrides)
 
     assert messages == [
         (
             "Single-key Gumbel-max watermarking with context deduplication disabled "
-            "or limited to fewer than 256 positions may increase the frequency of "
+            "or limited to fewer than 1024 positions may increase the frequency of "
             "degenerate generations, including repetition loops. Use "
             "deduplicate_contexts='single_turn' or 'all' with "
-            "deduplicate_contexts_max_history at least 256 or null to mitigate this."
+            "deduplicate_contexts_max_history at least 1024 or null to mitigate this."
         )
     ]
 
@@ -276,7 +276,36 @@ def test_repeated_context_mask_can_include_prompt_tokens():
     assert all_history.item()
 
 
-def test_gpu_sampler_all_history_uses_prompt_context():
+def test_repeated_context_mask_can_skip_partial_contexts():
+    all_token_ids = torch.tensor([[10, 11, 12, 13, 1, 2, 3, 4]], dtype=torch.int32)
+    req_indices = torch.tensor([0])
+    prompt_lens = torch.tensor([4])
+    contexts = torch.tensor([[-1, -1, -1, 1]])
+
+    partial = repeated_context_mask(
+        all_token_ids,
+        req_indices,
+        prompt_lens,
+        torch.tensor([5]),
+        contexts,
+        include_prompt=True,
+        skip_partial_context=True,
+    )
+    complete = repeated_context_mask(
+        all_token_ids,
+        req_indices,
+        prompt_lens,
+        torch.tensor([8]),
+        torch.tensor([[1, 2, 3, 4]]),
+        include_prompt=True,
+        skip_partial_context=True,
+    )
+
+    assert partial.item()
+    assert not complete.item()
+
+
+def test_gpu_sampler_contexts_are_completion_local_for_all_scopes():
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = SimpleNamespace(context_width=4)
     sampler.req_states = SimpleNamespace(
@@ -292,7 +321,28 @@ def test_gpu_sampler_all_history_uses_prompt_context():
     all_history = sampler._get_contexts(request_indices)
 
     assert torch.equal(single_turn, torch.tensor([[-1, -1, 1, 2]]))
-    assert torch.equal(all_history, torch.tensor([[12, 13, 1, 2]]))
+    assert torch.equal(all_history, single_turn)
+
+
+def test_gpu_sampler_all_history_skips_partial_context():
+    sampler = object.__new__(GPUWatermarkSampler)
+    sampler.watermarker = SimpleNamespace(context_width=4)
+    sampler.req_states = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=torch.tensor([[10, 11, 12, 13, 1, 2]])),
+        prompt_len=SimpleNamespace(gpu=torch.tensor([4])),
+        total_len=SimpleNamespace(gpu=torch.tensor([6])),
+    )
+    sampler.deduplicate_contexts_max_history = None
+    request_indices = torch.tensor([0])
+    contexts = sampler._get_contexts(request_indices)
+
+    sampler.deduplicate_contexts = "single_turn"
+    single_turn = sampler._get_repeated_contexts(request_indices, contexts)
+    sampler.deduplicate_contexts = "all"
+    all_history = sampler._get_repeated_contexts(request_indices, contexts)
+
+    assert not single_turn.item()
+    assert all_history.item()
 
 
 def test_repeated_context_mask_respects_max_history():
@@ -375,6 +425,30 @@ def test_repeated_context_mask_max_history_accelerator_parity(
         *(value.cuda() for value in inputs),
         max_history=max_history,
         include_prompt=include_prompt,
+    ).cpu()
+
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+)
+def test_repeated_context_mask_partial_context_accelerator_parity():
+    inputs = (
+        torch.tensor([[10, 11, 12, 13, 1]], dtype=torch.int32),
+        torch.tensor([0], dtype=torch.int32),
+        torch.tensor([4], dtype=torch.int32),
+        torch.tensor([5], dtype=torch.int32),
+        torch.tensor([[-1, -1, -1, 1]], dtype=torch.int64),
+    )
+
+    expected = repeated_context_mask(
+        *inputs, include_prompt=True, skip_partial_context=True
+    )
+    actual = repeated_context_mask(
+        *(value.cuda() for value in inputs),
+        include_prompt=True,
+        skip_partial_context=True,
     ).cpu()
 
     assert torch.equal(actual, expected)

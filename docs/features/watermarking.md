@@ -70,10 +70,10 @@ certain token choices would be correlated. Ordinary sampling at these positions
 allows for single-sequence non-distortion (see section G.3 of the
 [SynthID-Text supplementary materials](https://media.springernature.com/original/springer-static/esm/art%3A10.1038%2Fs41586-024-08025-4/MediaObjects/41586_2024_8025_MOESM1_ESM.pdf)).
 The detector independently deduplicates contexts so repeated keyed random
-vectors are not treated as independent evidence. When the first occurrence was
-watermarked, this does not reduce the watermarking signal unless a user tampers
-with the output and removes that occurrence while leaving an unwatermarked
-repetition.
+vectors are not treated as independent evidence, meaning that context
+deduplication at generation time does not reduce the watermarking signal, unless
+a user tampers with the output and removes the first occurrence while leaving an
+unwatermarked repetition.
 
 `deduplicate_contexts` controls which history is searched for a repeated
 context:
@@ -82,13 +82,15 @@ context:
 - `"single_turn"`, the default, searches the tokens generated for the current
   request. This gives single-turn non-distortion.
 - `"all"` also searches the prompt, which extends non-distortion across the
-  turns of a conversation. The first `context_width` generated tokens are then
-  keyed on the prompt rather than on padding, and a generated position whose
-  context already occurs in the prompt is not watermarked. When the prompt
-  already contains the structure of the answer, for example a tool result the
-  model extends, little of the answer may be watermarked. The detector needs
-  the prompt for this scope; see [Detection](#detection). Use `"all"` only when
-  non-distortion across turns is required.
+  turns of a conversation. The first `context_width` generated tokens use
+  ordinary sampling, and subsequent tokens whose context already occurs in the
+  prompt are not watermarked. Previous turns of a session, or a prompt that
+  already contains the structure of the answer such as a tool result the model
+  extends, may therefore leave little of the answer watermarked. Given the
+  impact of `"all"` on both performance (sampling steps must scan over a
+  potentially large amount of previous context) and watermarking detectability
+  (we may significantly reduce the amount of watermarked tokens), you should
+  only use `"all"` when non-distortion across multiple turns is required.
 
 `deduplicate_contexts_max_history` limits the search to the most recent
 positions and defaults to 8,192. Each position is compared over the
@@ -97,7 +99,8 @@ longer. A smaller value reduces scanning cost but only provides the guarantee
 within that window. Set it to `null` to search back to the start of the
 generation for `"single_turn"`, or of the request for `"all"`; an unbounded
 search costs more as the sequence grows. The setting has no effect when
-`deduplicate_contexts` is `"none"`.
+`deduplicate_contexts` is `"none"`. Values below 1,024 emit a warning because a
+short window can miss repetition loops whose contexts recur farther apart.
 
 For example, this checks prompt and completion history within the default
 8,192-position window:
@@ -152,22 +155,11 @@ random vectors are not treated as independent evidence. Keep
 `deduplicate_contexts=True` unless the detector's calibration has been adjusted
 for correlated scores.
 
-The detector must also know the server's `deduplicate_contexts` scope. Text
-generated with `"all"` keys its first `context_width` tokens on the prompt and
-leaves every context that already occurred in the prompt unwatermarked, so the
-detector needs the prompt to recompute the same contexts and to skip the same
-positions. Pass it as `context_prefix`; its tokens are never scored:
-
-```python
-detector = GumbelWatermarkDetector(key=42, prf="philox", history_scope="all")
-result = detector.detect(completion_ids, context_prefix=prompt_ids)
-```
-
-With the default `"single_turn"` scope, and with `"none"`, the completion alone
-is the correct input and a `context_prefix` is rejected. For `"all"` the prefix
-may be omitted when the prompt is unavailable: the p-value stays calibrated,
-but positions that were never watermarked are scored and detection is weaker,
-so the detector logs a warning.
+Detection does not require the prompt or the generation-time context
+deduplication scope. It operates on the supplied token sequence and tests for
+the watermark on a best-effort basis. When generation used `"all"`, ordinary
+sampling at positions whose contexts occurred in earlier turns can reduce
+detection power.
 
 The reported p-value is calibrated under the assumption that scored PRF inputs
 are independent. A deployment uses one fixed key, so repeated structures across

@@ -144,6 +144,7 @@ class GPUWatermarkSampler(Sampler):
             contexts,
             self.deduplicate_contexts_max_history,
             include_prompt=self.deduplicate_contexts == "all",
+            skip_partial_context=self.deduplicate_contexts == "all",
         )
 
     def _get_contexts(self, expanded_idx_mapping: torch.Tensor) -> torch.Tensor:
@@ -153,17 +154,12 @@ class GPUWatermarkSampler(Sampler):
         safe_req_indices = req_indices.clamp_min(0)
         total_lens = self.req_states.total_len.gpu[safe_req_indices].to(torch.int64)
         prompt_lens = self.req_states.prompt_len.gpu[safe_req_indices].to(torch.int64)
-        history_starts = (
-            torch.zeros_like(prompt_lens)
-            if self.deduplicate_contexts == "all"
-            else prompt_lens
-        )
         offsets = torch.arange(
             -context_width, 0, dtype=torch.int64, device=req_indices.device
         )
         positions = total_lens.unsqueeze(-1) + offsets
         valid_positions = valid_reqs.unsqueeze(-1) & (
-            positions >= history_starts.unsqueeze(-1)
+            positions >= prompt_lens.unsqueeze(-1)
         )
         positions = positions.clamp_min(0)
         contexts = self.req_states.all_token_ids.gpu[
