@@ -1961,7 +1961,7 @@ def qwen_gdn_attention_core(
 
 direct_register_custom_op(
     op_name="qwen_gdn_attention_core",
-    op_func=qwen_gdn_attention_core,
+    op_func=eager_break_during_capture(qwen_gdn_attention_core),
     mutates_args=["a_or_z_out", "core_attn_out"],
 )
 
@@ -1985,7 +1985,7 @@ def qwen_gdn_attention_core_fused_norm_packed(
 
 direct_register_custom_op(
     op_name="qwen_gdn_attention_core_fused_norm_packed",
-    op_func=qwen_gdn_attention_core_fused_norm_packed,
+    op_func=eager_break_during_capture(qwen_gdn_attention_core_fused_norm_packed),
     mutates_args=["core_attn_out"],
 )
 
