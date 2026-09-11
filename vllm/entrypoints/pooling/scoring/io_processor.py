@@ -845,7 +845,14 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
     ) -> tuple[RequestFactory, int]:
         assert isinstance(ctx, OfflineScoringInputsContext)
 
+        max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
+            pooling_params=ctx.pooling_params
+        )
         scoring_data = ctx.scoring_data
+        if max_tokens_per_query > 0 or max_tokens_per_doc > 0:
+            scoring_data = self._truncate_scoring_data(
+                scoring_data, max_tokens_per_query, max_tokens_per_doc
+            )
         prompt_extras = ctx.pooling_params.extra_kwargs
 
         queries = self.ensure_str(scoring_data.data_1)
