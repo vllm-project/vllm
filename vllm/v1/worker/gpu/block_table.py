@@ -82,6 +82,7 @@ class BlockTables:
             device=self.device,
         )
 
+        # Set by the elastic EP warmup so KV writes land in the null block.
         self.redirect_writes_to_null_block = False
 
         self.init_block_table_layout_tensors()
