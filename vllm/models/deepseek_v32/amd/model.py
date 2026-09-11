@@ -7,8 +7,13 @@ from itertools import islice
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group
+from vllm.distributed import (
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -34,19 +39,52 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
 )
-from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .rocm import DeepseekV32MLAAttention
 
 
 class DeepseekV32DecoderLayer(torch.nn.Module):
+    @staticmethod
+    def fused_allreduce_rms_norm(
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        norm: RMSNorm,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """One aiter custom-all-reduce kernel, else a separate all-reduce + norm."""
+        if get_tensor_model_parallel_world_size() == 1:
+            return norm(hidden_states, residual)
+
+        # The fused op asserts the kernel ran; oversized batches must fall back.
+        if (
+            rocm_aiter_ops.is_fused_ar_rmsnorm_enabled()
+            and (aiter_ar := rocm_aiter_ops.get_aiter_allreduce()) is not None
+            and not aiter_ar.disabled
+            and aiter_ar.should_custom_ar(hidden_states)
+        ):
+            out = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()(
+                input_=hidden_states,
+                residual=residual,
+                weight=norm.weight.to(hidden_states.dtype),
+                epsilon=norm.variance_epsilon,
+            )
+            return out[0], out[1]
+
+        reduced = tensor_model_parallel_all_reduce(hidden_states)
+        return norm(reduced, residual)
+
     def __init__(
         self,
         vllm_config: VllmConfig,
         prefix: str,
         config=None,
         topk_indices_buffer: torch.Tensor | None = None,
+        q_c_norm_buffer: torch.Tensor | None = None,
+        kv_c_norm_buffer: torch.Tensor | None = None,
+        mqa_q_buffer: torch.Tensor | None = None,
+        q_index_buffer: torch.Tensor | None = None,
+        index_weights_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
 
@@ -66,6 +104,11 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             config=config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            q_c_norm_buffer=q_c_norm_buffer,
+            kv_c_norm_buffer=kv_c_norm_buffer,
+            mqa_q_buffer=mqa_q_buffer,
+            q_index_buffer=q_index_buffer,
+            index_weights_buffer=index_weights_buffer,
         )
 
         if (
@@ -105,11 +148,11 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = fused_allreduce_rms_norm(
+            hidden_states, residual = self.fused_allreduce_rms_norm(
                 hidden_states, residual, self.input_layernorm
             )
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-        hidden_states, residual = fused_allreduce_rms_norm(
+        hidden_states, residual = self.fused_allreduce_rms_norm(
             hidden_states, residual, self.post_attention_layernorm
         )
         hidden_states = self.mlp(hidden_states)
@@ -125,8 +168,6 @@ class DeepseekV32Model(torch.nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        from vllm.platforms import current_platform
-
         self.device = current_platform.device_type
 
         self.vocab_size = config.vocab_size
@@ -137,6 +178,50 @@ class DeepseekV32Model(torch.nn.Module):
             dtype=torch.int32,
             device=self.device,
         )
+        use_aiter_qk_norm_rope = rocm_aiter_ops.is_mla_qk_norm_rope_enabled()
+        if use_aiter_qk_norm_rope:
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            num_local_heads = (
+                config.num_attention_heads // get_tensor_model_parallel_world_size()
+            )
+            mqa_q_buffer = torch.empty(
+                max_tokens,
+                num_local_heads,
+                config.kv_lora_rank + config.qk_rope_head_dim,
+                dtype=torch.float8_e4m3fn,
+                device=self.device,
+            )
+            q_index_buffer = torch.empty(
+                max_tokens,
+                config.index_n_heads,
+                config.index_head_dim,
+                dtype=torch.float8_e4m3fn,
+                device=self.device,
+            )
+            index_weights_buffer = torch.empty(
+                max_tokens,
+                config.index_n_heads,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            q_c_norm_buffer = torch.empty(
+                max_tokens,
+                config.q_lora_rank,
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
+            kv_c_norm_buffer = torch.empty(
+                max_tokens,
+                config.kv_lora_rank,
+                dtype=vllm_config.model_config.dtype,
+                device=self.device,
+            )
+        else:
+            q_c_norm_buffer = None
+            kv_c_norm_buffer = None
+            mqa_q_buffer = None
+            q_index_buffer = None
+            index_weights_buffer = None
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -154,9 +239,30 @@ class DeepseekV32Model(torch.nn.Module):
                 vllm_config=vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
+                q_c_norm_buffer=q_c_norm_buffer,
+                kv_c_norm_buffer=kv_c_norm_buffer,
+                mqa_q_buffer=mqa_q_buffer,
+                q_index_buffer=q_index_buffer,
+                index_weights_buffer=index_weights_buffer,
             ),
             prefix=f"{prefix}.layers",
         )
+
+        if use_aiter_qk_norm_rope:
+            # Split once off the layers' own rope: get_rope memoises, so every
+            # layer shares it. The MLA op derives the cos/sin row offset from
+            # rot_dim rather than a stride, so the chunk views will not do; the
+            # indexer op does take a stride but is kept contiguous to match.
+            attn = self.layers[self.start_layer].self_attn
+            cos, sin = attn.rotary_emb.cos_sin_cache.chunk(2, dim=-1)
+            rope_cos, rope_sin = cos.contiguous(), sin.contiguous()
+            if attn.indexer_rope_emb is attn.rotary_emb:
+                index_cos, index_sin = rope_cos, rope_sin
+            else:
+                cos, sin = attn.indexer_rope_emb.cos_sin_cache.chunk(2, dim=-1)
+                index_cos, index_sin = cos.contiguous(), sin.contiguous()
+            for layer in self.layers[self.start_layer : self.end_layer]:
+                layer.self_attn.set_aiter_rope(rope_cos, rope_sin, index_cos, index_sin)
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -207,7 +313,9 @@ class DeepseekV32Model(torch.nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states, _ = fused_allreduce_rms_norm(hidden_states, residual, self.norm)
+        hidden_states, _ = DeepseekV32DecoderLayer.fused_allreduce_rms_norm(
+            hidden_states, residual, self.norm
+        )
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
