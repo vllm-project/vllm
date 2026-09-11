@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
-import io
 import itertools
 import json
 import logging
@@ -34,7 +33,6 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import aiohttp
-import pybase64 as base64
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -125,19 +123,6 @@ def content_uuid(item: dict) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def _b64_tensor(values: list) -> str:
-    import torch
-
-    buf = io.BytesIO()
-    flat = [v for item in values for v in (item if isinstance(item, list) else [item])]
-    # Floats stay float64 so timestamp strings format exactly as the
-    # encoder computed them.
-    dtype = torch.float64 if any(isinstance(v, float) for v in flat) else None
-    # Downstream stacks per item, so hand over a flat vector.
-    torch.save(torch.tensor(flat, dtype=dtype), buf)
-    return base64.b64encode(buf.getvalue()).decode()
-
-
 def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
     """Replace each media item with a metadata-only reference for the decoder.
 
@@ -172,7 +157,15 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
             # Whatever keys the encoder reported are the metadata its model
             # declared as needed to size the placeholder range; the proxy does
             # not need to know their names.
-            metadata = {k: _b64_tensor(v) for k, v in meta.items()}
+            # Downstream stacks per item; keep the existing per-item vector shape.
+            metadata = {
+                k: [
+                    x
+                    for item in v
+                    for x in (item if isinstance(item, list) else [item])
+                ]
+                for k, v in meta.items()
+            }
             if not metadata or not item_uuid:
                 # Nothing to size the placeholder range with. A processor cache
                 # hit is not a cause on its own: with the default `lru` type the
