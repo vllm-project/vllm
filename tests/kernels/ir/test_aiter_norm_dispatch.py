@@ -11,7 +11,13 @@ through to a provider that handles arbitrary strides.
 import pytest
 import torch
 
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.kernels.aiter_ops import flatten_to_2d_is_free
+
+pytestmark = pytest.mark.skipif(
+    not is_aiter_found_and_supported(),
+    reason="Only test on ROCm with AITER installed and supported",
+)
 
 
 def _qkv_slice_by_head(num_tokens, num_q_heads, num_kv_heads, head_dim):
