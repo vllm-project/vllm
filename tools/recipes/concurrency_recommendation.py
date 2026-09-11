@@ -159,9 +159,7 @@ def _aggregate_candidates(
                 "sla_eligible": p99_sla_eligible and compliance_eligible,
                 "valid": valid,
                 "invalid_reason": reason,
-                "summary_files": sorted(
-                    {str(run["_summary_path"]) for run in runs}
-                ),
+                "summary_files": sorted({str(run["_summary_path"]) for run in runs}),
             }
         )
 
@@ -223,7 +221,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--results-dir", default=DEFAULT_RESULTS_DIR)
     parser.add_argument("--ttft-sla-ms", type=float, default=DEFAULT_TTFT_SLA_MS)
     parser.add_argument("--tpot-sla-ms", type=float, default=DEFAULT_TPOT_SLA_MS)
-    parser.add_argument("--seed-concurrency", type=int, default=DEFAULT_SEED_CONCURRENCY)
+    parser.add_argument(
+        "--seed-concurrency", type=int, default=DEFAULT_SEED_CONCURRENCY
+    )
     parser.add_argument(
         "--minimum-compliance",
         type=float,

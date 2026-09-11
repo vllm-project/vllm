@@ -336,6 +336,7 @@ def test_run_comb_continue_on_error_keeps_later_runs(
     assert (base_path / "run=0.failure.json").exists()
     assert (base_path / "summary.json").exists()
 
+
 def test_run_comb_warmup_default_is_backward_compatible(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -372,4 +373,3 @@ def test_run_comb_warmup_default_is_backward_compatible(
 
     assert calls == [0]
     assert measured == [{"run_number": 0}]
-
