@@ -56,6 +56,10 @@ from vllm.v1.spec_decode.utils import (
     _EAGLE_PREPARE_NEXT_TOKEN_PADDED_KERNEL,
     _EAGLE_STEP_SLOT_MAPPING_METADATA_KERNEL,
     PADDING_SLOT_ID,
+    _copy_and_expand_eagle_inputs,
+    _eagle_prepare_inputs_padded,
+    _eagle_prepare_next_token_padded,
+    _eagle_step_slot_mapping_metadata,
     compute_new_slot_mapping,
     eagle_step_update_slot_mapping_and_metadata,
     extend_all_queries_by_N,
@@ -141,20 +145,18 @@ class SpecDecodeBaseProposer:
 
         self.max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        _EAGLE_STEP_SLOT_MAPPING_METADATA_KERNEL.register_warmup(
+        _eagle_step_slot_mapping_metadata.register_warmup(
             max_model_len=self.max_model_len,
             max_batch_size=self.max_batch_size,
         )
-        _EAGLE_PREPARE_INPUTS_PADDED_KERNEL.register_warmup(
-            max_batch_size=self.max_batch_size
-        )
-        _EAGLE_PREPARE_NEXT_TOKEN_PADDED_KERNEL.register_warmup(
+        _eagle_prepare_inputs_padded.register_warmup(max_batch_size=self.max_batch_size)
+        _eagle_prepare_next_token_padded.register_warmup(
             vocab_size=vllm_config.model_config.get_vocab_size(),
             num_sampled_tokens_per_req=self.num_speculative_tokens + 1,
             max_batch_size=self.max_batch_size,
         )
         if self.needs_extra_input_slots:
-            _COPY_AND_EXPAND_EAGLE_INPUTS_KERNEL.register_warmup(
+            _copy_and_expand_eagle_inputs.register_warmup(
                 parallel_drafting_token_id=self.parallel_drafting_token_id,
                 num_padding_slots_per_request=self.extra_slots_per_request,
                 shift_input_ids=self.pass_hidden_states_to_model,
@@ -891,12 +893,13 @@ class SpecDecodeBaseProposer:
                 total_num_input_tokens, dtype=torch.int32, device=self.device
             )
 
+            # Kernel grid: one program per request (row)
             query_start_loc = cad.query_start_loc
             query_end_loc = cad.query_start_loc[1:] - 1
             if num_rejected_tokens_gpu is not None:
                 query_end_loc = query_end_loc - num_rejected_tokens_gpu
 
-            _COPY_AND_EXPAND_EAGLE_INPUTS_KERNEL(
+            _copy_and_expand_eagle_inputs(
                 # (Padded) Inputs from the target model
                 target_token_ids_ptr=target_token_ids,
                 target_positions_ptr=target_positions,
@@ -1084,9 +1087,11 @@ class SpecDecodeBaseProposer:
         next_token_ids = torch.empty(batch_size, dtype=torch.int32, device=device)
         valid_sampled_tokens_count = next_token_ids.new_empty(batch_size)
 
+        # Kernel grid: one program per request (row)
+
         # Find the next power of 2 for block sizes
         BLOCK_SIZE_TOKENS = next_power_of_2(num_tokens)
-        _EAGLE_PREPARE_NEXT_TOKEN_PADDED_KERNEL(
+        _eagle_prepare_next_token_padded(
             sampled_token_ids,
             discard_request_mask,
             backup_tokens_gpu,
@@ -1125,7 +1130,7 @@ class SpecDecodeBaseProposer:
             (num_reqs,), dtype=torch.int32, device=device
         )
 
-        _EAGLE_PREPARE_INPUTS_PADDED_KERNEL(
+        _eagle_prepare_inputs_padded(
             spec_decode_metadata.cu_num_draft_tokens,
             valid_sampled_tokens_count,
             common_attn_metadata.query_start_loc,

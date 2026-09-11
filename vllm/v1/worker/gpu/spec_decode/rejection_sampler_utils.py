@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
 from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices, _when
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
-    VllmTritonJitKernel,
-    triton_scalar_specialization_rep,
+    triton_kernel_dispatcher_with_warmup,
     triton_warmup_inputs,
 )
 from vllm.triton_utils import tl, tldevice, triton
@@ -931,648 +929,409 @@ def _insert_resampled_kernel(
     )
 
 
-class ComputeLocalLogitsStatsKernel(
-    VllmTritonJitKernel["ComputeLocalLogitsStatsKernel.CompileKey"]
-):
-    kernel = staticmethod(_compute_local_logits_stats_kernel)
+def _logits_warmup_variant(
+    target_dtype: torch.dtype,
+    draft_dtype: torch.dtype,
+    vocab_size: int,
+    num_speculative_steps: int,
+    has_draft: bool,
+) -> dict[str, Any]:
+    return dict(
+        target=TritonWarmupTensor(target_dtype),
+        draft=TritonWarmupTensor(draft_dtype) if has_draft else None,
+        draft_stride_0=num_speculative_steps * vocab_size if has_draft else 0,
+        draft_stride_1=vocab_size if has_draft else 0,
+        has_draft=has_draft,
+    )
 
-    @dataclass(frozen=True)
-    class CompileKey:
-        target_dtype: torch.dtype
-        draft_dtype: torch.dtype | None
-        target_logits_stride: int
-        draft_logits_stride_0: int
-        draft_logits_stride_1: int
-        local_logits_stride: int
-        vocab_size: int
-        num_speculative_steps: int
-        block_size: int
-        has_draft_logits: bool
 
-    def dispatch(
-        self,
-        *,
-        target_dtype: torch.dtype,
-        draft_dtype: torch.dtype | None,
-        target_logits_stride: int,
-        draft_logits_stride_0: int,
-        draft_logits_stride_1: int,
-        local_logits_stride: int,
-        vocab_size: int,
-        num_speculative_steps: int,
-        block_size: int,
-        has_draft_logits: bool,
-    ) -> CompileKey:
-        return self.CompileKey(
-            target_dtype=target_dtype,
-            draft_dtype=draft_dtype,
-            target_logits_stride=triton_scalar_specialization_rep(
-                target_logits_stride
-            ),
-            draft_logits_stride_0=triton_scalar_specialization_rep(
-                draft_logits_stride_0
-            ),
-            draft_logits_stride_1=triton_scalar_specialization_rep(
-                draft_logits_stride_1
-            ),
-            local_logits_stride=triton_scalar_specialization_rep(
-                local_logits_stride
-            ),
-            vocab_size=triton_scalar_specialization_rep(vocab_size),
-            num_speculative_steps=triton_scalar_specialization_rep(
-                num_speculative_steps
-            ),
-            block_size=block_size,
-            has_draft_logits=has_draft_logits,
+def _warmup_pointer_groups(
+    *groups: tuple[torch.dtype, tuple[str, ...]],
+) -> list[tuple[torch.dtype, tuple[str, ...]]]:
+    return [(dtype, names) for dtype, names in groups if names]
+
+
+def _compute_local_logits_stats_warmup_inputs(
+    *,
+    model_dtype: torch.dtype,
+    draft_dtype: torch.dtype,
+    vocab_size: int,
+    num_speculative_steps: int,
+) -> dict[str, Any]:
+    stride = triton.cdiv(vocab_size, 8192)
+    target_dtype: Any = WarmupChoices(
+        *(
+            (model_dtype,)
+            if model_dtype == torch.float32
+            else (model_dtype, torch.float32)
         )
-
-    def get_warmup_keys(
-        self, *, model_dtype: torch.dtype, vocab_size: int, num_speculative_steps: int
-    ) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            zip_inputs(
-                dict(
-                    target_dtype=model_dtype,
-                    draft_dtype=None,
-                    draft_logits_stride_0=0,
-                    draft_logits_stride_1=0,
-                    has_draft_logits=False,
-                ),
-                dict(
-                    target_dtype=torch.float32,
-                    draft_dtype=None,
-                    draft_logits_stride_0=0,
-                    draft_logits_stride_1=0,
-                    has_draft_logits=False,
-                ),
-                dict(
-                    target_dtype=model_dtype,
-                    draft_dtype=model_dtype,
-                    draft_logits_stride_0=num_speculative_steps * vocab_size,
-                    draft_logits_stride_1=vocab_size,
-                    has_draft_logits=True,
-                ),
-                dict(
-                    target_dtype=torch.float32,
-                    draft_dtype=model_dtype,
-                    draft_logits_stride_0=num_speculative_steps * vocab_size,
-                    draft_logits_stride_1=vocab_size,
-                    has_draft_logits=True,
-                ),
-            ),
-            target_logits_stride=vocab_size,
-            local_logits_stride=triton.cdiv(vocab_size, 8192),
-            vocab_size=vocab_size,
-            num_speculative_steps=num_speculative_steps,
-            block_size=8192,
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        int32_ptr = TritonWarmupTensor(torch.int32)
-        int64_ptr = TritonWarmupTensor(torch.int64)
-        float32_ptr = TritonWarmupTensor(torch.float32)
-        target_ptr = TritonWarmupTensor(compile_key.target_dtype)
-        draft_ptr = (
-            None
-            if compile_key.draft_dtype is None
-            else TritonWarmupTensor(compile_key.draft_dtype)
-        )
-        local_logits_stride = compile_key.local_logits_stride
-        return triton_warmup_inputs(
-            self.kernel,
-            int64_ptr,
-            local_logits_stride,
-            float32_ptr,
-            local_logits_stride,
-            float32_ptr,
-            local_logits_stride,
-            float32_ptr,
-            local_logits_stride,
-            float32_ptr,
-            local_logits_stride,
-            target_ptr,
-            compile_key.target_logits_stride,
-            draft_ptr,
-            compile_key.draft_logits_stride_0,
-            compile_key.draft_logits_stride_1,
-            int64_ptr,
-            int32_ptr,
-            float32_ptr,
-            compile_key.vocab_size,
-            compile_key.num_speculative_steps,
-            BLOCK_SIZE=compile_key.block_size,
-            HAS_DRAFT_LOGITS=compile_key.has_draft_logits,
-            grid=(1, 1),
-        )
-
-    @kernel_launcher
-    def __call__(
-        self, grid: tuple[int, ...], *args: Any, **kwargs: Any
-    ) -> tuple[tuple[int, ...], dict[str, Any]]:
-        return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
-
-
-class ComputeCumulativeLogPKernel(
-    VllmTritonJitKernel["ComputeCumulativeLogPKernel.CompileKey"]
-):
-    kernel = staticmethod(_compute_cumulative_log_p_kernel)
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        target_dtype: torch.dtype
-        draft_dtype: torch.dtype | None
-        target_logits_stride: int
-        draft_logits_stride_0: int
-        draft_logits_stride_1: int
-        local_logits_stride: int
-        vocab_num_blocks: int
-        padded_vocab_num_blocks: int
-        has_draft_logits: bool
-
-    def dispatch(self, **compile_key_fields: Any) -> CompileKey:
-        return self.CompileKey(**compile_key_fields)
-
-    def get_warmup_keys(
-        self, *, model_dtype: torch.dtype, vocab_size: int, num_speculative_steps: int
-    ) -> list[CompileKey]:
-        vocab_num_blocks = triton.cdiv(vocab_size, 8192)
-        return self._trace_dispatch(self.dispatch)(
-            zip_inputs(
-                dict(
-                    target_dtype=model_dtype,
-                    draft_dtype=None,
-                    draft_logits_stride_0=0,
-                    draft_logits_stride_1=0,
-                    has_draft_logits=False,
-                ),
-                dict(
-                    target_dtype=torch.float32,
-                    draft_dtype=None,
-                    draft_logits_stride_0=0,
-                    draft_logits_stride_1=0,
-                    has_draft_logits=False,
-                ),
-                dict(
-                    target_dtype=model_dtype,
-                    draft_dtype=model_dtype,
-                    draft_logits_stride_0=num_speculative_steps * vocab_size,
-                    draft_logits_stride_1=vocab_size,
-                    has_draft_logits=True,
-                ),
-                dict(
-                    target_dtype=torch.float32,
-                    draft_dtype=model_dtype,
-                    draft_logits_stride_0=num_speculative_steps * vocab_size,
-                    draft_logits_stride_1=vocab_size,
-                    has_draft_logits=True,
-                ),
-            ),
-            target_logits_stride=vocab_size,
-            local_logits_stride=vocab_num_blocks,
-            vocab_num_blocks=vocab_num_blocks,
-            padded_vocab_num_blocks=triton.next_power_of_2(vocab_num_blocks),
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        int32_ptr = TritonWarmupTensor(torch.int32)
-        int64_ptr = TritonWarmupTensor(torch.int64)
-        float32_ptr = TritonWarmupTensor(torch.float32)
-        draft_ptr = (
-            None
-            if compile_key.draft_dtype is None
-            else TritonWarmupTensor(compile_key.draft_dtype)
-        )
-        return triton_warmup_inputs(
-            self.kernel,
-            float32_ptr,
-            TritonWarmupTensor(compile_key.target_dtype),
-            compile_key.target_logits_stride,
-            float32_ptr,
-            compile_key.local_logits_stride,
-            float32_ptr,
-            compile_key.local_logits_stride,
-            int32_ptr,
-            draft_ptr,
-            compile_key.draft_logits_stride_0,
-            compile_key.draft_logits_stride_1,
-            float32_ptr,
-            compile_key.local_logits_stride,
-            float32_ptr,
-            compile_key.local_logits_stride,
-            int32_ptr,
-            int64_ptr,
-            float32_ptr,
-            compile_key.vocab_num_blocks,
-            PADDED_VOCAB_NUM_BLOCKS=compile_key.padded_vocab_num_blocks,
-            HAS_DRAFT_LOGITS=compile_key.has_draft_logits,
-            grid=(1,),
-            num_warps=1,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self, grid: tuple[int, ...], *args: Any, **kwargs: Any
-    ) -> tuple[tuple[int, ...], dict[str, Any]]:
-        return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
-
-
-class ComputeLocalResidualMassKernel(
-    VllmTritonJitKernel["ComputeLocalResidualMassKernel.CompileKey"]
-):
-    kernel = staticmethod(_compute_local_residual_mass_kernel)
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        target_dtype: torch.dtype
-        draft_dtype: torch.dtype
-        target_logits_stride: int
-        draft_logits_stride_0: int
-        draft_logits_stride_1: int
-        local_logits_stride: int
-        vocab_size: int
-        num_speculative_steps: int
-        vocab_num_blocks: int
-        block_size: int
-        padded_vocab_num_blocks: int
-
-    def dispatch(self, **compile_key_fields: Any) -> CompileKey:
-        return self.CompileKey(**compile_key_fields)
-
-    def get_warmup_keys(
-        self, *, model_dtype: torch.dtype, vocab_size: int, num_speculative_steps: int
-    ) -> list[CompileKey]:
-        vocab_num_blocks = triton.cdiv(vocab_size, 8192)
-        return self._trace_dispatch(self.dispatch)(
-            zip_inputs(
-                dict(target_dtype=model_dtype, draft_dtype=model_dtype),
-                dict(target_dtype=torch.float32, draft_dtype=model_dtype),
-            ),
-            target_logits_stride=vocab_size,
-            draft_logits_stride_0=num_speculative_steps * vocab_size,
-            draft_logits_stride_1=vocab_size,
-            local_logits_stride=vocab_num_blocks,
-            vocab_size=vocab_size,
-            num_speculative_steps=num_speculative_steps,
-            vocab_num_blocks=vocab_num_blocks,
-            block_size=8192,
-            padded_vocab_num_blocks=triton.next_power_of_2(vocab_num_blocks),
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        int32_ptr = TritonWarmupTensor(torch.int32)
-        int64_ptr = TritonWarmupTensor(torch.int64)
-        float32_ptr = TritonWarmupTensor(torch.float32)
-        return triton_warmup_inputs(
-            self.kernel,
-            float32_ptr,
-            compile_key.local_logits_stride,
-            float32_ptr,
-            TritonWarmupTensor(compile_key.target_dtype),
-            compile_key.target_logits_stride,
-            float32_ptr,
-            compile_key.local_logits_stride,
-            float32_ptr,
-            compile_key.local_logits_stride,
-            TritonWarmupTensor(compile_key.draft_dtype),
-            compile_key.draft_logits_stride_0,
-            compile_key.draft_logits_stride_1,
-            float32_ptr,
-            compile_key.local_logits_stride,
-            float32_ptr,
-            compile_key.local_logits_stride,
-            int32_ptr,
-            int64_ptr,
-            int32_ptr,
-            float32_ptr,
-            compile_key.vocab_size,
-            compile_key.num_speculative_steps,
-            compile_key.vocab_num_blocks,
-            BLOCK_SIZE=compile_key.block_size,
-            PADDED_VOCAB_NUM_BLOCKS=compile_key.padded_vocab_num_blocks,
-            grid=(1, 1),
-        )
-
-    @kernel_launcher
-    def __call__(
-        self, grid: tuple[int, ...], *args: Any, **kwargs: Any
-    ) -> tuple[tuple[int, ...], dict[str, Any]]:
-        return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
-
-
-class RejectionKernel(VllmTritonJitKernel["RejectionKernel.CompileKey"]):
-    kernel = staticmethod(_rejection_kernel)
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        target_dtype: torch.dtype
-        draft_dtype: torch.dtype | None
-        target_logits_stride: int
-        draft_logits_stride_0: int
-        draft_logits_stride_1: int
-        sampled_stride: int
-        local_logits_stride: int
-        local_residual_mass_stride: int
-        vocab_num_blocks: int
-        padded_vocab_num_blocks: int
-        has_draft_logits: bool
-        synthetic_mode: bool
-        use_block_verification: bool
-
-    def dispatch(self, **compile_key_fields: Any) -> CompileKey:
-        return self.CompileKey(**compile_key_fields)
-
-    def get_warmup_keys(
-        self,
-        *,
-        model_dtype: torch.dtype,
-        vocab_size: int,
-        num_speculative_steps: int,
-        synthetic_mode: bool,
-        use_block_verification: bool,
-    ) -> list[CompileKey]:
-        vocab_num_blocks = triton.cdiv(vocab_size, 8192)
-        return self._trace_dispatch(self.dispatch)(
-            zip_inputs(
-                dict(
-                    target_dtype=model_dtype,
-                    draft_dtype=None,
-                    draft_logits_stride_0=0,
-                    draft_logits_stride_1=0,
-                    has_draft_logits=False,
-                ),
-                dict(
-                    target_dtype=torch.float32,
-                    draft_dtype=None,
-                    draft_logits_stride_0=0,
-                    draft_logits_stride_1=0,
-                    has_draft_logits=False,
-                ),
-                dict(
-                    target_dtype=model_dtype,
-                    draft_dtype=model_dtype,
-                    draft_logits_stride_0=num_speculative_steps * vocab_size,
-                    draft_logits_stride_1=vocab_size,
-                    has_draft_logits=True,
-                ),
-                dict(
-                    target_dtype=torch.float32,
-                    draft_dtype=model_dtype,
-                    draft_logits_stride_0=num_speculative_steps * vocab_size,
-                    draft_logits_stride_1=vocab_size,
-                    has_draft_logits=True,
-                ),
-            ),
-            target_logits_stride=vocab_size,
-            sampled_stride=num_speculative_steps + 1,
-            local_logits_stride=vocab_num_blocks,
-            local_residual_mass_stride=(
-                vocab_num_blocks if use_block_verification else 0
-            ),
-            vocab_num_blocks=vocab_num_blocks,
-            padded_vocab_num_blocks=triton.next_power_of_2(vocab_num_blocks),
-            synthetic_mode=synthetic_mode,
-            use_block_verification=use_block_verification,
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        int32_ptr = TritonWarmupTensor(torch.int32)
-        int64_ptr = TritonWarmupTensor(torch.int64)
-        float32_ptr = TritonWarmupTensor(torch.float32)
-        draft_ptr = (
-            None
-            if compile_key.draft_dtype is None
-            else TritonWarmupTensor(compile_key.draft_dtype)
-        )
-        local_logits_stride = compile_key.local_logits_stride
-        return triton_warmup_inputs(
-            self.kernel,
-            int64_ptr,
-            compile_key.sampled_stride,
-            int32_ptr,
-            float32_ptr,
-            float32_ptr,
-            TritonWarmupTensor(compile_key.target_dtype),
-            compile_key.target_logits_stride,
-            int64_ptr,
-            local_logits_stride,
-            float32_ptr,
-            local_logits_stride,
-            float32_ptr,
-            local_logits_stride,
-            int32_ptr,
-            draft_ptr,
-            compile_key.draft_logits_stride_0,
-            compile_key.draft_logits_stride_1,
-            float32_ptr,
-            local_logits_stride,
-            float32_ptr,
-            local_logits_stride,
-            int32_ptr,
-            int64_ptr,
-            float32_ptr,
-            int64_ptr,
-            int64_ptr,
-            float32_ptr if compile_key.synthetic_mode else None,
-            float32_ptr if compile_key.use_block_verification else None,
+    )
+    has_draft: Any = WarmupChoices(False, True)
+    variant = _logits_warmup_variant(
+        target_dtype,
+        draft_dtype,
+        vocab_size,
+        num_speculative_steps,
+        has_draft,
+    )
+    pointer_dtypes = _warmup_pointer_groups(
+        (torch.int64, ("target_local_argmax_ptr", "expanded_idx_mapping_ptr")),
+        (
+            torch.float32,
             (
-                float32_ptr
-                if compile_key.use_block_verification
-                and compile_key.has_draft_logits
-                else None
+                "target_local_max_ptr",
+                "target_local_sumexp_ptr",
+                "draft_local_max_ptr",
+                "draft_local_sumexp_ptr",
+                "temp_ptr",
             ),
-            compile_key.local_residual_mass_stride,
-            compile_key.vocab_num_blocks,
-            PADDED_VOCAB_NUM_BLOCKS=compile_key.padded_vocab_num_blocks,
-            HAS_DRAFT_LOGITS=compile_key.has_draft_logits,
-            SYNTHETIC_MODE=compile_key.synthetic_mode,
-            USE_BLOCK_VERIFICATION=compile_key.use_block_verification,
-            grid=(1,),
-            num_warps=1,
+        ),
+        (torch.int32, ("expanded_local_pos_ptr",)),
+    )
+    return triton_warmup_inputs(
+        _compute_local_logits_stats_kernel,
+        target_logits_ptr=variant["target"],
+        draft_logits_ptr=variant["draft"],
+        target_local_argmax_stride=stride,
+        target_local_max_stride=stride,
+        target_local_sumexp_stride=stride,
+        draft_local_max_stride=stride,
+        draft_local_sumexp_stride=stride,
+        target_logits_stride=vocab_size,
+        draft_logits_stride_0=variant["draft_stride_0"],
+        draft_logits_stride_1=variant["draft_stride_1"],
+        vocab_size=vocab_size,
+        num_speculative_steps=num_speculative_steps,
+        BLOCK_SIZE=8192,
+        HAS_DRAFT_LOGITS=variant["has_draft"],
+        grid=(1, 1),
+        pointer_dtypes=pointer_dtypes,
+    )
+
+
+def _compute_cumulative_log_p_warmup_inputs(
+    *,
+    model_dtype: torch.dtype,
+    draft_dtype: torch.dtype,
+    vocab_size: int,
+    num_speculative_steps: int,
+) -> dict[str, Any]:
+    vocab_num_blocks = triton.cdiv(vocab_size, 8192)
+    target_dtype: Any = WarmupChoices(
+        *(
+            (model_dtype,)
+            if model_dtype == torch.float32
+            else (model_dtype, torch.float32)
         )
+    )
+    has_draft: Any = WarmupChoices(False, True)
+    variant = _logits_warmup_variant(
+        target_dtype,
+        draft_dtype,
+        vocab_size,
+        num_speculative_steps,
+        has_draft,
+    )
+    pointer_dtypes = _warmup_pointer_groups(
+        (
+            torch.float32,
+            (
+                "cumulative_log_p_ptr",
+                "target_local_max_ptr",
+                "target_local_sumexp_ptr",
+                "draft_local_max_ptr",
+                "draft_local_sumexp_ptr",
+                "temp_ptr",
+            ),
+        ),
+        (torch.int32, ("draft_sampled_ptr", "cu_num_logits_ptr")),
+        (torch.int64, ("idx_mapping_ptr",)),
+    )
+    return triton_warmup_inputs(
+        _compute_cumulative_log_p_kernel,
+        target_logits_ptr=variant["target"],
+        draft_logits_ptr=variant["draft"],
+        target_logits_stride=vocab_size,
+        target_local_max_stride=vocab_num_blocks,
+        target_local_sumexp_stride=vocab_num_blocks,
+        draft_logits_stride_0=variant["draft_stride_0"],
+        draft_logits_stride_1=variant["draft_stride_1"],
+        draft_local_max_stride=vocab_num_blocks,
+        draft_local_sumexp_stride=vocab_num_blocks,
+        vocab_num_blocks=vocab_num_blocks,
+        PADDED_VOCAB_NUM_BLOCKS=triton.next_power_of_2(vocab_num_blocks),
+        HAS_DRAFT_LOGITS=variant["has_draft"],
+        grid=(1,),
+        num_warps=1,
+        pointer_dtypes=pointer_dtypes,
+    )
 
-    @kernel_launcher
-    def __call__(
-        self, grid: tuple[int, ...], *args: Any, **kwargs: Any
-    ) -> tuple[tuple[int, ...], dict[str, Any]]:
-        return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
+
+def _compute_local_residual_mass_warmup_inputs(
+    *,
+    model_dtype: torch.dtype,
+    draft_dtype: torch.dtype,
+    vocab_size: int,
+    num_speculative_steps: int,
+) -> dict[str, Any]:
+    vocab_num_blocks = triton.cdiv(vocab_size, 8192)
+    target_dtype: Any = WarmupChoices(
+        *(
+            (model_dtype,)
+            if model_dtype == torch.float32
+            else (model_dtype, torch.float32)
+        )
+    )
+    has_draft: Any = WarmupChoices(False, True)
+    variant = _logits_warmup_variant(
+        target_dtype,
+        draft_dtype,
+        vocab_size,
+        num_speculative_steps,
+        has_draft,
+    )
+    _when(has_draft)
+    pointer_dtypes = _warmup_pointer_groups(
+        (
+            torch.float32,
+            (
+                "local_residual_mass_ptr",
+                "cumulative_log_p_ptr",
+                "target_local_max_ptr",
+                "target_local_sumexp_ptr",
+                "draft_local_max_ptr",
+                "draft_local_sumexp_ptr",
+                "temp_ptr",
+            ),
+        ),
+        (torch.int32, ("draft_sampled_ptr",)),
+        (torch.int64, ("expanded_idx_mapping_ptr",)),
+        (torch.int32, ("expanded_local_pos_ptr",)),
+    )
+    return triton_warmup_inputs(
+        _compute_local_residual_mass_kernel,
+        target_logits_ptr=variant["target"],
+        draft_logits_ptr=variant["draft"],
+        local_residual_mass_stride=vocab_num_blocks,
+        target_logits_stride=vocab_size,
+        target_local_max_stride=vocab_num_blocks,
+        target_local_sumexp_stride=vocab_num_blocks,
+        draft_logits_stride_0=variant["draft_stride_0"],
+        draft_logits_stride_1=variant["draft_stride_1"],
+        draft_local_max_stride=vocab_num_blocks,
+        draft_local_sumexp_stride=vocab_num_blocks,
+        vocab_size=vocab_size,
+        num_speculative_steps=num_speculative_steps,
+        vocab_num_blocks=vocab_num_blocks,
+        BLOCK_SIZE=8192,
+        PADDED_VOCAB_NUM_BLOCKS=triton.next_power_of_2(vocab_num_blocks),
+        grid=(1, 1),
+        pointer_dtypes=pointer_dtypes,
+    )
 
 
-class ResampleKernel(VllmTritonJitKernel["ResampleKernel.CompileKey"]):
-    kernel = staticmethod(_resample_kernel)
+def _rejection_warmup_inputs(
+    *,
+    model_dtype: torch.dtype,
+    draft_dtype: torch.dtype,
+    vocab_size: int,
+    num_speculative_steps: int,
+    synthetic_mode: bool,
+    use_block_verification: bool,
+) -> dict[str, Any]:
+    vocab_num_blocks = triton.cdiv(vocab_size, 8192)
+    padded_vocab_num_blocks = triton.next_power_of_2(vocab_num_blocks)
+    local_residual_mass_stride = vocab_num_blocks if use_block_verification else 0
+    target_dtype: Any = WarmupChoices(
+        *(
+            (model_dtype,)
+            if model_dtype == torch.float32
+            else (model_dtype, torch.float32)
+        )
+    )
+    has_draft: Any = WarmupChoices(False, True)
+    variant = _logits_warmup_variant(
+        target_dtype,
+        draft_dtype,
+        vocab_size,
+        num_speculative_steps,
+        has_draft,
+    )
+    pointer_dtypes = _warmup_pointer_groups(
+        (
+            torch.int64,
+            (
+                "sampled_ptr",
+                "target_local_argmax_ptr",
+                "idx_mapping_ptr",
+                "seed_ptr",
+                "pos_ptr",
+            ),
+        ),
+        (torch.int32, ("rejected_steps_ptr", "draft_sampled_ptr", "cu_num_logits_ptr")),
+        (
+            torch.float32,
+            (
+                "target_rejected_logsumexp_ptr",
+                "draft_rejected_logsumexp_ptr",
+                "target_local_max_ptr",
+                "target_local_sumexp_ptr",
+                "draft_local_max_ptr",
+                "draft_local_sumexp_ptr",
+                "temp_ptr",
+            ),
+        ),
+    )
+    return triton_warmup_inputs(
+        _rejection_kernel,
+        target_logits_ptr=variant["target"],
+        draft_logits_ptr=variant["draft"],
+        synthetic_conditional_rates_ptr=TritonWarmupTensor(torch.float32)
+        if synthetic_mode
+        else None,
+        cumulative_log_p_ptr=TritonWarmupTensor(torch.float32)
+        if use_block_verification
+        else None,
+        local_residual_mass_ptr=TritonWarmupTensor(torch.float32)
+        if use_block_verification and variant["has_draft"]
+        else None,
+        sampled_stride=num_speculative_steps + 1,
+        target_logits_stride=vocab_size,
+        target_local_argmax_stride=vocab_num_blocks,
+        target_local_max_stride=vocab_num_blocks,
+        target_local_sumexp_stride=vocab_num_blocks,
+        draft_logits_stride_0=variant["draft_stride_0"],
+        draft_logits_stride_1=variant["draft_stride_1"],
+        draft_local_max_stride=vocab_num_blocks,
+        draft_local_sumexp_stride=vocab_num_blocks,
+        local_residual_mass_stride=local_residual_mass_stride,
+        vocab_num_blocks=vocab_num_blocks,
+        PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+        HAS_DRAFT_LOGITS=variant["has_draft"],
+        SYNTHETIC_MODE=synthetic_mode,
+        USE_BLOCK_VERIFICATION=use_block_verification,
+        grid=(1,),
+        num_warps=1,
+        pointer_dtypes=pointer_dtypes,
+    )
 
-    @dataclass(frozen=True)
-    class CompileKey:
-        target_dtype: torch.dtype
-        draft_dtype: torch.dtype | None
-        resampled_max_dtype: torch.dtype
-        target_logits_stride: int
-        resampled_stride: int
-        draft_logits_stride_0: int
-        draft_logits_stride_1: int
-        vocab_size: int
-        block_size: int
-        has_draft_logits: bool
-        use_fp64: bool
-        use_block_verification: bool
 
-    def dispatch(self, **compile_key_fields: Any) -> CompileKey:
-        return self.CompileKey(**compile_key_fields)
+def _resample_warmup_inputs(
+    *,
+    model_dtype: torch.dtype,
+    draft_dtype: torch.dtype,
+    vocab_size: int,
+    num_speculative_steps: int,
+    use_fp64: bool,
+    use_block_verification: bool,
+) -> dict[str, Any]:
+    resampled_stride = triton.cdiv(vocab_size, 1024)
+    resampled_dtype = torch.float64 if use_fp64 else torch.float32
+    target_dtype: Any = WarmupChoices(
+        *(
+            (model_dtype,)
+            if model_dtype == torch.float32
+            else (model_dtype, torch.float32)
+        )
+    )
+    has_draft: Any = WarmupChoices(False, True)
+    variant = _logits_warmup_variant(
+        target_dtype,
+        draft_dtype,
+        vocab_size,
+        num_speculative_steps,
+        has_draft,
+    )
+    pointer_dtypes = _warmup_pointer_groups(
+        (
+            torch.int64,
+            (
+                "resampled_local_argmax_ptr",
+                "expanded_idx_mapping_ptr",
+                "seed_ptr",
+                "pos_ptr",
+            ),
+        ),
+        (resampled_dtype, ("resampled_local_max_ptr",)),
+        (
+            torch.float32,
+            (
+                "target_rejected_logsumexp_ptr",
+                "draft_rejected_logsumexp_ptr",
+                "temp_ptr",
+            ),
+        ),
+        (torch.int32, ("rejected_step_ptr", "cu_num_logits_ptr", "draft_sampled_ptr")),
+    )
+    return triton_warmup_inputs(
+        _resample_kernel,
+        target_logits_ptr=variant["target"],
+        draft_logits_ptr=variant["draft"],
+        cumulative_log_p_ptr=TritonWarmupTensor(torch.float32)
+        if use_block_verification
+        else None,
+        resampled_local_argmax_stride=resampled_stride,
+        resampled_local_max_stride=resampled_stride,
+        target_logits_stride=vocab_size,
+        draft_logits_stride_0=variant["draft_stride_0"],
+        draft_logits_stride_1=variant["draft_stride_1"],
+        vocab_size=vocab_size,
+        BLOCK_SIZE=1024,
+        HAS_DRAFT_LOGITS=variant["has_draft"],
+        USE_FP64=use_fp64,
+        USE_BLOCK_VERIFICATION=use_block_verification,
+        grid=(1, 1),
+        pointer_dtypes=pointer_dtypes,
+    )
 
-    def get_warmup_keys(
-        self,
-        *,
-        model_dtype: torch.dtype,
-        vocab_size: int,
-        num_speculative_steps: int,
-        use_fp64: bool,
-        use_block_verification: bool,
-    ) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            zip_inputs(
-                dict(
-                    target_dtype=model_dtype,
-                    draft_dtype=None,
-                    draft_logits_stride_0=0,
-                    draft_logits_stride_1=0,
-                    has_draft_logits=False,
-                ),
-                dict(
-                    target_dtype=torch.float32,
-                    draft_dtype=None,
-                    draft_logits_stride_0=0,
-                    draft_logits_stride_1=0,
-                    has_draft_logits=False,
-                ),
-                dict(
-                    target_dtype=model_dtype,
-                    draft_dtype=model_dtype,
-                    draft_logits_stride_0=num_speculative_steps * vocab_size,
-                    draft_logits_stride_1=vocab_size,
-                    has_draft_logits=True,
-                ),
-                dict(
-                    target_dtype=torch.float32,
-                    draft_dtype=model_dtype,
-                    draft_logits_stride_0=num_speculative_steps * vocab_size,
-                    draft_logits_stride_1=vocab_size,
-                    has_draft_logits=True,
+
+def _insert_resampled_warmup_inputs(
+    *, num_speculative_steps: int, vocab_size: int, use_fp64: bool
+) -> dict[str, Any]:
+    resample_num_blocks = triton.cdiv(vocab_size, 1024)
+    resampled_dtype = torch.float64 if use_fp64 else torch.float32
+    return triton_warmup_inputs(
+        _insert_resampled_kernel,
+        sampled_stride=num_speculative_steps + 1,
+        resampled_local_argmax_stride=resample_num_blocks,
+        resample_num_blocks=resample_num_blocks,
+        resampled_local_max_stride=resample_num_blocks,
+        PADDED_RESAMPLE_NUM_BLOCKS=triton.next_power_of_2(resample_num_blocks),
+        grid=(1,),
+        pointer_dtypes=_warmup_pointer_groups(
+            (
+                torch.int64,
+                (
+                    "sampled_ptr",
+                    "resampled_local_argmax_ptr",
+                    "expanded_idx_mapping_ptr",
                 ),
             ),
-            resampled_max_dtype=torch.float64 if use_fp64 else torch.float32,
-            target_logits_stride=vocab_size,
-            resampled_stride=triton.cdiv(vocab_size, 1024),
-            vocab_size=vocab_size,
-            block_size=1024,
-            use_fp64=use_fp64,
-            use_block_verification=use_block_verification,
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        int32_ptr = TritonWarmupTensor(torch.int32)
-        int64_ptr = TritonWarmupTensor(torch.int64)
-        float32_ptr = TritonWarmupTensor(torch.float32)
-        draft_ptr = (
-            None
-            if compile_key.draft_dtype is None
-            else TritonWarmupTensor(compile_key.draft_dtype)
-        )
-        return triton_warmup_inputs(
-            self.kernel,
-            int64_ptr,
-            compile_key.resampled_stride,
-            TritonWarmupTensor(compile_key.resampled_max_dtype),
-            compile_key.resampled_stride,
-            TritonWarmupTensor(compile_key.target_dtype),
-            compile_key.target_logits_stride,
-            float32_ptr,
-            draft_ptr,
-            compile_key.draft_logits_stride_0,
-            compile_key.draft_logits_stride_1,
-            float32_ptr,
-            int32_ptr,
-            int32_ptr,
-            int64_ptr,
-            int32_ptr,
-            float32_ptr,
-            int64_ptr,
-            int64_ptr,
-            float32_ptr if compile_key.use_block_verification else None,
-            compile_key.vocab_size,
-            BLOCK_SIZE=compile_key.block_size,
-            HAS_DRAFT_LOGITS=compile_key.has_draft_logits,
-            USE_FP64=compile_key.use_fp64,
-            USE_BLOCK_VERIFICATION=compile_key.use_block_verification,
-            grid=(1, 1),
-        )
-
-    @kernel_launcher
-    def __call__(
-        self, grid: tuple[int, ...], *args: Any, **kwargs: Any
-    ) -> tuple[tuple[int, ...], dict[str, Any]]:
-        return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
+            (torch.int32, ("num_sampled_ptr", "cu_num_logits_ptr")),
+            (resampled_dtype, ("resampled_local_max_ptr",)),
+            (torch.float32, ("temp_ptr",)),
+        ),
+    )
 
 
-class InsertResampledKernel(
-    VllmTritonJitKernel["InsertResampledKernel.CompileKey"]
-):
-    kernel = staticmethod(_insert_resampled_kernel)
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        resampled_max_dtype: torch.dtype
-        sampled_stride: int
-        resampled_local_argmax_stride: int
-        resampled_local_max_stride: int
-        resample_num_blocks: int
-        padded_resample_num_blocks: int
-
-    def dispatch(self, **compile_key_fields: Any) -> CompileKey:
-        return self.CompileKey(**compile_key_fields)
-
-    def get_warmup_keys(
-        self,
-        *,
-        num_speculative_steps: int,
-        vocab_size: int,
-        use_fp64: bool,
-    ) -> list[CompileKey]:
-        resample_num_blocks = triton.cdiv(vocab_size, 1024)
-        return self._trace_dispatch(self.dispatch)(
-            resampled_max_dtype=torch.float64 if use_fp64 else torch.float32,
-            sampled_stride=num_speculative_steps + 1,
-            resampled_local_argmax_stride=resample_num_blocks,
-            resampled_local_max_stride=resample_num_blocks,
-            resample_num_blocks=resample_num_blocks,
-            padded_resample_num_blocks=triton.next_power_of_2(
-                resample_num_blocks
-            ),
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        int32_ptr = TritonWarmupTensor(torch.int32)
-        int64_ptr = TritonWarmupTensor(torch.int64)
-        return triton_warmup_inputs(
-            self.kernel,
-            int64_ptr,
-            compile_key.sampled_stride,
-            int32_ptr,
-            int64_ptr,
-            compile_key.resampled_local_argmax_stride,
-            TritonWarmupTensor(compile_key.resampled_max_dtype),
-            compile_key.resampled_local_max_stride,
-            compile_key.resample_num_blocks,
-            int32_ptr,
-            int64_ptr,
-            TritonWarmupTensor(torch.float32),
-            PADDED_RESAMPLE_NUM_BLOCKS=compile_key.padded_resample_num_blocks,
-            grid=(1,),
-        )
-
-    @kernel_launcher
-    def __call__(
-        self, grid: tuple[int, ...], *args: Any, **kwargs: Any
-    ) -> tuple[tuple[int, ...], dict[str, Any]]:
-        return grid, {**dict(zip(self._kernel_arg_names, args)), **kwargs}
+_COMPUTE_LOCAL_LOGITS_STATS_KERNEL = triton_kernel_dispatcher_with_warmup(
+    warmup_inputs=_compute_local_logits_stats_warmup_inputs
+)(_compute_local_logits_stats_kernel)
+_COMPUTE_CUMULATIVE_LOG_P_KERNEL = triton_kernel_dispatcher_with_warmup(
+    warmup_inputs=_compute_cumulative_log_p_warmup_inputs
+)(_compute_cumulative_log_p_kernel)
+_COMPUTE_LOCAL_RESIDUAL_MASS_KERNEL = triton_kernel_dispatcher_with_warmup(
+    warmup_inputs=_compute_local_residual_mass_warmup_inputs
+)(_compute_local_residual_mass_kernel)
+_REJECTION_KERNEL = triton_kernel_dispatcher_with_warmup(
+    warmup_inputs=_rejection_warmup_inputs
+)(_rejection_kernel)
+_RESAMPLE_KERNEL = triton_kernel_dispatcher_with_warmup(
+    warmup_inputs=_resample_warmup_inputs
+)(_resample_kernel)
+_INSERT_RESAMPLED_KERNEL = triton_kernel_dispatcher_with_warmup(
+    warmup_inputs=_insert_resampled_warmup_inputs
+)(_insert_resampled_kernel)
 
 
 def rejection_sample(
@@ -1638,7 +1397,7 @@ def rejection_sample(
     draft_local_sumexp = target_logits.new_empty(
         num_logits, vocab_num_blocks, dtype=torch.float32
     )
-    _COMPUTE_LOCAL_LOGITS_STATS_KERNEL((num_logits, vocab_num_blocks),
+    _COMPUTE_LOCAL_LOGITS_STATS_KERNEL[(num_logits, vocab_num_blocks)](
         target_local_argmax,
         target_local_argmax.stride(0),
         target_local_max,
@@ -1674,7 +1433,7 @@ def rejection_sample(
         # cumulative_log_p[start + i] = log(p_{i+1}), the cumulative ratio after
         # the (i+1)-th draft token.
         cumulative_log_p = target_logits.new_empty(num_logits, dtype=torch.float32)
-        _COMPUTE_CUMULATIVE_LOG_P_KERNEL((num_reqs,),
+        _COMPUTE_CUMULATIVE_LOG_P_KERNEL[(num_reqs,)](
             cumulative_log_p,
             target_logits,
             target_logits.stride(0),
@@ -1707,7 +1466,7 @@ def rejection_sample(
             local_residual_mass = target_logits.new_empty(
                 num_logits, vocab_num_blocks, dtype=torch.float32
             )
-            _COMPUTE_LOCAL_RESIDUAL_MASS_KERNEL((num_logits, vocab_num_blocks),
+            _COMPUTE_LOCAL_RESIDUAL_MASS_KERNEL[(num_logits, vocab_num_blocks)](
                 local_residual_mass,
                 local_residual_mass.stride(0),
                 cumulative_log_p,
@@ -1748,7 +1507,7 @@ def rejection_sample(
     num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
     target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
-    _REJECTION_KERNEL((num_reqs,),
+    _REJECTION_KERNEL[(num_reqs,)](
         sampled,
         sampled.stride(0),
         num_sampled,
@@ -1799,7 +1558,7 @@ def rejection_sample(
         resample_num_blocks,
         dtype=torch.float64 if use_fp64 else torch.float32,
     )
-    _RESAMPLE_KERNEL((num_reqs, resample_num_blocks),
+    _RESAMPLE_KERNEL[(num_reqs, resample_num_blocks)](
         resampled_local_argmax,
         resampled_local_argmax.stride(0),
         resampled_local_max,
@@ -1827,7 +1586,7 @@ def rejection_sample(
     )
 
     # Insert the resampled tokens into the output sampled.
-    _INSERT_RESAMPLED_KERNEL((num_reqs,),
+    _INSERT_RESAMPLED_KERNEL[(num_reqs,)](
         sampled,
         sampled.stride(0),
         num_sampled,

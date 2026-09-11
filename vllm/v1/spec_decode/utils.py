@@ -5,11 +5,14 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import (WarmupIntRange, kernel_launcher, zip_inputs)
+from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
+    WarmupIntRange,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
     TritonWarmupTensor,
-    VllmTritonJitKernel,
-    triton_scalar_specialization_rep,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -94,6 +97,49 @@ def eagle_step_slot_mapping_metadata_kernel(
     tl.store(seq_lens_ptr + req_idx, new_seq_len)
 
 
+def _eagle_step_warmup_inputs(*, max_model_len: int, max_batch_size: int):
+    block_size = WarmupIntRange(1, 257, advance=lambda value: value * 2)
+    n_blocks_per_req = triton.cdiv(max_model_len, block_size)
+    return dict(
+        positions=TritonWarmupTensor(torch.int64),
+        block_table=TritonWarmupTensor(
+            torch.int32, shape=(1, n_blocks_per_req), strides=(n_blocks_per_req, 1)
+        ),
+        block_table_stride=n_blocks_per_req,
+        seq_lens=TritonWarmupTensor(torch.int32),
+        out_clamped_positions=TritonWarmupTensor(torch.int64),
+        out_slot_mapping=TritonWarmupTensor(torch.int64),
+        block_size=block_size,
+        max_model_len=max_model_len,
+        n_blocks_per_req=n_blocks_per_req,
+        PAD_ID=PADDING_SLOT_ID,
+        batch_size=WarmupIntRange(1, max_batch_size + 1),
+        input_batch_size=1,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=eagle_step_slot_mapping_metadata_kernel,
+    warmup_inputs=_eagle_step_warmup_inputs,
+)
+def _eagle_step_slot_mapping_metadata(
+    positions: torch.Tensor,
+    block_table: torch.Tensor,
+    block_table_stride: int,
+    seq_lens: torch.Tensor,
+    out_clamped_positions: torch.Tensor,
+    out_slot_mapping: torch.Tensor,
+    *,
+    block_size: int,
+    max_model_len: int,
+    n_blocks_per_req: int,
+    PAD_ID: int,
+    batch_size: int,
+    input_batch_size: int,
+) -> DispatchSpec:
+    return (input_batch_size,), {}
+
+
 def eagle_step_update_slot_mapping_and_metadata(
     positions_1d: torch.Tensor,
     block_table_tensor: torch.Tensor,
@@ -127,7 +173,7 @@ def eagle_step_update_slot_mapping_and_metadata(
         input_batch_size = batch_size
 
     n_blocks_per_req = block_table_tensor.shape[1]
-    _EAGLE_STEP_SLOT_MAPPING_METADATA_KERNEL(
+    _eagle_step_slot_mapping_metadata(
         positions_1d,
         block_table_tensor,
         block_table_tensor.stride(0),
@@ -183,6 +229,33 @@ def eagle_prepare_inputs_padded_kernel(
     index_to_sample = q_last_tok_idx - num_rejected_tokens
     tl.store(token_indices_to_sample_ptr + req_idx, index_to_sample)
     tl.store(num_rejected_tokens_gpu_ptr + req_idx, num_rejected_tokens)
+
+
+def _eagle_prepare_inputs_warmup_inputs(*, max_batch_size: int):
+    int32 = TritonWarmupTensor(torch.int32)
+    return dict(
+        cu_num_draft_tokens=int32,
+        valid_sampled_tokens_count=int32,
+        query_start_loc_gpu=int32,
+        token_indices_to_sample=int32,
+        num_rejected_tokens_gpu=int32,
+        num_reqs=WarmupIntRange(1, max_batch_size + 1),
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=eagle_prepare_inputs_padded_kernel,
+    warmup_inputs=_eagle_prepare_inputs_warmup_inputs,
+)
+def _eagle_prepare_inputs_padded(
+    cu_num_draft_tokens: torch.Tensor,
+    valid_sampled_tokens_count: torch.Tensor,
+    query_start_loc_gpu: torch.Tensor,
+    token_indices_to_sample: torch.Tensor,
+    num_rejected_tokens_gpu: torch.Tensor,
+    num_reqs: int,
+) -> DispatchSpec:
+    return (num_reqs,), {}
 
 
 @triton.jit
@@ -246,6 +319,48 @@ def eagle_prepare_next_token_padded_kernel(
             tl.store(next_token_ids_ptr + req_idx, backup_token)
 
         tl.store(valid_sampled_tokens_count_ptr + req_idx, valid_count)
+
+
+def _eagle_prepare_next_token_warmup_inputs(
+    *, vocab_size: int, num_sampled_tokens_per_req: int, max_batch_size: int
+):
+    int32 = TritonWarmupTensor(torch.int32)
+    return dict(
+        sampled_token_ids=TritonWarmupTensor(
+            torch.int32,
+            shape=(1, num_sampled_tokens_per_req),
+            strides=(num_sampled_tokens_per_req, 1),
+        ),
+        discard_request_mask=TritonWarmupTensor(torch.bool),
+        backup_next_token_ids=int32,
+        next_token_ids=int32,
+        valid_sampled_tokens_count=int32,
+        vocab_size=vocab_size,
+        num_sampled_tokens_per_req=num_sampled_tokens_per_req,
+        num_reqs=WarmupIntRange(1, max_batch_size + 1),
+        stride_sampled_token_ids=num_sampled_tokens_per_req,
+        BLOCK_SIZE_TOKENS=next_power_of_2(num_sampled_tokens_per_req),
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=eagle_prepare_next_token_padded_kernel,
+    warmup_inputs=_eagle_prepare_next_token_warmup_inputs,
+)
+def _eagle_prepare_next_token_padded(
+    sampled_token_ids: torch.Tensor,
+    discard_request_mask: torch.Tensor,
+    backup_next_token_ids: torch.Tensor,
+    next_token_ids: torch.Tensor,
+    valid_sampled_tokens_count: torch.Tensor,
+    vocab_size: int,
+    num_sampled_tokens_per_req: int,
+    num_reqs: int,
+    stride_sampled_token_ids: int,
+    *,
+    BLOCK_SIZE_TOKENS: int,
+) -> DispatchSpec:
+    return (num_reqs,), {}
 
 
 def compute_new_slot_mapping(
@@ -464,339 +579,66 @@ def copy_and_expand_eagle_inputs_kernel(
     )
 
 
-class EagleStepSlotMappingMetadataKernel(
-    VllmTritonJitKernel["EagleStepSlotMappingMetadataKernel.CompileKey"]
+def _copy_and_expand_eagle_warmup_inputs(
+    *,
+    parallel_drafting_token_id: int,
+    num_padding_slots_per_request: int,
+    shift_input_ids: bool,
+    max_num_tokens: int,
 ):
-    _BLOCK_SIZES = (1, 2, 4, 8, 16, 32, 64, 128, 256)
-    kernel = staticmethod(eagle_step_slot_mapping_metadata_kernel)
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        block_table_stride: int
-        block_size: int
-        max_model_len: int
-        n_blocks_per_req: int
-        pad_id: int
-        batch_size: int
-
-    def dispatch(
-        self,
-        *,
-        block_table_stride: int,
-        block_size: int,
-        max_model_len: int,
-        n_blocks_per_req: int,
-        pad_id: int,
-        batch_size: int,
-    ) -> CompileKey:
-        return self.CompileKey(
-            block_table_stride=triton_scalar_specialization_rep(block_table_stride),
-            block_size=block_size,
-            max_model_len=max_model_len,
-            n_blocks_per_req=n_blocks_per_req,
-            pad_id=pad_id,
-            batch_size=triton_scalar_specialization_rep(batch_size),
-        )
-
-    def get_warmup_keys(
-        self,
-        *,
-        max_model_len: int,
-        max_batch_size: int,
-    ) -> list[CompileKey]:
-        block_sizes = zip_inputs(
-            *(
-                dict(
-                    block_size=block_size,
-                    n_blocks_per_req=triton.cdiv(max_model_len, block_size),
-                    block_table_stride=triton.cdiv(max_model_len, block_size),
-                )
-                for block_size in self._BLOCK_SIZES
-            )
-        )
-        return self._trace_dispatch(self.dispatch)(
-            block_sizes,
-            max_model_len=max_model_len,
-            pad_id=PADDING_SLOT_ID,
-            batch_size=WarmupIntRange(1, max_batch_size + 1),
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        return dict(
-            positions=TritonWarmupTensor(torch.int64),
-            block_table=TritonWarmupTensor(
-                torch.int32,
-                shape=(1, compile_key.n_blocks_per_req),
-                strides=(compile_key.block_table_stride, 1),
-            ),
-            block_table_stride=compile_key.block_table_stride,
-            seq_lens=TritonWarmupTensor(torch.int32),
-            out_clamped_positions=TritonWarmupTensor(torch.int64),
-            out_slot_mapping=TritonWarmupTensor(torch.int64),
-            block_size=compile_key.block_size,
-            max_model_len=compile_key.max_model_len,
-            n_blocks_per_req=compile_key.n_blocks_per_req,
-            PAD_ID=compile_key.pad_id,
-            batch_size=compile_key.batch_size,
-            input_batch_size=1,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        positions: torch.Tensor,
-        block_table: torch.Tensor,
-        block_table_stride: int,
-        seq_lens: torch.Tensor,
-        out_clamped_positions: torch.Tensor,
-        out_slot_mapping: torch.Tensor,
-        *,
-        block_size: int,
-        max_model_len: int,
-        n_blocks_per_req: int,
-        PAD_ID: int,
-        batch_size: int,
-        input_batch_size: int,
-    ) -> tuple[tuple[int, ...], dict[str, Any]]:
-        return (input_batch_size,), dict(
-            block_size=block_size,
-            max_model_len=max_model_len,
-            n_blocks_per_req=n_blocks_per_req,
-            PAD_ID=PAD_ID,
-            batch_size=batch_size,
-        )
+    int32 = TritonWarmupTensor(torch.int32)
+    int64 = TritonWarmupTensor(torch.int64)
+    boolean = TritonWarmupTensor(torch.bool)
+    return dict(
+        target_token_ids_ptr=int32,
+        target_positions_ptr=int64,
+        next_token_ids_ptr=int32,
+        out_input_ids_ptr=int32,
+        out_positions_ptr=int64,
+        out_is_rejected_token_mask_ptr=boolean,
+        out_is_masked_token_mask_ptr=boolean,
+        out_new_token_indices_ptr=int32,
+        out_hidden_state_mapping_ptr=int32,
+        query_start_loc_ptr=int32,
+        query_end_loc_ptr=int32,
+        padding_token_id=0,
+        parallel_drafting_token_id=parallel_drafting_token_id,
+        total_input_tokens=WarmupIntRange(1, max_num_tokens + 1),
+        num_padding_slots_per_request=num_padding_slots_per_request,
+        shift_input_ids=shift_input_ids,
+        BLOCK_SIZE_TOKENS=WarmupIntRange(1, 257, advance=lambda value: value * 2),
+        batch_size=1,
+        num_blocks=1,
+    )
 
 
-class EaglePrepareInputsPaddedKernel(
-    VllmTritonJitKernel["EaglePrepareInputsPaddedKernel.CompileKey"]
-):
-    kernel = staticmethod(eagle_prepare_inputs_padded_kernel)
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        num_reqs: int
-
-    def dispatch(self, *, num_reqs: int) -> CompileKey:
-        return self.CompileKey(num_reqs=triton_scalar_specialization_rep(num_reqs))
-
-    def get_warmup_keys(self, *, max_batch_size: int) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            num_reqs=WarmupIntRange(1, max_batch_size + 1)
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        return dict(
-            cu_num_draft_tokens=TritonWarmupTensor(torch.int32),
-            valid_sampled_tokens_count=TritonWarmupTensor(torch.int32),
-            query_start_loc_gpu=TritonWarmupTensor(torch.int32),
-            token_indices_to_sample=TritonWarmupTensor(torch.int32),
-            num_rejected_tokens_gpu=TritonWarmupTensor(torch.int32),
-            num_reqs=compile_key.num_reqs,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        cu_num_draft_tokens: torch.Tensor,
-        valid_sampled_tokens_count: torch.Tensor,
-        query_start_loc_gpu: torch.Tensor,
-        token_indices_to_sample: torch.Tensor,
-        num_rejected_tokens_gpu: torch.Tensor,
-        num_reqs: int,
-    ) -> tuple[tuple[int, ...], dict[str, Any]]:
-        return (num_reqs,), {}
-
-
-class EaglePrepareNextTokenPaddedKernel(
-    VllmTritonJitKernel["EaglePrepareNextTokenPaddedKernel.CompileKey"]
-):
-    kernel = staticmethod(eagle_prepare_next_token_padded_kernel)
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        vocab_size: int
-        num_sampled_tokens_per_req: int
-        num_reqs: int
-        stride_sampled_token_ids: int
-        block_size_tokens: int
-
-    def dispatch(
-        self,
-        *,
-        vocab_size: int,
-        num_sampled_tokens_per_req: int,
-        num_reqs: int,
-        stride_sampled_token_ids: int,
-        block_size_tokens: int,
-    ) -> CompileKey:
-        return self.CompileKey(
-            vocab_size=triton_scalar_specialization_rep(vocab_size),
-            num_sampled_tokens_per_req=triton_scalar_specialization_rep(
-                num_sampled_tokens_per_req
-            ),
-            num_reqs=triton_scalar_specialization_rep(num_reqs),
-            stride_sampled_token_ids=triton_scalar_specialization_rep(
-                stride_sampled_token_ids
-            ),
-            block_size_tokens=block_size_tokens,
-        )
-
-    def get_warmup_keys(
-        self,
-        *,
-        vocab_size: int,
-        num_sampled_tokens_per_req: int,
-        max_batch_size: int,
-    ) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            vocab_size=vocab_size,
-            num_sampled_tokens_per_req=num_sampled_tokens_per_req,
-            num_reqs=WarmupIntRange(1, max_batch_size + 1),
-            stride_sampled_token_ids=num_sampled_tokens_per_req,
-            block_size_tokens=next_power_of_2(num_sampled_tokens_per_req),
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        return dict(
-            sampled_token_ids=TritonWarmupTensor(
-                torch.int32,
-                shape=(1, compile_key.num_sampled_tokens_per_req),
-                strides=(compile_key.stride_sampled_token_ids, 1),
-            ),
-            discard_request_mask=TritonWarmupTensor(torch.bool),
-            backup_next_token_ids=TritonWarmupTensor(torch.int32),
-            next_token_ids=TritonWarmupTensor(torch.int32),
-            valid_sampled_tokens_count=TritonWarmupTensor(torch.int32),
-            vocab_size=compile_key.vocab_size,
-            num_sampled_tokens_per_req=compile_key.num_sampled_tokens_per_req,
-            num_reqs=compile_key.num_reqs,
-            stride_sampled_token_ids=compile_key.stride_sampled_token_ids,
-            BLOCK_SIZE_TOKENS=compile_key.block_size_tokens,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        sampled_token_ids: torch.Tensor,
-        discard_request_mask: torch.Tensor,
-        backup_next_token_ids: torch.Tensor,
-        next_token_ids: torch.Tensor,
-        valid_sampled_tokens_count: torch.Tensor,
-        vocab_size: int,
-        num_sampled_tokens_per_req: int,
-        num_reqs: int,
-        stride_sampled_token_ids: int,
-        *,
-        BLOCK_SIZE_TOKENS: int,
-    ) -> tuple[tuple[int, ...], dict[str, Any]]:
-        return (num_reqs,), dict(BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS)
-
-
-class CopyAndExpandEagleInputsKernel(
-    VllmTritonJitKernel["CopyAndExpandEagleInputsKernel.CompileKey"]
-):
-    kernel = staticmethod(copy_and_expand_eagle_inputs_kernel)
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        padding_token_id: int
-        parallel_drafting_token_id: int
-        total_input_tokens: int
-        num_padding_slots_per_request: int
-        shift_input_ids: bool
-        block_size_tokens: int
-
-    def dispatch(
-        self,
-        *,
-        padding_token_id: int,
-        parallel_drafting_token_id: int,
-        total_input_tokens: int,
-        num_padding_slots_per_request: int,
-        shift_input_ids: bool,
-        block_size_tokens: int,
-    ) -> CompileKey:
-        return self.CompileKey(
-            padding_token_id=triton_scalar_specialization_rep(padding_token_id),
-            parallel_drafting_token_id=triton_scalar_specialization_rep(
-                parallel_drafting_token_id
-            ),
-            total_input_tokens=triton_scalar_specialization_rep(total_input_tokens),
-            num_padding_slots_per_request=triton_scalar_specialization_rep(
-                num_padding_slots_per_request
-            ),
-            shift_input_ids=shift_input_ids,
-            block_size_tokens=block_size_tokens,
-        )
-
-    def get_warmup_keys(
-        self,
-        *,
-        parallel_drafting_token_id: int,
-        num_padding_slots_per_request: int,
-        shift_input_ids: bool,
-        max_num_tokens: int,
-    ) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            padding_token_id=0,
-            parallel_drafting_token_id=parallel_drafting_token_id,
-            total_input_tokens=WarmupIntRange(1, max_num_tokens + 1),
-            num_padding_slots_per_request=num_padding_slots_per_request,
-            shift_input_ids=shift_input_ids,
-            block_size_tokens=(1, 2, 4, 8, 16, 32, 64, 128, 256),
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        int32 = TritonWarmupTensor(torch.int32)
-        int64 = TritonWarmupTensor(torch.int64)
-        boolean = TritonWarmupTensor(torch.bool)
-        return dict(
-            target_token_ids=int32,
-            target_positions=int64,
-            next_token_ids=int32,
-            out_input_ids=int32,
-            out_positions=int64,
-            out_is_rejected_token_mask=boolean,
-            out_is_masked_token_mask=boolean,
-            out_new_token_indices=int32,
-            out_hidden_state_mapping=int32,
-            query_start_loc=int32,
-            query_end_loc=int32,
-            padding_token_id=compile_key.padding_token_id,
-            parallel_drafting_token_id=compile_key.parallel_drafting_token_id,
-            total_input_tokens=compile_key.total_input_tokens,
-            num_padding_slots_per_request=(compile_key.num_padding_slots_per_request),
-            shift_input_ids=compile_key.shift_input_ids,
-            BLOCK_SIZE_TOKENS=compile_key.block_size_tokens,
-            batch_size=1,
-            num_blocks=1,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        target_token_ids: torch.Tensor,
-        target_positions: torch.Tensor,
-        next_token_ids: torch.Tensor,
-        out_input_ids: torch.Tensor,
-        out_positions: torch.Tensor,
-        out_is_rejected_token_mask: torch.Tensor,
-        out_is_masked_token_mask: torch.Tensor,
-        out_new_token_indices: torch.Tensor,
-        out_hidden_state_mapping: torch.Tensor,
-        query_start_loc: torch.Tensor,
-        query_end_loc: torch.Tensor,
-        padding_token_id: int,
-        parallel_drafting_token_id: int,
-        total_input_tokens: int,
-        num_padding_slots_per_request: int,
-        shift_input_ids: bool,
-        *,
-        BLOCK_SIZE_TOKENS: int,
-        batch_size: int,
-        num_blocks: int,
-    ) -> tuple[tuple[int, ...], dict[str, Any]]:
-        return (batch_size, num_blocks), dict(BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS)
+@triton_kernel_dispatcher_with_warmup(
+    kernel=copy_and_expand_eagle_inputs_kernel,
+    warmup_inputs=_copy_and_expand_eagle_warmup_inputs,
+)
+def _copy_and_expand_eagle_inputs(
+    target_token_ids_ptr: torch.Tensor,
+    target_positions_ptr: torch.Tensor,
+    next_token_ids_ptr: torch.Tensor,
+    out_input_ids_ptr: torch.Tensor,
+    out_positions_ptr: torch.Tensor,
+    out_is_rejected_token_mask_ptr: torch.Tensor,
+    out_is_masked_token_mask_ptr: torch.Tensor,
+    out_new_token_indices_ptr: torch.Tensor,
+    out_hidden_state_mapping_ptr: torch.Tensor,
+    query_start_loc_ptr: torch.Tensor,
+    query_end_loc_ptr: torch.Tensor,
+    padding_token_id: int,
+    parallel_drafting_token_id: int,
+    total_input_tokens: int,
+    num_padding_slots_per_request: int,
+    shift_input_ids: bool,
+    *,
+    BLOCK_SIZE_TOKENS: int,
+    batch_size: int,
+    num_blocks: int,
+) -> DispatchSpec:
+    return (batch_size, num_blocks), {}
 
 
 @triton.jit
@@ -907,124 +749,73 @@ def copy_and_expand_dflash_inputs_kernel(
     )
 
 
-class CopyAndExpandDflashInputsKernel(
-    VllmTritonJitKernel["CopyAndExpandDflashInputsKernel.CompileKey"]
+def _copy_and_expand_dflash_warmup_inputs(
+    *,
+    block_table_stride: int,
+    parallel_drafting_token_id: int,
+    block_size: int,
+    num_speculative_tokens: int,
 ):
-    kernel = staticmethod(copy_and_expand_dflash_inputs_kernel)
+    int32 = TritonWarmupTensor(torch.int32)
+    int64 = TritonWarmupTensor(torch.int64)
+    triton_block_size = WarmupIntRange(1, 257, advance=lambda value: value * 2)
+    has_num_rejected = WarmupChoices(False, True)
+    return dict(
+        next_token_ids_ptr=int32,
+        target_positions_ptr=int64,
+        out_input_ids_ptr=int32,
+        out_context_positions_ptr=int64,
+        out_query_positions_ptr=int64,
+        out_context_slot_mapping_ptr=int64,
+        out_query_slot_mapping_ptr=int64,
+        out_token_indices_ptr=int32,
+        block_table_ptr=int32,
+        query_start_loc_ptr=int32,
+        num_rejected_tokens_ptr=(int32 if has_num_rejected else 0),
+        block_table_stride=block_table_stride,
+        parallel_drafting_token_id=parallel_drafting_token_id,
+        block_size=block_size,
+        num_query_per_req=1 + num_speculative_tokens,
+        num_speculative_tokens=num_speculative_tokens,
+        total_input_tokens=WarmupChoices(1, 2, 16),
+        max_tokens_per_req=triton_block_size,
+        triton_block_size=triton_block_size,
+        has_num_rejected=has_num_rejected,
+    )
 
-    @dataclass(frozen=True)
-    class CompileKey:
-        block_table_stride: int
-        parallel_drafting_token_id: int
-        block_size: int
-        num_query_per_req: int
-        num_speculative_tokens: int
-        total_input_tokens: int
-        triton_block_size: int
-        has_num_rejected: bool
 
-    def dispatch(
-        self,
-        *,
-        block_table_stride: int,
-        parallel_drafting_token_id: int,
-        block_size: int,
-        num_query_per_req: int,
-        num_speculative_tokens: int,
-        total_input_tokens: int,
-        triton_block_size: int,
-        has_num_rejected: bool,
-    ) -> CompileKey:
-        return self.CompileKey(
-            block_table_stride=triton_scalar_specialization_rep(block_table_stride),
-            parallel_drafting_token_id=triton_scalar_specialization_rep(
-                parallel_drafting_token_id
-            ),
-            block_size=triton_scalar_specialization_rep(block_size),
-            num_query_per_req=triton_scalar_specialization_rep(num_query_per_req),
-            num_speculative_tokens=triton_scalar_specialization_rep(
-                num_speculative_tokens
-            ),
-            total_input_tokens=triton_scalar_specialization_rep(total_input_tokens),
-            triton_block_size=triton_block_size,
-            has_num_rejected=has_num_rejected,
-        )
-
-    def get_warmup_keys(
-        self,
-        *,
-        block_table_stride: int,
-        parallel_drafting_token_id: int,
-        block_size: int,
-        num_speculative_tokens: int,
-    ) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            block_table_stride=block_table_stride,
-            parallel_drafting_token_id=parallel_drafting_token_id,
-            block_size=block_size,
-            num_query_per_req=1 + num_speculative_tokens,
-            num_speculative_tokens=num_speculative_tokens,
-            total_input_tokens=(1, 2, 16),
-            triton_block_size=(1, 2, 4, 8, 16, 32, 64, 128, 256),
-            has_num_rejected=(False, True),
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        int32_ptr = TritonWarmupTensor(torch.int32)
-        int64_ptr = TritonWarmupTensor(torch.int64)
-        return dict(
-            next_token_ids_ptr=int32_ptr,
-            target_positions_ptr=int64_ptr,
-            out_input_ids_ptr=int32_ptr,
-            out_context_positions_ptr=int64_ptr,
-            out_query_positions_ptr=int64_ptr,
-            out_context_slot_mapping_ptr=int64_ptr,
-            out_query_slot_mapping_ptr=int64_ptr,
-            out_token_indices_ptr=int32_ptr,
-            block_table_ptr=int32_ptr,
-            query_start_loc_ptr=int32_ptr,
-            num_rejected_tokens_ptr=int32_ptr,
-            max_tokens_per_req=compile_key.triton_block_size,
-            **vars(compile_key),
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        *,
-        next_token_ids_ptr: torch.Tensor,
-        target_positions_ptr: torch.Tensor,
-        out_input_ids_ptr: torch.Tensor,
-        out_context_positions_ptr: torch.Tensor,
-        out_query_positions_ptr: torch.Tensor,
-        out_context_slot_mapping_ptr: torch.Tensor,
-        out_query_slot_mapping_ptr: torch.Tensor,
-        out_token_indices_ptr: torch.Tensor,
-        block_table_ptr: torch.Tensor,
-        query_start_loc_ptr: torch.Tensor,
-        num_rejected_tokens_ptr: torch.Tensor | int,
-        block_table_stride: int,
-        parallel_drafting_token_id: int,
-        block_size: int,
-        num_query_per_req: int,
-        num_speculative_tokens: int,
-        total_input_tokens: int,
-        max_tokens_per_req: int,
-        triton_block_size: int,
-        has_num_rejected: bool,
-    ) -> tuple[tuple[int, ...], dict[str, Any]]:
-        num_reqs = query_start_loc_ptr.shape[0] - 1
-        num_blocks = triton.cdiv(max_tokens_per_req, triton_block_size)
-        return (num_reqs, num_blocks), dict(
-            block_table_stride=block_table_stride,
-            parallel_drafting_token_id=parallel_drafting_token_id,
-            block_size=block_size,
-            num_query_per_req=num_query_per_req,
-            num_speculative_tokens=num_speculative_tokens,
-            total_input_tokens=total_input_tokens,
-            BLOCK_SIZE=triton_block_size,
-            HAS_NUM_REJECTED=has_num_rejected,
-        )
+@triton_kernel_dispatcher_with_warmup(
+    kernel=copy_and_expand_dflash_inputs_kernel,
+    warmup_inputs=_copy_and_expand_dflash_warmup_inputs,
+)
+def _copy_and_expand_dflash_inputs(
+    *,
+    next_token_ids_ptr: torch.Tensor,
+    target_positions_ptr: torch.Tensor,
+    out_input_ids_ptr: torch.Tensor,
+    out_context_positions_ptr: torch.Tensor,
+    out_query_positions_ptr: torch.Tensor,
+    out_context_slot_mapping_ptr: torch.Tensor,
+    out_query_slot_mapping_ptr: torch.Tensor,
+    out_token_indices_ptr: torch.Tensor,
+    block_table_ptr: torch.Tensor,
+    query_start_loc_ptr: torch.Tensor,
+    num_rejected_tokens_ptr: torch.Tensor | int,
+    block_table_stride: int,
+    parallel_drafting_token_id: int,
+    block_size: int,
+    num_query_per_req: int,
+    num_speculative_tokens: int,
+    total_input_tokens: int,
+    max_tokens_per_req: int,
+    triton_block_size: int,
+    has_num_rejected: bool,
+) -> DispatchSpec:
+    num_reqs = query_start_loc_ptr.shape[0] - 1
+    num_blocks = triton.cdiv(max_tokens_per_req, triton_block_size)
+    return (num_reqs, num_blocks), dict(
+        BLOCK_SIZE=triton_block_size,
+    )
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)

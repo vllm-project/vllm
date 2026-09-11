@@ -577,6 +577,25 @@ def test_registry_records_only_inside_model_setup_context() -> None:
     assert kernel.compiled == []
 
 
+def test_registry_capture() -> None:
+    class Owner:
+        @JitWarmupRegistry.capture
+        def __init__(
+            self,
+            vllm_config: Any,
+            kernel: RecordingToyKernel,
+        ) -> None:
+            kernel.register_warmup(3, vllm_config)
+
+    kernel = RecordingToyKernel()
+    config = _config()
+    owner = Owner(config, kernel)
+
+    assert len(owner.jit_warmup_registry) == 1  # type: ignore[attr-defined]
+    kernel.register_warmup(5, config)
+    assert len(owner.jit_warmup_registry) == 1  # type: ignore[attr-defined]
+
+
 def test_registry_expands_requests_and_deduplicates_owner_keys() -> None:
     registry = JitWarmupRegistry(_config())
     kernel = RecordingToyKernel()
