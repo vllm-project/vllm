@@ -21,6 +21,15 @@ from vllm.model_executor.kernels.mhc.torch import (
     mhc_post_torch,
     mhc_pre_delayed_torch,
 )
+from vllm.model_executor.layers.mhc import HAS_TILELANG_MHC
+
+# Unconditional for mypy; only imported at runtime when the fused path is used.
+if typing.TYPE_CHECKING or HAS_TILELANG_MHC:
+    from vllm.model_executor.kernels.mhc.tilelang import (
+        mhc_post_tilelang,
+        mhc_pre_delayed_tilelang,
+    )
+
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -71,6 +80,25 @@ if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
 logger = init_logger(__name__)
+
+
+def _fuse_mhc(dtype: torch.dtype) -> bool:
+    """Fused TileLang mHC is bf16-only; other dtypes use the torch reference."""
+    return HAS_TILELANG_MHC and dtype == torch.bfloat16
+
+
+def _mhc_impls(fused: bool) -> tuple[Callable, Callable]:
+    """The (pre, post) mHC implementations for a fused or reference path."""
+    if fused:
+        return mhc_pre_delayed_tilelang, mhc_post_tilelang
+    return mhc_pre_delayed_torch, mhc_post_torch
+
+
+def _mhc_norm_kwargs(norm: RMSNorm, fused: bool) -> dict[str, typing.Any]:
+    """RMSNorm arguments folded into the fused pre-kernel; empty for torch."""
+    if not fused:
+        return {}
+    return {"norm_weight": norm.weight, "norm_eps": norm.variance_epsilon}
 
 
 class DeepseekV4MoE(DeepseekV4MoEBase):
@@ -166,6 +194,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
+        self.fuse_mhc = _fuse_mhc(vllm_config.model_config.dtype)
+        self._mhc_pre, self._mhc_post = _mhc_impls(self.fuse_mhc)
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
 
         self.engram: Engram | None = None
@@ -275,7 +305,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # copies and the identity pre-mix selects copy 0.
                 assert self.hc_attn_fn_broadcast is not None
                 residual = x.unsqueeze(1).expand(-1, self.hc_mult, -1).contiguous()
-                post_mix, res_mix, x, attn_pre = mhc_pre_delayed_torch(
+                post_mix, res_mix, x, attn_pre = self._mhc_pre(
                     residual,
                     self.hc_attn_fn_broadcast,
                     self.hc_attn_scale,
@@ -286,10 +316,11 @@ class DeepseekV4DecoderLayer(nn.Module):
                     self.hc_post_alpha,
                     self.hc_sinkhorn_iters,
                     x=x,
+                    **_mhc_norm_kwargs(self.attn_norm, self.fuse_mhc),
                 )
             else:
                 residual = x
-                post_mix, res_mix, x, attn_pre = mhc_pre_delayed_torch(
+                post_mix, res_mix, x, attn_pre = self._mhc_pre(
                     residual,
                     self.hc_attn_fn,
                     self.hc_attn_scale,
@@ -300,9 +331,10 @@ class DeepseekV4DecoderLayer(nn.Module):
                     self.hc_post_alpha,
                     self.hc_sinkhorn_iters,
                     pre_mix=pre_mix,
+                    **_mhc_norm_kwargs(self.attn_norm, self.fuse_mhc),
                 )
         else:
-            residual = mhc_post_torch(x, residual, post_mix, res_mix)
+            residual = self._mhc_post(x, residual, post_mix, res_mix)
             if self.engram is not None and engram_hashes is not None:
                 # Engram injection happens between the previous sublayer's
                 # post and this block's pre, on the full hc stream, so the
@@ -312,7 +344,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     engram_hashes[:, self.engram.layer_hash_index],
                     engram_mask,
                 )
-            post_mix, res_mix, x, attn_pre = mhc_pre_delayed_torch(
+            post_mix, res_mix, x, attn_pre = self._mhc_pre(
                 residual,
                 self.hc_attn_fn,
                 self.hc_attn_scale,
@@ -323,8 +355,10 @@ class DeepseekV4DecoderLayer(nn.Module):
                 self.hc_post_alpha,
                 self.hc_sinkhorn_iters,
                 pre_mix=pre_mix,
+                **_mhc_norm_kwargs(self.attn_norm, self.fuse_mhc),
             )
-        x = self.attn_norm(x)
+        if not self.fuse_mhc:
+            x = self.attn_norm(x)
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
@@ -333,8 +367,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        residual = mhc_post_torch(x, residual, post_mix, res_mix)
-        post_mix, res_mix, x, ffn_pre = mhc_pre_delayed_torch(
+        residual = self._mhc_post(x, residual, post_mix, res_mix)
+        post_mix, res_mix, x, ffn_pre = self._mhc_pre(
             residual,
             self.hc_ffn_fn,
             self.hc_ffn_scale,
@@ -345,8 +379,10 @@ class DeepseekV4DecoderLayer(nn.Module):
             self.hc_post_alpha,
             self.hc_sinkhorn_iters,
             pre_mix=attn_pre,
+            **_mhc_norm_kwargs(self.ffn_norm, self.fuse_mhc),
         )
-        x = self.ffn_norm(x)
+        if not self.fuse_mhc:
+            x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix, ffn_pre
 
@@ -362,6 +398,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.parallel_config = vllm_config.parallel_config
         self.use_mega_moe = False
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
+        _, self._mhc_post = _mhc_impls(_fuse_mhc(vllm_config.model_config.dtype))
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE currently requires expert parallel. "
@@ -603,7 +640,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
             if idx + 1 in self.aux_hidden_state_layers:
                 # Reconstruct the aux hidden state for draft models
-                aux_recon = mhc_post_torch(hidden_states, residual, post_mix, res_mix)
+                aux_recon = self._mhc_post(hidden_states, residual, post_mix, res_mix)
                 aux_hidden_state = aux_recon.mean(dim=1)
                 if self.use_sequence_parallel:
                     aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
@@ -614,7 +651,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             if self.end_layer in self.aux_hidden_state_layers:
                 hidden_states = final_aux_recon
             else:
-                hidden_states = mhc_post_torch(
+                hidden_states = self._mhc_post(
                     hidden_states, residual, post_mix, res_mix
                 )
 
