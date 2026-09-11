@@ -16,10 +16,6 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
 )
-from vllm.v1.worker.gpu.pcp_hidden_restore import (
-    PCPMulticastHiddenStateRestorer,
-    PCPMulticastUnavailableError,
-)
 
 logger = init_logger(__name__)
 
@@ -55,7 +51,6 @@ class PCPManager:
         dcp_world_size: int = 1,
         dcp_rank: int = 0,
         cp_interleave: int = 1,
-        hidden_state_restorer: PCPMulticastHiddenStateRestorer | None = None,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
@@ -69,10 +64,6 @@ class PCPManager:
         self._local_gather_idx: torch.Tensor | None = None
         self.draft_prefill_batch: InputBatch | None = None
         self._block_tables = block_tables
-        self._hidden_state_restorer = hidden_state_restorer
-        self._hidden_restore_idx_cpu: np.ndarray | None = None
-        self._hidden_states_are_replicated = False
-        self._sample_rows_are_identity = False
         self._sample_local_row_idx: torch.Tensor | None = None
         self._sample_restore_idx: torch.Tensor | None = None
         self._hidden_restore_idx: torch.Tensor | None = None
@@ -274,8 +265,6 @@ class PCPManager:
         query_start_loc_np: np.ndarray,
         padded_num_tokens: int | None = None,
     ) -> tuple[list[list[RankSegment]], list[int]]:
-        self._hidden_states_are_replicated = not np.any(is_prefilling)
-        self._sample_rows_are_identity = bool(np.all(num_scheduled_tokens == 1))
         segments_by_rank = []
         per_rank_num_tokens = []
         for rank in range(self.pcp_world_size):
@@ -332,11 +321,13 @@ class PCPManager:
                 )
 
         self._hidden_restore_idx = None
-        self._hidden_restore_idx_cpu = (
-            None if self._hidden_states_are_replicated else hidden_restore_idx
-        )
-        if not self._hidden_states_are_replicated:
-            # Reuse the existing inverse layout; only upload the sampled rows.
+        self._sample_local_row_idx = None
+        self._sample_restore_idx = None
+        if np.any(is_prefilling):
+            self._hidden_restore_idx = async_copy_to_gpu(
+                hidden_restore_idx, device=self.device
+            )
+            # Map sampled rows into a padded, compact all-gather.
             final_rows = hidden_restore_idx[query_start_loc_np[1:] - 1]
             owners, rows = np.divmod(final_rows, padded_num_tokens)
             counts = np.bincount(owners, minlength=self.pcp_world_size)
@@ -659,35 +650,22 @@ class PCPManager:
 
     def restore_sample_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         assert self._global_batch is not None
-        if self._hidden_states_are_replicated:
-            if self._sample_rows_are_identity:
+        if not self._global_batch.has_prefill:
+            if np.all(self._global_batch.num_scheduled_tokens == 1):
                 return hidden_states[: self._global_batch.num_reqs]
             return hidden_states[self._global_batch.logits_indices]
         local_rows, restore = self._sample_local_row_idx, self._sample_restore_idx
         assert local_rows is not None and restore is not None
         if hidden_states.shape[0] == local_rows.shape[0] == 1:
             return get_pcp_group().all_gather(hidden_states, dim=0)[restore]
-        if self._hidden_state_restorer is not None:
-            return self._hidden_state_restorer.restore_selected(
-                hidden_states, local_rows, restore, num_selected_rows=restore.numel()
-            )
         return get_pcp_group().all_gather(hidden_states[local_rows], dim=0)[restore]
 
-    def restore_full_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self._hidden_states_are_replicated:
-            return hidden_states
+    def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self._hidden_restore_idx is None:
-            if self._hidden_restore_idx_cpu is None:
-                return hidden_states
-            self._hidden_restore_idx = async_copy_to_gpu(
-                self._hidden_restore_idx_cpu, device=self.device
-            )
+            return hidden_states
         return get_pcp_group().all_gather(hidden_states, dim=0)[
             self._hidden_restore_idx
         ]
-
-    def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.restore_full_hidden_states(hidden_states)
 
     def get_draft_input_buffers(
         self, input_buffers: InputBuffers
@@ -733,11 +711,11 @@ class PCPManager:
         self,
         hidden_states: torch.Tensor,
         *,
-        needs_prompt_hidden_states: bool,
+        needs_full_hidden_states: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, InputBatch]:
         assert self._global_batch is not None
-        if needs_prompt_hidden_states:
-            hidden_states = self.restore_full_hidden_states(hidden_states)
+        if needs_full_hidden_states:
+            hidden_states = self.restore_hidden_states(hidden_states)
             sampled = hidden_states[self._global_batch.logits_indices]
         else:
             sampled = self.restore_sample_hidden_states(hidden_states)
@@ -772,14 +750,14 @@ def maybe_restore_pcp_for_sampling(
     hidden_states: torch.Tensor | None,
     input_batch: InputBatch,
     *,
-    needs_prompt_hidden_states: bool,
+    needs_full_hidden_states: bool,
 ) -> tuple[torch.Tensor, torch.Tensor | None, InputBatch]:
     assert hidden_states is not None
     if manager is None:
         return hidden_states, None, input_batch
     return manager.restore_for_sampling(
         hidden_states,
-        needs_prompt_hidden_states=needs_prompt_hidden_states,
+        needs_full_hidden_states=needs_full_hidden_states,
     )
 
 
@@ -792,47 +770,12 @@ def maybe_get_pcp_global_batch(
     return manager._global_batch
 
 
-def maybe_create_pcp_hidden_state_restorer(
-    vllm_config: VllmConfig,
-    device: torch.device,
-    supports_mm_inputs: bool,
-) -> PCPMulticastHiddenStateRestorer | None:
-    """Allocate the fastest available compact-row exchange before profiling.
-
-    The allocation is persistent non-KV memory. Creating it with the model
-    runner ensures vLLM's normal memory profiler subtracts it before sizing the
-    KV cache. Systems without CUDA multicast retain the compact-row algorithm
-    through the existing PCP collective.
-    """
-    if vllm_config.parallel_config.prefill_context_parallel_size <= 1:
-        return None
-    PCPManager.validate_config(vllm_config, supports_mm_inputs)
-    try:
-        restorer = PCPMulticastHiddenStateRestorer(
-            group=get_pcp_group().cpu_group,
-            device=device,
-            max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
-            hidden_size=vllm_config.model_config.get_hidden_size(),
-            dtype=vllm_config.model_config.dtype,
-        )
-        logger.info("PCP final-row restore backend: symmetric-memory multicast")
-        return restorer
-    except PCPMulticastUnavailableError as error:
-        logger.warning_once(
-            "CUDA multicast is unavailable for compact PCP final-row exchange; "
-            "using the PCP collective backend instead: %s",
-            error,
-        )
-        return None
-
-
 def maybe_build_pcp_manager(
     vllm_config: VllmConfig,
     device: torch.device,
     supports_mm_inputs: bool,
     block_tables: BlockTables,
     cls: type[PCPManager] = PCPManager,
-    hidden_state_restorer: PCPMulticastHiddenStateRestorer | None = None,
 ) -> PCPManager | None:
     parallel_config = vllm_config.parallel_config
     pcp_size = parallel_config.prefill_context_parallel_size
@@ -855,5 +798,4 @@ def maybe_build_pcp_manager(
         dcp_world_size=dcp_size,
         dcp_rank=dcp_rank,
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
-        hidden_state_restorer=hidden_state_restorer,
     )
