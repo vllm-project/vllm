@@ -101,10 +101,10 @@ def _index_block_score_kernel(
     stride_bt_b,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
+    USE_SPLIT_K: tl.constexpr,
 ):
     pid_q = tl.program_id(0)
     pid_bh = tl.program_id(1)
-    pid_k = tl.program_id(2)
     pid_b = pid_bh // num_idx_heads
     pid_h = pid_bh % num_idx_heads
 
@@ -134,11 +134,16 @@ def _index_block_score_kernel(
     # Causal window: only blocks up to the last query token's position.
     hi = min(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
     num_blocks = tl.cdiv(hi, BLOCK_SIZE_K)
-    blocks_per_split = tl.cdiv(num_blocks, tl.num_programs(2))
-    block_start = pid_k * blocks_per_split
-    block_end = tl.minimum(block_start + blocks_per_split, num_blocks)
-    if block_start >= block_end:
-        return
+    if USE_SPLIT_K:
+        pid_k = tl.program_id(2)
+        blocks_per_split = tl.cdiv(num_blocks, tl.num_programs(2))
+        block_start = pid_k * blocks_per_split
+        block_end = tl.minimum(block_start + blocks_per_split, num_blocks)
+        if block_start >= block_end:
+            return
+    else:
+        block_start = 0
+        block_end = num_blocks
     for blk in tl.range(block_start, block_end):
         i = blk * BLOCK_SIZE_K
         page = tl.load(bt_row + blk).to(tl.int64)
@@ -712,6 +717,7 @@ def minimax_m3_index_score(
         block_table.stride(0),
         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+        USE_SPLIT_K=split_k > 1,
     )
     return score
 
