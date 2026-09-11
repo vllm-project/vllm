@@ -146,6 +146,23 @@ random vectors are not treated as independent evidence. Keep
 `deduplicate_contexts=True` unless the detector's calibration has been adjusted
 for correlated scores.
 
+The detector must also know the server's `deduplicate_contexts` scope. Text
+generated with `"all"` keys its first `context_width` tokens on the prompt and
+leaves every context that already occurred in the prompt unwatermarked, so the
+detector needs the prompt to recompute the same contexts and to skip the same
+positions. Pass it as `context_prefix`; its tokens are never scored:
+
+```python
+detector = GumbelWatermarkDetector(key=42, prf="philox", history_scope="all")
+result = detector.detect(completion_ids, context_prefix=prompt_ids)
+```
+
+With the default `"single_turn"` scope, and with `"none"`, the completion alone
+is the correct input and a `context_prefix` is rejected. For `"all"` the prefix
+may be omitted when the prompt is unavailable: the p-value stays calibrated,
+but positions that were never watermarked are scored and detection is weaker,
+so the detector logs a warning.
+
 The reported p-value is calibrated under the assumption that scored PRF inputs
 are independent. A deployment uses one fixed key, so repeated structures across
 documents reuse the same PRF values and can make the realized false-positive

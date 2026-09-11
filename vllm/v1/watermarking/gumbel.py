@@ -8,7 +8,7 @@ import warnings
 
 import torch
 
-from vllm.config.watermarking import WatermarkPRFName
+from vllm.config.watermarking import WatermarkContextScope, WatermarkPRFName
 from vllm.v1.watermarking.detector import (
     WatermarkDetector,
 )
@@ -109,10 +109,13 @@ class GumbelWatermarkDetector(WatermarkDetector):
         p_value_threshold: float = 0.01,
         prf: WatermarkPRF | WatermarkPRFName = "philox",
         deduplicate_contexts: bool = True,
+        history_scope: WatermarkContextScope = "single_turn",
     ) -> None:
         prf = create_prf(prf, key) if isinstance(prf, str) else prf
         _validate_context_width(context_width)
-        super().__init__(context_width, p_value_threshold, deduplicate_contexts)
+        super().__init__(
+            context_width, p_value_threshold, deduplicate_contexts, history_scope
+        )
         self.prf = prf
 
     def _score_tokens(

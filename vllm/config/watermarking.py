@@ -13,6 +13,7 @@ logger = init_logger(__name__)
 
 WatermarkingAlgorithm = Literal["gumbel"]
 WatermarkPRFName = Literal["philox"]
+WatermarkContextScope = Literal["none", "single_turn", "all"]
 
 _SPECULATIVE_DECODING_SUPPORT: dict[WatermarkingAlgorithm, bool] = {
     "gumbel": False,
@@ -29,7 +30,7 @@ class WatermarkConfig:
     """Algorithm used to watermark generated text."""
     context_width: int = Field(default=4, ge=1)
     """Number of prior tokens used by the watermark PRF."""
-    deduplicate_contexts: Literal["none", "single_turn", "all"] = "single_turn"
+    deduplicate_contexts: WatermarkContextScope = "single_turn"
     """History scope used to identify repeated watermark contexts."""
     deduplicate_contexts_max_history: int | None = Field(default=8192, ge=1)
     """Maximum prior positions searched, or ``None`` for the full scope."""
