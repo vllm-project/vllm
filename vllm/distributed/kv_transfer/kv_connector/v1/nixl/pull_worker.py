@@ -66,6 +66,13 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             )
             # always store metadata for failure recovery
             self._recving_metadata[req_id] = meta
+            if (
+                meta.remote.blocks_ttl is not None
+                and meta.remote.blocks_deadline is None
+            ):
+                meta.remote.blocks_deadline = (
+                    time.perf_counter() + meta.remote.blocks_ttl
+                )
             if remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
@@ -127,12 +134,10 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     def _is_turn2_read_expired(self, meta: ReqMeta) -> bool:
         """Whether D's cached blocks for this turn-2 readback have (nearly) expired."""
         assert meta.remote is not None
-        blocks_expiry_time = meta.remote.blocks_expiry_time
+        deadline = meta.remote.blocks_deadline
         # Deadline may be absent (router may not forward it) -> read as usual.
-        if blocks_expiry_time is None or not meta.local_physical_block_ids:
+        if deadline is None or not meta.local_physical_block_ids:
             return False
-        clock_offset = self._engine_clock_offset[meta.remote.engine_id]
-        deadline = blocks_expiry_time - clock_offset
         return time.perf_counter() + _KV_BLOCKS_EXPIRY_SAFETY_MARGIN >= deadline
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):

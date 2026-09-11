@@ -328,7 +328,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return
 
         def _on_handshake(
-            f: Future[tuple[dict[tuple[int, int], str], float]],
+            f: Future[dict[tuple[int, int], str]],
             rid: str = req_id,
             rd: dict[str, Any] = reg_data,
         ) -> None:
@@ -444,7 +444,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if fut is not None:
 
             def _on_handshake(
-                f: Future[tuple[dict[tuple[int, int], str], float]],
+                f: Future[dict[tuple[int, int], str]],
                 rid: str = request_id,
                 blocks: BlockIds = local_block_ids,
                 rd: dict[str, Any] = registration_data,

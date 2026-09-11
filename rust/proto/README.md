@@ -2,10 +2,10 @@
 
 This directory is the canonical source for vLLM's gRPC schema. Package `vllm` holds four
 services: `Inference` in `inference.proto`, and in `control.proto` `Control` (server and model
-info, aborts, LoRA), `KvTransfer` (KV event sources) and `RlControl` (pause/resume, sleep/wake,
-weight updates). The RPCs that moved off `Control` to `KvTransfer` and `RlControl` are still
-declared on `Control`, deprecated, for one release, and answer `Unimplemented` when the service
-they moved to is not mounted.
+info, aborts, LoRA), `KvTransfer` (KV event sources, KV transfer info, NIXL handshake metadata)
+and `RlControl` (pause/resume, sleep/wake, weight updates). The RPCs that moved off `Control`
+to `KvTransfer` and `RlControl` are still declared on `Control`, deprecated, for one release,
+and answer `Unimplemented` when the service they moved to is not mounted.
 
 The schema is published to `buf.build/vllm-project/vllm`:
 

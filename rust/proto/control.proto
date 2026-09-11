@@ -55,6 +55,10 @@ service Control {
 service KvTransfer {
   // KV event discovery.
   rpc GetKvEventSources (GetKvEventSourcesRequest) returns (GetKvEventSourcesResponse) {}
+
+  // KV transfer (P/D disaggregation) discovery and peer handshake.
+  rpc GetKvTransferInfo (GetKvTransferInfoRequest) returns (GetKvTransferInfoResponse) {}
+  rpc GetKvHandshakeMetadata (GetKvHandshakeMetadataRequest) returns (GetKvHandshakeMetadataResponse) {}
 }
 
 service RlControl {
@@ -240,4 +244,38 @@ message KvEventSource {
   uint32 buffer_steps = 8;
   uint32 hwm = 9;
   uint32 max_queue_size = 10;
+}
+
+// ======================================================================================
+// KV transfer
+// ======================================================================================
+
+message GetKvTransferInfoRequest {}
+message GetKvTransferInfoResponse { repeated KvTransferEngine engines = 1; }
+
+// One data-parallel engine's identity in the KV transfer topology. A router
+// pairs prefill and decode engines whose `compatibility_hash` values match and
+// passes `engine_id` to the peer as `remote_engine_id`.
+message KvTransferEngine {
+  string engine_id = 1;
+  string connector = 2;
+  string role = 3;
+  uint32 data_parallel_rank = 4;
+  uint32 tensor_parallel_size = 5;
+  uint32 pipeline_parallel_size = 6;
+  uint32 kv_block_size = 7;
+  string compatibility_hash = 8;
+}
+
+message GetKvHandshakeMetadataRequest { string engine_id = 1; }
+message GetKvHandshakeMetadataResponse { repeated KvHandshakeRank ranks = 1; }
+
+// Connector-specific handshake payload for one (pp_rank, tp_rank) worker,
+// encoded with `encoding`. Opaque to the frontend and the router.
+message KvHandshakeRank {
+  uint32 pp_rank = 1;
+  uint32 tp_rank = 2;
+  string compatibility_hash = 3;
+  string encoding = 4;
+  bytes payload = 5;
 }

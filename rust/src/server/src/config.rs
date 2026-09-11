@@ -264,6 +264,9 @@ pub struct Config {
     pub grpc_port: Option<u16>,
     /// Which gRPC services to mount on `grpc_port`.
     pub grpc_services: GrpcServiceSelection,
+    /// Host peers dial for the gRPC control plane, advertised as
+    /// `remote_control_host` in returned `kv_transfer_params`.
+    pub kv_control_advertise_host: Option<String>,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
     /// Maximum idle time on a keep-alive HTTP connection before the server

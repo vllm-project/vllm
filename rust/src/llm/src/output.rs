@@ -219,6 +219,17 @@ pub struct GenerateOutputStream {
     /// Removes this request's external→internal tracking edge on drop. Held for
     /// its `Drop` side effect only; never read directly.
     _request_guard: RequestGuard,
+    /// Advertised in returned `kv_transfer_params`.
+    kv_control_address: KvControlAddress,
+}
+
+/// Where peers reach this frontend's gRPC control plane. Advertised only when a
+/// port is set; the host is optional and defaults, on the peer, to the KV
+/// connector's own `remote_host`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KvControlAddress {
+    pub port: Option<u16>,
+    pub host: Option<String>,
 }
 
 impl GenerateOutputStream {
@@ -229,6 +240,7 @@ impl GenerateOutputStream {
         raw_stream: EngineCoreOutputStream,
         request_metrics: RequestMetricsTracker,
         request_guard: RequestGuard,
+        kv_control_address: KvControlAddress,
     ) -> Self {
         Self {
             pending_prompt_info: Some(GeneratePromptInfo {
@@ -238,6 +250,7 @@ impl GenerateOutputStream {
             raw_stream,
             request_metrics,
             _request_guard: request_guard,
+            kv_control_address,
         }
     }
 
@@ -289,7 +302,10 @@ impl Stream for GenerateOutputStream {
             logprobs,
             finish_reason,
             cached_token_count,
-            kv_transfer_params: raw.kv_transfer_params,
+            kv_transfer_params: advertise_control_address(
+                raw.kv_transfer_params,
+                &self.kv_control_address,
+            ),
             ec_transfer_params: raw.ec_transfer_params,
         };
 
@@ -393,5 +409,67 @@ impl<T: Stream<Item = Result<GenerateOutput>> + Send> T {
 
             unreachable!("generate stream should yield an error instead of closing early")
         }
+    }
+}
+
+/// Add `remote_control_port` (and `remote_control_host` when configured) to
+/// `kv_transfer_params` that hand this engine to a peer (they name
+/// `remote_engine_id`), so the peer's frontend can fetch the handshake
+/// metadata over this frontend's gRPC control plane.
+fn advertise_control_address(
+    kv_transfer_params: Option<serde_json::Value>,
+    address: &KvControlAddress,
+) -> Option<serde_json::Value> {
+    let mut params = kv_transfer_params?;
+    if let (Some(port), Some(map)) = (address.port, params.as_object_mut())
+        && map.contains_key("remote_engine_id")
+    {
+        map.insert("remote_control_port".to_string(), port.into());
+        if let Some(host) = &address.host {
+            map.insert("remote_control_host".to_string(), host.clone().into());
+        }
+    }
+    Some(params)
+}
+
+#[cfg(test)]
+mod control_address_tests {
+    use serde_json::json;
+
+    use super::{KvControlAddress, advertise_control_address};
+
+    #[test]
+    fn advertises_only_when_params_name_a_remote_engine() {
+        let port_only = KvControlAddress {
+            port: Some(50051),
+            host: None,
+        };
+        assert_eq!(advertise_control_address(None, &port_only), None);
+        let params = json!({"remote_engine_id": "p0", "remote_host": "10.0.0.1"});
+        assert_eq!(
+            advertise_control_address(Some(params.clone()), &port_only),
+            Some(
+                json!({"remote_engine_id": "p0", "remote_host": "10.0.0.1", "remote_control_port": 50051})
+            )
+        );
+        assert_eq!(
+            advertise_control_address(Some(params.clone()), &KvControlAddress::default()),
+            Some(params.clone())
+        );
+        let with_host = KvControlAddress {
+            port: Some(50051),
+            host: Some("prefill-control".into()),
+        };
+        assert_eq!(
+            advertise_control_address(Some(params), &with_host),
+            Some(
+                json!({"remote_engine_id": "p0", "remote_host": "10.0.0.1", "remote_control_port": 50051, "remote_control_host": "prefill-control"})
+            )
+        );
+        let consumed = json!({"do_remote_prefill": false});
+        assert_eq!(
+            advertise_control_address(Some(consumed.clone()), &port_only),
+            Some(consumed)
+        );
     }
 }

@@ -8,6 +8,7 @@ import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorHandshakeEntry,
     KVConnectorHandshakeMetadata,
 )
 from vllm.v1.engine import core as engine_core_module
@@ -40,24 +41,42 @@ class _FakeExecutor:
         self.handshake_calls += 1
         return self.handshake_metadata
 
+    def collective_rpc(self, method: str, timeout=None, args=(), kwargs=None):
+        self.rpc_calls = getattr(self, "rpc_calls", [])
+        self.rpc_calls.append((method, args))
+        return []
+
     def init_kv_output_aggregator(self, connector: KVConnectorBase_V1) -> None:
         pass
 
 
 def _run_engine_core_handshake(
     monkeypatch: pytest.MonkeyPatch,
-    connector: KVConnectorBase_V1,
+    connector: KVConnectorBase_V1 | None,
     *,
     handshake_metadata: (
         list[dict[tuple[int, int], KVConnectorHandshakeMetadata] | None] | None
     ),
 ) -> _FakeExecutor:
+    _build_engine_core(monkeypatch, connector, handshake_metadata=handshake_metadata)
+    assert _FakeExecutor.last_instance is not None
+    return _FakeExecutor.last_instance
+
+
+def _build_engine_core(
+    monkeypatch: pytest.MonkeyPatch,
+    connector: KVConnectorBase_V1 | None,
+    *,
+    handshake_metadata: (
+        list[dict[tuple[int, int], KVConnectorHandshakeMetadata] | None] | None
+    ),
+) -> engine_core_module.EngineCore:
     class _FakeScheduler:
         def __init__(self, **kwargs: Any) -> None:
             self.connector = connector
             self.ec_connector = None
 
-        def get_kv_connector(self) -> KVConnectorBase_V1:
+        def get_kv_connector(self) -> KVConnectorBase_V1 | None:
             return connector
 
     _FakeExecutor.handshake_metadata_src = handshake_metadata
@@ -112,9 +131,7 @@ def _run_engine_core_handshake(
         ),
     )
 
-    engine_core_module.EngineCore(vllm_config, _FakeExecutor, log_stats=False)
-    assert _FakeExecutor.last_instance is not None
-    return _FakeExecutor.last_instance
+    return engine_core_module.EngineCore(vllm_config, _FakeExecutor, log_stats=False)
 
 
 class _LegacyConnector(KVConnectorBase_V1):
@@ -231,3 +248,80 @@ def test_engine_passes_handshake_metadata_through_for_pp_aware_connector(
         (0, 0): metadata_0,
         (1, 0): metadata_1,
     }
+
+
+class _EntriesConnector(_PPAwareConnector):
+    def get_xfer_handshake_entries(self) -> list[KVConnectorHandshakeEntry]:
+        return [
+            KVConnectorHandshakeEntry(
+                pp_rank=pp_rank,
+                tp_rank=tp_rank,
+                payload=f"meta-{pp_rank}-{tp_rank}".encode(),
+                compatibility_hash="hash",
+            )
+            for pp_rank, tp_rank in sorted(self.pp_aware_metadata or {})
+        ]
+
+
+def test_engine_serves_handshake_entries_from_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `get_kv_connector_handshake_entries` utility returns whatever the
+    scheduler-side connector encoded from the aggregated worker metadata."""
+    connector = _EntriesConnector()
+
+    engine_core = _build_engine_core(
+        monkeypatch,
+        connector,
+        handshake_metadata=[{(0, 0): _Metadata()}, {(1, 0): _Metadata()}],
+    )
+
+    assert engine_core.get_kv_connector_handshake_entries() == [
+        KVConnectorHandshakeEntry(0, 0, b"meta-0-0", "hash"),
+        KVConnectorHandshakeEntry(1, 0, b"meta-1-0", "hash"),
+    ]
+
+
+def test_engine_handshake_entries_default_to_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Connectors that do not implement the entry getter, and engines without
+    a connector at all, report no entries rather than failing the call."""
+    legacy = _build_engine_core(
+        monkeypatch, _LegacyConnector(), handshake_metadata=[{(0, 0): _Metadata()}]
+    )
+    assert legacy.get_kv_connector_handshake_entries() == []
+
+    without_connector = _build_engine_core(monkeypatch, None, handshake_metadata=None)
+    assert without_connector.get_kv_connector_handshake_entries() == []
+
+
+def test_engine_pushes_remote_handshake_entries_to_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `add_remote_kv_handshake` utility arrives with plain msgpack maps
+    and is handed to every worker as typed entries."""
+    engine_core = _build_engine_core(
+        monkeypatch, _EntriesConnector(), handshake_metadata=[{(0, 0): _Metadata()}]
+    )
+    engine_core.add_remote_kv_handshake(
+        "remote-engine",
+        [
+            {"pp_rank": 0, "tp_rank": 1, "payload": b"x", "compatibility_hash": "h"},
+            {"pp_rank": 0, "tp_rank": 0, "payload": b"y"},
+        ],
+    )
+    executor = _FakeExecutor.last_instance
+    assert executor is not None
+    assert executor.rpc_calls == [
+        (
+            "add_remote_kv_handshake",
+            (
+                "remote-engine",
+                [
+                    KVConnectorHandshakeEntry(0, 1, b"x", "h"),
+                    KVConnectorHandshakeEntry(0, 0, b"y"),
+                ],
+            ),
+        )
+    ]
