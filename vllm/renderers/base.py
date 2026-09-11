@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import inspect
 import time
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Generic, overload
+from typing import TYPE_CHECKING, Any, Generic, cast, overload
 
 from typing_extensions import TypeVar
 
@@ -39,6 +40,10 @@ from vllm.multimodal.parse import (
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
+from vllm.multimodal.processing.processor import (
+    MissingMultiModalMedia,
+    MultiModalProcessorCacheMissError,
+)
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import make_async
@@ -69,6 +74,7 @@ logger = init_logger(__name__)
 
 
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
+_MediaFallbacks = dict[tuple[str, int], Callable[[], object | Awaitable[object]]]
 
 
 class BaseRenderer(ABC, Generic[_T]):
@@ -516,7 +522,7 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> tuple[list["ConversationMessage"], DictPrompt]:
         return self.render_messages(messages, params)
 
-    # Helpers to enable passing skip_mm_cache to the renderer in some subclasses (e.g. HfRenderer).
+    # Helpers to pass skip_mm_cache to renderers that support it.
     def _render_messages_for_chat(
         self,
         messages: list["ChatCompletionMessageParam"],
@@ -902,6 +908,94 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return mm_inputs
 
+    @staticmethod
+    def _replace_missing_mm_data(
+        mm_data: MultiModalDataDict,
+        missing_media: Sequence[MissingMultiModalMedia],
+        loaded_media: Sequence[object],
+    ) -> MultiModalDataDict:
+        updated_data = dict(mm_data)
+        updated_modalities = dict[str, list[object | None]]()
+
+        for missing, media in zip(missing_media, loaded_media):
+            items = updated_modalities.get(missing.modality)
+            if items is None:
+                modality_data = updated_data[missing.modality]
+                if not isinstance(modality_data, list):
+                    raise RuntimeError(
+                        "Expected URL-backed multi-modal data to be a list, "
+                        f"but got {type(modality_data)} for {missing.modality!r}."
+                    )
+                items = list(modality_data)
+                updated_modalities[missing.modality] = items
+                updated_data[missing.modality] = items
+            items[missing.item_idx] = media
+
+        return updated_data
+
+    @staticmethod
+    def _get_media_fallbacks(
+        error: MultiModalProcessorCacheMissError,
+        media_fallbacks: _MediaFallbacks,
+    ) -> list[Callable[[], object | Awaitable[object]]]:
+        loaders = []
+        for missing in error.missing_media:
+            loader = media_fallbacks.get((missing.modality, missing.item_idx))
+            if loader is None:
+                raise ValueError(
+                    f"Cache miss for {missing.modality} at index "
+                    f"{missing.item_idx} but data is not provided."
+                ) from None
+            loaders.append(loader)
+        return loaders
+
+    def _load_missing_mm_media(
+        self,
+        error: MultiModalProcessorCacheMissError,
+        media_fallbacks: _MediaFallbacks,
+        mm_data: MultiModalDataDict,
+    ) -> MultiModalDataDict:
+        loaders = self._get_media_fallbacks(error, media_fallbacks)
+        loaded_media = [loader() for loader in loaders]
+        if any(inspect.isawaitable(media) for media in loaded_media):
+            raise RuntimeError("Async media fallback used in synchronous rendering.")
+
+        for missing in error.missing_media:
+            media_fallbacks.pop((missing.modality, missing.item_idx))
+        return self._replace_missing_mm_data(mm_data, error.missing_media, loaded_media)
+
+    async def _load_missing_mm_media_async(
+        self,
+        error: MultiModalProcessorCacheMissError,
+        media_fallbacks: _MediaFallbacks,
+        mm_data: MultiModalDataDict,
+    ) -> MultiModalDataDict:
+        loaders = self._get_media_fallbacks(error, media_fallbacks)
+
+        async def load(
+            loader: Callable[[], object | Awaitable[object]],
+        ) -> object:
+            media = loader()
+            if inspect.isawaitable(media):
+                return await media
+            return media
+
+        loaded_media = await asyncio.gather(
+            *(load(loader) for loader in loaders),
+            return_exceptions=True,
+        )
+        for result in loaded_media:
+            if isinstance(result, BaseException):
+                raise result
+
+        for missing in error.missing_media:
+            media_fallbacks.pop((missing.modality, missing.item_idx))
+        return self._replace_missing_mm_data(
+            mm_data,
+            error.missing_media,
+            cast(list[object], loaded_media),
+        )
+
     def _process_tokens(
         self,
         prompt: TokensPrompt,
@@ -912,17 +1006,34 @@ class BaseRenderer(ABC, Generic[_T]):
         to the shared thread pool in the async variant.
         """
         prompt_token_ids = prompt["prompt_token_ids"]
+        media_fallbacks = cast(
+            _MediaFallbacks,
+            cast(dict[str, Any], prompt).pop("_mm_media_fallbacks", {}),
+        )
 
         engine_input: TokensInput | MultiModalInput
         if multi_modal_data := prompt.get("multi_modal_data"):
-            engine_input = self._process_multimodal(
-                prompt_token_ids,
-                multi_modal_data,
-                mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
-                mm_uuids=prompt.get("multi_modal_uuids"),
-                media_io_kwargs=prompt.get("media_io_kwargs"),
-                skip_mm_cache=skip_mm_cache,
-            )
+            try:
+                engine_input = self._process_multimodal(
+                    prompt_token_ids,
+                    multi_modal_data,
+                    mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
+                    mm_uuids=prompt.get("multi_modal_uuids"),
+                    media_io_kwargs=prompt.get("media_io_kwargs"),
+                    skip_mm_cache=skip_mm_cache,
+                )
+            except MultiModalProcessorCacheMissError as error:
+                multi_modal_data = self._load_missing_mm_media(
+                    error, media_fallbacks, multi_modal_data
+                )
+                engine_input = self._process_multimodal(
+                    prompt_token_ids,
+                    multi_modal_data,
+                    mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
+                    mm_uuids=prompt.get("multi_modal_uuids"),
+                    media_io_kwargs=prompt.get("media_io_kwargs"),
+                    skip_mm_cache=skip_mm_cache,
+                )
         else:
             engine_input = tokens_input(prompt_token_ids)
 
@@ -975,17 +1086,34 @@ class BaseRenderer(ABC, Generic[_T]):
         skip_mm_cache: bool = False,
     ) -> TokensInput | MultiModalInput:
         prompt_token_ids = prompt["prompt_token_ids"]
+        media_fallbacks = cast(
+            _MediaFallbacks,
+            cast(dict[str, Any], prompt).pop("_mm_media_fallbacks", {}),
+        )
 
         engine_input: TokensInput | MultiModalInput
         if multi_modal_data := prompt.get("multi_modal_data"):
-            engine_input = await self._process_multimodal_async(
-                prompt_token_ids,
-                multi_modal_data,
-                mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
-                mm_uuids=prompt.get("multi_modal_uuids"),
-                media_io_kwargs=prompt.get("media_io_kwargs"),
-                skip_mm_cache=skip_mm_cache,
-            )
+            try:
+                engine_input = await self._process_multimodal_async(
+                    prompt_token_ids,
+                    multi_modal_data,
+                    mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
+                    mm_uuids=prompt.get("multi_modal_uuids"),
+                    media_io_kwargs=prompt.get("media_io_kwargs"),
+                    skip_mm_cache=skip_mm_cache,
+                )
+            except MultiModalProcessorCacheMissError as error:
+                multi_modal_data = await self._load_missing_mm_media_async(
+                    error, media_fallbacks, multi_modal_data
+                )
+                engine_input = await self._process_multimodal_async(
+                    prompt_token_ids,
+                    multi_modal_data,
+                    mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
+                    mm_uuids=prompt.get("multi_modal_uuids"),
+                    media_io_kwargs=prompt.get("media_io_kwargs"),
+                    skip_mm_cache=skip_mm_cache,
+                )
         else:
             engine_input = tokens_input(prompt_token_ids)
 

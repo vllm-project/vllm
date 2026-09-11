@@ -30,9 +30,7 @@ kimi_vision_chunk_video = {
     "video_chunk": [Image.fromarray(frame) for frame in baby_reading_np_ndarrays[:4]],
     "uuid": "test-video-uuid",
     "video_idx": 0,
-    "prompt": (
-        "<|media_begin|>video<|media_content|><|media_pad|><|media_end|>"
-    ),
+    "prompt": ("<|media_begin|>video<|media_content|><|media_pad|><|media_end|>"),
 }
 
 
@@ -106,7 +104,6 @@ def test_cached_uuid_skips_url_loading(
     media: object,
     skip_early_mm_lookup: bool,
 ):
-    monkeypatch.setenv("VLLM_EARLY_UUID_LOOKUPS", "1")
     renderer = _build_renderer()
     media_url = f"https://example.com/test.{modality}"
     media_uuid = f"test-{modality}-uuid"
@@ -140,6 +137,56 @@ def test_cached_uuid_skips_url_loading(
 @pytest.mark.parametrize(
     ("modality", "media"),
     [
+        pytest.param("image", cherry_pil_image, id="image"),
+        pytest.param("video", baby_reading_np_ndarrays, id="video"),
+    ],
+)
+def test_uuid_cache_eviction_falls_back_to_url(
+    monkeypatch: pytest.MonkeyPatch,
+    modality: str,
+    media: object,
+):
+    renderer = _build_renderer()
+    mm_processor_cache = renderer.mm_processor_cache
+    assert mm_processor_cache is not None
+
+    first_lookup = True
+
+    def is_cached_once(_mm_hash: str) -> bool:
+        nonlocal first_lookup
+        is_cached = first_lookup
+        first_lookup = False
+        return is_cached
+
+    is_cached_item = Mock(side_effect=is_cached_once)
+    monkeypatch.setattr(mm_processor_cache, "is_cached_item", is_cached_item)
+    fetch_media = Mock(return_value=media)
+    monkeypatch.setattr(MediaConnector, f"fetch_{modality}", fetch_media)
+
+    media_url = f"https://example.com/test.{modality}"
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"Describe this {modality}."},
+                {
+                    "type": f"{modality}_url",
+                    f"{modality}_url": {"url": media_url},
+                    "uuid": f"test-{modality}-uuid",
+                },
+            ],
+        }
+    ]
+
+    _, prompts = renderer.render_chat([messages], ChatParams())
+
+    assert len(prompts[0]["mm_hashes"][modality]) == 1
+    assert fetch_media.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("modality", "media"),
+    [
         pytest.param("image", kimi_vision_chunk_image, id="image"),
         pytest.param("video", kimi_vision_chunk_video, id="video"),
     ],
@@ -149,7 +196,6 @@ def test_early_uuid_lookup_is_disabled_for_unified_vision_chunks(
     modality: str,
     media: object,
 ):
-    monkeypatch.setenv("VLLM_EARLY_UUID_LOOKUPS", "1")
     renderer = _build_renderer(
         model="moonshotai/Kimi-K2.5",
         trust_remote_code=True,

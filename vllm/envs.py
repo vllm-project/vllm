@@ -74,7 +74,6 @@ if TYPE_CHECKING:
     VLLM_MEDIA_CACHE: str = ""
     VLLM_MEDIA_CACHE_MAX_SIZE_MB: int = 5120
     VLLM_MEDIA_CACHE_TTL_HOURS: float = 24
-    VLLM_EARLY_UUID_LOOKUPS: bool = False
     VLLM_MEDIA_FETCH_MAX_RETRIES: int = 3
     VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB: int = 256
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
@@ -978,12 +977,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # are evicted regardless of cache size. Default is 24 hours.
     "VLLM_MEDIA_CACHE_TTL_HOURS": lambda: float(
         os.getenv("VLLM_MEDIA_CACHE_TTL_HOURS", "24")
-    ),
-    # Whether to probe the multi-modal processor cache before loading image or
-    # video URLs with UUIDs. Cache hits skip URL loading and decoding. Disabled
-    # by default.
-    "VLLM_EARLY_UUID_LOOKUPS": lambda: bool(
-        int(os.getenv("VLLM_EARLY_UUID_LOOKUPS", "0"))
     ),
     # Maximum number of retries for fetching media (images, audio, video)
     # from URLs. Each retry quadruples the timeout. Default is 3.
@@ -2353,7 +2346,6 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MEDIA_CACHE",
         "VLLM_MEDIA_CACHE_MAX_SIZE_MB",
         "VLLM_MEDIA_CACHE_TTL_HOURS",
-        "VLLM_EARLY_UUID_LOOKUPS",
         "VLLM_MEDIA_FETCH_MAX_RETRIES",
         "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
         "VLLM_MEDIA_LOADING_THREAD_COUNT",

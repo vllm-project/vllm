@@ -242,10 +242,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     skip_early_mm_lookup: bool = Field(
         default=False,
-        description=(
-            "Skip early image and video UUID cache lookups for this request. "
-            "Only applies when VLLM_EARLY_UUID_LOOKUPS=1."
-        ),
+        description="Skip early image and video UUID cache lookups for this request.",
     )
     priority: int = Field(
         default=0,
