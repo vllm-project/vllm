@@ -8,7 +8,7 @@ import cutlass
 import cutlass.cute as cute
 import torch
 from cuda.bindings.driver import CUstream
-from cutlass import Float32, Int32, Uint32, Uint64
+from cutlass import Float32, Int32, Int64, Uint32, Uint64
 from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import recast_val
@@ -39,6 +39,53 @@ def stable_topk_from_gathered_candidates_cutedsl(
         )
     _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL(gathered, out, topk=topk)
     return out
+
+
+def stable_topk_from_peer_candidates_cutedsl(
+    peer_candidate_ptrs: torch.Tensor,
+    world_size: int,
+    rows: int,
+    local_candidates: int,
+    topk: int,
+    out: torch.Tensor,
+) -> None:
+    """Select directly from owner-local symmetric-memory candidate shards.
+
+    ``peer_candidate_ptrs`` contains one locally valid symmetric-memory address
+    per owner. The consumer follows this device pointer table without
+    materializing a contiguous gathered tensor.
+    """
+    if world_size <= 1:
+        raise ValueError("peer candidate stable top-k requires world_size > 1")
+    if rows <= 0 or local_candidates <= 0:
+        raise ValueError(
+            "peer candidate stable top-k requires positive rows and candidate count"
+        )
+    if local_candidates % StableTopKFromGatheredCandidatesKernel.tb_size:
+        raise ValueError(
+            "peer candidate stable top-k requires candidates per owner to be a "
+            f"multiple of {StableTopKFromGatheredCandidatesKernel.tb_size}; got "
+            f"{local_candidates}"
+        )
+    if (
+        peer_candidate_ptrs.device != out.device
+        or peer_candidate_ptrs.dtype != torch.int64
+        or peer_candidate_ptrs.shape != (world_size,)
+        or not peer_candidate_ptrs.is_contiguous()
+    ):
+        raise ValueError(
+            "peer candidate pointers must be a contiguous CUDA int64 tensor "
+            f"with shape ({world_size},) on the output device"
+        )
+    if out.dtype != torch.int32 or out.shape != (rows, topk):
+        raise ValueError(f"top-k output must have shape ({rows}, {topk})")
+    _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL(
+        peer_candidate_ptrs,
+        out,
+        topk=topk,
+        world_size=world_size,
+        local_candidates=local_candidates,
+    )
 
 
 def pack_dcp_topk_candidates_cutedsl(
@@ -269,6 +316,7 @@ class StableTopKFromGatheredCandidatesKernel(
     class CompileKey:
         topk: int
         num_candidates: int
+        world_size: int = 0
 
     @staticmethod
     def kernel(compile_key: CompileKey) -> Any:
@@ -281,6 +329,8 @@ class StableTopKFromGatheredCandidatesKernel(
         hist_chunks = StableTopKFromGatheredCandidatesKernel.hist_chunks
         warps_per_block = StableTopKFromGatheredCandidatesKernel.warps_per_block
         topk = compile_key.topk
+        world_size = compile_key.world_size
+        local_candidates = compile_key.num_candidates // world_size if world_size else 0
         assert hist_bins == 1 << radix_bits
         assert compile_key.num_candidates % tb_size == 0, (
             "StableTopKFromGatheredCandidatesKernel requires candidate count "
@@ -474,7 +524,6 @@ class StableTopKFromGatheredCandidatesKernel(
         def device_kernel(input: cute.Tensor, out: cute.Tensor):
             row, _, _ = cute.arch.block_idx()
             tid, _, _ = cute.arch.thread_idx()
-            input_row = input[row, None, None]
             output_row = out[row, None]
             keys = cute.make_rmem_tensor((keys_per_thread,), Uint64)
 
@@ -485,11 +534,35 @@ class StableTopKFromGatheredCandidatesKernel(
             for i in range(tid, topk, tb_size):
                 output_row[i] = Int32(-1)
 
-            for key_idx in cutlass.range_constexpr(keys_per_thread):
-                col = tid + Int32(key_idx * tb_size)
-                score = Float32(input_row[col, 0])
-                token_id = Int32(input_row[col, 1])
-                keys[key_idx] = stable_key(score, token_id)
+            if cutlass.const_expr(world_size > 0):
+                keys_per_owner = local_candidates // tb_size
+                for owner in cutlass.range_constexpr(world_size):
+                    peer_ptr = cute.make_ptr(
+                        Float32,
+                        input[owner],
+                        cute.AddressSpace.gmem,
+                        assumed_align=8,
+                    )
+                    peer = cute.make_tensor(
+                        peer_ptr,
+                        cute.make_layout(
+                            (out.shape[0] * local_candidates * 2,), stride=(1,)
+                        ),
+                    )
+                    for local_key in cutlass.range_constexpr(keys_per_owner):
+                        key_idx = owner * keys_per_owner + local_key
+                        local_col = tid + Int32(local_key * tb_size)
+                        offset = (row * Int32(local_candidates) + local_col) * Int32(2)
+                        score = Float32(peer[offset])
+                        token_id = Int32(peer[offset + Int32(1)])
+                        keys[key_idx] = stable_key(score, token_id)
+            else:
+                input_row = input[row, None, None]
+                for key_idx in cutlass.range_constexpr(keys_per_thread):
+                    col = tid + Int32(key_idx * tb_size)
+                    score = Float32(input_row[col, 0])
+                    token_id = Int32(input_row[col, 1])
+                    keys[key_idx] = stable_key(score, token_id)
 
             if tid == Int32(0):
                 committed_count_smem.store(Int32(0))
@@ -527,7 +600,7 @@ class StableTopKFromGatheredCandidatesKernel(
             out: cute.Tensor,
             stream: CUstream,
         ):
-            grid = (gathered.shape[0], 1, 1)
+            grid = (out.shape[0], 1, 1)
             device_kernel(gathered, out).launch(
                 grid=grid,
                 block=(tb_size, 1, 1),
@@ -562,6 +635,10 @@ class StableTopKFromGatheredCandidatesKernel(
             stride=(cute.sym_int64(divisibility=2), 2, 1),
             assumed_align=8,
         )
+        if compile_key.world_size:
+            gathered = make_fake_tensor(
+                Int64, (compile_key.world_size,), divisibility=1
+            )
         out = make_fake_tensor(
             Int32,
             (num_rows, compile_key.topk),
@@ -576,8 +653,16 @@ class StableTopKFromGatheredCandidatesKernel(
         out: torch.Tensor,
         *,
         topk: int,
+        world_size: int = 0,
+        local_candidates: int = 0,
     ) -> CuTeDSLLaunchSpec[CompileKey]:
-        compile_key = self.dispatch(topk=topk, num_candidates=gathered.shape[1])
+        compile_key = self.dispatch(
+            topk=topk,
+            num_candidates=(
+                world_size * local_candidates if world_size else gathered.shape[1]
+            ),
+            world_size=world_size,
+        )
         return (
             compile_key,
             (gathered, out),
