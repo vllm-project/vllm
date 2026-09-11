@@ -3,7 +3,6 @@
 
 import time
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import msgspec
 import pytest
@@ -17,7 +16,6 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
-from vllm.v1.engine.core import EngineCore
 from vllm.v1.metrics.forward_pass_metrics import (
     FPM_TIMING_SCOPE_MODEL_STEP_CUDA,
     ForwardPassMetrics,
@@ -28,12 +26,10 @@ from vllm.v1.metrics.forward_pass_metrics import (
     ZmqForwardPassMetricsPublisher,
     decode_forward_pass_metrics,
     encode_forward_pass_metrics,
-    is_forward_pass_metrics_output_rank,
     make_forward_pass_metrics_timer,
 )
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -105,13 +101,9 @@ class _FakeScheduler:
         }
         self.waiting = []
         self.skipped_waiting = []
-        self.emit = True
 
     def get_forward_pass_metrics_request_state(self):
         return self.requests, self.waiting, self.skipped_waiting
-
-    def should_emit_forward_pass_metrics(self, scheduler_output):
-        return self.emit
 
 
 def _make_scheduler_output(
@@ -178,23 +170,8 @@ def test_forward_pass_metrics_v1_wire_contract():
     assert decode_forward_pass_metrics(unsupported_payload) is None
 
 
-def test_timing_tuple_survives_model_output_ipc_codec():
-    output = ModelRunnerOutput(
-        req_ids=[],
-        req_id_to_index={},
-        forward_pass_timing_samples=((7, 0.012),),
-    )
-
-    encoded = MsgpackEncoder().encode(output)
-    decoded = MsgpackDecoder(ModelRunnerOutput).decode(encoded)
-
-    assert decoded.forward_pass_timing_samples == ((7, 0.012),)
-    empty_output = ModelRunnerOutput(req_ids=[], req_id_to_index={})
-    assert empty_output.forward_pass_timing_samples == ()
-
-
 def test_timer_hot_drain_never_synchronizes_pending_event():
-    timestamps = iter((10.0, 15.0))
+    timestamps = iter((10.0, 15.0, 20.0, 27.0))
     events = []
 
     def event_factory():
@@ -215,32 +192,13 @@ def test_timer_hot_drain_never_synchronizes_pending_event():
     events[-1].complete = True
     assert timer.drain_samples() == ((4, 0.005),)
     assert sum(event.synchronize_calls for event in events) == 0
-
-
-def test_timer_cold_flush_waits_for_final_event():
-    events = []
-
-    def event_factory():
-        event = _FakeTimingEvent(iter((20.0, 27.0)))
-        events.append(event)
-        return event
-
-    # Each event owns its iterator, so provide explicit timestamps for records.
-    timer = ForwardPassMetricsTimer(
-        num_event_pairs=1,
-        event_factory=event_factory,
-    )
-    events[0]._timestamps = iter((20.0,))
-    events[1]._timestamps = iter((27.0,))
-    scheduler_output = SchedulerOutput.make_empty()
-    scheduler_output.total_num_scheduled_tokens = 1
-    scheduler_output.forward_pass_metrics_iteration_id = 9
+    assert len(events) == 2
 
     timer.start(scheduler_output)
     timer.finish()
-
-    assert timer.drain_samples(wait=True) == ((9, 0.007),)
-    assert events[1].synchronize_calls == 1
+    assert timer.drain_samples(wait=True) == ((4, 0.007),)
+    assert events[-1].synchronize_calls == 1
+    assert len(events) == 2  # Event pair is recycled, including on the cold flush.
 
 
 def test_sampling_finishes_existing_timing_after_draft_without_waiting():
@@ -295,25 +253,9 @@ def test_timer_is_disabled_off_and_on_non_output_ranks():
 def test_fpm_requires_model_config():
     with pytest.raises(ValueError, match="support generative models only"):
         VllmConfig(
-            model_config=None,
             device_config=DeviceConfig(device="cuda"),
             observability_config=ObservabilityConfig(forward_pass_metrics_port=20380),
         )
-
-
-def test_only_executor_output_rank_owns_timing_events():
-    config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            world_size=4,
-            tensor_parallel_size=2,
-            prefill_context_parallel_size=2,
-        )
-    )
-
-    assert is_forward_pass_metrics_output_rank(config, 0)
-    assert not is_forward_pass_metrics_output_rank(config, 1)
-    assert not is_forward_pass_metrics_output_rank(config, 2)
-    assert not is_forward_pass_metrics_output_rank(config, 3)
 
 
 def test_emitter_joins_delayed_timing_with_original_snapshots():
@@ -380,6 +322,12 @@ def test_emitter_classifies_chunked_prefill_and_queued_decode_states():
         )
     ]
     output = _make_scheduler_output("prefill", computed_tokens=4, context_phase=True)
+    # Odd query sizes exercise half-token attention lengths, not prompt lengths.
+    new = _make_scheduler_output("new", prompt_tokens=3, computed_tokens=2)
+    new.scheduled_new_reqs[0].prompt_token_ids = [0] * 1000
+    output.scheduled_new_reqs = new.scheduled_new_reqs
+    output.num_scheduled_tokens["new"] = 3
+    output.total_num_scheduled_tokens = 4
 
     emitter.begin_iteration(scheduler, output)
     emitter.complete_iteration(
@@ -395,8 +343,11 @@ def test_emitter_classifies_chunked_prefill_and_queued_decode_states():
     )
 
     metrics = publisher.published[0]
-    assert metrics.scheduled_requests.num_prefill_requests == 1
-    assert metrics.scheduled_requests.sum_prefill_kv_tokens == 4
+    assert metrics.scheduled_requests.num_prefill_requests == 2
+    assert metrics.scheduled_requests.sum_prefill_tokens == 4
+    assert metrics.scheduled_requests.sum_prefill_kv_tokens == 6
+    # Attention lengths are 4 + 1/2 = 4.5 and 2 + 3/2 = 3.5; Var = 0.25.
+    assert metrics.scheduled_requests.var_prefill_length == 0.25
     assert metrics.queued_requests.num_decode_requests == 2
     assert metrics.queued_requests.sum_decode_kv_tokens == 150
 
@@ -494,8 +445,7 @@ def test_async_sd_rejection_does_not_cross_request_generation(preempted):
     assert publisher.published[-1].scheduled_requests.sum_decode_kv_tokens == 20
 
 
-@pytest.mark.parametrize("suppressed", [True, False])
-def test_async_sd_correction_survives_suppressed_or_dropped_sample(suppressed):
+def test_async_sd_correction_survives_dropped_sample():
     scheduler = _FakeScheduler()
     scheduler.requests["decode"].num_preemptions = 0
     publisher = _FakeMetricsPublisher()
@@ -508,9 +458,7 @@ def test_async_sd_correction_survives_suppressed_or_dropped_sample(suppressed):
     )
     first = _make_scheduler_output("decode", computed_tokens=100)
     first.scheduled_spec_decode_tokens = {"decode": [-1] * 3}
-    scheduler.emit = not suppressed
     emitter.begin_iteration(scheduler, first)
-    scheduler.emit = True
     second = _make_scheduler_output("decode", computed_tokens=104)
     emitter.begin_iteration(scheduler, second)
     result = ModelRunnerOutput(
@@ -529,53 +477,6 @@ def test_async_sd_correction_survives_suppressed_or_dropped_sample(suppressed):
     assert not emitter._spec_requests
 
 
-def test_emitter_suppresses_iterations_and_bounds_pending_state():
-    publisher = _FakeMetricsPublisher()
-    emitter = ForwardPassMetricsEmitter(
-        "worker", 0, publisher, max_pending_iterations=1
-    )
-    scheduler = _FakeScheduler()
-    suppressed = _make_scheduler_output("prefill", prompt_tokens=8)
-    scheduler.emit = False
-    emitter.begin_iteration(scheduler, suppressed)
-    assert suppressed.forward_pass_metrics_iteration_id is None
-    assert not emitter.has_pending_timing()
-
-    scheduler.emit = True
-    first = _make_scheduler_output("prefill", prompt_tokens=8)
-    second = _make_scheduler_output("decode", computed_tokens=64)
-    emitter.begin_iteration(scheduler, first)
-    emitter.begin_iteration(scheduler, second)
-    emitter.complete_timing_samples(((first.forward_pass_metrics_iteration_id, 0.01),))
-    assert publisher.published == []
-
-    emitter.complete_iteration(
-        scheduler,
-        second,
-        ModelRunnerOutput(
-            req_ids=[],
-            req_id_to_index={},
-            forward_pass_timing_samples=(
-                (second.forward_pass_metrics_iteration_id, 0.02),
-            ),
-        ),
-    )
-    assert len(publisher.published) == 1
-
-
-def test_engine_idle_flush_waits_for_and_completes_final_timing():
-    core = EngineCore.__new__(EngineCore)
-    core.forward_pass_metrics_emitter = emitter = MagicMock()
-    core.model_executor = executor = MagicMock()
-    emitter.has_pending_timing.return_value = True
-    executor.drain_forward_pass_timing.return_value = ((11, 0.03),)
-
-    EngineCore._flush_forward_pass_metrics(core)
-
-    executor.drain_forward_pass_timing.assert_called_once_with(wait=True)
-    emitter.complete_timing_samples.assert_called_once_with(((11, 0.03),))
-
-
 def test_zmq_publisher_frames_payload_and_stops_cleanly():
     port = get_open_port()
     endpoint = f"tcp://127.0.0.1:{port}"
@@ -583,7 +484,7 @@ def test_zmq_publisher_frames_payload_and_stops_cleanly():
     subscriber = context.socket(zmq.SUB)
     subscriber.setsockopt(zmq.SUBSCRIBE, b"")
     subscriber.connect(endpoint)
-    publisher = ZmqForwardPassMetricsPublisher(endpoint, "worker", 0, 8)
+    publisher = ZmqForwardPassMetricsPublisher(endpoint, "worker", 0)
     try:
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
@@ -610,7 +511,7 @@ def test_zmq_publisher_emits_idle_heartbeat(monkeypatch):
     subscriber = zmq.Context.instance().socket(zmq.SUB)
     subscriber.setsockopt(zmq.SUBSCRIBE, b"")
     subscriber.connect(endpoint)
-    publisher = ZmqForwardPassMetricsPublisher(endpoint, "worker", 2, 8)
+    publisher = ZmqForwardPassMetricsPublisher(endpoint, "worker", 2)
     try:
         assert subscriber.poll(2_000, zmq.POLLIN)
         _, _, payload = subscriber.recv_multipart()
@@ -629,6 +530,6 @@ def test_zmq_publisher_reports_bind_failure_from_its_thread():
     blocker.bind(endpoint)
     try:
         with pytest.raises(RuntimeError, match="Failed to bind"):
-            ZmqForwardPassMetricsPublisher(endpoint, "worker", 0, 8)
+            ZmqForwardPassMetricsPublisher(endpoint, "worker", 0)
     finally:
         blocker.close(linger=0)

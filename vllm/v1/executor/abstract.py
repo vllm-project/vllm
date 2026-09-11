@@ -263,13 +263,11 @@ class Executor(ABC):
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
 
-    def drain_forward_pass_timing(
-        self, wait: bool = True
-    ) -> tuple[tuple[int, float], ...]:
-        """Collect completed CUDA timings from the model-output worker."""
+    def drain_forward_pass_timing(self) -> tuple[tuple[int, float], ...]:
+        """Wait for remaining timings at idle or shutdown."""
 
         worker_samples: list[tuple[tuple[int, float], ...]] = self.collective_rpc(
-            "drain_forward_pass_timing", kwargs={"wait": wait}
+            "drain_forward_pass_timing"
         )
         return tuple(sample for samples in worker_samples for sample in samples)
 

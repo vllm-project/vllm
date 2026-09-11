@@ -303,8 +303,7 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
-    # Engine-assigned identity used to associate asynchronously completed CUDA
-    # timing with this scheduler iteration. None when native FPM is disabled.
+    # Sequence number matching this iteration to its timing; None when FPM is off.
     forward_pass_metrics_iteration_id: int | None = None
 
     @classmethod

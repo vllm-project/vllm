@@ -779,7 +779,7 @@ class EngineCore:
         emitter = self.forward_pass_metrics_emitter
         if emitter is None or not emitter.has_pending_timing():
             return
-        samples = self.model_executor.drain_forward_pass_timing(wait=True)
+        samples = self.model_executor.drain_forward_pass_timing()
         emitter.complete_timing_samples(samples)
 
     def _process_aborts_queue(self):

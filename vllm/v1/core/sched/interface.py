@@ -259,13 +259,6 @@ class SchedulerInterface(ABC):
             "metrics are enabled"
         )
 
-    def should_emit_forward_pass_metrics(
-        self, scheduler_output: "SchedulerOutput"
-    ) -> bool:
-        """Whether native FPM should measure and emit this iteration."""
-
-        return True
-
     @abstractmethod
     def make_stats(self) -> "SchedulerStats | None":
         """Make a SchedulerStats object for logging.

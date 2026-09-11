@@ -684,9 +684,6 @@ class EngineArgs:
     forward_pass_metrics_worker_id: str = (
         ObservabilityConfig.forward_pass_metrics_worker_id
     )
-    forward_pass_metrics_max_queue_size: int = (
-        ObservabilityConfig.forward_pass_metrics_max_queue_size
-    )
     jit_monitor_mode: Literal["warn", "error"] = ObservabilityConfig.jit_monitor_mode
     jit_monitor_verbose: bool = ObservabilityConfig.jit_monitor_verbose
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
@@ -1560,10 +1557,6 @@ class EngineArgs:
             **observability_kwargs["forward_pass_metrics_worker_id"],
         )
         observability_group.add_argument(
-            "--forward-pass-metrics-max-queue-size",
-            **observability_kwargs["forward_pass_metrics_max_queue_size"],
-        )
-        observability_group.add_argument(
             "--jit-monitor-mode",
             **observability_kwargs["jit_monitor_mode"],
         )
@@ -2020,9 +2013,6 @@ class EngineArgs:
             enable_logging_iteration_details=self.enable_logging_iteration_details,
             forward_pass_metrics_port=self.forward_pass_metrics_port,
             forward_pass_metrics_worker_id=self.forward_pass_metrics_worker_id,
-            forward_pass_metrics_max_queue_size=(
-                self.forward_pass_metrics_max_queue_size
-            ),
             jit_monitor_mode=self.jit_monitor_mode,
             jit_monitor_verbose=self.jit_monitor_verbose,
         )

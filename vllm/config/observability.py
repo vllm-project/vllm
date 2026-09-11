@@ -97,10 +97,6 @@ class ObservabilityConfig:
     """Worker identifier stamped onto forward-pass metrics. Defaults to the
     generated vLLM instance ID when unset."""
 
-    forward_pass_metrics_max_queue_size: int = Field(default=10_000, gt=0)
-    """Maximum number of forward-pass metrics waiting for background ZMQ
-    publication. New samples are dropped instead of blocking when full."""
-
     jit_monitor_mode: Literal["warn", "error"] = "warn"
     """How to handle post-warmup JIT compilation events."""
 

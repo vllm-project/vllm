@@ -6,10 +6,18 @@
 Start vLLM with FPM enabled before running this script:
 
     vllm serve MODEL --forward-pass-metrics-port 20380
-    python forward_pass_metrics_subscriber.py --endpoint tcp://localhost:20380
+    python forward_pass_metrics_subscriber.py --port 20380
 
 For data parallel deployments, vLLM publishes rank N on BASE_PORT + N. Run one
 subscriber per rank endpoint.
+
+Example output (variances are across requests, in tokens squared):
+
+    seq=7 worker='worker-0' dp=0 step=12.000ms scope=model_step_cuda
+      scheduled prefill: reqs=2 new=8 kv=6 attention_var=1.00
+      scheduled decode:  reqs=2 kv=64 kv_var=0.00
+      queued prefill:    reqs=1 tokens=12 length_var=0.00
+      queued decode:     reqs=0 kv=0 kv_var=0.00
 """
 
 import argparse
@@ -18,52 +26,13 @@ import sys
 import msgspec
 import zmq
 
-FPM_VERSION = 1
-FPM_TIMING_SCOPE = "model_step_cuda"
+from vllm.v1.metrics.forward_pass_metrics import (
+    FPM_TIMING_SCOPE_MODEL_STEP_CUDA,
+    FPM_VERSION,
+    ForwardPassMetrics,
+)
 
-
-# Types copied from vllm.v1.metrics.forward_pass_metrics to demonstrate the
-# external wire contract without importing vLLM internals.
-class ScheduledRequestMetrics(
-    msgspec.Struct,
-    frozen=True,  # type: ignore[call-arg]
-    gc=False,  # type: ignore[call-arg]
-):
-    num_prefill_requests: int = 0
-    sum_prefill_tokens: int = 0
-    var_prefill_length: float = 0.0
-    sum_prefill_kv_tokens: int = 0
-    num_decode_requests: int = 0
-    sum_decode_kv_tokens: int = 0
-    var_decode_kv_tokens: float = 0.0
-
-
-class QueuedRequestMetrics(
-    msgspec.Struct,
-    frozen=True,  # type: ignore[call-arg]
-    gc=False,  # type: ignore[call-arg]
-):
-    num_prefill_requests: int = 0
-    sum_prefill_tokens: int = 0
-    var_prefill_length: float = 0.0
-    num_decode_requests: int = 0
-    sum_decode_kv_tokens: int = 0
-    var_decode_kv_tokens: float = 0.0
-
-
-class ForwardPassMetrics(
-    msgspec.Struct,
-    frozen=True,  # type: ignore[call-arg]
-    gc=False,  # type: ignore[call-arg]
-):
-    version: int = FPM_VERSION
-    worker_id: str = ""
-    dp_rank: int = 0
-    counter_id: int = 0
-    timing_scope: str = FPM_TIMING_SCOPE
-    wall_time: float = 0.0
-    scheduled_requests: ScheduledRequestMetrics = ScheduledRequestMetrics()
-    queued_requests: QueuedRequestMetrics = QueuedRequestMetrics()
+POLL_TIMEOUT_MS = 1000
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,41 +40,50 @@ def parse_args() -> argparse.Namespace:
         description="Subscribe to native vLLM forward-pass metrics.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument(
+    address = parser.add_mutually_exclusive_group()
+    address.add_argument(
         "--endpoint",
-        default="tcp://localhost:20380",
         help="ZMQ endpoint for one vLLM data-parallel rank.",
     )
-    parser.add_argument(
-        "--poll-timeout-ms",
+    address.add_argument(
+        "--port",
         type=int,
-        default=1000,
-        help="How long to poll before checking for Ctrl+C.",
+        default=20380,
+        help="Local FPM port (shorthand for --endpoint tcp://localhost:PORT).",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
+    args.endpoint = args.endpoint or f"tcp://localhost:{args.port}"
+    return args
 
 
 def print_metrics(sequence: int, metrics: ForwardPassMetrics) -> None:
-    prefix = (
-        f"sequence={sequence} worker_id={metrics.worker_id!r} dp_rank={metrics.dp_rank}"
-    )
+    prefix = f"seq={sequence} worker={metrics.worker_id!r} dp={metrics.dp_rank}"
     if metrics.wall_time == 0.0:
         print(f"{prefix} heartbeat")
         return
 
-    scheduled = msgspec.to_builtins(metrics.scheduled_requests)
-    queued = msgspec.to_builtins(metrics.queued_requests)
+    scheduled = metrics.scheduled_requests
+    queued = metrics.queued_requests
     print(
-        f"{prefix} wall_time_ms={metrics.wall_time * 1000:.3f} "
-        f"scheduled={scheduled} queued={queued}"
+        f"{prefix} step={metrics.wall_time * 1000:.3f}ms scope={metrics.timing_scope}\n"
+        f"  scheduled prefill: reqs={scheduled.num_prefill_requests} "
+        f"new={scheduled.sum_prefill_tokens} kv={scheduled.sum_prefill_kv_tokens} "
+        f"attention_var={scheduled.var_prefill_length:.2f}\n"
+        f"  scheduled decode:  reqs={scheduled.num_decode_requests} "
+        f"kv={scheduled.sum_decode_kv_tokens} "
+        f"kv_var={scheduled.var_decode_kv_tokens:.2f}\n"
+        f"  queued prefill:    reqs={queued.num_prefill_requests} "
+        f"tokens={queued.sum_prefill_tokens} "
+        f"length_var={queued.var_prefill_length:.2f}\n"
+        f"  queued decode:     reqs={queued.num_decode_requests} "
+        f"kv={queued.sum_decode_kv_tokens} kv_var={queued.var_decode_kv_tokens:.2f}"
     )
 
 
 def main() -> None:
     args = parse_args()
-    if args.poll_timeout_ms <= 0:
-        raise ValueError("--poll-timeout-ms must be positive")
-
     decoder = msgspec.msgpack.Decoder(ForwardPassMetrics)
     context = zmq.Context()
     subscriber = context.socket(zmq.SUB)
@@ -116,7 +94,7 @@ def main() -> None:
     print(f"Listening for forward-pass metrics on {args.endpoint}")
     try:
         while True:
-            if not subscriber.poll(args.poll_timeout_ms):
+            if not subscriber.poll(POLL_TIMEOUT_MS):
                 continue
 
             frames = subscriber.recv_multipart()
@@ -145,10 +123,10 @@ def main() -> None:
                     file=sys.stderr,
                 )
                 continue
-            if metrics.timing_scope != FPM_TIMING_SCOPE:
+            if metrics.timing_scope != FPM_TIMING_SCOPE_MODEL_STEP_CUDA:
                 print(
                     f"Ignoring timing scope {metrics.timing_scope!r}; "
-                    f"expected {FPM_TIMING_SCOPE!r}",
+                    f"expected {FPM_TIMING_SCOPE_MODEL_STEP_CUDA!r}",
                     file=sys.stderr,
                 )
                 continue

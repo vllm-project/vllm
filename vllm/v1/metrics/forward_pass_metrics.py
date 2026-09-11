@@ -32,6 +32,7 @@ import torch
 import zmq
 
 from vllm.logger import init_logger
+from vllm.utils.math_utils import WelfordAccumulator
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -43,28 +44,8 @@ logger = init_logger(__name__)
 
 FPM_VERSION = 1
 FPM_HEARTBEAT_INTERVAL_SECONDS = 1.0
+FPM_MAX_QUEUE_SIZE = 10_000
 FPM_TIMING_SCOPE_MODEL_STEP_CUDA = "model_step_cuda"
-
-
-@dataclass(slots=True)
-class WelfordAccumulator:
-    """Single-pass count, sum, and population variance accumulator."""
-
-    count: int = 0
-    total: int = 0
-    _mean: float = 0.0
-    _m2: float = 0.0
-
-    def add(self, value: int) -> None:
-        self.count += 1
-        self.total += value
-        delta = value - self._mean
-        self._mean += delta / self.count
-        self._m2 += delta * (value - self._mean)
-
-    @property
-    def variance(self) -> float:
-        return self._m2 / self.count if self.count else 0.0
 
 
 class ScheduledRequestMetrics(
@@ -76,10 +57,12 @@ class ScheduledRequestMetrics(
 
     num_prefill_requests: int = 0
     sum_prefill_tokens: int = 0
+    # Across this iteration's prefill requests: Var(kv_read + scheduled_tokens / 2).
     var_prefill_length: float = 0.0
     sum_prefill_kv_tokens: int = 0
     num_decode_requests: int = 0
     sum_decode_kv_tokens: int = 0
+    # Population variance of per-request KV lengths in this decode batch (tokens²).
     var_decode_kv_tokens: float = 0.0
 
 
@@ -306,9 +289,8 @@ class ZmqForwardPassMetricsPublisher:
         endpoint: str,
         worker_id: str,
         dp_rank: int,
-        max_queue_size: int,
     ) -> None:
-        self._queue = queue.Queue[ForwardPassMetrics | None](maxsize=max_queue_size)
+        self._queue = queue.Queue[ForwardPassMetrics | None](maxsize=FPM_MAX_QUEUE_SIZE)
         self._worker_id = worker_id
         self._dp_rank = dp_rank
         self._sequence = count()
@@ -461,7 +443,6 @@ class ForwardPassMetricsEmitter:
             endpoint=f"tcp://*:{port}",
             worker_id=worker_id,
             dp_rank=dp_rank,
-            max_queue_size=config.forward_pass_metrics_max_queue_size,
         )
         logger.info("Forward-pass metrics publisher bound to tcp://*:%d", port)
         return cls(
@@ -489,13 +470,10 @@ class ForwardPassMetricsEmitter:
                 for rid in scheduler_output.num_scheduled_tokens
                 if (request := requests.get(rid)) is not None
             }
-            # Even a suppressed/dropped iteration can reject tokens included
+            # Even a dropped iteration can reject tokens included
             # in a later snapshot. Keep this until its CPU output is settled.
             self._spec_requests[id(scheduler_output)] = generations
-        if (
-            scheduler_output.total_num_scheduled_tokens == 0
-            or not scheduler.should_emit_forward_pass_metrics(scheduler_output)
-        ):
+        if scheduler_output.total_num_scheduled_tokens == 0:
             return
         if len(self._pending) >= self._max_pending_iterations:
             stale_iteration_id, _ = self._pending.popitem(last=False)
@@ -507,7 +485,7 @@ class ForwardPassMetricsEmitter:
         iteration_id = next(self._iteration_ids)
         scheduler_output.forward_pass_metrics_iteration_id = iteration_id
         self._pending[iteration_id] = _PendingIteration(
-            scheduled=_extract_scheduled_metrics(scheduler, scheduler_output)
+            scheduled=_extract_scheduled_metrics(scheduler_output)
         )
         if self._correct_async_spec_lengths:
             pending = self._pending[iteration_id]
@@ -621,11 +599,9 @@ class ForwardPassMetricsEmitter:
 
 
 def _extract_scheduled_metrics(
-    scheduler: SchedulerInterface,
     output: SchedulerOutput,
 ) -> ScheduledRequestMetrics:
     num_scheduled = output.num_scheduled_tokens
-    requests, _, _ = scheduler.get_forward_pass_metrics_request_state()
     prefill_lengths = WelfordAccumulator()
     decode_kv = WelfordAccumulator()
     num_prefill = 0
@@ -634,23 +610,19 @@ def _extract_scheduled_metrics(
 
     for request_data in output.scheduled_new_reqs:
         num_prefill += 1
-        sum_prefill_tokens += num_scheduled.get(request_data.req_id, 0)
-        request = requests.get(request_data.req_id)
-        prompt_length = (
-            request.num_prompt_tokens
-            if request is not None
-            else len(request_data.prompt_token_ids or ())
-        )
-        prefill_lengths.add(prompt_length)
+        query_tokens = num_scheduled.get(request_data.req_id, 0)
+        sum_prefill_tokens += query_tokens
+        # Accumulate twice the attention length to preserve half-token values.
+        prefill_lengths.add(2 * request_data.num_computed_tokens + query_tokens)
         sum_prefill_kv_tokens += request_data.num_computed_tokens
 
     cached = output.scheduled_cached_reqs
     for index, request_id in enumerate(cached.req_ids):
         if cached.is_context_phase(request_id):
             num_prefill += 1
-            sum_prefill_tokens += num_scheduled.get(request_id, 0)
-            request = requests.get(request_id)
-            prefill_lengths.add(request.num_prompt_tokens if request else 0)
+            query_tokens = num_scheduled.get(request_id, 0)
+            sum_prefill_tokens += query_tokens
+            prefill_lengths.add(2 * cached.num_computed_tokens[index] + query_tokens)
             sum_prefill_kv_tokens += cached.num_computed_tokens[index]
         else:
             decode_kv.add(cached.num_computed_tokens[index])
@@ -658,7 +630,7 @@ def _extract_scheduled_metrics(
     return ScheduledRequestMetrics(
         num_prefill_requests=num_prefill,
         sum_prefill_tokens=sum_prefill_tokens,
-        var_prefill_length=prefill_lengths.variance,
+        var_prefill_length=prefill_lengths.variance / 4,
         sum_prefill_kv_tokens=sum_prefill_kv_tokens,
         num_decode_requests=decode_kv.count,
         sum_decode_kv_tokens=decode_kv.total,
