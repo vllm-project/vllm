@@ -10,6 +10,7 @@ import functools
 import os
 import pickle
 import socket
+import struct
 import sys
 import time
 import uuid
@@ -521,6 +522,32 @@ def get_cached_tcp_store_client(host: str, port: int) -> TCPStore:
     same connection.  A new ``(host, port)`` evicts the old entry.
     """
     return TCPStore(host, port, is_master=False, wait_for_workers=False)
+
+
+def allocate_group_ports(
+    store: Store, key: str, host: str, count: int
+) -> tuple[list[int], list[socket.socket]]:
+    """Bind sockets and publish the ports to *store*.
+
+    Returns ``(ports, sockets)`` with the sockets still open.
+    """
+    socks: list[socket.socket] = []
+    ports: list[int] = []
+    for _ in range(count):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind((host, 0))
+        s.listen()
+        socks.append(s)
+        ports.append(s.getsockname()[1])
+    store.set(key, struct.pack(f"!{count}I", *ports))
+    return ports, socks
+
+
+def fetch_group_ports(store: Store, key: str, count: int) -> list[int]:
+    """Read ports published under *key* by func:`allocate_group_ports`. Blocks until
+    the key is available.
+    """
+    return list(struct.unpack(f"!{count}I", store.get(key)))
 
 
 # Whether this process has entered steady state — init (weight load, KV setup,

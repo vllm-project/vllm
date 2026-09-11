@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """EngineCoreSentinel and fault_tolerant_wrapper for the engine core."""
 
-import json
 import threading
 from collections.abc import Callable
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import msgspec
 import torch
@@ -17,12 +16,12 @@ from torch.distributed.distributed_c10d import Backend, _get_default_timeout
 from vllm.config import set_current_vllm_config
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.utils import (
+    create_tcp_store,
     enter_steady_state,
     init_gloo_process_group,
     set_gloo_backend_timeout,
 )
 from vllm.logger import init_logger
-from vllm.utils.network_utils import get_open_port
 from vllm.v1.engine import (
     FT_STATUS_CALL_ID,
     EngineCoreOutputs,
@@ -67,6 +66,7 @@ class EngineCoreSentinel:
         self._initial_dp_size = parallel_config.data_parallel_size
         self._dead_dp_ranks: set[int] = set()
         self._steady_state_activated = False
+        self._recovery_store: TCPStore | None = None
 
     @property
     def coordinator_disabled(self) -> bool:
@@ -330,22 +330,23 @@ class EngineCoreSentinel:
         params["dp_master_ip"] = master_ip
         params["dp_group_rank"] = alive.index(self.parallel_config.data_parallel_rank)
         params["dp_group_size"] = len(alive)
-        if self.parallel_config.tensor_parallel_size > 1:
-            # The TP group is engine-local; no store coordination needed.
-            params["new_tp_group_port"] = get_open_port()
+        recovery_round = ft_request.request_id or str(self._dp_reinit_epoch)
+        params["recovery_round"] = recovery_round
 
         if self._initial_dp_size == 1:
-            # dp=1 has no dp_store/dp_group; nothing else to reinit.
+            # dp=1 has no dp_store/dp_group; the engine still hosts the
+            # recovery store for its own workers' TP group reinit.
+            params["recovery_store_port"] = self._coordinate_recovery_store_port(
+                master_ip, recovery_round, is_master=True
+            )
             return
 
-        recovery_round = ft_request.request_id or str(self._dp_reinit_epoch)
+        params["recovery_store_port"] = self._coordinate_recovery_store_port(
+            master_ip, recovery_round, is_master=(params["dp_group_rank"] == 0)
+        )
         with set_current_vllm_config(engine.vllm_config):
-            params.update(
-                self._reinit_engine_groups(
-                    params["dp_group_rank"],
-                    len(alive),
-                    recovery_round,
-                )
+            self._reinit_engine_groups(
+                params["dp_group_rank"], len(alive), recovery_round
             )
         # Commit the master IP only after the group reinit succeeded, so a
         # failed recovery leaves a consistent state that can be retried.
@@ -404,26 +405,11 @@ class EngineCoreSentinel:
 
     def _reinit_engine_groups(
         self, dense_rank: int, dense_size: int, recovery_round: str
-    ) -> dict:
-        """Reinit the engine DP group and coordinate fresh ports for the
-        worker DP/EP/EPLB groups. Returns worker params."""
+    ) -> None:
+        """Reinit the engine DP group (dp>1). Worker group ports are
+        coordinated by the workers themselves via the recovery store."""
         engine = cast("DPEngineCoreProc", self.engine)
         self._dp_reinit_epoch += 1
-
-        worker_params: dict[str, Any] = {
-            "new_stateless_dp_group_ports": self._coordinate_ports(
-                "ft_worker_dp_ports",
-                dense_rank,
-                recovery_round,
-                count=self.parallel_config.world_size,
-            ),
-            "new_ep_group_port": self._coordinate_ports(
-                "ft_worker_ep_port", dense_rank, recovery_round
-            )[0],
-            "new_eplb_group_port": self._coordinate_ports(
-                "ft_worker_eplb_port", dense_rank, recovery_round
-            )[0],
-        }
 
         prefix_store = PrefixStore(f"ft_engine_dp_{recovery_round}", engine.dp_store)
         timeout_seconds = self.parallel_config.cpu_distributed_timeout_seconds
@@ -439,25 +425,25 @@ class EngineCoreSentinel:
         )
         stateless_destroy_torch_distributed_process_group(engine.dp_group)
         engine.dp_group = new_group
-        return worker_params
 
-    def _coordinate_ports(
-        self,
-        key_prefix: str,
-        dense_rank: int,
-        recovery_round: str,
-        count: int = 1,
-    ) -> list[int]:
-        """Dense rank 0 picks fresh ports and publishes them via dp_store;
-        other ranks block-read them."""
-        key = f"{key_prefix}_{recovery_round}"
-        store = cast("DPEngineCoreProc", self.engine).dp_store
-        if dense_rank == 0:
-            ports = [get_open_port() for _ in range(count)]
-            store.set(key, json.dumps(ports).encode())
-        else:
-            ports = json.loads(store.get(key).decode())
-        return ports
+    def _coordinate_recovery_store_port(
+        self, master_ip: str, recovery_round: str, is_master: bool
+    ) -> int:
+        """Create (is_master) or look up (others) the per-round TCPStore
+        that workers use to coordinate reinit ports; return its port."""
+        if is_master:
+            store = create_tcp_store(
+                master_ip, 0, is_master=True, world_size=-1, wait_for_workers=False
+            )
+            self._recovery_store = store
+            if self._initial_dp_size > 1:
+                key = f"ft_recovery_store_port_{recovery_round}"
+                cast("DPEngineCoreProc", self.engine).dp_store.set(
+                    key, str(store.port).encode()
+                )
+            return store.port
+        key = f"ft_recovery_store_port_{recovery_round}"
+        return int(cast("DPEngineCoreProc", self.engine).dp_store.get(key).decode())
 
 
 def fault_tolerant_wrapper(busy_loop_func: Callable):
