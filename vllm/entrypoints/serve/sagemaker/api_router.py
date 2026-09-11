@@ -145,13 +145,15 @@ def _attach_router(
 def sagemaker_standards_bootstrap(app: FastAPI) -> FastAPI:
     """Bootstrap the app with the SageMaker hosting standards.
 
-    Restores handler levels afterwards since importing
-    model_hosting_container_standards may reconfigure root logging.
+    Handler levels are restored right after the import because importing
+    model_hosting_container_standards may reconfigure root logging, and
+    bootstrap must run with the original levels.
     """
     snapshot = _snapshot_handler_levels()
     try:
         import model_hosting_container_standards.sagemaker as sagemaker_standards
 
-        return sagemaker_standards.bootstrap(app)
+        app = sagemaker_standards.bootstrap(app)
     finally:
         _restore_handler_levels(snapshot)
+    return app
