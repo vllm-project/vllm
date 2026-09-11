@@ -9,10 +9,12 @@ never addressed by the logical view.
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
@@ -26,9 +28,11 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu import attn_utils
 from vllm.v1.worker.gpu.attn_utils import (
+    FastPrefillHelper,
     get_attn_cg_support,
     get_query_lens_mismatch_unsupported_backend,
 )
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.utils import (
     AttentionGroup,
     allocate_kv_cache,
@@ -180,6 +184,63 @@ def test_get_kv_sharing_fast_prefill_eligible_layers(monkeypatch: pytest.MonkeyP
         cache_config=SimpleNamespace(kv_sharing_fast_prefill=False)
     )
     assert attn_utils.get_kv_sharing_fast_prefill_eligible_layers(vllm_config) == set()
+
+
+@pytest.mark.parametrize(
+    "num_tokens", [1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128]
+)
+@pytest.mark.parametrize("num_active_loras", [1, 2, 4])
+def test_fast_prefill_dispatch_preserves_active_lora_count(
+    num_tokens: int, num_active_loras: int
+):
+    """Fast-prefill padding must match the main dispatch's LoRA variant."""
+
+    class FakeCudaGraphManager:
+        device = "cpu"
+
+        def __init__(self):
+            self.dispatch_calls = []
+
+        def dispatch(self, **kwargs):
+            self.dispatch_calls.append(kwargs)
+            # A captured no-LoRA graph is padded to 8 tokens, while the
+            # active-LoRA path stays eager at the unpadded token count.
+            if kwargs["num_active_loras"] == 0:
+                num_tokens = 8
+                mode = CUDAGraphMode.PIECEWISE
+            else:
+                num_tokens = kwargs["num_tokens"]
+                mode = CUDAGraphMode.NONE
+            return BatchExecutionDescriptor(
+                cg_mode=mode,
+                num_tokens=num_tokens,
+                num_reqs=kwargs["num_reqs"],
+                num_active_loras=kwargs["num_active_loras"],
+                num_ubatches=1,
+            )
+
+    manager = FakeCudaGraphManager()
+    helper = FastPrefillHelper(manager, max_num_tokens=max(32, num_tokens))
+    metadata = helper.prepare(
+        torch.arange(num_tokens, dtype=torch.int32),
+        num_reqs=1,
+        cu_num_logits_np=np.array([0, num_tokens], dtype=np.int32),
+        has_prefill=True,
+        batch_desc=BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.NONE,
+            num_tokens=num_tokens,
+            num_reqs=1,
+            num_active_loras=num_active_loras,
+            num_ubatches=1,
+        ),
+        num_active_loras=num_active_loras,
+    )
+
+    assert metadata is not None
+    assert metadata.num_logits_indices == num_tokens
+    assert metadata.logits_indices_padded.shape[0] == num_tokens
+    assert metadata.max_logits_per_req == num_tokens
+    assert manager.dispatch_calls[-1]["num_active_loras"] == num_active_loras
 
 
 def test_reshape_padded_kv_cache_strides_by_padded_page():
