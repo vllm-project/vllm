@@ -28,6 +28,21 @@ logger = init_logger(__name__)
 _FP8_PREFILL_TILE_Q = 256
 # K-side tiling granularity required by the PS scheduler.
 _KVLEN_GRANULARITY = 128
+# mla_prefill_ps_asm_fwd and mla_reduce_v1 only accept 16-aligned head counts.
+_HEAD_ALIGNMENT = 16
+
+
+def _aligned_num_heads(num_heads: int) -> int:
+    return -(-num_heads // _HEAD_ALIGNMENT) * _HEAD_ALIGNMENT
+
+
+def _pad_heads(x: torch.Tensor, target_heads: int) -> torch.Tensor:
+    """Replicate-pad `[tokens, heads, dim]` up to `target_heads`."""
+    num_heads = x.shape[1]
+    if num_heads == target_heads:
+        return x
+    reps = -(-target_heads // num_heads)
+    return x.repeat(1, reps, 1)[:, :target_heads, :].contiguous()
 
 
 class AiterAsmPrefillBackend(MLAPrefillBackend):
@@ -36,10 +51,13 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
     Persistent metadata buffers are prepared once per forward and then re-used across
     layers.
 
-    Requires FP8 Q/KV cache and gfx950.
+    Requires FP8 Q/KV cache and gfx950. Head counts that are not a multiple of
+    16 are replicate-padded up to one, see ``_run_kernel``.
     """
 
-    supported_dtypes = [torch.float16, torch.bfloat16]
+    # The kernel writes bf16 through a raw output pointer, so fp16 models have
+    # to take another prefill backend.
+    supported_dtypes = [torch.bfloat16]
     supported_mla_dimensions: ClassVar[list[MLADimensions]] = [
         MLADimensions(
             qk_nope_head_dim=128,
@@ -72,6 +90,8 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
     @classmethod
     def is_available(cls) -> bool:
         try:
+            from aiter import mla_prefill_ps_asm_fwd, mla_reduce_v1  # noqa: F401
+
             from vllm.platforms.rocm import on_gfx950
         except Exception:  # noqa: BLE001
             return False
@@ -93,12 +113,24 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
                 "fp8_e5m2; per-token-head and nvfp4 variants are not supported)"
             )
         if selector_config.dcp_world_size > 1:
-            # Decode context parallel does not support scaled/fp8 KV
             invalid_reasons.append(
                 "decode context parallelism (DCP) is not supported with the "
                 "FP8 KV cache required by AITER_ASM"
             )
+        num_heads = selector_config.num_heads
+        if num_heads and not cls._supports_num_heads(num_heads):
+            invalid_reasons.append(
+                f"num_heads {num_heads} is unsupported (AITER_ASM pads "
+                "unaligned head counts up to the next multiple of 16, which "
+                "AITER bounds at 128)"
+            )
         return invalid_reasons
+
+    @staticmethod
+    def _supports_num_heads(num_heads: int) -> bool:
+        from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
+
+        return AiterMLAHelper.is_valid_num_heads(num_heads)
 
     def __init__(
         self,
@@ -119,6 +151,12 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             v_head_dim=v_head_dim,
             vllm_config=vllm_config,
         )
+
+        assert self._supports_num_heads(num_heads), (
+            f"AITER_ASM MLA prefill does not support {num_heads} heads"
+        )
+        # PS ASM prefill requires 16-aligned heads
+        self._kernel_num_heads = _aligned_num_heads(num_heads)
 
         from aiter import (
             get_ps_metadata_info_v1,
@@ -165,8 +203,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         # The reduce_partial_map_size from get_ps_metadata_info_v1 is a much looser
         # upper bound that reach TB scale at large context sizes, so it's unusable.
         # The PS scheduler can emit one partial tile per QO tile OR per CU. Where
-        #  1. the QO tiles can be spread either over the max num batched tokens, or
-        #     over all requests (max num seqs)
+        #  1. the QO tiles can be spread either over the max num batched tokens
         #  2. the CU count is a property of gfx950.
         qo_tile_cnt = (
             cdiv(self._max_num_batched_tokens, _FP8_PREFILL_TILE_Q) + max_num_seqs - 1
@@ -181,9 +218,9 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         max_total_q = self._max_num_batched_tokens
         # logits, attn_lse, final_lse
         current_workspace_manager().get_simultaneous(
-            ((max_partial_q, self.num_heads, self.v_head_dim), torch.float32),
-            ((max_partial_q, self.num_heads), torch.float32),
-            ((max_total_q, self.num_heads), torch.float32),
+            ((max_partial_q, self._kernel_num_heads, self.v_head_dim), torch.float32),
+            ((max_partial_q, self._kernel_num_heads), torch.float32),
+            ((max_total_q, self._kernel_num_heads), torch.float32),
         )
 
     def _get_kv_indices_buf(self, device: torch.device, length: int) -> torch.Tensor:
@@ -233,7 +270,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         host-to-device syncs/copies. Same for num_partial_tiles. Hence we build
         it once per forward and re-use across layers.
         """
-        num_head_k = self.num_heads
+        num_head_k = self._kernel_num_heads
 
         (
             (work_metadata_size, work_metadata_dtype),
@@ -379,6 +416,13 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         """
         from vllm.v1.worker.workspace import current_workspace_manager
 
+        # Pad up to 16, run padded, and slice output back down to the real head count.
+        nhead = self._kernel_num_heads
+        pad = nhead != self.num_heads
+        q = _pad_heads(q, nhead)
+        k = _pad_heads(k, nhead)
+        v = _pad_heads(v, nhead)
+
         # mla_prefill_ps_asm_fwd requires contiguous V in (seq, head, v_head_dim).
         # cp_gather_cache produces V as a slice of the wider nope+rope buffer
         # so we need to copy.
@@ -392,12 +436,12 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         # Partial/scratch buffers for the PS kernels.
         partial_q = max(num_partial_tiles, 1) * _FP8_PREFILL_TILE_Q
         logits, attn_lse, final_lse = current_workspace_manager().get_simultaneous(
-            ((partial_q, self.num_heads, self.v_head_dim), torch.float32),
-            ((partial_q, self.num_heads), torch.float32),
-            ((total_q, self.num_heads), torch.float32),
+            ((partial_q, nhead, self.v_head_dim), torch.float32),
+            ((partial_q, nhead), torch.float32),
+            ((total_q, nhead), torch.float32),
         )
         out = torch.empty(
-            (total_q, self.num_heads, self.v_head_dim),
+            (total_q, nhead, self.v_head_dim),
             dtype=out_dtype,
             device=q.device,
         )
@@ -438,6 +482,10 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
                 out,
                 final_lse,
             )
+
+        if pad:
+            out = out[:, : self.num_heads, :].contiguous()
+            final_lse = final_lse[:, : self.num_heads]
 
         # mla_reduce_v1 writes final_lse as (total_q, num_heads), but
         # triton_merge_attn_states wants it as (num_heads, total_q)

@@ -39,13 +39,16 @@ class MLAPrefillSelectorConfig(NamedTuple):
     )
     cache_dtype: str = "auto"
     dcp_world_size: int = 1
+    # Q heads per rank
+    num_heads: int = 0
 
     def __repr__(self):
         return (
             f"MLAPrefillSelectorConfig(dtype={self.dtype}, "
             f"mla_dimensions={self.mla_dimensions}, "
             f"cache_dtype={self.cache_dtype}, "
-            f"dcp_world_size={self.dcp_world_size})"
+            f"dcp_world_size={self.dcp_world_size}, "
+            f"num_heads={self.num_heads})"
         )
 
 
@@ -136,6 +139,9 @@ def get_mla_prefill_backend(
         )
     else:
         hf_text_config = model_config.hf_text_config
+        num_heads = model_config.get_num_attention_heads(
+            vllm_config.parallel_config,
+        )
         selector_config = MLAPrefillSelectorConfig(
             dtype=model_config.dtype,
             mla_dimensions=MLADimensions(
@@ -145,6 +151,7 @@ def get_mla_prefill_backend(
             ),
             cache_dtype=cache_dtype,
             dcp_world_size=dcp_world_size,
+            num_heads=num_heads,
         )
 
     if attention_config.mla_prefill_backend is not None:
