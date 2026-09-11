@@ -492,6 +492,16 @@ def prepare_kernel_block_sizes(
             selected_kernel_size = select_common_block_size(
                 kv_manager_block_size, group_backends
             )
+            if (
+                current_platform.is_rocm()
+                and isinstance(kv_cache_spec, MLAAttentionSpec)
+                and kv_cache_spec.storage_block_size is not None
+            ):
+                # allocate_kv_cache views the physical cache at
+                # storage_block_size granularity; the block table must use the
+                # same granularity or pool-page consumers (indexer K gather,
+                # paged MQA logits) index past the table.
+                selected_kernel_size = kv_cache_spec.storage_block_size
             kernel_block_sizes.append(selected_kernel_size)
         elif isinstance(kv_cache_spec, MambaSpec):
             # This is likely Mamba or other non-attention cache, no splitting.
