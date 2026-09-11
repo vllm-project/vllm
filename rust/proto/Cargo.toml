@@ -1,0 +1,22 @@
+[package]
+name = "vllm-proto"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Protobuf messages and gRPC bindings for the vLLM Rust frontend"
+repository = "https://github.com/vllm-project/vllm"
+readme = "README.md"
+include = ["*.proto", "src/**", "build.rs", "Cargo.toml", "README.md"]
+
+[dependencies]
+prost.workspace = true
+prost-types.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+
+[build-dependencies]
+protox.workspace = true
+tonic-prost-build.workspace = true
+
+[lints]
+workspace = true
