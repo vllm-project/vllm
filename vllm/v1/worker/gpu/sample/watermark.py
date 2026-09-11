@@ -56,6 +56,7 @@ def _repeated_context_mask_kernel(
     CONTEXT_WIDTH: tl.constexpr,
     MAX_HISTORY: tl.constexpr,
     INCLUDE_PROMPT: tl.constexpr,
+    SKIP_PARTIAL_CONTEXT: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -65,6 +66,9 @@ def _repeated_context_mask_kernel(
         return
     prompt_len = tl.load(prompt_lens_ptr + req_idx)
     total_len = tl.load(total_lens_ptr + req_idx)
+    if SKIP_PARTIAL_CONTEXT and total_len - prompt_len < CONTEXT_WIDTH:
+        tl.store(output_ptr + row, 1)
+        return
     sequence_start = 0 if INCLUDE_PROMPT else prompt_len
     history_len = total_len - sequence_start
 
@@ -103,6 +107,7 @@ def _repeated_context_mask_cpu(
     contexts: torch.Tensor,
     max_history: int | None = None,
     include_prompt: bool = False,
+    skip_partial_context: bool = False,
 ) -> torch.Tensor:
     """Reference implementation; the parity tests check the Triton kernel against it."""
     repeated = torch.zeros(len(req_indices), dtype=torch.bool)
@@ -112,6 +117,9 @@ def _repeated_context_mask_cpu(
             continue
         prompt_len = int(prompt_lens[req_idx])
         total_len = int(total_lens[req_idx])
+        if skip_partial_context and total_len - prompt_len < contexts.shape[-1]:
+            repeated[row] = True
+            continue
         sequence_start = 0 if include_prompt else prompt_len
         history_tokens = all_token_ids[req_idx, sequence_start:total_len].tolist()
         prefix = [-1] * contexts.shape[-1]
@@ -137,6 +145,7 @@ def repeated_context_mask(
     contexts: torch.Tensor,
     max_history: int | None = None,
     include_prompt: bool = False,
+    skip_partial_context: bool = False,
 ) -> torch.Tensor:
     """Return, per row, whether the row's context already occurred in its history.
 
@@ -152,6 +161,8 @@ def repeated_context_mask(
             ``None`` for all of them. The window compared at each position
             reaches `context_width` tokens further back.
         include_prompt: Search the prompt as well as the generated tokens.
+        skip_partial_context: Mark contexts containing start padding so they use
+            ordinary sampling.
     """
     if max_history is not None and max_history < 1:
         raise ValueError("max_history must be positive or None")
@@ -164,6 +175,7 @@ def repeated_context_mask(
             contexts,
             max_history,
             include_prompt,
+            skip_partial_context,
         )
 
     if contexts.stride(-1) != 1:
@@ -181,6 +193,7 @@ def repeated_context_mask(
         CONTEXT_WIDTH=contexts.shape[-1],
         MAX_HISTORY=0 if max_history is None else max_history,
         INCLUDE_PROMPT=include_prompt,
+        SKIP_PARTIAL_CONTEXT=skip_partial_context,
         BLOCK=512,
     )
     return repeated

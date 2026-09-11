@@ -7,11 +7,6 @@ from typing import TypeAlias
 
 import torch
 
-from vllm.config.watermarking import WatermarkContextScope
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
 Context: TypeAlias = tuple[int, ...]
 
 
@@ -29,7 +24,6 @@ class WatermarkDetector(ABC):
         context_width: int,
         p_value_threshold: float,
         deduplicate_contexts: bool = False,
-        history_scope: WatermarkContextScope = "single_turn",
     ) -> None:
         if context_width < 1:
             raise ValueError("context_width must be positive")
@@ -38,32 +32,9 @@ class WatermarkDetector(ABC):
         self.context_width = context_width
         self.p_value_threshold = p_value_threshold
         self.deduplicate_contexts = deduplicate_contexts
-        self.history_scope = history_scope
 
-    def detect(
-        self, token_ids: list[int], context_prefix: list[int] | None = None
-    ) -> WatermarkDetection:
-        """Score `token_ids` for the watermark.
-
-        Args:
-            token_ids: Generated tokens to score.
-            context_prefix: The prompt the tokens were generated from. Needed
-                with `history_scope="all"`, where it supplies the contexts of
-                the first tokens and the contexts generation skipped as
-                repeated. Never scored. Optional for `"all"` (weaker test,
-                warns once), rejected for other scopes.
-        """
-        if self.history_scope != "all" and context_prefix is not None:
-            raise ValueError(
-                f'context_prefix is not used with history_scope="{self.history_scope}"'
-            )
-        if self.history_scope == "all" and context_prefix is None:
-            logger.warning_once(
-                'Detecting text generated with deduplicate_contexts="all" without '
-                "the prompt as context_prefix scores positions that were never "
-                "watermarked; the p-value stays calibrated but detection is weaker."
-            )
-        contexts, targets = self._prepare_inputs(token_ids, context_prefix)
+    def detect(self, token_ids: list[int]) -> WatermarkDetection:
+        contexts, targets = self._prepare_inputs(token_ids)
         num_scored_tokens = len(targets)
         if num_scored_tokens == 0:
             return WatermarkDetection(0.0, 1.0, 0, False)
@@ -79,16 +50,12 @@ class WatermarkDetector(ABC):
         )
 
     def _prepare_inputs(
-        self, token_ids: list[int], context_prefix: list[int] | None = None
+        self, token_ids: list[int]
     ) -> tuple[torch.Tensor, torch.Tensor]:
         contexts: list[Context] = []
         targets = []
         seen_contexts: set[Context] = set()
         prefix = [-1] * self.context_width
-        for token_id in context_prefix or ():
-            if self.deduplicate_contexts:
-                seen_contexts.add(tuple(prefix[-self.context_width :]))
-            prefix.append(token_id)
         for token_id in token_ids:
             context = tuple(prefix[-self.context_width :])
             # Reusing a context reuses one keyed random vector, so the resulting

@@ -18,7 +18,7 @@ WatermarkContextScope = Literal["none", "single_turn", "all"]
 _SPECULATIVE_DECODING_SUPPORT: dict[WatermarkingAlgorithm, bool] = {
     "gumbel": False,
 }
-_MIN_RECOMMENDED_DEDUP_HISTORY = 256
+_MIN_RECOMMENDED_DEDUP_HISTORY = 1024
 
 
 @config
@@ -35,9 +35,8 @@ class WatermarkConfig:
     """Which history is searched for a repeated context before a token is
     sampled; a repeated context is sampled without the watermark. `none`
     disables the search. `single_turn` (default) searches this request's
-    generated tokens. `all` also searches the prompt and keys the first
-    `context_width` generated tokens on the prompt instead of on padding, so
-    the detector must be given the prompt as `context_prefix`."""
+    generated tokens. `all` also searches the prompt and samples the first
+    `context_width` generated tokens without watermarking."""
     deduplicate_contexts_max_history: int | None = Field(default=8192, ge=1)
     """Number of most recent history positions searched (default 8192), or
     `None` for the whole scope. Each position is compared over the
