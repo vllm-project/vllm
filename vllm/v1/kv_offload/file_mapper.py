@@ -75,7 +75,12 @@ class FileMapper:
         # identity participates in the storage namespace.
         if canonical_format is not None:
             self.fields["canonical_format"] = canonical_format
-        elif kv_cache_layout is not None:
+        else:
+            if kv_cache_layout is None:
+                raise ValueError(
+                    "KV cache layout has not been resolved; the direct page "
+                    "format records it in the storage namespace."
+                )
             self.fields["kv_cache_layout"] = kv_cache_layout
         self.base_path: str = self._compute_base_path(root_dir, self.fields)
 

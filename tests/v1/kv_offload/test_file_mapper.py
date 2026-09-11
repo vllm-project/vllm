@@ -4,6 +4,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.kv_offload.base import OffloadingSpec, make_offload_key
 from vllm.v1.kv_offload.config import (
@@ -232,6 +234,11 @@ def test_direct_layout_separates_persistent_namespaces():
     assert len({fm.base_path for fm in mappers.values()}) == len(KVCacheLayout)
     for layout, fm in mappers.items():
         assert fm.fields["kv_cache_layout"] == layout.name
+
+
+def test_direct_layout_requires_resolved_layout():
+    with pytest.raises(ValueError, match="KV cache layout has not been resolved"):
+        make_mapper_from_offloading_spec(kv_cache_layout=None)
 
 
 def test_canonical_namespace_does_not_repeat_the_layout():
