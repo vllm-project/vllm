@@ -23,6 +23,10 @@ from vllm.distributed import (
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, PluggableLayer
+from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+    FP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -30,6 +34,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.input_projection import gdn_input_gemms
 from vllm.model_executor.layers.mamba.mamba_mixer2 import mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
@@ -43,6 +48,10 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
@@ -89,6 +98,37 @@ logger = init_logger(__name__)
 
 MAX_FUSED_GDN_MTP_TOKENS = 8
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
+
+
+def _input_fp8_kernel(linear):
+    method = getattr(linear, "scheme", getattr(linear, "quant_method", None))
+    return getattr(method, "fp8_linear", getattr(method, "kernel", None))
+
+
+def _shared_input_quant(qkvz, ba) -> QuantFP8 | None:
+    """Select one quantizer after both projections' weights have been finalized."""
+    kernels = []
+    scales = []
+    for linear in (qkvz, ba):
+        if not isinstance(linear, ColumnParallelLinear):
+            return None
+        kernel = _input_fp8_kernel(linear)
+        if (
+            not isinstance(kernel, FP8ScaledMMLinearKernel)
+            or kernel.input_quant_key() != kFp8StaticTensorSym
+            or kernel.quant_fp8.num_token_padding is not None
+        ):
+            return None
+        scale = getattr(linear, "input_scale", None)
+        if scale is None or scale.numel() != 1 or scale.dtype != torch.float32:
+            return None
+        kernels.append(kernel)
+        scales.append(scale.reshape(()))
+    if not torch.equal(scales[0], scales[1]):
+        return None
+    if not (torch.isfinite(scales[0]) & (scales[0] > 0)).item():
+        return None
+    return kernels[0].quant_fp8
 
 
 def _resolve_gdn_prefill_backend(
@@ -446,6 +486,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.in_proj_ba",
         )
         self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
+        self._allow_shared_input_quant = (
+            current_platform.is_cuda()
+            and vllm_config.lora_config is None
+            and not envs.VLLM_BATCH_INVARIANT
+        )
+        self._shared_input_quant: QuantFP8 | None = None
+        self._concurrent_input_gemm_requested = (
+            isinstance(vllm_config.additional_config, dict)
+            and vllm_config.additional_config.get("gdn_concurrent_input_gemm", False)
+            and not vllm_config.parallel_config.use_ubatching
+        )
+        self._concurrent_input_gemm = False
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -895,6 +947,63 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             return self.forward_cuda(hidden_states)
 
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        # The loader invokes attention post-load hooks after quant finalization,
+        # including reloads. Keep both scale parameters independent for refits.
+        self._shared_input_quant = (
+            _shared_input_quant(self.in_proj_qkvz, self.in_proj_ba)
+            if self._allow_shared_input_quant
+            else None
+        )
+        self._concurrent_input_gemm = (
+            self._concurrent_input_gemm_requested
+            and self._shared_input_quant is not None
+            and act_dtype == torch.bfloat16
+            and current_platform.has_device_capability(100)
+            and all(
+                linear.bias is None
+                and not linear.gather_output
+                and linear.weight.dtype == torch.float8_e4m3fn
+                and linear.weight.shape
+                == (self.hidden_size, linear.output_size_per_partition)
+                and linear.weight.stride() == (1, self.hidden_size)
+                and self.hidden_size % 16 == 0
+                and linear.output_size_per_partition % 16 == 0
+                and linear.weight_scale.numel() == 1
+                and linear.weight_scale.dtype == torch.float32
+                and _input_fp8_kernel(linear).config.out_dtype in (None, act_dtype)
+                for linear in (self.in_proj_qkvz, self.in_proj_ba)
+            )
+        )
+
+    def _input_projections(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        proj_input: torch.Tensor | QuantizedActivation = hidden_states
+        if self._shared_input_quant is not None:
+            data, scale = self._shared_input_quant(
+                hidden_states, self.in_proj_qkvz.input_scale
+            )
+            proj_input = QuantizedActivation(
+                data,
+                scale,
+                hidden_states.dtype,
+                hidden_states.shape,
+                kFp8StaticTensorSym,
+            )
+            if self._concurrent_input_gemm:
+                return gdn_input_gemms(
+                    data,
+                    self.in_proj_qkvz.weight,
+                    self.in_proj_ba.weight,
+                    scale,
+                    self.in_proj_qkvz.weight_scale,
+                    self.in_proj_ba.weight_scale,
+                )
+        qkvz, _ = self.in_proj_qkvz(proj_input)
+        ba, _ = self.in_proj_ba(proj_input)
+        return qkvz, ba
+
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
@@ -909,8 +1018,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        mixed_qkvz, ba = self._input_projections(hidden_states)
 
         use_fused_gdn_decode = (
             self.enable_fused_gdn_decode
