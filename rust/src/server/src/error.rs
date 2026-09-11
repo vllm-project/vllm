@@ -168,6 +168,19 @@ mod tests {
     }
 
     #[test]
+    fn invalid_reasoning_effort_maps_to_invalid_request() {
+        let error = vllm_chat::Error::InvalidReasoningEffort(
+            "DeepSeek V4.1 reasoning_effort must be within [1, 100]".to_string(),
+        );
+        let api_error = chat_submit_error("failed to submit chat request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            api_error.to_error_response().error.error_type,
+            "invalid_request_error"
+        );
+    }
+
+    #[test]
     fn llm_wrapped_empty_prompt_maps_to_invalid_request() {
         let error = vllm_text::Error::Llm(vllm_llm::Error::EmptyPromptTokenIds {
             request_id: "req-1".to_string(),
@@ -222,6 +235,31 @@ mod tests {
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "invalid_request_error");
         assert!(response.error.message.contains("allowed_token_ids"));
+    }
+
+    #[test]
+    fn truncate_exceeds_budget_maps_to_invalid_request() {
+        let error = vllm_text::Error::TruncatePromptTokensExceedsBudget {
+            value: 8000,
+            budget: 4000,
+        };
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("truncate_prompt_tokens=8000"));
+        assert!(response.error.message.contains("max_tokens = 4000"));
+    }
+
+    #[test]
+    fn invalid_truncate_prompt_tokens_maps_to_invalid_request() {
+        let error = vllm_text::Error::InvalidTruncatePromptTokens { value: -2 };
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("-2"));
+        assert!(response.error.message.contains("must be >= -1"));
     }
 
     #[test]

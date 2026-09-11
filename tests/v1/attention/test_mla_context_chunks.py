@@ -57,6 +57,9 @@ def build_chunked_context(
         ([1024, 1024, 1024], 1024),
         # Unaligned tails.
         ([37, 1000, 5], 1024),
+        # A zero-context request between active requests must not become an
+        # empty TRTLLM ragged-attention row.
+        ([4, 0, 2], 1024),
         ([1], 1024),
     ],
 )
@@ -74,6 +77,7 @@ def test_chunks_gather_every_context_row_exactly_once(context_lens, workspace_si
     gathered: dict[int, list[tuple[int, int]]] = {}
     previous_request_start = -1
     for chunk in metadata.chunks:
+        assert chunk.all_rows_active
         assert chunk.num_context_tokens <= workspace_size
         assert chunk.num_context_tokens == int(chunk.cu_seq_lens[-1])
         assert chunk.token_to_seq.shape[0] == chunk.num_context_tokens

@@ -71,7 +71,10 @@ class SharedOffloadRegion:
     the rest open the existing file and wait until it reaches the expected
     size.  Each worker then mmap()s the full file.
 
-    File path: /dev/shm/vllm_offload_{engine_id}.mmap
+    File path: /dev/shm/vllm_offload_{engine_id}.mmap.  When a barrier is
+    given, the path is unlinked once every worker has mapped the file, so
+    the kernel reclaims the memory when the last worker exits, no matter
+    how it exits; mappings taken before the unlink stay valid.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -79,82 +82,119 @@ class SharedOffloadRegion:
     def __init__(
         self,
         engine_id: str,
-        num_blocks: int,
+        num_chunks: int,
         rank: int | None,
-        kv_bytes_per_block: int,
+        kv_bytes_per_chunk: int,
         cpu_page_size: int,
+        barrier: Callable[[], None] | None = None,
     ) -> None:
         self.page_size = mmap.PAGESIZE
-        assert kv_bytes_per_block % self.page_size == 0
+        assert kv_bytes_per_chunk % self.page_size == 0
 
-        self.num_blocks = num_blocks
-        self._row_stride = kv_bytes_per_block
-        self.total_size_bytes = self.num_blocks * self._row_stride
+        self.num_chunks = num_chunks
+        self._row_stride = kv_bytes_per_chunk
+        self.total_size_bytes = self.num_chunks * self._row_stride
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
         self._creator = False  # set True only if this worker creates the file
         self.rank = rank
         if rank is not None:
-            # byte offset to this worker's first slot within each block row
+            # byte offset to this worker's first slot within each chunk row
             self._worker_offset = rank * cpu_page_size
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
         try:
-            self.fd: int | None = os.open(
-                self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
-            )
-        except FileExistsError:
-            # Joiner path — another worker won O_EXCL. Reopen and wait
-            # for the file to reach expected size.
-            self.fd = os.open(self.mmap_path, os.O_RDWR)
             try:
-                _wait_for_file_size(self.fd, self.total_size_bytes)
-            except (TimeoutError, OSError):
-                os.close(self.fd)
-                raise
-            logger.info("Opened existing mmap file %s", self.mmap_path)
-        else:
-            # Creator path. We won O_EXCL, so we own the file: any
-            # failure here must clean up so concurrent joiners don't
-            # land on a 0-byte stub and spin in _wait_for_file_size
-            # for the full 30 s timeout.
-            try:
-                check_shm_free_space(self.total_size_bytes)
-                os.ftruncate(self.fd, self.total_size_bytes)
-            except (RuntimeError, OSError):
-                os.unlink(self.mmap_path)
-                os.close(self.fd)
-                raise
-            self._creator = True
-            logger.info(
-                "Created mmap file %s (%.2f GB)",
-                self.mmap_path,
-                self.total_size_bytes / 1e9,
-            )
+                self.fd: int | None = os.open(
+                    self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
+                )
+            except FileExistsError:
+                # Joiner path — another worker won O_EXCL. Reopen and wait
+                # for the file to reach expected size.
+                self.fd = os.open(self.mmap_path, os.O_RDWR)
+                try:
+                    _wait_for_file_size(self.fd, self.total_size_bytes)
+                except (TimeoutError, OSError):
+                    os.close(self.fd)
+                    raise
+                logger.info("Opened existing mmap file %s", self.mmap_path)
+            else:
+                # Creator path. We won O_EXCL, so we own the file: any
+                # failure here must clean up so concurrent joiners don't
+                # land on a 0-byte stub and spin in _wait_for_file_size
+                # for the full 30 s timeout.
+                try:
+                    check_shm_free_space(self.total_size_bytes)
+                    os.ftruncate(self.fd, self.total_size_bytes)
+                except (RuntimeError, OSError):
+                    os.unlink(self.mmap_path)
+                    os.close(self.fd)
+                    raise
+                self._creator = True
+                logger.info(
+                    "Created mmap file %s (%.2f GB)",
+                    self.mmap_path,
+                    self.total_size_bytes / 1e9,
+                )
 
-        self.mmap_obj: mmap.mmap | None = mmap.mmap(
-            self.fd,
-            self.total_size_bytes,
-            flags=mmap.MAP_SHARED,
-            prot=mmap.PROT_READ | mmap.PROT_WRITE,
-        )
+            self.mmap_obj: mmap.mmap | None = mmap.mmap(
+                self.fd,
+                self.total_size_bytes,
+                flags=mmap.MAP_SHARED,
+                prot=mmap.PROT_READ | mmap.PROT_WRITE,
+            )
+        except Exception:
+            if self._creator:
+                os.unlink(self.mmap_path)
+                self._creator = False
+            # Peers block inside the barrier until the collective times out if
+            # we die before reaching it.  Arrive anyway so every worker calls
+            # barrier() exactly once and they fail on their own errors instead
+            # of hanging; a failure here must not replace ours.
+            if barrier is not None:
+                try:
+                    barrier()
+                except Exception:
+                    logger.warning(
+                        "Failed to release peers waiting at the mmap barrier",
+                        exc_info=True,
+                    )
+            raise
+
+        if barrier is not None:
+            # Every worker has mapped the file once the barrier releases, so
+            # its name is no longer needed and dropping it here means no exit
+            # path — including SIGKILL — can leak the file.
+            try:
+                barrier()
+            except Exception:
+                if self._creator:
+                    os.unlink(self.mmap_path)
+                    self._creator = False
+                self.mmap_obj.close()
+                os.close(self.fd)
+                raise
+            if self._creator:
+                os.unlink(self.mmap_path)
+                self._creator = False
+                logger.info("Unlinked mmap file %s", self.mmap_path)
 
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
 
         if rank is not None:
-            # Populate only this worker's pages (one slot per block row).
+            # Populate only this worker's pages (one slot per chunk row).
             worker_offset = rank * cpu_page_size
             _t0 = time.perf_counter()
             page_size = self.page_size
-            for block in range(num_blocks):
-                raw_offset = block * self._row_stride + worker_offset
+            for chunk in range(num_chunks):
+                raw_offset = chunk * self._row_stride + worker_offset
                 aligned_offset = (raw_offset // page_size) * page_size
                 end = raw_offset + cpu_page_size
                 aligned_length = end - aligned_offset
                 populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
             logger.debug(
-                "MADV_POPULATE_WRITE loop: %d blocks in %.3f s",
-                num_blocks,
+                "MADV_POPULATE_WRITE loop: %d chunks in %.3f s",
+                num_chunks,
                 time.perf_counter() - _t0,
             )
         else:
@@ -175,22 +215,22 @@ class SharedOffloadRegion:
 
         Must be called once per canonical tensor. The full mmap layout is:
 
-            worker0_block0 | worker1_block0 | ... | worker{M-1}_block0
-            worker0_block1 | worker1_block1 | ... | worker{M-1}_block1
+            worker0_chunk0 | worker1_chunk0 | ... | worker{M-1}_chunk0
+            worker0_chunk1 | worker1_chunk1 | ... | worker{M-1}_chunk1
             ...
 
-        Each worker_block cell is cpu_page_size bytes and holds all canonical
-        tensors for that worker and block concatenated:
+        Each worker_chunk cell is cpu_page_size bytes and holds all canonical
+        tensors for that worker and chunk concatenated:
             [ tensor0_data | tensor1_data | ... | tensor{L-1}_data ]
 
         Consecutive rows are separated by row_stride = cpu_page_size * M.
 
-        Returns an int8 tensor of shape (num_blocks, tensor_page_size) with stride
+        Returns an int8 tensor of shape (num_chunks, tensor_page_size) with stride
         (row_stride, 1).  Using int8 keeps stride == bytes, so swap_blocks
         address arithmetic works without any dtype conversion.
 
         Args:
-            tensor_page_size: Bytes per block for this  tensor.
+            tensor_page_size: Bytes per chunk for this tensor.
         """
         assert self.rank is not None
         new_offset = self._worker_offset + tensor_page_size
@@ -201,7 +241,7 @@ class SharedOffloadRegion:
         )
         worker_layer_view = torch.as_strided(
             self._base,
-            size=(self.num_blocks, tensor_page_size),
+            size=(self.num_chunks, tensor_page_size),
             stride=(self._row_stride, 1),
             storage_offset=self._worker_offset,
         )
@@ -226,8 +266,8 @@ class SharedOffloadRegion:
             _canonical_offset=0, then advances by each tensor's size
 
         Each canonical_t{i} cell is that tensor's canonical page for the
-        block. Canonical areas are carved consecutively from the start of
-        each block row; consecutive rows are separated by row_stride. Every
+        chunk. Canonical areas are carved consecutively from the start of
+        each chunk row; consecutive rows are separated by row_stride. Every
         worker gets the identical byte ranges and writes only its disjoint
         bytes within them, as described by its canonical mappings — unlike
         create_next_worker_view, which gives each worker a private
@@ -239,13 +279,13 @@ class SharedOffloadRegion:
         where one canonical copy replaces world_size worker copies.
 
         Args:
-            tensor_page_size: Canonical bytes per block for this tensor.
+            tensor_page_size: Canonical bytes per chunk for this tensor.
         """
         new_offset = self._canonical_offset + tensor_page_size
         assert new_offset <= self._row_stride
         view = torch.as_strided(
             self._base,
-            size=(self.num_blocks, tensor_page_size),
+            size=(self.num_chunks, tensor_page_size),
             stride=(self._row_stride, 1),
             storage_offset=self._canonical_offset,
         )
@@ -256,10 +296,10 @@ class SharedOffloadRegion:
     def create_kv_memoryview(self) -> memoryview:
         """Return a zero-copy memoryview over the entire KV buffer.
 
-        Shape: (num_blocks, row_stride_bytes). Secondary tiers address
-        block *b* as ``view[b]``.
+        Shape: (num_chunks, row_stride_bytes). Secondary tiers address
+        chunk *b* as ``view[b]``.
         """
-        kv_tensor = self._base.view(self.num_blocks, self._row_stride)
+        kv_tensor = self._base.view(self.num_chunks, self._row_stride)
         np_arr = kv_tensor.numpy()
         assert np_arr.ctypes.data == self._base.data_ptr(), (
             "view()/numpy() created a copy instead of sharing the mmap buffer; "

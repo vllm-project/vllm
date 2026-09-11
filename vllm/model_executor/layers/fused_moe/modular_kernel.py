@@ -34,6 +34,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
     dbo_maybe_run_recv_hook,
@@ -109,7 +110,10 @@ class ExpertTokensMetadata:
         expert_num_tokens_list: list[int], device: str
     ) -> "ExpertTokensMetadata":
         expert_num_tokens_cpu = torch.tensor(
-            expert_num_tokens_list, device="cpu", dtype=torch.int32
+            expert_num_tokens_list,
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=PIN_MEMORY,
         )
         return ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens_cpu.to(device, non_blocking=True),
@@ -902,7 +906,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         *,
         topk_ids: torch.Tensor | None = None,
         expert_map: torch.Tensor | None = None,
-        valid_rows: torch.Tensor | None = None,
+        valid_token_counts: torch.Tensor | None = None,
     ) -> None:
         apply_moe_activation(
             activation,
@@ -911,7 +915,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
             activation_config=self.activation_config,
             topk_ids=topk_ids,
             expert_map=expert_map,
-            valid_rows=valid_rows,
+            valid_token_counts=valid_token_counts,
         )
 
     @abstractmethod
@@ -1171,6 +1175,24 @@ class FusedMoEKernelModularImpl:
         # time we need cache3, we're done with cache1.
         # Reuse workspace13 for the output since there is only one chunk.
         max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
+
+        if current_platform.is_cpu():
+            # Every CPU FusedMoEExpertsModular kernel reports zero-sized
+            # workspace13/workspace2 (it manages its own scratch space
+            # internally) and just needs the output buffer, so skip the
+            # workspace manager entirely here -- it's the one part of this
+            # call graph Dynamo can't trace (ContextVar-based lane lookup),
+            # and CPU never actually needs its cross-chunk memory reuse.
+            common_workspace = torch.empty(
+                (max_shape_size,), dtype=workspace_dtype, device=device
+            )
+            workspace2 = torch.empty(
+                workspace2_shape, dtype=workspace_dtype, device=device
+            )
+            workspace13 = _resize_cache(common_workspace, workspace13_shape)
+            fused_out = _resize_cache(common_workspace, fused_out_shape)
+            return workspace13, workspace2, fused_out
+
         common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
             ((max_shape_size,), workspace_dtype),
             (workspace2_shape, workspace_dtype),

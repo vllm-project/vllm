@@ -12,16 +12,16 @@ except ImportError as e:
         "    pip install 'cohere-melody>=0.11.1'"
     ) from e
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
+)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,

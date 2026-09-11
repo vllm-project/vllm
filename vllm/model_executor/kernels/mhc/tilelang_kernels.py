@@ -38,6 +38,8 @@ def mhc_pre_big_fuse_tilelang(
     post_mix,
     comb_mix,
     layer_input,
+    pre_mix_in,
+    pre_mix_out,
     hidden_size: int,
     rms_eps: float,
     hc_pre_eps: float,
@@ -46,11 +48,20 @@ def mhc_pre_big_fuse_tilelang(
     sinkhorn_repeat: int,
     n_splits: int = 16,
     hc_mult: int = 4,
+    use_pre_mix_in: bool = False,
+    save_pre_mix: bool = False,
+    rms_numel: int = 0,
 ):
-    """Deeply fused kernels, everything other than gemm & sqrsum in mHC pre block."""
+    """Fuse coefficient generation and residual collapse after the projection.
+
+    With save_pre_mix, store the new pre-mix and collapse with pre_mix_in,
+    or select stream zero when use_pre_mix_in is false.
+    """
     num_tokens = T.dynamic("num_tokens")
     hc_mult3 = hc_mult * (2 + hc_mult)
     hidden_block = math.gcd(512, hidden_size)
+    if rms_numel == 0:
+        rms_numel = hc_mult * hidden_size
 
     gemm_out_mul: T.Tensor[[n_splits, num_tokens, hc_mult3], T.float32]  # type: ignore[no-redef, valid-type]
     gemm_out_sqrsum: T.Tensor[[n_splits, num_tokens], T.float32]  # type: ignore[no-redef, valid-type]
@@ -61,6 +72,9 @@ def mhc_pre_big_fuse_tilelang(
     post_mix: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
     comb_mix: T.Tensor[[num_tokens, hc_mult * hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
     layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
+
+    pre_mix_in: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
+    pre_mix_out: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
 
     with T.Kernel(num_tokens, threads=96) as i:
         if ENABLE_PDL:
@@ -73,7 +87,7 @@ def mhc_pre_big_fuse_tilelang(
         rms[0] = 0
         for i_split in T.serial(n_splits):
             rms[0] += gemm_out_sqrsum[i_split, i]
-        rms[0] = T.rsqrt(rms[0] / (hc_mult * hidden_size) + rms_eps)
+        rms[0] = T.rsqrt(rms[0] / rms_numel + rms_eps)
         for j in T.Parallel(hc_mult3):
             mixes[j] = 0
             for i_split in T.serial(n_splits):
@@ -87,6 +101,11 @@ def mhc_pre_big_fuse_tilelang(
             # _pre_split_mixes_fwd (post & comb)
             cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
             for j in T.Parallel(hc_mult):
+                if save_pre_mix:
+                    pre_mix_out[i, j] = (
+                        T.sigmoid(mixes_shared[j] * hc_scale[0] + hc_base[j])
+                        + hc_pre_eps
+                    )
                 post_mix[i, j] = (
                     T.sigmoid(
                         mixes_shared[j + hc_mult] * hc_scale[1] + hc_base[j + hc_mult]
@@ -137,12 +156,15 @@ def mhc_pre_big_fuse_tilelang(
             # _pre_split_mixes_fwd (pre)
             pre_mix_shared = T.alloc_shared(hc_mult, T.float32)
             for j in T.Parallel(hc_mult):
-                pre_mix_shared[j] = (
-                    T.sigmoid(
-                        mixes_shared[j] * hc_scale[0] + hc_base[j],
+                if use_pre_mix_in:
+                    pre_mix_shared[j] = pre_mix_in[i, j]
+                elif save_pre_mix:
+                    pre_mix_shared[j] = T.if_then_else(j == 0, 1.0, 0.0)
+                else:
+                    pre_mix_shared[j] = (
+                        T.sigmoid(mixes_shared[j] * hc_scale[0] + hc_base[j])
+                        + hc_pre_eps
                     )
-                    + hc_pre_eps
-                )
             ###################################################################
             # _pre_apply_mix_fwd
             for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=2):
@@ -179,6 +201,8 @@ def mhc_pre_big_fuse_with_norm_tilelang(
     comb_mix,
     layer_input,
     norm_weight,
+    pre_mix_in,
+    pre_mix_out,
     hidden_size: int,
     rms_eps: float,
     hc_pre_eps: float,
@@ -189,11 +213,16 @@ def mhc_pre_big_fuse_with_norm_tilelang(
     n_splits: int = 16,
     hc_mult: int = 4,
     gemm_last_dim: int = -1,
+    use_pre_mix_in: bool = False,
+    save_pre_mix: bool = False,
+    rms_numel: int = 0,
 ):
     num_tokens = T.dynamic("num_tokens")
     hc_mult3 = hc_mult * (2 + hc_mult)
     if gemm_last_dim < 0:
         gemm_last_dim = hc_mult3
+    if rms_numel == 0:
+        rms_numel = hc_mult * hidden_size
     hidden_block = math.gcd(1024, hidden_size)
 
     gemm_out_mul: T.Tensor[[n_splits, num_tokens, gemm_last_dim], T.float32]  # type: ignore[no-redef, valid-type]
@@ -206,6 +235,9 @@ def mhc_pre_big_fuse_with_norm_tilelang(
     layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
     norm_weight: T.Tensor[[hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
 
+    pre_mix_in: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
+    pre_mix_out: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
+
     with T.Kernel(num_tokens, threads=96) as i:
         rms = T.alloc_fragment(1, T.float32)
         mixes = T.alloc_fragment(hc_mult3, T.float32)
@@ -217,7 +249,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
 
         for i_split in T.serial(n_splits):
             rms[0] += gemm_out_sqrsum[i_split, i]
-        rms[0] = T.rsqrt(rms[0] / (hc_mult * hidden_size) + rms_eps)
+        rms[0] = T.rsqrt(rms[0] / rms_numel + rms_eps)
         for j in T.Parallel(hc_mult3):
             mixes[j] = 0
             for i_split in T.serial(n_splits):
@@ -229,6 +261,11 @@ def mhc_pre_big_fuse_with_norm_tilelang(
         if T.get_thread_binding() < 32:
             cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
             for j in T.Parallel(hc_mult):
+                if save_pre_mix:
+                    pre_mix_out[i, j] = (
+                        T.sigmoid(mixes_shared[j] * hc_scale[0] + hc_base[j])
+                        + hc_pre_eps
+                    )
                 post_mix[i, j] = (
                     T.sigmoid(
                         mixes_shared[j + hc_mult] * hc_scale[1] + hc_base[j + hc_mult]
@@ -270,12 +307,15 @@ def mhc_pre_big_fuse_with_norm_tilelang(
         else:
             pre_mix_shared = T.alloc_shared(hc_mult, T.float32)
             for j in T.Parallel(hc_mult):
-                pre_mix_shared[j] = (
-                    T.sigmoid(
-                        mixes_shared[j] * hc_scale[0] + hc_base[j],
+                if use_pre_mix_in:
+                    pre_mix_shared[j] = pre_mix_in[i, j]
+                elif save_pre_mix:
+                    pre_mix_shared[j] = T.if_then_else(j == 0, 1.0, 0.0)
+                else:
+                    pre_mix_shared[j] = (
+                        T.sigmoid(mixes_shared[j] * hc_scale[0] + hc_base[j])
+                        + hc_pre_eps
                     )
-                    + hc_pre_eps
-                )
 
             # Pass 1: stash unnormalized weighted-sum output in shared memory
             # as bf16 (matches the rounding that RMSNorm would see) while
@@ -298,9 +338,18 @@ def mhc_pre_big_fuse_with_norm_tilelang(
                     for i1_h in T.Parallel(hidden_block):
                         ol[i1_h] += pre * xl[i_hc, i1_h]
 
-                for i1_h in T.Parallel(hidden_block):
-                    sumsq_per_pos[i1_h] += ol[i1_h] * ol[i1_h]
-                    output_shared[i0_h * hidden_block + i1_h] = T.bfloat16(ol[i1_h])
+                if save_pre_mix:
+                    # Keep the BF16 boundary before the delayed input RMSNorm.
+                    rounded = T.alloc_fragment(hidden_block, T.bfloat16)
+                    T.copy(ol, rounded)
+                    for i1_h in T.Parallel(hidden_block):
+                        value = T.float32(rounded[i1_h])
+                        sumsq_per_pos[i1_h] += value * value
+                        output_shared[i0_h * hidden_block + i1_h] = rounded[i1_h]
+                else:
+                    for i1_h in T.Parallel(hidden_block):
+                        sumsq_per_pos[i1_h] += ol[i1_h] * ol[i1_h]
+                        output_shared[i0_h * hidden_block + i1_h] = T.bfloat16(ol[i1_h])
 
             sumsq = T.alloc_fragment(1, T.float32)
             T.reduce_sum(sumsq_per_pos, sumsq, dim=0)
@@ -704,7 +753,7 @@ def hc_prenorm_gemm_tilelang(
 
         for it in T.serial(k_iters):
             i_k = i_s * k_per_split + it * n_thr + tid
-            x_val = x[i_n, i_k]
+            x_val = T.cast(x[i_n, i_k], T.float32)
             for i_o in T.unroll(tile_n):
                 out_idx = i_t * tile_n + i_o
                 if out_idx < n_out:
@@ -794,7 +843,7 @@ def hc_prenorm_gemm_block_m_tilelang(
             for i_m in T.unroll(block_m):
                 token_idx = i_mt * block_m + i_m
                 if token_idx < num_tokens:
-                    x_val = x[token_idx, i_k]
+                    x_val = T.cast(x[token_idx, i_k], T.float32)
                     for i_o in T.unroll(tile_n):
                         acc[i_m, i_o] += x_val * fn_val[i_o]
                     if i_t == 0:

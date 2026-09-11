@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,12 +11,13 @@ use serde_with::SerializeDisplay;
 use validator::Validate;
 use vllm_chat::ReasoningEffort;
 use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
+use vllm_text::TruncationSide;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, Normalizable, PromptLogprobs, StreamOptions, StringOrArray, Tool,
-    ToolCall, ToolCallDelta, ToolChoice, Usage, default_true, deserialize_request_top_k,
-    validate_messages, validate_stop, validate_top_p_value,
+    ChatLogProbs, ChatMessage, Normalizable, PromptLogprobs, StreamOptions, StreamResponseEnvelope,
+    StringOrArray, Tool, ToolCall, ToolCallDelta, ToolChoice, Usage, default_true,
+    deserialize_request_top_k, validate_messages, validate_stop, validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -158,6 +160,9 @@ pub struct ChatCompletionRequest {
     /// Truncate prompt tokens to this length
     pub truncate_prompt_tokens: Option<i64>,
 
+    /// Which side to truncate from when truncate_prompt_tokens is active
+    pub truncation_side: Option<TruncationSide>,
+
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
 
@@ -289,6 +294,7 @@ impl Default for ChatCompletionRequest {
             skip_special_tokens: true,
             spaces_between_special_tokens: true,
             truncate_prompt_tokens: None,
+            truncation_side: None,
             prompt_logprobs: None,
             allowed_token_ids: None,
             bad_words: None,
@@ -383,10 +389,8 @@ pub(super) struct ChatCompletionMessage {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ChatCompletionStreamResponse {
-    pub id: String,
-    pub object: String,
-    pub created: u64,
-    pub model: String,
+    #[serde(flatten)]
+    pub envelope: Arc<StreamResponseEnvelope>,
     pub choices: Vec<ChatCompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub prompt_token_ids: Option<Vec<u32>>,
@@ -394,12 +398,9 @@ pub(super) struct ChatCompletionStreamResponse {
 
 impl ChatCompletionStreamResponse {
     /// Create a stream response with the standard envelope fields pre-filled.
-    pub fn new(id: &str, model: &str, created: u64) -> Self {
+    pub fn new(envelope: &Arc<StreamResponseEnvelope>) -> Self {
         Self {
-            id: id.to_string(),
-            object: "chat.completion.chunk".to_string(),
-            created,
-            model: model.to_string(),
+            envelope: Arc::clone(envelope),
             choices: Vec::new(),
             usage: None,
             prompt_token_ids: None,
