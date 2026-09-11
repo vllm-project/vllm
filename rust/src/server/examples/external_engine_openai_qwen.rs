@@ -70,6 +70,7 @@ async fn main() -> Result<()> {
         reasoning_parser: ParserSelection::Auto,
         renderer: RendererSelection::Auto,
         language_model_only: false,
+        allowed_media_domains: None,
         chat_template: None,
         default_chat_template_kwargs: None,
         limit_mm_per_prompt: HashMap::new(),

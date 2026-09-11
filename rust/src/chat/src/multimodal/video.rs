@@ -183,7 +183,7 @@ mod tests {
     use super::super::tests::{
         QWEN3_IMAGE_PAD_ID, QWEN3_VIDEO_PAD_ID, qwen3_vl_info, qwen3_vl_tokenizer,
     };
-    use super::super::{MultimodalConfigFiles, MultimodalModelInfo};
+    use super::super::{MediaAccessOptions, MultimodalConfigFiles, MultimodalModelInfo};
     use super::*;
 
     #[test]
@@ -208,6 +208,7 @@ mod tests {
                 files,
                 Arc::new(qwen3_vl_tokenizer()),
                 std::collections::HashMap::new(),
+                MediaAccessOptions::default(),
             )
         };
 
