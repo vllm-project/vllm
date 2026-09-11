@@ -39,6 +39,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeEntry,
     KVConnectorHandshakeMetadata,
 )
 from vllm.distributed.parallel_state import (
@@ -704,6 +705,14 @@ class Worker(WorkerBase):
         pp_rank = get_pp_group().rank_in_group
         tp_rank = get_tp_group().rank_in_group
         return {(pp_rank, tp_rank): metadata}
+
+    def add_remote_kv_handshake(
+        self, remote_engine_id: str, entries: list[KVConnectorHandshakeEntry]
+    ) -> None:
+        if has_kv_transfer_group():
+            get_kv_transfer_group().add_remote_handshake_entries(
+                remote_engine_id, entries
+            )
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()

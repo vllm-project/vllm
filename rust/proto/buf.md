@@ -4,7 +4,7 @@ Protocol definitions for the optional gRPC server exposed by the vLLM Rust front
 
 - `Inference` provides unary and streaming generation.
 - `Control` provides server and model discovery, request aborts, and LoRA management.
-- `KvTransfer` provides KV event sources.
+- `KvTransfer` provides KV event sources, KV transfer info, and NIXL handshake metadata.
 - `RlControl` provides pause/resume, sleep/wake, and weight updates.
 
 `Control` still declares the RPCs that moved to `KvTransfer` and `RlControl`, marked deprecated, for one release.

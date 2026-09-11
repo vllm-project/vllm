@@ -20,6 +20,7 @@ use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
+use crate::protocol::kv_transfer::KvConnectorHandshakeEntry;
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::multimodal::{
     MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmModality, MmSlice,
@@ -2640,6 +2641,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let multi_connector_stats_hex =
         lines.next().expect("missing MultiConnector stats fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
+    let handshake_entries_hex = lines.next().expect("missing handshake entries fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -2864,6 +2866,37 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     assert_eq!(kv_events_config.buffer_steps, 10_000);
     assert_eq!(kv_events_config.hwm, 100_000);
     assert_eq!(kv_events_config.max_queue_size, 100_000);
+    let kv_transfer_info = ready_response.kv_transfer_info.expect("KV transfer info should decode");
+    assert_eq!(kv_transfer_info.engine_id, "prefill-0_dp0");
+    assert_eq!(kv_transfer_info.kv_connector, "NixlConnector");
+    assert_eq!(kv_transfer_info.kv_role, "kv_producer");
+
+    // The utility result path decodes through an rmpv::Value, so go that way too.
+    let handshake_value = decode_value(&hex::decode(handshake_entries_hex).unwrap());
+    let handshake_entries: Vec<KvConnectorHandshakeEntry> =
+        rmpv::ext::from_value(handshake_value).expect("handshake entries should decode");
+    assert_eq!(
+        handshake_entries,
+        vec![
+            KvConnectorHandshakeEntry {
+                pp_rank: 0,
+                tp_rank: 0,
+                payload: bytes::Bytes::from_static(b"\x82\xa1a\x01"),
+                compatibility_hash: Some("abc123".to_string()),
+            },
+            KvConnectorHandshakeEntry {
+                pp_rank: 1,
+                tp_rank: 0,
+                payload: bytes::Bytes::from_static(b"\x00\xff"),
+                compatibility_hash: None,
+            },
+        ]
+    );
+    assert_eq!(
+        hex::encode(rmp_serde::to_vec_named(&handshake_entries).unwrap()),
+        handshake_entries_hex,
+        "named msgpack encoding of handshake entries drifted from the Python dataclass",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

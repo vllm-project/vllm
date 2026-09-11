@@ -16,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     yield_req_data,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeEntry,
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
 )
@@ -105,6 +106,13 @@ class NixlBaseConnectorScheduler:
         # Background thread for handling new handshake requests.
         self._nixl_handshake_listener_t: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._handshake_entries: list[KVConnectorHandshakeEntry] = []
+        self._serve_side_channel = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "handshake_transport", "auto"
+            )
+            != "grpc"
+        )
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -303,6 +311,7 @@ class NixlBaseConnectorScheduler:
             metadata (dict): the handshake metadata to set.
         """
         encoded_data: dict[tuple[int, int], bytes] = {}
+        entries: list[KVConnectorHandshakeEntry] = []
         encoder = msgspec.msgpack.Encoder()
         for (pp_rank, tp_rank), rank_metadata in metadata.items():
             if not isinstance(rank_metadata, NixlHandshakePayload):
@@ -310,16 +319,26 @@ class NixlBaseConnectorScheduler:
                     "NixlConnectorScheduler expects NixlHandshakePayload for "
                     "handshake metadata."
                 )
-            encoded_data[(pp_rank, tp_rank)] = encoder.encode(rank_metadata)
+            payload = encoder.encode(rank_metadata)
+            encoded_data[(pp_rank, tp_rank)] = payload
+            entries.append(
+                KVConnectorHandshakeEntry(
+                    pp_rank=pp_rank,
+                    tp_rank=tp_rank,
+                    payload=payload,
+                    compatibility_hash=rank_metadata.compatibility_hash,
+                )
+            )
             logger.debug(
                 "PP rank %d, TP rank %d: encoded NixlHandshakePayload size: %s bytes",
                 pp_rank,
                 tp_rank,
-                str(len(encoded_data[(pp_rank, tp_rank)])),
+                str(len(payload)),
             )
+        self._handshake_entries = entries
 
         # Only start the listener when we have metadata to serve.
-        if self._nixl_handshake_listener_t is None:
+        if self._serve_side_channel and self._nixl_handshake_listener_t is None:
             ready_event = threading.Event()
             self._nixl_handshake_listener_t = threading.Thread(
                 target=self._nixl_handshake_listener,
@@ -335,6 +354,9 @@ class NixlBaseConnectorScheduler:
             )
             self._nixl_handshake_listener_t.start()
             ready_event.wait()  # Wait for listener ZMQ socket to be ready.
+
+    def get_xfer_handshake_entries(self) -> list[KVConnectorHandshakeEntry]:
+        return self._handshake_entries
 
     @staticmethod
     def _nixl_handshake_listener(

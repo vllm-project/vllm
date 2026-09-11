@@ -183,8 +183,8 @@ impl GrpcServiceSelection {
         }
         if services.contains(GrpcServices::KV_TRANSFER) && !kv_transfer_configured(ready) {
             bail!(
-                "--grpc-services requested kv-transfer, but no engine has ZMQ KV cache events \
-                 (--kv-events-config) configured"
+                "--grpc-services requested kv-transfer, but no engine has a KV connector \
+                 (--kv-transfer-config) or ZMQ KV cache events (--kv-events-config) configured"
             );
         }
         if services.contains(GrpcServices::RL_CONTROL) && !rl_configured(ready) {
@@ -240,7 +240,9 @@ impl<'de> Deserialize<'de> for GrpcServiceSelection {
 
 /// True when any engine gives the KV transfer RPCs something to report.
 fn kv_transfer_configured(ready: &[&EngineCoreReadyResponse]) -> bool {
-    ready.iter().any(|ready| kv_event_source(ready).is_some())
+    ready
+        .iter()
+        .any(|ready| ready.kv_transfer_info.is_some() || kv_event_source(ready).is_some())
 }
 
 /// True when every engine can serve the RL RPCs, which drive them all at once.
@@ -271,7 +273,7 @@ pub(crate) fn draft_weight_updates_enabled(ready: &[&EngineCoreReadyResponse]) -
 #[cfg(test)]
 mod tests {
     use vllm_engine_core_client::mock_engine::default_ready_response;
-    use vllm_engine_core_client::protocol::handshake::KvEventsConfig;
+    use vllm_engine_core_client::protocol::handshake::{KvEventsConfig, KvTransferInfo};
 
     use super::*;
 
@@ -289,6 +291,14 @@ mod tests {
             hwm: 1,
             max_queue_size: 1,
             topic: String::new(),
+        }
+    }
+
+    fn kv_transfer_info() -> KvTransferInfo {
+        KvTransferInfo {
+            engine_id: "prefill-0".to_string(),
+            kv_connector: "NixlConnector".to_string(),
+            kv_role: "kv_producer".to_string(),
         }
     }
 
@@ -425,8 +435,16 @@ mod tests {
     #[test]
     fn configured_derives_services_from_ready_responses() {
         let base = GrpcServices::INFERENCE | GrpcServices::CONTROL;
-        let cases: [(&str, Vec<EngineCoreReadyResponse>, GrpcServices); 9] = [
+        let cases: [(&str, Vec<EngineCoreReadyResponse>, GrpcServices); 10] = [
             ("plain engine", vec![default_ready_response()], base),
+            (
+                "kv connector",
+                vec![EngineCoreReadyResponse {
+                    kv_transfer_info: Some(kv_transfer_info()),
+                    ..default_ready_response()
+                }],
+                base | GrpcServices::KV_TRANSFER,
+            ),
             (
                 "kv events enabled",
                 vec![EngineCoreReadyResponse {
@@ -468,10 +486,10 @@ mod tests {
                 base | GrpcServices::RL_CONTROL,
             ),
             (
-                "one engine of two publishes KV events",
+                "one engine of two has a KV connector",
                 vec![
                     EngineCoreReadyResponse {
-                        kv_events_config: Some(kv_events(true)),
+                        kv_transfer_info: Some(kv_transfer_info()),
                         ..default_ready_response()
                     },
                     default_ready_response(),
@@ -595,7 +613,7 @@ mod tests {
     #[test]
     fn explicit_selection_keeps_exactly_what_was_asked_for() {
         let configured = [EngineCoreReadyResponse {
-            kv_events_config: Some(kv_events(true)),
+            kv_transfer_info: Some(kv_transfer_info()),
             enable_sleep_mode: true,
             ..default_ready_response()
         }];

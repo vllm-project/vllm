@@ -83,6 +83,7 @@ async fn main() -> Result<()> {
         disable_log_stats: false,
         grpc_port: None,
         grpc_services: GrpcServiceSelection::All,
+        kv_control_advertise_host: None,
         shutdown_timeout: Duration::ZERO,
         keep_alive_timeout: Duration::from_secs(5),
         profiler: None,

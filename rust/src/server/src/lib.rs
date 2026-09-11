@@ -7,6 +7,7 @@ mod config;
 mod error;
 mod grpc;
 mod grpc_services;
+mod kv_peer;
 mod listener;
 mod lora;
 mod middleware;
@@ -52,6 +53,8 @@ pub use vllm_chat::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
+
+use crate::kv_peer::KvPeerHandshaker;
 use vllm_text::TextLlm;
 
 use crate::listener::{Listener, MaybeTlsListener};
@@ -138,8 +141,13 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         .grpc_services
         .resolve(&client.ready_responses())
         .context("invalid --grpc-services selection")?;
+    let kv_control_port =
+        config.grpc_port.filter(|_| grpc_services.contains(GrpcServices::KV_TRANSFER));
 
-    let llm = Llm::new(client).with_log_stats(!config.disable_log_stats);
+    let llm = Llm::new(client)
+        .with_log_stats(!config.disable_log_stats)
+        .with_kv_peer_handshake(Arc::new(KvPeerHandshaker::new()))
+        .with_kv_control_address(kv_control_port, config.kv_control_advertise_host.clone());
     let text = TextLlm::new(llm, text_backend).with_max_logprobs(config.max_logprobs);
 
     let chat = ChatLlm::new(text, chat_backend)

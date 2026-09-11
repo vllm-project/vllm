@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorHandshakeEntry,
     SupportsHMA,
     supports_hma,
 )
@@ -167,6 +168,21 @@ def test_register_finished_partial_tail_notifies_every_connector():
     second.register_finished_partial_tail.assert_called_once_with(
         request, block_ids, offloads
     )
+
+
+def test_get_xfer_handshake_entries_returns_first_non_empty():
+    connector = object.__new__(MultiConnector)
+    first = MagicMock(spec_set=KVConnectorBase_V1)
+    second = MagicMock(spec_set=KVConnectorBase_V1)
+    entry = KVConnectorHandshakeEntry(0, 0, b"payload", "hash")
+    first.get_xfer_handshake_entries.return_value = []
+    second.get_xfer_handshake_entries.return_value = [entry]
+    connector._connectors = [first, second]
+
+    assert connector.get_xfer_handshake_entries() == [entry]
+
+    second.get_xfer_handshake_entries.return_value = []
+    assert connector.get_xfer_handshake_entries() == []
 
 
 @pytest.fixture

@@ -18,6 +18,7 @@ use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result, bail_invalid_client_config};
 use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
+use crate::protocol::kv_transfer::KvConnectorHandshakeEntry;
 use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode};
@@ -840,6 +841,15 @@ impl EngineCoreClient {
     /// Return the committed weight version agreed on by every connected engine.
     pub async fn get_weight_version(&self) -> Result<String> {
         self.call_utility_consensus("get_weight_version", ()).await
+    }
+
+    /// Return each engine's KV connector handshake entries, in the same order
+    /// as [`ready_responses`](Self::ready_responses). Engines without a KV
+    /// connector return an empty list.
+    pub async fn get_kv_connector_handshake_entries(
+        &self,
+    ) -> Result<Vec<Vec<KvConnectorHandshakeEntry>>> {
+        self.call_utility("get_kv_connector_handshake_entries", ()).await
     }
 
     /// Return whether the engine is currently sleeping at any level.

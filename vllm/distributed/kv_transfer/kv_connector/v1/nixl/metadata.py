@@ -19,6 +19,10 @@ TransferHandle = int
 ReqId = str
 
 GET_META_MSG = b"get_meta_msg"
+# How a worker obtains a remote engine's handshake payload: "auto" uses payloads the
+# frontend pushed from the remote's gRPC control plane and falls back to the ZMQ side
+# channel, "grpc" never falls back, "zmq" never uses pushed payloads.
+HANDSHAKE_TRANSPORTS = ("auto", "grpc", "zmq")
 
 # Push-mode (WRITE-based) registration notification.
 # Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
@@ -47,6 +51,10 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   9: Add block_strides
 #  10: Add dense virtual transfer pages for compressed MLA caches
 #  11: Add per-region transfer geometry and memory types to NixlAgentMetadata
+#      (unbumped) kv_transfer_params gain remote_blocks_ttl (seconds) and
+#      remote_control_port (gRPC control plane for the handshake).
+#      remote_blocks_expiry_time is still emitted for one release and then
+#      removed; readers use remote_blocks_ttl only
 #
 NIXL_CONNECTOR_VERSION: int = 11
 
@@ -226,7 +234,10 @@ class RemoteMeta:
     port: int
     engine_id: str
     request_id: str
-    blocks_expiry_time: float | None = None
+    # Seconds the remote keeps the blocks, counted from when this worker first
+    # sees the request; the worker stamps blocks_deadline on its own clock.
+    blocks_ttl: float | None = None
+    blocks_deadline: float | None = None
 
 
 @dataclass
@@ -313,6 +324,6 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             request_id=kv_transfer_params["remote_request_id"],
             host=kv_transfer_params["remote_host"],
             port=kv_transfer_params["remote_port"],
-            blocks_expiry_time=kv_transfer_params.get("remote_blocks_expiry_time"),
+            blocks_ttl=kv_transfer_params.get("remote_blocks_ttl"),
         )
         self.reqs_to_recv[request_id] = req

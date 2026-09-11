@@ -108,6 +108,196 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
   --decoder-ports 8200
 ```
 
+## Router discovery over the gRPC control plane
+
+A router that pairs prefill and decode instances needs to know, for each instance, which
+engines it runs, whether two instances can exchange KV cache at all, and where a decoder
+should reach a prefiller. The Rust frontend serves this from its gRPC `KvTransfer` service, on
+the same listener that carries the other control RPCs and under the same TLS settings, so the
+information never has to be scraped from logs or read off the unauthenticated ZMQ side channel.
+
+### Enabling it
+
+The control plane exists only in the Rust frontend, and the gRPC port is a Rust frontend flag.
+Start each instance with `vllm-rs serve` (the binary ships inside the `vllm` package) and pass
+`--grpc-port`; every flag the Rust frontend does not own is forwarded to the Python engine:
+
+```bash
+# Prefiller
+VLLM_NIXL_SIDE_CHANNEL_HOST=10.0.0.1 VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
+vllm-rs serve Qwen/Qwen3-0.6B \
+  --host 0.0.0.0 --port 8100 --grpc-port 50051 \
+  --tensor-parallel-size 1 \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+
+# Decoder
+VLLM_NIXL_SIDE_CHANNEL_HOST=10.0.0.2 VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
+vllm-rs serve Qwen/Qwen3-0.6B \
+  --host 0.0.0.0 --port 8200 --grpc-port 50051 \
+  --tensor-parallel-size 1 \
+  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+```
+
+`vllm serve` with `VLLM_USE_RUST_FRONTEND=1` does not forward `--grpc-port` to the Rust
+frontend today, so the gRPC control plane is only reachable through `vllm-rs serve`.
+
+`--grpc-services` mounts all four services by default; `--grpc-services configured` derives
+the set from the engine configuration, which mounts `KvTransfer` whenever a KV connector is
+configured. Adding
+`--grpc-services control,kv-transfer` keeps the handshake plus the `Control` RPCs a router
+discovers instances with, and drops `Generate` and the RL RPCs from the port; on an instance no
+router queries, `--grpc-services kv-transfer` leaves only the handshake. The services left out
+answer `Unimplemented`, and `Control.GetServerInfo` reports the mounted set in its `services`
+field. The moved RPCs also stay callable at their old `vllm.Control` paths for one release,
+deprecated, and answer `Unimplemented` whenever `KvTransfer` or `RlControl` is unmounted.
+A frontend only advertises `remote_control_port` when `KvTransfer` is mounted, so
+narrowing the set off `kv-transfer` sends peers back to the ZMQ side channel rather than to an
+unmounted service.
+
+### How the handshake runs
+
+A frontend with a gRPC port adds `remote_control_port` to the `kv_transfer_params` a
+prefiller returns. When a request carrying such params reaches a decoder frontend, that
+frontend calls the prefiller's `GetKvHandshakeMetadata`, hands the payload to its own workers,
+and only then submits the request; the workers register the remote NIXL agent from the pushed
+payload and never open a side channel. Pairs where either side lacks a control plane keep
+using the ZMQ side channel. The `handshake_transport` connector option pins the behaviour:
+
+| Value | Worker behaviour | ZMQ listener |
+| --- | --- | --- |
+| `auto` (default) | pushed payload when present, else ZMQ side channel | started |
+| `grpc` | pushed payload only; a peer without `remote_control_port` fails the handshake | not started |
+| `zmq` | ZMQ side channel only | started |
+
+```bash
+--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_connector_extra_config":{"handshake_transport":"grpc"}}'
+```
+
+By default a peer dials `remote_host` (the side-channel host, usually the pod IP) on
+`remote_control_port`. Pass `--kv-control-advertise-host <name>` to advertise a different
+host as `remote_control_host`; under a service mesh this must be a Service name, since the
+sidecar only originates mTLS towards destinations in its registry, and the mesh policy must
+admit the decode instances' identity as callers of the control port.
+
+The ZMQ side channel and `VLLM_NIXL_SIDE_CHANNEL_*` are deprecated: `auto` is the default
+for this release, `grpc` becomes the default in the next, and the ZMQ path is removed after
+that. Deployments on the Python frontend stay on ZMQ until then.
+
+### What a router gets
+
+`GetKvTransferInfo` lists the engines behind one frontend, one entry per data-parallel rank:
+
+```bash
+grpcurl -plaintext -import-path rust/proto -proto control.proto \
+  10.0.0.1:50051 vllm.KvTransfer/GetKvTransferInfo
+```
+
+```json
+{
+  "engines": [
+    {
+      "engineId": "ba35fccd-4e4d-41b9-bac4-15afc77d11a3",
+      "connector": "NixlConnector",
+      "role": "kv_both",
+      "tensorParallelSize": 1,
+      "pipelineParallelSize": 1,
+      "kvBlockSize": 128,
+      "compatibilityHash": "3b135b15c7aad11057176dab7f5b2f9986ae6ff21e9203b926f483166fbbe80d"
+    }
+  ]
+}
+```
+
+- `engineId` is the value a prefiller returns as `remote_engine_id` in `kv_transfer_params`,
+  so a router can map a finished prefill back to the instance that owns the KV blocks.
+- `compatibilityHash` covers the vLLM version, model, dtype, KV cache layout and attention
+  backend. Only pair instances whose hashes match; a mismatch fails the handshake on the
+  decoder (see [NixlConnector Compatibility Matrix](nixl_connector_compatibility.md)).
+- `kvBlockSize`, `tensorParallelSize` and `pipelineParallelSize` are the values the decoder
+  validates against its own configuration when it registers the remote agent.
+
+`GetKvHandshakeMetadata` returns, for one `engine_id`, the msgpack-encoded
+`NixlHandshakePayload` of every `(pp_rank, tp_rank)` worker. It is byte-identical to what the
+ZMQ side channel serves and is meant for tooling and for a router that wants to verify a
+peer before sending traffic; the payload is opaque and should not be parsed by the router.
+
+```bash
+grpcurl -plaintext -import-path rust/proto -proto control.proto \
+  -d '{"engine_id":"ba35fccd-4e4d-41b9-bac4-15afc77d11a3"}' \
+  10.0.0.1:50051 vllm.KvTransfer/GetKvHandshakeMetadata
+```
+
+The schema is `rust/proto/control.proto`, also published to `buf.build/vllm-project/vllm`.
+
+### Securing the control plane
+
+The handshake payload contains the RDMA registration of the KV cache, which is what lets a
+peer read that memory. Treat the gRPC port like the side channel port: private network only,
+and authenticated when the network is shared.
+
+- **TLS terminated by vLLM.** The gRPC listener uses the frontend's TLS flags:
+  `--ssl-certfile` (optionally `--ssl-keyfile`), plus `--ssl-ca-certs` and
+  `--ssl-cert-reqs 2` to require a client certificate. This is the option when no service mesh
+  is in place.
+- **Service mesh.** With Istio in sidecar mode, require mTLS on the gRPC port alone, admit the
+  router's identity to it, and admit peer instances to the two handshake RPCs only, since the
+  same port can also carry `Generate`, `PauseGeneration`, `Sleep`, the weight-update RPCs and the
+  KV event stream endpoint. The HTTP port and the side channel keep their existing behaviour:
+
+    ```yaml
+    apiVersion: security.istio.io/v1
+    kind: PeerAuthentication
+    metadata:
+      name: kv-control-plane
+    spec:
+      selector:
+        matchLabels:
+          llm-d.ai/role: prefill
+      mtls:
+        mode: PERMISSIVE
+      portLevelMtls:
+        "50051":
+          mode: STRICT
+    ---
+    apiVersion: security.istio.io/v1
+    kind: AuthorizationPolicy
+    metadata:
+      name: kv-control-plane-callers
+    spec:
+      selector:
+        matchLabels:
+          llm-d.ai/role: prefill
+      action: DENY
+      rules:
+        - to:
+            - operation:
+                ports: ["50051"]
+          from:
+            - source:
+                notPrincipals:
+                  - cluster.local/ns/<namespace>/sa/<router-service-account>
+                  - cluster.local/ns/<namespace>/sa/<decode-service-account>
+        - to:
+            - operation:
+                ports: ["50051"]
+                notPaths:
+                  - /vllm.KvTransfer/GetKvHandshakeMetadata
+                  - /vllm.KvTransfer/GetKvTransferInfo
+          from:
+            - source:
+                principals:
+                  - cluster.local/ns/<namespace>/sa/<decode-service-account>
+    ```
+
+  Istio only originates mTLS towards destinations in its service registry, and only evaluates
+  path rules on a port it sees as HTTP, so expose the gRPC port of every role the policy selects
+  through a `Service` with a port named `grpc-control` and have clients dial that name. On a port
+  outside the registry, Istio drops the HTTP fields and the second rule degrades to denying the
+  peer identity the whole port.
+
+See [gRPC Interface](../usage/security.md#grpc-interface) for the rest of the control
+service's security considerations.
+
 ## Environment Variables
 
 - `VLLM_NIXL_SIDE_CHANNEL_PORT`: Port for NIXL handshake communication

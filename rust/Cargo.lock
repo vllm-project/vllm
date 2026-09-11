@@ -5961,6 +5961,7 @@ dependencies = [
  "libc",
  "llm-multimodal",
  "openssl",
+ "parking_lot",
  "prost",
  "prost-types",
  "protox",

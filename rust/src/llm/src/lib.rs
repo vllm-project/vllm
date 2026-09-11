@@ -1,17 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::sync::Arc;
+
 use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
 
 mod error;
 mod inflight;
+mod kv_peer;
 mod log_stats;
 mod output;
 mod request;
 mod request_metrics;
 
 pub use error::{Error, Result};
+pub use kv_peer::KvPeerHandshake;
+pub use output::KvControlAddress;
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
     GenerateOutputStreamExt, GeneratePromptInfo, TokenUsage,
@@ -36,6 +41,8 @@ pub struct Llm {
     randomize_request_id: bool,
     stats_logger: Option<StatsLogger>,
     inflight: InflightRequests,
+    kv_peer_handshake: Option<Arc<dyn KvPeerHandshake>>,
+    kv_control_address: KvControlAddress,
 }
 
 impl Llm {
@@ -47,6 +54,8 @@ impl Llm {
             randomize_request_id: true,
             stats_logger: None,
             inflight: InflightRequests::new(),
+            kv_peer_handshake: None,
+            kv_control_address: KvControlAddress::default(),
         }
     }
 
@@ -68,6 +77,22 @@ impl Llm {
     /// engine-core.
     pub fn with_request_id_randomization(mut self, enabled: bool) -> Self {
         self.randomize_request_id = enabled;
+        self
+    }
+
+    /// Run `handshake` for every request carrying `kv_transfer_params` before
+    /// it is submitted to engine-core.
+    pub fn with_kv_peer_handshake(mut self, handshake: Arc<dyn KvPeerHandshake>) -> Self {
+        self.kv_peer_handshake = Some(handshake);
+        self
+    }
+
+    /// Advertise this frontend's gRPC control plane in the `kv_transfer_params`
+    /// returned to clients (`remote_control_port`, plus `remote_control_host`
+    /// when `host` is given), so a peer frontend can fetch this instance's
+    /// handshake metadata over gRPC.
+    pub fn with_kv_control_address(mut self, port: Option<u16>, host: Option<String>) -> Self {
+        self.kv_control_address = KvControlAddress { port, host };
         self
     }
 
@@ -97,6 +122,12 @@ impl Llm {
             (prepared.engine_request.sampling_params.as_ref()).map(|p| p.max_tokens);
         let prompt_len = prepared.prompt_token_ids().len() as u32;
 
+        if let Some(handshake) = &self.kv_peer_handshake
+            && let Some(params) = kv_peer::kv_transfer_params(&prepared.engine_request)
+        {
+            handshake.ensure(&self.client, params).await?;
+        }
+
         let stream = self.client.call(prepared.engine_request).await?;
 
         let request_metrics = RequestMetricsTracker::new(
@@ -114,6 +145,7 @@ impl Llm {
             stream,
             request_metrics,
             guard,
+            self.kv_control_address.clone(),
         ))
     }
 

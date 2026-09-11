@@ -33,16 +33,20 @@ use vllm_engine_core_client::mock_engine::{
     default_ready_response,
 };
 use vllm_engine_core_client::protocol::decode_value;
-use vllm_engine_core_client::protocol::handshake::{EngineCoreReadyResponse, KvEventsConfig};
+use vllm_engine_core_client::protocol::handshake::{
+    EngineCoreReadyResponse, KvEventsConfig, KvTransferInfo,
+};
+use vllm_engine_core_client::protocol::kv_transfer::KvConnectorHandshakeEntry;
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
     UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task_with_ready};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
-use vllm_llm::Llm;
+use vllm_llm::{GenerateRequest, Llm};
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend};
 use vllm_tokenizer::test_utils::TestTokenizer;
@@ -50,7 +54,7 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::convert::json_to_proto_struct;
-use super::kv_transfer::kv_event_source;
+use super::kv_transfer::{kv_event_source, kv_transfer_engine};
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
 use super::pb::kv_transfer_client::KvTransferClient;
@@ -60,6 +64,7 @@ use super::{
     KvTransferGrpcService, KvTransferServiceImpl, RlControlGrpcService, RlControlServiceImpl, pb,
 };
 use crate::grpc_services::{GrpcServiceSelection, GrpcServices};
+use crate::kv_peer::KvPeerHandshaker;
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::state::AppState;
 use crate::tls;
@@ -188,6 +193,15 @@ async fn reply_utility_bool(
     expected_method: &str,
     result: bool,
 ) {
+    reply_utility_value(dealer, push, expected_method, Value::Boolean(result)).await;
+}
+
+async fn reply_utility_value(
+    dealer: &mut DealerSocket,
+    push: &mut PushSocket,
+    expected_method: &str,
+    result: Value,
+) {
     let frames = recv_engine_message(dealer).await;
     assert_eq!(frames[0].as_ref(), &[0x03]);
     let payload = decode_value(&frames[1]).expect("decode utility payload");
@@ -200,15 +214,38 @@ async fn reply_utility_bool(
             output: UtilityOutput {
                 call_id: call_id.into(),
                 failure_message: None,
-                result: Some(UtilityResultEnvelope::without_type_info(Value::Boolean(
-                    result,
-                ))),
+                result: Some(UtilityResultEnvelope::without_type_info(result)),
             },
             ..Default::default()
         }
         .into(),
     )
     .await;
+}
+
+fn test_kv_transfer_info() -> KvTransferInfo {
+    KvTransferInfo {
+        engine_id: "prefill-0_dp0".to_string(),
+        kv_connector: "NixlConnector".to_string(),
+        kv_role: "kv_producer".to_string(),
+    }
+}
+
+fn test_handshake_entries() -> Vec<KvConnectorHandshakeEntry> {
+    vec![
+        KvConnectorHandshakeEntry {
+            pp_rank: 0,
+            tp_rank: 0,
+            payload: bytes::Bytes::from_static(b"agent-0"),
+            compatibility_hash: Some("abc123".to_string()),
+        },
+        KvConnectorHandshakeEntry {
+            pp_rank: 0,
+            tp_rank: 1,
+            payload: bytes::Bytes::from_static(b"agent-1"),
+            compatibility_hash: Some("abc123".to_string()),
+        },
+    ]
 }
 
 async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<bytes::Bytes> {
@@ -489,6 +526,16 @@ async fn start_grpc_test_server(
     engine_health: tokio::sync::watch::Receiver<bool>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> (Channel, tokio::task::JoinHandle<()>) {
+    let (channel, _addr, server_task) =
+        start_grpc_test_server_with_addr(services, engine_health, shutdown).await;
+    (channel, server_task)
+}
+
+async fn start_grpc_test_server_with_addr(
+    services: TestServices,
+    engine_health: tokio::sync::watch::Receiver<bool>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> (Channel, std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     let (health_reporter, health_service) = health_reporter();
     let mounted = services.mounted;
     super::mark_serving(&health_reporter, mounted).await;
@@ -520,7 +567,7 @@ async fn start_grpc_test_server(
         .await
         .expect("connect grpc channel");
 
-    (channel, server_task)
+    (channel, addr, server_task)
 }
 
 /// Spin up a TLS gRPC server (server cert from `certs`, `cert_reqs` mTLS mode).
@@ -2144,6 +2191,157 @@ async fn control_aggregates_multi_engine_capacity() {
 }
 
 #[test]
+fn kv_transfer_engine_requires_kv_transfer_info() {
+    let mut ready = default_ready_response();
+    assert!(kv_transfer_engine(&ready, &test_handshake_entries()).is_none());
+
+    ready.kv_transfer_info = Some(test_kv_transfer_info());
+    ready.data_parallel_rank = 1;
+    ready.tensor_parallel_size = 2;
+    ready.pipeline_parallel_size = 1;
+    ready.block_size = 16;
+    let engine = kv_transfer_engine(&ready, &test_handshake_entries()).expect("kv transfer engine");
+    expect_test::expect![[r#"
+        KvTransferEngine {
+            engine_id: "prefill-0_dp0",
+            connector: "NixlConnector",
+            role: "kv_producer",
+            data_parallel_rank: 1,
+            tensor_parallel_size: 2,
+            pipeline_parallel_size: 1,
+            kv_block_size: 16,
+            compatibility_hash: "abc123",
+        }
+    "#]]
+    .assert_debug_eq(&engine);
+
+    let without_hash = kv_transfer_engine(&ready, &[]).expect("kv transfer engine");
+    assert!(without_hash.compatibility_hash.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn kv_transfer_rpcs_serve_cached_handshake_entries() {
+    let mut ready = default_ready_response();
+    ready.tensor_parallel_size = 2;
+    ready.kv_transfer_info = Some(test_kv_transfer_info());
+    let entries = test_handshake_entries();
+    // Named map encoding, matching how the engine's msgpack encoder emits dataclasses.
+    let entries_value = decode_value(&rmp_serde::to_vec_named(&entries).expect("encode entries"))
+        .expect("decode handshake entries");
+    let (services, engine_health, engine_task) = setup_grpc_service_with_engine_script(
+        b"engine-grpc-kv-transfer".to_vec(),
+        ready,
+        Arc::new(FakeTextBackend),
+        move |dealer, push| {
+            boxed_test_future(async move {
+                // Answer exactly once: later RPCs must be served from cache.
+                reply_utility_value(
+                    dealer,
+                    push,
+                    "get_kv_connector_handshake_entries",
+                    entries_value,
+                )
+                .await;
+            })
+        },
+    )
+    .await;
+    let (channel, server_task) = start_grpc_test_server(
+        services,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut kv_client = KvTransferClient::new(channel);
+
+    let info = tokio::time::timeout(
+        Duration::from_secs(5),
+        kv_client.get_kv_transfer_info(pb::GetKvTransferInfoRequest {}),
+    )
+    .await
+    .expect("get kv transfer info timed out")
+    .expect("get kv transfer info")
+    .into_inner();
+    expect_test::expect![[r#"
+        GetKvTransferInfoResponse {
+            engines: [
+                KvTransferEngine {
+                    engine_id: "prefill-0_dp0",
+                    connector: "NixlConnector",
+                    role: "kv_producer",
+                    data_parallel_rank: 0,
+                    tensor_parallel_size: 2,
+                    pipeline_parallel_size: 1,
+                    kv_block_size: 16,
+                    compatibility_hash: "abc123",
+                },
+            ],
+        }
+    "#]]
+    .assert_debug_eq(&info);
+
+    let metadata = tokio::time::timeout(
+        Duration::from_secs(5),
+        kv_client.get_kv_handshake_metadata(pb::GetKvHandshakeMetadataRequest {
+            engine_id: "prefill-0_dp0".to_string(),
+        }),
+    )
+    .await
+    .expect("get kv handshake metadata timed out")
+    .expect("get kv handshake metadata")
+    .into_inner();
+    expect_test::expect![[r#"
+        GetKvHandshakeMetadataResponse {
+            ranks: [
+                KvHandshakeRank {
+                    pp_rank: 0,
+                    tp_rank: 0,
+                    compatibility_hash: "abc123",
+                    encoding: "msgpack",
+                    payload: [
+                        97,
+                        103,
+                        101,
+                        110,
+                        116,
+                        45,
+                        48,
+                    ],
+                },
+                KvHandshakeRank {
+                    pp_rank: 0,
+                    tp_rank: 1,
+                    compatibility_hash: "abc123",
+                    encoding: "msgpack",
+                    payload: [
+                        97,
+                        103,
+                        101,
+                        110,
+                        116,
+                        45,
+                        49,
+                    ],
+                },
+            ],
+        }
+    "#]]
+    .assert_debug_eq(&metadata);
+
+    let unknown = kv_client
+        .get_kv_handshake_metadata(pb::GetKvHandshakeMetadataRequest {
+            engine_id: "nope".to_string(),
+        })
+        .await
+        .expect_err("unknown engine id is rejected");
+    assert_eq!(unknown.code(), tonic::Code::NotFound);
+
+    server_task.abort();
+    drop(engine_task);
+}
+
+#[test]
 fn kv_event_source_filters_and_exposes_zmq_publisher() {
     let mut ready = default_ready_response();
     ready.data_parallel_rank = 2;
@@ -2341,4 +2539,155 @@ async fn grpc_health_watch_closes_on_graceful_shutdown() {
         .await
         .expect("timed out waiting for gRPC server shutdown")
         .expect("gRPC server task failed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn kv_peer_handshake_pushes_prefill_metadata_before_generate() {
+    // Prefill side: a frontend whose control plane serves handshake entries.
+    let mut prefill_ready = default_ready_response();
+    prefill_ready.kv_transfer_info = Some(test_kv_transfer_info());
+    let entries = test_handshake_entries();
+    let entries_value =
+        decode_value(&rmp_serde::to_vec_named(&entries).expect("encode entries")).expect("decode");
+    let (prefill_services, prefill_health, _prefill_engine) =
+        setup_grpc_service_with_engine_script(
+            b"engine-kv-peer-prefill".to_vec(),
+            prefill_ready,
+            Arc::new(FakeTextBackend),
+            move |dealer, push| {
+                boxed_test_future(async move {
+                    reply_utility_value(
+                        dealer,
+                        push,
+                        "get_kv_connector_handshake_entries",
+                        entries_value,
+                    )
+                    .await;
+                })
+            },
+        )
+        .await;
+    let (_prefill_channel, prefill_addr, prefill_server) = start_grpc_test_server_with_addr(
+        prefill_services,
+        prefill_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+
+    // Decode side: the engine must see the pushed handshake before any request,
+    // and only once across two requests naming the same peer.
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let expected_entries = entries.clone();
+    let decode_engine = MockEngineTask::new(spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        b"engine-kv-peer-decode".to_vec(),
+        default_ready_response(),
+        move |dealer, push| {
+            boxed_test_future(async move {
+                let frames = recv_engine_message(dealer).await;
+                assert_eq!(
+                    frames[0].as_ref(),
+                    &[0x03],
+                    "handshake push must precede the request"
+                );
+                let payload = decode_value(&frames[1]).expect("decode utility payload");
+                let fields = payload.as_array().expect("utility payload array");
+                let call_id = fields[1].as_u64().expect("utility call id");
+                assert_eq!(fields[2].as_str(), Some("add_remote_kv_handshake"));
+                let args = fields[3].as_array().expect("utility args");
+                assert_eq!(args[0].as_str(), Some("prefill-0_dp0"));
+                // The engine converts these with msgspec into a dataclass, which
+                // needs named maps, not the positional arrays rmp_serde emits
+                // for structs by default.
+                assert!(
+                    args[1].as_array().expect("entries").iter().all(Value::is_map),
+                    "entries must be msgpack maps: {:?}",
+                    args[1]
+                );
+                let pushed: Vec<KvConnectorHandshakeEntry> =
+                    rmpv::ext::from_value(args[1].clone()).expect("pushed entries");
+                assert_eq!(pushed, expected_entries);
+                send_outputs(
+                    push,
+                    UtilityCallOutput {
+                        output: UtilityOutput {
+                            call_id: call_id.into(),
+                            failure_message: None,
+                            result: Some(UtilityResultEnvelope::without_type_info(Value::Nil)),
+                        },
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+                for _ in 0..2 {
+                    let add = recv_engine_message(dealer).await;
+                    assert_eq!(add[0].as_ref(), &[0x00]);
+                    let request: EngineCoreRequest =
+                        rmp_serde::from_slice(&add[1]).expect("decode generation request");
+                    send_outputs(
+                        push,
+                        engine_outputs_for_request(
+                            &request.request_id,
+                            vec![(vec![7], Some(EngineCoreFinishReason::Stop))],
+                        ),
+                    )
+                    .await;
+                }
+            })
+        },
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect decode client");
+    let llm = Llm::new(client).with_kv_peer_handshake(Arc::new(KvPeerHandshaker::new()));
+
+    let request = |id: &str| {
+        let mut sampling_params = EngineCoreSamplingParams::for_test();
+        sampling_params.max_tokens = 1;
+        sampling_params.extra_args = Some(std::collections::HashMap::from([(
+            "kv_transfer_params".to_string(),
+            serde_json::json!({
+                "do_remote_prefill": true,
+                "remote_engine_id": "prefill-0_dp0",
+                "remote_host": prefill_addr.ip().to_string(),
+                "remote_port": 5600,
+                "remote_control_port": prefill_addr.port(),
+            }),
+        )]));
+        GenerateRequest {
+            request_id: id.to_string(),
+            prompt_token_ids: vec![1, 2, 3],
+            sampling_params,
+            mm_features: None,
+            arrival_time: None,
+            cache_salt: None,
+            trace_headers: None,
+            priority: 0,
+            data_parallel_rank: None,
+            session_id: None,
+            reasoning_parser_kwargs: None,
+            lora_request: None,
+        }
+    };
+    for id in ["req-1", "req-2"] {
+        let mut stream = llm.generate(request(id)).await.expect("generate");
+        let mut finished = false;
+        while let Some(output) = stream.next().await {
+            finished |= output.expect("generate output").finished();
+        }
+        assert!(finished, "{id} did not finish");
+    }
+
+    prefill_server.abort();
+    drop(decode_engine);
 }
