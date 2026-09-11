@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import Any
@@ -401,21 +401,17 @@ def allocate_kv_cache(
     device: torch.device,
     layout: KVCacheLayout,
     kernel_block_sizes: list[int] | None = None,
-    host_allocator: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
 
     Every KVCacheTensor places its layers in the same backing allocation: layer ``l`` of
     block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
-    groups overlay each other, so tensors may address the same bytes. Host-resident
-    tensors share a second backing, taken from ``host_allocator`` when given.
-    Layers whose spec has no per-layer view map to their backing tensor instead.
+    groups overlay each other, so tensors may address the same bytes.
     """
-    tensors = kv_cache_config.kv_cache_tensors
-    if not tensors:
+    if not kv_cache_config.kv_cache_tensors:
         return {}
 
-    sizes = {tensor.size for tensor in tensors if not tensor.host_resident}
+    sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
     assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
     raw_size = sizes.pop()
     # wvSplitKrc's process-lifetime static workspaces (csrc/rocm/skinny_gemms.cu)
@@ -432,21 +428,10 @@ def allocate_kv_cache(
         buf_size = ((raw_size + page_size - 1) // page_size) * page_size
     else:
         buf_size = raw_size
-    backings = {False: torch.zeros(buf_size, dtype=torch.int8, device=device)}
-
-    host_sizes = {tensor.size for tensor in tensors if tensor.host_resident}
-    assert len(host_sizes) <= 1, "Host KV cache tensors must share one backing."
-    if host_sizes:
-        host_size = host_sizes.pop()
-        backings[True] = (
-            host_allocator(host_size)
-            if host_allocator is not None
-            else torch.zeros(host_size, dtype=torch.int8, device="cpu")
-        )
+    buf = torch.zeros(buf_size, dtype=torch.int8, device=device)
 
     kv_caches: dict[str, torch.Tensor] = {}
-    for tensor in tensors:
-        buf = backings[tensor.host_resident]
+    for tensor in kv_cache_config.kv_cache_tensors:
         layer_name = tensor.layers[0]
         group_id, group = next(
             (group_id, group)
@@ -456,6 +441,7 @@ def allocate_kv_cache(
         spec = group.kv_cache_spec
         if isinstance(spec, UniformTypeKVCacheSpecs):
             spec = spec.kv_cache_specs[layer_name]
+
         if not spec.has_layer_views:
             kv_caches.update((name, buf) for name in tensor.layers)
             continue

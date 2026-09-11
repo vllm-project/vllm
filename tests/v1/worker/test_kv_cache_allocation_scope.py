@@ -46,13 +46,13 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch, hisparse) -> No
 
     hisparse_bindings = []
     if hisparse:
-        host_allocator = SimpleNamespace(registered_pools={})
+        host_pool = SimpleNamespace()
 
         def bind_hisparse(**kwargs):
             hisparse_bindings.append(kwargs)
             assert scope.active
             assert kwargs["kv_caches"] is kv_caches
-            assert kwargs["pinned_host_pools"] is host_allocator.registered_pools
+            assert kwargs["host_pool"] is host_pool
             return [
                 SimpleNamespace(
                     view=SimpleNamespace(cache=torch.empty(1, 1, 1), block_size=1),
@@ -60,10 +60,8 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch, hisparse) -> No
                 )
             ]
 
-        monkeypatch.setattr(
-            hisparse_binding, "HiSparseHostAllocator", lambda config: host_allocator
-        )
-        monkeypatch.setattr(hisparse_binding, "allocate_kv_cache", allocate)
+        monkeypatch.setattr(hisparse_binding, "HiSparseHostPool", lambda: host_pool)
+        monkeypatch.setattr(hisparse_binding, "allocate_hisparse_kv_caches", allocate)
         monkeypatch.setattr(hisparse_binding, "bind_hisparse_kv_caches", bind_hisparse)
 
     config = SimpleNamespace(

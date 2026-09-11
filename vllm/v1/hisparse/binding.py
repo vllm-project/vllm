@@ -3,6 +3,7 @@
 """Worker-side wiring of HiSparse caches to attention layers."""
 
 from collections.abc import Mapping
+from copy import copy
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -22,8 +23,11 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheLayout,
     KVCacheSpec,
     MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
+    create_kv_cache_views,
 )
 from vllm.v1.worker.utils import allocate_kv_cache, select_common_block_size
 
@@ -64,6 +68,49 @@ def resolve_hisparse_block_size(
     )
 
 
+def allocate_hisparse_kv_caches(
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    layout: KVCacheLayout,
+    kernel_block_sizes: list[int],
+    host_pool: HiSparseHostPool,
+) -> dict[str, torch.Tensor]:
+    """Allocate the host pool separately from the shared device backing."""
+    device_config = copy(kv_cache_config)
+    device_config.kv_cache_tensors = [
+        tensor
+        for tensor in kv_cache_config.kv_cache_tensors
+        if not tensor.host_resident
+    ]
+    kv_caches = allocate_kv_cache(device_config, device, layout, kernel_block_sizes)
+    host_tensors = [
+        tensor for tensor in kv_cache_config.kv_cache_tensors if tensor.host_resident
+    ]
+    (host_size,) = {tensor.size for tensor in host_tensors}
+    backing = host_pool.allocate(host_size)
+    (host_group_id,) = kv_cache_config.host_group_ids
+    host_spec = kv_cache_config.kv_cache_groups[host_group_id].kv_cache_spec
+    for tensor in host_tensors:
+        spec = (
+            host_spec.kv_cache_specs[tensor.layers[0]]
+            if isinstance(host_spec, UniformTypeKVCacheSpecs)
+            else host_spec
+        )
+        kernel_block_size = kernel_block_sizes[host_group_id]
+        if isinstance(spec, MLAAttentionSpec) and spec.storage_block_size is not None:
+            kernel_block_size = spec.storage_block_size
+        views = create_kv_cache_views(
+            backing,
+            spec,
+            kv_cache_config.num_blocks_of(tensor),
+            layout,
+            tensor,
+            kernel_block_size=kernel_block_size,
+        )
+        kv_caches.update(zip(tensor.layers, views))
+    return kv_caches
+
+
 def init_hisparse_kv_cache(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
@@ -74,12 +121,12 @@ def init_hisparse_kv_cache(
 ) -> dict[str, torch.Tensor]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
     host_pool = HiSparseHostPool()
-    kv_caches = allocate_kv_cache(
+    kv_caches = allocate_hisparse_kv_caches(
         kv_cache_config,
         device,
         vllm_config.cache_config.get_resolved_kv_cache_layout(),
         kernel_block_sizes,
-        host_allocator=host_pool.allocate,
+        host_pool,
     )
     cache_handles = bind_hisparse_kv_caches(
         forward_context=forward_context,

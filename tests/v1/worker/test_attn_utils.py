@@ -15,6 +15,7 @@ import torch
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiSparseResidentSpec,
@@ -448,7 +449,7 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(
             )
 
 
-def test_allocate_kv_cache_host_pool_and_view_less_specs():
+def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
     """Host tensors get their own backing; view-less specs keep the raw one."""
     spec = FullAttentionSpec(
         block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float32
@@ -492,9 +493,14 @@ def test_allocate_kv_cache_host_pool_and_view_less_specs():
         host_buffers.append(torch.zeros(size, dtype=torch.int8))
         return host_buffers[-1]
 
-    caches = allocate_kv_cache(
-        config, torch.device("cpu"), KVCacheLayout.LBHNC, host_allocator=host_allocator
+    caches = allocate_hisparse_kv_caches(
+        config,
+        torch.device("cpu"),
+        KVCacheLayout.LBHNC,
+        [2, 2, 2],
+        SimpleNamespace(allocate=host_allocator),
     )
+    assert len(config.kv_cache_tensors) == 3
 
     assert [buf.numel() for buf in host_buffers] == [3 * page]
     assert caches["source"].shape[0] == 3
