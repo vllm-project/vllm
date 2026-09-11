@@ -237,7 +237,6 @@ def _philox_context_state(
     key_1,
     CONTEXT_WIDTH: tl.constexpr,
 ):
-    """Absorb one context row into the Philox state. Scalar, once per program."""
     state_0 = tl.full((), _CONTEXT_DOMAIN, tl.uint32)
     state_1 = tl.full((), CONTEXT_WIDTH, tl.uint32)
     state_2 = tl.full((), 0, tl.uint32)
@@ -269,7 +268,6 @@ def _philox_context_state(
 
 @triton.jit
 def _philox_candidate_words(groups, state_0, state_1, state_2, state_3, key_0, key_1):
-    """One Philox call per group of 4 tokens. Token 4g+j reads output j."""
     candidate_words = groups.to(tl.uint32)
     vector_zero = candidate_words * 0
     return _philox4x32_10(
@@ -306,13 +304,7 @@ def philox_gumbel_block_argmax(
     CONTEXT_WIDTH: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Keyed Gumbel-max argmax over one vocab block of in-register logits.
-
-    Shares the PRF with `_philox_gumbel_kernel`, so for a given
-    (context, token) the uniform is bit-identical. The returned value is fp32
-    regardless of the caller's Gumbel precision: the watermark draw must stay a
-    function of (context, token) alone so detection keeps working.
-    """
+    """Apply the detector-compatible PRF to one vocabulary block."""
     tl.static_assert(BLOCK_SIZE % 4 == 0)
     state_0, state_1, state_2, state_3 = _philox_context_state(
         contexts_row_ptr, key_0, key_1, CONTEXT_WIDTH

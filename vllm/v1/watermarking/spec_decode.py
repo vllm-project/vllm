@@ -93,12 +93,7 @@ def _philox_key(watermarker: Watermarker) -> int:
 
 
 def _resolve_watermark_key(watermarker: Watermarker) -> int:
-    """Philox key of the watermarker driving the in-kernel recovery draw.
-
-    Raises:
-        ValueError: if a role-splitting watermarker is passed instead of its
-            target role, which would key the recovery draw with the draft key.
-    """
+    """Return the Philox recovery key."""
     if isinstance(watermarker, SupportsSpeculativeDecoding):
         raise ValueError(
             f"{type(watermarker).__name__} keys the target role separately from "
@@ -111,12 +106,7 @@ def _resolve_watermark_key(watermarker: Watermarker) -> int:
 def speculative_target_watermark_key(
     watermark_config: WatermarkConfig | None,
 ) -> int | None:
-    """Philox key the resample kernel is launched with for ``watermark_config``.
-
-    Mirrors how the model runner builds the sampler's watermarker, so callers
-    that never construct a sampler (the JIT warmup) can reproduce the exact
-    kernel argument the engine will use.
-    """
+    """Resolve the resample kernel's Philox key from configuration."""
     if watermark_config is None:
         return None
 
@@ -142,13 +132,7 @@ def watermarked_rejection_sample(
     watermarker: Watermarker,
     use_fp64: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Rejection sampling whose recovered token carries the target's key.
-
-    The token the target supplies itself (the residual draw after the first
-    rejection, or the bonus token) is drawn inside the resample kernel with
-    keyed Philox noise over the row's watermark context. Rows that are opted
-    out, greedy, or padded keep the stock seeded draw.
-    """
+    """Use the target key for rejection recovery and bonus tokens."""
     assert contexts.shape == (target_logits.shape[0], watermarker.context_width)
     return rejection_sample(
         target_logits,

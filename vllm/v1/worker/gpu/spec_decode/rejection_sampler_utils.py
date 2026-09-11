@@ -706,7 +706,6 @@ def _seeded_resample_argmax(
     vocab_size,
     USE_FP64: tl.constexpr,
 ):
-    """Stock (unwatermarked) Gumbel-max draw over one residual vocab block."""
     return gumbel_block_argmax(
         residual_logits,
         block,
@@ -807,10 +806,7 @@ def _resample_kernel(
         other=float("-inf"),
     ).to(tl.float32)
 
-    # Compute the residual logits to resample the rejected token from.
     if is_bonus or not is_valid_rejected_draft:
-        # Bonus token (no rejections) or -1 placeholder token. In either case,
-        # directly use the target logits.
         residual_logits = target_logits
     elif HAS_DRAFT_LOGITS:
         # draft_logits is stored pre-temperature, so apply scale first.
@@ -840,12 +836,7 @@ def _resample_kernel(
                 )
             target_log_probs += log_p_tau
         draft_log_probs = draft_logits - draft_lse
-        # Compute the residual:
-        #   r(x) = max(p(x) - q(x), 0)
-        # Gumbel sampling needs logits, so we compute it in log space:
-        #   log(r(x)) = log(max(exp(log_p(x)) - exp(log_q(x)), 0))
-        # The more numerically stable form is:
-        #   log(max(exp(a) - exp(b), 0)) = a + log(max(1 - exp(b - a), 0))
+        # Compute log(max(p - q, 0)) without subtracting probabilities.
         ratio = tl.exp(draft_log_probs - target_log_probs)
         residual_logits = tl.where(
             ratio < 1.0,
@@ -853,26 +844,15 @@ def _resample_kernel(
             float("-inf"),
         ).to(tl.float32)
     else:
-        # One-hot draft. The residual is just the target distribution with
-        # the rejected draft token probability zeroed out.
-        # NOTE: During block verification, the residual becomes:
-        #   0                   if x == rejected_draft_token
-        #   p_tau * M_b(x) / Z  otherwise
-        # Therefore p_tau is a constant that cancels under normalization,
-        # and does not need to be applied.
+        # The block-verification factor is constant and cancels on normalization.
         residual_logits = tl.where(
             block != rejected_draft_token,
             target_logits,
             float("-inf"),
         ).to(tl.float32)
 
-    # Resample the rejected/bonus token. Watermarked requests draw the token
-    # from the same residual with keyed Philox noise instead of the request's
-    # seeded noise; everything else keeps the stock draw bit-for-bit.
     if WATERMARK:
-        # A padded row (req_state_idx == -1) has no watermark state; fall back
-        # to the stock draw. Greedy rows are never watermarked, matching the
-        # unsped path.
+        # Padded and greedy rows retain the stock draw.
         is_watermarked = (
             tl.load(
                 watermarking_ptr + req_state_idx,
@@ -892,8 +872,7 @@ def _resample_kernel(
                 CONTEXT_WIDTH,
                 BLOCK_SIZE,
             )
-            # USE_FP64 must not change the keyed draw (the detector's uniform
-            # is fp32); upcast only so both branches yield one dtype.
+            # Detector compatibility fixes the keyed draw at fp32.
             value = watermark_value.to(tl.float64) if USE_FP64 else watermark_value
         else:
             value, idx = _seeded_resample_argmax(
@@ -1027,9 +1006,7 @@ def rejection_sample(
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
     use_block_verification: bool = False,
-    # [num_logits, context_width]
     contexts: torch.Tensor | None = None,
-    # [max_num_reqs]
     watermarking: torch.Tensor | None = None,
     watermark_key: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1040,8 +1017,6 @@ def rejection_sample(
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
 
-    # Watermarking (optional): the resample kernel draws the recovered token
-    # with keyed Philox noise over the verification row's context.
     watermark = contexts is not None
     assert watermark == (watermarking is not None) == (watermark_key is not None), (
         "contexts, watermarking and watermark_key must be set together."

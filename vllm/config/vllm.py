@@ -1168,6 +1168,23 @@ class VllmConfig:
                     "allow_target_only_watermarking=true to leave draft tokens "
                     "unwatermarked."
                 )
+            if (
+                watermark_config.allow_target_only_watermarking
+                and not watermark_config.supports_speculative_decoding
+            ):
+                logger.warning_once(
+                    "Target-only watermarking leaves accepted draft tokens "
+                    "unwatermarked, weakening detectability in proportion to the "
+                    "share of output tokens supplied by accepted drafts.",
+                    scope="global",
+                )
+            if watermark_config.deduplicate_contexts != "none":
+                logger.warning_once(
+                    "Context deduplication is not supported with speculative "
+                    "decoding and will not be applied to accepted drafts, "
+                    "rejection-recovery tokens, or bonus tokens.",
+                    scope="global",
+                )
             if watermark_config.algorithm == "dual_key_gumbel" and (
                 watermark_config.alpha != get_field(WatermarkConfig, "alpha").default
             ):

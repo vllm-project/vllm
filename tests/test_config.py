@@ -2752,7 +2752,7 @@ def _watermarked_vllm_config() -> VllmConfig:
     return config
 
 
-def test_target_only_gumbel_allows_speculative_decoding():
+def test_target_only_gumbel_allows_speculative_decoding(caplog_vllm, disable_log_dedup):
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(
         key=42, allow_target_only_watermarking=True
@@ -2764,7 +2764,31 @@ def test_target_only_gumbel_allows_speculative_decoding():
         parallel_drafting=False,
     )
 
-    config._check_watermarking_unsupported()
+    with caplog_vllm.at_level(logging.WARNING):
+        config._check_watermarking_unsupported()
+
+    assert "Target-only watermarking leaves accepted draft tokens" in caplog_vllm.text
+    assert "Context deduplication is not supported" in caplog_vllm.text
+
+
+def test_speculative_watermarking_without_context_dedup_does_not_warn(
+    caplog_vllm, disable_log_dedup
+):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        algorithm="dual_key_gumbel", key=42, deduplicate_contexts="none"
+    )
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    with caplog_vllm.at_level(logging.WARNING):
+        config._check_watermarking_unsupported()
+
+    assert "Context deduplication is not supported" not in caplog_vllm.text
 
 
 def test_gumbel_rejects_speculative_decoding_without_target_only():

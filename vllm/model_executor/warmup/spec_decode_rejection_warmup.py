@@ -1,13 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Warm up spec-decode rejection-sampler Triton kernels.
-
-The rejection sampler kernels (``_compute_local_logits_stats_kernel``,
-``_rejection_kernel``, ``_resample_kernel``) are JIT-compiled by Triton on
-first use. Without warmup, the first spec-decode request pays a multi-second
-compilation cost. This pre-compiles them with dummy data matching the
-server's vocab size, speculative config and watermark config.
-"""
+"""Warm up speculative-decoding rejection kernels."""
 
 from __future__ import annotations
 
@@ -39,15 +32,10 @@ def spec_decode_rejection_warmup(worker: Worker) -> None:
     if num_spec <= 0 or vocab_size <= 0:
         return
 
-    # Mirror the constexpr-relevant flags the runtime uses.
     rejection_method = getattr(spec_config, "rejection_sample_method", None)
     use_block_verification = rejection_method == "block"
     use_synthetic = rejection_method == "synthetic"
-    # ``HAS_DRAFT_LOGITS`` is a constexpr of all three kernels. ``Speculator``
-    # allocates ``draft_logits`` only for ``draft_sample_method`` ==
-    # "probabilistic"; with the default "greedy" the runtime passes
-    # ``draft_logits=None``, so warming a real tensor compiles a specialization
-    # no such engine launches.
+    # HAS_DRAFT_LOGITS is a constexpr, so the warmup must match the runtime.
     use_draft_logits = (
         getattr(spec_config, "draft_sample_method", "greedy") == "probabilistic"
     )
@@ -57,11 +45,6 @@ def spec_decode_rejection_warmup(worker: Worker) -> None:
     tokens_per_req = num_spec + 1
     num_logits = num_reqs * tokens_per_req
 
-    # ``WATERMARK`` and ``CONTEXT_WIDTH`` are constexprs of ``_resample_kernel``,
-    # so a watermarked engine launches a different specialization than the stock
-    # one. Warm the variant the runtime will actually use: RejectionSampler
-    # passes the watermark triple when a watermark config is present, so
-    # the unwatermarked variant is never launched in that case.
     watermark_config = worker.vllm_config.watermark_config
     watermark_kwargs: dict[str, Any] = {}
     if watermark_config is not None:
@@ -76,12 +59,7 @@ def spec_decode_rejection_warmup(worker: Worker) -> None:
                 exc_info=True,
             )
             return
-        # Contexts are int32 [num_logits, context_width] and contiguous, matching
-        # GPUWatermarkSampler._get_contexts, which reads the int32 request-state
-        # token ids (the pointer dtype and the row stride are part of the
-        # specialization key). The key halves are do_not_specialize'd, which drops
-        # the divisibility hints but not the i32/i64 type Triton infers from an
-        # int argument's magnitude, so warm the key the engine actually uses.
+        # Tensor dtypes and integer widths affect Triton specialization.
         watermark_kwargs = {
             "contexts": torch.zeros(
                 (num_logits, watermark_config.context_width),
@@ -92,12 +70,7 @@ def spec_decode_rejection_warmup(worker: Worker) -> None:
             "watermark_key": watermark_key,
         }
 
-    # Triton JIT-specializes on tensor dtypes. The target logits may be fp32
-    # (apply_sampling_params copies to fp32 when processing is needed) or the
-    # model dtype (pass-through otherwise), while draft logits are always the
-    # model dtype. Warm every (target, draft) combination the runtime can hit;
-    # ``None`` means the runtime launches the HAS_DRAFT_LOGITS=False variant,
-    # for which the draft dtype does not exist.
+    # Sampling-parameter processing may promote either distribution to fp32.
     model_dtype = model_config.dtype
     warmup_dtype_pairs: set[tuple[torch.dtype, torch.dtype | None]]
     if use_draft_logits:
@@ -139,18 +112,11 @@ def spec_decode_rejection_warmup(worker: Worker) -> None:
             rejection_sample(
                 target_logits=target_logits,
                 draft_logits=draft_logits,
-                # ``draft_sampled`` is a slice of ``InputBatch.input_ids``, which
-                # is int32; ``pos`` slices ``InputBatch.positions``, which is int64.
                 draft_sampled=torch.zeros(num_logits, dtype=torch.int32, device=device),
                 cu_num_logits=torch.tensor(
                     [0, num_logits], dtype=torch.int32, device=device
                 ),
                 pos=torch.zeros(num_logits, dtype=torch.int64, device=device),
-                # ``idx_mapping`` is built from an ``np.intp`` array (and from
-                # ``torch.arange(..., dtype=torch.int64)`` for dummy batches), so
-                # it is int64; ``expanded_idx_mapping`` is either that same tensor
-                # or ``idx_mapping.new_empty(...)``, hence int64 too.
-                # ``expanded_local_pos`` is separately allocated as int32.
                 idx_mapping=torch.zeros(num_reqs, dtype=torch.int64, device=device),
                 expanded_idx_mapping=torch.zeros(
                     num_logits, dtype=torch.int64, device=device

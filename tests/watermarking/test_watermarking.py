@@ -210,7 +210,6 @@ def test_speculative_decoding_uses_fixed_dual_key_roles():
 
 
 def test_recovery_key_rejects_the_unsplit_dual_key_watermarker():
-    """The in-kernel recovery draw must never fall back to the draft's key A."""
     watermarker = create_watermarker(
         WatermarkConfig(algorithm="dual_key_gumbel", key=42, alpha=0.25)
     )
@@ -224,12 +223,6 @@ def test_recovery_key_rejects_the_unsplit_dual_key_watermarker():
 
 @pytest.mark.parametrize("algorithm", ["gumbel", "dual_key_gumbel"])
 def test_config_key_resolution_matches_the_model_runner(algorithm: str):
-    """Callers without a sampler must reproduce the runtime's kernel key.
-
-    The JIT warmup has no sampler to read the key off, so it derives it from the
-    config; if that drifts from the model runner it warms a specialization the
-    engine never launches.
-    """
     config = WatermarkConfig(algorithm=algorithm, key=42, alpha=0.25)
     runtime_key = _resolve_watermark_key(
         create_speculative_target_watermarker(create_watermarker(config))

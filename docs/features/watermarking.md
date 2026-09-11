@@ -39,11 +39,10 @@ and defaults to 4. Larger values make the watermark less robust to
 edits because an insertion, deletion, or substitution changes more subsequent
 contexts. Values above 16 are allowed but emit a warning.
 
-`alpha` sets the key-B probability under `dual_key_gumbel` and has no effect
-with `gumbel`. See [Dual-key Gumbel-max](#dual-key-gumbel-max).
-
 `allow_target_only_watermarking` defaults to false and only has an effect when
-speculative decoding is enabled. See
+speculative decoding is enabled. It permits speculative decoding with a
+watermarking algorithm that does not support it natively, at the cost of
+weaker detectability. See
 [Speculative decoding](#speculative-decoding).
 
 ## Architecture
@@ -64,9 +63,8 @@ generation.
 Watermarking requires speculative decoding to use probabilistic draft sampling,
 standard rejection sampling, and an autoregressive model-based method (`dspark`,
 `eagle`, `eagle3`, or `mtp`). Parallel drafting is supported only by `dspark`.
-Configurations that violate these constraints are rejected at startup.
 
-A watermarking algorithm without native speculative-decoding support is also
+A watermarking algorithm without native speculative-decoding support is
 rejected before model loading. Set
 `"allow_target_only_watermarking": true` to allow it: accepted draft tokens are
 not watermarked, while target-side rejection recovery and bonus sampling remain
@@ -74,12 +72,10 @@ watermarked. The watermark signal is diluted in proportion to the share of
 output tokens supplied by accepted drafts; rejected drafts do not dilute it
 because their recovery tokens are watermarked.
 
-In one GSM8K measurement with MTP on a 2B model,
-`num_speculative_tokens=2`, and a mean acceptance length of 2.58, 61% of output
-tokens came from accepted drafts. The share of generations detected at
-`p_value <= 0.01` fell from 74.7% to 42.0% over 300 generations of roughly 385
-scored tokens each. This is an example rather than a guarantee: the loss depends
-on the deployment's acceptance rate and how many tokens the detector sees.
+!!! important
+    Speculative-decoding token paths do not currently support generation-side
+    context deduplication. The configured `deduplicate_contexts` policy is not
+    applied to accepted drafts, rejection-recovery tokens, or bonus tokens.
 
 For `dual_key_gumbel`, `alpha` has no effect under speculative decoding. The
 speculative protocol selects the key for each token instead.
@@ -146,9 +142,9 @@ vllm serve MODEL \
 ### Dual-key Gumbel-max
 
 Dual-key Gumbel-max derives independent keys A and B from one configured master
-key using SHA-256 domain separation. During ordinary generation, each token uses
-key A with probability `1 - alpha` and key B with probability `alpha`; `alpha`
-defaults to 0.1. Detection scores every token against both keys.
+key. During ordinary generation, each token uses key A with probability
+`1 - alpha` and key B with probability `alpha`. The algorithm-specific `alpha`
+parameter defaults to 0.1. Detection scores every token against both keys.
 
 The same two key streams support speculative decoding without changing its
 acceptance rate. In this mode, the speculative protocol selects the key instead
@@ -204,23 +200,9 @@ result = GumbelWatermarkDetector(key=42, prf="philox").detect(token_ids)
 print(result.p_value, result.is_watermarked)
 ```
 
-Use the detector class that matches the generation algorithm:
-`GumbelWatermarkDetector` for `gumbel`, and `DualKeyGumbelWatermarkDetector` for
-`dual_key_gumbel`. The dual-key detector accepts the master key configured on
-the engine and derives keys A and B internally:
-
-```python
-from vllm.v1.watermarking import DualKeyGumbelWatermarkDetector
-
-detector = DualKeyGumbelWatermarkDetector(key=42, prf="philox")
-result = detector.detect(token_ids)
-```
-
-Using `GumbelWatermarkDetector` with the master key to score
-`dual_key_gumbel` output produces a null detection without an error because
-neither derived key equals the master key.
-
-The tokenizer, PRF, key, and context width must match generation.
+The detection configuration must match the generation configuration, including
+the tokenizer, PRF, watermarking algorithm, algorithm-specific watermarking
+configuration, and key.
 Gumbel-max detection scores repeated contexts once by default so identical PRF
 random vectors are not treated as independent evidence. Keep
 `deduplicate_contexts=True` unless the detector's calibration has been adjusted

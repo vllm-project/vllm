@@ -844,12 +844,6 @@ def _residual_recovery_logits(
     num_sampled: torch.Tensor,
     vocab_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-request recovery logits and the verification row they belong to.
-
-    Mirrors the residual `_resample_kernel` builds in registers:
-    bonus and -1-placeholder rows recover from the target logits, everything
-    else from log(max(p - q, 0)).
-    """
     target_logits = inputs["target_logits"]
     draft_logits = inputs["draft_logits"]
     cu_num_logits = inputs["cu_num_logits"]
@@ -910,34 +904,21 @@ def _watermark_inputs(
     )
     if one_hot_draft:
         inputs["draft_logits"] = None
-    # -1 placeholder drafts recover from the target logits, not the residual.
     inputs["draft_sampled"].view(num_trials, num_speculative_steps + 1)[::5, 1] = -1
     num_logits = inputs["target_logits"].shape[0]
     contexts = torch.randint(
         0, vocab_size, (num_logits, context_width), dtype=torch.int64, device=device
     )
-    # Prompt positions arrive as -1 and must hash like the PyTorch PRF does.
     contexts[::7, 0] = -1
     return inputs, contexts
 
 
 @pytest.mark.parametrize("one_hot_draft", [False, True])
-# The resample kernel tiles the vocabulary in RESAMPLE_BLOCK_SIZE (1024) blocks
-# and each block must offset its Philox group indices by block_idx. 1024 is a
-# single full block (block_idx is always 0, and no lane is masked off); 3500 is
-# four blocks with a partial tail, so it pins both the per-block group offset --
-# a production vocabulary is ~149 blocks, and dropping the offset would reuse
-# the first block's PRF counters for every later block -- and the tail mask.
+# Cover one full block and a partial multi-block vocabulary.
 @pytest.mark.parametrize("vocab_size", [1024, 3500])
 def test_watermarked_recovery_matches_philox_gumbel_sample(
     one_hot_draft: bool, vocab_size: int
 ):
-    """The in-kernel key-B draw must equal philox_gumbel_sample on the residual.
-
-    The kernel now builds the residual once, in registers, and draws from it
-    with keyed Philox noise. This pins that draw to the standalone watermark
-    kernel the detector's PRF is defined by.
-    """
     torch.manual_seed(7)
     key = 0xDA39A3EE5E6B4B0D
     context_width = 4
@@ -963,20 +944,17 @@ def test_watermarked_recovery_matches_philox_gumbel_sample(
     recovered = sampled[torch.arange(128, device="cuda"), num_sampled.long() - 1]
     torch.testing.assert_close(recovered, expected, rtol=0, atol=0)
 
-    # The recovery shapes must actually occur, or the assertion is vacuous.
     is_bonus = resample_rows == inputs["cu_num_logits"][1:] - 1
     next_rows = (resample_rows + 1).clamp_max(inputs["draft_sampled"].shape[0] - 1)
     is_placeholder = ~is_bonus & (inputs["draft_sampled"][next_rows] < 0)
     assert int((~is_bonus & ~is_placeholder).sum()) > 0
     assert int(is_placeholder.sum()) > 0
     if not one_hot_draft:
-        # One-hot drafts are accepted with probability p(draft token), which is
-        # ~1/V here, so they practically never reach the bonus row.
+        # One-hot drafts almost never reach the bonus row.
         assert int(is_bonus.sum()) > 0
 
 
 def test_watermarked_recovery_leaves_disabled_rows_on_the_stock_draw():
-    """Opted-out and greedy rows must stay bit-identical to rejection_sample."""
     torch.manual_seed(11)
     num_trials = 96
     vocab_size = 512
@@ -989,7 +967,6 @@ def test_watermarked_recovery_leaves_disabled_rows_on_the_stock_draw():
     )
     watermarking = torch.zeros(num_trials, dtype=torch.bool, device="cuda")
     watermarking[::2] = True
-    # Greedy requests are never watermarked, even when opted in.
     inputs["temperature"][:8] = 0.0
 
     stock_sampled, stock_num_sampled = rejection_sample(
@@ -1013,7 +990,6 @@ def test_watermarked_recovery_leaves_disabled_rows_on_the_stock_draw():
         rtol=0,
         atol=0,
     )
-    # Accepted draft tokens are untouched by the recovery draw.
     for req in range(num_trials):
         n = int(num_sampled[req]) - 1
         torch.testing.assert_close(
@@ -1023,7 +999,6 @@ def test_watermarked_recovery_leaves_disabled_rows_on_the_stock_draw():
 
 
 def test_watermarked_recovery_is_unchanged_by_fp64_gumbel():
-    """use_fp64 must not move the keyed draw: the detector's uniform is fp32."""
     torch.manual_seed(13)
     inputs, contexts = _watermark_inputs(
         num_trials=64,

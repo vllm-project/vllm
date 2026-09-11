@@ -139,23 +139,11 @@ class GPUWatermarkSampler(Sampler):
         expanded_local_pos: torch.Tensor | None = None,
         draft_sampled: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Build one watermark context for each flattened verification row.
+        """Build contexts for flattened verification rows.
 
-        For each verification row:
-
-        1. Add its request-local speculative position to ``total_len`` to get
-           the absolute position being sampled.
-        2. Read context positions below ``total_len`` from committed output.
-        3. Read later context positions from preceding draft rows.
-
-        For example, with committed output ``[10, 11]``, proposals ``[20, 21]``,
-        and context width 2, local positions ``[0, 1, 2]`` sample after prefixes
-        ``[10, 11]``, ``[10, 11, 20]``, and ``[10, 11, 20, 21]``. Their contexts
-        are therefore ``[10, 11]``, ``[11, 20]``, and ``[20, 21]``.
-
-        ``draft_sampled`` has the same flattened, request-chunked layout as the
-        verification logits. Its first row per request precedes the first draft
-        token, so the draft index includes a one-row offset.
+        With committed tokens ``[10, 11]``, drafts ``[20, 21]``, and width 2,
+        local positions ``[0, 1, 2]`` use contexts ``[10, 11]``, ``[11, 20]``,
+        and ``[20, 21]``. The first verification row precedes the first draft.
         """
         context_width = self.watermarker.context_width
         req_indices = expanded_idx_mapping.to(torch.int64)

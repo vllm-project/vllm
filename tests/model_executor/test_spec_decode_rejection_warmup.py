@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The warmup must launch the specialization the engine will launch.
-
-Triton keys a specialization on tensor pointer dtypes and on the i32/i64 type it
-infers from an integer argument's magnitude, so warming a variant the runtime
-never uses leaves the first request paying the compile this module exists to
-remove.
-"""
-
 from types import SimpleNamespace
 
 import pytest
@@ -58,11 +50,6 @@ def _capture_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
 def test_warmup_token_id_dtypes_match_the_runtime_buffers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``draft_sampled`` slices ``InputBatch.input_ids``, which is int32.
-
-    ``pos`` slices ``InputBatch.positions``, which is int64. Warming int64
-    ``draft_sampled`` compiles a specialization no engine launches.
-    """
     calls = _capture_calls(monkeypatch)
     spec_decode_rejection_warmup(_worker(None))
 
@@ -75,14 +62,6 @@ def test_warmup_token_id_dtypes_match_the_runtime_buffers(
 def test_warmup_index_mapping_dtypes_match_the_runtime_buffers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``idx_mapping`` and ``expanded_idx_mapping`` are int64 at runtime.
-
-    ``GPUModelRunner`` builds ``idx_mapping`` from an ``np.intp`` array (and
-    ``InputBatch.make_dummy`` from an explicitly int64 ``torch.arange``), and
-    ``expanded_idx_mapping`` is either that same tensor or
-    ``idx_mapping.new_empty(...)``. ``expanded_local_pos`` is separately
-    allocated as int32.
-    """
     calls = _capture_calls(monkeypatch)
     spec_decode_rejection_warmup(_worker(None))
 
@@ -96,12 +75,6 @@ def test_warmup_index_mapping_dtypes_match_the_runtime_buffers(
 def test_warmup_watermark_args_match_the_runtime_kernel_arguments(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Contexts are int32 and the key is the real key-B, not a placeholder.
-
-    ``GPUWatermarkSampler._get_contexts`` reads int32 request-state token ids,
-    and both 32-bit halves of a derived key exceed 2**31, so a key of 0 is typed
-    i32 where the real key is typed i64.
-    """
     watermark_config = WatermarkConfig(
         key=MASTER_KEY, algorithm="dual_key_gumbel", context_width=3
     )
@@ -137,12 +110,6 @@ def test_warmup_is_skipped_when_the_recovery_key_cannot_be_derived(
 def test_warmup_draft_logits_match_the_runtime_draft_sample_method(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``Speculator`` allocates ``draft_logits`` only for probabilistic drafts.
-
-    With the default ``draft_sample_method="greedy"`` the runtime calls
-    ``rejection_sample(..., draft_logits=None)``, i.e. the
-    ``HAS_DRAFT_LOGITS=False`` specialization.
-    """
     calls = _capture_calls(monkeypatch)
     spec_decode_rejection_warmup(_worker(None))
     assert calls
