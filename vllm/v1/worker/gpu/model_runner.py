@@ -22,7 +22,7 @@ import gc
 import time
 from contextlib import AbstractContextManager
 from copy import deepcopy
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import torch
@@ -1467,7 +1467,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         shard_metadata = None
         global_input_batch = input_batch
-        if self.batch_sharder is not None:
+        can_sample_local_logits = getattr(self.sampler, "can_sample_local_logits", None)
+        compute_local_logits = getattr(
+            self.model, "compute_diffusion_logits_local", None
+        )
+        use_diffusion_local_logits = (
+            self.rejection_sampler is None
+            and callable(can_sample_local_logits)
+            and callable(compute_local_logits)
+            and can_sample_local_logits(input_batch, grammar_output)
+        )
+        if use_diffusion_local_logits:
+            sample_hidden_states = hidden_states[input_batch.logits_indices]
+            logits = compute_local_logits(sample_hidden_states)
+        elif self.batch_sharder is not None:
             # Shard the inputs along the batch dimension to sample in parallel
             # across TP ranks.
             input_batch, sorted_logits_indices, grammar_output, shard_metadata = (
@@ -1501,7 +1514,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampler_output = None
         elif input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             assert self.sampler is not None
-            sampler_output = self.sampler(logits, input_batch)
+            if use_diffusion_local_logits:
+                sampler_output = cast(Any, self.sampler).sample_local_logits(
+                    logits, input_batch
+                )
+            else:
+                sampler_output = self.sampler(logits, input_batch)
         else:
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
