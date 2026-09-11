@@ -1449,10 +1449,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         else:
             self._mtp_hidden_buffer = None
 
-        if (
-            vllm_config.kernel_config.enable_jit_warmup
-            and get_pp_group().is_last_rank
-        ):
+        if vllm_config.kernel_config.enable_jit_warmup and get_pp_group().is_last_rank:
             from vllm.model_executor.kernels.mhc.tilelang_kernels import (
                 _HC_HEAD_FUSED_TILELANG_KERNEL,
             )

@@ -10,9 +10,11 @@ import torch.nn.functional as F
 import vllm.model_executor.kernels.mhc  # noqa: F401
 import vllm.model_executor.layers.mhc as mhc_layers
 from vllm.model_executor.kernels.mhc.tilelang import (
-    _tilelang_hc_prenorm_gemm,
     _torch_hc_prenorm_gemm,
     mhc_pre_delayed_tilelang,
+)
+from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+    _HC_PRENORM_GEMM_TILELANG_KERNEL,
 )
 from vllm.model_executor.kernels.mhc.torch import mhc_pre_delayed_torch
 from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
@@ -484,7 +486,14 @@ def test_hc_prenorm_gemm_tilelang(num_tokens, hidden_size):
     sqrsum = torch.empty_like(sqrsum_ref)
 
     _torch_hc_prenorm_gemm(x, fn, out_ref, sqrsum_ref)
-    _tilelang_hc_prenorm_gemm(x, fn, out, sqrsum, hidden_size, hc_mult)
+    _HC_PRENORM_GEMM_TILELANG_KERNEL(
+        x,
+        fn,
+        out,
+        sqrsum,
+        hidden_size,
+        hc_mult,
+    )
 
     torch.testing.assert_close(out, out_ref, atol=1e-5, rtol=1e-4)
     torch.testing.assert_close(sqrsum, sqrsum_ref, atol=1e-2, rtol=1e-6)
