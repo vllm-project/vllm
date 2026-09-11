@@ -442,9 +442,20 @@ class MoRIIOConnectorScheduler:
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
 
-    def map_request_id(self, request_id: ReqId, transfer_id: TransferId):
+    def map_request_id(self, request_id: ReqId, transfer_id: TransferId) -> bool:
+        """Bind transfer_id to request_id. False if another live request owns it."""
+        owner = self.transfer_id_to_request_id.get(transfer_id)
+        if owner is not None and owner != request_id:
+            logger.warning(
+                "MoRI-IO keeping transfer_id=%r bound to %r; ignoring request %r",
+                transfer_id,
+                owner,
+                request_id,
+            )
+            return False
         self.transfer_id_to_request_id[transfer_id] = request_id
         self.request_id_to_transfer_id[request_id] = transfer_id
+        return True
 
     def unmap_request_id(
         self, request_id: ReqId, transfer_id: TransferId | None = None
@@ -454,7 +465,7 @@ class MoRIIOConnectorScheduler:
         if request_id in self.request_id_to_transfer_id:
             tid = self.request_id_to_transfer_id[request_id]
             del self.request_id_to_transfer_id[request_id]
-            if tid in self.transfer_id_to_request_id:
+            if self.transfer_id_to_request_id.get(tid) == request_id:
                 del self.transfer_id_to_request_id[tid]
             return
 
@@ -462,6 +473,23 @@ class MoRIIOConnectorScheduler:
         if transfer_id is not None and transfer_id in self.transfer_id_to_request_id:
             original_rid = self.transfer_id_to_request_id[transfer_id]
             if original_rid != request_id:
+                # input_processor appends a suffix after map. A different
+                # request that reused transfer_id must not clear the owner.
+                mutated = (
+                    isinstance(request_id, str)
+                    and isinstance(original_rid, str)
+                    and request_id.startswith(original_rid)
+                    and len(request_id) > len(original_rid)
+                )
+                if not mutated:
+                    logger.debug(
+                        "MoRI-IO unmap skip: rid=%r is not owner of "
+                        "transfer_id=%r (owner=%r)",
+                        request_id,
+                        transfer_id,
+                        original_rid,
+                    )
+                    return
                 logger.debug(
                     "MoRI-IO unmap via transfer_id: %r -> %r", request_id, original_rid
                 )
@@ -640,7 +668,8 @@ class MoRIIOConnectorScheduler:
         transfer_id = params.get("transfer_id") or f"sidecar-{request.request_id}"
         params.setdefault("transfer_id", transfer_id)
         request_id = request.request_id
-        self.map_request_id(request_id, transfer_id)
+        if not self.map_request_id(request_id, transfer_id):
+            return
         if params.get("do_remote_decode"):
             local_block_ids = blocks.get_block_ids()[0]
             self._reqs_need_save[request.request_id] = (request, local_block_ids)
