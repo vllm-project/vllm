@@ -159,6 +159,38 @@ import vllm.v1.worker.utils as worker_utils
 worker_utils.KVBlockZeroer.__init__ = cpu_kv_zero.init
 worker_utils.KVBlockZeroer.zero_block_ids = cpu_kv_zero.zero_block_ids
 
+# Patch the hybrid model state's per-step accepted-token bookkeeping.
+import vllm.v1.worker.cpu.model_states.mamba_hybrid as cpu_mamba_hybrid
+import vllm.v1.worker.gpu.model_states.mamba_hybrid as gpu_mamba_hybrid
+
+gpu_mamba_hybrid._scatter_num_accepted_kernel = TorchKernel(
+    cpu_mamba_hybrid.scatter_num_accepted
+)
+gpu_mamba_hybrid._fill_num_accepted_kernel = TorchKernel(
+    cpu_mamba_hybrid.fill_num_accepted
+)
+
+# Patch align-mode state migration. The copy kernels address state tensors
+# through device pointer arrays, so they go at the method level, and
+# _populate_metadata is extended to keep the tensors those addresses describe.
+import vllm.v1.worker.cpu.mamba_utils as cpu_mamba_utils
+import vllm.v1.worker.mamba_utils as gpu_mamba_utils
+
+gpu_mamba_utils.MambaSpecDecodeGPUContext._populate_metadata = (
+    cpu_mamba_utils.populate_metadata
+)
+gpu_mamba_utils.MambaSpecDecodeGPUContext.run_fused_precopy = (
+    cpu_mamba_utils.run_fused_precopy
+)
+gpu_mamba_utils.MambaSpecDecodeGPUContext.run_fused_postprocess_align = (
+    cpu_mamba_utils.run_fused_postprocess_align
+)
+# This kernel is imported by name into the hybrid state, so the binding that
+# the caller resolves is the one there, not the one in mamba_utils.
+gpu_mamba_hybrid.preprocess_mamba_align_fused_kernel = TorchKernel(
+    cpu_mamba_utils.preprocess_mamba_align
+)
+
 # Patch sampler kernels.
 import vllm.v1.worker.cpu.sample.gumbel as cpu_gumbel
 import vllm.v1.worker.gpu.sample.gumbel as gpu_gumbel
