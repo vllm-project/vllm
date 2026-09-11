@@ -16,24 +16,26 @@ import os
 import torch
 
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.launch import (
-    _run_compiled,
-    _u8_flat,
-)
-from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.prefill import (
-    MAX_PREFILL_TOKENS,
-    MIN_PREFILL_TOKENS,
     _get_reduce_bf16,
     _get_sort,
     _get_tile_map,
-    block_m_for,
+    _run_compiled,
+    _u8_flat,
 )
 
+MIN_PREFILL_TOKENS = 3072
+MAX_PREFILL_TOKENS = 65536
+BM256_FROM_TOKENS = 16384  # sort / gemm1 block of 256 rows from here up
 GEMM1_SWIGLU_ALPHA = 1.702
 GEMM1_SWIGLU_LIMIT = 7.0
 # CTAs sharing one m-block's 24 n-tiles in gemm2 (gemm2_prefill.compile_moe_gemm2)
 GEMM2_N_SPLIT = 6
 GEMM2_N_SPLIT_LARGE = 4
 GEMM2_N_SPLIT_LARGE_FROM_TOKENS = 32768
+
+
+def block_m_for(n_tokens: int) -> int:
+    return 256 if n_tokens >= BM256_FROM_TOKENS else 128
 
 
 def gemm2_n_split_for(n_tokens: int) -> int:

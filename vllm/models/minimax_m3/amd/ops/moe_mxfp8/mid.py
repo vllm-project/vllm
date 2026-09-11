@@ -14,10 +14,10 @@ import functools
 import torch
 
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.launch import (
+    _get_sort,
     _run_compiled,
     _u8_flat,
 )
-from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.prefill import _get_sort
 
 MIN_MID_TOKENS = 257
 MAX_MID_TOKENS = 3071

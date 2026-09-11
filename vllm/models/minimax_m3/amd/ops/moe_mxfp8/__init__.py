@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import torch
 
-from vllm.models.minimax_m3.amd.ops.moe_flydsl_common import decode as _common_decode
-
 from . import decode, mid, prefill
 
 MAX_DECODE_TOKENS = decode.MAX_DECODE_TOKENS
@@ -41,7 +39,7 @@ _warmed = False
 
 def supports_shapes(hidden_size: int, intermediate_size: int) -> bool:
     """Layer shapes all three chains are written for."""
-    return _common_decode.supports_shapes(
+    return decode.supports_shapes(
         hidden_size, intermediate_size
     ) and prefill.supports_shapes(hidden_size, intermediate_size)
 

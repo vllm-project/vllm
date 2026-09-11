@@ -10,9 +10,6 @@ import functools
 
 import torch
 
-from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.decode import (
-    MAX_DECODE_TOKENS,
-)
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.launch import _get, _run_compiled
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.sort import max_sorted_rows
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.sort_decode import (
@@ -23,6 +20,7 @@ from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.sort_decode import (
 from .gemm1_decode import BM, WIDE_BM, compile_gemm1
 from .gemm2_decode import compile_gemm2
 
+MAX_DECODE_TOKENS = 256
 # sorted mode with a fused shared expert: its rows first in WIDE_BM-row blocks run
 # by the wide kernel bodies, so its weights stream once per WIDE_BM rows (not BM)
 WIDE_MIN_TOKENS = 40
@@ -31,6 +29,11 @@ _workspaces: dict = {}
 
 def wide_for(n_tokens: int) -> bool:
     return n_tokens >= WIDE_MIN_TOKENS
+
+
+def supports_shapes(hidden_size: int, intermediate_size: int) -> bool:
+    """Dimensions must fit the 256-wide K tiles and the three-way split-K."""
+    return hidden_size % 256 == 0 and intermediate_size % (256 * 3) == 0
 
 
 def _intermediate_workspace(
