@@ -60,10 +60,11 @@ def _repeated_context_mask_kernel(
 ):
     row = tl.program_id(0).to(tl.int64)
     req_idx = tl.load(req_indices_ptr + row).to(tl.int64)
-    valid_req = req_idx >= 0
-    safe_req_idx = tl.maximum(req_idx, 0)
-    prompt_len = tl.load(prompt_lens_ptr + safe_req_idx, mask=valid_req, other=0)
-    total_len = tl.load(total_lens_ptr + safe_req_idx, mask=valid_req, other=0)
+    if req_idx < 0:
+        tl.store(output_ptr + row, 0)
+        return
+    prompt_len = tl.load(prompt_lens_ptr + req_idx)
+    total_len = tl.load(total_lens_ptr + req_idx)
     sequence_start = 0 if INCLUDE_PROMPT else prompt_len
     history_len = total_len - sequence_start
 
@@ -77,16 +78,16 @@ def _repeated_context_mask_kernel(
     for block_start in tl.range(aligned_start, history_len, BLOCK):
         previous_pos = block_start + offsets
         in_window = (previous_pos >= scan_start) & (previous_pos < history_len)
-        matches = valid_req & in_window
+        matches = in_window
         for offset in range(CONTEXT_WIDTH):
             context_token = tl.load(contexts_ptr + row * context_stride + offset)
             historical_pos = previous_pos + offset - CONTEXT_WIDTH
             historical_token = tl.load(
                 all_token_ids_ptr
-                + safe_req_idx * all_token_ids_stride
+                + req_idx * all_token_ids_stride
                 + sequence_start
                 + tl.maximum(historical_pos, 0),
-                mask=valid_req & (historical_pos >= 0) & in_window,
+                mask=in_window & (historical_pos >= 0),
                 other=-1,
             )
             matches &= historical_token == context_token
@@ -103,6 +104,7 @@ def _repeated_context_mask_cpu(
     max_history: int | None = None,
     include_prompt: bool = False,
 ) -> torch.Tensor:
+    """Reference implementation; the parity tests check the Triton kernel against it."""
     repeated = torch.zeros(len(req_indices), dtype=torch.bool)
     for row, req_idx_tensor in enumerate(req_indices):
         req_idx = int(req_idx_tensor)
@@ -136,6 +138,21 @@ def repeated_context_mask(
     max_history: int | None = None,
     include_prompt: bool = False,
 ) -> torch.Tensor:
+    """Return, per row, whether the row's context already occurred in its history.
+
+    Args:
+        all_token_ids: `[max_num_reqs, max_model_len]` token ids of every request.
+        req_indices: Request slot per sampled row; -1 marks a padding row, which
+            is reported as not repeated.
+        prompt_lens: Prompt length per request slot.
+        total_lens: Prompt plus generated length per request slot.
+        contexts: `[num_rows, context_width]` context per row, padded with -1
+            before the start of the scanned history.
+        max_history: Number of most recent history positions searched, or
+            ``None`` for all of them. The window compared at each position
+            reaches `context_width` tokens further back.
+        include_prompt: Search the prompt as well as the generated tokens.
+    """
     if all_token_ids.device.type == "cpu":
         return _repeated_context_mask_cpu(
             all_token_ids,
