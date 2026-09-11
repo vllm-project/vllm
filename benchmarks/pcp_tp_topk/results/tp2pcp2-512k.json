@@ -1,0 +1,479 @@
+{
+  "settings": {
+    "output": "results/pcp-tp-indexer/tp2pcp2-512k-three-arm.json",
+    "tp": 2,
+    "pcp": 2,
+    "input": 524288,
+    "gpu_memory_utilization": 0.96
+  },
+  "records": [
+    {
+      "mode": "baseline",
+      "warmup": true,
+      "elapsed_s": 28.14367734687403,
+      "ttft_s": 26.66145348548889,
+      "tokens": [
+        25,
+        279,
+        2615,
+        2038,
+        374,
+        74702,
+        12,
+        15209
+      ],
+      "route": [
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        }
+      ]
+    },
+    {
+      "mode": "sharded",
+      "warmup": true,
+      "elapsed_s": 22.150061645079404,
+      "ttft_s": 20.70453429222107,
+      "tokens": [
+        25,
+        279,
+        2615,
+        2038,
+        374,
+        74702,
+        12,
+        15209
+      ],
+      "route": [
+        {
+          "mode": "sharded",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        }
+      ]
+    },
+    {
+      "mode": "direct",
+      "warmup": true,
+      "elapsed_s": 22.128881860990077,
+      "ttft_s": 20.68025493621826,
+      "tokens": [
+        25,
+        279,
+        2615,
+        2038,
+        374,
+        74702,
+        12,
+        15209
+      ],
+      "route": [
+        {
+          "mode": "direct",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 168
+        },
+        {
+          "mode": "direct",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 168
+        },
+        {
+          "mode": "direct",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 168
+        },
+        {
+          "mode": "direct",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 168
+        }
+      ]
+    },
+    {
+      "mode": "baseline",
+      "warmup": false,
+      "elapsed_s": 28.042587636969984,
+      "ttft_s": 26.609500408172607,
+      "tokens": [
+        25,
+        279,
+        2615,
+        2038,
+        374,
+        74702,
+        12,
+        15209
+      ],
+      "route": [
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "baseline",
+          "sharded": 0,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        }
+      ]
+    },
+    {
+      "mode": "sharded",
+      "warmup": false,
+      "elapsed_s": 22.176483490969986,
+      "ttft_s": 20.70362901687622,
+      "tokens": [
+        25,
+        279,
+        2615,
+        2038,
+        374,
+        74702,
+        12,
+        15209
+      ],
+      "route": [
+        {
+          "mode": "sharded",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        },
+        {
+          "mode": "sharded",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 0
+        }
+      ]
+    },
+    {
+      "mode": "direct",
+      "warmup": false,
+      "elapsed_s": 22.134700275957584,
+      "ttft_s": 20.67566990852356,
+      "tokens": [
+        25,
+        279,
+        2615,
+        2038,
+        374,
+        74702,
+        12,
+        15209
+      ],
+      "route": [
+        {
+          "mode": "direct",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 168
+        },
+        {
+          "mode": "direct",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 168
+        },
+        {
+          "mode": "direct",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 168
+        },
+        {
+          "mode": "direct",
+          "sharded": 8,
+          "prefill_rows": [
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768,
+            32768
+          ],
+          "direct_lookups": 168
+        }
+      ]
+    }
+  ]
+}
