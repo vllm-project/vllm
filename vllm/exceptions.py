@@ -170,3 +170,18 @@ class MaxQueuedTokensError(GracefulHTTPError):
             "Please try again later or on a different instance.",
             HTTPStatus.SERVICE_UNAVAILABLE,
         )
+
+
+class EngineFaultedError(GracefulHTTPError):
+    """Raised when the engine has faulted and is awaiting FT recovery.
+
+    Returns HTTP 503 (Service Unavailable) so that load balancers and
+    client SDKs retry the request on a different instance.
+    """
+
+    def __init__(self):
+        super().__init__(
+            "The engine has faulted and cannot accept new requests. "
+            "Please try again later or on a different instance.",
+            HTTPStatus.SERVICE_UNAVAILABLE,
+        )

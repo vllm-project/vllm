@@ -1326,6 +1326,11 @@ class AsyncMPClient(MPClient):
             status["ft_error"] = result.reason
         return result
 
+    @property
+    def engine_status(self) -> dict:
+        """Cached FT status entry of the managed engine."""
+        return self._engine_status.get(self.engine_ranks_managed[0], {})
+
     async def get_status(self):
         return {
             "schema_version": 1,
