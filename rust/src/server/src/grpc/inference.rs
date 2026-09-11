@@ -241,12 +241,6 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             .instrument(request_span.clone())
             .await
             .map_err(|error| log_text_error(&request_span, started_at, "collection", error))?;
-        info!(
-            parent: &request_span,
-            elapsed_ms = started_at.elapsed().as_millis() as u64,
-            "gRPC inference request completed"
-        );
-
         // Build the single aggregated response.
         let prompt_info = convert::to_prompt_info(
             &collected.prompt_token_ids,
@@ -267,6 +261,11 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             collected.logprobs.as_ref(),
             Some(&finish_info),
             &response_opts,
+        )?;
+        info!(
+            parent: &request_span,
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "gRPC inference request completed"
         );
 
         Ok(Response::new(pb::GenerateResponse {
@@ -331,19 +330,21 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
                                     logprobs,
                                 },
                             finished,
-                        }) => Ok(pb::GenerateResponse {
+                        }) => convert::to_sequence_output(
+                            &decoded.text,
+                            &token_ids,
+                            logprobs.as_ref(),
+                            finished.as_deref(),
+                            &response_opts,
+                        )
+                        .map(|outputs| pb::GenerateResponse {
                             prompt_info: None,
-                            outputs: Some(convert::to_sequence_output(
-                                &decoded.text,
-                                &token_ids,
-                                logprobs.as_ref(),
-                                finished.as_deref(),
-                                &response_opts,
-                            )),
+                            outputs: Some(outputs),
                         }),
                     };
 
-                    if tx.send(response).await.is_err() {
+                    let failed = response.is_err();
+                    if tx.send(response).await.is_err() || failed {
                         break;
                     }
                 }
