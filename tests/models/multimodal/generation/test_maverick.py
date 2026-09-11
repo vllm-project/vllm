@@ -24,7 +24,7 @@ from vllm import LLM, SamplingParams
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, FullAttentionSpec
 
-from ....utils import multi_gpu_test
+from ....utils import create_new_process_for_each_test, multi_gpu_marks
 
 # Sample prompts for testing
 PROMPTS: list[str] = [
@@ -593,13 +593,15 @@ def run_reduced_model(llm: LLM, should_profile: bool = False) -> None:
         print("-" * 40)
 
 
-@multi_gpu_test(num_gpus=2)
+@create_new_process_for_each_test("spawn")
 @pytest.mark.parametrize(
     "original_model_name,text_layers,num_experts,vision_layers,",
     [("meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", 4, 4, 2)],
 )
 @pytest.mark.parametrize("enforce_eager", [True, False])
-@pytest.mark.parametrize("tp,ep", [(2, True)])
+@pytest.mark.parametrize(
+    "tp,ep", [pytest.param(2, True, marks=multi_gpu_marks(num_gpus=2))]
+)
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_dummy_maverick(
     monkeypatch,
@@ -616,6 +618,7 @@ def test_dummy_maverick(
 ) -> None:
     # Disable multiprocessing allows us to access model executor from LLM engine
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     model_path = create_reduced_maverick_model(
         original_model_name=original_model_name,
