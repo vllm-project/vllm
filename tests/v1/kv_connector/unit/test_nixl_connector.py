@@ -1980,7 +1980,9 @@ def test_mixed_host_staging_does_not_report_failure_twice_after_drain():
 
     assert worker._get_finished_host_staging() == set()
     assert worker._failed_recv_pending == set()
-    worker._report_failed_recv.assert_not_called()
+    worker._report_failed_recv.assert_called_once_with("request")
+    assert worker._get_finished_host_staging() == set()
+    worker._report_failed_recv.assert_called_once_with("request")
 
 
 def _run_abort_timeout_test(llm: LLM, timeout: int):

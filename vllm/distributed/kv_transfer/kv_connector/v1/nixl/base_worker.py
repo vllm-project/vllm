@@ -2908,6 +2908,7 @@ class NixlBaseConnectorWorker:
             return False
         if req_id in self._failed_recv_pending:
             self._failed_recv_pending.discard(req_id)
+            self._report_failed_recv(req_id)
             return False
         if req_id not in self._recving_metadata:
             return False
@@ -2994,7 +2995,7 @@ class NixlBaseConnectorWorker:
                 self.xfer_stats.record_failed_notification()
 
     def _handle_failed_transfer(self, req_id: str, handle: int | None):
-        """Report a failure and let any remaining transfer components drain."""
+        """Defer failure reporting until all receive components have drained."""
         if handle is not None:
             with contextlib.suppress(Exception):
                 self.nixl_wrapper.release_xfer_handle(handle)
@@ -3002,16 +3003,11 @@ class NixlBaseConnectorWorker:
         if self._host_stager is not None:
             self._host_stager.abort(req_id)
         self._mark_recv_failed(req_id)
-        if not self._recving_transfers.get(req_id) and not self._host_staging_active(
-            req_id
-        ):
-            self._failed_recv_pending.discard(req_id)
+        self._finish_recv_component(req_id)
 
     def _mark_recv_failed(self, req_id: str) -> None:
-        if req_id in self._failed_recv_pending:
-            return
         self._failed_recv_pending.add(req_id)
-        self._report_failed_recv(req_id)
+        self._pending_recv_notifs.pop(req_id, None)
 
     def _report_failed_recv(self, req_id: str) -> None:
         """Report a failed recv and invalidate its blocks."""
