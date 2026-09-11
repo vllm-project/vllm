@@ -9,18 +9,16 @@ from typing import Annotated, Literal
 import numpy as np
 import torch
 import torch.nn as nn
+import transformers
 from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
+from packaging.version import Version
 from transformers import BatchFeature, PixtralVisionConfig
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens,
 )
-from transformers.models.pixtral.modeling_pixtral import (
-    PixtralRotaryEmbedding,
-    apply_rotary_pos_emb,
-    position_ids_in_meshgrid,
-)
+from transformers.models.pixtral.modeling_pixtral import apply_rotary_pos_emb
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -90,6 +88,44 @@ from .vision import (
 )
 
 PATCH_MERGE = "patch_merge"
+
+# transformers 5.17 reworked Pixtral's vision RoPE: `PixtralRotaryEmbedding` was
+# renamed to `PixtralVisionRotaryEmbedding`, `position_ids_in_meshgrid` was removed,
+# and the position ids changed from a flat `h * max_width + w` index into a
+# precomputed frequency table to `(h, w)` pairs consumed by axial RoPE. The two
+# formulations are numerically equivalent; only the plumbing differs.
+TRANSFORMERS_WITH_AXIAL_PIXTRAL_ROPE = Version(transformers.__version__) >= Version(
+    "5.17.0.dev0"
+)
+
+if TRANSFORMERS_WITH_AXIAL_PIXTRAL_ROPE:
+    from transformers.models.pixtral.modeling_pixtral import (
+        PixtralVisionRotaryEmbedding as PixtralRotaryEmbedding,
+    )
+else:
+    from transformers.models.pixtral.modeling_pixtral import PixtralRotaryEmbedding
+
+
+def _pixtral_position_ids(
+    patch_embeds_list: list[torch.Tensor], max_width: int
+) -> torch.Tensor:
+    """Position ids for the patches of every image, packed into one sequence.
+
+    Mirrors the position id construction of the installed transformers version:
+    `(h, w)` pairs of shape `(num_patches, 2)` on 5.17+, and flat
+    `h * max_width + w` indices of shape `(num_patches,)` before that.
+    """
+    positions = []
+    for patch in patch_embeds_list:
+        height, width = patch.shape[-2:]
+        h_grid, w_grid = torch.meshgrid(
+            torch.arange(height), torch.arange(width), indexing="ij"
+        )
+        if TRANSFORMERS_WITH_AXIAL_PIXTRAL_ROPE:
+            positions.append(torch.stack([h_grid.flatten(), w_grid.flatten()], dim=-1))
+        else:
+            positions.append(h_grid.flatten() * max_width + w_grid.flatten())
+    return torch.cat(positions)
 
 
 def _make_packed_sequence_metadata(
@@ -1501,7 +1537,7 @@ class PixtralHFVisionModel(nn.Module):
         patch_embeds = self.ln_pre(patch_embeds)
 
         # positional embeddings
-        position_ids = position_ids_in_meshgrid(
+        position_ids = _pixtral_position_ids(
             patch_embeds_list,
             max_width=self.config.image_size // self.config.patch_size,
         ).to(self.device)
