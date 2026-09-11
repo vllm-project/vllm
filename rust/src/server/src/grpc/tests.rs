@@ -37,7 +37,7 @@ use vllm_engine_core_client::protocol::decode_value;
 use vllm_engine_core_client::protocol::dtype::TensorDtype;
 use vllm_engine_core_client::protocol::handshake::{EngineCoreReadyResponse, KvEventsConfig};
 use vllm_engine_core_client::protocol::multimodal::{
-    MmBatchedField, MmFeatureSpec, MmField, MmFieldElem, MmKwargValue, PlaceholderRange,
+    MmBatchedField, MmField, MmFieldElem, MmKwargValue,
 };
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
@@ -50,17 +50,13 @@ use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task_w
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
 use vllm_llm::Llm;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend, TextRequest};
+use vllm_text::{Prompt, TextBackend};
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::control::kv_event_source;
 use super::convert::json_to_proto_struct;
-use super::inference::{
-    multimodal_cache_identifier, prepare_multimodal_cache_inputs,
-    salt_multimodal_identifiers_for_lora,
-};
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
 use super::{ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, pb};
@@ -74,91 +70,6 @@ use crate::tls_tests::{TestCerts, server_tls};
 // ========================================================================================
 
 type TestFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
-
-#[test]
-fn lora_isolates_multimodal_encoder_cache_identifiers() {
-    let field = MmField::Batched(MmBatchedField { keep_on_cpu: false });
-    let feature = MmFeatureSpec {
-        data: Some(BTreeMap::from([
-            (
-                "image_grid_thw".to_string(),
-                MmFieldElem {
-                    data: Some(MmKwargValue::Int(1)),
-                    field: field.clone(),
-                },
-            ),
-            (
-                "pixel_values".to_string(),
-                MmFieldElem {
-                    data: Some(MmKwargValue::Int(2)),
-                    field,
-                },
-            ),
-        ])),
-        modality: MmModality::Image,
-        identifier: "content-hash".to_string(),
-        mm_position: PlaceholderRange {
-            offset: 1,
-            length: 2,
-            is_embed: None,
-        },
-        mm_hash: Some("processor-hash".to_string()),
-    };
-
-    let base = salt_multimodal_identifiers_for_lora(Some(vec![feature.clone()]), "")
-        .expect("features should remain present");
-    let adapter_a = salt_multimodal_identifiers_for_lora(Some(vec![feature.clone()]), "adapter-a")
-        .expect("features should remain present");
-    let adapter_b = salt_multimodal_identifiers_for_lora(Some(vec![feature.clone()]), "adapter-b")
-        .expect("features should remain present");
-    let adapter_a_identifier = adapter_a[0].identifier.clone();
-
-    assert_ne!(base[0].identifier, "content-hash");
-    assert_ne!(adapter_a_identifier, adapter_b[0].identifier);
-    assert_ne!(adapter_a_identifier, base[0].identifier);
-
-    let adversarial_base = salt_multimodal_identifiers_for_lora(
-        Some(vec![MmFeatureSpec {
-            identifier: adapter_a_identifier.clone(),
-            ..feature.clone()
-        }]),
-        "",
-    )
-    .expect("features should remain present");
-    assert_ne!(adversarial_base[0].identifier, adapter_a_identifier);
-
-    let mut request = TextRequest::for_test();
-    request.mm_features = Some(vec![feature]);
-    request.sampling_params.vllm_xargs = Some(
-        [(
-            "ec_transfer_params".to_string(),
-            serde_json::json!({
-                "ec_items": [{
-                    "image_grid_thw": [[1, 16, 16]],
-                    "mm_hash": adapter_a_identifier,
-                }],
-            }),
-        )]
-        .into_iter()
-        .collect(),
-    );
-
-    prepare_multimodal_cache_inputs(&mut request, "adapter-a");
-
-    let prepared = request.mm_features.expect("features should remain present");
-    assert_eq!(prepared[0].identifier, adapter_a[0].identifier);
-    assert_eq!(
-        prepared[0]
-            .data
-            .as_ref()
-            .expect("feature data")
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        vec!["image_grid_thw"]
-    );
-    assert_eq!(prepared[0].mm_hash.as_deref(), Some("processor-hash"));
-}
 
 fn boxed_test_future<'a>(future: impl Future<Output = ()> + Send + 'a) -> TestFuture<'a> {
     Box::pin(future)
@@ -888,12 +799,9 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 let features = request.mm_features.as_ref().expect("multimodal features");
                 assert_eq!(features.len(), 2);
 
-                for (feature, source_identifier) in features.iter().zip(["image-1", "image-2"]) {
+                for (feature, identifier) in features.iter().zip(["image-1", "image-2"]) {
                     assert_eq!(feature.modality.as_str(), "image");
-                    assert_eq!(
-                        feature.identifier,
-                        multimodal_cache_identifier("", source_identifier)
-                    );
+                    assert_eq!(feature.identifier, identifier);
                     assert!(feature.mm_position.length > 1);
                     assert_eq!(
                         feature
@@ -945,8 +853,6 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
     )
     .await;
     let mut client = InferenceClient::new(channel);
-    let image_1_identifier = multimodal_cache_identifier("", "image-1");
-    let image_2_identifier = multimodal_cache_identifier("", "image-2");
 
     client
         .generate(pb::GenerateRequest {
@@ -968,10 +874,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 .collect(),
             kv: Some(pb::KvCacheParameters {
                 kv_transfer_params: Some(decode_kv_proto_struct()),
-                ec_transfer_params: Some(ec_proto_struct(&[
-                    image_2_identifier.as_str(),
-                    image_1_identifier.as_str(),
-                ])),
+                ec_transfer_params: Some(ec_proto_struct(&["image-2", "image-1"])),
                 ..Default::default()
             }),
             stopping: Some(pb::StoppingCriteria {
@@ -989,55 +892,57 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn unary_generate_forwards_preprocessed_multimodal_features() {
-    let kwargs = BTreeMap::from([(
-        "pixel_values".to_string(),
-        MmFieldElem {
-            data: Some(MmKwargValue::Tensor(WireTensor::from_raw(
-                TensorDtype::U8,
-                vec![3],
-                vec![1, 2, 3],
-            ))),
-            field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
-        },
-    )]);
-    let encoded_kwargs = rmp_serde::to_vec_named(&kwargs).expect("encode multimodal kwargs");
-    let expected_kwargs = kwargs.clone();
-    let (inference_service, control_service, engine_health, engine_task) =
-        setup_grpc_service_with_backend(
-            b"engine-grpc-preprocessed-multimodal",
-            default_stream_output_specs(),
-            multimodal_backend(),
-            move |request| {
-                assert_eq!(
-                    request.prompt_token_ids.as_deref(),
-                    Some(&[11, 99, 99, 12][..])
-                );
-                let features = request.mm_features.as_ref().expect("multimodal features");
-                assert_eq!(features.len(), 1);
-                let feature = &features[0];
-                assert_eq!(feature.modality, MmModality::Image);
-                assert_ne!(feature.identifier, "image-hash-a");
-                assert_eq!(feature.identifier.len(), 64);
-                assert!(feature.identifier.bytes().all(|byte| byte.is_ascii_hexdigit()));
-                assert_eq!(feature.mm_hash.as_deref(), Some("image-hash-a"));
-                assert_eq!(feature.mm_position.offset, 1);
-                assert_eq!(feature.mm_position.length, 2);
-                assert_eq!(feature.data.as_ref(), Some(&expected_kwargs));
+async fn generate_forwards_preprocessed_multimodal_features() {
+    for stream in [false, true] {
+        let kwargs = BTreeMap::from([(
+            "pixel_values".to_string(),
+            MmFieldElem {
+                data: Some(MmKwargValue::Tensor(WireTensor::from_raw(
+                    TensorDtype::U8,
+                    vec![3],
+                    vec![1, 2, 3],
+                ))),
+                field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
             },
+        )]);
+        let encoded_kwargs = rmp_serde::to_vec_named(&kwargs).expect("encode multimodal kwargs");
+        let expected_kwargs = kwargs.clone();
+        let (inference_service, control_service, engine_health, engine_task) =
+            setup_grpc_service_with_backend(
+                b"engine-grpc-preprocessed-multimodal",
+                default_stream_output_specs(),
+                multimodal_backend(),
+                move |request| {
+                    assert_eq!(
+                        request.prompt_token_ids.as_deref(),
+                        Some(&[11, 99, 99, 12][..])
+                    );
+                    let features = request.mm_features.as_ref().expect("multimodal features");
+                    assert_eq!(features.len(), 1);
+                    let feature = &features[0];
+                    assert_eq!(feature.modality.as_str(), "image");
+                    assert_eq!(feature.identifier, "image-hash-a");
+                    assert_eq!(feature.mm_hash.as_deref(), Some("image-hash-a"));
+                    assert_eq!(feature.mm_position.offset, 1);
+                    assert_eq!(feature.mm_position.length, 2);
+                    assert_eq!(feature.data.as_ref(), Some(&expected_kwargs));
+                    assert_eq!(
+                        feature.mm_position.is_embed,
+                        Some(WireTensor::from_bool(vec![2], vec![true, false]).unwrap())
+                    );
+                },
+            )
+            .await;
+        let (channel, server_task) = start_grpc_test_server(
+            inference_service,
+            control_service,
+            engine_health,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await;
-    let (channel, server_task) = start_grpc_test_server(
-        inference_service,
-        control_service,
-        engine_health,
-        tokio_util::sync::CancellationToken::new(),
-    )
-    .await;
-    let mut client = InferenceClient::new(channel);
+        let mut client = InferenceClient::new(channel);
 
-    client
-        .generate(pb::GenerateRequest {
+        let request = pb::GenerateRequest {
             request_id: "test-preprocessed-multimodal".to_string(),
             model: "test-model".to_string(),
             prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
@@ -1052,7 +957,7 @@ async fn unary_generate_forwards_preprocessed_multimodal_features() {
                         offset: 1,
                         length: 2,
                         mm_hash: Some("image-hash-a".to_string()),
-                        is_embed: Vec::new(),
+                        is_embed: vec![true, false],
                     },
                 )),
                 mime_type: String::new(),
@@ -1063,12 +968,18 @@ async fn unary_generate_forwards_preprocessed_multimodal_features() {
                 ..Default::default()
             }),
             ..Default::default()
-        })
-        .await
-        .expect("preprocessed multimodal generate");
+        };
+        if stream {
+            let mut response =
+                client.generate_stream(request).await.expect("preprocessed stream").into_inner();
+            while response.message().await.expect("stream message").is_some() {}
+        } else {
+            client.generate(request).await.expect("preprocessed generate");
+        }
 
-    engine_task.await.expect("mock engine task");
-    server_task.abort();
+        engine_task.await.expect("mock engine task");
+        server_task.abort();
+    }
 }
 
 fn preprocessed_grpc_media(
@@ -1157,7 +1068,7 @@ async fn unary_generate_rejects_preprocessed_features_for_text_only_model() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn unary_generate_enforces_preprocessed_multimodal_limits() {
+async fn generate_validates_preprocessed_model_limits_and_prompt() {
     let limits = MmLimitPerPrompt::from([(MmModality::Image, MmLimitSpec::Count(1))]);
     let (inference_service, control_service, engine_health, _engine_task) =
         setup_grpc_service_with_backend(
@@ -1176,15 +1087,40 @@ async fn unary_generate_enforces_preprocessed_multimodal_limits() {
     .await;
     let mut client = InferenceClient::new(channel);
 
-    let status = client
-        .generate(preprocessed_grpc_request(vec![
-            preprocessed_grpc_media(pb::Modality::Image, "image-a", 0, 1),
-            preprocessed_grpc_media(pb::Modality::Image, "image-b", 2, 1),
-        ]))
-        .await
-        .expect_err("preprocessed features must respect modality limits");
-
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    let over_limit = preprocessed_grpc_request(vec![
+        preprocessed_grpc_media(pb::Modality::Image, "image-a", 0, 1),
+        preprocessed_grpc_media(pb::Modality::Image, "image-b", 2, 1),
+    ]);
+    let bad_range = preprocessed_grpc_request(vec![preprocessed_grpc_media(
+        pb::Modality::Image,
+        "image",
+        3,
+        2,
+    )]);
+    let unsupported = preprocessed_grpc_request(vec![preprocessed_grpc_media(
+        pb::Modality::Audio,
+        "audio",
+        0,
+        1,
+    )]);
+    let mut text = preprocessed_grpc_request(vec![preprocessed_grpc_media(
+        pb::Modality::Image,
+        "image",
+        0,
+        1,
+    )]);
+    let mut truncated = text.clone();
+    text.prompt = Some(pb::generate_request::Prompt::Text("hello".to_owned()));
+    truncated.truncate_prompt_tokens = 1;
+    for request in [over_limit, bad_range, unsupported, text, truncated] {
+        let status = client.generate(request.clone()).await.expect_err("invalid multimodal input");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        let status = client
+            .generate_stream(request)
+            .await
+            .expect_err("invalid streaming multimodal input");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
     server_task.abort();
 }
 

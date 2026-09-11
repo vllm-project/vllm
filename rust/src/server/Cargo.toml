@@ -20,7 +20,6 @@ libc.workspace = true
 llm-multimodal.workspace = true
 openssl.workspace = true
 prost-types.workspace = true
-rmp-serde.workspace = true
 rmpv.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -59,6 +58,7 @@ async-openai = { workspace = true, features = ["full"] }
 bytes.workspace = true
 clap.workspace = true
 expect-test.workspace = true
+rmp-serde.workspace = true
 serial_test.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

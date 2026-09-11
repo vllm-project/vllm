@@ -9,6 +9,9 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use super::tensor::WireTensor;
 
+mod inline;
+pub use inline::{InlineMmError, InlineMmFeatures, MAX_INLINE_MM_BYTES, decode_inline_mm_kwargs};
+
 /// Modalities represented by engine-ready multimodal features.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

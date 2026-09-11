@@ -42,7 +42,7 @@ pub use request::{
     ChatToolChoice, GenerationPromptMode, ReasoningEffort, ResolvedToolContext, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
-pub use vllm_engine_core_client::protocol::multimodal::{MmFeatures, MmModality};
+pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 pub use vllm_llm::FinishReason;
 pub use vllm_text::GenerationConfigMode;
 
@@ -130,7 +130,7 @@ impl ChatRequestProcessor {
     /// Prepare media for an already-tokenized request.
     async fn prepare_media(
         &self,
-        media: Vec<MediaContentPart>,
+        media: multimodal::MultimodalInput,
         token_ids: &mut Vec<u32>,
     ) -> Result<Option<MmFeatures>> {
         if media.is_empty() {
@@ -140,8 +140,15 @@ impl ChatRequestProcessor {
             .backend
             .multimodal_model_info()
             .ok_or(Error::UnsupportedMultimodalRenderer)?;
-        let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
-        let features = info.prepare_multimodal(media, token_ids, model_dtype).await?;
+        let features = match media {
+            multimodal::MultimodalInput::Raw(parts) => {
+                let model_dtype = self.model_dtype.ok_or(Error::UnsupportedMultimodalRenderer)?;
+                info.prepare_multimodal(parts, token_ids, model_dtype).await?
+            }
+            multimodal::MultimodalInput::Preprocessed(features) => {
+                info.prepare_preprocessed(features, token_ids.len())?
+            }
+        };
         Ok(Some(features))
     }
 
@@ -285,24 +292,15 @@ impl ChatLlm {
         self.processor.backend.multimodal_model_info().is_some()
     }
 
-    /// Validate already-preprocessed multimodal feature modalities and limits.
-    pub fn validate_preprocessed_media(
-        &self,
-        modalities: impl IntoIterator<Item = MmModality>,
-    ) -> Result<()> {
-        let model_info = self.processor.backend.multimodal_model_info().ok_or(
-            Error::UnsupportedMultimodalContent("preprocessed multimodal features"),
-        )?;
-        model_info.validate_preprocessed_modalities(modalities)
-    }
-
     /// Prepare media for an already-tokenized request.
+    /// Raw content is preprocessed; inline features are checked against model
+    /// capabilities, modality limits, and the final prompt positions.
     pub async fn prepare_media(
         &self,
-        media: Vec<MediaContentPart>,
+        media: impl Into<multimodal::MultimodalInput>,
         token_ids: &mut Vec<u32>,
     ) -> Result<Option<MmFeatures>> {
-        self.processor.prepare_media(media, token_ids).await
+        self.processor.prepare_media(media.into(), token_ids).await
     }
 
     /// Effective tool-call parser name for this model, if parsing is enabled.

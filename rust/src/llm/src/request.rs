@@ -30,6 +30,7 @@ pub struct GenerateRequest {
     /// Sampling parameters forwarded to engine-core.
     pub sampling_params: EngineCoreSamplingParams,
     /// Optional multimodal features already prepared by `vllm-chat`.
+    /// Encoder identifiers are partitioned by LoRA during request preparation.
     pub mm_features: Option<MmFeatures>,
     /// Unix timestamp, in seconds, when this request arrived at the frontend.
     ///
@@ -72,7 +73,7 @@ impl GenerateRequest {
             request_id,
             prompt_token_ids,
             sampling_params,
-            mm_features,
+            mut mm_features,
             arrival_time,
             cache_salt,
             trace_headers,
@@ -82,6 +83,14 @@ impl GenerateRequest {
             reasoning_parser_kwargs,
             lora_request,
         } = self;
+
+        // Encoder outputs may depend on the adapter. Partition the cache for
+        // every frontend path, preserving the producer's processor hash.
+        if let (Some(features), Some(lora)) = (&mut mm_features, &lora_request) {
+            for feature in features {
+                feature.identifier = format!("{}:{}", lora.lora_name, feature.identifier);
+            }
+        }
 
         let external_request_id = request_id;
         let engine_request_id = if randomize_request_id {
@@ -231,5 +240,44 @@ mod tests {
         let prepared = request.prepare(false).unwrap();
 
         assert_eq!(prepared.engine_request.mm_features, Some(Vec::new()));
+    }
+
+    #[test]
+    fn prepare_partitions_encoder_cache_by_lora_and_preserves_processor_hash() {
+        use vllm_engine_core_client::protocol::lora::LoraRequest;
+        use vllm_engine_core_client::protocol::multimodal::{
+            MmFeatureSpec, MmModality, PlaceholderRange,
+        };
+
+        for adapter in [None, Some("adapter-a"), Some("adapter-b")] {
+            let mut request = sample_request();
+            request.mm_features = Some(vec![MmFeatureSpec {
+                data: None,
+                modality: MmModality::Image,
+                identifier: "image-id".to_owned(),
+                mm_hash: Some("processor-hash".to_owned()),
+                mm_position: PlaceholderRange {
+                    offset: 1,
+                    length: 2,
+                    is_embed: None,
+                },
+            }]);
+            request.lora_request = adapter.map(|name| LoraRequest {
+                lora_name: name.to_owned(),
+                lora_int_id: 1,
+                lora_path: "/adapter".to_owned(),
+                base_model_name: None,
+                tensorizer_config_dict: None,
+                load_inplace: false,
+                is_3d_lora_weight: false,
+            });
+            let prepared = request.prepare(false).unwrap();
+            let feature = &prepared.engine_request.mm_features.as_ref().unwrap()[0];
+            assert_eq!(
+                feature.identifier,
+                adapter.map_or_else(|| "image-id".to_owned(), |name| format!("{name}:image-id"))
+            );
+            assert_eq!(feature.mm_hash.as_deref(), Some("processor-hash"));
+        }
     }
 }

@@ -27,6 +27,8 @@ pub enum Error {
     UnsupportedModality { modality: String },
     #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
     MmLimitExceeded { modality: String, limit: usize },
+    #[error(transparent)]
+    InlineMultimodal(#[from] vllm_engine_core_client::protocol::multimodal::InlineMmError),
     #[error("multimodal preprocessing error: {0}")]
     Multimodal(#[message] String),
     #[error("{kind} parsing is not available for model `{model_id}`")]
@@ -106,6 +108,7 @@ impl Error {
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
             | Self::UnsupportedModality { .. }
+            | Self::InlineMultimodal(_)
             | Self::MmLimitExceeded { .. } => true,
 
             _ => false,

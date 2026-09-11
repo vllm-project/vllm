@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use futures::{Stream, StreamExt as _};
-use sha2::{Digest as _, Sha256};
 use thiserror_ext::AsReport as _;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -14,7 +13,6 @@ use tonic::{Request, Response, Status};
 use tracing::{Span, info, info_span, warn};
 use tracing_futures::Instrument as _;
 use uuid::Uuid;
-use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures};
 use vllm_llm::current_unix_timestamp_secs;
 use vllm_text::{DecodedTextEvent, Prompt, SampledDelta, TextOutputStreamExt as _, TextRequest};
 
@@ -25,30 +23,6 @@ use crate::state::AppState;
 pub(crate) type InferenceGrpcService = InferenceServer<InferenceServiceImpl>;
 
 const DATA_PARALLEL_RANK_METADATA_KEY: &str = "x-data-parallel-rank";
-
-pub(super) fn salt_multimodal_identifiers_for_lora(
-    features: Option<MmFeatures>,
-    lora_name: &str,
-) -> Option<MmFeatures> {
-    features.map(|features| {
-        features
-            .into_iter()
-            .map(|feature| MmFeatureSpec {
-                identifier: multimodal_cache_identifier(lora_name, &feature.identifier),
-                ..feature
-            })
-            .collect()
-    })
-}
-
-pub(super) fn multimodal_cache_identifier(lora_name: &str, identifier: &str) -> String {
-    let mut hasher = Sha256::new();
-    for component in [lora_name.as_bytes(), identifier.as_bytes()] {
-        hasher.update((component.len() as u64).to_be_bytes());
-        hasher.update(component);
-    }
-    format!("{:x}", hasher.finalize())
-}
 
 /// gRPC inference service backed by the shared application state.
 pub struct InferenceServiceImpl {
@@ -120,12 +94,6 @@ fn apply_encoder_cache_placeholders(text_request: &mut TextRequest) {
     }
 }
 
-pub(super) fn prepare_multimodal_cache_inputs(text_request: &mut TextRequest, lora_name: &str) {
-    text_request.mm_features =
-        salt_multimodal_identifiers_for_lora(text_request.mm_features.take(), lora_name);
-    apply_encoder_cache_placeholders(text_request);
-}
-
 impl InferenceServiceImpl {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
@@ -181,51 +149,27 @@ impl InferenceServiceImpl {
                 })?);
             }
 
-            match convert::multimodal_input_from_request(media)? {
-                convert::GrpcMultimodalInput::None => {}
-                convert::GrpcMultimodalInput::Raw(media) => {
-                    let Prompt::TokenIds(mut token_ids) = text_request.prompt else {
-                        return Err(Status::invalid_argument(
-                            "multimodal gRPC requests must provide token_ids input",
-                        ));
-                    };
-                    let mm_features = self
-                        .state
-                        .chat
-                        .prepare_media(media, &mut token_ids)
-                        .await
-                        .map_err(|error| Status::internal(error.to_report_string()))?;
-                    text_request.prompt = Prompt::TokenIds(token_ids);
-                    text_request.mm_features = mm_features;
-                }
-                convert::GrpcMultimodalInput::Preprocessed(features) => {
-                    self.state
-                        .chat
-                        .validate_preprocessed_media(
-                            features.iter().map(|feature| feature.modality),
-                        )
-                        .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
-                    let Prompt::TokenIds(token_ids) = &text_request.prompt else {
-                        return Err(Status::invalid_argument(
-                            "multimodal gRPC requests must provide token_ids input",
-                        ));
-                    };
-                    for (index, feature) in features.iter().enumerate() {
-                        feature
-                            .mm_position
-                            .offset
-                            .checked_add(feature.mm_position.length)
-                            .filter(|end| *end <= token_ids.len())
-                            .ok_or_else(|| {
-                                Status::invalid_argument(format!(
-                                    "media[{index}].features placeholder range exceeds token_ids"
-                                ))
-                            })?;
-                    }
-                    text_request.mm_features = Some(features);
-                }
+            let media = super::media::from_proto(media)?;
+            if !media.is_empty() {
+                let Prompt::TokenIds(mut token_ids) = text_request.prompt else {
+                    return Err(Status::invalid_argument(
+                        "multimodal gRPC requests must provide token_ids input",
+                    ));
+                };
+                let mm_features =
+                    self.state.chat.prepare_media(media, &mut token_ids).await.map_err(
+                        |error| {
+                            if error.is_request_validation_error() {
+                                Status::invalid_argument(error.to_report_string())
+                            } else {
+                                Status::internal(error.to_report_string())
+                            }
+                        },
+                    )?;
+                text_request.prompt = Prompt::TokenIds(token_ids);
+                text_request.mm_features = mm_features;
             }
-            prepare_multimodal_cache_inputs(&mut text_request, &lora_name);
+            apply_encoder_cache_placeholders(&mut text_request);
 
             Ok(text_request)
         }
