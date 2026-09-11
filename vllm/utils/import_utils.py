@@ -133,18 +133,21 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
 
 @cache
 def get_vllm_optional_dependencies():
-    metadata = importlib.metadata.metadata("vllm")
-    requirements = metadata.get_all("Requires-Dist", [])
-    extras = metadata.get_all("Provides-Extra", [])
+    try:
+        metadata = importlib.metadata.metadata("vllm")
+        requirements = metadata.get_all("Requires-Dist") or []
+        extras = metadata.get_all("Provides-Extra") or []
 
-    return {
-        extra: [
-            re.split(r";|>=|<=|==", req)[0]
-            for req in requirements
-            if req.endswith(f'extra == "{extra}"')
-        ]
-        for extra in extras
-    }
+        return {
+            extra: [
+                re.split(r";|>=|<=|==", req)[0]
+                for req in requirements
+                if req.endswith(f'extra == "{extra}"')
+            ]
+            for extra in extras
+        }
+    except Exception:
+        return {}
 
 
 class _PlaceholderBase:
@@ -611,13 +614,22 @@ def has_quark():
     return _has_module("quark")
 
 
-def check_torchcodec_available():
+def has_torchcodec() -> bool:
     """Whether the optional `torchcodec` package is available."""
+    return _has_module("torchcodec")
+
+
+def check_torchcodec_available():
+    """Verify that the optional `torchcodec` package is available and importable.
+
+    Raises:
+        ImportError: If `torchcodec` is not installed or failed to load.
+    """
     try:
-        import torchcodec  # noqa: F401
-    except RuntimeError as e:
-        # torchcodec will raise RuntimeError during import instead
-        # of ImportError when system ffmpeg unavailable, with a
+        importlib.import_module("torchcodec")
+    except (RuntimeError, OSError) as e:
+        # torchcodec will raise RuntimeError or OSError during import instead
+        # of ImportError when system ffmpeg is unavailable, with a
         # message that can leak sensitive system information.
         # Trim it down to avoid it.
         marker = (
@@ -625,5 +637,13 @@ def check_torchcodec_available():
         )
         message = str(e)
         if marker in message:
-            raise RuntimeError(message.split(marker, 1)[0].rstrip()) from None
-        raise e
+            raise ImportError(message.split(marker, 1)[0].rstrip()) from None
+        raise ImportError(
+            f"torchcodec is installed but failed to load ({e}). "
+            "Ensure system FFmpeg and required shared libraries are installed."
+        ) from e
+    except ImportError as e:
+        raise ImportError(
+            "The `torchcodec` package is required for the torchcodec video decoder. "
+            "Install it with: pip install torchcodec"
+        ) from e

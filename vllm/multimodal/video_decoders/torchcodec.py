@@ -16,7 +16,7 @@ from .base import (
 
 try:
     from torchcodec.decoders import VideoDecoder
-except (ImportError, RuntimeError):
+except (ImportError, RuntimeError, OSError):
     VideoDecoder = PlaceholderModule("torchcodec").placeholder_attr(  # type: ignore[assignment]
         "decoders.VideoDecoder"
     )
@@ -68,14 +68,22 @@ class TorchCodecVideoBackendMixin:
         num_ffmpeg_threads: int = 0,
         seek_mode: Literal["exact", "approximate"] = "exact",
     ) -> "VideoDecoder":
-        # NHWC matches the (num_frames, H, W, 3) uint8 RGB layout the rest
-        # of the pipeline expects, avoiding a transpose.
-        return VideoDecoder(
-            data,
-            dimension_order="NHWC",
-            num_ffmpeg_threads=num_ffmpeg_threads,
-            seek_mode=seek_mode,
-        )
+        try:
+            # NHWC matches the (num_frames, H, W, 3) uint8 RGB layout the rest
+            # of the pipeline expects, avoiding a transpose.
+            return VideoDecoder(
+                data,
+                dimension_order="NHWC",
+                num_ffmpeg_threads=num_ffmpeg_threads,
+                seek_mode=seek_mode,
+            )
+        except (RuntimeError, OSError) as e:
+            if "Could not load libtorchcodec" in str(e):
+                raise ImportError(
+                    "torchcodec video backend is unavailable (requires the "
+                    "torchcodec package and a system ffmpeg installation)"
+                ) from e
+            raise
 
     @staticmethod
     def get_torchcodec_metadata(decoder: "VideoDecoder") -> VideoSourceMetadata:

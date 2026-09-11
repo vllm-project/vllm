@@ -30,7 +30,7 @@ from vllm.multimodal.video_decoders.pynvvideocodec import (
 
 from ..utils import cosine_similarity, create_video_from_image, normalize_image
 
-pytestmark = pytest.mark.cpu_test
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 ASSETS_DIR = Path(__file__).parent.parent / "assets"
 assert ASSETS_DIR.exists()
@@ -550,3 +550,26 @@ def test_pynvvc_frames_normalized_to_nhwc(layout: str):
     assert out.shape == (n, h, w, c)
     assert out.is_contiguous()
     assert torch.equal(out, nhwc)  # content preserved / correctly transposed
+
+
+def test_torchcodec_oserror_raises_import_error(monkeypatch: pytest.MonkeyPatch):
+    """When torchcodec is installed but fails with OSError, decode_video should
+    raise an informative ImportError."""
+    from unittest.mock import patch
+
+    from vllm.multimodal.video import VideoTargetMetadata
+    from vllm.multimodal.video_decoders.torchcodec import decode_torchcodec
+
+    with (
+        patch(
+            "vllm.utils.import_utils.importlib.import_module",
+            side_effect=OSError("libavcodec.so.58: cannot open shared object file"),
+        ),
+        pytest.raises(ImportError, match="torchcodec is installed but failed to load"),
+    ):
+        decode_torchcodec(
+            loader_cls=None,
+            data=b"fake_video_bytes",
+            target=VideoTargetMetadata(num_frames=1, fps=1.0, max_duration=10),
+            sampling_kwargs={},
+        )

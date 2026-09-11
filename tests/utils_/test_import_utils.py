@@ -5,7 +5,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from vllm.utils.import_utils import PlaceholderModule, _has_module, import_plugin
+from vllm.utils.import_utils import (
+    PlaceholderModule,
+    _has_module,
+    check_torchcodec_available,
+    has_torchcodec,
+    import_plugin,
+)
+
+pytestmark = [pytest.mark.skip_global_cleanup]
 
 
 def _raises_module_not_found():
@@ -135,3 +143,84 @@ class TestImportPlugin:
         ):
             result = import_plugin("nonexistent_plugin_xyz")
             assert result is None
+
+
+class TestTorchcodecAvailability:
+    """Tests for torchcodec availability checks and error handling."""
+
+    def test_check_torchcodec_available_success(self):
+        with patch(
+            "vllm.utils.import_utils.importlib.import_module",
+            return_value=MagicMock(),
+        ):
+            # Should not raise any exception
+            check_torchcodec_available()
+
+    def test_check_torchcodec_available_not_installed(self):
+        with (
+            patch(
+                "vllm.utils.import_utils.importlib.import_module",
+                side_effect=ModuleNotFoundError("No module named 'torchcodec'"),
+            ),
+            pytest.raises(ImportError, match="The `torchcodec` package is required"),
+        ):
+            check_torchcodec_available()
+
+    def test_check_torchcodec_available_oserror(self):
+        with (
+            patch(
+                "vllm.utils.import_utils.importlib.import_module",
+                side_effect=OSError("libavcodec.so.58: cannot open shared object file"),
+            ),
+            pytest.raises(
+                ImportError,
+                match="torchcodec is installed but failed to load",
+            ),
+        ):
+            check_torchcodec_available()
+
+    def test_check_torchcodec_available_runtime_error_with_marker(self):
+        msg = (
+            "Failed to load\nThe following exceptions were raised as we tried to load "
+            "libtorchcodec:\n[sensitive system paths]"
+        )
+        with patch(
+            "vllm.utils.import_utils.importlib.import_module",
+            side_effect=RuntimeError(msg),
+        ):
+            with pytest.raises(ImportError) as exc_info:
+                check_torchcodec_available()
+            assert "[sensitive system paths]" not in str(exc_info.value)
+            assert "Failed to load" in str(exc_info.value)
+
+    def test_has_torchcodec_false_when_oserror(self):
+        _has_module.cache_clear()
+        fake_spec = MagicMock()
+        with (
+            patch(
+                "vllm.utils.import_utils.importlib.util.find_spec",
+                return_value=fake_spec,
+            ),
+            patch(
+                "vllm.utils.import_utils.importlib.import_module",
+                side_effect=OSError("libffmpeg.so not found"),
+            ),
+        ):
+            assert has_torchcodec() is False
+        _has_module.cache_clear()
+
+    def test_has_torchcodec_true_when_importable(self):
+        _has_module.cache_clear()
+        fake_spec = MagicMock()
+        with (
+            patch(
+                "vllm.utils.import_utils.importlib.util.find_spec",
+                return_value=fake_spec,
+            ),
+            patch(
+                "vllm.utils.import_utils.importlib.import_module",
+                return_value=MagicMock(),
+            ),
+        ):
+            assert has_torchcodec() is True
+        _has_module.cache_clear()
