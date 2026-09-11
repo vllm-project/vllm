@@ -1316,6 +1316,25 @@ def _replace_video_token_placeholders(
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
     @staticmethod
+    def _resolve_vision_size(
+        processor: Qwen2VLImageProcessor | Qwen3VLVideoProcessor,
+        mm_kwargs: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve vision size overrides against the processor defaults.
+
+        The returned `size` is complete: `size` is applied first, followed by
+        `min_pixels` and `max_pixels` for the corresponding edges.
+        """
+        size = dict(processor.size)
+        if (override_size := mm_kwargs.get("size")) is not None:
+            size = size | override_size
+        if (min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size["shortest_edge"] = min_pixels
+        if (max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size["longest_edge"] = max_pixels
+        return size
+
+    @staticmethod
     def _expands_only_video_token(hf_processor: ProcessorMixin) -> bool:
         """Transformers>=5.10 processors override `replace_video_token`
         to expand only the bare video token, keeping the prompt's outer
@@ -1365,24 +1384,26 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 # used to calculate the timestamps. Make sure that
                 # do_sample_frames in mm_kwargs is false for presampled videos.
 
-                # NOTE: a copy of is created to update do_sample_frames,
-                # otherwise mm_hash for the object will be incorrect.
-                video_mm_kwargs = dict(**hf_processor_mm_kwargs)
-                merged = self.info.ctx.get_merged_mm_kwargs(
+                # Use fresh merged kwargs for each item because sampling options are
+                # updated below; `hf_processor_mm_kwargs` must remain unchanged for
+                # `mm_hash`.
+                video_mm_kwargs = self.info.ctx.get_merged_mm_kwargs(
                     hf_processor_mm_kwargs, modality="video"
                 )
-                if merged.keys() & {"size", "min_pixels", "max_pixels"}:
-                    video_size = dict(self.info.get_video_processor().size)
-                    size_override = merged.get("size")
-                    if size_override is not None:
-                        video_size = video_size | size_override
-                    min_pixels = merged.get("min_pixels")
-                    if min_pixels is not None:
-                        video_size["shortest_edge"] = min_pixels
-                    max_pixels = merged.get("max_pixels")
-                    if max_pixels is not None:
-                        video_size["longest_edge"] = max_pixels
-                    video_mm_kwargs["size"] = video_size
+                video_scoped_kwargs = dict(video_mm_kwargs.get("videos_kwargs", {}))
+
+                # Resolve video sizing overrides against the processor defaults and
+                # keep the complete size under videos_kwargs. Transformers rejects a
+                # processor kwarg when provided both as a flat kwarg and under its
+                # modality-specific kwargs.
+                if video_mm_kwargs.keys() & {"size", "min_pixels", "max_pixels"}:
+                    video_scoped_kwargs["size"] = self._resolve_vision_size(
+                        self.info.get_video_processor(), video_mm_kwargs
+                    )
+                    video_scoped_kwargs.pop("min_pixels", None)
+                    video_scoped_kwargs.pop("max_pixels", None)
+
+                # Resolve per-item sampling options before computing timestamps.
                 sampled_fps = video_mm_kwargs.get("fps")
                 if is_list_of(sampled_fps, float):
                     video_mm_kwargs["fps"] = sampled_fps[item_idx]
@@ -1420,6 +1441,22 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 if "num_frames" in video_mm_kwargs and "fps" not in video_mm_kwargs:
                     video_mm_kwargs["fps"] = None
 
+                # Keep the final per-item sampling values under videos_kwargs.
+                for key in ("fps", "num_frames", "do_sample_frames"):
+                    if key in video_mm_kwargs:
+                        video_scoped_kwargs[key] = video_mm_kwargs[key]
+
+                # Before the HF call, remove flat copies of the video-scoped kwargs.
+                # min_pixels/max_pixels are already reflected in videos_kwargs["size"],
+                # and images_kwargs does not apply to this video-only call.
+                for key in video_scoped_kwargs.keys() | {
+                    "min_pixels",
+                    "max_pixels",
+                }:
+                    video_mm_kwargs.pop(key, None)
+                video_mm_kwargs.pop("images_kwargs", None)
+                video_mm_kwargs["videos_kwargs"] = video_scoped_kwargs
+
                 video_outputs = self.info.ctx.call_hf_processor(
                     self.info.get_hf_processor(**video_mm_kwargs),
                     dict(
@@ -1427,6 +1464,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                         **video_mm_data,
                     ),
                     video_mm_kwargs,
+                    mm_kwargs_are_merged=True,
                 )
 
                 # Discard HF output input_ids — we use get_video_repl below
@@ -1479,17 +1517,41 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         else:
             video_outputs = dict()
 
-        # fps/num_frames are video-only kwargs already consumed by the loop;
-        # exclude them so the text/image processor call below never gets a list.
-        non_video_mm_kwargs = {
-            k: v
-            for k, v in hf_processor_mm_kwargs.items()
-            if k not in ("fps", "num_frames")
-        }
+        image_mm_kwargs = self.info.ctx.get_merged_mm_kwargs(
+            hf_processor_mm_kwargs, modality="image"
+        )
+        image_scoped_kwargs = dict(image_mm_kwargs.get("images_kwargs", {}))
+
+        # Resolve image sizing overrides against the processor defaults and keep
+        # the complete size under images_kwargs. Transformers rejects a processor
+        # kwarg when provided both as a flat kwarg and under its modality-specific
+        # kwargs.
+        if image_mm_kwargs.keys() & {"size", "min_pixels", "max_pixels"}:
+            image_scoped_kwargs["size"] = self._resolve_vision_size(
+                self.info.get_image_processor(), image_mm_kwargs
+            )
+            image_scoped_kwargs.pop("min_pixels", None)
+            image_scoped_kwargs.pop("max_pixels", None)
+
+        # Before the HF call, remove flat copies of the image-scoped kwargs.
+        # min_pixels/max_pixels are already reflected in images_kwargs["size"].
+        for key in image_scoped_kwargs.keys() | {"min_pixels", "max_pixels"}:
+            image_mm_kwargs.pop(key, None)
+
+        # Videos are processed separately above, so remove video-specific kwargs
+        # from the text/image call.
+        for key in ("fps", "num_frames", "do_sample_frames"):
+            image_mm_kwargs.pop(key, None)
+        image_mm_kwargs.pop("videos_kwargs", None)
+
+        if image_scoped_kwargs:
+            image_mm_kwargs["images_kwargs"] = image_scoped_kwargs
+
         processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**non_video_mm_kwargs),
+            self.info.get_hf_processor(**image_mm_kwargs),
             dict(text=prompt_text, **mm_data),
-            non_video_mm_kwargs,
+            image_mm_kwargs,
+            mm_kwargs_are_merged=True,
         )
 
         # Replace each placeholder with pre-computed video tokens.
