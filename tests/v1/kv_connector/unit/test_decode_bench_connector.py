@@ -790,7 +790,7 @@ if __name__ == "__main__":
     "block_ids",
     [
         [0, 1, 2, 3],
-        [2, 5, 9],
+        [2, 5, 7],
         [0],
         [3, 4, 5, 99],
         [],
@@ -799,7 +799,7 @@ if __name__ == "__main__":
 def test_decode_bench_connector_fills_requested_blocks_only(block_ids):
     """Only the requested block rows are filled, contiguous or not."""
     block_size = 16
-    num_gpu_blocks = 10
+    num_gpu_blocks = 8
     vllm_config = create_vllm_config(
         block_size=block_size,
         max_num_batched_tokens=1000,
@@ -829,7 +829,7 @@ def test_decode_bench_connector_fills_requested_blocks_only(block_ids):
     connector.register_kv_caches({"layer": kv_cache})
     connector.bind_connector_metadata(
         DecodeBenchConnectorMetadata(
-            reqs_to_fill={"request": ((block_ids,), block_size)}
+            reqs_to_fill={"request": ((block_ids,), block_size * len(block_ids))}
         )
     )
 
@@ -848,7 +848,7 @@ def test_decode_bench_connector_fills_requested_blocks_only(block_ids):
 def test_decode_bench_connector_random_fill_leaves_other_blocks_zero():
     """A random fill stays inside the requested block rows."""
     block_size = 16
-    num_gpu_blocks = 10
+    num_gpu_blocks = 8
     requested = [0, 4, 7]
     vllm_config = create_vllm_config(
         block_size=block_size,
@@ -880,7 +880,7 @@ def test_decode_bench_connector_random_fill_leaves_other_blocks_zero():
     connector.register_kv_caches({"layer": kv_cache})
     connector.bind_connector_metadata(
         DecodeBenchConnectorMetadata(
-            reqs_to_fill={"request": ((requested,), block_size)}
+            reqs_to_fill={"request": ((requested,), block_size * len(requested))}
         )
     )
 
@@ -907,7 +907,7 @@ def test_decode_bench_connector_reuses_one_random_fill_buffer(
 ):
     """A contiguous random fill needs no scratch buffer, a scattered one reuses one."""
     block_size = 16
-    num_gpu_blocks = 10
+    num_gpu_blocks = 8
     vllm_config = create_vllm_config(
         block_size=block_size,
         max_num_batched_tokens=1000,
@@ -939,7 +939,7 @@ def test_decode_bench_connector_reuses_one_random_fill_buffer(
     for _ in range(3):
         connector.bind_connector_metadata(
             DecodeBenchConnectorMetadata(
-                reqs_to_fill={"request": ((block_ids,), block_size)}
+                reqs_to_fill={"request": ((block_ids,), block_size * len(block_ids))}
             )
         )
         connector.start_load_kv(
@@ -989,7 +989,9 @@ def test_decode_bench_connector_fills_state_tensors_once():
     for state_tensor in state_tensors:
         state_tensor.zero_()
     connector.bind_connector_metadata(
-        DecodeBenchConnectorMetadata(reqs_to_fill={"request": (([0, 1],), block_size)})
+        DecodeBenchConnectorMetadata(
+            reqs_to_fill={"request": (([0, 1],), block_size * 2)}
+        )
     )
 
     connector.start_load_kv(
