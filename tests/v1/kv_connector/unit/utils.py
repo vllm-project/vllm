@@ -545,6 +545,7 @@ def make_nixl_scheduler(
         sched._reqs_need_save = {}
         sched.use_host_buffer = False
         sched.engine_id = "test-engine"
+        sched.transfer_tp_size = 1
         sched.side_channel_host = "localhost"
         sched.side_channel_port = 5555
         sched.blocks_per_sw = []
@@ -584,6 +585,7 @@ def make_nixl_push_scheduler(
     sched.decoder_kv_blocks_ttl = decoder_kv_blocks_ttl
     sched.use_host_buffer = False
     sched.engine_id = "decode-engine"
+    sched.transfer_tp_size = 1
     sched.side_channel_host = "127.0.0.1"
     sched.side_channel_port = 5600
     sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled

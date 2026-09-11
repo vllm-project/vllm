@@ -576,19 +576,38 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
 
 
 class TestNixlHandshake:
-    @pytest.mark.parametrize("pcp_rank", [0, 1])
+    @pytest.mark.parametrize(
+        ("pcp_rank", "pcp_size", "dcp_size", "expected_tracked"),
+        [
+            (0, 2, 1, True),
+            (1, 2, 1, False),
+            (0, 2, 2, True),
+            (1, 2, 2, True),
+            (0, 4, 4, True),
+            (1, 4, 4, True),
+            (2, 4, 4, True),
+            (3, 4, 4, True),
+        ],
+    )
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     )
-    def test_pcp_producer_uses_canonical_replica(
-        self, default_vllm_config, dist_init, pcp_rank
+    def test_pcp_producer_exposes_dcp_shards_or_canonical_replica(
+        self,
+        default_vllm_config,
+        dist_init,
+        pcp_rank,
+        pcp_size,
+        dcp_size,
+        expected_tracked,
     ):
-        """Only PCP rank zero publishes, but every rank reports completion."""
+        """Replicated PCP is canonicalized; PCP-DCP publishes every shard."""
         from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
         vllm_config = create_vllm_config(kv_role="kv_producer")
-        vllm_config.parallel_config.prefill_context_parallel_size = 2
+        vllm_config.parallel_config.prefill_context_parallel_size = pcp_size
+        vllm_config.parallel_config.decode_context_parallel_size = dcp_size
         with (
             patch(
                 "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
@@ -610,13 +629,15 @@ class TestNixlHandshake:
         worker = connector.connector_worker
         assert worker is not None
         assert worker.pcp_rank == pcp_rank
+        assert worker.pcp_dcp_sharded is (dcp_size > 1)
+        assert worker.transfer_tp_rank == (pcp_rank if dcp_size > 1 else 0)
+        assert worker.transfer_tp_size == (pcp_size if dcp_size > 1 else 1)
 
         req_id = "req"
         metadata = NixlConnectorMetadata()
         metadata.reqs_in_batch.add(req_id)
         metadata.reqs_to_send[req_id] = time.perf_counter() + 10
         worker.start_load_kv(metadata)
-        expected_tracked = pcp_rank == 0
         assert (req_id in worker._reqs_to_process) == expected_tracked
         assert (req_id in worker._reqs_to_send) == expected_tracked
 
@@ -624,15 +645,15 @@ class TestNixlHandshake:
         worker.xfer_handshake_metadata = payload
         worker.transfer_topo = MagicMock()
         worker._get_new_notifs = MagicMock(
-            side_effect=lambda: {"sent"} if pcp_rank == 0 else set()
+            side_effect=lambda: {"sent"} if expected_tracked else set()
         )
 
-        expected_payload = payload if pcp_rank == 0 else None
+        expected_payload = payload if expected_tracked else None
         assert connector.get_handshake_metadata() is expected_payload
         done_sending, done_recving = connector.get_finished(set())
-        assert done_sending == ({"sent"} if pcp_rank == 0 else {req_id})
+        assert done_sending == ({"sent"} if expected_tracked else {req_id})
         assert done_recving == set()
-        if pcp_rank > 0:
+        if not expected_tracked:
             assert connector.get_finished(set()) == (set(), set())
 
     @patch(
@@ -3210,9 +3231,15 @@ def test_transfer_mode_changes_compatibility_hash():
 
 
 @pytest.mark.skip_global_cleanup
-def test_scheduler_advertises_transfer_mode():
-    # Each scheduler advertises its transfer mode in kv_transfer_params so an
-    # external router can route pull (READ) vs push (WRITE) producers.
+@pytest.mark.parametrize("mode", ["pull", "push"])
+@pytest.mark.parametrize(
+    "tp_size,pcp_size,dcp_size,transfer_tp_size",
+    [(1, 1, 1, 1), (4, 1, 1, 4), (4, 1, 4, 4), (1, 4, 1, 1), (1, 4, 4, 4)],
+)
+def test_scheduler_advertises_transfer_topology(
+    mode, tp_size, pcp_size, dcp_size, transfer_tp_size
+):
+    """The consumer must address every distinct producer KV shard."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
         NixlPullConnectorScheduler,
     )
@@ -3220,8 +3247,22 @@ def test_scheduler_advertises_transfer_mode():
         NixlPushConnectorScheduler,
     )
 
-    assert NixlPullConnectorScheduler._TRANSFER_MODE == "pull"
-    assert NixlPushConnectorScheduler._TRANSFER_MODE == "push"
+    config = create_vllm_config(kv_role="kv_producer")
+    config.parallel_config.tensor_parallel_size = tp_size
+    config.parallel_config.prefill_context_parallel_size = pcp_size
+    config.parallel_config.decode_context_parallel_size = dcp_size
+    cls = NixlPullConnectorScheduler if mode == "pull" else NixlPushConnectorScheduler
+    scheduler = cls(config, "prefiller", make_kv_cache_config(block_size=16))
+    request = create_request(request_id=1, num_tokens=32, do_remote_decode=True)
+    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+    try:
+        delay, params = scheduler.request_finished(request, ([0, 1],))
+        assert delay
+        assert params["transfer_mode"] == mode
+        assert params["tp_size"] == transfer_tp_size
+        assert params["dcp_size"] == dcp_size
+    finally:
+        scheduler.shutdown()
 
 
 @pytest.mark.parametrize(

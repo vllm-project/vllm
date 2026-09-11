@@ -353,6 +353,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.consumer_notification_counts_by_req = defaultdict(int)
         w.tp_rank = 0
         w.pcp_rank = 0
+        w.pcp_dcp_sharded = False
         w.world_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
@@ -540,9 +541,11 @@ class TestPushWriterStartLoadKv:
         assert w._push_writer_wake.is_set()
         assert w.start_push_calls == []
 
-    def test_noncanonical_pcp_rank_skips_producer_work(self):
+    @pytest.mark.parametrize("sharded", [False, True])
+    def test_noncanonical_pcp_rank_only_pushes_distinct_shards(self, sharded):
         w = _StubWriterWorker.fresh()
         w.pcp_rank = 1
+        w.pcp_dcp_sharded = sharded
         w._send_heartbeats = MagicMock()
 
         meta = NixlConnectorMetadata()
@@ -552,11 +555,11 @@ class TestPushWriterStartLoadKv:
 
         w.start_load_kv(meta)
 
-        assert w._finished_blocks_inbox.empty()
-        assert "req" not in w._reqs_to_process
-        assert "req" not in w._reqs_to_send
-        assert not w._push_writer_wake.is_set()
-        w._send_heartbeats.assert_not_called()
+        assert w._finished_blocks_inbox.empty() is (not sharded)
+        assert ("req" in w._reqs_to_process) is sharded
+        assert ("req" in w._reqs_to_send) is sharded
+        assert w._push_writer_wake.is_set() is sharded
+        assert w._send_heartbeats.called is sharded
 
 
 # The P→D handshake must run on the base worker's background executor, never

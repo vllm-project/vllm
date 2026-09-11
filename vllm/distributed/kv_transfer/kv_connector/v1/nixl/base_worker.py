@@ -529,9 +529,15 @@ class NixlBaseConnectorWorker:
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
 
-        # DCP support is scoped to MLA, with dcp_size in (1, tp_size): either fully
-        # replicated or fully sharded. A DCP rank is always derivable this way.
-        self.dcp_rank = self.tp_rank % self.dcp_size
+        # TP1 PCP+DCP owns distinct KV shards; replicated PCP uses rank zero.
+        self.pcp_dcp_sharded = self.pcp_size > 1 and self.dcp_size > 1
+        self.transfer_tp_size = (
+            self.pcp_size if self.pcp_dcp_sharded else self.world_size
+        )
+        self.transfer_tp_rank = self.pcp_rank if self.pcp_dcp_sharded else self.tp_rank
+
+        # MLA is either fully replicated or fully sharded across transfer ranks.
+        self.dcp_rank = self.transfer_tp_rank % self.dcp_size
 
         self.num_blocks = kv_cache_config.num_blocks
         self.enable_permute_local_kv = False
@@ -762,12 +768,16 @@ class NixlBaseConnectorWorker:
         local_dcp_size = self.dcp_size
         remote_pcp_size = agent_metadata.pcp_size
         remote_dcp_size = agent_metadata.dcp_size
-        if (local_pcp_size > 1 and remote_dcp_size > 1) or (
-            remote_pcp_size > 1 and local_dcp_size > 1
+        if remote_pcp_size > 1 and remote_dcp_size not in (1, remote_pcp_size):
+            raise NotImplementedError(
+                "Remote NixlConnector PCP+DCP does not span the full PCP group. "
+                f"Remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
+            )
+        if (local_pcp_size > 1 and local_dcp_size == 1 and remote_dcp_size > 1) or (
+            remote_pcp_size > 1 and remote_dcp_size == 1 and local_dcp_size > 1
         ):
             raise NotImplementedError(
-                "NixlConnector PCP requires decode_context_parallel_size=1 "
-                "on both instances. "
+                "Replicated PCP cannot be paired with a DCP-sharded NIXL peer. "
                 f"Local PCP/DCP={local_pcp_size}/{local_dcp_size}; "
                 f"remote PCP/DCP={remote_pcp_size}/{remote_dcp_size}."
             )
@@ -1191,8 +1201,8 @@ class NixlBaseConnectorWorker:
         """Register the KV Cache data in nixl."""
 
         self.transfer_topo = TransferTopology(
-            tp_rank=self.tp_rank,
-            tp_size=self.world_size,
+            tp_rank=self.transfer_tp_rank,
+            tp_size=self.transfer_tp_size,
             block_size=self.block_size,
             engine_id=self.engine_id,
             is_mla=self.use_mla,
