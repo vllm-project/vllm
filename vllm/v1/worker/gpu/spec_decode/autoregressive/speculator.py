@@ -333,6 +333,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             # Early exit.
             return self.draft_tokens[:num_reqs, :1]
 
+        if self.pcp_manager is not None and not dummy_run:
+            self.block_tables.gather_block_tables(
+                input_batch.idx_mapping, num_reqs_padded=num_reqs
+            )
+
         # Prepare the inputs for the decode steps.
         prepare_decode_inputs(
             self.draft_tokens[:num_reqs, 0],
