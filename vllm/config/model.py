@@ -242,7 +242,10 @@ class ModelConfig:
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
-    flexibility."""
+    flexibility.
+
+    NOTE: This disables both `torch.compile` and CUDA graphs, and is
+    equivalent to setting `-cc.mode=none -cc.cudagraph_mode=none`."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
     return_sampling_mask: bool = False
@@ -343,6 +346,10 @@ class ModelConfig:
     (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
     with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
     snapshot) may be registered in-tree or by plugins (RFC #34303)."""
+    enable_nccl_comm_suspend: bool = False
+    """Enable releasing NCCL communicator memory during sleep mode
+    (``ncclCommSuspend``/``ncclCommResume``). Experimental; when disabled
+    (the default) sleep still releases weights/KV-cache memory as before."""
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory
     allocation features such as multi-node NVLink support.
@@ -693,7 +700,10 @@ class ModelConfig:
                 self.tokenizer_mode = "kimi_k3"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
-            elif arch == "DeepseekV4ForCausalLM":
+            elif arch in (
+                "DeepseekV4ForCausalLM",
+                "DeepseekV4ForConditionalGeneration",
+            ):
                 self.tokenizer_mode = "deepseek_v4"
             elif arch in ("InklingForCausalLM", "InklingForConditionalGeneration"):
                 self.tokenizer_mode = "inkling"
@@ -2439,6 +2449,13 @@ def _get_and_verify_max_len(
     rope_parameters = getattr(hf_config, "rope_parameters", None)
     if rope_parameters and not is_rope_parameters_nested(rope_parameters):
         rope_parameters = {"": rope_parameters}
+    if rope_parameters is not None:
+        # Layers without RoPE do not contribute to context length scaling.
+        rope_parameters = {
+            layer_type: rp
+            for layer_type, rp in rope_parameters.items()
+            if rp is not None
+        }
 
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
     # scaling, so we skip applying the scaling factor again.
