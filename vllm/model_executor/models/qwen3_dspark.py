@@ -162,8 +162,20 @@ class Qwen3DSparkModel(DFlashQwen3Model):
             quant_config=self.quant_config,
         )
         self.confidence_head: DSparkConfidenceHead | None = None
-        if getattr(config, "enable_confidence_head", False):
-            with_markov = getattr(config, "confidence_head_with_markov", False)
+        # Legacy NVIDIA checkpoints store these fields in dflash_config.
+        # Prefer the speculators-format top-level fields when they are present.
+        dflash_config = getattr(config, "dflash_config", None) or {}
+        enable_confidence_head = getattr(
+            config,
+            "enable_confidence_head",
+            dflash_config.get("use_confidence_head", False),
+        )
+        if enable_confidence_head:
+            with_markov = getattr(
+                config,
+                "confidence_head_with_markov",
+                dflash_config.get("confidence_head_with_markov", False),
+            )
             input_dim = config.hidden_size
             if with_markov:
                 input_dim += config.markov_rank
