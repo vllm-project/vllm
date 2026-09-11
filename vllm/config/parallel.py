@@ -744,7 +744,7 @@ class ParallelConfig:
 
     @property
     def nnodes_within_dp(self) -> int:
-        """Number of nodes one DP replica spans. Always >= 1.
+        """Number of nodes one DP replica spans.
 
         External LB pins ``data_parallel_size_local`` to 1, so the ratio
         rounds down to 0 once DP replicas outnumber nodes. A replica that
@@ -755,7 +755,19 @@ class ParallelConfig:
         data_parallel_node_size = (
             self.data_parallel_size // self.data_parallel_size_local
         )
-        return max(self.nnodes // data_parallel_node_size, 1)
+        nnodes_within_dp = self.nnodes // data_parallel_node_size
+        if self.data_parallel_external_lb:
+            return max(nnodes_within_dp, 1)
+        if self.nnodes % data_parallel_node_size != 0:
+            raise ValueError(
+                "Invalid data parallel configuration: "
+                f"nnodes ({self.nnodes}) must be divisible by the number of "
+                "data parallel node groups "
+                f"({data_parallel_node_size} = data_parallel_size "
+                f"{self.data_parallel_size} / data_parallel_size_local "
+                f"{self.data_parallel_size_local})"
+            )
+        return nnodes_within_dp
 
     @property
     def local_world_size(self) -> int:

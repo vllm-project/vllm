@@ -1103,7 +1103,7 @@ def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
     assert parallel_config.world_size == 8
 
 
-@pytest.mark.parametrize("data_parallel_size", [2, 4, 8])
+@pytest.mark.parametrize("data_parallel_size", [4, 8])
 def test_nnodes_within_dp_when_replicas_outnumber_nodes(data_parallel_size):
     """A replica that fits on one node spans one node, never zero.
 
@@ -1123,6 +1123,19 @@ def test_nnodes_within_dp_when_replicas_outnumber_nodes(data_parallel_size):
     assert parallel_config.nnodes_within_dp == 1
     assert parallel_config.node_rank_within_dp == 0
     assert parallel_config.local_world_size == parallel_config.world_size
+
+
+@pytest.mark.parametrize("nnodes", [4, 9])
+def test_nnodes_within_dp_rejects_uneven_internal_lb(nnodes):
+    parallel_config = ParallelConfig(
+        data_parallel_size=8,
+        data_parallel_size_local=1,
+        distributed_executor_backend="mp",
+        nnodes=nnodes,
+    )
+
+    with pytest.raises(ValueError, match="Invalid data parallel configuration"):
+        _ = parallel_config.nnodes_within_dp
 
 
 def test_draft_model_enables_async_scheduling_by_default():
