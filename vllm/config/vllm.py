@@ -1181,8 +1181,8 @@ class VllmConfig:
 
         self.try_verify_and_update_config()
         self._resolve_and_verify_engram_config()
-        self._check_watermarking_unsupported()
 
+        self._check_watermarking_unsupported()
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()
