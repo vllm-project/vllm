@@ -29,6 +29,7 @@ from vllm.logger import init_logger
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
@@ -52,6 +53,7 @@ from vllm.multimodal.inputs import (
     AudioItem,
     BatchedTensorInputs,
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
     VideoItem,
 )
@@ -935,15 +937,22 @@ class NemotronH_Nano_VL_V2(
     requires_sequential_video_encoding = True
     """Temporarily needed for dynamic res video w/ conv3d, doesn't support bs>1 yet"""
 
-    # LoRA covers the language model only
+    supports_tower_connector_lora = True
     is_non_gated_moe = NemotronHForCausalLM.is_non_gated_moe
-    packed_modules_mapping = NemotronHForCausalLM.packed_modules_mapping
+    packed_modules_mapping = {
+        **NemotronHForCausalLM.packed_modules_mapping,
+        **RadioModel.packed_modules_mapping,
+    }
     embedding_modules = NemotronHForCausalLM.embedding_modules
     lora_skip_prefixes = NemotronHForCausalLM.lora_skip_prefixes
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "language_model.backbone": "language_model.model",
+            "vision_model.radio_model.model.blocks.": (
+                "vision_model.model.encoder.layers."
+            ),
+            "sound_projection.": "sound_encoder.projection.",
         },
     )
 
@@ -1005,13 +1014,21 @@ class NemotronH_Nano_VL_V2(
                     * int(round(1 / self.downsample_ratio)) ** 2,
                     eps=1e-5,
                 ),
-                nn.Linear(
+                ReplicatedLinear(
                     vit_hidden_size * int(round(1 / self.downsample_ratio)) ** 2,
                     vision_projection_hidden_size,
                     bias=False,
+                    return_bias=False,
+                    prefix=maybe_prefix(prefix, "mlp1.1"),
                 ),
                 ReLUSquaredActivation(),
-                nn.Linear(vision_projection_hidden_size, llm_hidden_size, bias=False),
+                ReplicatedLinear(
+                    vision_projection_hidden_size,
+                    llm_hidden_size,
+                    bias=False,
+                    return_bias=False,
+                    prefix=maybe_prefix(prefix, "mlp1.3"),
+                ),
             )
             self.mlp1 = mlp1.to(llm_dtype)
             self.sound_encoder: ProjectedParakeet | None = None
@@ -1025,6 +1042,7 @@ class NemotronH_Nano_VL_V2(
                     dtype=llm_dtype,
                     llm_hidden_size=llm_hidden_size,
                     max_model_len=model_config.max_model_len,
+                    prefix=maybe_prefix(prefix, "sound_encoder"),
                 )
 
         self.config = config
@@ -1576,6 +1594,91 @@ class NemotronH_Nano_VL_V2(
             connector=["mlp1", "sound_encoder.projection"],
             tower_model=["vision_model", "sound_encoder.encoder"],
         )
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        if modality == "audio":
+            if mm_kwargs is None:
+                return num_mm_embeds, num_mm_embeds
+
+            feature_field = mm_kwargs.get("input_audio_features")
+            if feature_field is None or not isinstance(
+                feature_field.data, torch.Tensor
+            ):
+                raise ValueError(
+                    "Missing tensor field 'input_audio_features' for audio LoRA"
+                )
+            if self.sound_encoder is None:
+                raise ValueError("Audio LoRA requires a sound encoder")
+
+            features = feature_field.data
+            batch_size = math.prod(features.shape[:-2])
+            padded_feature_length = features.shape[-2]
+            output_length: int = self.sound_encoder.encoder._get_subsampling_output_length(
+                torch.tensor([padded_feature_length])
+            ).item()
+            audio_tokens = batch_size * output_length
+            return audio_tokens, audio_tokens
+        if modality not in ("image", "video"):
+            raise ValueError(f"Unsupported modality: {modality}")
+
+        if mm_kwargs is not None:
+            embed_key = f"{modality}_embeds"
+            if embed_key in mm_kwargs:
+                return 0, 0
+
+        merge_size = int(round(1 / self.downsample_ratio))
+        num_skip = self.vision_model.model.patch_generator.num_skip
+
+        if mm_kwargs is None:
+            num_sequences = max(math.ceil(num_mm_embeds / self.num_image_token), 1)
+            tower_tokens = num_mm_embeds * merge_size**2 + num_sequences * num_skip
+            return tower_tokens, num_mm_embeds
+
+        pixel_key = (
+            "pixel_values_flat" if modality == "image" else "pixel_values_flat_video"
+        )
+        pixel_field = mm_kwargs.get(pixel_key)
+        if pixel_field is None or not isinstance(pixel_field.data, torch.Tensor):
+            raise ValueError(f"Missing tensor field {pixel_key!r} for {modality} LoRA")
+
+        pixel_values = pixel_field.data
+        patch_size = self.patch_size
+
+        if modality == "image" and "imgs_sizes" in mm_kwargs:
+            sizes_data = mm_kwargs["imgs_sizes"].data
+            if (
+                isinstance(sizes_data, tuple)
+                and len(sizes_data) == 2
+                and all(isinstance(dim, int) for dim in sizes_data)
+            ):
+                image_sizes = [sizes_data]
+            else:
+                image_sizes = list(sizes_data)
+
+            patch_counts = [
+                (height // patch_size) * (width // patch_size)
+                for height, width in image_sizes
+            ]
+            tower_tokens = sum(patch_counts) + len(patch_counts) * num_skip
+            connector_tokens = sum(count // merge_size**2 for count in patch_counts)
+            return tower_tokens, connector_tokens
+
+        num_inputs = pixel_values.shape[0]
+        height, width = pixel_values.shape[-2:]
+        patches_per_input = (height // patch_size) * (width // patch_size)
+        if modality == "video":
+            temporal_patch_size = self.video_temporal_patch_size
+            num_inputs = math.ceil(num_inputs / temporal_patch_size)
+
+        tower_tokens = num_inputs * (patches_per_input + num_skip)
+        connector_tokens = num_inputs * (patches_per_input // merge_size**2)
+        return tower_tokens, connector_tokens
 
     def compute_logits(
         self,
