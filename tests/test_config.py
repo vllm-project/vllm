@@ -57,6 +57,55 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_deepseek_v41_pp_sp_initializes_single_dp_communication(enabled):
+    import torch
+
+    from vllm.forward_context import DPMetadata
+    from vllm.model_executor.models.config import DeepseekV4ForCausalLMConfig
+
+    parallel = ParallelConfig(
+        tensor_parallel_size=2,
+        pipeline_parallel_size=2,
+        enable_expert_parallel=True,
+        is_moe_model=True,
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v41")
+        ),
+        parallel_config=parallel,
+        additional_config={"deepseek_v41_pp_sp": enabled},
+    )
+    DeepseekV4ForCausalLMConfig.verify_and_update_config(cast(VllmConfig, config))
+    assert parallel.use_sequence_parallel_moe == enabled
+    assert parallel.use_all2all == enabled
+    if enabled:
+        metadata = DPMetadata.make(parallel, 7, torch.tensor([7]))
+        with metadata.sp_local_sizes(2):
+            assert metadata.get_chunk_sizes_across_dp_rank() == [4, 4]
+
+
+def test_deepseek_v41_single_dp_pp_sp_rejects_unvalidated_collectives():
+    from vllm.model_executor.models.config import DeepseekV4ForCausalLMConfig
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v41")
+        ),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            pipeline_parallel_size=2,
+            enable_expert_parallel=True,
+            is_moe_model=True,
+            all2all_backend="deepep_high_throughput",
+        ),
+        additional_config={"deepseek_v41_pp_sp": True},
+    )
+    with pytest.raises(ValueError, match="requires allgather_reducescatter"):
+        DeepseekV4ForCausalLMConfig.verify_and_update_config(cast(VllmConfig, config))
+
+
 def test_kda_recoverssm_derivation_is_revalidated():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
