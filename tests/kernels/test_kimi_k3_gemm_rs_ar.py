@@ -23,7 +23,7 @@ _SHAPES = (
     (1024, 4224),
     (8191, 4224),
 )
-_N = 512
+_N = 1024
 
 
 def _reference(
@@ -201,6 +201,15 @@ def _worker(local_rank: int, world_size: int, master_port: int) -> None:
     group = dist.group.WORLD
     rank = dist.get_rank(group)
 
+    from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs_ar import GemmRsAr
+
+    num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    with pytest.MonkeyPatch.context() as patch:
+        for invalid_margin in (-1, num_sms - 1, num_sms):
+            patch.setenv("VLLM_KIMI_K3_GEMM_AR_SM_MARGIN", str(invalid_margin))
+            with pytest.raises(ValueError, match="must leave at least two SMs"):
+                GemmRsAr(max_M=1024, N=_N, all_reduce=True)
+
     weight_generator = torch.Generator(device=device)
     weights = {}
     for K in {K for _, K in _SHAPES}:
@@ -228,17 +237,21 @@ def _worker(local_rank: int, world_size: int, master_port: int) -> None:
 
 
 @pytest.mark.distributed(num_gpus=2)
+@pytest.mark.parametrize("sm_margin", [0, 7, 8])
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="Kimi-K3 GEMM-RS/AR requires SM100",
 )
-def test_kimi_k3_gemm_rs_ar(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_kimi_k3_gemm_rs_ar(monkeypatch: pytest.MonkeyPatch, sm_margin: int) -> None:
     world_size = 2
     if torch.accelerator.device_count() < world_size:
         pytest.skip("GEMM-RS/AR requires two GPUs")
 
     monkeypatch.setenv("NCCL_CUMEM_ENABLE", "1")
     monkeypatch.setenv("NCCL_NVLS_ENABLE", "1")
+    # Exercise capped grids, odd margins rounded for 2-CTA clusters, and
+    # unchanged RS behavior through the existing eager/graph reuse checks.
+    monkeypatch.setenv("VLLM_KIMI_K3_GEMM_AR_SM_MARGIN", str(sm_margin))
     try:
         mp.spawn(
             _worker,

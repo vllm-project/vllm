@@ -20,6 +20,7 @@ from cutlass.cute.runtime import make_fake_stream, make_fake_tensor, make_ptr, n
 from cutlass.cutlass_dsl import dsl_user_op
 from cutlass.utils import get_smem_capacity_in_bytes
 
+from vllm import envs
 from vllm.cute_utils import _tcgen05, mbarrier, simple_tma_copy, to_cta0_smem
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
@@ -728,6 +729,16 @@ class GemmRsAr:
         self.device = device
         self.all_reduce = all_reduce
 
+        num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+        sm_margin = envs.VLLM_KIMI_K3_GEMM_AR_SM_MARGIN if all_reduce else 0
+        if not 0 <= sm_margin <= num_sms - 2:
+            raise ValueError(
+                "VLLM_KIMI_K3_GEMM_AR_SM_MARGIN must leave at least two SMs "
+                f"for a 2-CTA cluster; got {sm_margin} on a {num_sms}-SM GPU"
+            )
+        # This caps the CTA grid; it does not reserve particular physical SMs.
+        self.num_sms = num_sms - sm_margin
+
         self.partial = symm_mem.empty((max_M, N), dtype=torch.bfloat16, device=device)
         self.partial_handle = symm_mem.rendezvous(self.partial, group)
         if self.partial_handle.multicast_ptr == 0:
@@ -742,8 +753,7 @@ class GemmRsAr:
         grid_m = (max_M + 127) // 128
         cta_group = 2 if max_M >= 1024 or grid_m % 2 == 0 else 1
         grid_m = (grid_m + cta_group - 1) // cta_group * cta_group
-        self.num_sms = torch.cuda.get_device_properties(device).multi_processor_count
-        max_flags = grid_m * (N // 128) + self.num_sms
+        max_flags = grid_m * (N // 128) + num_sms
         self.flags = symm_mem.empty(max_flags, dtype=torch.int32, device=device)
         self.flags_handle = symm_mem.rendezvous(self.flags, group)
         if self.flags_handle.multicast_ptr == 0:
