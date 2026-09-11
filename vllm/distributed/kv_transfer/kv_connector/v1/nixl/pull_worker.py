@@ -411,6 +411,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # workers will issue xfers to parts of the P worker remote kv caches.
 
         # Get descs ids.
+        skip_replicated_conv = self._skip_replicated_mamba_conv(
+            dst_engine_id, remote_rank
+        )
         remote_block_descs_ids = self._compute_desc_ids(
             block_ids=remote_block_ids,
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
@@ -427,6 +430,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 if read_spec.block_ids_by_region
                 else self.dst_uses_region_group_mapping[dst_engine_id]
             ),
+            skip_replicated_conv=skip_replicated_conv,
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
@@ -444,6 +448,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 if read_spec.block_ids_by_region
                 else self._uses_region_group_mapping
             ),
+            skip_replicated_conv=skip_replicated_conv,
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
