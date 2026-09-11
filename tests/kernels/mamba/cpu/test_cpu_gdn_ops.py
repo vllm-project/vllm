@@ -688,6 +688,158 @@ def test_spec_forward_prepares_native_conv_metadata(
         torch.testing.assert_close(actual, reference)
 
 
+@torch.inference_mode()
+def test_spec_forward_zero_acceptance_preserves_conv_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vllm#56419: constrained decoding can reject every draft token, handing
+    the spec path num_accepted == 0. The conv stage must not move the rolling
+    buffer for such a sequence and must not read before it (offset -1), while
+    still computing this step's draft outputs over the intact history.
+    """
+    dim = 96
+    num_spec = 4
+    state_len = CONV_KERNEL - 1 + num_spec
+    torch.manual_seed(0)
+
+    # The stored buffer: width-1 columns of accepted history, then the draft
+    # region this step fills.
+    stored = torch.randn(1, dim, state_len)
+    x_seq = torch.randn(num_spec, dim)
+    weight = torch.randn(dim, 1, CONV_KERNEL)
+    bias = torch.randn(dim)
+
+    captured = {}
+
+    def grab_rearrange(conv_out):
+        captured["conv_out"] = conv_out.clone()
+        return tuple(conv_out.unsqueeze(0).chunk(3, dim=-1)[i] for i in range(3))
+
+    layer = types.SimpleNamespace(
+        activation="silu",
+        conv1d=types.SimpleNamespace(weight=weight, bias=bias),
+        A_log=None,
+        dt_bias=None,
+        rearrange_mixed_qkv=grab_rearrange,
+    )
+    metadata = GDNAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=1,
+        num_spec_decode_tokens=num_spec,
+        num_actual_tokens=num_spec,
+        spec_state_indices_tensor=torch.zeros(1, num_spec, dtype=torch.int32),
+        spec_query_start_loc=torch.tensor([0, num_spec], dtype=torch.int32),
+        num_accepted_tokens=torch.tensor([0], dtype=torch.int32),
+    )
+
+    conv_buf = stored.clone()
+    monkeypatch.setattr(
+        gdn_attention.ops,
+        "fused_sigmoid_gating_delta_rule_update_spec_cpu",
+        lambda **kwargs: kwargs["q"],
+    )
+    # Force the fallback loop: the AMX/native branch is not where the guard
+    # under test lives.
+    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: False)
+    gdn_attention._spec_forward(
+        layer=layer,
+        attn_metadata_i=metadata,
+        mixed_qkv_spec=x_seq.clone(),
+        b_spec=torch.randn(num_spec, dim),
+        a_spec=torch.randn(num_spec, dim),
+        conv_buf=conv_buf,
+        ssm_state=torch.zeros(1, 2, 2, 2),
+        width=CONV_KERNEL,
+        state_len=state_len,
+    )
+
+    # Nothing was accepted, so the buffer must be byte-identical.
+    torch.testing.assert_close(conv_buf, stored, atol=0, rtol=0)
+
+    # The draft outputs must be the conv over the intact history plus the
+    # drafts: the reference is a direct conv over [history[0:width-1] | x].
+    ref_in = torch.cat(
+        [stored[0, :, : CONV_KERNEL - 1], x_seq.transpose(0, 1)], dim=-1
+    ).unsqueeze(0)
+    ref = F.silu(F.conv1d(ref_in, weight, bias, groups=dim))[0].transpose(0, 1)
+    torch.testing.assert_close(captured["conv_out"], ref, atol=1e-4, rtol=1e-4)
+
+
+def test_spec_forward_zero_acceptance_never_reaches_native_conv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The C++ multi-token conv kernel requires num_accepted >= 1 per sequence
+    (it reads the history at num_accepted - 1). A batch containing a fully
+    rejected sequence must take the fallback loop instead of calling it.
+    """
+    dim = 96
+    num_spec = 4
+    state_len = CONV_KERNEL - 1 + num_spec
+    torch.manual_seed(0)
+
+    calls = []
+
+    def spy_causal_conv1d_update_cpu(**kwargs):
+        calls.append(kwargs)
+        return kwargs["x"]
+
+    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
+    monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
+    monkeypatch.setattr(
+        gdn_attention.ops, "causal_conv1d_update_cpu", spy_causal_conv1d_update_cpu
+    )
+    monkeypatch.setattr(
+        gdn_attention.ops,
+        "fused_sigmoid_gating_delta_rule_update_spec_cpu",
+        lambda **kwargs: kwargs["q"],
+    )
+
+    layer = types.SimpleNamespace(
+        activation="silu",
+        conv1d=types.SimpleNamespace(
+            weight=torch.randn(dim, 1, CONV_KERNEL), bias=None
+        ),
+        A_log=None,
+        dt_bias=None,
+        rearrange_mixed_qkv=lambda x: tuple(
+            x.unsqueeze(0).chunk(3, dim=-1)[i] for i in range(3)
+        ),
+    )
+    metadata = GDNAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=2,
+        num_spec_decode_tokens=2 * num_spec,
+        num_actual_tokens=2 * num_spec,
+        spec_state_indices_tensor=torch.zeros(2, num_spec, dtype=torch.int32),
+        spec_query_start_loc=torch.tensor(
+            [0, num_spec, 2 * num_spec], dtype=torch.int32
+        ),
+        num_accepted_tokens=torch.tensor([0, 2], dtype=torch.int32),
+    )
+    gdn_attention._spec_forward(
+        layer=layer,
+        attn_metadata_i=metadata,
+        mixed_qkv_spec=torch.randn(2 * num_spec, dim),
+        b_spec=torch.randn(2 * num_spec, dim),
+        a_spec=torch.randn(2 * num_spec, dim),
+        conv_buf=torch.randn(2, dim, state_len),
+        ssm_state=torch.zeros(2, 2, 2, 2),
+        width=CONV_KERNEL,
+        state_len=state_len,
+    )
+
+    # One sequence accepted nothing, so the whole batch must have avoided the
+    # native kernel rather than handing it a num_accepted of 0.
+    for call in calls:
+        assert (call["num_accepted_tokens"] > 0).all()
+
+
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
 @torch.inference_mode()
 def test_causal_conv1d_torch_two_call_split(total_tokens: int, split: int) -> None:

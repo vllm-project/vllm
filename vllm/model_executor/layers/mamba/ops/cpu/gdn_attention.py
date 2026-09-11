@@ -421,6 +421,12 @@ def _spec_forward(
         and num_spec_decodes > 0
         and bool(torch.all(seq_lens == seq_lens[0]).item())
         and int(seq_lens[0].item()) > 0
+        # The C++ multi-token kernel requires num_accepted >= 1 per sequence
+        # (it reads the history window at num_accepted - 1 and rolls the
+        # buffer by that many columns). Constrained decoding can reject every
+        # draft, so a zero here routes the batch through the fallback loop,
+        # which clamps the window and skips the roll for those sequences.
+        and bool((num_accepted[:num_spec_decodes] > 0).all().item())
     )
     if can_use_native_conv:
         q_i = int(seq_lens[0].item())
@@ -445,9 +451,15 @@ def _spec_forward(
             q_i = int(seq_lens[i].item())
             if q_i == 0:
                 continue
+            acc_i = int(num_acc_cpu[i].item())
+            # num_accepted == 0 means constrained decoding rejected every draft
+            # of this sequence: the history window must not move (clamp like
+            # the GPU/SSM guard tl.maximum(num_accepted - 1, 0)) and the
+            # rolling buffer must keep the rejected drafts' region untouched
+            # by the roll, so no state is committed for them.
+            offset = max(acc_i - 1, 0)
             start = int(seq_starts[i].item())
             slot0 = int(col0[i].item())
-            offset = int(num_acc_cpu[i].item()) - 1
             B = conv_buf[slot0]  # (dim, state_len)
             x_seq = mixed_qkv_spec[start : start + q_i].transpose(0, 1).to(B.dtype)
             prior = B[:, offset : offset + (width - 1)]
@@ -456,11 +468,12 @@ def _spec_forward(
             if silu:
                 out = F.silu(out)
             conv_out[start : start + q_i] = out.transpose(0, 1).to(conv_out.dtype)
-            # Roll the buffer: drop the accepted history from the front, append
-            # the new draft tokens, keep total length == state_len.
-            keep = B[:, offset + 1 : offset + 1 + (state_len - q_i)]
-            new_B = torch.cat([keep, x_seq], dim=-1)
-            B.copy_(new_B)
+            if acc_i > 0:
+                # Roll the buffer: drop the accepted history from the front,
+                # append the new draft tokens, keep total length == state_len.
+                keep = B[:, offset + 1 : offset + 1 + (state_len - q_i)]
+                new_B = torch.cat([keep, x_seq], dim=-1)
+                B.copy_(new_B)
 
     # ---- 2. Recurrent (multi-slot SSM state) ----
     # Single fused kernel call: it runs the recurrence over each sequence's
