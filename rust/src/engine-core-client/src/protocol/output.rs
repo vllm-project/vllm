@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use bytes::Bytes;
 use enum_as_inner::EnumAsInner;
+use serde::de::{IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_default::DefaultFromSerde;
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -78,7 +79,7 @@ pub struct EngineCoreEvent {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/d3af8c18317c0dc008d42e4367fbb9045cfb7bf6/vllm/v1/engine/__init__.py#L154-L184>
-#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, DefaultFromSerde)]
 pub struct EngineCoreOutput {
     pub request_id: String,
     pub new_token_ids: Vec<u32>,
@@ -131,6 +132,58 @@ pub struct EngineCoreOutput {
     /// the Rust frontend does not yet surface it in responses.
     #[serde(default)]
     pub spec_decode_metrics: Option<OpaqueValue>,
+}
+
+impl<'de> Deserialize<'de> for EngineCoreOutput {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct OutputVisitor;
+
+        impl<'de> Visitor<'de> for OutputVisitor {
+            type Value = EngineCoreOutput;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an EngineCoreOutput array")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let output = EngineCoreOutput {
+                    request_id: seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?,
+                    new_token_ids: seq
+                        .next_element()?
+                        .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?,
+                    new_logprobs: seq.next_element()?.unwrap_or_default(),
+                    new_prompt_logprobs_tensors: seq.next_element()?.unwrap_or_default(),
+                    pooling_output: seq.next_element()?.unwrap_or_default(),
+                    finish_reason: seq.next_element()?.unwrap_or_default(),
+                    stop_reason: seq.next_element()?.unwrap_or_default(),
+                    events: seq.next_element()?.unwrap_or_default(),
+                    kv_transfer_params: seq.next_element()?.unwrap_or_default(),
+                    ec_transfer_params: seq.next_element()?.unwrap_or_default(),
+                    trace_headers: seq.next_element()?.unwrap_or_default(),
+                    prefill_stats: seq.next_element()?.unwrap_or_default(),
+                    routed_experts: seq.next_element()?.unwrap_or_default(),
+                    num_nans_in_logits: seq.next_element()?.unwrap_or_default(),
+                    mm_cache_miss_hashes: seq.next_element()?.unwrap_or_default(),
+                    new_sampling_mask: seq.next_element()?.unwrap_or_default(),
+                    spec_decode_metrics: seq.next_element()?.unwrap_or_default(),
+                };
+                // Match msgspec's array-like Struct evolution: extensions such as
+                // vLLM-Omni may append fields without changing the known prefix.
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+                Ok(output)
+            }
+        }
+
+        deserializer.deserialize_seq(OutputVisitor)
+    }
 }
 
 impl EngineCoreOutput {
@@ -401,6 +454,58 @@ mod tests {
         assert_eq!(
             decoded.finished_requests,
             Some(BTreeSet::from(["req-1".to_string()]))
+        );
+    }
+
+    #[test]
+    fn engine_core_outputs_ignore_appended_fields() {
+        let output = EngineCoreOutput {
+            request_id: "req-1".into(),
+            new_token_ids: vec![42],
+            finish_reason: Some(EngineCoreFinishReason::Length),
+            ..Default::default()
+        };
+        let mut fields = crate::protocol::decode_value(&encode_msgpack(&output).unwrap())
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        // Omni appends multimodal_output, is_segment_finished, and
+        // new_prompt_len_snapshot. Unknown payloads may contain nested values.
+        fields.extend([
+            OpaqueValue::Map(vec![(
+                "audio".into(),
+                OpaqueValue::Array(vec![OpaqueValue::Ext(1, vec![0, 1])]),
+            )]),
+            false.into(),
+            OpaqueValue::Nil,
+        ]);
+        let wire = (0, vec![OpaqueValue::Array(fields); 2]);
+        let frames = [Bytes::from(encode_msgpack(&wire).unwrap())];
+        let decoded = decode_engine_core_outputs(&frames).unwrap();
+        // A second output also checks that the first output's tail was consumed.
+        assert_eq!(decoded.as_request_batch().unwrap().outputs, vec![output; 2]);
+    }
+
+    #[test]
+    fn engine_core_output_requires_valid_known_fields() {
+        for fields in [
+            vec![],
+            vec!["req-1".into()],
+            vec!["req-1".into(), OpaqueValue::Nil],
+            vec!["req-1".into(), OpaqueValue::Array(vec![]), false.into()],
+        ] {
+            let bytes = encode_msgpack(&OpaqueValue::Array(fields)).unwrap();
+            assert!(decode_msgpack::<EngineCoreOutput>(&bytes).is_err());
+        }
+        let bytes = encode_msgpack(&("req-1", vec![42_u32])).unwrap();
+        assert_eq!(
+            decode_msgpack::<EngineCoreOutput>(&bytes).unwrap(),
+            EngineCoreOutput {
+                request_id: "req-1".into(),
+                new_token_ids: vec![42],
+                ..Default::default()
+            }
         );
     }
 
