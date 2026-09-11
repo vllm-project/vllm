@@ -205,6 +205,12 @@ class ParallelConfig:
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl"""
+    enable_sequence_parallel_moe: bool = False
+    """Allow model-selected sequence-parallel MoE with a single DP rank.
+
+    Model config hooks enable this before communication groups are created.
+    The model must shard its inputs and set FusedMoE's is_sequence_parallel.
+    """
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
@@ -722,7 +728,7 @@ class ParallelConfig:
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
-            and self.data_parallel_size > 1
+            and (self.data_parallel_size > 1 or self.enable_sequence_parallel_moe)
         )
 
     @property
