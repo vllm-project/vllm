@@ -21,7 +21,7 @@ def _make_model_state(
     """Build a minimal EplbModelState mock with its map tensors."""
     state = MagicMock()
     state.physical_to_logical_map = phy2log
-    state.physical_to_logical_map_storage = (
+    state.physical_to_logical_map_buffer = (
         phy2log if phy2log_storage is None else phy2log_storage
     )
     state.logical_to_physical_map = log2phy

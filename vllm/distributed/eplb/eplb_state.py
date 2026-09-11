@@ -121,8 +121,8 @@ class EplbModelState:
      [0, 2, 0, 1, 0, 3]]
     ```
     """
-    physical_to_logical_map_storage: torch.Tensor
-    """Maximum-capacity storage backing ``physical_to_logical_map``."""
+    physical_to_logical_map_buffer: torch.Tensor
+    """Maximum-capacity buffer backing ``physical_to_logical_map``."""
     logical_to_physical_map: torch.Tensor
     """
     Mapping from logical experts to physical experts.
@@ -170,8 +170,8 @@ class EplbModelState:
 
     Shape: (num_moe_layers, num_physical_experts)
     """
-    expert_load_pass_storage: torch.Tensor
-    """Maximum-capacity storage backing ``expert_load_pass``."""
+    expert_load_pass_buffer: torch.Tensor
+    """Maximum-capacity buffer backing ``expert_load_pass``."""
     expert_load_window: torch.Tensor
     """
     A sliding window of expert load.
@@ -424,8 +424,8 @@ class EplbState:
             )
             .contiguous()
         )
-        physical_to_logical_map_storage = physical_to_logical_map
-        physical_to_logical_map = physical_to_logical_map_storage[
+        physical_to_logical_map_buffer = physical_to_logical_map
+        physical_to_logical_map = physical_to_logical_map_buffer[
             :, : model.num_physical_experts
         ]
         logical_to_physical_map = (
@@ -446,12 +446,12 @@ class EplbState:
             .contiguous()
         )
 
-        expert_load_pass_storage = torch.zeros(
+        expert_load_pass_buffer = torch.zeros(
             (model.num_moe_layers, physical_expert_capacity),
             dtype=torch.int32,
             device=self.device,
         )
-        expert_load_pass = expert_load_pass_storage[:, : model.num_physical_experts]
+        expert_load_pass = expert_load_pass_buffer[:, : model.num_physical_experts]
         self.expert_load_window_size = self.parallel_config.eplb_config.window_size
         expert_load_window = torch.zeros(
             (
@@ -482,7 +482,7 @@ class EplbState:
         ]
 
         model.set_eplb_state(
-            expert_load_pass_storage,
+            expert_load_pass_buffer,
             logical_to_physical_map,
             logical_replica_count,
         )
@@ -501,11 +501,11 @@ class EplbState:
 
         model_state = EplbModelState(
             physical_to_logical_map=physical_to_logical_map,
-            physical_to_logical_map_storage=physical_to_logical_map_storage,
+            physical_to_logical_map_buffer=physical_to_logical_map_buffer,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
             expert_load_pass=expert_load_pass,
-            expert_load_pass_storage=expert_load_pass_storage,
+            expert_load_pass_buffer=expert_load_pass_buffer,
             expert_load_window=expert_load_window,
             model_name=model_config.model,
             model=model,
@@ -1099,7 +1099,7 @@ class EplbState:
         expanded_physical_to_logical: torch.Tensor,
     ) -> None:
         eplb_model_state = self.model_states[model_config.compute_hash()]
-        eplb_model_state.physical_to_logical_map_storage.copy_(
+        eplb_model_state.physical_to_logical_map_buffer.copy_(
             expanded_physical_to_logical
         )
         eplb_model_state.expert_load_pass.zero_()
@@ -1130,21 +1130,22 @@ class EplbState:
         model_config: ModelConfig,
         num_physical_experts: int,
     ) -> None:
+        """Replace physical_to_logical_map and expert_load_pass with views
+        covering the new active size.
+        """
         model_state = self.model_states[model_config.compute_hash()]
         old_num_physical_experts = model_state.model.num_physical_experts
         first_slot, last_slot = sorted((old_num_physical_experts, num_physical_experts))
-        physical_to_logical_map_storage = model_state.physical_to_logical_map_storage
-        expert_load_pass_storage = model_state.expert_load_pass_storage
-        assert last_slot <= physical_to_logical_map_storage.shape[1]
+        physical_to_logical_map_buffer = model_state.physical_to_logical_map_buffer
+        expert_load_pass_buffer = model_state.expert_load_pass_buffer
+        assert last_slot <= physical_to_logical_map_buffer.shape[1]
         expert_slots = slice(first_slot, last_slot)
-        physical_to_logical_map_storage[:, expert_slots].fill_(-1)
-        expert_load_pass_storage[:, expert_slots].zero_()
-        model_state.physical_to_logical_map = physical_to_logical_map_storage[
+        physical_to_logical_map_buffer[:, expert_slots].fill_(-1)
+        expert_load_pass_buffer[:, expert_slots].zero_()
+        model_state.physical_to_logical_map = physical_to_logical_map_buffer[
             :, :num_physical_experts
         ]
-        model_state.expert_load_pass = expert_load_pass_storage[
-            :, :num_physical_experts
-        ]
+        model_state.expert_load_pass = expert_load_pass_buffer[:, :num_physical_experts]
 
         pad_size = num_physical_experts - model_state.expert_load_window.shape[-1]
         model_state.expert_load_window = torch.nn.functional.pad(
@@ -1387,8 +1388,10 @@ def _commit_eplb_maps(
 
     if PIN_MEMORY and src.is_cpu:
         src = src.new_empty(src.shape, pin_memory=True).copy_(src)
+    # When the number of physical experts changes, refresh the active map view to
+    # cover the new size before copying it.
     if src.shape[1] != dst.shape[1]:
-        dst = model_state.physical_to_logical_map_storage[:, : src.shape[1]]
+        dst = model_state.physical_to_logical_map_buffer[:, : src.shape[1]]
         assert dst.shape == src.shape
         model_state.physical_to_logical_map = dst
     dst.copy_(src, non_blocking=True)

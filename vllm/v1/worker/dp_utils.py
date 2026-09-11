@@ -19,21 +19,21 @@ from vllm.v1.worker.ubatch_utils import (
 
 logger = init_logger(__name__)
 
-_assume_uniform_dp_batch = ContextVar("assume_uniform_dp_batch", default=False)
+_skip_dp_coordination = ContextVar("skip_dp_coordination", default=False)
 
 
 @contextmanager
-def assume_uniform_dp_batch():
-    """Derive DP coordination locally for a known-uniform synthetic batch."""
-    token = _assume_uniform_dp_batch.set(True)
+def skip_dp_coordination():
+    """Run without coordinating DP metadata with other DP ranks."""
+    token = _skip_dp_coordination.set(True)
     try:
         yield
     finally:
-        _assume_uniform_dp_batch.reset(token)
+        _skip_dp_coordination.reset(token)
 
 
-def is_uniform_dp_batch() -> bool:
-    return _assume_uniform_dp_batch.get()
+def should_skip_dp_coordination() -> bool:
+    return _skip_dp_coordination.get()
 
 
 def _get_device_and_group(parallel_config: ParallelConfig):
@@ -240,7 +240,7 @@ def coordinate_batch_across_dp(
     if num_tokens_padded is None:
         num_tokens_padded = num_tokens_unpadded
 
-    if is_uniform_dp_batch():
+    if should_skip_dp_coordination():
         should_ubatch = should_attempt_ubatching and not is_last_ubatch_empty(
             num_tokens_unpadded,
             num_tokens_padded,

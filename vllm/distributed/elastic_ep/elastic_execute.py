@@ -52,7 +52,7 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.utils import is_moe_layer
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
-from vllm.v1.worker.dp_utils import assume_uniform_dp_batch
+from vllm.v1.worker.dp_utils import skip_dp_coordination
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
 
@@ -361,7 +361,7 @@ class ElasticEPScalingExecutor:
         assert eplb_state is not None
         eplb_state.drain_async()
         eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
-        physical_to_logical = eplb_model_state.physical_to_logical_map_storage
+        physical_to_logical = eplb_model_state.physical_to_logical_map_buffer
         broadcast_expert_mapping(
             physical_to_logical=physical_to_logical,
             dp_group=standby_dp_group,
@@ -509,7 +509,7 @@ class ElasticEPScalingExecutor:
         model.expert_weights = []
         with set_current_vllm_config(self.worker.vllm_config):
             model.set_eplb_state(
-                eplb_model_state.expert_load_pass_storage,
+                eplb_model_state.expert_load_pass_buffer,
                 eplb_model_state.logical_to_physical_map,
                 eplb_model_state.logical_replica_count,
             )
@@ -692,7 +692,7 @@ class ElasticEPScalingExecutor:
         all2all_manager = get_ep_all2all_manager()
         reuse_kernel = self._can_reuse_fused_moe_kernel()
         with (
-            assume_uniform_dp_batch() if reuse_kernel else nullcontext(),
+            skip_dp_coordination() if reuse_kernel else nullcontext(),
             all2all_manager.mask_remote_ranks() if reuse_kernel else nullcontext(),
             self._disable_flashinfer_autotune() if reuse_kernel else nullcontext(),
         ):
