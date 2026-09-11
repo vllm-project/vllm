@@ -242,33 +242,18 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
 
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
-    MRV1 paths and off breakable cudagraphs by default."""
-    from vllm.config.vllm import (
-        ROCM_DEFAULT_MRV1_ARCHITECTURES,
-        default_breakable_cudagraph_architectures,
-    )
+    paths and off breakable cudagraphs by default."""
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
     from vllm.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
     # The lookup is lru_cached against a fixed platform.
     default_breakable_cudagraph_architectures.cache_clear()
     try:
-        assert "DeepseekV32ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-        assert "DeepseekV4ForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-        assert "GlmMoeDsaForCausalLM" in ROCM_DEFAULT_MRV1_ARCHITECTURES
-
         breakable_architectures = default_breakable_cudagraph_architectures()
         assert "DeepseekV32ForCausalLM" not in breakable_architectures
         assert "DeepseekV32MTPModel" not in breakable_architectures
         assert "GlmMoeDsaForCausalLM" not in breakable_architectures
-
-        # The carve-out takes effect via the runner-selection property
-        # (warning_once args must be hashable for its lru_cache).
-        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-        config = SimpleNamespace(
-            model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"])
-        )
-        assert VllmConfig.use_v2_model_runner.fget(config) is False
     finally:
         default_breakable_cudagraph_architectures.cache_clear()
 
