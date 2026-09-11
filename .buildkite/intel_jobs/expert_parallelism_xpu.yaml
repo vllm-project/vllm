@@ -12,8 +12,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s distributed/test_eplb_algo.py
   - pytest -v -s distributed/test_eplb_utils.py
@@ -38,8 +39,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s distributed/test_eplb_execute.py
   - pytest -v -s distributed/test_eplb_spec_decode.py
@@ -63,8 +65,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 16+
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - pytest -v -s distributed/test_elastic_ep.py

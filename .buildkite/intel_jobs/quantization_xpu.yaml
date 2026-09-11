@@ -13,8 +13,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - uv pip install --system torchao==0.17.0 --index-url https://download.pytorch.org/whl/cu130
   - uv pip install --system conch-triton-kernels
@@ -40,8 +41,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s fusion/
   source_file_dependencies:
@@ -65,8 +67,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -s -v tests/quantization/test_blackwell_moe.py
   source_file_dependencies:
@@ -93,8 +96,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s models/quantization
   source_file_dependencies:

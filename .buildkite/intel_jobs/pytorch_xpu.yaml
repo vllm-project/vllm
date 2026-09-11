@@ -13,8 +13,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'
   source_file_dependencies:
@@ -58,8 +59,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'
   source_file_dependencies:
@@ -104,8 +106,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - find compile/h100/ -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'
   source_file_dependencies:
@@ -151,8 +154,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
   source_file_dependencies:
@@ -197,8 +201,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_cudagraph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'
   source_file_dependencies:
@@ -244,8 +249,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -s -v compile/fullgraph/test_full_cudagraph.py
   source_file_dependencies:
@@ -290,8 +296,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
   source_file_dependencies:
