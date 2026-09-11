@@ -436,8 +436,9 @@ def test_compute_slot_mapping_uses_named_launcher_inputs(monkeypatch) -> None:
     )
     launches: list[tuple[Any, ...]] = []
 
-    def launch(grid: Any, names: Any, values: Any, **kwargs: Any) -> None:
-        launches.append((grid, dict(zip(names, values)), kwargs))
+    def launch(launch_spec: Any, inputs: Any) -> None:
+        grid, kwargs = launch_spec
+        launches.append((grid, inputs, kwargs))
 
     monkeypatch.setattr(owner, "launch", launch)
     owner.compile(compile_key)
