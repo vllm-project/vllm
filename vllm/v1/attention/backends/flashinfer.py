@@ -810,13 +810,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             and can_use_xqa_or_trtllm_gen_decode
             and self.num_qo_heads // self.num_kv_heads > 1
         ), f"Unexpected FlashInfer page size {self.page_size} without trtllm-gen GQA"
-        # The large-page TRTLLM kernels have no hdim512 specialization.
-        self.use_trtllm_decode_attention = can_use_xqa_or_trtllm_gen_decode and not (
-            self.head_dim == 512 and self.page_size >= 128
-        )
+        self.use_trtllm_decode_attention = can_use_xqa_or_trtllm_gen_decode
         self.flashinfer_trtllm_api_decode_kernel: FlashInferDecodeKernel | None = (
             self._get_flashinfer_trtllm_api_decode_kernel()
-            if self.use_trtllm_decode_attention
+            if can_use_xqa_or_trtllm_gen_decode
             else None
         )
         # The dedicated FlashInfer XQA API accepts head dimensions in
@@ -942,11 +939,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def get_q_data_type(self, is_prefill: bool) -> torch.dtype:
         # The user sets --attention-config.disable_flashinfer_q_quantization
         # to 1 explicitly, use model dtype for query.
-        if (
-            self.vllm_config.attention_config.disable_flashinfer_q_quantization
-            or self.head_dim == 512
-        ):
-            # Native FlashInfer hdim512 kernels accept FP8 KV, but not FP8 Q.
+        if self.vllm_config.attention_config.disable_flashinfer_q_quantization:
             return self.model_config.dtype
 
         # self.cache_dtype is resolved per KV-cache group: it is "auto" when
@@ -1328,26 +1321,22 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # - Decode (FI native, XQA, or trtllm-gen)
         use_cascade = common_prefix_len > 0
         uses_spec_reorder = self.reorder_batch_threshold > 1
-        # Large pages use trtllm-gen except for its unsupported hdim512 shape.
+        # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
         prefill_force_trtllm = (
             True if page_size >= 128 else self.attention_config.use_trtllm_attention
         )
-        prefill_use_trtllm = (
-            not (self.head_dim == 512 and page_size >= 128)
-            and causal
-            and use_trtllm_attention(
-                self.num_qo_heads,
-                self.num_kv_heads,
-                num_prefill_tokens,
-                max_seq_len,
-                self.dcp_world_size,
-                self.cache_dtype,
-                self.q_data_type_prefill,
-                is_prefill=True,
-                force_use_trtllm=prefill_force_trtllm,
-                has_sinks=self.has_sinks,
-                has_spec=uses_spec_reorder,
-            )
+        prefill_use_trtllm = causal and use_trtllm_attention(
+            self.num_qo_heads,
+            self.num_kv_heads,
+            num_prefill_tokens,
+            max_seq_len,
+            self.dcp_world_size,
+            self.cache_dtype,
+            self.q_data_type_prefill,
+            is_prefill=True,
+            force_use_trtllm=prefill_force_trtllm,
+            has_sinks=self.has_sinks,
+            has_spec=uses_spec_reorder,
         )
         decode_with_flashinfer_trtllm_api = self.use_trtllm_decode_attention and (
             causal or self.use_dedicated_xqa
@@ -1859,7 +1848,6 @@ class FlashInferImpl(AttentionImpl):
         # so only enable this for SM100 trtllm-gen where both use FP8-Q.
         self.supports_quant_query_input = (
             self.supports_xqa_or_trtllm_gen_decode
-            and head_size != 512
             and is_quantized_kv_cache(self.kv_cache_dtype)
             and current_platform.is_device_capability_family(100)
             and vllm_config is not None

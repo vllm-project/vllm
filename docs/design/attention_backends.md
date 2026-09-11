@@ -59,7 +59,7 @@ llm = LLM(
 ### Triton/FlashInfer Composite
 
 On Blackwell, `TRITON_FLASHINFER` is preferred for compatible
-multimodal-prefix configurations, including Gemma 4 with BF16 KV cache. It uses
+multimodal-prefix configurations, including Gemma 4 with BF16 or FP8 KV cache. It uses
 Triton when a batch's current queries require bidirectional image attention,
 and FlashInfer for causal text prefills and decode. Historical image tokens
 alone do not select Triton.
@@ -71,9 +71,10 @@ implementations, metadata dispatch, compatible cache requirements, and workspace
 sharing. The routing policy selects the child and defines graph-capture safety.
 Other combinations can reuse the same machinery.
 
-The backend supports head dimensions 256/512, unquantized FP16/BF16 KV cache,
-and 128-token kernel pages with a head-major cache layout. Native FlashInfer
-handles hdim512 causal attention; TRTLLM handles eligible hdim256 attention.
+The backend supports head dimensions 256/512, FP16/BF16 and FP8 KV cache,
+and 64-token kernel pages with a head-major cache layout. TRTLLM handles causal
+attention at both head dimensions; its hdim512 kernels do not support 128-token
+pages.
 For Gemma 4, full CUDA graphs cover single-token batches; multi-token batches
 use the non-full-graph execution path. Models whose image masks extend beyond
 the sliding window cannot use full attention graphs with this composite.

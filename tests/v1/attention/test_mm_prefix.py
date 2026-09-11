@@ -698,6 +698,8 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
     from vllm.v1.attention.backends.flashinfer import (
         FlashInferBackend,
         FlashInferMetadata,
+        FlashInferTrtllmAPIDecode,
+        TRTLLMPrefill,
     )
     from vllm.v1.attention.backends.triton_attn import (
         TritonAttentionBackend,
@@ -708,6 +710,8 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
     )
     from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 
+    (block_size,) = TritonFlashInferBackend.get_supported_kernel_block_sizes()
+    num_blocks = (209 + block_size - 1) // block_size
     torch.manual_seed(42)
     cfg = EngineArgs(
         model="google/gemma-4-31B-it",
@@ -715,7 +719,7 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
         max_model_len=512,
         max_num_seqs=4,
         max_num_batched_tokens=512,
-        block_size=128,
+        block_size=block_size,
         kv_cache_dtype=cache_dtype,
         enforce_eager=True,
         attention_config={"backend": "TRITON_FLASHINFER"},
@@ -724,7 +728,7 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
     window = 128 if head_size == 256 else None
     storage_dtype = torch.uint8 if cache_dtype == "fp8_e4m3" else DTYPE
     spec_kwargs = dict(
-        block_size=128,
+        block_size=block_size,
         num_kv_heads=16,
         head_size=head_size,
         dtype=storage_dtype,
@@ -779,16 +783,21 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
             )
             layer.mm_prefix_clamp_sliding_window = True
         builder = backend.get_builder_cls()(spec, ["composite_test"], cfg, DEVICE)
-        builder.set_kernel_block_size(128)
+        builder.set_kernel_block_size(block_size)
         cache = torch.empty(
-            2, 16, 128, 2 * head_size, dtype=storage_dtype, device=DEVICE
+            num_blocks,
+            16,
+            block_size,
+            2 * head_size,
+            dtype=storage_dtype,
+            device=DEVICE,
         )
         keys = torch.randn(209, 16, head_size, dtype=DTYPE, device=DEVICE)
         values = torch.randn_like(keys)
         if cache_dtype == "fp8_e4m3":
             keys = keys.to(torch.float8_e4m3fn).to(DTYPE)
             values = values.to(torch.float8_e4m3fn).to(DTYPE)
-        table = torch.tensor([[0, 1]], dtype=torch.int32, device=DEVICE)
+        table = torch.arange(num_blocks, dtype=torch.int32, device=DEVICE).unsqueeze(0)
         previous = 0
         for end, spans, metadata_type in [
             (128, [(32, 111)], TritonAttentionMetadata),
@@ -815,8 +824,13 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
             )
             metadata = builder.build(0, common)
             assert isinstance(metadata, metadata_type)
+            if isinstance(metadata, FlashInferMetadata):
+                if qlen == 1:
+                    assert isinstance(metadata.decode, FlashInferTrtllmAPIDecode)
+                else:
+                    assert isinstance(metadata.prefill, TRTLLMPrefill)
             query = torch.randn(qlen, 32, head_size, dtype=DTYPE, device=DEVICE)
-            if cache_dtype == "fp8_e4m3" and head_size == 256:
+            if cache_dtype == "fp8_e4m3":
                 query = query.to(torch.float8_e4m3fn).to(DTYPE)
             key, value = keys[previous:end], values[previous:end]
             output = torch.empty_like(query)

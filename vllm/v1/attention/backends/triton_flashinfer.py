@@ -17,6 +17,6 @@ TritonFlashInferBackend = create_composite_attention_backend(
     module=__name__,
     routing_policy=MMPrefixAttentionRouting,
     head_sizes=(256, 512),
-    kernel_block_sizes=(128,),
+    kernel_block_sizes=(64,),
     device_major=10,
 )
