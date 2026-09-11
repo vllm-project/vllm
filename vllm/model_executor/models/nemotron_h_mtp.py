@@ -390,6 +390,7 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
     @staticmethod
     def _find_quant_config(*args, **kwargs) -> QuantizationConfig | None:
         vllm_config = kwargs.get("vllm_config")
+        assert isinstance(vllm_config, VllmConfig)
         return get_draft_quant_config(vllm_config)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -478,9 +479,10 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
                     name = name.replace("backbone.", "model.")
 
             if "scale" in name or "zero_point" in name:
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None:
                     continue
+                name = remapped_name
 
             # Handle stacked parameters (qkv_proj) for attention layers
             is_stacked = False
