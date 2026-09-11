@@ -6,6 +6,7 @@
 mod config;
 mod error;
 mod grpc;
+mod grpc_services;
 mod listener;
 mod lora;
 mod middleware;
@@ -31,6 +32,7 @@ pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
     HttpListenerMode, LoraModulePath, TlsConfig,
 };
+pub use grpc_services::{GrpcServiceSelection, GrpcServices, GrpcServicesParseError};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -132,6 +134,11 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     .await
     .context("failed to connect to engine core")?;
 
+    let grpc_services = config
+        .grpc_services
+        .resolve(&client.ready_responses())
+        .context("invalid --grpc-services selection")?;
+
     let llm = Llm::new(client).with_log_stats(!config.disable_log_stats);
     let text = TextLlm::new(llm, text_backend).with_max_logprobs(config.max_logprobs);
 
@@ -146,7 +153,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_server_info(ServerInfoSnapshot::from_config(config))
             .with_api_keys(config.api_keys.clone())
             .with_cors(config.cors.clone())
-            .with_profiler(config.profiler.clone()),
+            .with_profiler(config.profiler.clone())
+            .with_grpc_services(grpc_services),
     );
 
     // Load operator-configured static LoRA adapters before serving, failing
@@ -226,6 +234,7 @@ where
     // synchronously here so bind errors (port in use, permission denied, ...)
     // surface before serving rather than being deferred until shutdown.
     let grpc_setup = if let Some(grpc_port) = config.grpc_port {
+        let services = state.grpc_services();
         let grpc_host = grpc_bind_host(&config.listener_mode);
         let grpc_listener = TcpListener::bind((grpc_host, grpc_port))
             .await
@@ -241,21 +250,38 @@ where
             .context("invalid gRPC TLS configuration")?;
         let (health_reporter, health_service) = health_reporter();
         let engine_health = state.engine_core_client().subscribe_health();
-        health_reporter.set_serving::<grpc::InferenceGrpcService>().await;
-        health_reporter.set_serving::<grpc::ControlGrpcService>().await;
-        let control_service =
-            grpc::ControlGrpcService::new(grpc::ControlServiceImpl::new(state.clone()))
-                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
-        let inference_service =
+        grpc::mark_serving(&health_reporter, services).await;
+        let kv_transfer_impl = Arc::new(grpc::KvTransferServiceImpl::new(state.clone()));
+        let rl_control_impl = Arc::new(grpc::RlControlServiceImpl::new(state.clone()));
+        let control_service = services.contains(GrpcServices::CONTROL).then(|| {
+            grpc::ControlGrpcService::new(grpc::ControlServiceImpl::new(
+                state.clone(),
+                kv_transfer_impl.clone(),
+                rl_control_impl.clone(),
+            ))
+            .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES)
+        });
+        let kv_transfer_service = services.contains(GrpcServices::KV_TRANSFER).then(|| {
+            grpc::KvTransferGrpcService::from_arc(kv_transfer_impl)
+                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES)
+        });
+        let rl_control_service = services.contains(GrpcServices::RL_CONTROL).then(|| {
+            grpc::RlControlGrpcService::from_arc(rl_control_impl)
+                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES)
+        });
+        let inference_service = services.contains(GrpcServices::INFERENCE).then(|| {
             grpc::InferenceGrpcService::new(grpc::InferenceServiceImpl::new(state.clone()))
-                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+                .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES)
+        });
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
             .layer(middleware::request_runtime_layer(state.clone()))
             .add_service(health_service)
-            .add_service(control_service)
-            .add_service(inference_service);
+            .add_optional_service(control_service)
+            .add_optional_service(kv_transfer_service)
+            .add_optional_service(rl_control_service)
+            .add_optional_service(inference_service);
         Some((
             addr,
             grpc_listener,
@@ -263,6 +289,7 @@ where
             grpc_tls,
             health_reporter,
             engine_health,
+            services,
         ))
     } else {
         None
@@ -352,8 +379,15 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let Some((addr, grpc_listener, svc, grpc_tls, health_reporter, engine_health)) =
-                grpc_setup
+            let Some((
+                addr,
+                grpc_listener,
+                svc,
+                grpc_tls,
+                health_reporter,
+                engine_health,
+                services,
+            )) = grpc_setup
             else {
                 // No gRPC configured: just wait for shutdown so we do not race the
                 // join! by resolving early and tripping the cancellation token.
@@ -367,9 +401,10 @@ where
             };
             let server =
                 svc.serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
-            let health_monitor = grpc::monitor_health(health_reporter, engine_health, shutdown);
+            let health_monitor =
+                grpc::monitor_health(health_reporter, engine_health, shutdown, services);
 
-            info!(%addr, tls, model, "gRPC server is ready to accept requests");
+            info!(%addr, tls, model, %services, "gRPC server is ready to accept requests");
 
             let server = async move {
                 let result = tokio::select! {

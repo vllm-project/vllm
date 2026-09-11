@@ -5947,6 +5947,7 @@ dependencies = [
  "asynk-strim-attr",
  "auto_enums",
  "axum",
+ "bitflags",
  "bytes",
  "clap",
  "educe",

@@ -19,7 +19,7 @@ use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    HttpListenerMode, ParserSelection, RendererSelection, serve,
+    GrpcServiceSelection, HttpListenerMode, ParserSelection, RendererSelection, serve,
 };
 
 #[derive(Debug, Parser)]
@@ -82,6 +82,7 @@ async fn main() -> Result<()> {
         api_keys: Vec::new(),
         disable_log_stats: false,
         grpc_port: None,
+        grpc_services: GrpcServiceSelection::All,
         shutdown_timeout: Duration::ZERO,
         keep_alive_timeout: Duration::from_secs(5),
         profiler: None,

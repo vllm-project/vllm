@@ -17,6 +17,8 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 
+use crate::grpc_services::GrpcServiceSelection;
+
 /// Default keep-alive idle timeout (seconds); also the head-read bound
 /// when keep-alive is disabled (`0`).
 pub const DEFAULT_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -260,6 +262,8 @@ pub struct Config {
     /// TCP port for the gRPC Inference service. When `None`, no gRPC server is
     /// started.
     pub grpc_port: Option<u16>,
+    /// Which gRPC services to mount on `grpc_port`.
+    pub grpc_services: GrpcServiceSelection,
     /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
     pub shutdown_timeout: Duration,
     /// Maximum idle time on a keep-alive HTTP connection before the server
@@ -288,6 +292,9 @@ impl Config {
             );
         }
         self.transport_mode.validate()?;
+        if self.grpc_port.is_none() && self.grpc_services != GrpcServiceSelection::All {
+            bail!("--grpc-services requires --grpc-port");
+        }
 
         Ok(())
     }

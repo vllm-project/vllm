@@ -6,26 +6,27 @@ use std::sync::Arc;
 use serde_json::Value as JsonValue;
 use thiserror_ext::AsReport as _;
 use tokio::sync::Mutex;
-use tonic::{Code, Request, Response, Status};
+use tonic::{Request, Response, Status};
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
-use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::utility::PauseMode as EnginePauseMode;
 
-use super::{ControlServer, pb};
-use crate::config::LoraModulePath;
-use crate::lora::{LoadLoraError, LoraDisabledError, LoraPathAccessError, UnloadLoraError};
+use crate::grpc::{RlControlServer, pb, utility_status};
+use crate::grpc_services::{
+    draft_weight_updates_enabled, sleep_mode_enabled, weight_transfer_backend,
+};
 use crate::state::AppState;
 
-pub(crate) type ControlGrpcService = ControlServer<ControlServiceImpl>;
+pub(crate) type RlControlGrpcService = RlControlServer<RlControlServiceImpl>;
 
-/// gRPC control service backed by the shared application state.
-pub struct ControlServiceImpl {
+/// gRPC reinforcement-learning control service backed by the shared application
+/// state.
+pub struct RlControlServiceImpl {
     state: Arc<AppState>,
     rl_lock: Mutex<()>,
 }
 
-impl ControlServiceImpl {
+impl RlControlServiceImpl {
     pub fn new(state: Arc<AppState>) -> Self {
         Self {
             state,
@@ -33,77 +34,38 @@ impl ControlServiceImpl {
         }
     }
 
-    fn ready(&self) -> &EngineCoreReadyResponse {
-        self.state.engine_core_client().ready_response()
-    }
-
     fn client(&self) -> &EngineCoreClient {
         self.state.engine_core_client()
     }
 
-    fn parallelism_info(&self) -> pb::ParallelismInfo {
-        let ready = self.ready();
-        pb::ParallelismInfo {
-            tensor_parallel_size: ready.tensor_parallel_size,
-            pipeline_parallel_size: ready.pipeline_parallel_size,
-            data_parallel_size: self.client().data_parallel_size().min(u32::MAX as usize) as u32,
-            data_parallel_rank: ready.data_parallel_rank,
-            decode_context_parallel_size: ready.decode_context_parallel_size,
-            world_size: ready.world_size,
-        }
-    }
-
-    fn weight_transfer_backend(&self) -> Option<&str> {
-        let responses = self.client().ready_responses();
-        let backend = responses.first()?.weight_transfer_backend.as_deref()?;
-        responses
-            .iter()
-            .all(|ready| ready.weight_transfer_backend.as_deref() == Some(backend))
-            .then_some(backend)
-    }
-
-    fn sleep_mode_enabled(&self) -> bool {
-        self.client().ready_responses().iter().all(|ready| ready.enable_sleep_mode)
-    }
-
-    fn draft_weight_updates_enabled(&self) -> bool {
-        self.client()
-            .ready_responses()
-            .iter()
-            .all(|ready| ready.supports_draft_weight_updates)
-    }
-
-    fn rl_capabilities(&self) -> pb::RlCapabilities {
-        let backend = self.weight_transfer_backend();
-        pb::RlCapabilities {
-            weight_transfer_enabled: backend.is_some(),
-            weight_transfer_backend: backend.unwrap_or_default().to_string(),
-            sleep_mode_enabled: self.sleep_mode_enabled(),
-            draft_weight_updates_enabled: self.draft_weight_updates_enabled(),
-        }
-    }
-
     fn require_weight_transfer(&self) -> Result<(), Status> {
-        self.weight_transfer_backend().map(|_| ()).ok_or_else(|| {
-            Status::failed_precondition(
-                "weight transfer is not configured; start vLLM with --weight-transfer-config",
-            )
-        })
+        weight_transfer_backend(&self.client().ready_responses())
+            .map(|_| ())
+            .ok_or_else(|| {
+                Status::failed_precondition(
+                    "every engine needs the same weight transfer backend; start vLLM with \
+                     --weight-transfer-config",
+                )
+            })
     }
 
     fn require_sleep_mode(&self) -> Result<(), Status> {
-        self.sleep_mode_enabled().then_some(()).ok_or_else(|| {
+        sleep_mode_enabled(&self.client().ready_responses()).then_some(()).ok_or_else(|| {
             Status::failed_precondition(
-                "sleep mode is not configured; start vLLM with --enable-sleep-mode",
+                "sleep mode is not configured on every engine; start vLLM with --enable-sleep-mode",
             )
         })
     }
 }
 
-const GRPC_API_VERSION: &str = "vllm";
-
-fn utility_status(method: &'static str, error: vllm_engine_core_client::Error) -> Status {
-    Status::internal(format!("{method} failed: {}", error.to_report_string()))
+pub(crate) fn rl_capabilities(ready: &[&EngineCoreReadyResponse]) -> pb::RlCapabilities {
+    let backend = weight_transfer_backend(ready);
+    pb::RlCapabilities {
+        weight_transfer_enabled: backend.is_some(),
+        weight_transfer_backend: backend.unwrap_or_default().to_string(),
+        sleep_mode_enabled: sleep_mode_enabled(ready),
+        draft_weight_updates_enabled: draft_weight_updates_enabled(ready),
+    }
 }
 
 fn pause_mode(mode: i32) -> Result<EnginePauseMode, Status> {
@@ -137,176 +99,8 @@ fn weight_version(value: String) -> Result<String, Status> {
     Ok(value)
 }
 
-fn lora_to_proto(adapter: &LoraRequest) -> pb::LoraAdapter {
-    pb::LoraAdapter {
-        lora_id: adapter.lora_int_id.min(i64::MAX as u64) as i64,
-        lora_name: adapter.lora_name.clone(),
-        source_path: adapter.lora_path.clone(),
-    }
-}
-
-fn load_lora_status(error: LoadLoraError) -> Status {
-    let code = match &error {
-        LoadLoraError::Disabled(_) => Code::FailedPrecondition,
-        LoadLoraError::InvalidAdapter { .. } => Code::InvalidArgument,
-        LoadLoraError::PathAccess(LoraPathAccessError::InvalidPath { .. }) => Code::InvalidArgument,
-        LoadLoraError::PathAccess(LoraPathAccessError::InvalidConfiguration { .. }) => {
-            Code::Internal
-        }
-        LoadLoraError::AlreadyLoaded { .. } | LoadLoraError::BaseModelName { .. } => {
-            Code::AlreadyExists
-        }
-        LoadLoraError::Engine { .. } | LoadLoraError::NotLoaded { .. } => Code::Internal,
-    };
-    Status::new(code, error.to_report_string())
-}
-
-fn unload_lora_status(error: UnloadLoraError) -> Status {
-    let code = match &error {
-        UnloadLoraError::Disabled(_) => Code::FailedPrecondition,
-        UnloadLoraError::NotFound { .. } => Code::NotFound,
-        UnloadLoraError::IntIdMismatch { .. }
-        | UnloadLoraError::Engine { .. }
-        | UnloadLoraError::NotRemoved { .. } => Code::Internal,
-    };
-    Status::new(code, error.to_report_string())
-}
-
-fn list_loras_status(error: LoraDisabledError) -> Status {
-    Status::failed_precondition(error.to_report_string())
-}
-
 #[tonic::async_trait]
-impl pb::control_server::Control for ControlServiceImpl {
-    async fn get_server_info(
-        &self,
-        _request: Request<pb::GetServerInfoRequest>,
-    ) -> Result<Response<pb::ServerInfo>, Status> {
-        let ready = self.ready();
-        Ok(Response::new(pb::ServerInfo {
-            engine_version: ready.vllm_version.clone(),
-            api_version: GRPC_API_VERSION.to_string(),
-            instance_id: ready.instance_id.clone(),
-            parallelism: Some(self.parallelism_info()),
-            max_model_len: self.state.engine_core_client().max_model_len(),
-            kv_block_size: ready.block_size.min(u64::from(u32::MAX)) as u32,
-            total_kv_blocks: self.state.engine_core_client().total_num_gpu_blocks(),
-            max_running_requests: ready.max_num_seqs,
-            max_batched_tokens: ready.max_num_batched_tokens,
-            max_loras: ready.max_loras,
-            rl_capabilities: Some(self.rl_capabilities()),
-        }))
-    }
-
-    async fn get_model_info(
-        &self,
-        _request: Request<pb::GetModelInfoRequest>,
-    ) -> Result<Response<pb::ModelInfo>, Status> {
-        let served = self.state.served_model_names();
-        Ok(Response::new(pb::ModelInfo {
-            model_id: self.state.chat.text().model_id().to_string(),
-            served_model_name: self.state.primary_model_name().to_string(),
-            served_model_aliases: served.iter().skip(1).cloned().collect(),
-            // GenerateRequest accepts both prompt representations.
-            supports_text_input: true,
-            supports_token_ids_input: true,
-            supports_lora: self.ready().supports_lora,
-            supports_multimodal: self.state.chat.supports_multimodal(),
-            reasoning_parser: self
-                .state
-                .chat
-                .reasoning_parser_name()
-                .unwrap_or_default()
-                .to_string(),
-            tool_call_parser: self
-                .state
-                .chat
-                .tool_call_parser_name()
-                .unwrap_or_default()
-                .to_string(),
-        }))
-    }
-
-    async fn abort(
-        &self,
-        request: Request<pb::AbortRequest>,
-    ) -> Result<Response<pb::AbortResponse>, Status> {
-        let request_ids = request.into_inner().request_ids;
-        if request_ids.is_empty() {
-            return Ok(Response::new(pb::AbortResponse {}));
-        }
-        self.state
-            .chat
-            .abort(&request_ids)
-            .await
-            .map_err(|error| Status::internal(error.to_report_string()))?;
-        Ok(Response::new(pb::AbortResponse {}))
-    }
-
-    async fn load_lora(
-        &self,
-        request: Request<pb::LoadLoraRequest>,
-    ) -> Result<Response<pb::LoadLoraResponse>, Status> {
-        let request = request.into_inner();
-        let module = LoraModulePath {
-            name: request.lora_name,
-            path: request.source_path,
-            base_model_name: None,
-            is_3d_lora_weight: false,
-        };
-        let adapter = self.state.load_lora(module, false).await.map_err(load_lora_status)?;
-        Ok(Response::new(pb::LoadLoraResponse {
-            adapter: Some(lora_to_proto(&adapter)),
-        }))
-    }
-
-    async fn unload_lora(
-        &self,
-        request: Request<pb::UnloadLoraRequest>,
-    ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
-        let name = request.into_inner().lora_name;
-        if name.trim().is_empty() {
-            return Err(Status::invalid_argument("lora_name is required"));
-        }
-
-        let adapter = self
-            .state
-            .list_loras()
-            .await
-            .map_err(list_loras_status)?
-            .into_iter()
-            .find(|adapter| adapter.lora_name == name)
-            .ok_or_else(|| Status::not_found(format!("LoRA adapter `{name}` is not loaded")))?;
-        let adapter = self
-            .state
-            .unload_lora(&name, Some(adapter.lora_int_id))
-            .await
-            .map_err(unload_lora_status)?;
-        Ok(Response::new(pb::UnloadLoraResponse {
-            adapter: Some(lora_to_proto(&adapter)),
-        }))
-    }
-
-    async fn list_loras(
-        &self,
-        _request: Request<pb::ListLorasRequest>,
-    ) -> Result<Response<pb::ListLorasResponse>, Status> {
-        let mut adapters = self.state.list_loras().await.map_err(list_loras_status)?;
-        adapters.sort_by(|left, right| left.lora_name.cmp(&right.lora_name));
-        Ok(Response::new(pb::ListLorasResponse {
-            adapters: adapters.iter().map(lora_to_proto).collect(),
-        }))
-    }
-
-    async fn get_kv_event_sources(
-        &self,
-        _request: Request<pb::GetKvEventSourcesRequest>,
-    ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
-        let client = self.state.engine_core_client();
-        let sources = client.ready_responses().into_iter().filter_map(kv_event_source).collect();
-        Ok(Response::new(pb::GetKvEventSourcesResponse { sources }))
-    }
-
+impl pb::rl_control_server::RlControl for RlControlServiceImpl {
     async fn pause_generation(
         &self,
         request: Request<pb::PauseGenerationRequest>,
@@ -421,7 +215,7 @@ impl pb::control_server::Control for ControlServiceImpl {
         _request: Request<pb::StartDraftWeightUpdateRequest>,
     ) -> Result<Response<pb::StartDraftWeightUpdateResponse>, Status> {
         self.require_weight_transfer()?;
-        if !self.draft_weight_updates_enabled() {
+        if !draft_weight_updates_enabled(&self.client().ready_responses()) {
             return Err(Status::failed_precondition(
                 "draft weight updates require a configured speculative draft model",
             ));
@@ -494,24 +288,4 @@ impl pb::control_server::Control for ControlServiceImpl {
             weight_version,
         }))
     }
-}
-
-pub(super) fn kv_event_source(response: &EngineCoreReadyResponse) -> Option<pb::KvEventSource> {
-    let config = response.kv_events_config.as_ref()?;
-    if !config.enable_kv_cache_events || config.publisher != "zmq" {
-        return None;
-    }
-
-    Some(pb::KvEventSource {
-        transport: "zmq".to_string(),
-        endpoint: config.endpoint.clone(),
-        topic: config.topic.clone(),
-        replay_endpoint: config.replay_endpoint.clone().unwrap_or_default(),
-        data_parallel_rank: Some(response.data_parallel_rank),
-        encoding: "msgpack".to_string(),
-        schema_version: 1,
-        buffer_steps: config.buffer_steps,
-        hwm: config.hwm,
-        max_queue_size: config.max_queue_size,
-    })
 }
