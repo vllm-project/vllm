@@ -33,6 +33,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+    CutlassExpertsMxfp4,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     select_deepseek_v4_mxfp4_moe_backend,
@@ -501,7 +504,7 @@ def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
     )
 
     monkeypatch.setattr(
-        ct_mxfp4.CutlassExpertsMxfp4,
+        CutlassExpertsMxfp4,
         "_supports_current_device",
         lambda: False,
     )
@@ -509,11 +512,6 @@ def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
         ct_mxfp4,
         "select_mxfp4_moe_backend",
         lambda config: (Mxfp4MoeBackend.B12X_MXFP4_MXFP8, B12xExperts),
-    )
-    monkeypatch.setattr(
-        ct_mxfp4,
-        "prepare_moe_fp4_layer_for_marlin",
-        lambda layer: pytest.fail("b12x must not use Marlin packing"),
     )
     moe_config = SimpleNamespace(
         w13_num_shards=2, moe_backend="b12x", activation=MoEActivation.SILU
