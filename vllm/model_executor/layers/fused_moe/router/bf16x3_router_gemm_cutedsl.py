@@ -160,6 +160,7 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
     class CompileKey:
         bn: int
         k: int
+        split_k: int
         use_pdl: bool
 
     @staticmethod
@@ -515,8 +516,13 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
         num_sms: int,
         use_pdl: bool,
     ) -> CompileKey:
-        BN, _ = _pick_tile_config(num_tokens, K, M, num_sms)
-        return self.CompileKey(bn=BN, k=K, use_pdl=use_pdl)
+        bn, split_k = _pick_tile_config(num_tokens, K, M, num_sms)
+        return self.CompileKey(
+            bn=bn,
+            k=K,
+            split_k=split_k,
+            use_pdl=use_pdl,
+        )
 
     def get_warmup_keys(
         self,
@@ -561,7 +567,7 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
             num_sms=num_sms,
             use_pdl=current_platform.is_arch_support_pdl(),
         )
-        _, split_k = _pick_tile_config(N, K, M, num_sms)
+        split_k = compile_key.split_k
         partials = X.new_empty(split_k, N, M, dtype=torch.float32)
         out = (
             partials.squeeze(0)
