@@ -552,9 +552,8 @@ def _mock_vllm_config():
 
 
 def test_wrapper_falls_through_on_runtime_mode_mismatch():
-    """A PIECEWISE-scoped wrapper must run FULL-dispatched batches eagerly
-    (and capture nothing) so an outer CUDAGraphWrapper can own them --
-    mirrors MRV2, where breakable only replaces the piecewise path."""
+    """A PIECEWISE-scoped wrapper runs other modes eagerly, capturing
+    nothing, so an outer CUDAGraphWrapper can own them."""
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
     from vllm.config import CUDAGraphMode
     from vllm.forward_context import BatchDescriptor, set_forward_context
@@ -620,8 +619,7 @@ def test_wrapper_captures_on_runtime_mode_match():
 
 
 def test_wrapper_default_matches_any_non_none_mode():
-    """runtime_mode=None keeps the original match-anything behavior (the
-    MRV2 instantiation relies on this)."""
+    """runtime_mode=None matches any non-NONE mode (MRV2 relies on this)."""
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
     from vllm.config import CUDAGraphMode
     from vllm.forward_context import BatchDescriptor, set_forward_context
@@ -652,8 +650,7 @@ def test_wrapper_default_matches_any_non_none_mode():
 
 
 def test_unwrap_recurses_through_nested_wrappers():
-    """get_model()-style unwrap must reach the raw model when a
-    CUDAGraphWrapper(FULL) is layered over a BreakableCUDAGraphWrapper."""
+    """unwrap() reaches the raw model through nested wrappers."""
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
     from vllm.compilation.cuda_graph import CUDAGraphWrapper
     from vllm.config import CUDAGraphMode
