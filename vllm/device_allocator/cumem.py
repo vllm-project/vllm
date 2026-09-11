@@ -106,6 +106,7 @@ class CuMemAllocator:
 
     instance: "CuMemAllocator | None" = None
     default_tag: str = "default"
+    cudagraph_tag: str = "cudagraph"
 
     @staticmethod
     def get_instance() -> "CuMemAllocator":
@@ -135,7 +136,7 @@ class CuMemAllocator:
     def __init__(self):
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
-        self.allocator_and_pools: dict[str, Any] = {}
+        self.allocator_and_pools: dict[str | tuple[int, int], Any] = {}
         # Creating strong references to the two callbacks here to prevent
         # these ephemeral bound-method objects being garbage collected.
         # See discussions in https://github.com/vllm-project/vllm/pull/22724
@@ -163,8 +164,16 @@ class CuMemAllocator:
         if not self.allocator_and_pools:
             return
 
-        pool_entries = list(self.allocator_and_pools.values())
-        self.allocator_and_pools.clear()
+        gc.collect()
+        pool_entries = []
+        for key, entry in list(self.allocator_and_pools.items()):
+            use_count = entry[0].use_count()
+            if use_count != 1:
+                logger.warning(
+                    "Keeping memory pool %s with %d live references", key, use_count
+                )
+                continue
+            pool_entries.append(self.allocator_and_pools.pop(key))
 
         mem_pools = [entry[0] for entry in pool_entries]
         allocators = [entry[1] for entry in pool_entries]
@@ -212,6 +221,11 @@ class CuMemAllocator:
             # still freeing the placeholder address.
             device, size, d_mem, _ = data.handle
             return (device, size, d_mem, [])
+        if data.is_asleep:
+            # CUDA's free callback always unmaps its returned handle. Remap an
+            # empty allocation first because sleep() already released the old
+            # physical allocation.
+            create_and_map(data.handle)
         # Drain pending kernels before the C extension's cuMemUnmap.
         # The pluggable allocator path doesn't defer reclaim like the
         # regular caching allocator, so without this, in-flight work
@@ -231,6 +245,7 @@ class CuMemAllocator:
         Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
         offloaded to CPU memory, and others will be discarded.
+        CUDA graph pools are always backed up to preserve captured constants.
 
         Args:
             offload_tags: The tags of the memory allocation that will be
@@ -244,6 +259,8 @@ class CuMemAllocator:
             offload_tags = (offload_tags,)
 
         assert isinstance(offload_tags, tuple)
+        # Graph pools can contain constants, including after level-2 sleep.
+        offload_tags = (*offload_tags, self.cudagraph_tag)
 
         total_bytes = 0
         backup_bytes = 0
@@ -329,12 +346,16 @@ class CuMemAllocator:
         Wake up the allocator from sleep mode.
         All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory.
+        Waking weights also restores CUDA graph pools.
 
         Args:
             tags: The tags of the memory allocation that will be loaded
                 back to GPU memory. If None, all memory allocation will be loaded
                 back to GPU memory.
         """
+        if tags is not None and "weights" in tags:
+            tags = [*tags, self.cudagraph_tag]
+
         gc.collect()
         torch.accelerator.empty_cache()
 
@@ -414,6 +435,49 @@ class CuMemAllocator:
             self.current_tag = old_tag
             if expandable_was_enabled:
                 torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+
+    @contextmanager
+    def use_cudagraph_pool(self, pool: tuple[int, int]) -> Iterator[tuple[int, int]]:
+        """Preserve graph pool sharing while tracking its allocations for sleep."""
+        if pool not in self.allocator_and_pools:
+            allocator = get_pluggable_allocator(
+                self.python_malloc_callback, self.python_free_callback
+            )
+            mem_pool = torch.cuda.MemPool(allocator._allocator)
+            self.allocator_and_pools[pool] = (mem_pool, allocator)
+
+        expandable_was_enabled = "expandable_segments:True" in os.environ.get(
+            "PYTORCH_CUDA_ALLOC_CONF", ""
+        )
+        if expandable_was_enabled:
+            torch.cuda.memory._set_allocator_settings("expandable_segments:False")
+        old_tag = self.current_tag
+        self.current_tag = self.cudagraph_tag
+        try:
+            # capture_begin routes allocations itself; use_mem_pool would start
+            # recording to this pool twice.
+            yield self.allocator_and_pools[pool][0].id
+        finally:
+            self.current_tag = old_tag
+            if expandable_was_enabled:
+                torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+
+    def release_cudagraph_pool(self, pool: tuple[int, int]) -> None:
+        """Drop an unused profiling pool before its allocator wrapper."""
+        gc.collect()
+        entry = self.allocator_and_pools.get(pool)
+        if entry is None:
+            return
+        mem_pool, allocator = entry
+        use_count = mem_pool.use_count()
+        if use_count != 1:
+            logger.warning(
+                "Keeping CUDA graph pool %s with %d live references", pool, use_count
+            )
+            return
+        del self.allocator_and_pools[pool], entry, mem_pool
+        gc.collect()
+        del allocator
 
     def get_current_usage(self) -> int:
         """
