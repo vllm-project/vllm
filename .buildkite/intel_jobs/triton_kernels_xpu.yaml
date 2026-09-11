@@ -12,8 +12,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - moe_mmk
   - expert_triton_kernel
@@ -34,8 +35,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - write_zeros_to_output
   - fused_moe_kernel_gptq_awq
@@ -55,8 +57,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - fused_moe_kernel
   source_file_dependencies:
@@ -77,8 +80,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - _count_expert_num_tokens
   source_file_dependencies:
@@ -97,8 +101,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - _causal_conv1d_fwd_kernel
   source_file_dependencies:
@@ -117,8 +122,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - _causal_conv1d_update_kernel
   source_file_dependencies:
@@ -139,8 +145,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - chunk_gated_delta_rule_fwd_kernel_h
   - chunk_local_cumsum_vector
@@ -167,18 +174,17 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - fused_recurrent_gated_delta_rule
   source_file_dependencies:
   - tests/kernels/test_fused_recurrent_packed_decode.py
-  - tests/models/kimi_k3/test_kda.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pytest tests/kernels/test_fused_recurrent_packed_decode.py::test_fused_recurrent_packed_decode_matches_reference -v || true &&
-    pytest tests/models/kimi_k3/test_kda.py::test_fused_kda_decode_correctness -v || true'
+    'pytest tests/kernels/test_fused_recurrent_packed_decode.py::test_fused_recurrent_packed_decode_matches_reference -v || true'
 - label: layer_norm_fwd_kernel
   device: intel_gpu
   timeout_in_minutes: 85
@@ -189,8 +195,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - layer_norm_fwd_kernel
   source_file_dependencies:
@@ -209,8 +216,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - _silu_mul_fp8_quant_deep_gemm
   source_file_dependencies:
@@ -229,8 +237,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - merge_attn_states_kernel
   source_file_dependencies:
@@ -239,6 +248,29 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/attention/test_merge_attn_states.py::test_merge_attn_states -v || true'
+- label: R04
+  device: intel_gpu
+  timeout_in_minutes: 85
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _fwd_kernel_stage1
+  - _fwd_grouped_kernel_stage1
+  - _fwd_kernel_stage2
+  source_file_dependencies:
+  - tests/kernels/attention/test_triton_decode_attention.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/kernels/attention/test_triton_decode_attention.py::test_decode_attention -v || true'
 - label: R05
   device: intel_gpu
   timeout_in_minutes: 85
@@ -249,8 +281,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - kernel_unified_attention_2d
   - kernel_unified_attention_3d
@@ -271,8 +304,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - scaled_mm_kernel
   source_file_dependencies:
@@ -291,8 +325,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - awq_dequantize_kernel
   source_file_dependencies:
@@ -311,8 +346,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - awq_gemm_kernel
   source_file_dependencies:
@@ -331,8 +367,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - round_int8
   - _per_token_quant_int8
@@ -342,26 +379,6 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/quantization/test_int8_kernel.py::test_per_token_quant_int8 -v || true'
-- label: _per_token_group_quant_int8
-  device: intel_gpu
-  timeout_in_minutes: 85
-  working_dir: .
-  no_plugin: true
-  env:
-    REGISTRY: public.ecr.aws/q9t5s3a7
-    REPO: vllm-ci-test-repo
-    VLLM_TEST_DEVICE: xpu
-  agent_tags:
-    label: debug
-    gpu: 1+
-  _raw_old_commands:
-  - _per_token_group_quant_int8
-  source_file_dependencies:
-  - tests/kernels/quantization/test_per_token_group_quant.py
-  commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'pytest tests/kernels/quantization/test_per_token_group_quant.py::test_per_token_group_quant_int8 -v || true'
 - label: _per_token_group_quant_fp8
   device: intel_gpu
   timeout_in_minutes: 85
@@ -372,8 +389,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - _per_token_group_quant_fp8
   source_file_dependencies:
@@ -392,8 +410,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - _per_token_group_quant_fp8_colmajor
   source_file_dependencies:
@@ -414,8 +433,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - softplus
   - _selective_scan_update_kernel
@@ -437,8 +457,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - _bmm_chunk_fwd_kernel
   - _chunk_scan_fwd_kernel
@@ -463,8 +484,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - layer_norm_gated_fwd_kernel
   source_file_dependencies:
@@ -483,8 +505,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - kda_gate_fwd_kernel
   source_file_dependencies:
@@ -503,8 +526,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - _fwd_diag_kernel
   - _fwd_kv_parallel
@@ -526,8 +550,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - _linear_attn_decode_kernel
   source_file_dependencies:

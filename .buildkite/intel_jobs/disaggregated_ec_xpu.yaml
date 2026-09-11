@@ -1,0 +1,29 @@
+group: Disaggregated EC XPU
+depends_on:
+  - image-build-xpu
+steps:
+- label: ':nvidia: (L4) Scale-out EC Connector E2E'
+  device: intel_gpu
+  timeout_in_minutes: 40
+  num_devices: 2
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  _raw_old_commands:
+  - bash entrypoints/scale_out/ec_integration/run_scale_out_ec_e2e_test.sh
+  source_file_dependencies:
+  - vllm/distributed/ec_transfer/
+  - vllm/entrypoints/scale_out/
+  - tests/entrypoints/scale_out/ec_integration/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    bash entrypoints/scale_out/ec_integration/run_scale_out_ec_e2e_test.sh || true'
