@@ -1727,3 +1727,20 @@ class TestClientErrorResponses:
 
         assert response.status_code == HTTPStatus.BAD_REQUEST
         assert response.json()["error"]["type"] == "BadRequestError"
+
+
+class TestWatermarking:
+    def test_defaults_to_unspecified(self):
+        request = _make_request([{"role": "user", "content": "hi"}])
+
+        assert _convert(request).watermarking is None
+
+    def test_forwards_explicit_enable(self):
+        request = _make_request([{"role": "user", "content": "hi"}], watermarking=True)
+
+        assert _convert(request).watermarking is True
+
+    def test_forwards_the_opt_out(self):
+        request = _make_request([{"role": "user", "content": "hi"}], watermarking=False)
+
+        assert not _convert(request).watermarking

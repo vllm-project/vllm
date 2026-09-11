@@ -41,6 +41,21 @@ def test_detector_deduplicates_context_even_when_target_differs():
     assert detection.num_scored_tokens == 3
 
 
+def test_watermarker_respects_filtered_token_support():
+    logits = torch.full((2, 8), -torch.inf)
+    logits[0, 3] = 0
+    logits[1, 6] = 0
+    contexts = torch.tensor([[1, 2, 3, 4], [4, 5, 6, 7]])
+
+    token_ids = (
+        GumbelWatermarker(key=42)
+        .sample(logits, contexts, lambda values: None)
+        .token_ids
+    )
+
+    assert torch.equal(token_ids, torch.tensor([3, 6]))
+
+
 def test_dual_key_detector_scores_each_token_against_both_keys():
     token_ids = [1, 2, 3, 4, 5]
     key_a_detector = GumbelWatermarkDetector(

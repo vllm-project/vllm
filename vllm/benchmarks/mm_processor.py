@@ -248,6 +248,7 @@ def benchmark_multimodal_processor(
             temperature=0.0,
             max_tokens=output_len,
             detokenize=True,
+            watermarking=False,
         )
         for output_len in expected_output_lens
     ]

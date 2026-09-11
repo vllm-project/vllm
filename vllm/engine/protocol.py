@@ -16,7 +16,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
@@ -45,6 +45,9 @@ class EngineClient(ABC):
     model_config: ModelConfig
     renderer: BaseRenderer
     input_processor: InputProcessor
+
+    def resolve_watermarking(self, params: SamplingParams | BeamSearchParams) -> bool:
+        return self.input_processor.resolve_watermarking(params)
 
     @property
     @abstractmethod

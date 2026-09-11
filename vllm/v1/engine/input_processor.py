@@ -24,7 +24,7 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.renderers.inputs.preprocess import parse_model_prompt
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
@@ -81,6 +81,10 @@ class InputProcessor:
     def get_tokenizer(self) -> TokenizerLike:
         return self.renderer.get_tokenizer()
 
+    def resolve_watermarking(self, params: SamplingParams | BeamSearchParams) -> bool:
+        params.watermarking = self.vllm_config._check_supports_watermarking(params)
+        return params.watermarking
+
     def _validate_params(
         self,
         params: SamplingParams | PoolingParams,
@@ -100,6 +104,7 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
+            self.resolve_watermarking(params)
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:

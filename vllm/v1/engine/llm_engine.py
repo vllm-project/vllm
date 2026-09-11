@@ -23,7 +23,7 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
@@ -47,6 +47,9 @@ _R = TypeVar("_R", default=Any)
 
 class LLMEngine:
     """Legacy LLMEngine for backwards compatibility."""
+
+    def resolve_watermarking(self, params: SamplingParams | BeamSearchParams) -> bool:
+        return self.input_processor.resolve_watermarking(params)
 
     def __init__(
         self,
@@ -253,6 +256,9 @@ class LLMEngine:
                     "does not match the EngineCoreRequest.request_id attribute. The "
                     "latter will be used, and the former will be ignored."
                 )
+            request_params = request.params
+            if isinstance(request_params, SamplingParams):
+                self.resolve_watermarking(request_params)
         else:
             request = self.input_processor.process_inputs(
                 request_id,
