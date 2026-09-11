@@ -380,8 +380,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # the default stream.
         aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
 
-        # Reserved topk indices buffer for all Indexer layers to reuse.
+        # Keep cross-layer index state separate for each microbatch.
+        ubatch_shape = (
+            (self.parallel_config.num_ubatches,)
+            if self.parallel_config.use_ubatching
+            else ()
+        )
         self.topk_indices_buffer = torch.empty(
+            *ubatch_shape,
             vllm_config.scheduler_config.max_num_batched_tokens,
             config.index_topk,
             dtype=torch.int32,
@@ -395,6 +401,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         candidate_topk_blocks = getattr(config, "candidate_topk_blocks", 0)
         if candidate_source_layer >= 0 and candidate_topk_blocks > 0:
             self.candidate_block_buffer = torch.empty(
+                *ubatch_shape,
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 candidate_topk_blocks,
                 dtype=torch.int32,

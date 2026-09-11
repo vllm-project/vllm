@@ -41,6 +41,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
+from vllm.v1.worker.ubatching import dbo_select_buffer
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -839,13 +840,13 @@ class SparseAttnIndexer(CustomOp):
         self.head_dim = head_dim
         self.max_model_len = max_model_len
         self.max_total_seq_len = max_total_seq_len
-        self.topk_indices_buffer = topk_indices_buffer
+        self._topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
         self.compress_ratio = compress_ratio
         # v4.1 two-level selection: the candidate source indexer writes the
         # top candidate blocks here; later indexers mask their scores with it.
-        self.candidate_blocks = candidate_blocks
+        self._candidate_blocks = candidate_blocks
         self.candidate_block_size = candidate_block_size
         self.candidate_write = candidate_write
         self.dense_mha_metadata_layer_name = ""
@@ -886,6 +887,20 @@ class SparseAttnIndexer(CustomOp):
 
                 _PACK_DCP_TOPK_CANDIDATES_KERNEL.register_warmup()
                 _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL.register_warmup()
+
+    @property
+    def topk_indices_buffer(self) -> torch.Tensor:
+        return dbo_select_buffer(self._topk_indices_buffer)
+
+    @topk_indices_buffer.setter
+    def topk_indices_buffer(self, buffer: torch.Tensor) -> None:
+        self._topk_indices_buffer = buffer
+
+    @property
+    def candidate_blocks(self) -> torch.Tensor | None:
+        if self._candidate_blocks is None:
+            return None
+        return dbo_select_buffer(self._candidate_blocks)
 
     @property
     def cp_kv_cache_interleave_size(self) -> int:
