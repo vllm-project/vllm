@@ -383,6 +383,12 @@ def get_quant_config(
 
     # If the quantization config is not found, use the default config.
     if not possible_config_filenames:
+        if model_config.quantization == "fp8":
+            logger.warning(
+                "--quantization fp8 is deprecated for online quantization; "
+                "use --quantization fp8_per_tensor instead."
+            )
+            return OnlineQuantizationConfig(args=_ONLINE_SHORTHANDS["fp8_per_tensor"])
         if model_config.quantization in _ONLINE_SHORTHANDS:
             args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
             assert isinstance(args, QuantizationConfigArgs)

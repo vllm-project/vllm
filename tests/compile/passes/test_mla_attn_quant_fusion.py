@@ -272,7 +272,6 @@ class TestMLAAttentionFp8GroupQuantPatternModel(MLAAttentionQuantPatternModel):
 
     quant_key = kFp8Dynamic128Sym
     quant_config = Fp8Config(
-        is_checkpoint_fp8_serialized=True,
         weight_block_size=[128, 128],
     )
 

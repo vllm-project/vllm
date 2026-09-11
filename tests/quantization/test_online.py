@@ -20,6 +20,8 @@ from tests.quantization.utils import (
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.config.cache import CacheConfig
+from vllm.config.kernel import KernelConfig
 from vllm.config.load import LoadConfig
 from vllm.config.model import ModelConfig
 from vllm.config.quantization import (
@@ -33,6 +35,9 @@ from vllm.model_executor.kernels.linear.mxfp8.emulation import (
 )
 from vllm.model_executor.kernels.linear.mxfp8.marlin import (
     MarlinMxfp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
@@ -122,6 +127,21 @@ GRANITE_MODEL_NAME = "ibm-granite/granite-3.0-1b-a400m-base"
 PARTIALLY_PREQUANTIZED_MODEL_NAME = (
     "nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable"
 )
+
+
+def test_legacy_fp8_online_quantization_uses_per_tensor_shorthand(
+    tmp_path, caplog, disable_log_dedup
+) -> None:
+    """Legacy FP8 online quantization uses the per-tensor shorthand."""
+    _write_minimal_llama_config(tmp_path)
+    model_config = ModelConfig(model=str(tmp_path), quantization="fp8")
+
+    result = weight_utils.get_quant_config(model_config, LoadConfig())
+
+    assert isinstance(result, OnlineQuantizationConfig)
+    assert result.args == resolve_quantization_config("fp8_per_tensor", None)
+    assert "--quantization fp8 is deprecated for online quantization" in caplog.text
+    assert "--quantization fp8_per_tensor instead" in caplog.text
 
 
 def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
@@ -509,33 +529,81 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
     reason="FP8 is not supported on this GPU type.",
 )
 @pytest.mark.parametrize(
-    ("model_name,quant_scheme,online_quant_args,expected_linear_cls,expected_moe_cls"),
+    (
+        "model_name,quant_scheme,online_quant_args,expected_linear_cls,expected_moe_cls,extra_runner_kwargs"
+    ),
     [
         # simple case - quantization='fp8_per_tensor'
-        (
+        pytest.param(
             GRANITE_MODEL_NAME,
             "fp8_per_tensor",
             None,
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
+            {},
+            id="fp8_per_tensor",
+        ),
+        # FP8 KV cache with the fp8_per_tensor shorthand.
+        pytest.param(
+            GRANITE_MODEL_NAME,
+            "fp8_per_tensor",
+            None,
+            Fp8PerTensorOnlineLinearMethod,
+            Fp8PerTensorOnlineMoEMethod,
+            {"kv_cache_dtype": "fp8"},
+            id="fp8_per_tensor-fp8-kv-cache",
+        ),
+        pytest.param(
+            GRANITE_MODEL_NAME,
+            "fp8_per_tensor",
+            None,
+            Fp8PerTensorOnlineLinearMethod,
+            Fp8PerTensorOnlineMoEMethod,
+            {"linear_backend": "marlin", "moe_backend": "marlin"},
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(),
+                reason="Marlin online FP8 coverage is CUDA-only.",
+            ),
+            id="fp8_per_tensor-marlin",
+        ),
+        pytest.param(
+            GRANITE_MODEL_NAME,
+            "fp8_per_tensor",
+            None,
+            Fp8PerTensorOnlineLinearMethod,
+            Fp8PerTensorOnlineMoEMethod,
+            {
+                "kv_cache_dtype": "fp8",
+                "linear_backend": "marlin",
+                "moe_backend": "marlin",
+            },
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(),
+                reason="Marlin online FP8 coverage is CUDA-only.",
+            ),
+            id="fp8_per_tensor-fp8-kv-cache-marlin",
         ),
         # simple case - quantization='fp8_per_block'
-        (
+        pytest.param(
             GRANITE_MODEL_NAME,
             "fp8_per_block",
             None,
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerBlockOnlineMoEMethod,
+            {},
+            id="fp8_per_block",
         ),
-        (
+        pytest.param(
             GRANITE_MODEL_NAME,
             "fp8_per_channel",
             None,
             Fp8PtpcOnlineLinearMethod,
             Fp8PtpcOnlineMoEMethod,
+            {},
+            id="fp8_per_channel",
         ),
         # quantization='online' with per-layer-kind overrides
-        (
+        pytest.param(
             GRANITE_MODEL_NAME,
             "online",
             {
@@ -544,9 +612,11 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             },
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
+            {},
+            id="per_layer_kind_overrides",
         ),
         # quantization='online' with per-layer target patterns
-        (
+        pytest.param(
             GRANITE_MODEL_NAME,
             "online",
             {
@@ -557,9 +627,11 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             },
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
+            {},
+            id="targets",
         ),
         # ignore with direct layer name
-        (
+        pytest.param(
             GRANITE_MODEL_NAME,
             "fp8_per_tensor",
             # qkv_proj is fused from q_proj/k_proj/v_proj. The shard regex
@@ -567,13 +639,17 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             {"ignore": ["model.layers.1.self_attn.o_proj", "re:.*[qkv]_proj"]},
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
+            {},
+            id="ignore",
         ),
-        (
+        pytest.param(
             GRANITE_MODEL_NAME,
             "mxfp4",
             None,
             Mxfp4OnlineLinearMethod,
             Mxfp4OnlineMoEMethod,
+            {},
+            id="mxfp4",
         ),
         pytest.param(
             PARTIALLY_PREQUANTIZED_MODEL_NAME,
@@ -581,18 +657,9 @@ def test_checkpoint_quantization_rejects_online_shorthand(tmp_path) -> None:
             {"targets": {"model.layers.1.self_attn.o_proj": "mxfp8"}},
             Mxfp8OnlineLinearMethod,
             CompressedTensorsMoEMethod,
+            {},
             id="partially_prequantized_checkpoint",
         ),
-    ],
-    ids=[
-        "fp8_per_tensor",
-        "fp8_per_block",
-        "fp8_per_channel",
-        "per_layer_kind_overrides",
-        "targets",
-        "ignore",
-        "mxfp4",
-        "partially_prequantized_checkpoint",
     ],
 )
 @pytest.mark.parametrize(
@@ -604,6 +671,7 @@ def test_online_quantization(
     online_quant_args: dict | None,
     expected_linear_cls,
     expected_moe_cls,
+    extra_runner_kwargs: dict,
     use_rocm_aiter: bool,
     monkeypatch,
     dist_init,
@@ -632,14 +700,31 @@ def test_online_quantization(
     ):
         pytest.skip(f"Skip test for online {quant_scheme} on XPU platform.")
 
+    runner_kwargs = dict(extra_runner_kwargs)
+    kv_cache_dtype = runner_kwargs.get("kv_cache_dtype", "auto")
+    force_marlin = extra_runner_kwargs.get("linear_backend") == "marlin"
+    if kv_cache_dtype == "fp8" and current_platform.is_device_capability_family(90):
+        # FA3 requires BF16 output when the query input is FP8.
+        runner_kwargs["dtype"] = "bfloat16"
+
+    vllm_config_kwargs = {
+        "cache_config": CacheConfig(cache_dtype=kv_cache_dtype),
+        "kernel_config": KernelConfig(
+            linear_backend=runner_kwargs.get("linear_backend", "auto"),
+            moe_backend=runner_kwargs.get("moe_backend", "auto"),
+        ),
+    }
+
     if model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME:
         model, vllm_config = load_model_without_vllm_runner(
             model_name,
+            dtype=runner_kwargs.get("dtype", "bfloat16"),
             model_config_kwargs={
                 "quantization_config": resolve_quantization_config(
                     None, online_quant_args
                 )
             },
+            vllm_config_kwargs=vllm_config_kwargs,
             model_loader_cls=DummyModelLoader,
         )
         assert isinstance(
@@ -657,7 +742,7 @@ def test_online_quantization(
     else:
         model, vllm_config = load_model_without_vllm_runner(
             model_name,
-            dtype="bfloat16",
+            dtype=runner_kwargs.get("dtype", "bfloat16"),
             quantization=quant_scheme,
             model_config_kwargs={
                 "quantization_config": resolve_quantization_config(
@@ -675,6 +760,7 @@ def test_online_quantization(
                     "num_experts_per_tok": 2,
                 },
             },
+            vllm_config_kwargs=vllm_config_kwargs,
             model_loader_cls=DummyModelLoader,
         )
 
@@ -702,7 +788,16 @@ def test_online_quantization(
     elif quant_scheme == "mxfp4":
         assert o_proj.weight.dtype == torch.uint8
     elif current_platform.is_cuda() or current_platform.is_xpu():
-        assert o_proj.weight.dtype == torch.float8_e4m3fn
+        if current_platform.supports_fp8() and not force_marlin:
+            assert o_proj.weight.dtype == torch.float8_e4m3fn
+            assert not isinstance(
+                o_proj.quant_method.fp8_linear, MarlinFP8ScaledMMLinearKernel
+            )
+        else:
+            assert o_proj.weight.dtype == torch.int32
+            assert isinstance(
+                o_proj.quant_method.fp8_linear, MarlinFP8ScaledMMLinearKernel
+            )
     elif current_platform.is_rocm():
         assert o_proj.weight.dtype == current_platform.fp8_dtype()
     else:
@@ -725,6 +820,11 @@ def test_online_quantization(
             assert isinstance(
                 layer.self_attn.qkv_proj.quant_method, UnquantizedLinearMethod
             )
+
+    if kv_cache_dtype == "fp8":
+        attn = model.model.layers[0].self_attn.attn
+        assert attn._k_scale == 1.0
+        assert attn._v_scale == 1.0
 
     if (
         model_name == GRANITE_MODEL_NAME
