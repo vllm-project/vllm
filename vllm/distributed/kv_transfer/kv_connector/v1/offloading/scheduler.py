@@ -305,7 +305,7 @@ class SchedulerOffloadConfig(NamedTuple):
         if retention_interval is not None:
             if retention_interval < 0:
                 raise ValueError(
-                    f"VLLM_PREFIX_CACHE_RETENTION_INTERVAL "
+                    f"prefix_cache_retention_interval "
                     f"({retention_interval}) must be non-negative."
                 )
             for config in kv_group_configs:
@@ -314,7 +314,7 @@ class SchedulerOffloadConfig(NamedTuple):
                     and retention_interval % config.tokens_per_chunk != 0
                 ):
                     raise ValueError(
-                        f"VLLM_PREFIX_CACHE_RETENTION_INTERVAL "
+                        f"prefix_cache_retention_interval "
                         f"({retention_interval}) must be a multiple of "
                         f"tokens_per_chunk ({config.tokens_per_chunk})."
                     )
@@ -1131,7 +1131,7 @@ class OffloadingConnectorScheduler:
             # Skip prefix-hit chunks for block-level policy; for
             # request-level, next_stored_chunk_idx stays at 0 so all
             # chunks (including hits) are offloaded.
-            if req_status.offloading_context.policy == OffloadPolicy.BLOCK_LEVEL:
+            if req_status.offloading_context.policy == OffloadPolicy.CHUNK_LEVEL:
                 group_state.next_stored_chunk_idx = num_chunks
 
         src_spec = self.manager.prepare_load(keys_to_load, req_status.req_context)
