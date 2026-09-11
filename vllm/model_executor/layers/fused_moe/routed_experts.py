@@ -640,6 +640,19 @@ class RoutedExperts(PluggableLayer):
         if full_load:
             shard_dim += 1
 
+        # In-place weight update for kernels that keep experts in a non-checkpoint
+        # layout (e.g. FlashInfer TRTLLM block layout).
+        load_in_kernel_format = getattr(
+            self.quant_method, "load_weight_slice_in_kernel_format", None
+        )
+        if (
+            load_in_kernel_format is not None
+            and not full_load
+            and "bias" not in weight_name
+            and load_in_kernel_format(self, param, loaded_weight, shard_id, expert_id)
+        ):
+            return True if return_success else None
+
         expert_data = param.data if full_load else param.data[expert_id]
 
         if "bias" in weight_name:
