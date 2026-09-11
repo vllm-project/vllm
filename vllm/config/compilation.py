@@ -77,6 +77,13 @@ class CUDAGraphMode(enum.Enum):
     def requires_piecewise_compilation(self) -> bool:
         return self.has_mode(CUDAGraphMode.PIECEWISE)
 
+    def without_piecewise(self) -> "CUDAGraphMode":
+        if self == CUDAGraphMode.PIECEWISE:
+            return CUDAGraphMode.NONE
+        if self == CUDAGraphMode.FULL_AND_PIECEWISE:
+            return CUDAGraphMode.FULL_DECODE_ONLY
+        return self
+
     def max_cudagraph_mode(self) -> "CUDAGraphMode":
         return CUDAGraphMode(max(self.value)) if self.separate_routine() else self
 
@@ -1382,6 +1389,7 @@ class CompilationConfig:
         kv_cache_config: "KVCacheConfig | None" = None,
         max_num_reqs: int | None = None,
         is_profiling: bool = False,
+        piecewise_capture_available: bool = True,
     ) -> CUDAGraphMode:
         from vllm.v1.attention.backend import AttentionCGSupport
 
@@ -1463,6 +1471,20 @@ class CompilationConfig:
                 msg += "; setting cudagraph_mode=NONE"
                 cudagraph_mode = CUDAGraphMode.NONE
             logger.warning(msg)
+
+        if (
+            not piecewise_capture_available
+            and cudagraph_mode.requires_piecewise_compilation()
+        ):
+            fallback_mode = cudagraph_mode.without_piecewise()
+            logger.warning_once(
+                "Cudagraph mode %s requires piecewise capture, but the loaded "
+                "model provides neither a compiled submodule nor breakable CUDA "
+                "graphs. Overriding to %s.",
+                cudagraph_mode,
+                fallback_mode,
+            )
+            cudagraph_mode = fallback_mode
 
         # double check that we can support full cudagraph if they are requested
         # even after automatic downgrades

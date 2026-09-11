@@ -285,7 +285,7 @@ repos:
     pass_filenames: false
     require_serial: true
     stages: [pre-commit] # Only run locally as Buildkite will cover this
-    files: ^rust/(Cargo\.toml|src/.*/Cargo\.toml)$
+    files: ^rust/(Cargo\.toml|proto/Cargo\.toml|src/.*/Cargo\.toml)$
   - id: rust-cargo-sort
     name: Rust - Sort Cargo manifest sections
     entry: tools/pre_commit/rust-check.sh sort --workspace
@@ -293,7 +293,7 @@ repos:
     pass_filenames: false
     require_serial: true
     stages: [pre-commit] # Only run locally as Buildkite will cover this
-    files: ^rust/(Cargo\.toml|src/.*/Cargo\.toml)$
+    files: ^rust/(Cargo\.toml|proto/Cargo\.toml|src/.*/Cargo\.toml)$
   - id: rust-cargo-fmt
     name: Rust - Format code
     entry: tools/pre_commit/rust-check.sh fmt
