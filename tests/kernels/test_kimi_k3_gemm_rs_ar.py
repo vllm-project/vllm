@@ -130,7 +130,7 @@ def _run_mode(
         assert first_output.data_ptr() != second_output.data_ptr()
         torch.testing.assert_close(first_output, first_snapshot, rtol=0, atol=0)
 
-    graph_M, graph_K = 1025, 4224
+    graph_M, graph_K = 4097, 4224
     input_generator.manual_seed(3000)
     graph_x = torch.randn(
         graph_M,
