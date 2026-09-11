@@ -959,6 +959,86 @@ static void launchFullCacheKernel(
 // ────────────────────────────────────────────────────────────────────────────
 // Torch op wrapper
 // ────────────────────────────────────────────────────────────────────────────
+void fused_deepseek_v4_kv_rope_insert(
+    torch::stable::Tensor const& kv, torch::stable::Tensor& k_cache,
+    torch::stable::Tensor const& slot_mapping,
+    torch::stable::Tensor const& position_ids,
+    torch::stable::Tensor const& cos_sin_cache, int64_t cache_block_size,
+    std::optional<torch::stable::Tensor> fp8_scale) {
+  using torch::headeronly::ScalarType;
+  STD_TORCH_CHECK(kv.device().is_cuda() && kv.is_contiguous() &&
+                      kv.dim() == 2 && kv.size(1) == 512 &&
+                      kv.scalar_type() == ScalarType::BFloat16,
+                  "kv must be contiguous CUDA bfloat16 [tokens, 512]");
+  auto const device = kv.get_device_index();
+  STD_TORCH_CHECK(k_cache.device().is_cuda() &&
+                      k_cache.get_device_index() == device &&
+                      k_cache.dim() == 3 && cache_block_size > 0 &&
+                      k_cache.size(1) == cache_block_size &&
+                      k_cache.stride(2) == 1,
+                  "k_cache must be a paged cache on the KV device");
+  for (auto const* tensor : {&slot_mapping, &position_ids}) {
+    STD_TORCH_CHECK(tensor->device().is_cuda() &&
+                        tensor->get_device_index() == device &&
+                        tensor->scalar_type() == ScalarType::Long &&
+                        tensor->dim() == 1 && tensor->is_contiguous(),
+                    "slots and positions must be contiguous int64 on the KV device");
+  }
+  STD_TORCH_CHECK(position_ids.size(0) == kv.size(0) &&
+                      slot_mapping.size(0) <= kv.size(0),
+                  "positions must match KV rows; slots may omit padded rows");
+  STD_TORCH_CHECK(cos_sin_cache.device().is_cuda() &&
+                      cos_sin_cache.get_device_index() == device &&
+                      cos_sin_cache.scalar_type() == ScalarType::Float &&
+                      cos_sin_cache.dim() == 2 &&
+                      cos_sin_cache.size(1) == 64 && cos_sin_cache.is_contiguous(),
+                  "cos_sin_cache must be contiguous float32 [max_pos, 64]");
+  bool const packed = k_cache.scalar_type() == ScalarType::Byte;
+  bool const fp8 = k_cache.scalar_type() == ScalarType::Float8_e4m3fn;
+  STD_TORCH_CHECK(packed || fp8 ||
+                      k_cache.scalar_type() == ScalarType::BFloat16,
+                  "cache must be uint8, bfloat16 or float8_e4m3fn");
+  STD_TORCH_CHECK(k_cache.size(2) == (packed ? 584 : 512),
+                  "cache row width does not match its dtype");
+  if (fp8) {
+    STD_TORCH_CHECK(fp8_scale.has_value() && fp8_scale->device().is_cuda() &&
+                        fp8_scale->get_device_index() == device &&
+                        fp8_scale->scalar_type() == ScalarType::Float &&
+                        fp8_scale->numel() == 1,
+                    "fp8 cache requires one float32 KV scale on the KV device");
+  }
+  int const num_tokens = static_cast<int>(slot_mapping.size(0));
+  if (num_tokens == 0) return;
+  const torch::stable::accelerator::DeviceGuard device_guard(device);
+  const cudaStream_t stream = get_current_cuda_stream(device);
+  using scalar_t = c10::BFloat16;
+  auto const* input = reinterpret_cast<scalar_t const*>(kv.const_data_ptr());
+  auto* cache = reinterpret_cast<uint8_t*>(k_cache.mutable_data_ptr());
+  auto const* slots = slot_mapping.const_data_ptr<int64_t>();
+  auto const* positions = position_ids.const_data_ptr<int64_t>();
+  auto const* cos_sin = cos_sin_cache.const_data_ptr<float>();
+  // Zero query heads schedules only the existing KV branch, preserving its
+  // RoPE rounding and quantization without allocating any query tensors.
+  if (packed) {
+    vllm::deepseek_v4_fused_ops::launchFusedDeepseekV4Templated<scalar_t, 0, false>(
+        nullptr, nullptr, input, cache, slots, positions, cos_sin, 0.0f,
+        num_tokens, num_tokens, 0, static_cast<int>(cache_block_size),
+        static_cast<int>(k_cache.stride(0)), stream);
+  } else if (fp8) {
+    vllm::deepseek_v4_fused_ops::launchFullCacheKernel<scalar_t, false, true>(
+        nullptr, nullptr, 0, 0, input, cache, slots, positions, cos_sin,
+        fp8_scale->const_data_ptr<float>(), nullptr, 0.0f, num_tokens, num_tokens,
+        0, static_cast<int>(cache_block_size), k_cache.stride(0),
+        k_cache.stride(1), false, "fused_deepseek_v4_kv_rope_insert", stream);
+  } else {
+    vllm::deepseek_v4_fused_ops::launchFullCacheKernel<scalar_t, false, false>(
+        nullptr, nullptr, 0, 0, input, cache, slots, positions, cos_sin, nullptr,
+        nullptr, 0.0f, num_tokens, num_tokens, 0, static_cast<int>(cache_block_size),
+        k_cache.stride(0) * 2, k_cache.stride(1) * 2, false,
+        "fused_deepseek_v4_kv_rope_insert", stream);
+  }
+}
+
 torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::stable::Tensor const& q_in,           // [N, num_heads_q, 512] bf16
     torch::stable::Tensor const& kv,             // [N, 512] bf16 (read-only)
