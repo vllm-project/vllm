@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.inc.schemes import (
     INCMxfp4Scheme,
     INCMxfp8Scheme,
     INCWna16Scheme,
+    inc_wna16_moe,
     resolve_scheme,
 )
 from vllm.model_executor.layers.quantization.inc.schemes.inc_fp8_linear import (
@@ -45,7 +46,6 @@ from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear import
     INCWNA16LinearScheme,
     INCXPULinearMethod,
 )
-from vllm.model_executor.layers.quantization.inc.schemes import inc_wna16_moe
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 
@@ -1981,7 +1981,9 @@ def test_resolve_gptq_moe_uses_auto_gptq_when_supported(monkeypatch) -> None:
         DummyMethod,
     )
 
-    inc_wna16_moe.INCWNA16MoEScheme(make_layer_config())._build_gptq_method(DummyLayer())
+    inc_wna16_moe.INCWNA16MoEScheme(make_layer_config())._build_gptq_method(
+        DummyLayer()
+    )
 
     assert isinstance(captured["cfg"], AutoGPTQConfig)
     assert captured["cfg"].weight_bits == 4
