@@ -880,7 +880,7 @@ class SimpleCPUOffloadScheduler:
                     token_end = token_start + group_size
                     parent_hash = (
                         None
-                        if i == 0
+                        if i == 0 or resolved_hashes is None
                         else maybe_convert_block_hash(resolved_hashes[i - 1])
                     )
                     lora_req = request.lora_request
