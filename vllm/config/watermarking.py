@@ -18,6 +18,7 @@ WatermarkContextScope = Literal["none", "single_turn", "all"]
 _SPECULATIVE_DECODING_SUPPORT: dict[WatermarkingAlgorithm, bool] = {
     "gumbel": False,
 }
+_MIN_RECOMMENDED_DEDUP_HISTORY = 256
 
 
 @config
@@ -31,30 +32,39 @@ class WatermarkConfig:
     context_width: int = Field(default=4, ge=1)
     """Number of prior tokens used by the watermark PRF."""
     deduplicate_contexts: WatermarkContextScope = "single_turn"
-    """History scope used to identify repeated watermark contexts."""
+    """Which history is searched for a repeated context before a token is
+    sampled; a repeated context is sampled without the watermark. `none`
+    disables the search. `single_turn` (default) searches this request's
+    generated tokens. `all` also searches the prompt and keys the first
+    `context_width` generated tokens on the prompt instead of on padding, so
+    the detector must be given the prompt as `context_prefix`."""
     deduplicate_contexts_max_history: int | None = Field(default=8192, ge=1)
-    """Maximum prior positions searched, or ``None`` for the full scope."""
+    """Number of most recent history positions searched (default 8192), or
+    `None` for the whole scope. Each position is compared over the
+    `context_width` tokens before it. Ignored when `deduplicate_contexts` is
+    `none`."""
     prf: WatermarkPRFName = "philox"
     """Pseudorandom function used by the watermarking algorithm."""
 
     @model_validator(mode="after")
-    def validate_key(self) -> Self:
+    def validate_watermark_settings(self) -> Self:
         if self.key > 2**64 - 1:
             raise ValueError("philox keys must fit in 64 bits")
         history_is_too_short = (
             self.deduplicate_contexts_max_history is not None
-            and self.deduplicate_contexts_max_history < 256
+            and self.deduplicate_contexts_max_history < _MIN_RECOMMENDED_DEDUP_HISTORY
         )
         if self.algorithm == "gumbel" and (
             self.deduplicate_contexts == "none" or history_is_too_short
         ):
             logger.warning_once(
                 "Single-key Gumbel-max watermarking with context deduplication "
-                "disabled or limited to fewer than 256 positions may increase the "
+                "disabled or limited to fewer than "
+                f"{_MIN_RECOMMENDED_DEDUP_HISTORY} positions may increase the "
                 "frequency of degenerate generations, including repetition loops. "
                 "Use deduplicate_contexts='single_turn' or 'all' with "
-                "deduplicate_contexts_max_history at least 256 or null to mitigate "
-                "this.",
+                "deduplicate_contexts_max_history at least "
+                f"{_MIN_RECOMMENDED_DEDUP_HISTORY} or null to mitigate this.",
                 scope="global",
             )
         return self
