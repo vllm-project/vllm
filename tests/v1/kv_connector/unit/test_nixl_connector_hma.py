@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheTensor,
     MLAAttentionSpec,
@@ -1373,7 +1374,6 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
     scheduler.needs_kv_cache_zeroing = True
     scheduler.kv_cache_manager = _make_fake_kv_cache_manager()
     scheduler.kv_cache_manager.cache_blocks = MagicMock()
-    scheduler.kv_cache_manager.hisparse_coordinator = MagicMock()
     scheduler.failed_recving_kv_req_ids = {"req-1"}
     scheduler.finished_recving_kv_req_ids = {"req-1"}
 
@@ -1388,7 +1388,6 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
     # and flow into the next step's zero list; Mamba blocks are not.
     scheduler._skip_zero_block_ids = set()
     assert scheduler._get_new_block_ids_to_zero() == [13, 14, 15]
-
 
 
 # ── Mamba N-1 prefill tests ──────────────────────────────────────────────
@@ -2013,14 +2012,13 @@ def test_hisparse_host_import_keeps_host_blocks_out_of_gpu_regions():
     scheduler._is_hma_required = False
     scheduler.kv_cache_config = KVCacheConfig(
         num_blocks=32,
-        num_blocks_by_pool=[32],
         hisparse_host_num_blocks=16,
         kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec(
                 ["source"],
                 spec,
-                block_pool_id=None,
+                host_resident=True,
                 enable_kv_transfer=False,
                 role=KVCacheGroupRole.HISPARSE_SOURCE,
             ),

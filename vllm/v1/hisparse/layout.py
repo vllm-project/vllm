@@ -216,7 +216,7 @@ def create_hisparse_layout(
         source_group_spec,
         role=KVCacheGroupRole.HISPARSE_SOURCE,
         host_resident=True,
-        enable_kv_transfer=True,
+        enable_kv_transfer=False,
     )
     regular_groups = groups[1:]
     gpu_groups = [indexer_group, *resident_groups, *hot_groups, *regular_groups]

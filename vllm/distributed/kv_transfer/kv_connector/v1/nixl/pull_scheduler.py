@@ -50,6 +50,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
               asynchronously (between scheduler steps).
         """
 
+        request.hisparse_gpu_import = True
         params = request.kv_transfer_params
         logger.debug(
             "NIXLConnector get_num_new_matched_tokens: "

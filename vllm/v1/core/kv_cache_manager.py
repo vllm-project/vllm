@@ -491,7 +491,9 @@ class KVCacheManager:
         ):
             watermark_blocks = self.watermark_blocks
 
-        hisparse_host_import = request.hisparse_host_import
+        hisparse_host_import = (
+            request.hisparse_host_import or not request.hisparse_gpu_import
+        )
         if full_sequence_must_fit:
             # First check and fail if the full request sequence won't fit.
             full_num_tokens = min(request.num_tokens, self.max_model_len)
@@ -602,6 +604,8 @@ class KVCacheManager:
                 hisparse_host_import=hisparse_host_import,
             )
 
+        if num_external_computed_tokens > 0:
+            request.hisparse_host_import = hisparse_host_import
         request.hisparse_host_import_pending = (
             num_external_computed_tokens > 0 and hisparse_host_import
         )

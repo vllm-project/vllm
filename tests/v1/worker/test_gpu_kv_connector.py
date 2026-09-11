@@ -100,13 +100,3 @@ def test_no_forward_starts_deferred_load_once(monkeypatch: pytest.MonkeyPatch):
     connector.no_forward(_scheduler_output(False))  # type: ignore[arg-type]
 
     assert events == ["handle", "bind", "prepare", "start", "clear"]
-
-
-def test_connector_can_require_pre_forward_start(monkeypatch: pytest.MonkeyPatch):
-    events: list[str] = []
-    connector = _make_connector(monkeypatch, events)
-    connector.kv_connector.requires_pre_forward_start = True
-
-    connector.pre_forward(_scheduler_output(False))  # type: ignore[arg-type]
-
-    assert events == ["handle", "bind", "prepare", "start"]

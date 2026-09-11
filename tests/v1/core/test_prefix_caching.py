@@ -342,6 +342,7 @@ def test_hisparse_indexer_only_import_lands_on_gpu_when_capacity_allows():
     manager.block_pool.evict_blocks({evicted_indexer_id})
 
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    resumed.hisparse_gpu_import = True
     blocks, num_local, _ = manager.get_computed_blocks(resumed)
     max_completion = HISPARSE_BLOCK_SIZE
     assert num_local == 2 * HISPARSE_BLOCK_SIZE
@@ -480,6 +481,7 @@ def test_connector_completes_partial_prefix_without_importing_missing_host_kv(
 def allocate_external_prefix(
     manager: KVCacheManager, request: Request, num_tokens: int
 ) -> KVCacheBlocks | None:
+    request.hisparse_gpu_import = True
     return manager.allocate_slots(
         request,
         num_new_tokens=0,
@@ -722,6 +724,7 @@ def test_hisparse_async_admission_requires_only_import_destinations(
     inflight = make_request(
         "inflight", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
     )
+    inflight.hisparse_host_import = True
     scheduler.add_request(inflight)
     scheduler.schedule()
     assert inflight in scheduler._inflight_prefills
@@ -729,6 +732,7 @@ def test_hisparse_async_admission_requires_only_import_destinations(
     request = make_request(
         "waiting", list(range(4 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
     )
+    request.hisparse_host_import = True
     scheduler.add_request(request)
     scheduler.schedule()
 
@@ -818,6 +822,7 @@ def test_host_receive_completion_without_spill_metadata(failed):
     """Only successful external receives make host pages readable."""
     manager = make_hisparse_kv_cache_manager(32, 16)
     request = make_request("import", list(range(32)), HISPARSE_BLOCK_SIZE, sha256)
+    request.hisparse_host_import = True
     assert allocate_external_prefix(manager, request, 32) is not None
     request.num_computed_tokens = 32
     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS

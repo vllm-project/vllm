@@ -134,8 +134,6 @@ def test_hisparse_written_rows_without_host_destinations_are_skipped():
     )
 
 
-
-
 def test_hisparse_appends_reference_slots_within_a_mirror_phase(monkeypatch):
     """Separate context and query writes must share one mirror phase."""
     worker = _make_hisparse_worker()
