@@ -4771,3 +4771,29 @@ def test_swa_shared_prefix_reuse_under_zero_retention():
     assert last_req_hit(retention=0, pin=False) == 0
     # retention=0 with the pin keeps the junction window -> reuse restored.
     assert last_req_hit(retention=0, pin=True) == 4 * block_size
+
+
+def test_get_unhashed_block_ids_all_groups():
+    """Unhashed, non-null block ids are reported per KV cache group.
+    A group with no unhashed blocks reports an empty list, not a missing entry.
+    """
+
+    def hashed(block_id: int, group_id: int) -> KVCacheBlock:
+        block = KVCacheBlock(block_id=block_id)
+        block.set_block_hash(make_block_hash_with_group_id(BlockHash(b"h"), group_id))
+        return block
+
+    blocks = KVCacheBlocks(
+        (
+            [
+                KVCacheBlock(block_id=1),  # unhashed
+                hashed(2, group_id=0),  # cached
+                KVCacheBlock(block_id=3, is_null=True),  # null padding
+                KVCacheBlock(block_id=4),  # unhashed
+            ],
+            # No unhashed blocks in this group.
+            [hashed(5, group_id=1), KVCacheBlock(block_id=6, is_null=True)],
+        )
+    )
+
+    assert blocks.get_unhashed_block_ids_all_groups() == [[1, 4], []]
