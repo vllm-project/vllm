@@ -386,8 +386,6 @@ class Step3p5MTPProposer(EagleProposer):
 
         if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
-            common_attn_metadata._seq_lens_cpu = None
-            common_attn_metadata._num_computed_tokens_cpu = None
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."

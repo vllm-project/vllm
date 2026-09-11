@@ -245,7 +245,18 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # Block sizes count uncompressed tokens: C4 indexer pages hold 64 rows.
         return [256]
+
+
+class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "DEEPSEEK_V41_INDEXER"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [64 if current_platform.is_device_capability_family(90) else 128]
 
 
 @dataclass
@@ -684,7 +695,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if self.vllm_config.speculative_config
             else 0
         )
-        self.use_fp4_indexer_cache = dsa_indexer_uses_fp4(self.vllm_config)
+        self.indexer_uses_fp4 = dsa_indexer_uses_fp4(self.vllm_config)
 
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
@@ -697,7 +708,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             self.use_flattening,
             self.supports_varlen,
             next_n,
-            self.use_fp4_indexer_cache,
+            self.indexer_uses_fp4,
         )
 
         sm_count = num_compute_units(self.device.index)
@@ -1239,9 +1250,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     )
                     block_table = self.indexer_decode_block_table_buffer[:rows, :cols]
 
-            seq_lens_is_buffer_view = (use_native and next_n > 1) or (
-                not use_native and max_decode_len > 1
-            )
+            # Flattening always returns a buffer view, including single-token
+            # batches. Keep its address stable across varlen graph replays.
+            seq_lens_is_buffer_view = not use_native or next_n > 1
 
             # DCP: localize the now-expanded per-token global bounds to this
             # rank's owned KV. Done here (after expansion) so each token's global
