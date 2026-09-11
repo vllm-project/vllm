@@ -926,8 +926,8 @@ def _watermark_inputs(
 # and each block must offset its Philox group indices by block_idx. 1024 is a
 # single full block (block_idx is always 0, and no lane is masked off); 3500 is
 # four blocks with a partial tail, so it pins both the per-block group offset --
-# a production vocabulary is ~149 blocks, and dropping the offset would mis-key
-# every token outside the first -- and the tail mask.
+# a production vocabulary is ~149 blocks, and dropping the offset would reuse
+# the first block's PRF counters for every later block -- and the tail mask.
 @pytest.mark.parametrize("vocab_size", [1024, 3500])
 def test_watermarked_recovery_matches_philox_gumbel_sample(
     one_hot_draft: bool, vocab_size: int

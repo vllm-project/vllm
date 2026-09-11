@@ -50,7 +50,7 @@ from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config, replace
+from .utils import SupportsHash, config, get_field, replace
 from .watermarking import WatermarkConfig
 from .weight_transfer import WeightTransferConfig
 
@@ -1157,6 +1157,26 @@ class VllmConfig:
                 raise ValueError(
                     "Watermarking supports only autoregressive model-based "
                     "speculative decoding."
+                )
+            if (
+                not watermark_config.allow_target_only_watermarking
+                and not watermark_config.supports_speculative_decoding
+            ):
+                raise ValueError(
+                    f"The '{watermark_config.algorithm}' watermarking algorithm "
+                    "does not support speculative decoding. Set "
+                    "allow_target_only_watermarking=true to leave draft tokens "
+                    "unwatermarked."
+                )
+            if watermark_config.algorithm == "dual_key_gumbel" and (
+                watermark_config.alpha != get_field(WatermarkConfig, "alpha").default
+            ):
+                logger.warning_once(
+                    "Speculative decoding selects the watermark key by token role: "
+                    "draft tokens use key A, recovery and bonus tokens use key B. "
+                    "The configured alpha=%s is not used.",
+                    watermark_config.alpha,
+                    scope="global",
                 )
         if beam_search:
             raise ValueError("Beam search is not supported with watermarking.")

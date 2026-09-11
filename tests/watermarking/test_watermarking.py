@@ -141,6 +141,27 @@ def test_dual_key_watermarker_routes_tokens_with_alpha():
     )
 
 
+def test_dual_key_routing_logits_are_cached():
+    alpha = 0.25
+    watermarker = DualKeyGumbelWatermarker(key=42, context_width=2, alpha=alpha)
+    logits = torch.zeros(2, 16)
+    contexts = torch.tensor([[1, 2], [3, 4]])
+    recorded: list[torch.Tensor] = []
+
+    def route(routing_logits):
+        recorded.append(routing_logits)
+        return torch.tensor([0, 1])
+
+    watermarker.sample(logits, contexts, route)
+    watermarker.sample(logits, contexts, route)
+
+    expected = torch.tensor([1 - alpha, alpha], dtype=torch.float32).log()
+    expected = expected.expand(2, -1)
+    assert len(recorded) == 2
+    assert all(torch.equal(seen, expected) for seen in recorded)
+    assert len(watermarker._routing_logits_cache) == 1
+
+
 def test_speculative_decoding_uses_fixed_dual_key_roles():
     watermarker = create_watermarker(
         WatermarkConfig(algorithm="dual_key_gumbel", key=42, alpha=0.25)

@@ -52,6 +52,10 @@ class WatermarkConfig:
     allow_target_only_watermarking: bool = False
     """Allow speculative decoding without watermarking draft tokens."""
 
+    @property
+    def supports_speculative_decoding(self) -> bool:
+        return self.algorithm == "dual_key_gumbel"
+
     @model_validator(mode="after")
     def validate_watermark_settings(self) -> Self:
         if self.key > 2**64 - 1:

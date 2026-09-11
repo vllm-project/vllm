@@ -2767,6 +2767,68 @@ def test_target_only_gumbel_allows_speculative_decoding():
     config._check_watermarking_unsupported()
 
 
+def test_gumbel_rejects_speculative_decoding_without_target_only():
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        algorithm="gumbel", key=42, allow_target_only_watermarking=False
+    )
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    with pytest.raises(ValueError, match="'gumbel'.*allow_target_only_watermarking"):
+        config._check_watermarking_unsupported()
+
+
+def test_dual_key_gumbel_warns_that_configured_alpha_is_unused(
+    caplog_vllm, disable_log_dedup
+):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        algorithm="dual_key_gumbel", key=42, alpha=0.25
+    )
+    config.speculative_config = SimpleNamespace(
+        method="mtp",
+        draft_sample_method="probabilistic",
+        rejection_sample_method="standard",
+        parallel_drafting=False,
+    )
+
+    with caplog_vllm.at_level(logging.WARNING):
+        config._check_watermarking_unsupported()
+
+    assert "The configured alpha=0.25 is not used" in caplog_vllm.text
+
+
+@pytest.mark.parametrize(
+    ("alpha", "speculative"),
+    [(0.1, True), (0.25, False)],
+    ids=["default-alpha", "no-specdec"],
+)
+def test_dual_key_gumbel_alpha_warning_is_not_emitted(
+    caplog_vllm, disable_log_dedup, alpha, speculative
+):
+    config = _watermarked_vllm_config()
+    config.watermark_config = WatermarkConfig(
+        algorithm="dual_key_gumbel", key=42, alpha=alpha
+    )
+    if speculative:
+        config.speculative_config = SimpleNamespace(
+            method="mtp",
+            draft_sample_method="probabilistic",
+            rejection_sample_method="standard",
+            parallel_drafting=False,
+        )
+
+    with caplog_vllm.at_level(logging.WARNING):
+        config._check_watermarking_unsupported()
+
+    assert "is not used" not in caplog_vllm.text
+
+
 def test_dual_key_gumbel_requires_probabilistic_drafting():
     config = _watermarked_vllm_config()
     config.watermark_config = WatermarkConfig(algorithm="dual_key_gumbel", key=42)
