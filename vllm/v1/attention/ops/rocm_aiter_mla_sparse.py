@@ -3,6 +3,7 @@
 import functools
 import importlib
 import math
+import os
 from collections.abc import Callable
 from importlib.util import find_spec
 
@@ -61,6 +62,16 @@ _GFX950_C4A_NATIVE_MAX_ROWS = 256
 # Conservative perf gate, not a correctness bound: OPUS is correct for any query
 # count, but Triton stays faster below this measured crossover.
 _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES = 1024
+
+# Split-K tile for the gfx950 sparse decode kernel. Upstream hard-codes 32;
+# this reads the same value unless VLLM_ROCM_SPARSE_DECODE_BLOCK_K is set, so
+# an unset environment reproduces upstream exactly.
+_DECODE_BLOCK_K = int(os.getenv("VLLM_ROCM_SPARSE_DECODE_BLOCK_K", "32"))
+if _DECODE_BLOCK_K not in (16, 32, 64, 128):
+    raise ValueError(
+        "VLLM_ROCM_SPARSE_DECODE_BLOCK_K must be one of 16, 32, 64, 128; "
+        f"got {_DECODE_BLOCK_K}"
+    )
 
 
 def _get_aiter_top_k_kernel(
@@ -3017,7 +3028,10 @@ def _rocm_sparse_attn_decode_ragged_triton(
         )
         return out
 
-    block_k = 32  # KV tokens walked per split-K iteration. Tuned on gfx950.
+    # KV tokens walked per split-K iteration. 32 is the upstream gfx950 tuning
+    # and stays the default; the override exists to screen the decode kernel
+    # that TraceLens shows at 13.81 ms/iter against ATOM's 5.23 ms ASM kernel.
+    block_k = _DECODE_BLOCK_K
     if _ON_GFX950:
         inv_q = 1.0 / max(1, num_queries)
         avg_main_len = main_indices.numel() * inv_q
@@ -3167,6 +3181,287 @@ def _rocm_sparse_attn_decode_ragged_triton(
     return out
 
 
+@triton.jit
+def _v4_gather_repack_kernel(
+    out_nope_ptr,
+    out_rope_ptr,
+    cache_ptr,
+    cache_stride0,
+    indices_ptr,
+    dst_ptr,
+    n_entries,
+    block_size: tl.constexpr,
+    NOPE: tl.constexpr,
+    ROPE: tl.constexpr,
+    QK: tl.constexpr,
+    NT: tl.constexpr,
+    SOFF: tl.constexpr,
+):
+    """Gather one selected token out of a paged V4 cache and write it in the
+    two-buffer layout aiter's v4 nm ASM decode consumes.
+
+    Source addressing mirrors ``_sparse_attn_decode_ragged_kernel`` exactly:
+    token data at ``pos * 576`` inside the block, the 8 scale bytes after all
+    token data. Nothing is requantized; the 448 FP8 bytes are copied verbatim
+    and the 7 UE8M0 scale bytes are duplicated into ``[448, 462)``.
+
+    ``dst_ptr`` carries a precomputed destination row per entry, negative for
+    entries the Triton path would have masked out. Keeping that decision on the
+    host side of a device array means this kernel never reads a device value
+    from the host, so it is safe inside a captured CUDA graph.
+    """
+    e = tl.program_id(0)
+    if e >= n_entries:
+        return
+    dst = tl.load(dst_ptr + e)
+    if dst < 0:
+        return
+
+    slot = tl.load(indices_ptr + e).to(tl.int64)
+    blk = slot // block_size
+    pos = slot % block_size
+    base = cache_ptr + blk * cache_stride0 + pos * 576
+
+    off = tl.arange(0, 512)
+    m = off < NOPE
+    tl.store(out_nope_ptr + dst * QK + off, tl.load(base + off, mask=m, other=0), mask=m)
+
+    s = tl.arange(0, 16)
+    sm = s < NT * 2
+    sb = tl.load(
+        cache_ptr + blk * cache_stride0 + block_size * 576 + pos * 8 + s // 2,
+        mask=sm,
+        other=0,
+    )
+    tl.store(out_nope_ptr + dst * QK + SOFF + s, sb, mask=sm)
+    pad = tl.arange(0, 64)
+    pm = (SOFF + NT * 2 + pad) < QK
+    tl.store(
+        out_nope_ptr + dst * QK + SOFF + NT * 2 + pad,
+        tl.zeros((64,), tl.uint8),
+        mask=pm,
+    )
+
+    r = tl.arange(0, 64)
+    rp = (base + NOPE).to(tl.pointer_type(tl.bfloat16))
+    tl.store(out_rope_ptr + dst * ROPE + r, tl.load(rp + r))
+
+
+_V4_NOPE, _V4_ROPE, _V4_QK = 448, 64, 512
+_V4_NTILES, _V4_SOFF, _V4_FP8_MAX = 7, 448, 448.0
+# gfx950 ships the v4 nm decode kernel only for these gqa ratios at qSeqLen 1
+# (aiter asm_mla_v4.cu). TP1/DP8 keeps every head on the rank, so we land on a
+# shipped variant without ATOM's head padding.
+_V4_SHIPPED_GQA = (16, 32, 64, 128)
+# Upper bound on the transient unified buffer, in rows of 512B NoPE + 128B RoPE.
+# 2^18 rows is 168 MB, roughly 7x a real C64 decode step, and keeps the
+# worst-case profiling shape off this path.
+_V4_MAX_UNIFIED_ROWS = 1 << 18
+# A served rank holds millions of token slots per cache; the profiling dummy run
+# holds 128. Anything below this is not a real decode.
+_V4_MIN_CACHE_ROWS = 1 << 14
+_V4_ASM_DECODE = os.getenv("VLLM_ROCM_V4_ASM_DECODE", "0") == "1"
+
+
+@functools.lru_cache
+def _v4_asm_decode_fn():
+    try:
+        from aiter.mla import mla_decode_fwd_v4_nm
+    except ImportError:
+        logger.info_once("aiter mla_decode_fwd_v4_nm unavailable; staying on Triton")
+        return None
+    return mla_decode_fwd_v4_nm
+
+
+def _v4_pack_query(q: torch.Tensor):
+    """BF16 q [T,H,512] -> (packed FP8 [T,H,512], BF16 RoPE [T,H,64]).
+
+    Quantizes the 448 NoPE dims per 64-element tile with the same UE8M0 rule the
+    cache writer uses, so Q and K are on the same scale grid.
+    """
+    T, H, _ = q.shape
+    flat = q.reshape(T * H, _V4_QK)
+    nope = flat[:, :_V4_NOPE].float().view(T * H, _V4_NTILES, 64)
+    absmax = nope.abs().amax(dim=-1).clamp_min(1e-4)
+    exp = torch.ceil(torch.log2(absmax / _V4_FP8_MAX))
+    qn = (nope / torch.pow(2.0, exp).unsqueeze(-1)).clamp(-_V4_FP8_MAX, _V4_FP8_MAX)
+
+    packed = torch.zeros((T * H, _V4_QK), dtype=torch.uint8, device=q.device)
+    packed[:, :_V4_NOPE] = (
+        qn.to(torch.float8_e4m3fn).view(T * H, _V4_NOPE).view(torch.uint8)
+    )
+    sc = (exp.to(torch.int32) + 127).clamp(0, 255).to(torch.uint8)
+    packed[:, _V4_SOFF : _V4_SOFF + _V4_NTILES * 2] = sc.repeat_interleave(2, dim=1)
+    rope = flat[:, _V4_NOPE :].contiguous().to(torch.bfloat16)
+    return (
+        packed.view(torch.float8_e4m3fn).view(T, H, _V4_QK),
+        rope.view(T, H, _V4_ROPE),
+    )
+
+
+def _rocm_sparse_attn_decode_aiter_asm(
+    q: torch.Tensor,
+    main_cache: torch.Tensor,
+    main_indices: torch.Tensor,
+    main_indptr: torch.Tensor,
+    extra_cache: torch.Tensor,
+    extra_indices: torch.Tensor,
+    extra_indptr: torch.Tensor,
+    attn_sink: torch.Tensor,
+    out: torch.Tensor,
+) -> bool:
+    """Replace the Triton sparse decode with aiter's v4 nm ASM kernel.
+
+    Both caches are gathered into one unified two-buffer allocation, compressed
+    rows first then the SWA window, which is how ATOM gives a single-source
+    kernel a two-source decode. Returns False when the shape is not supported,
+    leaving the caller on the Triton path.
+    """
+    fn = _v4_asm_decode_fn()
+    if fn is None:
+        return False
+
+    T, H = q.shape[0], q.shape[1]
+    if H not in _V4_SHIPPED_GQA or q.shape[-1] != _V4_QK or T == 0:
+        return False
+    # The memory-profiling dummy run executes before the KV caches exist, so the
+    # cache tensors handed in here are placeholders. Launching the gather on
+    # them faults the worker with no Python traceback. Same signal the prefill
+    # path uses to detect profiling.
+    if (
+        extra_cache.ndim != 3
+        or main_cache.ndim != 3
+        or extra_cache.numel() == 0
+        or main_cache.numel() == 0
+    ):
+        return False
+    try:
+        in_profiling = not isinstance(get_forward_context().attn_metadata, dict)
+    except AssertionError:
+        # No forward context outside the engine (standalone equivalence tests).
+        in_profiling = False
+    if in_profiling:
+        return False
+    # The probe fired at T=256, which is the FULL cudagraph capture size, not a
+    # real decode step. Capture drives dummy metadata whose slots this path
+    # filters out as invalid, leaving every sequence with zero KV length, and
+    # the ASM kernel aborts on that with HSA_STATUS_ERROR_EXCEPTION rather than
+    # a memory fault. Capture therefore records Triton and replay keeps using
+    # it; the ASM path serves the eager decode steps. is_current_stream_capturing
+    # is a host-side query and does not synchronise.
+    if torch.cuda.is_current_stream_capturing():
+        return False
+    # The memory-profiling dummy run keeps attn_metadata a dict and is not a
+    # capture, so neither check above sees it. What gives it away is the cache:
+    # profiling allocates 64 blocks, so the compressed cache holds 64*2 = 128
+    # token slots against 32768 dummy indices. Nearly every index then fails the
+    # validity filter, every sequence ends up with zero KV length, and the ASM
+    # kernel aborts on that with HSA_STATUS_ERROR_EXCEPTION. A served rank has
+    # millions of slots, so this separates the two by five orders of magnitude.
+    if (
+        main_cache.shape[0] * main_cache.shape[1] < _V4_MIN_CACHE_ROWS
+        or extra_cache.shape[0] * extra_cache.shape[1] < _V4_MIN_CACHE_ROWS
+    ):
+        return False
+
+    dev = q.device
+    # Element counts come from shapes, never from a device read: this path runs
+    # inside a captured CUDA graph, where a device-to-host sync raises
+    # "operation not permitted when stream is capturing".
+    n_extra = extra_indices.numel()
+    n_main = main_indices.numel()
+    total = n_extra + n_main
+    if extra_indptr.numel() != T + 1 or main_indptr.numel() != T + 1:
+        return False
+    # The unified buffer is sized by the ragged arrays' CAPACITY, not by the
+    # live entry count, because the live count only exists on the device. A
+    # real decode step is ~37k rows (24 MB), but the memory-profiling dummy run
+    # drives the worst-case prefill shape, where the same expression reaches
+    # millions of rows and several GB, which killed the worker during
+    # determine_available_memory. Bound it and let those steps use Triton.
+    if total == 0 or total > _V4_MAX_UNIFIED_ROWS:
+        return False
+
+    def plan(indices, indptr, n, cache):
+        """Per-entry destination row, negative where the Triton path masks out.
+
+        The ragged arrays are preallocated workspaces, so entries past
+        ``indptr[T]`` are stale, and live entries may still hold a slot the
+        Triton kernel would reject (`slot < 0 or slot >= num_rows`). A single
+        ASM call cannot mask per entry, so those are compacted out of the CSR
+        instead: lengths count only surviving entries.
+        """
+        num_rows = cache.shape[0] * cache.shape[1]
+        pos = torch.arange(n, device=dev, dtype=torch.int32)
+        owner = torch.searchsorted(indptr, pos, right=True) - 1
+        live = (pos < indptr[T]) & (owner >= 0)
+        ok = live & (indices >= 0) & (indices < num_rows)
+        # searchsorted returns T for entries past indptr[T], and those exist
+        # because the ragged arrays are capacity-sized workspaces. Their owner
+        # is only ever used to index T-element tensors (`lens_e` below), so it
+        # must be clamped on BOTH sides; clamping only the low side reads one
+        # past the end and faults the device. `ok` already excludes them from
+        # the result, so any in-range value works here.
+        owner = owner.clamp(0, max(T - 1, 0))
+        # Exclusive prefix count of survivors, so rank within a query is the
+        # difference against that query's own base.
+        cp = torch.zeros((n + 1,), dtype=torch.int32, device=dev)
+        torch.cumsum(ok.to(torch.int32), dim=0, out=cp[1:])
+        lens = cp[indptr[1:].long()] - cp[indptr[:-1].long()]
+        rank = cp[pos.long()] - cp[indptr[owner.long()].long()]
+        return ok, owner, rank, lens
+
+    ok_e, own_e, rank_e, lens_e = plan(extra_indices, extra_indptr, n_extra, extra_cache)
+    ok_m, own_m, rank_m, lens_m = plan(main_indices, main_indptr, n_main, main_cache)
+
+    combined = torch.zeros((T + 1,), dtype=torch.int32, device=dev)
+    torch.cumsum(lens_e + lens_m, dim=0, out=combined[1:])
+
+    dst_e = torch.where(ok_e, combined[own_e.long()] + rank_e, -1)
+    dst_m = torch.where(ok_m, combined[own_m.long()] + lens_e[own_m.long()] + rank_m, -1)
+
+    nope = torch.empty((total, _V4_QK), dtype=torch.uint8, device=dev)
+    rope = torch.empty((total, _V4_ROPE), dtype=torch.bfloat16, device=dev)
+    cfg = dict(
+        NOPE=_V4_NOPE,
+        ROPE=_V4_ROPE,
+        QK=_V4_QK,
+        NT=_V4_NTILES,
+        SOFF=_V4_SOFF,
+    )
+    # Compressed rows occupy the head of each query's slice, SWA the tail.
+    _v4_gather_repack_kernel[(n_extra,)](
+        nope, rope, extra_cache, extra_cache.stride(0), extra_indices, dst_e,
+        n_extra, block_size=extra_cache.shape[1], **cfg
+    )
+    _v4_gather_repack_kernel[(n_main,)](
+        nope, rope, main_cache, main_cache.stride(0), main_indices, dst_m,
+        n_main, block_size=main_cache.shape[1], **cfg
+    )
+
+    q_packed, q_rope = _v4_pack_query(q)
+    fn(
+        q_packed,
+        q_rope,
+        nope.view(torch.float8_e4m3fn).view(total, 1, 1, _V4_QK),
+        rope.view(total, 1, 1, _V4_ROPE),
+        out,
+        torch.arange(T + 1, dtype=torch.int32, device=dev),
+        combined,
+        torch.arange(total, dtype=torch.int32, device=dev),
+        1,
+        sink=attn_sink.contiguous().to(torch.float32),
+        # ATOM always passes an explicit split count. Leaving it to aiter's
+        # heuristic selects a multi-pass mode that allocates FP32 logits of
+        # [total_q, splits, heads, 512] per call and then runs the stage2 merge;
+        # at 61 layers and decode frequency that is heavy transient churn.
+        # num_kv_splits=1 keeps the single-pass path, where the kernel writes
+        # BF16 straight into `out` and no merge runs.
+        num_kv_splits=1,
+    )
+    return True
+
+
 def _rocm_sparse_attn_decode_triton(
     q: torch.Tensor,
     main_cache: torch.Tensor,
@@ -3208,6 +3503,30 @@ def _rocm_sparse_attn_decode_triton(
             else (extra_indices >= 0).sum(dim=-1, dtype=torch.int32),
             num_rows=extra_cache.shape[0] * extra_cache.shape[1],
         )
+
+    if (
+        _V4_ASM_DECODE
+        and _ON_GFX950
+        and out is not None
+        and attn_sink is not None
+        and extra_cache is not None
+        and extra_ragged_indices is not None
+        and extra_ragged_indptr is not None
+        and nope_head_dim == _V4_NOPE
+        and rope_head_dim == _V4_ROPE
+        and _rocm_sparse_attn_decode_aiter_asm(
+            q=q,
+            main_cache=main_cache,
+            main_indices=main_ragged_indices,
+            main_indptr=main_ragged_indptr,
+            extra_cache=extra_cache,
+            extra_indices=extra_ragged_indices,
+            extra_indptr=extra_ragged_indptr,
+            attn_sink=attn_sink,
+            out=out,
+        )
+    ):
+        return out
 
     return _rocm_sparse_attn_decode_ragged_triton(
         q=q,
