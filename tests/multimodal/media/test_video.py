@@ -550,6 +550,33 @@ class TestMergeKwargsGpuBackendPolicy:
         assert result["num_frames"] == 8
 
 
+@pytest.mark.parametrize(
+    "default_kwargs",
+    [
+        {"backend": "torchcodec", "device": "cuda", "seek_mode": "approximate"},
+        {"backend": "pynvvideocodec", "hw_decoders": 2},
+    ],
+)
+def test_switching_backend_drops_stale_codec_options(default_kwargs):
+    """Codec-specific options from the static config must not leak into a
+    different codec backend selected per-request, where they would fail the
+    new backend's option validation."""
+    result = VideoMediaIO.merge_kwargs(
+        default_kwargs={**default_kwargs, "num_frames": 8},
+        runtime_kwargs={"backend": "opencv"},
+    )
+    assert result == {"backend": "opencv", "num_frames": 8}
+
+
+def test_same_backend_keeps_codec_options():
+    result = VideoMediaIO.merge_kwargs(
+        default_kwargs={"backend": "torchcodec", "device": "cuda"},
+        runtime_kwargs={"backend": "torchcodec", "num_frames": 8},
+    )
+    assert result["device"] == "cuda"
+    assert result["num_frames"] == 8
+
+
 @pytest.mark.parametrize("layout", ["nhwc", "nchw"])
 def test_pynvvc_frames_normalized_to_nhwc(layout: str):
     """PyNvVideoCodec frame batches are normalized to NHWC regardless of the

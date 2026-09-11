@@ -41,6 +41,17 @@ def _get_backend_option_defaults(backend: str) -> dict[str, Any]:
         ) from None
 
 
+# TODO(Isotr0py): Make kwargs structured.
+def incompatible_backend_options(
+    old_backend: str | None,
+    new_backend: str,
+) -> set[str]:
+    """Option names accepted by ``old_backend`` but not by ``new_backend``."""
+    old = _BACKEND_OPTION_DEFAULTS.get(old_backend or "", {})
+    new = _BACKEND_OPTION_DEFAULTS.get(new_backend, {})
+    return old.keys() - new.keys()
+
+
 def resolve_video_backend_kwargs(
     backend: str,
     kwargs: dict[str, Any],
@@ -104,5 +115,6 @@ __all__ = [
     "VideoTargetMetadata",
     "check_frame_pixel_limit",
     "decode_video",
+    "incompatible_backend_options",
     "resolve_video_backend_kwargs",
 ]

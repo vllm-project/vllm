@@ -20,6 +20,7 @@ from vllm.utils.sparse_utils import (
 )
 
 from ..video import VIDEO_LOADER_REGISTRY, DecodedFrames
+from ..video_decoders import incompatible_backend_options
 from .base import MediaIO, MediaWithBytes
 from .image import MAGIC_NUMPY_PREFIX, ImageMediaIO
 
@@ -78,6 +79,14 @@ class VideoMediaIO(MediaIO[MediaWithBytes[tuple[DecodedFrames, dict[str, Any]]]]
                 merged.pop("fps", None)
             elif "fps" in runtime_kwargs and "num_frames" not in runtime_kwargs:
                 merged.pop("num_frames", None)
+
+            requested_backend = runtime_kwargs.get("backend")
+            static_backend = (default_kwargs or {}).get("backend")
+            if requested_backend and requested_backend != static_backend:
+                for name in incompatible_backend_options(
+                    static_backend, requested_backend
+                ):
+                    merged.pop(name, None)
         return merged
 
     def __init__(
