@@ -187,7 +187,6 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
 
         @cute.kernel
         def kernel(
-            self,
             X_tma: cpasync.TmaInfo,
             W_tma: cpasync.TmaInfo,
             out: cute.Tensor,
@@ -515,8 +514,8 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
         num_sms: int,
         use_pdl: bool,
     ) -> CompileKey:
-        bn, _ = _pick_tile_config(num_tokens, K, M, num_sms)
-        return self.CompileKey(bn=bn, k=K, use_pdl=use_pdl)
+        tile_config = _pick_tile_config(num_tokens, K, M, num_sms)
+        return self.CompileKey(bn=tile_config[0], k=K, use_pdl=use_pdl)
 
     def get_warmup_keys(
         self,

@@ -1211,9 +1211,14 @@ class MhcPreBigFuseTileLangKernel(
             middle_args = (residual_out, *output_args, norm_weight)
         elif compile_key.use_norm_weight:
             assert norm_weight is not None
-            middle_args = (*output_args, norm_weight)
+            # The delayed pre-mix extension added these two tensor arguments
+            # to the kernel signature. This wrapper uses neither feature, so
+            # an existing correctly-shaped output is a safe placeholder.
+            middle_args = (*output_args, norm_weight, post_mix, post_mix)
         else:
-            middle_args = output_args
+            # See the normalized variant above. The arguments are not read or
+            # written while use_pre_mix_in and save_pre_mix remain false.
+            middle_args = (*output_args, post_mix, post_mix)
         norm_eps_args = (compile_key.norm_eps,) if compile_key.use_norm_weight else ()
         return (
             *common_args,

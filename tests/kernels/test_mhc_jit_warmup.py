@@ -113,6 +113,75 @@ def test_mhc_pre_big_fuse_dispatch_matches_legacy_runtime_config(
 
 
 @pytest.mark.parametrize(
+    ("is_broadcast", "use_norm_weight", "expected_middle"),
+    [
+        (False, False, ("post", "comb", "layer", "post", "post")),
+        (
+            False,
+            True,
+            ("post", "comb", "layer", "norm", "post", "post"),
+        ),
+        (True, True, ("resout", "post", "comb", "layer", "norm")),
+    ],
+)
+def test_mhc_pre_big_fuse_kernel_args_match_selected_signature(
+    is_broadcast: bool,
+    use_norm_weight: bool,
+    expected_middle: tuple[str, ...],
+) -> None:
+    """Keep dispatcher arguments aligned with all three TileLang signatures."""
+    kernel = MhcPreBigFuseTileLangKernel()
+    compile_key = kernel.CompileKey(
+        hidden_size=4096,
+        hc_mult=4,
+        n_splits=2,
+        use_norm_weight=use_norm_weight,
+        is_broadcast=is_broadcast,
+        rms_eps=1.0e-6,
+        hc_pre_eps=2.0e-6,
+        hc_sinkhorn_eps=3.0e-6,
+        hc_post_mult_value=0.5,
+        sinkhorn_repeat=3,
+        norm_eps=1.0e-5,
+    )
+
+    args = kernel._kernel_args(
+        compile_key,
+        gemm_out_mul="mul",
+        gemm_out_sqrsum="sum",
+        hc_scale="scale",
+        hc_base="base",
+        residual="res",
+        residual_out="resout" if is_broadcast else None,
+        post_mix="post",
+        comb_mix="comb",
+        layer_input="layer",
+        norm_weight="norm" if use_norm_weight else None,
+    )
+    expected_tail = (
+        4096,
+        1.0e-6,
+        2.0e-6,
+        3.0e-6,
+        0.5,
+        3,
+        *((1.0e-5,) if use_norm_weight else ()),
+        2,
+        4,
+    )
+
+    assert args == (
+        "mul",
+        "sum",
+        "scale",
+        "base",
+        "res",
+        *expected_middle,
+        *expected_tail,
+    )
+
+
+@pytest.mark.parametrize(
     ("num_tokens", "hidden_size", "expected_n_splits", "expected_tile_n"),
     [(4, 4096, 8, 2), (4, 8192, 4, 2), (8, 4096, 4, 3)],
 )
