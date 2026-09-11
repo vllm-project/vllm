@@ -2160,8 +2160,7 @@ class FlashInferImpl(AttentionImpl):
                 if use_dcp:
                     if key is None or value is None:
                         raise NotImplementedError(
-                            "FlashInfer DCP prefill does not support KV-sharing "
-                            "layers"
+                            "FlashInfer DCP prefill does not support KV-sharing layers"
                         )
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
                     assert prefill_wrapper._context._window_left == self.window_left
