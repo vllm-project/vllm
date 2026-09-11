@@ -39,6 +39,9 @@ def kernel_launcher(call_fn: Callable[..., Any]) -> Callable[..., Any]:
     @wraps(call_fn)
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
         launch_spec = call_fn(self, *args, **kwargs)
+        if not self.bind_launch_inputs:
+            return self.launch(launch_spec, {})
+
         bound = signature.bind(self, *args, **kwargs)
         bound.apply_defaults()
         inputs = {
@@ -568,6 +571,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
     """Kernel wrapper that owns dispatch, warmup keys, and compilation."""
 
     CompileKey: type[CompileKeyT]
+    bind_launch_inputs = True
 
     def __init__(self) -> None:
         self._dispatch_trace = _trace_compile_key_dispatch(self.dispatch)

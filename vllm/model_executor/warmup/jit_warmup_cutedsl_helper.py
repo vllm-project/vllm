@@ -50,6 +50,7 @@ class VllmCuTeDSLJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
     """CuTeDSL owner whose compiled executor is shared by warmup and runtime."""
 
     kernel: ClassVar[Any]
+    bind_launch_inputs = False
 
     @abstractmethod
     def warmup_inputs(self, compile_key: CompileKeyT) -> tuple[Any, ...]:
