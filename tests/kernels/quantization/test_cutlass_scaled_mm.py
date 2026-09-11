@@ -591,6 +591,56 @@ def test_cutlass_subset():
     torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
 
 
+@pytest.mark.parametrize("m", [16, 64])
+@pytest.mark.parametrize("padded", ["packed", "a", "b", "out"])
+@pytest.mark.skipif(
+    not 100 <= capability < 120,
+    reason="Requires the SM100 FP8 CUTLASS caller.",
+)
+def test_cutlass_fp8_sm100_leading_strides(m: int, padded: str):
+    """Aligned leading padding must preserve values and output guard columns."""
+    # Without batch invariance, M=16 swaps A/B; M=64, K<4096 does not.
+    n, k, padding = 256, 256, 16
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    a_packed = torch.randint(-2, 3, (m, k), device="cuda", generator=generator).to(
+        torch.float8_e4m3fn
+    )
+    b_packed = (
+        torch.randint(-2, 3, (n, k), device="cuda", generator=generator)
+        .to(torch.float8_e4m3fn)
+        .t()
+    )
+    a = a_packed
+    b = b_packed
+    if padded == "a":
+        a = torch.zeros((m, k + padding), dtype=a.dtype, device="cuda")[:, :k]
+        a.copy_(a_packed)
+    if padded == "b":
+        b = torch.zeros((n, k + padding), dtype=b.dtype, device="cuda")[:, :k].t()
+        b.copy_(b_packed)
+
+    scale_a = torch.full((1, 1), 0.5, device="cuda")
+    scale_b = torch.full((1, 1), 0.25, device="cuda")
+    out_dtype = torch.bfloat16
+    sentinel = -1024
+    out_storage = torch.full(
+        (m, n + (padding if padded == "out" else 0)),
+        sentinel,
+        dtype=out_dtype,
+        device="cuda",
+    )
+    out = out_storage[:, :n]
+    expected = baseline_scaled_mm(a_packed, b_packed, scale_a, scale_b, out_dtype)
+    packed_out = ops.cutlass_scaled_mm(a_packed, b_packed, scale_a, scale_b, out_dtype)
+    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, None)
+
+    # Small integer operands and dyadic scales make the FP32 reference exact.
+    torch.testing.assert_close(packed_out, expected, rtol=0, atol=0)
+    torch.testing.assert_close(out, packed_out, rtol=0, atol=0)
+    if padded == "out":
+        assert torch.all(out_storage[:, n:] == sentinel)
+
+
 # Test to make sure cuda graphs work
 class CutlassLayer(torch.nn.Module):
     def __init__(self, b, scale_a, scale_b, out_dtype):
