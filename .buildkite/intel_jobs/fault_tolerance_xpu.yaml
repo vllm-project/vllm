@@ -13,8 +13,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - export NCCL_CUMEM_HOST_ENABLE=0

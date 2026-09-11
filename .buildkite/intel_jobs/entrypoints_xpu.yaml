@@ -12,8 +12,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/weight_transfer
@@ -40,8 +41,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode
@@ -59,9 +61,10 @@ steps:
     pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode || true &&
     pytest -v -s entrypoints/llm/test_generate.py || true &&
     pytest -v -s entrypoints/llm/offline_mode || true'
-- label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server)'
+- label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server) %N'
   device: intel_gpu
   timeout_in_minutes: 75
+  parallelism: 4
   working_dir: .
   no_plugin: true
   env:
@@ -69,13 +72,14 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
-  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
-  - pytest -v -s entrypoints/scale_out
+  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc; fi
+  - pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   source_file_dependencies:
   - vllm/
   - '!vllm/distributed/kv_transfer/'
@@ -86,9 +90,9 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
-    pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc || true &&
-    PYTHONPATH=/workspace/vllm pytest -v -s entrypoints/serve/dev/rpc || true &&
-    pytest -v -s entrypoints/scale_out || true'
+    pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true &&
+    if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then PYTHONPATH=/workspace/vllm pytest -v -s entrypoints/serve/dev/rpc; fi || true &&
+    pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server OpenAI - Part 1)'
   device: intel_gpu
   timeout_in_minutes: 68
@@ -99,8 +103,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
@@ -108,7 +113,6 @@ steps:
   - vllm/
   - '!vllm/distributed/kv_transfer/'
   - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -125,8 +129,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion
@@ -135,7 +140,6 @@ steps:
   - vllm/
   - '!vllm/distributed/kv_transfer/'
   - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -153,20 +157,23 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -v -s tool_use
   - pytest -v -s entrypoints/tool_parsers
   - pytest -v -s entrypoints/generate
   - pytest -v -s entrypoints/anthropic
+  - pytest -v -s entrypoints/cohere
   source_file_dependencies:
   - vllm/
   - '!vllm/distributed/kv_transfer/'
   - tests/tool_use
   - tests/entrypoints/tool_parsers
-  - tests/entrypoints/anthropic
   - tests/entrypoints/generate
+  - tests/entrypoints/anthropic
+  - tests/entrypoints/cohere
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -174,7 +181,8 @@ steps:
     pytest -v -s tool_use || true &&
     pytest -v -s entrypoints/tool_parsers || true &&
     pytest -v -s entrypoints/generate || true &&
-    pytest -v -s entrypoints/anthropic || true'
+    pytest -v -s entrypoints/anthropic || true &&
+    pytest -v -s entrypoints/cohere || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (Responses API)'
   device: intel_gpu
   timeout_in_minutes: 50
@@ -185,8 +193,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -v -s entrypoints/openai/responses
   source_file_dependencies:
@@ -208,8 +217,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/speech_to_text
@@ -234,8 +244,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/multimodal
@@ -260,8 +271,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/pooling
@@ -285,8 +297,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pytest -s entrypoints/openai/correctness/
   source_file_dependencies:

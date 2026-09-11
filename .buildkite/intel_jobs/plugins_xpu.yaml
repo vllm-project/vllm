@@ -13,8 +13,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - pip install -e ./plugins/vllm_add_dummy_platform
   - pytest -v -s plugins_tests/test_platform_plugins.py
@@ -85,8 +86,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - pip install "vllm-gguf-plugin >= 0.0.2"
   - pytest -v -s plugins_tests/gguf
@@ -111,8 +113,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 16+
   _raw_old_commands:
   - unset VLLM_GPU_SYNC_CHECK
   - pip install "vllm-bnb-plugin >= 0.0.1"
@@ -139,8 +142,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - unset VLLM_GPU_SYNC_CHECK
   - pip install "vllm-bnb-plugin >= 0.0.1"
