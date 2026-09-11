@@ -227,6 +227,6 @@ class DeepseekV4Aligner(nn.Module):
         x = x.view(n_vit_h, n_vit_w, -1).permute(2, 0, 1)
         x = F.pad(x, (0, -n_vit_w % r, 0, -n_vit_h % r))
         x = F.unfold(x.unsqueeze(0), r, stride=r).squeeze(0).transpose(0, 1)
-        hidden, _ = self.w1(x.contiguous())
+        hidden, _ = self.w1(x)
         out, _ = self.w2(F.gelu(hidden))
         return out
