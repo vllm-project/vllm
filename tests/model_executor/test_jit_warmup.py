@@ -171,6 +171,19 @@ def test_warmup_range_validates_custom_advancement() -> None:
         )
 
 
+def test_warmup_cases_support_lambda_advancement() -> None:
+    def warmup_inputs() -> dict[str, Any]:
+        value: Any = WarmupIntRange(1, 9, advance=lambda value: value * 2)
+        return dict(value=value)
+
+    assert list(ToyKernel()._expand_warmup_cases(warmup_inputs)) == [
+        {"value": 1},
+        {"value": 2},
+        {"value": 4},
+        {"value": 8},
+    ]
+
+
 def test_compile_key_uses_defaults_locals_attributes_and_expressions() -> None:
     cfg = _config(bias=3, disabled=True, name="cfg", vectorized=True)
 

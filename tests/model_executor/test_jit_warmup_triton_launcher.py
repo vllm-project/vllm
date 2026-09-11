@@ -166,6 +166,8 @@ def test_triton_kernel_decorator_returns_launcher(
     _patch_key_deriver(monkeypatch, fake_keys)
 
     keys = launch.get_warmup_keys()
+    keys_with_config = launch.get_warmup_keys(vllm_config=object())
+    assert keys_with_config == keys
     assert [dict(key.inputs)["second"] for key in keys] == [1, 2]
     launch.compile(keys[0])
     assert kernel.warmup_calls == [
