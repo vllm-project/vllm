@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
 from runtime_tuning import WorkloadHints
 
 SUPPORTED_TENSOR_PARALLEL_SIZES = frozenset({1, 2, 4, 8})
@@ -368,10 +367,12 @@ MAX_SWEEP_RETRIES="${{VLLM_RECIPE_SWEEP_RETRIES:-2}}"
 
     EXPERIMENT_DIR="${{SCRIPT_DIR}}/results/{experiment_name}"
     if [[ -d "${{EXPERIMENT_DIR}}" ]]; then
-      echo "Sweep command failed; retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} with --resume"
+      echo "Sweep command failed;" \
+        "retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} with --resume"      
       RETRY_ARGS=(--resume "${{RETRY_ARGS[@]}}")
     else
-      echo "Sweep command failed before resumable state was created; retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} from the start"
+      echo "Sweep command failed before resumable state was created;" \
+        "retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} from the start"      
     fi
 
     VLLM_RECIPE_SWEEP_RETRY_COUNT="${{NEXT_RETRY}}" exec "$0" "${{RETRY_ARGS[@]}}"
@@ -801,10 +802,12 @@ vllm bench sweep serve_workload \
 
     EXPERIMENT_DIR="${{SCRIPT_DIR}}/results/concurrency-tuning"
     if [[ -d "${{EXPERIMENT_DIR}}" ]]; then
-      echo "Sweep command failed; retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} with --resume"
+      echo "Sweep command failed;" \
+        "retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} with --resume"      
       RETRY_ARGS=(--resume "${{RETRY_ARGS[@]}}")
     else
-      echo "Sweep command failed before resumable state was created; retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} from the start"
+      echo "Sweep command failed before resumable state was created;" \
+        "retry ${{NEXT_RETRY}}/${{MAX_SWEEP_RETRIES}} from the start"      
     fi
 
     VLLM_RECIPE_SWEEP_RETRY_COUNT="${{NEXT_RETRY}}" exec "$0" "${{RETRY_ARGS[@]}}"
