@@ -13,8 +13,8 @@ if(TML_FA4_SRC_DIR)
 else()
   FetchContent_Declare(
     tml_fa4
-    GIT_REPOSITORY https://github.com/vllm-project/tml-fa4.git
-    GIT_TAG b206834606ed5b5f21f8eed6b0683f528ea9cf7d
+    GIT_REPOSITORY https://github.com/ZJY0516/tml-fa4.git
+    GIT_TAG c5b4d5e2586cce0b9671772433cac2b8dafb6795
     GIT_PROGRESS TRUE
     CONFIGURE_COMMAND ""
     BUILD_COMMAND "")
