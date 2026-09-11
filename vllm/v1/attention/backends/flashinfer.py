@@ -942,7 +942,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def get_q_data_type(self, is_prefill: bool) -> torch.dtype:
         # The user sets --attention-config.disable_flashinfer_q_quantization
         # to 1 explicitly, use model dtype for query.
-        if self.vllm_config.attention_config.disable_flashinfer_q_quantization:
+        if (
+            self.vllm_config.attention_config.disable_flashinfer_q_quantization
+            or self.head_dim == 512
+        ):
+            # Native FlashInfer hdim512 kernels accept FP8 KV, but not FP8 Q.
             return self.model_config.dtype
 
         # self.cache_dtype is resolved per KV-cache group: it is "auto" when
@@ -1855,6 +1859,7 @@ class FlashInferImpl(AttentionImpl):
         # so only enable this for SM100 trtllm-gen where both use FP8-Q.
         self.supports_quant_query_input = (
             self.supports_xqa_or_trtllm_gen_decode
+            and head_size != 512
             and is_quantized_kv_cache(self.kv_cache_dtype)
             and current_platform.is_device_capability_family(100)
             and vllm_config is not None

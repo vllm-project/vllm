@@ -675,9 +675,12 @@ def test_composite_routes_queries_that_need_image_masking(
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA attention kernels")
 @pytest.mark.parametrize("head_size", [256, 512])
-@pytest.mark.parametrize("reverse_children", [False, True])
+@pytest.mark.parametrize(
+    "reverse_children,cache_dtype",
+    [(False, "auto"), (True, "auto"), (False, "fp8_e4m3")],
+)
 def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
-    head_size, reverse_children
+    head_size, reverse_children, cache_dtype
 ):
     """Changing routes must preserve KV writes, image masking and graph replay."""
     if not current_platform.is_device_capability_family(100):
@@ -713,13 +716,19 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
         max_num_seqs=4,
         max_num_batched_tokens=512,
         block_size=128,
+        kv_cache_dtype=cache_dtype,
         enforce_eager=True,
         attention_config={"backend": "TRITON_FLASHINFER"},
     ).create_engine_config()
     cfg.cache_config.kv_cache_layout = "LBHNC"
     window = 128 if head_size == 256 else None
+    storage_dtype = torch.uint8 if cache_dtype == "fp8_e4m3" else DTYPE
     spec_kwargs = dict(
-        block_size=128, num_kv_heads=16, head_size=head_size, dtype=DTYPE
+        block_size=128,
+        num_kv_heads=16,
+        head_size=head_size,
+        dtype=storage_dtype,
+        kv_quant_mode=get_kv_quant_mode(cache_dtype),
     )
     spec = (
         SlidingWindowSpec(**spec_kwargs, sliding_window=window)
@@ -771,9 +780,14 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
             layer.mm_prefix_clamp_sliding_window = True
         builder = backend.get_builder_cls()(spec, ["composite_test"], cfg, DEVICE)
         builder.set_kernel_block_size(128)
-        cache = torch.empty(2, 16, 128, 2 * head_size, dtype=DTYPE, device=DEVICE)
+        cache = torch.empty(
+            2, 16, 128, 2 * head_size, dtype=storage_dtype, device=DEVICE
+        )
         keys = torch.randn(209, 16, head_size, dtype=DTYPE, device=DEVICE)
         values = torch.randn_like(keys)
+        if cache_dtype == "fp8_e4m3":
+            keys = keys.to(torch.float8_e4m3fn).to(DTYPE)
+            values = values.to(torch.float8_e4m3fn).to(DTYPE)
         table = torch.tensor([[0, 1]], dtype=torch.int32, device=DEVICE)
         previous = 0
         for end, spans, metadata_type in [
@@ -802,6 +816,8 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
             metadata = builder.build(0, common)
             assert isinstance(metadata, metadata_type)
             query = torch.randn(qlen, 32, head_size, dtype=DTYPE, device=DEVICE)
+            if cache_dtype == "fp8_e4m3" and head_size == 256:
+                query = query.to(torch.float8_e4m3fn).to(DTYPE)
             key, value = keys[previous:end], values[previous:end]
             output = torch.empty_like(query)
             layer.impl.do_kv_cache_update(layer, key, value, cache, common.slot_mapping)

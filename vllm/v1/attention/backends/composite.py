@@ -424,7 +424,7 @@ def create_composite_attention_backend(
 
         @classmethod
         def supports_kv_cache_dtype(cls, dtype):
-            return super().supports_kv_cache_dtype(dtype) and all(
+            return all(
                 backend.supports_kv_cache_dtype(dtype)
                 for backend in (general_backend, causal_backend)
             )
