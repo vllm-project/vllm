@@ -16,8 +16,6 @@ materialize [N * (B - 1), V] bf16 logits per pass (~146 MB at N = 32, V = 152k)
 only to reduce them; fusing the add into the reduction never writes them.
 """
 
-import torch
-
 from vllm.triton_utils import tl, triton
 
 
@@ -208,8 +206,8 @@ def _xpress_add_argmax_reduce_to_blk_kernel(
 ):
     """Stage 2 of the fused argmax: reduce one row's chunk maxima into ``blk``.
 
-    Grid: (rows,). Row r is slot ``1 + r % (B - 1)`` of block ``r // (B - 1)``; the winner is
-    written to ``blk[n, slot]`` directly so the next pass reads it in place.
+    Grid: (rows,). Row r is slot ``1 + r % (B - 1)`` of block ``r // (B - 1)``;
+    the winner is written to ``blk[n, slot]`` so the next pass reads it in place.
     """
     row = tl.program_id(0).to(tl.int64)
     best_val = -float("inf")
