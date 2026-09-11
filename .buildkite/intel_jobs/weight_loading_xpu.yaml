@@ -14,8 +14,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
   source_file_dependencies:

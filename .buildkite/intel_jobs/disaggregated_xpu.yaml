@@ -13,8 +13,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 16+
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
@@ -38,8 +39,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 16+
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - FLASHINFER=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
@@ -63,8 +65,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 16+
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - bash v1/kv_connector/nixl_push_integration/config_sweep_accuracy_test.sh
@@ -89,8 +92,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 16+
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
@@ -114,8 +118,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 16+
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
@@ -139,8 +144,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 16+
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
@@ -164,8 +170,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - bash v1/kv_connector/nixl_integration/run_edge_case_test.sh
@@ -190,8 +197,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
@@ -217,8 +225,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
@@ -245,8 +254,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
@@ -271,8 +281,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 16+
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
@@ -300,8 +311,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 16+
   _raw_old_commands:
   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
   - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh

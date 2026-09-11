@@ -12,8 +12,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - apt-get update && apt-get install -y curl libsodium23
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -27,6 +28,8 @@ steps:
   - vllm/model_executor/warmup
   - tests/model_executor
   - tests/model_executor/test_jit_warmup.py
+  - tests/model_executor/test_jit_warmup_cutedsl_launcher.py
+  - tests/model_executor/test_jit_warmup_triton_launcher.py
   - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   commands:
   - >-

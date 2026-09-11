@@ -13,8 +13,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
   source_file_dependencies:
@@ -36,8 +37,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 24+
   _raw_old_commands:
   - export VLLM_USE_DEEP_GEMM=0
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
@@ -61,8 +63,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
   source_file_dependencies:
@@ -86,8 +89,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
   source_file_dependencies:
@@ -111,8 +115,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt
   source_file_dependencies:
@@ -144,14 +149,17 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode.txt
   source_file_dependencies:
-  - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-confidence-TP4.yaml
+  - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-confidence-TEP4.yaml
+  - tests/evals/gsm8k/configs/Kimi-K3-pruned75-DSpark-TP4.yaml
   - tests/evals/gsm8k/configs/models-spec-decode.txt
   - vllm/models/deepseek_v4/
+  - vllm/models/kimi_k3/
   - vllm/model_executor/models/qwen3_dspark.py
   - vllm/v1/spec_decode/metrics.py
   - vllm/v1/worker/gpu/spec_decode/adaptive_verification.py
@@ -176,8 +184,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell-ep.txt
   source_file_dependencies:
@@ -200,8 +209,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-blackwell.txt
   source_file_dependencies:
@@ -219,6 +229,7 @@ steps:
     pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-blackwell.txt || true'
 - label: ':nvidia: (H100) MoE Refactor Integration TEMPORARY'
   device: intel_gpu
+  parallelism: 4
   num_devices: 2
   optional: false
   working_dir: .
@@ -228,15 +239,16 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 24+
   _raw_old_commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100-shard-$$BUILDKITE_PARALLEL_JOB.txt
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt --deselect="tests/evals/gsm8k/test_gsm8k_correctness.py::test_gsm8k_correctness[Qwen3-30B-A3B-Fp8-AutoFp8-deepgemm]" --deselect="tests/evals/gsm8k/test_gsm8k_correctness.py::test_gsm8k_correctness[Qwen3-30B-A3B-Fp8-CT-Block-deepgemm]" --deselect="tests/evals/gsm8k/test_gsm8k_correctness.py::test_gsm8k_correctness[Qwen3-30B-A3B-Fp8-AutoFp8-marlin]" --deselect="tests/evals/gsm8k/test_gsm8k_correctness.py::test_gsm8k_correctness[Qwen3-30B-A3B-Fp8-CT-Block-marlin]" --deselect="tests/evals/gsm8k/test_gsm8k_correctness.py::test_gsm8k_correctness[Qwen3-30B-A3B-Fp8-CT-Channel-marlin]"|| true'
+    pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100-shard-$$BUILDKITE_PARALLEL_JOB.txt || true'
 - label: ':nvidia: (B200) MoE Refactor Integration TEMPORARY Shard %N'
   device: intel_gpu
   parallelism: 4
@@ -249,8 +261,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-b200-shard-$$BUILDKITE_PARALLEL_JOB.txt
   commands:
@@ -269,8 +282,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt
   commands:
@@ -291,8 +305,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-a100-shard-$$BUILDKITE_PARALLEL_JOB.txt
   source_file_dependencies:
@@ -318,8 +333,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
   source_file_dependencies:
@@ -346,8 +362,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-h100-shard-$$BUILDKITE_PARALLEL_JOB.txt
   source_file_dependencies:
@@ -373,8 +390,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
   source_file_dependencies:
@@ -400,8 +418,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config.txt
   source_file_dependencies:
@@ -427,8 +446,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
@@ -454,8 +474,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant.txt
   source_file_dependencies:
@@ -480,8 +501,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 24+
   _raw_old_commands:
   - uv pip install --system 'gpt-oss[eval]==0.0.5'
   - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-h100.txt
@@ -492,7 +514,7 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'uv pip install gpt-oss[eval]==0.0.5 || true &&
+    'uv pip install "gpt-oss[eval]==0.0.5" || true &&
     cd tests &&
     pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-h100.txt || true'
 - label: ':nvidia: (B200) GPQA Eval (GPT-OSS)'
@@ -507,8 +529,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 24+
   _raw_old_commands:
   - uv pip install --system 'gpt-oss[eval]==0.0.5'
   - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt
@@ -519,7 +542,7 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'uv pip install gpt-oss[eval]==0.0.5 || true &&
+    'uv pip install "gpt-oss[eval]==0.0.5" || true &&
     cd tests &&
     pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt || true'
 - label: ':nvidia: (B200) Qwen3.8-Flash-Next-FP8 Accuracy Eval'
@@ -534,8 +557,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 24+
   _raw_old_commands:
   - uv pip install --system 'evalscope==1.10.0'
   - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-b200.txt
@@ -550,7 +574,7 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'uv pip install evalscope==1.10.0 || true &&
+    'uv pip install "evalscope==1.10.0" || true &&
     cd tests &&
     pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-b200.txt || true'
 - label: ':nvidia: (H200) Qwen3.8-Flash-Next-FP8 Accuracy Eval'
@@ -565,8 +589,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 24+
   _raw_old_commands:
   - uv pip install --system 'evalscope==1.10.0'
   - pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-h200.txt
@@ -581,7 +606,7 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'uv pip install evalscope==1.10.0 || true &&
+    'uv pip install "evalscope==1.10.0" || true &&
     cd tests &&
     pytest -s -v evals/qwen4_exp/test_accuracy.py --config-list-file=configs/models-h200.txt || true'
 - label: ':nvidia: (DGX) Spark GPQA Eval (GPT-OSS)'
@@ -596,8 +621,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - uv pip install --system 'gpt-oss[eval]==0.0.5'
   - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-spark.txt
@@ -608,7 +634,7 @@ steps:
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'uv pip install gpt-oss[eval]==0.0.5 || true &&
+    'uv pip install "gpt-oss[eval]==0.0.5" || true &&
     cd tests &&
     pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-spark.txt || true'
 - label: ':nvidia: (H200 MIG 35GB) LM Eval KV-Offload'
@@ -621,8 +647,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "nemotron-h-8b or gemma-4-e4b-it"
   source_file_dependencies:
@@ -647,8 +674,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 2+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b or deepseek-v2-lite"
   source_file_dependencies:
@@ -673,8 +701,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 4+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"
   source_file_dependencies:
@@ -698,8 +727,9 @@ steps:
     REPO: vllm-ci-test-repo
     VLLM_TEST_DEVICE: xpu
   agent_tags:
-    label: debug
+    label: production
     gpu: 1+
+    mem: 24+
   _raw_old_commands:
   - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt
   source_file_dependencies:
