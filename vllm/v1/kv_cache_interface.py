@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.cache import CacheDType
 
 logger = init_logger(__name__)
 
@@ -388,6 +389,9 @@ class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
+    cache_dtype: CacheDType | None = None
+    """Logical cache dtype used by attention kernels. This is distinct from
+    ``dtype`` because packed formats such as FP8 and NVFP4 use uint8 storage."""
     head_size_v: int = None  # type: ignore[assignment]
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
@@ -515,6 +519,7 @@ class FullAttentionSpec(AttentionSpec):
             head_size=specs[0].head_size,
             head_size_v=specs[0].head_size_v,
             dtype=specs[0].dtype,
+            cache_dtype=specs[0].cache_dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
@@ -593,6 +598,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
+            cache_dtype=specs[0].cache_dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
@@ -651,6 +657,7 @@ class RSWASpec(FullAttentionSpec):
             head_size=base.head_size,
             head_size_v=base.head_size_v,
             dtype=base.dtype,
+            cache_dtype=base.cache_dtype,
             kv_quant_mode=base.kv_quant_mode,
             page_size_padded=base.page_size_padded,
             num_head_slots=base.num_head_slots,
@@ -834,11 +841,13 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             "quantization method, tokens per state, model version, sliding "
             "window size, and retained token count."
         )
-        return cls(
+        merged_spec = cls(
             block_size=specs[0].block_size,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
+            cache_dtype=specs[0].cache_dtype,
+            kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
@@ -848,6 +857,13 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
         )
+        for spec in specs:
+            for f in fields(AttentionSpec):
+                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
+                    "All attention layers in the same KV cache group must have "
+                    "the same attention spec."
+                )
+        return merged_spec
 
     def is_uniform_with_collection(
         self, kv_cache_specs: dict[str, KVCacheSpec]
@@ -1046,6 +1062,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             head_size_v=specs[0].head_size_v,
             sink_len=specs[0].sink_len,
             dtype=specs[0].dtype,
+            cache_dtype=specs[0].cache_dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
