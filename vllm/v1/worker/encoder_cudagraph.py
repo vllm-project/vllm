@@ -376,7 +376,10 @@ class EncoderCudaGraphManager:
                 padding_logic = self.config.padding_logics.get(
                     key, self._copy_padded_buffer
                 )
-                padding_logic(buf, src)
+                # Padding callbacks may write Python scalars into CUDA
+                # buffers (e.g. `dst[-1] = capacity`), which syncs.
+                with gpu_sync_allowed():
+                    padding_logic(buf, src)
 
         with record_function_or_nullcontext("encoder_cudagraph: replay"):
             graph_meta.graph.replay()

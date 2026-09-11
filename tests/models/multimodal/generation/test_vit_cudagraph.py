@@ -115,6 +115,10 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
                 model_arch="Mistral3ForConditionalGeneration",
             ),
         },
+        # Resolves to the Pixtral architecture, so the `pixtral` entry
+        # covers the encoder cudagraph path. Hangs at engine startup on CI.
+        # TODO: Re-enable once the startup hang is root-caused.
+        skip=True,
         marks=[pytest.mark.core_model],
     ),
     "gemma3": VitCudagraphTestConfig(
