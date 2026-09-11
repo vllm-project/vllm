@@ -9,6 +9,8 @@ import json
 import math
 import os
 import shlex
+import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +19,36 @@ from runtime_tuning import WorkloadHints
 
 SUPPORTED_TENSOR_PARALLEL_SIZES = frozenset({1, 2, 4, 8})
 
+MOE_EXPERT_COUNT_KEYS = (
+    "num_experts",
+    "num_local_experts",
+    "num_sparse_experts",
+    "num_total_experts",
+    "n_experts",
+    "n_routed_experts",
+    "num_routed_experts",
+)
+MOE_INTERMEDIATE_SIZE_KEYS = (
+    "moe_intermediate_size",
+    "expert_intermediate_size",
+    "moe_ffn_hidden_size",
+)
+
 PROMPTS_PER_CONCURRENCY = 10
 MIN_NUM_PROMPTS = 100
 MAX_NUM_PROMPTS = 1000
+
+
+@dataclass(frozen=True)
+class ModelParallelMetadata:
+    """Model dimensions needed to reject invalid MoE layouts before startup."""
+
+    is_moe: bool | None
+    num_experts: int | None = None
+    moe_intermediate_size: int | None = None
+
+
+UNKNOWN_MODEL_PARALLEL_METADATA = ModelParallelMetadata(is_moe=None)
 
 
 def _num_prompts_for_concurrency(concurrency: int) -> int:
@@ -155,32 +184,215 @@ def _scheduler_baseline_for_dp(
     return per_replica_concurrency, batch
 
 
-def build_parallel_layout_params(
-    config: dict[str, Any], workload: WorkloadHints, numa_node_count: int
-) -> list[dict[str, Any]]:
-    """Build full-NUMA layouts plus the largest supported TP layout."""
-    validate_sweep_workload(workload)
-    if numa_node_count <= 1:
-        raise ValueError("Parallel-layout sweep requires at least two NUMA nodes.")
+def _model_config_value(view: Any, key: str) -> Any:
+    if isinstance(view, dict):
+        return view.get(key)
+    return getattr(view, key, None)
 
-    candidates = []
+
+def _config_views(hf_config: Any) -> list[Any]:
+    """Return common nested model config views without duplicates."""
+    views = [hf_config]
+    for view in views:
+        for key in (
+            "text_config",
+            "language_config",
+            "llm_config",
+            "ffn_config",
+            "moe_config",
+        ):
+            value = _model_config_value(view, key)
+            if value is not None and all(value is not item for item in views):
+                views.append(value)
+    return views
+
+
+def _first_positive_model_int(views: list[Any], keys: tuple[str, ...]) -> int | None:
+    for view in views:
+        for key in keys:
+            value = _model_config_value(view, key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+    return None
+
+
+def _config_identifies_moe(views: list[Any]) -> bool:
+    for view in views:
+        model_type = _model_config_value(view, "model_type")
+        if isinstance(model_type, str) and "moe" in model_type.lower():
+            return True
+        architectures = _model_config_value(view, "architectures")
+        if isinstance(architectures, list) and any(
+            isinstance(name, str) and "moe" in name.lower() for name in architectures
+        ):
+            return True
+    return False
+
+
+def model_parallel_metadata_from_config(hf_config: Any) -> ModelParallelMetadata:
+    """Extract MoE markers from a loaded Transformers-compatible config."""
+    views = _config_views(hf_config)
+    num_experts = _first_positive_model_int(views, MOE_EXPERT_COUNT_KEYS)
+    moe_intermediate_size = _first_positive_model_int(views, MOE_INTERMEDIATE_SIZE_KEYS)
+    is_moe = (
+        num_experts is not None
+        or moe_intermediate_size is not None
+        or _config_identifies_moe(views)
+    )
+    if is_moe and moe_intermediate_size is None:
+        # Some MoE configs use the generic name for each expert's FFN width.
+        moe_intermediate_size = _first_positive_model_int(views, ("intermediate_size",))
+    return ModelParallelMetadata(
+        is_moe=is_moe,
+        num_experts=num_experts,
+        moe_intermediate_size=moe_intermediate_size,
+    )
+
+
+def inspect_model_parallel_metadata(config: dict[str, Any]) -> ModelParallelMetadata:
+    """Load the model config and extract portable MoE topology markers."""
+    model = config.get("model")
+    if not isinstance(model, str) or not model:
+        raise ValueError("Parallel-layout sweep requires a model in config.yml.")
+
+    from vllm.transformers_utils.config import get_config
+
+    hf_config = get_config(
+        model,
+        trust_remote_code=config.get("trust-remote-code") is True,
+        revision=config.get("revision"),
+        code_revision=config.get("code-revision"),
+        config_format=config.get("config-format", "auto"),
+    )
+    return model_parallel_metadata_from_config(hf_config)
+
+
+def cpu_supports_moe_dp_collectives() -> bool:
+    """Whether CPU overrides the variable-size collectives used by MoE DP."""
+    try:
+        from vllm.distributed.device_communicators.base_device_communicator import (
+            DeviceCommunicatorBase,
+        )
+        from vllm.distributed.device_communicators.cpu_communicator import (
+            CpuCommunicator,
+        )
+    except Exception:
+        return False
+
+    return all(
+        getattr(CpuCommunicator, name) is not getattr(DeviceCommunicatorBase, name)
+        for name in ("all_gatherv", "reduce_scatterv")
+    )
+
+
+def _parallel_layout_name(
+    tensor_parallel_size: int, data_parallel_size: int, numa_node_count: int
+) -> str:
+    name = f"tp{tensor_parallel_size}_dp{data_parallel_size}"
+    used_nodes = tensor_parallel_size * data_parallel_size
+    if used_nodes != numa_node_count:
+        name += f"_numa{used_nodes}of{numa_node_count}"
+    return name
+
+
+def _default_parallel_layout_sizes(numa_node_count: int) -> list[tuple[int, int]]:
     max_supported_tp = max(
         size for size in SUPPORTED_TENSOR_PARALLEL_SIZES if size <= numa_node_count
     )
+    layouts = []
     for tensor_parallel_size in range(numa_node_count, 0, -1):
         if tensor_parallel_size not in SUPPORTED_TENSOR_PARALLEL_SIZES:
             continue
         uses_all_numa_nodes = numa_node_count % tensor_parallel_size == 0
         if not uses_all_numa_nodes and tensor_parallel_size != max_supported_tp:
             continue
-        data_parallel_size = max(1, numa_node_count // tensor_parallel_size)
+        layouts.append(
+            (tensor_parallel_size, max(1, numa_node_count // tensor_parallel_size))
+        )
+    return layouts
+
+
+def build_parallel_layout_plan(
+    config: dict[str, Any],
+    workload: WorkloadHints,
+    numa_node_count: int,
+    *,
+    model_metadata: ModelParallelMetadata = UNKNOWN_MODEL_PARALLEL_METADATA,
+    cpu_moe_dp_supported: bool = True,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build candidates and diagnostics after applying parallel safety policy."""
+    validate_sweep_workload(workload)
+    if numa_node_count <= 1:
+        raise ValueError("Parallel-layout sweep requires at least two NUMA nodes.")
+
+    layouts = _default_parallel_layout_sizes(numa_node_count)
+    skipped: list[dict[str, Any]] = []
+    if model_metadata.is_moe and not cpu_moe_dp_supported:
+        for tensor_parallel_size, data_parallel_size in layouts:
+            if data_parallel_size <= 1:
+                continue
+            skipped.append(
+                {
+                    "_benchmark_name": _parallel_layout_name(
+                        tensor_parallel_size, data_parallel_size, numa_node_count
+                    ),
+                    "policy": "cpu_moe_dp_collectives",
+                    "tensor_parallel_size": tensor_parallel_size,
+                    "data_parallel_size": data_parallel_size,
+                    "reason": (
+                        "CPU communicator does not implement the variable-size "
+                        "collectives required by MoE data parallelism"
+                    ),
+                }
+            )
+        # Keep TP coverage instead of collapsing the sweep to whichever DP=1
+        # layout happened to exist in the full-NUMA candidate set.
+        layouts = [
+            (tensor_parallel_size, 1)
+            for tensor_parallel_size in sorted(
+                SUPPORTED_TENSOR_PARALLEL_SIZES, reverse=True
+            )
+            if tensor_parallel_size <= numa_node_count
+        ]
+
+    pcp_size = config.get("prefill-context-parallel-size", 1)
+    if not isinstance(pcp_size, int) or isinstance(pcp_size, bool) or pcp_size <= 0:
+        raise ValueError("prefill-context-parallel-size must be a positive integer.")
+    uses_expert_parallel = config.get("enable-expert-parallel") is True
+
+    candidates = []
+    for tensor_parallel_size, data_parallel_size in layouts:
+        name = _parallel_layout_name(
+            tensor_parallel_size, data_parallel_size, numa_node_count
+        )
+        effective_parallel_size = tensor_parallel_size * data_parallel_size * pcp_size
+        moe_width = model_metadata.moe_intermediate_size
+        if (
+            model_metadata.is_moe
+            and not uses_expert_parallel
+            and moe_width is not None
+            and moe_width % effective_parallel_size != 0
+        ):
+            skipped.append(
+                {
+                    "_benchmark_name": name,
+                    "policy": "moe_effective_parallel_size",
+                    "tensor_parallel_size": tensor_parallel_size,
+                    "data_parallel_size": data_parallel_size,
+                    "prefill_context_parallel_size": pcp_size,
+                    "effective_parallel_size": effective_parallel_size,
+                    "moe_intermediate_size": moe_width,
+                    "reason": (
+                        "moe_intermediate_size is not divisible by the effective "
+                        "TP x DP x PCP size while expert parallelism is disabled"
+                    ),
+                }
+            )
+            continue
+
         max_num_seqs, max_num_batched_tokens = _scheduler_baseline_for_dp(
             config, workload, data_parallel_size
         )
-        name = f"tp{tensor_parallel_size}_dp{data_parallel_size}"
-        if not uses_all_numa_nodes:
-            used_nodes = tensor_parallel_size * data_parallel_size
-            name += f"_numa{used_nodes}of{numa_node_count}"
         candidates.append(
             {
                 "_benchmark_name": name,
@@ -190,6 +402,31 @@ def build_parallel_layout_params(
                 "max_num_batched_tokens": max_num_batched_tokens,
             }
         )
+
+    if not candidates:
+        raise ValueError(
+            "No valid parallel-layout candidates remain after applying model and "
+            "runtime capability checks. See parallel_layout_skips.json."
+        )
+    return candidates, skipped
+
+
+def build_parallel_layout_params(
+    config: dict[str, Any],
+    workload: WorkloadHints,
+    numa_node_count: int,
+    *,
+    model_metadata: ModelParallelMetadata = UNKNOWN_MODEL_PARALLEL_METADATA,
+    cpu_moe_dp_supported: bool = True,
+) -> list[dict[str, Any]]:
+    """Build full-NUMA layouts plus the largest supported TP layout."""
+    candidates, _ = build_parallel_layout_plan(
+        config,
+        workload,
+        numa_node_count,
+        model_metadata=model_metadata,
+        cpu_moe_dp_supported=cpu_moe_dp_supported,
+    )
     return candidates
 
 
@@ -623,9 +860,7 @@ def write_sweep_files(
         workload=workload,
     )
     _write_guide(guide, workload)
-    analysis_files = _write_post_benchmark_analysis_files(
-        directory, workload=workload
-    )
+    analysis_files = _write_post_benchmark_analysis_files(directory, workload=workload)
 
     return [
         sweep_config,
@@ -653,6 +888,7 @@ def write_parallel_layout_sweep_files(
     directory.mkdir(parents=True, exist_ok=True)
 
     parallel_params = directory / "parallel_layout_serve_params.json"
+    parallel_skips = directory / "parallel_layout_skips.json"
     bench_params = directory / "bench_params.json"
     run_parallel = directory / "run_parallel_layout_sweep.sh"
     recommend_parallel = directory / "recommend_parallel_layout.py"
@@ -663,10 +899,27 @@ def write_parallel_layout_sweep_files(
     env_rel = _relative_to(directory, env_path)
     request_model, tokenizer = _benchmark_models(config)
 
-    _write_json(
-        parallel_params,
-        build_parallel_layout_params(config, workload, numa_node_count),
+    try:
+        model_metadata = inspect_model_parallel_metadata(config)
+    except Exception as exc:
+        print(
+            "Warning: could not inspect model parallel metadata; retaining the "
+            f"generic layouts and relying on sweep error isolation: {exc}",
+            file=sys.stderr,
+        )
+        model_metadata = UNKNOWN_MODEL_PARALLEL_METADATA
+    cpu_moe_dp_supported = (
+        cpu_supports_moe_dp_collectives() if model_metadata.is_moe else True
     )
+    parallel_candidates, skipped_candidates = build_parallel_layout_plan(
+        config,
+        workload,
+        numa_node_count,
+        model_metadata=model_metadata,
+        cpu_moe_dp_supported=cpu_moe_dp_supported,
+    )
+    _write_json(parallel_params, parallel_candidates)
+    _write_json(parallel_skips, skipped_candidates)
     _write_json(bench_params, build_bench_params(workload))
     _write_run_script(
         run_parallel,
@@ -703,6 +956,17 @@ Tensor parallelism is restricted to `1`, `2`, `4`, or `8`. The largest
 supported TP not exceeding the NUMA-node count is also included, even when it
 leaves some NUMA nodes idle.
 
+Before benchmarking, the generator applies two MoE safety checks:
+
+- When the CPU communicator lacks variable-size MoE collectives, MoE candidates
+  use `DP=1`; every supported TP size is retained as a replacement candidate.
+- With expert parallelism disabled and a known MoE intermediate size, candidates
+  must satisfy `moe_intermediate_size % (TP * DP * PCP) == 0`.
+
+Rejected layouts and their reasons are written to
+`parallel_layout_skips.json`. If model metadata cannot be inspected, generic
+layouts are retained and the runner's per-combination error isolation applies.
+
 Run:
 
 ```bash
@@ -723,12 +987,11 @@ concurrency and scheduler tuning should follow automatically.
 """,
         encoding="utf-8",
     )
-    analysis_files = _write_post_benchmark_analysis_files(
-        directory, workload=workload
-    )
+    analysis_files = _write_post_benchmark_analysis_files(directory, workload=workload)
 
     return [
         parallel_params,
+        parallel_skips,
         bench_params,
         run_parallel,
         recommend_parallel,
@@ -1013,9 +1276,7 @@ def write_concurrency_sweep_files(
         workload=workload,
     )
     _write_concurrency_recommend_script(recommend_script, workload=workload)
-    analysis_files = _write_post_benchmark_analysis_files(
-        directory, workload=workload
-    )
+    analysis_files = _write_post_benchmark_analysis_files(directory, workload=workload)
     return [bench_params, run_script, recommend_script, *analysis_files]
 
 
