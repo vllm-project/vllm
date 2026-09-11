@@ -15,7 +15,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import numpy as np
@@ -2821,7 +2821,9 @@ class NixlBaseConnectorWorker:
                 req_id = self._failed_recv_reqs.get_nowait()
             except queue.Empty:
                 break
-            self._handle_failed_transfer(req_id, None, self._recv_failures, failure=None)
+            self._handle_failed_transfer(
+                req_id, None, self._recv_failures, record_failed_transfer=False
+            )
 
         failed_recv_reqs: set[ReqId] = set()
         if self._recv_failures:
@@ -3067,25 +3069,23 @@ class NixlBaseConnectorWorker:
         req_id: str,
         handle: int | None,
         failed_req_ids: set[str] | None = None,
-        failure: Literal["transfer", "handshake"] | None = "transfer",
+        record_failed_transfer: bool = True,
     ) -> bool:
-        """
-        Record a failure and release its handle, returning False to retain it.
+        """Record a failure and release its handle, returning False to retain it.
 
         Args:
             req_id: The request ID.
             handle: The transfer handle.
             failed_req_ids: Requests observed as failed; each stays listed
                 until it has no outstanding handles.
-            failure: The failure category to record, grouped with transfer
-                failures when the handshake failed, or ``None`` when the
-                caller already recorded a more specific metric (eg KV expiry,
-                which is reported separately from transport failures).
+            record_failed_transfer: Whether to count the failure toward the
+                transport-failure metric. Callers that already recorded a more
+                specific metric (eg KV expiry, reported separately from
+                transport failures) pass False.
+
         """
-        if failure == "transfer":
+        if record_failed_transfer:
             self.xfer_stats.record_failed_transfer()
-        elif failure == "handshake":
-            self.xfer_stats.record_failed_handshake()
         if failed_req_ids is not None:
             failed_req_ids.add(req_id)
         return handle is None or self._try_release_xfer_handle(req_id, handle)
