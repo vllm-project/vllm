@@ -540,6 +540,26 @@ prepare_ci_build_context() {
     echo "Using canonical CI Docker context: ${ROCM_BUILD_CONTEXT_ROOT}"
 }
 
+configure_custom_rocm_stages() {
+    using_custom_rocm_dockerfiles || return 0
+    local context_root="${ROCM_BUILD_CONTEXT_ROOT:-.}"
+    local dockerfile="${context_root}/${CI_BASE_DOCKERFILE}"
+    local stages=""
+
+    (cd "${context_root}" && \
+        validate_rocm_dockerfile "${CI_BASE_DOCKERFILE}" \
+            ci_base test export_vllm export_test_smoke csrc-build rust-build) \
+        || return $?
+    # Hash all stages for custom layouts, including additional helper stages.
+    stages=$(rocm_dockerfile_stages "${dockerfile}" | paste -sd ' ')
+    CI_BASE_DOCKERFILE_STAGES="${CI_BASE_DOCKERFILE_STAGES:-${stages}}"
+    ROCM_CSRC_DOCKERFILE_STAGES="${ROCM_CSRC_DOCKERFILE_STAGES:-${stages}}"
+    ROCM_RUST_DOCKERFILE_STAGES="${ROCM_RUST_DOCKERFILE_STAGES:-${stages}}"
+    if [[ " ${stages} " != *" build_rocshmem "* ]]; then
+        unset ROCSHMEM_BRANCH ROCSHMEM_CACHE_KEY DEEPEP_CACHE_KEY
+    fi
+}
+
 compose_dependency_cache_key() {
     local prefix="$1"
     local material="$2"
@@ -569,11 +589,11 @@ hash_dockerfile_stages() {
             }
             emit = 0
         }
-        $1 == "FROM" {
+        toupper($1) == "FROM" {
             stage = ""
             for (idx = 1; idx <= NF; idx++) {
                 if (tolower($idx) == "as" && idx < NF) {
-                    stage = $(idx + 1)
+                    stage = tolower($(idx + 1))
                 }
             }
             emit = (stage in wanted)
@@ -613,11 +633,11 @@ discover_dockerfile_stage_args() {
         }
         {
             line = $0
-            if ($1 == "FROM") {
+            if (toupper($1) == "FROM") {
                 stage = ""
                 for (idx = 1; idx <= NF; idx++) {
                     if (tolower($idx) == "as" && idx < NF) {
-                        stage = $(idx + 1)
+                        stage = tolower($(idx + 1))
                     }
                 }
                 emit = (stage in wanted)
@@ -630,7 +650,7 @@ discover_dockerfile_stage_args() {
             for (idx = 1; idx <= line_count; idx++) {
                 line = lines[idx]
                 arg_name = line
-                sub(/^[[:space:]]*ARG[[:space:]]+/, "", arg_name)
+                sub(/^[[:space:]]*[Aa][Rr][Gg][[:space:]]+/, "", arg_name)
                 if (arg_name != line) {
                     sub(/[=[:space:]].*/, "", arg_name)
                     if (arg_name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) {
@@ -716,7 +736,7 @@ extract_dockerfile_arg_default() {
     if [[ -n "${ROCM_BUILD_CONTEXT_ROOT:-}" && "${dockerfile}" != /* ]]; then
         physical_dockerfile="${ROCM_BUILD_CONTEXT_ROOT}/${dockerfile}"
     fi
-    sed -n -E "s/^[[:space:]]*ARG[[:space:]]+${arg_name}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
+    sed -n -E "s/^[[:space:]]*[Aa][Rr][Gg][[:space:]]+${arg_name}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
         "${physical_dockerfile}" | head -1
 }
 
@@ -1002,15 +1022,16 @@ create_and_bootstrap_builder() {
 init_config() {
     # shellcheck source=.buildkite/scripts/rocm/build-config.sh
     source "$(dirname "${BASH_SOURCE[0]}")/rocm/build-config.sh"
+    configure_rocm_build
 
     TARGET="${1:-test-ci}"
-    if [[ "${VLLM_USE_ROCK:-0}" == "1" ]]; then
+    if using_custom_rocm_dockerfiles; then
         if [[ -z "${BASE_IMAGE:-}" ]]; then
-            echo "Rock builds require BASE_IMAGE from the Rock base handoff" >&2
+            echo "Custom ROCm builds require BASE_IMAGE from the selected base handoff" >&2
             return 1
         fi
         if ! is_ci_base_target && [[ -z "${CI_BASE_IMAGE:-}" ]]; then
-            echo "Rock test builds require CI_BASE_IMAGE from the Rock ci_base handoff" >&2
+            echo "Custom ROCm builds require CI_BASE_IMAGE from the selected ci_base handoff" >&2
             return 1
         fi
     fi
@@ -1023,7 +1044,9 @@ init_config() {
     PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH:-gfx90a;gfx942;gfx950}"
     CI_BASE_CONTENT_FILES="${CI_BASE_CONTENT_FILES:-${DEFAULT_CI_BASE_CONTENT_FILES}}"
     CI_BASE_DOCKERFILE="${CI_BASE_DOCKERFILE:-${DEFAULT_CI_BASE_DOCKERFILE}}"
-    CI_BASE_DOCKERFILE_STAGES="${CI_BASE_DOCKERFILE_STAGES:-${DEFAULT_CI_BASE_DOCKERFILE_STAGES}}"
+    if ! using_custom_rocm_dockerfiles; then
+        CI_BASE_DOCKERFILE_STAGES="${CI_BASE_DOCKERFILE_STAGES:-${DEFAULT_CI_BASE_DOCKERFILE_STAGES}}"
+    fi
     CI_BASE_METADATA_VERSION="${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}"
     CI_BASE_IMAGE_TAG="${CI_BASE_IMAGE_TAG:-rocm/vllm-dev:ci_base}"
     export PYTORCH_ROCM_ARCH CI_BASE_DOCKERFILE
@@ -1055,6 +1078,11 @@ print_header() {
 }
 
 validate_inputs() {
+    if using_custom_rocm_dockerfiles; then
+        validate_rocm_dockerfile "${ROCM_BASE_DOCKERFILE}" || return $?
+        validate_rocm_dockerfile "${CI_BASE_DOCKERFILE}" \
+            ci_base test export_vllm export_test_smoke csrc-build rust-build || return $?
+    fi
     if [[ ! -f "${VLLM_BAKE_FILE}" ]]; then
         echo "Error: vLLM bake file not found at ${VLLM_BAKE_FILE}"
         echo "Make sure you're running from the vLLM repository root"
@@ -1082,8 +1110,8 @@ load_ci_hcl() {
 
 init_bake_files() {
     BAKE_FILES=(-f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}")
-    if [[ "${VLLM_USE_ROCK:-0}" == "1" ]]; then
-        # Initial Rock evaluations reuse local cache without replacing the
+    if using_custom_rocm_dockerfiles; then
+        # Custom stacks reuse local cache without replacing the
         # standard ROCm registry caches for the same commit or branch.
         BAKE_FILES+=(--set '*.cache-to=')
     fi
@@ -2293,7 +2321,7 @@ extract_dependency_pins() {
         fi
 
         val=$(
-            sed -n -E "s/^[[:space:]]*ARG[[:space:]]+${var}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
+            sed -n -E "s/^[[:space:]]*[Aa][Rr][Gg][[:space:]]+${var}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
                 "${physical_dockerfile}" | head -1
         )
         if [[ -n "${val}" ]]; then
@@ -2705,6 +2733,7 @@ main() {
     init_bake_files
     if is_ci_base_target; then
         prepare_ci_build_context
+        configure_custom_rocm_stages
     fi
     compute_ci_base_hash_if_needed
     configure_ci_base_image_refs
@@ -2715,6 +2744,7 @@ main() {
     # version metadata only after that lookup sees the available tag history.
     if ! is_ci_base_target; then
         prepare_ci_build_context
+        configure_custom_rocm_stages
     fi
     extract_dependency_pins
     write_rocm_build_arg_override

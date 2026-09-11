@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
 import os
 import shlex
 import subprocess
@@ -362,11 +363,45 @@ def test_rocm_git_fetch_disables_automatic_maintenance(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.parametrize("use_rock", ["0", "1"])
+@pytest.mark.parametrize(
+    ("base_stack", "stack", "use_rock", "rename"),
+    [
+        pytest.param(None, None, "0", False, id="default"),
+        pytest.param("rocm", "rocm", "0", False, id="explicit-defaults"),
+        pytest.param("rock", "rock", "0", False, id="custom-pair"),
+        pytest.param(None, None, "1", False, id="rock-shorthand"),
+        pytest.param("rock", None, "0", False, id="custom-base-only"),
+        pytest.param(None, "rock", "0", False, id="custom-final-only"),
+        pytest.param("rocm", "rocm", "1", False, id="explicit-overrides-shorthand"),
+        pytest.param("rock", "rock", "0", True, id="renamed-rock"),
+        pytest.param("rocm", "rocm", "0", True, id="renamed-rocm"),
+    ],
+)
 def test_amd_stack_selection_preserves_handoff_and_protects_stable_images(
+    tmp_path: Path,
+    base_stack: str | None,
+    stack: str | None,
     use_rock: str,
+    rename: bool,
 ) -> None:
-    """Nightly Rock builds must keep the runtime contract without promoting ROCm."""
+    """Any custom stack must preserve handoffs without promoting stable images."""
+    selection = {"VLLM_USE_ROCK": use_rock}
+    fallback_stack = "rock" if use_rock == "1" else "rocm"
+    base_dockerfile = f"docker/Dockerfile.{base_stack or fallback_stack}_base"
+    dockerfile = f"docker/Dockerfile.{stack or fallback_stack}"
+    if rename:
+        (tmp_path / "docker").symlink_to(REPO_ROOT / "docker", target_is_directory=True)
+        for name, source in (("base", base_dockerfile), ("final", dockerfile)):
+            (tmp_path / name).write_text((REPO_ROOT / source).read_text())
+        base_dockerfile, dockerfile = "base", "final"
+    if base_stack is not None:
+        selection["CI_ROCM_DOCKERFILE_BASE"] = base_dockerfile
+    if stack is not None:
+        selection["CI_ROCM_DOCKERFILE"] = dockerfile
+    custom = (base_dockerfile, dockerfile) != (
+        "docker/Dockerfile.rocm_base",
+        "docker/Dockerfile.rocm",
+    )
     result = subprocess.run(
         [
             "bash",
@@ -374,11 +409,14 @@ def test_amd_stack_selection_preserves_handoff_and_protects_stable_images(
             """
 source "$1/.buildkite/scripts/ci-bake-rocm.sh"
 init_config ci-base-rocm-ci-with-deps
+validate_inputs
+init_bake_files
 configure_ci_base_image_refs
 printf 'dockerfile=%s\n' "$CI_BASE_DOCKERFILE"
+printf 'bake_files=%s\n' "${BAKE_FILES[*]}"
 printf 'handoff=%s\n' "$CI_BASE_IMAGE_TAG_BUILD_REF"
 if wants_stable_ci_base_tag; then echo ci_stable=yes; else echo ci_stable=no; fi
-if [[ "$VLLM_USE_ROCK" == 1 ]]; then
+if using_custom_rocm_dockerfiles; then
     resolve_ci_base_dependency_targets
     printf 'targets=%s\n' "${BAKE_TARGETS[*]}"
 fi
@@ -392,7 +430,7 @@ if should_push_stable_tag; then echo base_stable=yes; else echo base_stable=no; 
         ],
         env={
             "PATH": os.environ["PATH"],
-            "VLLM_USE_ROCK": use_rock,
+            **selection,
             "BUILDKITE": "true",
             "BUILDKITE_BUILD_ID": "test-build",
             "BUILDKITE_COMMIT": "a" * 40,
@@ -407,20 +445,33 @@ if should_push_stable_tag; then echo base_stable=yes; else echo base_stable=no; 
         capture_output=True,
         text=True,
         check=True,
+        cwd=tmp_path if rename else REPO_ROOT,
     )
     lines = result.stdout.splitlines()
-    stack = "rock" if use_rock == "1" else "rocm"
-    stable = "no" if use_rock == "1" else "yes"
-    assert f"dockerfile=docker/Dockerfile.{stack}" in lines
-    assert f"base=docker/Dockerfile.{stack}_base" in lines
+    stable = "no" if custom else "yes"
+    assert f"dockerfile={dockerfile}" in lines
+    assert f"base={base_dockerfile}" in lines
     assert "handoff=rocm/vllm-dev:ci_base-build-test-build" in lines
-    assert f"cache=rocm/vllm-ci-cache:{stack}-base-main" in lines
+    cache_prefix = "rocm-base"
+    if custom:
+        selection_hash = hashlib.sha256(
+            f"{base_dockerfile}\n{dockerfile}\n".encode()
+        ).hexdigest()[:12]
+        cache_prefix += f"-{selection_hash}"
+    assert f"cache=rocm/vllm-ci-cache:{cache_prefix}-main" in lines
     assert f"ci_stable={stable}" in lines
     assert f"base_stable={stable}" in lines
-    if use_rock == "1":
+    bake_files = next(line for line in lines if line.startswith("bake_files="))
+    assert ("*.cache-to=" in bake_files) == custom
+    if custom:
         assert "targets=ci-base-rocm-ci" in lines
 
 
+@pytest.mark.parametrize(
+    "selection",
+    [{"VLLM_USE_ROCK": "1"}, {"CI_ROCM_DOCKERFILE": "docker/Dockerfile.rock"}],
+    ids=["rock-shorthand", "custom-final"],
+)
 @pytest.mark.parametrize(
     ("target", "base_image", "missing"),
     [
@@ -428,42 +479,141 @@ if should_push_stable_tag; then echo base_stable=yes; else echo base_stable=no; 
         ("test-rocm-ci-with-wheel", "rock-base", "CI_BASE_IMAGE"),
     ],
 )
-def test_rock_build_requires_selected_base_handoffs(
-    target: str, base_image: str, missing: str
+def test_custom_rocm_build_requires_selected_base_handoffs(
+    selection: dict[str, str], target: str, base_image: str, missing: str
 ) -> None:
     result = subprocess.run(
         ["bash", str(ROCM_CI_BAKE), target],
         env={
             "PATH": os.environ["PATH"],
-            "VLLM_USE_ROCK": "1",
+            **selection,
             "BASE_IMAGE": base_image,
         },
         capture_output=True,
         text=True,
+        cwd=REPO_ROOT,
     )
     assert result.returncode != 0
-    assert f"require {missing} from the Rock" in result.stderr
+    assert f"require {missing} from the selected" in result.stderr
+
+
+@pytest.mark.parametrize("missing_file", [True, False], ids=["file", "stage"])
+def test_custom_rocm_dockerfile_must_support_ci_targets(
+    tmp_path: Path, missing_file: bool
+) -> None:
+    """Reject unusable Dockerfiles before fetching images or starting a build."""
+    (tmp_path / "docker").symlink_to(REPO_ROOT / "docker", target_is_directory=True)
+    if not missing_file:
+        (tmp_path / "Dockerfile.custom").write_text("FROM scratch AS ci_base\n")
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; init_config ci-base-rocm-ci-with-deps; validate_inputs',
+            "bash",
+            str(ROCM_CI_BAKE),
+        ],
+        env={
+            "PATH": os.environ["PATH"],
+            "CI_ROCM_DOCKERFILE": "Dockerfile.custom",
+            "BASE_IMAGE": "selected-base",
+        },
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    if missing_file:
+        assert "ROCm Dockerfile not found: Dockerfile.custom" in result.stderr
+    else:
+        assert "is missing required stage: test" in result.stderr
+
+
+def test_custom_rocm_content_hash_covers_helper_stages(tmp_path: Path) -> None:
+    """A custom helper stage and its build arguments must invalidate cached images."""
+    (tmp_path / "Dockerfile.custom").write_text(
+        "from scratch as extra_helper\n"
+        "arg EXTRA_VERSION=one\n"
+        'RUN echo "$EXTRA_VERSION"\n'
+        "FROM extra_helper AS ci_base\n"
+        "FROM ci_base AS test\n"
+        "FROM scratch AS export_vllm\n"
+        "FROM scratch AS export_test_smoke\n"
+        "FROM scratch AS csrc-build\n"
+        "FROM scratch AS rust-build\n"
+    )
+    (tmp_path / "input.txt").write_text("unchanged input\n")
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            """
+set -euo pipefail
+git init --quiet
+git add Dockerfile.custom input.txt
+tree=$(git write-tree)
+commit=$(printf fixture | git -c user.name=Test -c user.email=test@example.com \\
+    commit-tree "$tree")
+git update-ref HEAD "$commit"
+source "$1"
+init_config ci-base-rocm-ci-with-deps
+prepare_ci_build_context
+configure_custom_rocm_stages
+printf 'hash=%s\n' "$(compute_ci_base_content_hash)"
+EXTRA_VERSION=two
+printf 'hash=%s\n' "$(compute_ci_base_content_hash)"
+sed -i 's/RUN echo/RUN printf/' "$ROCM_BUILD_CONTEXT_ROOT/Dockerfile.custom"
+printf 'hash=%s\n' "$(compute_ci_base_content_hash)"
+""",
+            "bash",
+            str(ROCM_CI_BAKE),
+        ],
+        env={
+            "PATH": os.environ["PATH"],
+            "BUILDKITE": "true",
+            "CI_ROCM_DOCKERFILE": "Dockerfile.custom",
+            "BASE_IMAGE": "selected-base",
+            "CI_BASE_CONTENT_FILES": "input.txt",
+        },
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    hashes = [line for line in result.stdout.splitlines() if line.startswith("hash=")]
+    assert len(hashes) == len(set(hashes)) == 3
 
 
 @pytest.mark.parametrize(
-    ("use_rock", "skip", "error"),
+    ("selection", "skip", "error"),
     [
-        ("invalid", "0", "VLLM_USE_ROCK must be 0 or 1"),
-        ("1", "1", "requires ROCM_BASE_REFRESH_SKIP=0"),
+        ({"VLLM_USE_ROCK": "invalid"}, "0", "VLLM_USE_ROCK must be 0 or 1"),
+        ({"VLLM_USE_ROCK": "1"}, "1", "require ROCM_BASE_REFRESH_SKIP=0"),
+        (
+            {"CI_ROCM_DOCKERFILE_BASE": "docker/Dockerfile.rock_base"},
+            "1",
+            "require ROCM_BASE_REFRESH_SKIP=0",
+        ),
+        (
+            {"CI_ROCM_DOCKERFILE": "docker/Dockerfile.rock"},
+            "1",
+            "require ROCM_BASE_REFRESH_SKIP=0",
+        ),
     ],
 )
-def test_rock_base_selection_rejects_unsafe_fallbacks(
-    use_rock: str, skip: str, error: str
+def test_custom_rocm_base_selection_rejects_unsafe_fallbacks(
+    selection: dict[str, str], skip: str, error: str
 ) -> None:
     result = subprocess.run(
         ["bash", str(REPO_ROOT / ".buildkite/scripts/rocm/refresh-base-image.sh")],
         env={
             "PATH": os.environ["PATH"],
-            "VLLM_USE_ROCK": use_rock,
+            **selection,
             "ROCM_BASE_REFRESH_SKIP": skip,
         },
         capture_output=True,
         text=True,
+        cwd=REPO_ROOT,
     )
     assert result.returncode == 2
     assert error in result.stderr

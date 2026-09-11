@@ -6,6 +6,7 @@ set -euo pipefail
 
 # shellcheck source=.buildkite/scripts/rocm/build-config.sh
 source "$(dirname "${BASH_SOURCE[0]}")/build-config.sh"
+configure_rocm_build
 
 DOCKERFILE="${ROCM_BASE_DOCKERFILE:-docker/Dockerfile.rocm_base}"
 BASE_REPO="${ROCM_BASE_IMAGE_REPO:-rocm/vllm-dev}"
@@ -16,8 +17,9 @@ DEFAULT_ROCM_BASE_CONTENT_FILES="${DOCKERFILE}"
 
 ROCM_BASE_LAYER_CACHE_REF=""
 BASE_CACHE_PREFIX="rocm-base"
-if [[ "${VLLM_USE_ROCK:-0}" == "1" ]]; then
-    BASE_CACHE_PREFIX="rock-base"
+if using_custom_rocm_dockerfiles; then
+    BASE_CACHE_PREFIX="rocm-base-$(printf '%s\n%s\n' \
+        "${ROCM_BASE_DOCKERFILE}" "${CI_BASE_DOCKERFILE}" | sha256sum | cut -c1-12)"
 fi
 ROCM_BASE_TRUSTED_LAYER_CACHE_REF="${CACHE_REPO}:${BASE_CACHE_PREFIX}-main"
 ROCM_BASE_STABLE_TAG_UPDATED=0
@@ -146,7 +148,7 @@ configure_rocm_base_layer_cache() {
 extract_arg_default() {
     local arg_name="$1"
 
-    sed -n -E "s/^[[:space:]]*ARG[[:space:]]+${arg_name}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
+    sed -n -E "s/^[[:space:]]*[Aa][Rr][Gg][[:space:]]+${arg_name}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
         "${DOCKERFILE}" | head -1
 }
 
@@ -425,18 +427,16 @@ build_base_image() {
     read -r -a content_paths <<< "${content_files}"
     content_files_hash="$(compute_content_hash "${content_paths[@]}")"
     base_hash=$(compute_base_content_hash "${use_sccache}" "${base_image_digest}")
-    rocm_version="$(rocm_version_from_base_image "${base_image_arg}")"
+    rocm_version="$(extract_arg_default ROCM_SDK_VERSION)"
+    rocm_version="${rocm_version:-$(rocm_version_from_base_image "${base_image_arg}")}"
     triton_arg="$(extract_arg_default TRITON_BRANCH)"
     pytorch_arg="$(extract_arg_default PYTORCH_BRANCH)"
     pytorch_vision_arg="$(extract_arg_default PYTORCH_VISION_BRANCH)"
     pytorch_audio_arg="$(extract_arg_default PYTORCH_AUDIO_BRANCH)"
-    if [[ "${VLLM_USE_ROCK:-0}" == "1" ]]; then
-        rocm_version="$(extract_arg_default ROCM_SDK_VERSION)"
-        triton_arg="$(extract_arg_default TRITON_VERSION)"
-        pytorch_arg="$(extract_arg_default TORCH_VERSION)"
-        pytorch_vision_arg="$(extract_arg_default TORCHVISION_VERSION)"
-        pytorch_audio_arg="$(extract_arg_default TORCHAUDIO_VERSION)"
-    fi
+    triton_arg="${triton_arg:-$(extract_arg_default TRITON_VERSION)}"
+    pytorch_arg="${pytorch_arg:-$(extract_arg_default TORCH_VERSION)}"
+    pytorch_vision_arg="${pytorch_vision_arg:-$(extract_arg_default TORCHVISION_VERSION)}"
+    pytorch_audio_arg="${pytorch_audio_arg:-$(extract_arg_default TORCHAUDIO_VERSION)}"
     fa_arg="$(extract_arg_default FA_BRANCH)"
     aiter_arg="$(extract_arg_default AITER_BRANCH)"
     mori_arg="$(extract_arg_default MORI_BRANCH)"
@@ -579,9 +579,12 @@ build_base_image() {
 }
 
 main() {
-    if [[ "${VLLM_USE_ROCK:-0}" == "1" && "${ROCM_BASE_REFRESH_SKIP:-0}" == "1" ]]; then
-        echo "VLLM_USE_ROCK=1 requires ROCM_BASE_REFRESH_SKIP=0 to select the Rock base" >&2
-        return 2
+    if using_custom_rocm_dockerfiles; then
+        if [[ "${ROCM_BASE_REFRESH_SKIP:-0}" == "1" ]]; then
+            echo "Custom ROCm Dockerfiles require ROCM_BASE_REFRESH_SKIP=0" >&2
+            return 2
+        fi
+        validate_rocm_dockerfile "${DOCKERFILE}" || return $?
     fi
     metadata_set "rocm-base-refresh" "0"
 
