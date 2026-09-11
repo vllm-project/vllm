@@ -42,6 +42,110 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize(
+    "cache_dtype", [torch.uint8, torch.bfloat16, torch.float8_e4m3fn]
+)
+@pytest.mark.parametrize("num_tokens", [1, 17, 1023, 1024])
+@pytest.mark.parametrize("use_graph", [False, True])
+def test_dspark_context_kv_matches_query_insert(cache_dtype, num_tokens, use_graph):
+    """KV-only insertion must preserve every cache byte, including graph replay."""
+    from vllm.models.deepseek_v4_1.nvidia.dspark import _insert_context_kv
+
+    torch.manual_seed(42)
+    block_size = 256
+    num_blocks = math.ceil((num_tokens + 7) / block_size)
+    row_size = 584 if cache_dtype == torch.uint8 else 512
+    page_stride = math.ceil(block_size * row_size / 576) * 576 + 576
+    backing = torch.full((num_blocks, page_stride), 3, device="cuda").to(cache_dtype)
+    cache = backing.as_strided(
+        (num_blocks, block_size, row_size), (page_stride, row_size, 1)
+    )
+    reference_backing = backing.clone()
+    reference = reference_backing.as_strided(cache.shape, cache.stride())
+    kv = torch.randn(num_tokens + 3, 512, device="cuda", dtype=torch.bfloat16)
+    positions = torch.arange(num_tokens + 3, device="cuda") + 7
+    angles = torch.randn(num_tokens + 16, 32, device="cuda")
+    cos_sin = torch.cat((angles.cos(), angles.sin()), dim=-1)
+    slots = torch.randperm(num_blocks * block_size, device="cuda")[:num_tokens]
+    slots[::5] = -1
+    scale = torch.tensor([0.7], device="cuda")
+    attn = SimpleNamespace(
+        swa_cache_layer=SimpleNamespace(kv_cache=cache, block_size=block_size),
+        head_dim=512,
+        rotary_emb=SimpleNamespace(cos_sin_cache=cos_sin),
+        _flashinfer_fp8_kv_scale=scale,
+    )
+
+    def legacy_insert():
+        q = torch.zeros(kv.shape[0], 8, 512, dtype=kv.dtype, device="cuda")
+        if cache_dtype == torch.uint8:
+            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+                q,
+                kv,
+                reference.view(num_blocks, -1),
+                slots,
+                positions,
+                cos_sin,
+                8,
+                1e-20,
+                block_size,
+            )
+        elif cache_dtype == torch.bfloat16:
+            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
+                q,
+                kv,
+                reference,
+                slots,
+                positions,
+                cos_sin,
+                1e-20,
+                block_size,
+            )
+        else:
+            q_fp8 = torch.empty_like(q, dtype=cache_dtype)
+            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
+                q,
+                kv,
+                q_fp8,
+                reference,
+                slots,
+                positions,
+                cos_sin,
+                scale,
+                scale,
+                1e-20,
+                block_size,
+            )
+
+    def insert():
+        _insert_context_kv(attn, kv, positions, slots)
+
+    insert()
+    graph = None
+    if use_graph:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            insert()
+    for iteration in range(3):
+        kv.normal_()
+        positions.add_(1)
+        if iteration == 2:
+            slots.fill_(-1)
+        backing.view(torch.uint8).fill_(165)
+        reference_backing.copy_(backing)
+        before = kv.clone()
+        legacy_insert()
+        insert() if graph is None else graph.replay()
+        torch.testing.assert_close(
+            backing.view(torch.uint8),
+            reference_backing.view(torch.uint8),
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(kv, before, rtol=0, atol=0)
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="graph capture coverage"
 )

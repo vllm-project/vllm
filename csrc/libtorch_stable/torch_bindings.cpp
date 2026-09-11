@@ -426,6 +426,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "int forced_token_heads_per_warp=-1) -> ()");
 
   ops.def(
+      "fused_deepseek_v4_kv_rope_insert("
+      "Tensor kv, Tensor! k_cache, Tensor slot_mapping, Tensor position_ids, "
+      "Tensor cos_sin_cache, int cache_block_size, Tensor? fp8_scale=None) -> "
+      "()");
+  ops.def(
       "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert("
       "Tensor q_in, Tensor kv, Tensor! k_cache, "
       "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
@@ -807,6 +812,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
   ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
+  ops.impl("fused_deepseek_v4_kv_rope_insert",
+           TORCH_BOX(&fused_deepseek_v4_kv_rope_insert));
   ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
            TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert));
   ops.impl(
