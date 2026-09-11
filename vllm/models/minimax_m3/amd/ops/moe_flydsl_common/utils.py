@@ -109,21 +109,13 @@ def inline_sort_max_pairs(n_tokens, topk, bm):
 
 
 def inline_sort_table(arg_topk, i32_ntok, TOPK, p_i32, lane, tab, max_pairs=64, bm=16):
-    """Inline sort (n_tokens <= BM): no sort kernel; each block builds its own
-    sorted_token_ids table from ``topk_ids`` with a wave ballot.
-
-    Routing pair q = token*TOPK + slot (row-major topk_ids). Block p owns expert
-    e = topk_ids[p] iff p is the FIRST pair with that expert; its rows are all pairs
-    with expert e, in pair order (<= n_tokens <= BM rows, so one m-block per expert;
-    the shared expert is the block with n_tokens rows). The 32-entry table ``tab``
-    (an i32 LDS pointer) holds token | slot<<24 per row, token = n_tokens for padding
-    rows, i.e. exactly what moe_sorting would have written for this block. Returns
-    (expert id, owner, row count, build_table); non-owner blocks (duplicate experts)
-    must exit. Pairs are scanned 64 per wave pass; ``max_pairs`` (BM*TOPK, 80 at
-    BM=16 / topk 5) sets the number of passes. One 80-320 B load + ballots + LDS
-    stores per block instead of a separate sort kernel. ``bm`` (16 or 32) is the
-    block's row count; non-matching pairs are parked in slot ``bm``, so ``tab``
-    needs ``bm + 1`` entries.
+    """Inline sort (n_tokens <= BM), no sort kernel: routing pair q = token*TOPK + slot;
+    block p owns expert e = topk_ids[p] iff p is the first pair with that expert,
+    its rows are all pairs with expert e in pair order (one m-block per expert).
+    ``tab`` (i32 LDS, ``bm + 1`` entries) receives token | slot<<24 per row, token
+    = n_tokens for padding, i.e. what moe_sorting would write for this block;
+    non-matching pairs are parked in slot ``bm``. Returns (expert id, owner, row
+    count, build_table); non-owner blocks must exit. ``max_pairs`` = BM*TOPK.
     """
     n_chunks = (int(max_pairs) + 63) // 64
     n_pairs = i32_ntok * fx.Int32(TOPK)

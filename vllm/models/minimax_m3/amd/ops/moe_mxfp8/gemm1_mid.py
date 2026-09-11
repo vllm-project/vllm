@@ -1,38 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Mid-batch gate/up fp8 GEMM (256 < M < 3072) with swiglu-OAI + MXFP8 quant.
+"""Mid-batch gate/up fp8 GEMM (257..3071 tokens) with swiglu-OAI + MXFP8 quant:
 
     h[row, :] = swiglu_oai( x[tok] @ W_gate[e]^T , x[tok] @ W_up[e]^T )
     out_q[row, :], out_scale[row, :] = mxfp8_quant(h[row, :])      (per 32 cols)
 
-Why not ``gemm1_prefill.py`` here: with random routing every routed
-expert holds 16..64 rows at these batch sizes, i.e. one 128-row block, so the
-prefill tile (128 rows x 256 W columns, one CTA per CU) runs 792..864
-workgroups = three full rounds plus a tail round almost as long: 257 us at
-512, 1024 and 2048 tokens against aiter's 206 / 229 / 273 (MI355X, 09-10).
-This kernel keeps the same 1.57 MB W13 slice per workgroup but takes the
-sort's ``BM``-row blocks (32 / 64 / 128), reads the A tile once per workgroup
-through LDS and fits two workgroups per CU (LDS 33..68 KB, ~230 registers).
-
-Per workgroup: ``BM`` sorted rows x ``TN`` output columns (``TN`` gate + ``TN``
-up columns of the gate/up-interleaved W13); four N-waves of ``TN/4`` output
-columns (``NI`` 16-column tiles of gate and of up each).
-
-* A: ``KB`` K-steps of 128 B per row are gathered once per workgroup
-  (``sorted_ids`` -> token row, 16 B per lane) into an LDS slot with a 16 B
-  row pad (conflict-free 16 B reads); two slots, one barrier per batch, the
-  batch loads issued before the W loads of the same step so the in-order
-  vmcnt waits cover them. Padding rows (token == n_tokens) read as zeros
-  through the OOB-clamped resource.
-* W: per K-step and 16-column tile the two 1 KB preshuffled blocks ``2kt``,
-  ``2kt+1`` (16 B per lane each), ``PREFETCH`` steps in flight, non-temporal.
-* MFMA: ``v_mfma_scale_f32_16x16x128_f8f6f4`` with fp8 operands, the per-lane
-  operand and scale layout of ``gemm1_prefill.py`` (operands fed
-  swapped so a lane holds a row's 4 consecutive columns; accumulators in
-  AGPR; scale bytes row-half + 2 x step parity / gate-up + 2 x step parity).
-* epilogue: per (row, 32-column group) amax over the 4 lanes of the row,
-  e8m0 = ceil_pow2(amax / 448), ``v_cvt_scalef32_pk_fp8_f32``, permlane16 swap
-  -> 8 B per lane; scale pairs in the e8m0-shuffled sorted layout gemm2 reads.
+Per workgroup ``BM`` sorted rows (the sort block, 32 / 64 / 128) x ``TN`` output
+columns, four N-waves of ``TN/4`` columns, two workgroups per CU. A is gathered once
+per workgroup through LDS (``KB`` K-steps per batch, two slots, one barrier per
+batch; padding rows read zeros through the OOB-clamped resource); W13 streams per
+wave (two 1 KB preshuffled blocks per K-step and 16-column tile, ``PREFETCH`` deep,
+non-temporal). MFMA ``v_mfma_scale_f32_16x16x128_f8f6f4`` with the operand / scale
+layout of ``gemm1_prefill`` (AGPR accumulators). Epilogue: per (row, 32-column
+group) amax, e8m0 = ceil_pow2(amax / 448), ``v_cvt_scalef32_pk_fp8_f32``; the
+workgroup also zeroes its share of gemm2's output.
 
 Layouts (bytes), those of ``gemm1_prefill.py``:
   A         [n_tokens, H]                   per-token fp8 (aiter per_1x32 quant)
@@ -63,6 +44,7 @@ from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.epilogue import (
 )
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.loaders import (
     _as_f32,
+    _fmax,
     _permlane16_swap,
     _swiglu_oai,
 )
@@ -70,7 +52,6 @@ from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.utils import _lds_ptr3, _r
 from vllm.models.minimax_m3.amd.ops.moe_mxfp8.gemm1_prefill import (
     Mfma16x16x128Fp8,
     _e8m0_roundup_fp8,
-    _fmax,
     _pack8,
 )
 
@@ -87,7 +68,7 @@ def _pin_accumulators(values):
     (tied ``=a`` / ``0``) with the XDL wait states inside: the epilogue's
     ``v_accvgpr_read`` copies then depend on this fence and cannot be hoisted
     right behind the last inline-asm MFMA (the compiler sees no hazard through
-    the asm; seen as random wrong rows at BM 64 in the a4w4 lab kernel)."""
+    the asm; seen as random wrong rows at BM 64)."""
     ty = ir.Type.parse(
         "!llvm.struct<(" + ", ".join(["vector<4xf32>"] * len(values)) + ")>"
     )
@@ -109,9 +90,8 @@ def compile_moe_gemm1_mid(*, H: int, I: int, E: int, BM: int):  # noqa: E741
     last expert's blocks (``num_valid_ids[1]`` on) mapped first; blocks at or
     past ``num_valid_ids[0]`` exit at once."""
     assert BM in (32, 64, 128), BM
-    # A batch (K-steps per LDS slot, 2 slots) and W prefetch depth per block size:
-    # 128-row blocks go to 1-step batches and a 2-deep ring to fit 2 waves per
-    # SIMD (280 -> 232 registers, LDS 70 -> 38 KB; 2048 tokens: chain -2%, 3 x A/B)
+    # A batch (K-steps per LDS slot, 2 slots) and W prefetch depth: 128-row blocks
+    # take 1-step batches and a 2-deep ring to keep 2 waves per SIMD
     KB = {32: 4, 64: 4, 128: 1}[BM]
     PF = {32: PREFETCH, 64: PREFETCH, 128: 2}[BM]
     KT = H // BLOCK_K
@@ -190,11 +170,9 @@ def compile_moe_gemm1_mid(*, H: int, I: int, E: int, BM: int):  # noqa: E741
                 nv_rsrc, fx.Int32(1), vec_width=1, dtype=fx.Int32, is_scalar=True
             )
         )
-        # block order: the last expert's blocks first (the fused shared expert,
-        # M / BM blocks re-reading one W13 slice per tile: dispatched together
-        # L2 / MALL serve the re-reads; as the grid's tail they ran latency-bound
-        # -> gemm1 -8 us at 512..2048 tokens), then the routed blocks, then the
-        # blocks past num_valid_ids[0], which exit
+        # block order: the last expert's blocks first (a fused shared expert
+        # re-reads one W13 slice per tile; dispatched together L2 serves it),
+        # then the routed blocks, then the blocks past num_valid_ids[0] (exit)
         valid_blocks = valid_rows // BM
         last_blocks = valid_blocks - last_start // BM
         mb0, nb = bx // N_TILES, bx % N_TILES

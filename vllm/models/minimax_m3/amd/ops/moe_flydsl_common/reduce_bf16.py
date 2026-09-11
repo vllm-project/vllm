@@ -1,28 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3 prefill MoE final reduce over gemm2's bf16 token-major partials
-(the "bf16" output mode of the a4w4 and a8w8 gemm2):
+"""Top-k sum of gemm2's bf16 token-major partials (routing weights already applied):
 
     y[tok, :] = sum_k out[tok*topk + k, :]      -> bf16 (f32 accumulate)
 
-gemm2 already multiplied every partial row by its routing weight, so this is a
-plain top-k sum in k order -- the arithmetic of aiter's ``moe_reduction_kernel``
-it replaces, bit-identical output (32768 tokens, standalone: 451 -> 404 us; the
-bytes are the same, the gain is the non-temporal loads and one wave
-per 1 KB chunk of every row).
-
-One wave per (token, 512-column chunk): lane L owns columns ``chunk*512 + L*8
-.. +8`` of the token's ``topk`` rows -- one dwordx4 per row, so every load /
-store instruction of the wave covers 1 KB contiguous. The partials are read once
-(non-temporal loads); the output is stored normally so the layer's next op finds
-it in cache (a non-temporal store only pays off standalone at 32768 tokens, and
-loses at 8192). One wave per CTA measured fastest (4 waves: +3%, 2 waves: +10%);
-``chunks_per_wave`` / ``waves_per_cta`` / ``nt_store`` keep the other variants
-for the lab.
-
-Layouts (bytes):
-  OUT  [n_tokens*topk, H]   bf16, token-major (gemm2, routing weights applied)
-  Y    [n_tokens, H]        bf16
+Same arithmetic as aiter's ``moe_reduction_kernel``. One wave per (token,
+512-column chunk), one dwordx4 per lane per row, non-temporal loads.
+Layouts (bytes): OUT [n_tokens*topk, H] bf16 token-major; Y [n_tokens, H] bf16.
 """
 
 import flydsl.compiler as flyc
@@ -40,24 +24,16 @@ _CHUNK = 512  # bf16 columns per (wave, dwordx4)
 _NT = 2  # non-temporal cache policy
 
 
-def compile_moe_reduce_bf16(
-    *,
-    H: int,
-    topk: int,
-    chunks_per_wave: int = CHUNKS_PER_WAVE,
-    waves_per_cta: int = WAVES_PER_CTA,
-    nt_load: bool = True,
-    nt_store: bool = False,
-):
-    CPW = chunks_per_wave
-    WPC = waves_per_cta
+def compile_moe_reduce_bf16(*, H: int, topk: int):
+    CPW = CHUNKS_PER_WAVE
+    WPC = WAVES_PER_CTA
     assert H % (_CHUNK * CPW) == 0
     SEGS = H // (_CHUNK * CPW)  # waves per token
     ROW_DW = H // 2
     CHUNK_DW = _CHUNK // 2
-    LD = _NT if nt_load else 0
-    ST = _NT if nt_store else 0
-    name = f"m3_reduce_bf16_h{H}_k{topk}_c{CPW}_w{WPC}_l{LD}_s{ST}"
+    LD = _NT  # non-temporal loads
+    ST = 0  # default-policy stores
+    name = f"m3_reduce_bf16_h{H}_k{topk}"
 
     @flyc.kernel(name=name, known_block_size=[64 * WPC, 1, 1])
     def kernel_reduce_bf16(OUT: fx.Tensor, Y: fx.Tensor, n_tokens: fx.Int32):

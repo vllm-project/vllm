@@ -1,29 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3 prefill routing sort: FlyDSL port of aiter's 3-stage mxfp4 sorter
-(``csrc/kernels/mxfp4_moe/moe_aux/moe_3stage_sort.cuh``), token count a runtime
-argument. Two launches per call:
+"""Prefill routing sort, aiter's 3-stage ``moe_3stage_sort.cuh`` contract in two
+launches: ``sort_count`` (each CTA counts the experts of its share of the (token,
+slot) pairs) and ``sort_place_pad`` (each CTA: expert totals padded to block_m,
+start rows by scan, placement through LDS cursors, padding; CTA 0 writes
+``sorted_expert_ids`` per block, ``num_valid_ids[0]`` = padded total and
+``num_valid_ids[1]`` = the last expert's first row).
 
-  sort_count      grid SORT_CTAS  each CTA counts its share of the (token,
-                                  slot) pairs in LDS and writes
-                                  ``block_offsets[e, cta] = count``
-  sort_place_pad  grid SORT_CTAS  each CTA sums the counts (expert totals,
-                                  padded to block_m; the rows the CTAs before
-                                  it place), scans them for the expert start
-                                  rows, places its pairs (LDS atomic on its
-                                  per-expert cursor) and pads its share of
-                                  experts; CTA 0 also writes
-                                  ``sorted_expert_ids`` per block,
-                                  ``num_valid_ids[0]`` = padded total and
-                                  ``num_valid_ids[1]`` = the last expert's
-                                  first row (the mid chain's fused shared
-                                  expert: its blocks go first in the GEMMs)
-
-Outputs are aiter's layout: ``sorted_ids[row] = token | slot << 24`` (padding
-rows: ``n_tokens``), ``sorted_weights`` (padding 0), ``sorted_expert_ids`` per
-block, ``num_valid_ids[0]``. Rows inside one expert come out in arrival order
-of the atomics, i.e. not deterministic (same as the HIP kernel); the consumers
-do not depend on it.
+Outputs: ``sorted_ids[row] = token | slot << 24`` (padding rows: ``n_tokens``),
+``sorted_weights`` (padding 0), ``sorted_expert_ids``, ``num_valid_ids``. Rows inside
+an expert come out in atomic arrival order (as in aiter); consumers do not rely on it.
 """
 
 import functools
@@ -32,11 +18,11 @@ from dataclasses import dataclass
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 import torch
-from flydsl._mlir.dialects import llvm
 from flydsl.expr import range_constexpr
 
-# histogram / placement blocks (place_pad at 32768 tokens: 18 us with 32, 6 with 128)
-SORT_CTAS = 128
+from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.utils import _lds_atomic_add_i32
+
+SORT_CTAS = 128  # histogram / placement blocks
 THREADS = 1024  # >= E and >= block_m
 
 
@@ -87,21 +73,6 @@ class SortBuffers:
             int(n_tokens),
             torch.cuda.current_stream(),
         )
-
-
-def _lds_atomic_add_i32(ptr, value):
-    """``old = *ptr; *ptr += value`` on an LDS i32 pointer; returns ``old`` (fx has
-    no atomic wrapper, so this is the one raw LLVM op)."""
-    return fx.Int32(
-        llvm.AtomicRMWOp(
-            llvm.AtomicBinOp.add,
-            ptr.llvm_ptr,
-            fx.Int32(value).ir_value(),
-            llvm.AtomicOrdering.monotonic,
-            syncscope="workgroup",
-            alignment=4,
-        ).result
-    )
 
 
 @functools.cache

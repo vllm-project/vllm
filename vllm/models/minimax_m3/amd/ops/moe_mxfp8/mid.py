@@ -1,17 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlyDSL mid-batch MoE for MiniMax-M3 MXFP8 weights on gfx950 (fp8 x fp8),
-``MIN_MID_TOKENS <= M <= MAX_MID_TOKENS``: between the decode chain
-(``decode.py``, M <= 256) and the prefill one (``prefill.py``, M >= 3072).
-
-Chain: ``moe_flydsl_common.sort`` with ``block_m_for(M)``-row blocks, aiter's
-fused per-token fp8 quant (``fused_dynamic_mx_quant_moe_sort``), ``gemm1``
-(gate/up + swiglu-OAI + MXFP8 quant, A through LDS, 2 CTAs per CU), ``gemm2``
-(down GEMM accumulating routing-weighted bf16 atomically into the output,
-which gemm1 zeroes). No tile map, no partials, no reduction, no fill kernel.
-
-Weights: the tensors ``ModelOptMxFp8FusedMoE`` stores for the AITER_MXFP8
-backend (``shuffle_mxfp8_moe_weights``), as for the other two packages.
+"""Mid-batch chain (fp8 x fp8, ``MIN_MID_TOKENS <= M <= MAX_MID_TOKENS``):
+``moe_flydsl_common.sort`` in ``block_m_for(M)``-row blocks, aiter's fused per-token
+fp8 quant, ``gemm1_mid`` (gate/up + swiglu-OAI + MXFP8 quant, zeroes the output),
+``gemm2_mid`` (down GEMM, routing-weighted bf16 atomic accumulation). No tile map,
+no partials, no reduction.
 """
 
 from __future__ import annotations
@@ -20,19 +13,18 @@ import functools
 
 import torch
 
-from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.prefill import (
-    _get_sort,
+from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.launch import (
     _run_compiled,
+    _u8_flat,
 )
+from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.prefill import _get_sort
 
 MIN_MID_TOKENS = 257
 MAX_MID_TOKENS = 3071
-# sort block: one block per routed expert at these batch sizes (16..64 rows
-# each with random routing), the shared expert in M/BM blocks
+# sort block by batch size (a routed expert holds 16..64 rows here: one block each)
 BM64_FROM_TOKENS = 768
 BM128_FROM_TOKENS = 1536
-# gemm2 row tile = the sort block (64-row tiles on a 128 sort: 206 vs 194 us at 2048)
-GEMM2_MAX_TILE_M = 128
+GEMM2_MAX_TILE_M = 128  # gemm2 row tile = the sort block
 
 
 def block_m_for(n_tokens: int) -> int:
@@ -41,10 +33,6 @@ def block_m_for(n_tokens: int) -> int:
     if n_tokens >= BM64_FROM_TOKENS:
         return 64
     return 32
-
-
-def _u8_flat(t: torch.Tensor) -> torch.Tensor:
-    return t.view(torch.uint8).view(-1)
 
 
 @functools.cache
@@ -89,12 +77,11 @@ def a8w8_mid_moe(
     hidden_size: int,
     intermediate_size: int,
     num_experts: int,
-    block_m: int | None = None,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """One MoE layer for ``MIN_MID_TOKENS <= M <= MAX_MID_TOKENS`` (``block_m``
-    overrides ``block_m_for`` for the lab). Returns ``[M, hidden_size]`` bf16
-    (``out`` when given: contiguous, zeroed and accumulated into here)."""
+    """One MoE layer for ``MIN_MID_TOKENS <= M <= MAX_MID_TOKENS``, returned as
+    ``[M, hidden_size]`` bf16 (``out`` when given: contiguous, zeroed and
+    accumulated into here)."""
     from aiter import dtypes
     from aiter.ops.quant import fused_dynamic_mx_quant_moe_sort
 
@@ -107,7 +94,7 @@ def a8w8_mid_moe(
     topk_weights = topk_weights.to(torch.float32).contiguous()
     device = x.device
     stream = torch.cuda.current_stream()
-    bm = block_m_for(n_tokens) if block_m is None else block_m
+    bm = block_m_for(n_tokens)
     inter = intermediate_size
 
     bufs = SortBuffers.allocate(n_tokens, num_experts, topk, bm, device)

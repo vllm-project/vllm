@@ -1,31 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Mid-batch down fp8 GEMM (256 < M < 3072) with a routing-weighted bf16 atomic
-epilogue: no partials, no reduction.
+"""Mid-batch down fp8 GEMM (257..3071 tokens) with a routing-weighted bf16 atomic
+epilogue (no partials, no reduction):
 
     out[tok, :] += w[row] * (h[row, :] @ W2[e]^T)      for every sorted row
 
-The prefill gemm2 writes ``[M, topk, H]`` partials and reduces them (at 512
-tokens 172 + 8 us against aiter's atomic 112). Below 3072 tokens the output
-is small enough for the atomics: the accumulated ``[M, H]`` bf16 is 6..38 MB
-and every element takes topk adds.
-
-Per workgroup: ``BM`` sorted rows x ``TN`` output columns; four N-waves of
-``TN/4`` columns (``NI`` 16-column tiles). The A tile (``BM`` rows x ``I`` fp8
-bytes, contiguous in the sorted intermediate) goes through LDS (row pad 16 B):
-at once when it fits 64 KB, else in 2-step batches through two slots as in
-gemm1; W2 is streamed per wave (two 1 KB preshuffled blocks per K-step and
-16-column tile, ``PREFETCH`` steps deep, non-temporal). The scaled MFMA is the
-intrinsic form (accumulators in VGPR, MFMA C layout), the epilogue is
-``moe_flydsl_common.atomic._atomic_bf16_epilog`` (LDS [BM, TN] f32, aliasing
-the A region, then packed bf16 atomic adds).
+Per workgroup ``BM`` sorted rows x ``TN`` output columns, four N-waves of ``TN/4``
+columns. The A tile (``BM`` rows x ``I`` fp8, contiguous in the sorted intermediate)
+goes through LDS at once when it fits 64 KB, else in 2-step batches through two
+slots; W2 streams per wave (two 1 KB preshuffled blocks per K-step and 16-column
+tile, ``PREFETCH`` deep, non-temporal). Scaled MFMA in intrinsic form (VGPR
+accumulators); epilogue ``moe_flydsl_common.atomic._atomic_bf16_epilog`` (LDS
+[BM, TN] f32 aliasing the A region, then packed bf16 atomic adds).
 
 Layouts (bytes), those of ``gemm2_prefill.py``:
   A        [num_m_blocks*BM, I]            gemm1's sorted fp8 intermediate
   A_scale  [num_m_blocks*BM, I/32]         sorted rows, e8m0-shuffled
   W2       [E, H/16, I/64, 4, 16, 16]      shuffled weights, gate_up=False
   W2_sc    [E*H/32, I/256, 4, 16] dwords   scale bytes: N-half + 2 x 128-K half
-  OUT      [n_tokens, H] bf16              zeroed by the caller, atomically accumulated
+  OUT      [n_tokens, H] bf16              zeroed by gemm1, atomically accumulated
 """
 
 from typing import Any  # noqa: F401 (used in a type comment)
@@ -60,11 +53,11 @@ def compile_moe_gemm2_mid(
     sort_block_m: int | None = None,
 ):
     """Grouped fp8 gemm2 for one (H, I, E, BM); ``BM`` (32 / 64 / 128) is the row
-    tile, ``sort_block_m`` (default ``BM``) the sort block of the inputs: a
-    128-row sort can run in 64-row tiles. Grid: ``num_tiles * launch.n_tiles``
-    workgroups of 256 threads, ``num_tiles`` = sort blocks x ``sort_block_m //
-    BM``, workgroup ``(mb, nb)`` = ``divmod(bx, n_tiles)``; tiles at or past
-    ``num_valid_ids[0]`` exit at once."""
+    tile, ``sort_block_m`` (default ``BM``) the sort block of the inputs. Grid:
+    ``num_tiles * launch.n_tiles`` workgroups of 256 threads, ``num_tiles`` = sort
+    blocks x ``sort_block_m // BM``, workgroup ``(mb, nb)`` = ``divmod(bx, n_tiles)``;
+    tiles at or past ``num_valid_ids[0]`` exit at once.
+    """
     assert BM in (32, 64, 128), BM
     SBM = BM if sort_block_m is None else sort_block_m
     SUB = SBM // BM  # tiles per sort block
@@ -74,9 +67,8 @@ def compile_moe_gemm2_mid(
     KT = I // BLOCK_K
     N_TILES = H // TN
     assert H % TN == 0 and I % 256 == 0 and MR % 2 == 0 and NI % 2 == 0
-    # A staging: the whole [BM, I] tile at once when it fits 64 KB of LDS (two
-    # CTAs per CU next to the epilogue's [BM, TN] f32), else in KB-step batches
-    # through two slots as gemm1 does
+    # A staging: the whole [BM, I] tile at once when it fits 64 KB of LDS, else
+    # in KB-step batches through two slots as gemm1 does
     KB = KT if BM * (I + LDS_PAD) <= 64 * 1024 else 2
     PF = 2 if BM == 128 else PREFETCH
     NSLOT = 1 if KB == KT else 2

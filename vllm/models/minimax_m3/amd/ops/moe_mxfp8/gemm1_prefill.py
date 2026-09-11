@@ -1,38 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3 prefill MoE stage 1 for MXFP8 (a8w8), with fp8 operands.
+"""Prefill gate/up fp8 GEMM (3072..65536 tokens) with swiglu-OAI + MXFP8 quant:
 
     h[row, :] = swiglu_oai( x[tok] @ W_gate[e]^T , x[tok] @ W_up[e]^T )
     out_q[row, :], out_scale[row, :] = mxfp8_quant(h[row, :])      (per 32 cols)
 
-What the 1-byte elements change (everything else -- 2x2 waves, 8-buffer LDS
-ping-pong, depth-2 K pipeline, AGPR-pinned scaled MFMA, MFMA-shadow
-interleaving, expert-major XCD tile map -- is the a4w4 kernel):
+4 waves 2x2 on a 128- or 256-row m-tile x 256 W columns, 8-buffer LDS ping-pong,
+depth-2 K pipeline of 128-K steps (128 B per row), ``v_mfma_scale_f32_16x16x128_f8f6f4``
+with fp8 operands and AGPR accumulators, expert-major tile map over the 8 XCDs.
+The fp8 MFMA wants per lane the K bytes ``[16*klane, +16)`` and ``[64 + 16*klane, +16)``
+of the 128-K step as one 8-VGPR operand; the per-lane e8m0 is the lane's own 32-K
+group. One 256 B scale block covers two steps (gathered on odd steps). W13 is
+gate/up interleaved per 16 columns; one scale dword carries gate (bytes 0/2) and up
+(1/3) of a group. Epilogue: per-32-col amax over a row's 4 lanes, e8m0 =
+ceil_pow2(amax / 448), ``v_cvt_scalef32_pk_fp8_f32``, 8 B per lane after a
+permlane16 swap; scales in the e8m0-shuffled sorted layout gemm2 reads.
 
-  * BLOCK_K is 128 (fp4: 256): a K-step still moves 128 B per row through LDS,
-    so the LDS budget and the DMA stream per step are unchanged; K_ITERS
-    doubles and each step runs one MFMA per (a-tile, b-tile) instead of two.
-  * ``v_mfma_scale_f32_16x16x128_f8f6f4`` with fp8 operands (cbsz/blgp 0) wants
-    per lane the K bytes ``[16*klane, +16)`` and ``[64 + 16*klane, +16)`` of the
-    128-K step (two 16 B pieces, not 32 consecutive K; see
-    ``decode.py`` notes / aiter's a8w8 kernels) -- exactly the two
-    ``step 0 / step 1`` reads of the a4w4 S2R loader, concatenated into one
-    8-VGPR operand. The per-lane e8m0 is the lane's own 32-K group, as for fp4.
-  * one 256-B scale block covers 256 K = two steps: the gather runs on odd
-    steps, the scale byte alternates with the step parity.
-  * W13 is gate/up interleaved per 16 columns (aiter
-    ``shuffle_weight(is_guinterleave=True, gate_up=True)``): the gate block of
-    16-column group n0 is followed by its up block, and one scale dword
-    (``shuffle_scale(..., True, True)``) carries gate (byte 0/2) and up (1/3)
-    of that group.
-  * epilogue: swiglu-OAI, per-32-col amax over the 4 lanes of a row, e8m0 =
-    ceil_pow2(amax / 448), ``v_cvt_scalef32_pk_fp8_f32``, 8 B per lane after a
-    permlane16 swap; scales in the e8m0-shuffled sorted layout gemm2 reads.
-
-Layouts (all bytes):
+Layouts (bytes):
   A        [n_tokens, H]                   per-token fp8 (aiter per_1x32 quant)
   A_scale  [pad32(max_sorted), H/32]       sorted rows, e8m0-shuffled
-                                           (aiter fused_dynamic_mx_quant_moe_sort, fp8)
   W13      [E, I/16, 2, H/64, 4, 16, 16]   shuffle_weight(is_guinterleave, gate_up)
   W13_sc   [E*I/16, H/256, 4, 16] dwords   shuffle_scale(..., True, True)
   OUT_Q    [num_m_blocks*BLOCK_M, I]       sorted rows, fp8 e4m3
@@ -67,6 +53,7 @@ from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.loaders import (
     _Buf,
     _divmod_nonneg,
     _flat_frag,
+    _fmax,
     _g2s_thunks,
     _min,
     _permlane16_swap,
@@ -78,11 +65,7 @@ from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.loaders import (
     wait_barrier,
 )
 
-BLOCK_K = 128  # K per pipeline step (128 B per row: the a4w4 step's bytes)
-
-
-def _fmax(a, b):
-    return (a > b).select(a, b)
+BLOCK_K = 128  # K per pipeline step (128 B per row)
 
 
 def _e8m0_roundup_fp8(amax):
@@ -145,7 +128,7 @@ class Mfma16x16x128Fp8:
         ``sb_index(j, gu) -> (dword index into sb, byte)``; the default is the
         gate/up-interleaved W13 (``sb[j]``, byte ``gu``), 32-row groups use
         ``(j // 2, j % 2)``. ``interleave`` / ``late``: thunks spread over the
-        MFMAs (see the a4w4 class)."""
+        MFMAs."""
         if sb_index is None:
             sb_index = lambda j, gu: (j, gu)  # noqa: E731
         thunks = list(interleave) if interleave else []
@@ -153,9 +136,7 @@ class Mfma16x16x128Fp8:
         order = self._order()
         n_mfma = len(order)
         # thunk t goes right after MFMA (t * n_mfma) // n_thunks: with more thunks
-        # than MFMAs several share a slot, so nothing is left to trail after the
-        # last MFMA (the a4w4 class issues one per MFMA and drains the rest at the
-        # end: 8-10 uncovered ds_reads per step in the hot-loop table)
+        # than MFMAs several share a slot, so none trails the last MFMA
         by_slot = {}  # type: dict[int, list]
         for t, th in enumerate(thunks):
             by_slot.setdefault((t * n_mfma) // len(thunks), []).append(th)

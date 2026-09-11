@@ -2,28 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (C) 2025-2026 FlyDSL Project Contributors
 """Decode down GEMM (bf16 intermediate x MXFP8 W2, MFMA 16x16x32) with a
-routing-weighted bf16 atomic-add epilogue.
+routing-weighted bf16 atomic-add epilogue. Each workgroup handles an m-block, a
+128-column n-block and a split-K index; A is staged through LDS, W streamed per
+wave. A 256-K tile of a column is four 1 KB preshuffled blocks of 64 K (lane
+(klane, n) holds K ``klane*16 .. +16`` of block ``k0`` = two MFMA K-steps of 8,
+unpacked with ``v_cvt_scalef32_pk_bf16_fp8``); per 256-K tile a lane loads two scale
+dwords (32-K groups ``klane//2`` and ``2 + klane//2``; bytes: 128-K half, N-half).
+A block of ``BM`` sorted rows is ``BM/16`` row tiles sharing every unpacked W fragment;
+``wide=True`` runs the fused shared expert's WIDE_SORT_BM-row sort blocks first, as
+WIDE_BM-row tiles.
 
-Each workgroup handles an m-block, a 128-column n-block and a split-K index,
-with A staged through LDS, W streamed per wave and an LDS-staged atomic epilogue:
-
-* a 256-K tile of a column is four 1 KB preshuffled blocks of 64 K (fp4: two of
-  128 K); lane (klane, n) holds K ``klane*16 .. +16`` of block ``k0`` -> two MFMA
-  K-steps of 8 per block, unpacked with ``v_cvt_scalef32_pk_bf16_fp8``.
-* the A fragment of block ``k0``, K-step ``ku`` is row ``l16``, K ``k0*64 +
-  q16*16 + ku*8`` of the tile.
-* scales: a lane's 16 K lie in 32-K group ``(k0%2)*2 + klane//2`` of the 128-K
-  half ``k0//2``, so per 256-K tile it loads two scale dwords (groups
-  ``klane//2`` and ``2 + klane//2``, bytes: 128-K half, N-half).
-
-* a block of ``BM`` sorted rows is ``RT = BM/16`` MFMA row tiles that share every
-  unpacked W fragment. With ``wide=True`` (sorted layout of ``sort_decode``'s
-  ``wide_first``) the shared expert's rows come first in WIDE_SORT_BM-row
-  blocks, which this kernel runs as WIDE_BM-row blocks with the wide body; the
-  routed experts follow in ``BM``-row blocks.
-
-Layouts (aiter ``shuffle_weight(is_guinterleave=True, gate_up=False)`` +
-``shuffle_scale``, what vLLM's ``shuffle_mxfp8_moe_weights`` stores for w2):
+Layouts (``shuffle_weight(is_guinterleave=True, gate_up=False)`` + ``shuffle_scale``):
   W2     [E, H/16, K/64, klane 4, nlane 16, 16 B]  fp8 e4m3
   W2_sc  [E*H/32, K/256, klane 4, nlane 16] dwords  e8m0 (bytes: 128-K half, N-half)
 """
@@ -51,21 +40,14 @@ from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.utils import (
 
 from .gemm1_decode import _fp8x8_to_bf16
 
-BM = 16  # default rows per m-block; compile_gemm2(BM=32) runs two 16-row tiles
-# Tiles: 128 output columns x 256 K per workgroup (MI355X 09-09 sweep: twice the
-# workgroups of the a16w4 256-column tile, 0.5-1 us faster at every M by better
-# balance across CUs). Split-K 3 up to KSPLIT_SMALL_M_TOKENS is worth ~1.5 us of
-# latency hiding; at 256 tokens it costs ~5 us of extra atomics, so larger batches
-# run unsplit.
-TILE_N = 128
-TILE_K = 256
+BM = 16  # rows per m-block; compile_gemm2(BM=32) runs two 16-row tiles
+TILE_N = 128  # output columns per workgroup
+TILE_K = 256  # K per workgroup step
 BLOCK_K = 64  # K per 1 KB W block (16 columns)
-KSPLIT_SMALL_M = 3
+KSPLIT_SMALL_M = 3  # split-K up to KSPLIT_SMALL_M_TOKENS (more atomics above)
 KSPLIT_SMALL_M_TOKENS = 64
-# Wide blocks of the shared expert: the sort pads it to WIDE_SORT_BM-row blocks
-# (gemm1's wide block); this kernel runs them as WIDE_BM-row blocks so its W2
-# streams M/WIDE_BM times instead of M/16 (a 32-row A tile keeps the LDS and
-# accumulator footprint within the 16-row tile's occupancy).
+# the fused shared expert's blocks: sorted in WIDE_SORT_BM-row blocks (gemm1's
+# wide block), run here as WIDE_BM-row tiles
 WIDE_SORT_BM = 128
 WIDE_BM = 32
 
@@ -97,14 +79,14 @@ def compile_gemm2(
     BM=BM,
     wide=False,
 ):
-    """N_OUT = hidden size (output columns), D_INTER = contraction. Kernel for
-    batches of up to ``n_tokens`` tokens: that picks split-K (``launch.ksplit``
-    CTAs per tile, each over D_INTER/ksplit) and the inline-sort scan length
-    (``launch.kernel_name``); ``inline_sort`` needs ``TOPK``. ``launch.tile_n`` is
-    the N tile for the grid. ``BM`` (16 or 32) is the sort's row block of the
-    routed experts; ``wide`` (sorted mode) adds the body for the shared expert's
-    wide blocks, which come first: ``ceil(n_tokens/WIDE_SORT_BM) *
-    (WIDE_SORT_BM/WIDE_BM)`` wide blocks of ``launch.wide_bm`` rows."""
+    """N_OUT = hidden size (output columns), D_INTER = contraction. Kernel for batches
+    of up to ``n_tokens`` tokens: picks split-K (``launch.ksplit`` CTAs per tile)
+    and the inline-sort scan length; ``inline_sort`` needs ``TOPK``; ``launch.tile_n``
+    is the N tile for the grid. ``BM`` (16 or 32) is the sort's row block; ``wide``
+    adds the body for the shared expert's wide blocks, which come first
+    (``ceil(n_tokens/WIDE_SORT_BM) * (WIDE_SORT_BM/WIDE_BM)`` tiles of
+    ``launch.wide_bm`` rows).
+    """
     assert BM in (16, 32), BM
     ksplit = KSPLIT_SMALL_M if n_tokens <= KSPLIT_SMALL_M_TOKENS else 1
     b_cache_mod = 2  # non-temporal W loads

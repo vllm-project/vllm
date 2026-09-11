@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Decode routing sort for the a16w4 MoE chain (M <= max_tokens): one launch.
-
-Block 0 sorts the (token, slot) pairs by expert: every thread loads its <= PPT
-pairs at once (one round trip), LDS histogram, a Hillis-Steele scan over the
-padded counts, then placement through LDS cursors and padding; every other block
-zeroes a slice of the output buffer that gemm2's atomics accumulate into. Same
-output contract as aiter ``moe_sorting``:
+"""Decode routing sort (M <= max_tokens), one launch: block 0 sorts the (token, slot)
+pairs by expert (LDS histogram, Hillis-Steele scan of the padded counts, placement
+through LDS cursors, padding); the other blocks zero the output gemm2 accumulates
+into. aiter ``moe_sorting`` contract:
 
   sorted_ids[row]        = token | slot << 24   (padding rows: token = n_tokens)
   sorted_weights[row]    = routing weight       (padding rows: 0)
@@ -14,9 +11,7 @@ output contract as aiter ``moe_sorting``:
   num_valid_ids[0]       = padded sorted row count
   out[n_tokens, H]       = 0 (bf16)
 
-Rows inside one expert come out in the arrival order of the LDS atomics (not
-deterministic, as in aiter); the gemms do not depend on it. aiter's
-``moe_sorting`` is two kernels (~9.6 us together at M=64..256 in a graph).
+``wide_first=(expert, wide_bm)`` puts that expert's rows first in wide_bm-row blocks.
 """
 
 import functools
@@ -26,14 +21,8 @@ import flydsl.expr as fx
 import torch
 from flydsl.expr import const_expr, range_constexpr
 
+from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.sort import max_sorted_rows
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.utils import _lds_atomic_add_i32
-
-
-def max_sorted_rows(n_tokens: int, E: int, topk: int, block_m: int) -> int:
-    """aiter's bound: every active expert pads by < block_m rows."""
-    active = min(E, n_tokens * topk)
-    cumsum_max = n_tokens * topk + active * (block_m - 1)
-    return ((cumsum_max + block_m - 1) // block_m) * block_m
 
 
 def wide_layout_rows(n_tokens: int, E: int, topk: int, block_m: int, wide_bm: int):
@@ -215,12 +204,11 @@ def compile_decode_sort(
 
 
 def moe_sort_decode(topk_ids, topk_weights, E, H, block_m, out, wide_first=None):
-    """Drop-in for ``moe_sorting(topk_ids, topk_w, E, H, dtype, block_size)`` ->
-    (sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids); ``out``
-    (``[n_tokens, H]`` bf16, contiguous) is zeroed in place. ``wide_first =
-    (expert, wide_bm)``: that expert's rows first in wide_bm-row blocks (see
-    ``compile_decode_sort``); ``sorted_expert_ids`` then has one entry per wide
-    block followed by one per block_m block."""
+    """Drop-in for aiter ``moe_sorting`` -> (sorted_ids, sorted_weights,
+    sorted_expert_ids, num_valid_ids); ``out`` (``[n_tokens, H]`` bf16, contiguous)
+    is zeroed in place. With ``wide_first`` ``sorted_expert_ids`` has one entry
+    per wide block followed by one per block_m block.
+    """
     n_tokens, topk = topk_ids.shape
     dev = topk_ids.device
     if wide_first is None:

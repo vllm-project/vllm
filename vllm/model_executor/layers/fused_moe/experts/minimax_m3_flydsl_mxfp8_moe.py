@@ -1,14 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3 MXFP8 MoE on the FlyDSL kernels under
-``vllm/models/minimax_m3/amd/ops/moe_mxfp8`` (gfx950, TP4 layer shapes).
-
-Same weights and quant config as ``AiterMxfp8Experts`` (the shuffled MXFP8
-layout of ``convert_to_fp8_moe_kernel_format``), whose ``apply`` stays the
-fallback for anything the kernels do not cover. The MXFP8 MoE oracle lists this
-class ahead of ``AiterMxfp8Experts`` for the ``aiter`` backend, so it is used
-whenever ``is_supported_config`` passes; ``VLLM_ROCM_USE_M3_FLYDSL_MOE=0``
-keeps aiter's kernels.
+"""MiniMax-M3 MXFP8 MoE on the FlyDSL kernels of
+``vllm/models/minimax_m3/amd/ops/moe_mxfp8`` (gfx950). Same weights and quant
+config as ``AiterMxfp8Experts``, whose ``apply`` is the fallback for what the
+kernels do not cover; the MXFP8 MoE oracle lists this class ahead of it for the
+``aiter`` backend. ``VLLM_ROCM_USE_M3_FLYDSL_MOE=0`` keeps aiter's kernels.
 """
 
 from __future__ import annotations

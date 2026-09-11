@@ -1,44 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3 prefill MoE final reduce over gemm2's mxfp8 token-major rows
-(``out_mode="fp8"``; the a4w4 lab's ``reduce_fp8.py``):
+"""Top-k reduction of gemm2's MXFP8 token-major partials (``out_mode="fp8"``):
 
     y[tok, :] = sum_k w[tok, k] * dequant(out[tok*topk + k, :])      -> bf16
 
-One wave per (token, 1024-column chunk): lane L owns columns ``chunk*1024 + L*16
-.. +16`` of the token's ``topk`` rows (16 fp8 = one dwordx4 per row, so every
-load instruction of the wave covers 1 KB contiguous and every store 2 KB). Per
-row: one dwordx4 + one scale byte, ``v_cvt_pk_f32_fp8`` and one fma per value
-with (2^(e8m0-127) * w). The partials are read once (non-temporal loads); the
-output is stored normally so the layer's next op finds it in cache. 4 waves per
-CTA (32768 tokens, standalone: 277 -> 243 us against the previous
-one-wave-per-token layout; ``chunks_per_wave`` / ``waves_per_cta`` /
-``nt_store`` keep the other variants for the lab).
-
-Layouts (bytes):
-  OUT     [n_tokens*topk, H]      fp8 e4m3, token-major (gemm2)
-  OUT_sc  [n_tokens*topk, H/32]   e8m0
-  W       [n_tokens, topk]        f32 routing weights (shared expert = 1)
-  Y       [n_tokens, H]           bf16
+One wave per (token, 1024-column chunk), 16 fp8 = one dwordx4 per lane per row plus
+one scale byte, ``v_cvt_pk_f32_fp8`` and one fma per value with 2^(e8m0-127) * w;
+non-temporal loads, 4 waves per CTA.
+Layouts (bytes): OUT [n_tokens*topk, H] fp8 e4m3; OUT_sc [n_tokens*topk, H/32] e8m0;
+W [n_tokens, topk] f32; Y [n_tokens, H] bf16.
 """
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops
 from flydsl._mlir import ir as _ir
-from flydsl._mlir.dialects import arith as _arith
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import vector as _vector
 from flydsl.expr import range_constexpr
 from flydsl.expr.typing import T as _T
 from flydsl.expr.typing import Vector as Vec
 
+from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.epilogue import _bf16x2
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.loaders import _as_f32
-
-
-def _i1(v: bool):
-    return fx.Boolean(v).ir_value()
-
 
 WAVES_PER_CTA = 4
 CHUNKS_PER_WAVE = 1  # dwordx4 per lane per row
@@ -50,7 +34,11 @@ def _cvt_pk_f32_fp8(dword, hi: bool):
     """v_cvt_pk_f32_fp8: 2 fp8 (low / high word of ``dword``) -> 2 f32"""
     v2f32 = _ir.VectorType.get([2], _T.f32)
     res = _llvm.call_intrinsic(
-        v2f32, "llvm.amdgcn.cvt.pk.f32.fp8", [fx.as_ir_value(dword), _i1(hi)], [], []
+        v2f32,
+        "llvm.amdgcn.cvt.pk.f32.fp8",
+        [fx.as_ir_value(dword), fx.Boolean(hi).ir_value()],
+        [],
+        [],
     )
     return Vec(res)
 
@@ -67,40 +55,23 @@ def _fma(a, b, c):
     )
 
 
-def _pack_bf16x2(a, b):
-    """two f32 -> one i32 of 2 bf16 (RNE, v_cvt_pk_bf16_f32 on gfx950)"""
-    v2f32 = _ir.VectorType.get([2], _T.f32)
-    v2bf16 = _ir.VectorType.get([2], _ir.BF16Type.get())
-    v = _vector.FromElementsOp(v2f32, [fx.as_ir_value(a), fx.as_ir_value(b)]).result
-    t = _arith.TruncFOp(v2bf16, v).result
-    return _llvm.bitcast(_T.i32, t)
-
-
 def _v4i32(vals):
     ty = _ir.VectorType.get([4], _T.i32)
     return _vector.FromElementsOp(ty, [fx.as_ir_value(v) for v in vals]).result
 
 
-def compile_moe_reduce_fp8(
-    *,
-    H: int,
-    topk: int,
-    chunks_per_wave: int = CHUNKS_PER_WAVE,
-    waves_per_cta: int = WAVES_PER_CTA,
-    nt_load: bool = True,
-    nt_store: bool = False,
-):
-    CPW = chunks_per_wave
-    WPC = waves_per_cta
+def compile_moe_reduce_fp8(*, H: int, topk: int):
+    CPW = CHUNKS_PER_WAVE
+    WPC = WAVES_PER_CTA
     assert H % (_CHUNK * CPW) == 0
     SEGS = H // (_CHUNK * CPW)  # waves per token
     SC_COLS = H // 32
     ROW_DW = H // 4
     CHUNK_DW = _CHUNK // 4
     CHUNK_SC = _CHUNK // 32
-    LD = _NT if nt_load else 0
-    ST = _NT if nt_store else 0
-    name = f"m3_reduce_fp8_h{H}_k{topk}_c{CPW}_w{WPC}_l{LD}_s{ST}"
+    LD = _NT  # non-temporal loads
+    ST = 0  # default-policy stores
+    name = f"m3_reduce_fp8_h{H}_k{topk}"
 
     @flyc.kernel(name=name, known_block_size=[64 * WPC, 1, 1])
     def kernel_reduce_fp8(
@@ -188,9 +159,7 @@ def compile_moe_reduce_fp8(
                 tok * (H // 2) + seg * (CHUNK_DW * 2 * CPW) + lane * 8
             )  # bf16 row in dwords
             for i in range_constexpr(CPW):
-                packed = [
-                    _pack_bf16x2(acc[i][2 * j], acc[i][2 * j + 1]) for j in range(8)
-                ]
+                packed = [_bf16x2(acc[i][2 * j], acc[i][2 * j + 1]) for j in range(8)]
                 base = y_dw + i * (CHUNK_DW * 2)
                 buffer_ops.buffer_store(
                     _v4i32(packed[0:4]), y_rsrc, base, cache_modifier=ST

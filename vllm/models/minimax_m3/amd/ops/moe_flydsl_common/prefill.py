@@ -19,18 +19,6 @@ def block_m_for(n_tokens: int) -> int:
     return 256 if n_tokens >= BM256_FROM_TOKENS else 128
 
 
-def _run_compiled(exe, *args):
-    """First call compiles and runs (``flyc.compile``); later calls dispatch the
-    cached CompiledFunction (the shim aiter ships in ``tensor_shim.py``)."""
-    import flydsl.compiler as flyc
-
-    cf = getattr(exe, "_cf", None)
-    if cf is None:
-        exe._cf = flyc.compile(exe, *args)
-    else:
-        cf(*args)
-
-
 @functools.cache
 def _get_sort(num_experts: int, topk: int, block_m: int):
     from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.sort import compile_moe_sort

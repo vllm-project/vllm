@@ -1,32 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""FlyDSL prefill MoE for MiniMax-M3 MXFP8 weights on gfx950 (fp8 x fp8),
-``MIN_PREFILL_TOKENS <= M <= MAX_PREFILL_TOKENS``.
-
-The MXFP8 layer (``ModelOptMxFp8FusedMoE``, backend AITER_MXFP8) runs aiter's
-a8w8 chain: routing sort, fused per-token fp8 quant, stage-1 GEMM writing the
-fp8 intermediate + e8m0 scales, stage-2 GEMM (bf16 ``[M, topk, H]`` partials
-or atomics) and the top-k reduction. This package keeps aiter's quant kernel
-and the ``moe_flydsl_common`` sort / tile map / bf16 reduce, and replaces the
-two GEMMs with the fp8 ports of the a4w4 prefill kernels:
-
-* ``gemm1``: gate/up fp8 GEMM (4-wave 2x2, ``v_mfma_scale_f32_16x16x128_f8f6f4``
-  with fp8 operands, AGPR accumulators, 128-K steps) with swiglu-OAI and the
-  per-32-column MXFP8 quant of the intermediate fused into the epilogue; reads
-  the gate/up-interleaved W13 the AITER_MXFP8 backend stores;
-* ``gemm2``: down fp8 GEMM writing bf16 ``[M, topk, H]`` partials
-  (``out_mode="bf16"``, reduced by ``moe_flydsl_common.reduce_bf16``) or MXFP8
-  partials (``"fp8"``, reduced by ``reduce_fp8``).
-
-Weights: ``w13`` ``[E, 2I, H]`` fp8 e4m3 (``shuffle_weight(is_guinterleave=True,
-gate_up=True)``), ``w13_scale`` (``shuffle_scale(..., True, True)``), ``w2``
-``[E, H, I]`` (``shuffle_weight``), ``w2_scale`` (``shuffle_scale``): the tensors
-``convert_to_fp8_moe_kernel_format`` leaves on the layer. Only their data
-pointers are used.
-
-``mxfp8_moe`` (the package entry point) sends every
-``MIN_PREFILL_TOKENS <= M <= MAX_PREFILL_TOKENS`` batch here.
+"""Prefill chain (fp8 x fp8, ``MIN_PREFILL_TOKENS <= M <= MAX_PREFILL_TOKENS``):
+``moe_flydsl_common`` sort + tile map, aiter's fused per-token fp8 quant,
+``gemm1_prefill`` (gate/up + swiglu-OAI + MXFP8 quant of the intermediate),
+``gemm2_prefill`` (down GEMM writing ``[M, topk, H]`` partials) and the top-k
+reduction (``reduce_bf16``, or ``reduce_fp8`` when ``AITER_FLYDSL_STAGE2_FP8=1``).
 """
 
 from __future__ import annotations
@@ -36,22 +15,22 @@ import os
 
 import torch
 
+from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.launch import (
+    _run_compiled,
+    _u8_flat,
+)
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.prefill import (
     MAX_PREFILL_TOKENS,
     MIN_PREFILL_TOKENS,
     _get_reduce_bf16,
     _get_sort,
     _get_tile_map,
-    _run_compiled,
     block_m_for,
 )
 
 GEMM1_SWIGLU_ALPHA = 1.702
 GEMM1_SWIGLU_LIMIT = 7.0
-# CTAs sharing one m-block's 24 n-tiles in gemm2 (see ``gemm2.compile_moe_gemm2``).
-# gemm2 alone, MI355X: 6 beats 4 by 4-9% up to 16384 tokens (512: 177 -> 167 us,
-# 4096: 234 -> 230, 16384: 621 -> 591); 4 wins from 32768 (1069 vs 1077, 65536:
-# 2027 vs 2062), where the rotated n-tile sweep already fills the machine.
+# CTAs sharing one m-block's 24 n-tiles in gemm2 (gemm2_prefill.compile_moe_gemm2)
 GEMM2_N_SPLIT = 6
 GEMM2_N_SPLIT_LARGE = 4
 GEMM2_N_SPLIT_LARGE_FROM_TOKENS = 32768
@@ -76,10 +55,6 @@ def default_out_mode() -> str:
 
 _GEMM1_BLOCK_K = 128
 _GEMM2_INTERMEDIATE = 768
-
-
-def _u8_flat(t: torch.Tensor) -> torch.Tensor:
-    return t.view(torch.uint8).view(-1)
 
 
 def supports_shapes(hidden_size: int, intermediate_size: int) -> bool:
@@ -191,10 +166,9 @@ def a8w8_prefill_moe(
     num_m_blocks2 = (num_m_blocks * bm) // 128
     n_split = gemm2_n_split_for(n_tokens)
     grid2 = gemm2_grid(num_m_blocks2, n_split)
-    # The bf16 partials reach 4.03 GB at 65536 tokens: they are passed by their
-    # own element view (a byte view has more than 2^31 elements), and gemm2 /
-    # reduce_bf16 address them with i32 byte offsets and record counts that wrap
-    # past 2^31 -- the buffer instructions read both as u32, so 4 GB is the limit.
+    # the bf16 partials are 4.03 GB at 65536 tokens: pass the element view (a byte
+    # view exceeds 2^31 elements); the kernels' i32 byte offsets are read as u32 by
+    # the buffer instructions, so 4 GB is the limit
     _run_compiled(
         _get_gemm2(
             hidden_size, intermediate_size, num_experts, topk, bm, n_split, out_mode

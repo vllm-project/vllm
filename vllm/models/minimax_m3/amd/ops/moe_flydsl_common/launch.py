@@ -3,6 +3,12 @@
 """MiniMax-M3 FlyDSL MoE launch helpers."""
 
 import flydsl.compiler as flyc
+import torch
+
+
+def _u8_flat(t: torch.Tensor) -> torch.Tensor:
+    """The flat byte view the kernels take their tensors as."""
+    return t.view(torch.uint8).view(-1)
 
 
 def _run_compiled(exe, *args):

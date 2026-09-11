@@ -1,18 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlyDSL decode MoE for MiniMax-M3 MXFP8 weights on gfx950 (bf16 x, M <= 256).
-
-Inline-sort routing at M <= 16,
-``sort_decode`` above, gate/up GEMM + swiglu-OAI, down GEMM with atomic
-accumulation, with the two GEMMs reading fp8 e4m3 weights (``gemm1.py``,
-``gemm2.py``). The activations stay bf16 (a16w8): decode is weight-bandwidth
-bound, so the MXFP8 activation quant of the aiter a8w8 path buys nothing there
-and its two quant passes are dropped.
-
-Weights are the tensors ``ModelOptMxFp8FusedMoE`` stores on the layer for the
-AITER_MXFP8 backend (``shuffle_mxfp8_moe_weights``: gate/up-interleaved
-``shuffle_weight`` + ``shuffle_scale``). ``mxfp8_moe`` (the package entry point)
-sends every ``M <= MAX_DECODE_TOKENS`` batch here.
+"""Decode chain (bf16 activations x MXFP8 weights, M <= 256): inline routing up to 16
+tokens, ``sort_decode`` above; gate/up GEMM + swiglu-OAI (``gemm1_decode``), down
+GEMM with routing-weighted bf16 atomic accumulation (``gemm2_decode``). Weights:
+the gate/up-interleaved ``shuffle_weight`` / ``shuffle_scale`` tensors of AITER_MXFP8.
 """
 
 import functools
@@ -23,47 +14,32 @@ from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.decode import (
     MAX_DECODE_TOKENS,
 )
 from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.launch import _get, _run_compiled
+from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.sort import max_sorted_rows
+from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.sort_decode import (
+    moe_sort_decode,
+    wide_layout_rows,
+)
 
-from .gemm1_decode import BM, compile_gemm1
+from .gemm1_decode import BM, WIDE_BM, compile_gemm1
 from .gemm2_decode import compile_gemm2
 
-# Sort row block: 16 (one MFMA tile per block) below BM32_MIN_TOKENS, 32 from
-# there (two tiles per unpacked W fragment: an expert with more than 16 rows,
-# always the shared one, streams its weights half as often; inline sort reaches
-# 32 tokens). MI355X chain sweep of 09-09: 32 loses at every M <= 256 (most
-# experts have < 16 rows, so the second tile is padding work and the larger A
-# staging halves the workgroups per CU), so it is off; kept for the lab.
-BM32_MIN_TOKENS = MAX_DECODE_TOKENS + 1
-# Wide-first layout (sorted mode): the shared expert, which every token routes
-# to, is sorted first in gemm1.WIDE_BM-row blocks and run with the wide bodies
-# of gemm1 / gemm2, so its weights stream once per WIDE_BM rows instead of once
-# per 16. Chain sweep (MI355X, 09-09): -2 us at 48, -4 at 64, -7 at 96, -10 at
-# 128, -18 at 256; nothing at 32.
+# sorted mode with a fused shared expert: its rows first in WIDE_BM-row blocks run
+# by the wide kernel bodies, so its weights stream once per WIDE_BM rows (not BM)
 WIDE_MIN_TOKENS = 40
 _workspaces: dict = {}
 
 
-def block_m_for(n_tokens: int) -> int:
-    return 32 if n_tokens >= BM32_MIN_TOKENS else 16
-
-
 def wide_for(n_tokens: int) -> bool:
-    return n_tokens >= WIDE_MIN_TOKENS and n_tokens > block_m_for(n_tokens)
+    return n_tokens >= WIDE_MIN_TOKENS
 
 
 def _intermediate_workspace(
     device: torch.device, topk: int, intermediate_size: int, num_experts: int
 ) -> torch.Tensor:
     """gemm1 output, bf16 ``[rows, I]``: by pair (``pair * BM + row``) on the
-    sort-free path, by sorted row on the sorted one; sized for the largest of
-    the layouts of either block size at ``MAX_DECODE_TOKENS`` and allocated once
-    per (device, topk, I, E) so HIP-graph capture records no allocation."""
-    from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.sort_decode import (
-        max_sorted_rows,
-        wide_layout_rows,
-    )
-    from vllm.models.minimax_m3.amd.ops.moe_mxfp8.gemm1_decode import WIDE_BM
-
+    sort-free path, by sorted row on the sorted one; sized for the largest layout
+    at ``MAX_DECODE_TOKENS`` and allocated once per (device, topk, I, E) so
+    HIP-graph capture records no allocation."""
     key = (
         device.index if device.index is not None else -1,
         topk,
@@ -73,15 +49,9 @@ def _intermediate_workspace(
     ws = _workspaces.get(key)
     if ws is None:
         rows = max(
-            [32 * topk * 32]
-            + [
-                max_sorted_rows(MAX_DECODE_TOKENS, num_experts, topk, bm)
-                for bm in (16, 32)
-            ]
-            + [
-                sum(wide_layout_rows(MAX_DECODE_TOKENS, num_experts, topk, bm, WIDE_BM))
-                for bm in (16, 32)
-            ]
+            32 * topk * 32,
+            max_sorted_rows(MAX_DECODE_TOKENS, num_experts, topk, BM),
+            sum(wide_layout_rows(MAX_DECODE_TOKENS, num_experts, topk, BM, WIDE_BM)),
         )
         ws = torch.empty((rows, intermediate_size), dtype=torch.bfloat16, device=device)
         _workspaces[key] = ws
@@ -105,20 +75,11 @@ def a16w8_decode_moe(
     fused_shared_expert: bool = True,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """One MoE layer for ``M <= 256`` tokens on the FlyDSL a16w8 kernels.
-
-    ``w13``/``w2`` (fp8) and their e8m0 scales are the layer tensors after
-    ``shuffle_mxfp8_moe_weights``; only their data pointers are used.
-    ``topk_ids`` / ``topk_weights`` are ``[M, topk]``. ``fused_shared_expert``
-    says that the last expert is the fused shared one, routed by every token:
-    the wide-first sort layout (``WIDE_MIN_TOKENS``) budgets its blocks from
-    ``M`` and is only used then. Returns ``[M, hidden_size]`` bf16 (``out`` when
-    given: contiguous, zeroed and accumulated into here).
+    """One MoE layer for ``M <= 256`` tokens -> ``[M, hidden_size]`` bf16 (``out`` when
+    given: contiguous, zeroed and accumulated into). ``fused_shared_expert``: the
+    last expert is routed by every token; only then may the wide-first sort layout
+    (``WIDE_MIN_TOKENS``) be used, as it budgets that expert's blocks from ``M``.
     """
-    from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.sort_decode import (
-        moe_sort_decode,
-    )
-
     n_tokens = x.shape[0]
     assert n_tokens <= MAX_DECODE_TOKENS, n_tokens
     assert x.shape[1] == hidden_size and x.dtype == torch.bfloat16 and x.is_contiguous()
@@ -133,14 +94,12 @@ def a16w8_decode_moe(
         )
     assert out.shape == (n_tokens, hidden_size) and out.dtype == torch.bfloat16
     assert out.is_contiguous()
-    bm = block_m_for(n_tokens)
+    bm = BM
     inline = n_tokens <= bm
     wide = fused_shared_expert and wide_for(n_tokens)
     if inline:
         sorted_ids = sorted_w = sorted_eids = num_valid = None
     else:
-        from vllm.models.minimax_m3.amd.ops.moe_mxfp8.gemm1_decode import WIDE_BM
-
         sorted_ids, sorted_w, sorted_eids, num_valid = moe_sort_decode(
             topk_ids,
             topk_weights,
@@ -194,6 +153,7 @@ def a16w8_decode_moe(
     return out
 
 
+@functools.cache
 def get_gemm1(**kw):
     return _get(compile_gemm1, **kw)
 

@@ -1,26 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""gemm1's expert-major tile order as a device kernel (replaces the ~75 us torch
-construction in the benches; one CTA per 256 blocks, a few microseconds).
-
-Sorted rows come in expert order, so the valid m-blocks of an expert are one
-contiguous run ``[lo, hi)`` of ``sorted_expert_ids``. gemm1's work list puts every
-(m, n) tile of an expert together, n-major inside the expert so consecutive
-blocks share the W13 slab::
+"""gemm1's expert-major tile order. Sorted rows come in expert order, so an expert's
+valid m-blocks are one run ``[lo, hi)`` of ``sorted_expert_ids``; its (m, n) tiles
+are listed together, n-major, so consecutive blocks share the W13 slab::
 
     tile_map[NB_N*lo + n*(hi - lo) + (m - lo)] = m << 3 | n      for valid m, n < NB_N
     tile_map[valid_blocks*NB_N .. grid)        = -1               (idle blocks)
     tile_map[grid]                              = valid_blocks*NB_N
 
-Thread ``tid`` of CTA ``bx`` handles block ``bx*256 + tid``; ``lo`` / ``hi`` come
-from two binary searches over the (non-decreasing) expert ids, branch-free. The
-idle tail of the map is filled by all CTAs together.
+Thread ``tid`` of CTA ``bx`` handles block ``bx*256 + tid``; ``lo`` / ``hi`` come from
+two binary searches over the non-decreasing expert ids.
 """
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import range_constexpr
+
+from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.loaders import _min
 
 _THREADS = 256
 _MAX_BLOCKS = (
@@ -48,9 +45,6 @@ def compile_tile_map(*, I: int, BM: int = 128):  # noqa: E741
 
         def _eid(i):
             return fx.Int32(sorted_expert_ids[i])
-
-        def _min(a, b):
-            return (a < b).select(a, b)
 
         def _bound(e, upper):
             """first index in [0, vb) whose expert id is > e (upper) / >= e (lower)"""

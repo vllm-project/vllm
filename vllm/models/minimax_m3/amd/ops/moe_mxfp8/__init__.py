@@ -1,22 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlyDSL MoE for MiniMax-M3 with MXFP8 weights on gfx950 (the TP4 layer shapes:
-hidden 6144, intermediate 768 per rank).
-
-One entry point, ``mxfp8_moe``, picks the chain by batch size:
-
-* ``decode.py``: bf16 activations x MXFP8 weights, ``M <= MAX_DECODE_TOKENS``
-  (inline routing up to 16 tokens, ``sort_decode`` above);
-* ``mid.py``: fp8 x fp8, ``MIN_MID_TOKENS <= M <= MAX_MID_TOKENS``, atomic output;
-* ``prefill.py``: fp8 x fp8, ``MIN_PREFILL_TOKENS <= M <= MAX_PREFILL_TOKENS``,
-  bf16 (or MXFP8) partials + top-k reduction.
-
-The weights are the tensors ``ModelOptMxFp8FusedMoE`` stores for the AITER_MXFP8
-backend (``shuffle_mxfp8_moe_weights``), so ``MiniMaxM3FlyDSLMxfp8Experts``
-(``vllm/model_executor/layers/fused_moe/experts/minimax_m3_flydsl_mxfp8_moe.py``)
-runs these chains in place of ``AiterMxfp8Experts``; the MXFP8 MoE oracle picks it
-when ``is_supported_config`` passes, ``VLLM_ROCM_USE_M3_FLYDSL_MOE=0`` keeps aiter.
-The sort / tile map / reduction helpers are in ``moe_flydsl_common``.
+"""FlyDSL MoE for MiniMax-M3 MXFP8 weights on gfx950 (TP4 shapes: hidden 6144,
+intermediate 768 per rank). ``mxfp8_moe`` picks the chain by batch size: ``decode``
+(bf16 x fp8, M <= 256), ``mid`` (fp8 x fp8, 257..3071, atomic output), ``prefill``
+(fp8 x fp8, 3072..65536, partials + top-k reduction). The weights are the tensors
+``ModelOptMxFp8FusedMoE`` stores for AITER_MXFP8 (``shuffle_mxfp8_moe_weights``);
+``MiniMaxM3FlyDSLMxfp8Experts`` (``fused_moe/experts``) runs this in place of
+``AiterMxfp8Experts``. Shared sort / tile map / reduce helpers: ``moe_flydsl_common``.
 """
 
 from __future__ import annotations
@@ -139,13 +129,11 @@ def mxfp8_moe(
     fused_shared_expert: bool = False,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """One MoE layer, ``[M, hidden_size]`` bf16 (written into ``out`` when given).
-
-    ``w13`` / ``w2`` (fp8 e4m3) and their e8m0 scales are the layer tensors after
-    ``shuffle_mxfp8_moe_weights``; ``topk_ids`` / ``topk_weights`` are ``[M, topk]``.
-    ``fused_shared_expert``: the last expert is aiter's fused shared expert, routed
-    by every token (lets decode use its wide sort layout); vLLM keeps the shared
-    expert a separate module for ModelOpt MXFP8, where this is False.
+    """One MoE layer -> ``[M, hidden_size]`` bf16 (into ``out`` when given). ``w13`` /
+    ``w2`` (fp8 e4m3) and their e8m0 scales are the layer tensors after
+    ``shuffle_mxfp8_moe_weights``. ``fused_shared_expert``: the last expert is
+    aiter's fused shared expert, routed by every token (decode may then use its
+    wide sort layout); False for ModelOpt MXFP8, where vLLM keeps it separate.
     """
     global _warmed
     kw = dict(

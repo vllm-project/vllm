@@ -1,17 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3 FlyDSL MoE kernels (gfx950), ``vllm/models/minimax_m3/amd/ops/moe_mxfp8``:
-the a16w8 decode chain (M <= 256), the a8w8 mid-batch chain (257..3071) and the a8w8
-prefill chain (3072..65536), the package's dispatch, and the experts class the MXFP8
-MoE oracle selects for them.
-
-Weights are quantized to MXFP8 (fp8 e4m3 + per-32 e8m0, the checkpoint format) and
-shuffled exactly like ``ModelOptMxFp8FusedMoE`` does for the AITER_MXFP8 backend
-(``shuffle_mxfp8_moe_weights``). Routing either mimics aiter's fused shared expert
-(the last expert routed by every token with weight 1) or is the routed-only top-k
-vLLM produces when the shared expert is a separate module (ModelOpt MXFP8). Outputs
-are compared with the production aiter a8w8 call (``fused_moe`` per_1x32, gate/up
-INTERLEAVE) and with a float reference on the dequantized experts.
+"""MiniMax-M3 FlyDSL MoE (gfx950, ``vllm/models/minimax_m3/amd/ops/moe_mxfp8``): the
+decode / mid / prefill chains against aiter's a8w8 call and a float reference on
+dequantized MXFP8 experts, the package dispatch, and the experts class the MXFP8
+oracle selects. Routing either mimics aiter's fused shared expert (last expert,
+every token, weight 1) or is the routed-only top-k of ModelOpt MXFP8.
 """
 
 from types import SimpleNamespace

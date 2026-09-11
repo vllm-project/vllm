@@ -1,36 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3 prefill MoE stage 2 for MXFP8 (a8w8, down projection), token-major
-bf16 output:
+"""Prefill down fp8 GEMM (3072..65536 tokens), token-major partials:
 
     out[tok*topk + slot, :] = bf16( (h[row, :] @ W2[e]^T) * sorted_weights[row] )
 
-reduced by ``moe_flydsl_common.reduce_bf16`` (aiter's ``moe_reduction`` arithmetic).
-
-Structure: the fp8 gemm1 mainloop (4-wave 2x2, LDS ping-pong, 128-K steps,
-``v_mfma_scale_f32_16x16x128_f8f6f4``, AGPR accumulators) run as one flat
-sequence over the CTA's n-tiles: a CTA owns an m-tile of 128 sorted rows and
-sweeps ``NT`` n-tiles of 256 W2 rows (``n_split`` CTAs share the 6144 columns;
-rotated start inside long same-expert runs as in the a4w4 kernel). K = I = 768
-is 6 steps per n-tile; the loads for the first steps of n-tile t+1 are issued
-during n-tile t, so the DMA stream never drains. W2 (from HBM) is prefetched
-three steps ahead (3 LDS stages), A (16 KB per step, re-read from L2 per
-n-tile) two: the fp8 A tile (96 KB) does not fit next to the B stages in LDS,
-and pinned in AGPRs it would take 192 of them. LDS: 32 KB A + 96 KB B + 16 KB
-scales + 16 KB epilogue staging = 160 KB.
-
-Epilogue: after the last MFMA of an n-tile the 128 accumulators are scaled by
-the row's routing weight, packed to bf16, staged 16 rows at a time in a
-wave-private LDS buffer (XOR-swizzled rows) and flushed token-major as full
-128-B lines (16 B per lane, non-temporal; 8-B stores straight from the
-accumulators cost 35% of the kernel). Padded rows (tok == n_tokens) fall
-outside the output buffer resource and are dropped.
-
-Scale blocks (256 B = 32 rows x 8 K-groups): 3 per operand per n-tile
-(K = 768), numbered b = 3t + g across the sweep and kept in 4 LDS slots (b % 4);
-block b is gathered at flat step 2b - 3 (step 1: block 2 of t; steps 3/5: blocks
-0/1 of t+1), three steps ahead, and its slot is next taken by block b + 4 at
-flat step 2b + 5, after b's last read at 2b.
+reduced by ``moe_flydsl_common.reduce_bf16`` (``out_mode="bf16"``) or, as unweighted
+MXFP8 partials, by ``reduce_fp8`` (``"fp8"``). The gemm1 mainloop (4 waves 2x2, LDS
+ping-pong, 128-K steps, ``v_mfma_scale_f32_16x16x128_f8f6f4``, AGPR accumulators)
+runs as one flat sequence over the CTA's n-tiles: a CTA owns an m-tile of 128 sorted
+rows and sweeps ``NT`` n-tiles of 256 W2 rows (``n_split`` CTAs share the 6144
+columns, rotated start inside long same-expert runs). K = 768 is 6 steps per n-tile;
+the first loads of n-tile t+1 are issued during n-tile t. W2 is prefetched three
+steps ahead (3 LDS stages), A two; LDS: 32 KB A + 96 KB B + 16 KB scales + 16 KB
+epilogue staging. Epilogue: accumulators scaled by the routing weight, packed to
+bf16, staged 16 rows at a time in a wave-private LDS buffer and flushed token-major
+as full 128 B lines (non-temporal); padded rows (tok == n_tokens) fall outside the
+output resource. Scale blocks (256 B = 32 rows x 8 K-groups): 3 per operand per
+n-tile, block b = 3t + g in LDS slot b % 4, gathered at flat step 2b - 3.
 
 Layouts (bytes):
   A         [num_m_blocks*BM, I]         sorted rows, fp8 (gemm1 OUT_Q)
@@ -73,6 +59,7 @@ from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.loaders import (
     _Buf,
     _divmod_nonneg,
     _flat_frag,
+    _fmax,
     _g2s_thunks,
     _permlane16_swap,
     _riffle,
@@ -82,7 +69,7 @@ from vllm.models.minimax_m3.amd.ops.moe_flydsl_common.loaders import (
     wait_barrier,
 )
 
-from .gemm1_prefill import BLOCK_K, Mfma16x16x128Fp8, _e8m0_roundup_fp8, _fmax
+from .gemm1_prefill import BLOCK_K, Mfma16x16x128Fp8, _e8m0_roundup_fp8
 
 OUT_MODES = ("bf16", "fp8")
 
@@ -97,27 +84,14 @@ def compile_moe_gemm2(
     topk: int,
     n_split: int = 2,
     sort_block_m: int = 128,
-    rotate: bool = True,
     out_mode: str = "bf16",
 ):
-    """Grouped fp8 gemm2 for one (H, I, E, topk). ``sort_block_m`` (128 / 256) is
-    the ``moe_sorting`` block of the inputs; the kernel tiles 128 rows and skips the
-    all-padding halves of a 256-sort. ``rotate``: the rotated n-tile sweep inside
-    long same-expert runs (off: every CTA sweeps from its chunk's first n-tile).
-
-    ``out_mode`` (the switch the a4w4 kernel has as ``out_dtype``; the package
-    follows aiter's ``AITER_FLYDSL_STAGE2_FP8`` for the default):
-      "bf16"    OUT [n_tokens*topk, H] bf16 = y * routing weight, token-major
-                partials for ``moe_flydsl_common.reduce_bf16``; deterministic.
-      "fp8"     OUT [n_tokens*topk, H] fp8 e4m3 + OUT_scale [n_tokens*topk, H/32]
-                e8m0 (unweighted, per 32 columns, ceil_pow2(amax/448)); the routing
-                weights are applied by ``reduce_fp8.py``. Half the partial traffic
-                of "bf16", deterministic, one more quantization of the result
-                (3.5-5% faster on the chain).
-    bf16 atomics into the output (aiter's own stage 2) were measured and dropped:
-    812 vs 643 us at 4096 tokens even with line-coalesced pk_add; the L2 atomic
-    throughput costs more than the partial round trip. Atomics pay off only at
-    decode sizes (``decode.py``).
+    """Grouped fp8 gemm2 for one (H, I, E, topk). ``sort_block_m`` (128 / 256) is the
+    sort block of the inputs; the kernel tiles 128 rows and skips the all-padding
+    halves of a 256-sort. ``out_mode``: "bf16" = weighted bf16 partials for
+    ``moe_flydsl_common.reduce_bf16``; "fp8" = unweighted fp8 e4m3 partials +
+    e8m0 per 32 columns (ceil_pow2(amax/448)) for ``reduce_fp8``, half the partial
+    traffic, one more quantization. Both deterministic.
     """
     assert out_mode in OUT_MODES, out_mode
     MODE = out_mode
@@ -255,8 +229,8 @@ def compile_moe_gemm2(
             )
             block_valid = block_valid & ((first_sid & fx.Int32(0x00FFFFFF)) < n_tokens)
         chunk_n0 = chunk * NT  # first n-tile (global index) of this CTA
-        # ---- rotated n-tile sweep inside runs of >= 4 same-expert m-tiles (see the
-        # a4w4 kernel: neighbouring CTAs then find their next W2 tile in L2) ----
+        # ---- rotated n-tile sweep inside runs of >= 4 same-expert m-tiles:
+        # neighbouring CTAs then find their next W2 tile in L2 ----
         ROT_STRIDE, ROT_GATE = 2, 3
         _d = fx.Int32(ROT_GATE)
         _lo_ok = tile_i >= _d
@@ -280,8 +254,6 @@ def compile_moe_gemm2(
             )
         )
         rot_on = (_lo_ok & (_e_lo == expert)) | (_hi_ok & (_e_hi == expert))
-        if const_expr(not rotate):
-            rot_on = rot_on & (fx.Int32(0) == fx.Int32(1))
         nt_rot = rot_on.select(
             _divmod_nonneg(tile_i * fx.Int32(ROT_STRIDE), NT)[1], fx.Int32(0)
         )
@@ -482,18 +454,12 @@ def compile_moe_gemm2(
             sc0_sbC0, sc0_sbC1 = b_scale_ld.read(_slot(0, 0))
             sc0 = (sc0_saR0, sc0_saR1, sc0_sbC0, sc0_sbC1)
 
-            # Per step kc (0..5) of n-tile nt, in issue order: B(kc+3) b0 (NB) b1
-            # (NB), a0(kc+2) (NA), [MID] scale gather (odd kc), a1(kc+2) (NA). B for
-            # flat step f goes to stage f % 3 (the stage consumed in this step: its
-            # halves were read into registers in the previous step), A to stage
-            # f % 2. Loop-top wait: a1(kc) landed (issued last in step kc-2), i.e.
-            # all of step kc-1's loads may fly; MID: a0(kc+1) landed (issued in step
-            # kc-1 before its gather and a1), B(kc+1) is older. Both counts are the
-            # loads issued after the one needed; the epilogue stores are not
-            # counted: stores and loads retire out of order with respect to each
-            # other (LLVM's SIInsertWaitcnts: mixed pending events), so a count that
-            # included them could pass with the needed loads still in flight
-            # (measured: races in the first n-tile).
+            # Per step kc of n-tile nt, in issue order: B(kc+3) b0 b1, a0(kc+2),
+            # [MID] scale gather (odd kc), a1(kc+2); B of flat step f in stage f % 3,
+            # A in stage f % 2. Loop-top wait: a1(kc) landed = all of step kc-1's
+            # loads may fly; MID wait: a0(kc+1) landed. vmcnt counts loads only:
+            # stores retire out of order with respect to loads, so the epilogue
+            # stores must not be counted (they were: races in the first n-tile).
             def _top_vmcnt(kc):
                 return 2 * NB + 2 * NA + (1 - kc % 2)
 

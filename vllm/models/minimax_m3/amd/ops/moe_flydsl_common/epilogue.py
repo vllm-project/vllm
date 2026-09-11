@@ -18,12 +18,6 @@ def _lds_ptr(addr_i32):
     return _llvm.inttoptr(_lds_ptr_t(), fx.as_ir_value(addr_i32))
 
 
-def _lds_load_i32(addr_i32):
-    return fx.Int32(
-        _llvm.LoadOp(fx.Int32.ir_type, _lds_ptr(addr_i32), alignment=4).result
-    )
-
-
 def _lds_load_vec(addr_i32, n):
     ty = _ir.VectorType.get([n], _T.i32)
     return _llvm.LoadOp(ty, _lds_ptr(addr_i32), alignment=4 * n).result
