@@ -81,6 +81,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "DeepseekV4ForCausalLM",
         "DeepseekV4ForConditionalGeneration",
         "DeepSeekV4MTPModel",
+        "DeepseekV41ForCausalLM",
         "Dots3NoteForCausalLM",
         "Dots3NoteMTPModel",
         "Glm5NextForCausalLM",
@@ -991,6 +992,28 @@ class VllmConfig:
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
 
+    def _normalize_piecewise_cudagraph_mode(
+        self, *, breakable_cudagraph_enabled: bool
+    ) -> None:
+        compilation_config = self.compilation_config
+        if (
+            compilation_config.cudagraph_mode.requires_piecewise_compilation()
+            and compilation_config.mode != CompilationMode.VLLM_COMPILE
+            and not breakable_cudagraph_enabled
+        ):
+            fallback_mode = compilation_config.cudagraph_mode.without_piecewise()
+            logger.info_once(
+                "Cudagraph mode %s is not compatible with compilation mode %s. "
+                "Overriding to %s.",
+                compilation_config.cudagraph_mode,
+                compilation_config.mode,
+                fallback_mode,
+            )
+            compilation_config.cudagraph_mode = fallback_mode
+            if fallback_mode == CUDAGraphMode.NONE:
+                compilation_config.max_cudagraph_capture_size = 0
+                compilation_config.cudagraph_capture_sizes = []
+
     def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.
 
@@ -1536,18 +1559,9 @@ class VllmConfig:
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
-        if (
-            self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
-            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
-            and not envs.VLLM_USE_BREAKABLE_CUDAGRAPH
-        ):
-            logger.info_once(
-                "Cudagraph mode %s is not compatible with compilation mode %s."
-                "Overriding to NONE.",
-                self.compilation_config.cudagraph_mode,
-                self.compilation_config.mode,
-            )
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        self._normalize_piecewise_cudagraph_mode(
+            breakable_cudagraph_enabled=breakable_cudagraph_enabled
+        )
 
         # async tp is built on top of sequence parallelism and requires it.
         pass_config = self.compilation_config.pass_config
@@ -1716,8 +1730,13 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
+        self._normalize_piecewise_cudagraph_mode(
+            breakable_cudagraph_enabled=breakable_cudagraph_enabled
+        )
+
         self._resolve_mm_embedding_inputs()
         self._resolve_mm_processor_device()
+        self._resolve_mm_video_decode_device()
         self._validate_mm_processor_device()
 
         if self.use_v2_model_runner:
@@ -2605,6 +2624,61 @@ class VllmConfig:
             device_type,
         )
 
+    def _resolve_mm_video_decode_device(self) -> None:
+        """Default video decoding to torchcodec GPU backend for EPD encoder-only
+        instance if the mm processor runs on CUDA.
+
+        The processor consumes the decoded frames on-device in that case, so
+        keeping the frames on the GPU skips the host round-trip through the
+        CPU media path. An explicit codec/backend choice in
+        `--media-io-kwargs` is left alone, and the default is skipped where
+        torchcodec (or its FFmpeg runtime) is unavailable.
+        """
+        if self.model_config is None or self.model_config.multimodal_config is None:
+            return
+        mm_config = self.model_config.multimodal_config
+
+        ec_config = self.ec_transfer_config
+        # An EC producer that is not also a consumer runs no forward pass and
+        # allocates no KV cache, so frontend accelerator work has the device to
+        # itself.
+        if ec_config is None or not ec_config.is_encode_only:
+            return
+
+        from vllm.platforms import current_platform
+
+        device_type = current_platform.device_type
+        if (
+            device_type != "cuda"
+            or mm_config.get_mm_processor_device_type() != device_type
+        ):
+            return
+
+        # User set video backend or device explicitly
+        video_kwargs = mm_config.media_io_kwargs.setdefault("video", {})
+        if "backend" in video_kwargs or "device" in video_kwargs:
+            return
+
+        from vllm.utils.import_utils import check_torchcodec_available
+
+        try:
+            check_torchcodec_available()
+        except (ImportError, RuntimeError):
+            # torchcodec is not installed, or is installed without a usable
+            # FFmpeg runtime (it raises rather than returning False).
+            logger.info_once(
+                "EPD encoder instance: keeping CPU video decoding because "
+                "torchcodec is not available (needs a CUDA build with FFmpeg)."
+            )
+            return
+
+        video_kwargs["backend"] = "torchcodec"
+        video_kwargs["device"] = device_type
+        logger.info_once(
+            "EPD encoder instance: decoding video with NVDEC (torchcodec device=%s).",
+            device_type,
+        )
+
     def _validate_mm_processor_device(self) -> None:
         """Hand the EC config to `MultiModalConfig`, which owns the rule."""
         model_config = self.model_config
@@ -2728,12 +2802,11 @@ class VllmConfig:
                 "Adaptive verification is not currently compatible with LoRA"
             )
 
-        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-            # The draft budget divides by step costs profiled from captured
-            # cudagraphs; eager execution captures none.
+        if not self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             raise ValueError(
-                "Adaptive verification is not currently compatible with "
-                "enforce_eager/cudagraph_mode=none"
+                "Adaptive verification requires full CUDA graphs. Use cudagraph "
+                "mode FULL, FULL_DECODE_ONLY, or FULL_AND_PIECEWISE, or disable "
+                "adaptive verification."
             )
 
         if self.parallel_config.pipeline_parallel_size > 1:
