@@ -1,4 +1,6 @@
-# tests/entrypoints/openai/test_listen.py
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import errno
 import socket
 from argparse import Namespace
