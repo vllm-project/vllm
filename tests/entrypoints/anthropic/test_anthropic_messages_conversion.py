@@ -2117,3 +2117,20 @@ class TestMidConversationToolChanges:
             ValidationError, match='only allowed in messages with role "system"'
         ):
             request_cls(model="test-model", max_tokens=128, **fields)
+
+
+class TestWatermarking:
+    def test_defaults_to_unspecified(self):
+        request = _make_request([{"role": "user", "content": "hi"}])
+
+        assert _convert(request).watermarking is None
+
+    def test_forwards_explicit_enable(self):
+        request = _make_request([{"role": "user", "content": "hi"}], watermarking=True)
+
+        assert _convert(request).watermarking is True
+
+    def test_forwards_the_opt_out(self):
+        request = _make_request([{"role": "user", "content": "hi"}], watermarking=False)
+
+        assert not _convert(request).watermarking
