@@ -68,6 +68,11 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
+def _get_arange_buffer_size(max_batch_size: int, max_num_tokens: int) -> int:
+    """Return the capacity needed for token and query boundary indices."""
+    return max(max_batch_size, max_num_tokens) + 1
+
+
 class SpecDecodeBaseProposer:
     def __init__(
         self,
@@ -202,8 +207,10 @@ class SpecDecodeBaseProposer:
         self.block_size: int = -1
 
         # We need +1 here because the arange is used to set query_start_loc,
-        # which has one more element than batch_size.
-        max_num_slots_for_arange = max(self.max_batch_size + 1, self.max_num_tokens)
+        # which has one more element than the corresponding item count.
+        max_num_slots_for_arange = _get_arange_buffer_size(
+            self.max_batch_size, self.max_num_tokens
+        )
         self.arange = torch.arange(
             max_num_slots_for_arange, device=device, dtype=torch.int32
         )

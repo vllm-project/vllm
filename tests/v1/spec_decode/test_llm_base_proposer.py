@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for SpecDecodeBaseProposer.initialize_attn_backend.
+"""Tests for SpecDecodeBaseProposer.
 
 Block tables are stored at kernel-block granularity, so the proposer's
 ``block_size`` (used for slot-mapping math) must be the kernel block size,
@@ -20,6 +20,23 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 
 SCHEDULER_BLOCK_SIZE = 256
 KERNEL_BLOCK_SIZE = 64
+
+
+@pytest.mark.parametrize(
+    ("max_batch_size", "max_num_tokens", "expected_size"),
+    [
+        pytest.param(60, 240, 241, id="token-bound"),
+        pytest.param(256, 128, 257, id="batch-bound"),
+        pytest.param(128, 128, 129, id="equal-bounds"),
+    ],
+)
+def test_arange_buffer_includes_boundary(
+    max_batch_size: int, max_num_tokens: int, expected_size: int
+):
+    assert (
+        llm_base_proposer._get_arange_buffer_size(max_batch_size, max_num_tokens)
+        == expected_size
+    )
 
 
 class _FakeAttentionGroup:
