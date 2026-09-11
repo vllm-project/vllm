@@ -162,6 +162,11 @@ void cutlass_gemm_caller_blockwise(torch::stable::Tensor& out, torch::stable::Te
   c_stride =
       cutlass::make_cute_packed_stride(StrideC{}, swap_ab ? cute::make_shape(n, m, 1) : cute::make_shape(m, n, 1));
 
+  cute::get<0>(a_stride) = a.stride(0);
+  cute::get<0>(b_stride) = b.stride(1);
+  // Swapping A and B transposes the output layout.
+  cute::get<swap_ab ? 1 : 0>(c_stride) = out.stride(0);
+
   LayoutSFA layout_SFA = swap_ab ? 
       ScaleConfig::tile_atom_to_shape_SFA(make_shape(n, m, k, 1)) :
       ScaleConfig::tile_atom_to_shape_SFA(make_shape(m, n, k, 1));
