@@ -61,6 +61,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     FP8_SCALE_SENTINEL,
@@ -105,12 +106,17 @@ from vllm.model_executor.utils import (
     replace_parameter,
     set_weight_attrs,
 )
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
+
+# ``FP8_PB_WO`` is ModelOpt's canonical 2D block-FP8 name. Early composed
+# Qwen3.8-Flash-Next checkpoints used ``FP8_BLOCK_SCALES`` for the same tensor
+# layout, so retain it as a checkpoint-compatibility alias.
+_BLOCK_FP8_MOE_ALGOS = ("FP8_PB_WO", "FP8_BLOCK_SCALES")
 
 # Single source of truth for the ModelOpt linear algos.
 #
@@ -1017,7 +1023,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
         replace_parameter(layer, "w2_input_scale", a2_scale)
 
-        # Setup modular kernel.
+        self._build_moe_kernel(layer)
+
+    def _build_moe_kernel(self, layer: RoutedExperts) -> None:
+        """Build the modular MoE kernel from the (already in-format) weights."""
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None
         self.moe_kernel = make_nvfp4_moe_kernel(
@@ -1043,7 +1052,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 "weight cache IPC for NVFP4 MoE is only verified with the "
                 f"FLASHINFER_TRTLLM backend, got {self.nvfp4_backend}"
             )
-        self._restore_trtllm_moe_config_padding(layer)
+        self._restore_padded_moe_dims(layer)
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None
         self.moe_kernel = make_nvfp4_moe_kernel(
@@ -1055,23 +1064,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
-    def _restore_trtllm_moe_config_padding(self, layer: RoutedExperts) -> None:
-        """Reapply the padded dims align_*_for_fi stamps on ``moe_config``.
-
-        Mirrors align_trtllm_fp4_moe_hidden_dim_for_fi (hidden -> 256) and
-        align_fp4_moe_weights_for_fi (local intermediate -> 64 gated / 128) so
-        the kernel sees the same shapes it did on the exporting side.
-        """
+    def _restore_padded_moe_dims(self, layer: RoutedExperts) -> None:
+        """Recover the padded `moe_config` dims from the exported weights."""
         mc = layer.moe_config
-        padded_hidden = round_up(mc.hidden_dim, 256)
+        padded_hidden = layer.w2_weight.shape[1]
         if padded_hidden != mc.hidden_dim:
             if mc.hidden_dim_unpadded is None:
                 mc.hidden_dim_unpadded = mc.hidden_dim
             mc.hidden_dim = padded_hidden
-        min_alignment = 64 if layer.activation.is_gated else 128
-        mc.intermediate_size_per_partition = round_up(
-            mc.intermediate_size_per_partition, min_alignment
-        )
+        mc.intermediate_size_per_partition = layer.w2_weight.shape[2] * 2
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         return make_nvfp4_moe_quant_config(
@@ -1545,11 +1546,28 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         self.w4a16_nvfp4_config = w4a16_nvfp4_config
         self.mxfp8_config = mxfp8_config
 
+        block_sizes = {
+            int(layer_info.get("group_size", 128))
+            for layer_info in quantized_layers.values()
+            if layer_info.get("quant_algo", "").upper() in _BLOCK_FP8_MOE_ALGOS
+        }
+        if len(block_sizes) > 1:
+            raise ValueError(
+                "MIXED_PRECISION currently requires all block-FP8 MoE layers "
+                f"to use one group_size, got {sorted(block_sizes)}."
+            )
+        block_size = next(iter(block_sizes), 128)
+        self.fp8_block_config = Fp8Config(
+            is_checkpoint_fp8_serialized=True,
+            activation_scheme="dynamic",
+            weight_block_size=[block_size, block_size],
+        )
+
     def has_blocked_weights(self) -> bool:
         # Same gate as ModelOptFp8Config.has_blocked_weights, resolved per
         # layer: "+quant_fp8" must be on as soon as any layer is block-scaled.
         return any(
-            info.get("quant_algo", "").upper() == "FP8_PB_WO"
+            info.get("quant_algo", "").upper() in _BLOCK_FP8_MOE_ALGOS
             for info in self.quantized_layers.values()
         )
 
@@ -1784,6 +1802,8 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             return build_linear_method(getattr(self, subcfg_attr), quant_algo, prefix)
 
         if isinstance(layer, RoutedExperts):
+            if quant_algo in _BLOCK_FP8_MOE_ALGOS:
+                return Fp8MoEMethod(self.fp8_block_config, layer)
             if quant_algo == "FP8":
                 return ModelOptFp8MoEMethod(
                     quant_config=self.fp8_config,
@@ -1850,6 +1870,7 @@ class CkptCtx:
     """Per-checkpoint facts a QuantKey cannot carry."""
 
     group_size: int | None = None
+    scale_block_size: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -2182,6 +2203,23 @@ class KMxfp8Static(QuantKeyScheme):
 
     key = kMxfp8Static
 
+    @staticmethod
+    def get_scale_weight_loader(weight_loader: Callable, ctx: CkptCtx) -> Callable:
+        block_rows, block_cols = ctx.scale_block_size or (1, MXFP8_BLOCK_SIZE)
+        if block_rows < 1 or block_cols != MXFP8_BLOCK_SIZE:
+            raise NotImplementedError(
+                f"MXFP8 checkpoint scale block {ctx.scale_block_size} is unsupported"
+            )
+
+        def scaled_loader(param, loaded_weight, *args, **kwargs):
+            assert loaded_weight.dtype in (torch.uint8, torch.float8_e8m0fnu)
+            loaded_weight = loaded_weight.view(torch.uint8).repeat_interleave(
+                block_rows, dim=0
+            )
+            return weight_loader(param, loaded_weight, *args, **kwargs)
+
+        return scaled_loader if block_rows > 1 else weight_loader
+
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is not WEIGHT:
             self.reject(role)
@@ -2200,6 +2238,7 @@ class KMxfp8Static(QuantKeyScheme):
             input_dim=1,
             output_dim=0,
         )
+        scale_loader = self.get_scale_weight_loader(wl, ctx)
         self.register_params(
             layer,
             "weight_scale",
@@ -2209,10 +2248,11 @@ class KMxfp8Static(QuantKeyScheme):
             ),
             MXFP8_SCALE_DTYPE,
             ModelWeightParameter,
-            wl,
+            scale_loader,
             input_dim=1,
             output_dim=0,
         )
+        layer.weight_block_size = [1, MXFP8_BLOCK_SIZE]
 
     def process(self, layer, role) -> None:
         if role is not WEIGHT:
@@ -2222,6 +2262,8 @@ class KMxfp8Static(QuantKeyScheme):
         # on). On a weight reload process runs again after that swap, so skip
         # the fp8 asserts when the weight is already >=2-byte.
         if layer.weight.element_size() >= 2:
+            return
+        if getattr(layer, "is_bmm", False) and layer.weight.ndim == 3:
             return
         assert layer.weight.ndim == 2 and layer.weight.dtype == MXFP8_VALUE_DTYPE
         assert layer.weight_scale.ndim == 2
@@ -2284,7 +2326,9 @@ def select_linear_kernel(
         # after #50273); W4A4 → use_a16=False.
         return init_nvfp4_linear_kernel(use_a16=spec.activation is None)
     if w.scale.dtype == MXFP8_SCALE_DTYPE:
-        return init_mxfp8_linear_kernel()
+        return init_mxfp8_linear_kernel(
+            bmm_batch_size=getattr(layer, "bmm_batch_size", None)
+        )
     # fp8 family: init_fp8 routes block-vs-plain itself off the activation key,
     # and needs a real key -- weight-only fp8 is not a ModelOpt format.
     act = spec.activation
@@ -2450,6 +2494,12 @@ class ModelOptLinearMethod(LinearMethodBase):
         # NVFP4 methods.
         self.kernel: Any = None
 
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        # TODO(Isotr0py): support fp8/mxfp8 ModelOpt kernels transpose/repack.
+        w = self.spec.weight
+        return isinstance(w, QuantKey) and w.dtype == FP4_DTYPE
+
     def create_weights(
         self,
         layer,
@@ -2504,6 +2554,32 @@ class ModelOptLinearMethod(LinearMethodBase):
             self.akey.process(layer, ACT)
         maybe_fuse_global_scales(layer)
         self.fmt.post_process(layer)
+        layer.is_w4a16_nvfp4 = (
+            self.spec.weight == kNvfp4Static and self.spec.activation is None
+        )
+        if getattr(layer, "_retain_weight_for_gather", False):
+            if not layer.is_w4a16_nvfp4:
+                raise NotImplementedError(
+                    "Gathered projection is only supported for ModelOpt W4A16 "
+                    "NVFP4 weights."
+                )
+            assert self.ctx.group_size is not None
+            layer.register_buffer(
+                "_nvfp4_weight_for_gather", layer.weight.detach(), persistent=False
+            )
+            layer.register_buffer(
+                "_nvfp4_weight_scale_for_gather",
+                layer.weight_scale.detach(),
+                persistent=False,
+            )
+            layer.register_buffer(
+                "_nvfp4_weight_global_scale_for_gather",
+                layer.weight_global_scale.detach(),
+                persistent=False,
+            )
+            layer._nvfp4_group_size_for_gather = self.ctx.group_size
+        if self.spec.weight == kMxfp8Static and getattr(layer, "is_bmm", False):
+            self.kernel = init_mxfp8_linear_kernel(bmm_batch_size=layer.bmm_batch_size)
         self.kernel.process_weights_after_loading(layer)
 
     def apply(self, layer, x, bias=None):

@@ -108,6 +108,12 @@ def restore_nvfp4_cutlass_padding_cols(layer: torch.nn.Module) -> None:
     packed_cols = layer.weight.shape[1]
     logical_packed_cols = layer.input_size_per_partition // 2
     layer.weights_padding_cols = packed_cols - logical_packed_cols
+def nvfp4_weight_padding_bytes(layer: torch.nn.Module) -> int:
+    """
+    Compute K-dim padding (packed bytes) of an NVFP4 weight,
+    Aligned with `pad_nvfp4_weight_for_cutlass` above.
+    """
+    return layer.weight.shape[1] - layer.input_size_per_partition // 2
 
 
 def pad_nvfp4_activation_for_cutlass(
