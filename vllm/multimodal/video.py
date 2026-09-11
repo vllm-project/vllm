@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from abc import abstractmethod
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar, TypeAlias, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -27,6 +27,10 @@ except ImportError:
 
 
 logger = init_logger(__name__)
+
+DecodedFrames: TypeAlias = npt.NDArray | torch.Tensor
+"""Decoded video frames: a host ``np.ndarray``, or a device ``torch.Tensor``
+when a GPU decoding codec is used (e.g. torchcodec with ``device="cuda"``)."""
 
 
 class VideoLoaderRegistry(ExtensionManager):
@@ -164,8 +168,13 @@ class VideoLoader:
         cls,
         data: bytes,
         **kwargs,
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
-        """Load video frames from bytes and return (frames_array, metadata_dict)."""
+    ) -> tuple[DecodedFrames, dict[str, Any]]:
+        """Load video frames from bytes and return (frames, metadata_dict).
+
+        ``frames`` is a CPU ``np.ndarray`` unless a GPU decoding codec is
+        used (e.g. torchcodec with ``device="cuda"``), in which case it is
+        a ``torch.Tensor`` living on that device.
+        """
         raise NotImplementedError
 
     @classmethod
@@ -239,7 +248,7 @@ class VideoBackend(VideoLoader):
         *,
         backend: VideoDecoderBackend = "opencv",
         **kwargs: Any,
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
+    ) -> tuple[DecodedFrames, dict[str, Any]]:
         """Load sampled frames from raw video bytes.
 
         Args:
@@ -265,6 +274,11 @@ class VideoBackend(VideoLoader):
                   creation at the cost of relying on the file's metadata. See
                   https://meta-pytorch.org/torchcodec/stable/generated_examples/decoding/approximate_mode.html
                   for details.
+                - ``device`` (TorchCodec): ``"cpu"`` (default) decodes on the
+                  host and returns a ``np.ndarray``; ``"cuda"`` decodes with
+                  NVDEC and returns the frames as a CUDA ``torch.Tensor``,
+                  which a device-side HF video processor can consume without
+                  a host round-trip.
                 - ``hw_decoders`` (PyNvVideoCodec): maximum number of
                   concurrent decoder slots. Defaults to 2 and must be a
                   positive integer.
@@ -272,7 +286,8 @@ class VideoBackend(VideoLoader):
                   size and pool acquisition timeout in seconds.
 
         Returns:
-            Tuple of ``(frames_array, metadata_dict)``.
+            Tuple of ``(frames, metadata_dict)``, where ``frames`` is a
+            CPU ``np.ndarray`` unless TorchCodec decodes on ``device="cuda"``.
         """
         target = VideoTargetMetadata(
             num_frames=num_frames, fps=fps, max_duration=max_duration
