@@ -232,7 +232,7 @@ class ConvertReqIndexToGlobalIndexKernel(
         dcp_size = vllm_config.parallel_config.decode_context_parallel_size
         dcp_interleave = vllm_config.parallel_config.cp_kv_cache_interleave_size
         dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
-        num_topk_tokens = vllm_config.model_config.hf_config.index_topk
+        num_topk_tokens = vllm_config.model_config.hf_text_config.index_topk
         max_num_blocks = cdiv(
             vllm_config.model_config.max_model_len,
             block_size * dcp_size,
