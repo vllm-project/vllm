@@ -259,6 +259,62 @@ def test_cutlass_fp8_blockwise_scale_gemm(
     cutlass_fp8_gemm_helper(m, n, k, a_scale_group_shape, b_scale_group_shape, use_bias)
 
 
+@pytest.mark.parametrize("m", [8, 16])
+@pytest.mark.parametrize("padded", ["packed", "a", "b", "out"])
+@pytest.mark.skipif(
+    not 100 <= capability < 120,
+    reason="Requires the SM100 blockwise FP8 CUTLASS caller.",
+)
+def test_cutlass_fp8_sm100_blockwise_leading_strides(m: int, padded: str):
+    """Block scaling must preserve logical values across aligned leading padding."""
+    # M=8 swaps A/B; M=16 uses the normal layout and TMA epilogue.
+    n, k, padding = 256, 256, 128
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    a_packed = torch.randint(-2, 3, (m, k), device="cuda", generator=generator).to(
+        torch.float8_e4m3fn
+    )
+    b_packed = (
+        torch.randint(-2, 3, (n, k), device="cuda", generator=generator)
+        .to(torch.float8_e4m3fn)
+        .t()
+    )
+    a = a_packed
+    b = b_packed
+    if padded == "a":
+        a = torch.zeros((m, k + padding), dtype=a.dtype, device="cuda")[:, :k]
+        a.copy_(a_packed)
+    if padded == "b":
+        b = torch.zeros((n, k + padding), dtype=b.dtype, device="cuda")[:, :k].t()
+        b.copy_(b_packed)
+
+    scale_a = torch.tensor(
+        [[0.25, 0.5], [0.5, 0.125]], dtype=torch.float32, device="cuda"
+    ).repeat(m // 2, 1)
+    scale_b = torch.tensor(
+        [[0.5, 0.25], [0.125, 1.0]], dtype=torch.float32, device="cuda"
+    )
+    scale_a = scale_a.t().contiguous().t()
+    scale_b = scale_b.t().contiguous().t()
+    out_dtype = torch.bfloat16
+    sentinel = -1024
+    out_storage = torch.full(
+        (m, n + (padding if padded == "out" else 0)),
+        sentinel,
+        dtype=out_dtype,
+        device="cuda",
+    )
+    out = out_storage[:, :n]
+    expected = baseline_scaled_mm(a_packed, b_packed, scale_a, scale_b, out_dtype)
+    packed_out = ops.cutlass_scaled_mm(a_packed, b_packed, scale_a, scale_b, out_dtype)
+    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, None)
+
+    # Integer operands and dyadic block scales keep the FP32 reference exact.
+    torch.testing.assert_close(packed_out, expected, rtol=0, atol=0)
+    torch.testing.assert_close(out, packed_out, rtol=0, atol=0)
+    if padded == "out":
+        assert torch.all(out_storage[:, n:] == sentinel)
+
+
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize(
     "a_scale_group_shape", [PER_TOKEN_GROUP_SHAPE, TENSORWISE_GROUP_SHAPE]
