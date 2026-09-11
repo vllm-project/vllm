@@ -784,10 +784,10 @@ class SimpleCPUOffloadScheduler:
         return merged_gpu_block_ids, merged_cpu_block_ids, req_ids, merged_block_meta
 
     def _cached_gpu_block(
-        self, resolved_hashes: "BlockHashList", block_idx: int, group_id: int
+        self, resolved_hashes: "BlockHashList | None", block_idx: int, group_id: int
     ) -> "KVCacheBlock | None":
         """Return the GPU block still cached under this group's block hash."""
-        if block_idx >= len(resolved_hashes):
+        if resolved_hashes is None or block_idx >= len(resolved_hashes):
             return None
         assert self._gpu_block_pool is not None
         blocks = self._gpu_block_pool.get_cached_block(
@@ -837,10 +837,15 @@ class SimpleCPUOffloadScheduler:
             # FIXME (yifan): handle CPU cache eviction, where
             # num_stored_blocks can be stale and omit evicted blocks in
             # the middle of the request.
+            spec = self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec
             group_size = self.group_block_sizes[g]
             ready = min(len(group_gpu_ids), aligned_tokens // group_size)
-            resolved_hashes = resolve_block_hashes(
-                request.block_hashes, self.hash_block_size, group_size
+            resolved_hashes = (
+                resolve_block_hashes(
+                    request.block_hashes, self.hash_block_size, group_size
+                )
+                if spec.prefix_cacheable and group_size >= self.hash_block_size
+                else None
             )
             curr_mm_idx = 0
             secondary_mm_idx = 0
