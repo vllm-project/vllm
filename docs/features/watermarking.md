@@ -72,10 +72,9 @@ watermarked. The watermark signal is diluted in proportion to the share of
 output tokens supplied by accepted drafts; rejected drafts do not dilute it
 because their recovery tokens are watermarked.
 
-!!! important
-    Speculative-decoding token paths do not currently support generation-side
-    context deduplication. The configured `deduplicate_contexts` policy is not
-    applied to accepted drafts, rejection-recovery tokens, or bonus tokens.
+Speculative-decoding token paths do not currently support generation-side
+context deduplication. The configured `deduplicate_contexts` policy is not
+applied to accepted drafts, rejection-recovery tokens, or bonus tokens.
 
 For `dual_key_gumbel`, `alpha` has no effect under speculative decoding. The
 speculative protocol selects the key for each token instead.
@@ -202,7 +201,12 @@ print(result.p_value, result.is_watermarked)
 
 The detection configuration must match the generation configuration, including
 the tokenizer, PRF, watermarking algorithm, algorithm-specific watermarking
-configuration, and key.
+configuration, and key. In practice, this information is often unavailable
+when checking a piece of text. Deployments should therefore retain the set of
+candidate configurations they have served, test the text against each
+candidate, and correct for multiple testing, for example with a Bonferroni
+correction to the resulting p-values.
+
 Gumbel-max detection scores repeated contexts once by default so identical PRF
 random vectors are not treated as independent evidence. Keep
 `deduplicate_contexts=True` unless the detector's calibration has been adjusted
