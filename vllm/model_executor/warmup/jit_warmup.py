@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, fields
+from functools import wraps
 from typing import Any, Generic, TypeVar, cast
 
 __all__ = [
@@ -966,6 +967,19 @@ class JitWarmupRegistry:
             VllmJitKernel[Any],
             list[tuple[tuple[Any, ...], dict[str, Any]]],
         ] = {}
+
+    @classmethod
+    def capture(cls, init_fn: Callable[..., None]) -> Callable[..., None]:
+        """Collect warmup registrations made while the decorated callable runs."""
+
+        @wraps(init_fn)
+        def wrapped(instance: Any, vllm_config: Any, *args: Any, **kwargs: Any) -> None:
+            registry = cls(vllm_config)
+            instance.jit_warmup_registry = registry
+            with registry.activate():
+                init_fn(instance, vllm_config, *args, **kwargs)
+
+        return wrapped
 
     @contextmanager
     def activate(self) -> Iterator[None]:

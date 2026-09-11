@@ -498,6 +498,7 @@ class ExecuteModelState(NamedTuple):
 class GPUModelRunner(
     LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ECConnectorModelRunnerMixin
 ):
+    @JitWarmupRegistry.capture
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -514,7 +515,6 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
-        self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -590,11 +590,10 @@ class GPUModelRunner(
         self._pp_recv_work: torch.distributed.Work | None = None
 
         # Sampler
-        with self.jit_warmup_registry.activate():
-            self.sampler = Sampler(
-                logprobs_mode=self.model_config.logprobs_mode,
-                use_fp64_gumbel=self.model_config.use_fp64_gumbel,
-            )
+        self.sampler = Sampler(
+            logprobs_mode=self.model_config.logprobs_mode,
+            use_fp64_gumbel=self.model_config.use_fp64_gumbel,
+        )
 
         self.eplb_state: EplbState | None = None
         self._moe_model: MixtureOfExperts | None = None
@@ -639,72 +638,69 @@ class GPUModelRunner(
                 | Gemma4Proposer
                 | Step3p5MTPProposer
             )
-            with self.jit_warmup_registry.activate():
-                if self.speculative_config.method == "custom_class":
-                    self.drafter = create_custom_proposer(  # type: ignore[assignment]
-                        self.vllm_config
-                    )
-                elif self.speculative_config.method == "ngram":
-                    from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-
-                    self.drafter = NgramProposer(self.vllm_config)
-                elif self.speculative_config.uses_draft_model():
-                    self.drafter = DraftModelProposer(
-                        vllm_config=self.vllm_config,
-                        device=self.device,
-                        runner=self,
-                    )
-                elif self.speculative_config.use_ngram_gpu():
-                    self.drafter = NgramProposerGPU(self.vllm_config, self.device, self)
-                    self.num_tokens_no_spec_gpu = torch.zeros(
-                        self.max_num_reqs, dtype=torch.int32, device=device
-                    )
-                    self.token_ids_gpu_tensor = torch.zeros(
-                        self.max_num_reqs,
-                        self.max_model_len,
-                        dtype=torch.int32,
-                        device=device,
-                    )
-                    self._ngram_pinned_idx_buf = torch.zeros(
-                        self.max_num_reqs, dtype=torch.long, pin_memory=True
-                    )
-                    self._ngram_pinned_val_buf = torch.zeros(
-                        self.max_num_reqs, dtype=torch.int32, pin_memory=True
-                    )
-                elif self.speculative_config.use_gemma4_mtp():
-                    self.drafter = Gemma4Proposer(self.vllm_config, self.device, self)
-                elif self.speculative_config.use_step3p5_mtp():
-                    self.drafter = Step3p5MTPProposer(
-                        self.vllm_config, self.device, self
-                    )
-                elif self.speculative_config.use_dflash():
-                    self.drafter = DFlashProposer(self.vllm_config, self.device, self)
-                    self.use_aux_hidden_state_outputs = True
-                elif self.speculative_config.method == "suffix":
-                    self.drafter = SuffixDecodingProposer(self.vllm_config)
-                elif self.speculative_config.use_eagle():
-                    self.drafter = EagleProposer(self.vllm_config, self.device, self)
-                    if self.speculative_config.method == "eagle3":
-                        self.use_aux_hidden_state_outputs = (
-                            self.drafter.eagle3_use_aux_hidden_state
-                        )
-                elif self.speculative_config.method == "medusa":
-                    self.drafter = MedusaProposer(
-                        vllm_config=self.vllm_config, device=self.device
-                    )
-                elif self.speculative_config.method == "extract_hidden_states":
-                    self.drafter = ExtractHiddenStatesProposer(
-                        vllm_config=self.vllm_config, device=self.device
-                    )
-                    self.use_aux_hidden_state_outputs = True
-                else:
-                    raise ValueError(
-                        "Unknown speculative decoding method: "
-                        f"{self.speculative_config.method}"
-                    )
-                self.rejection_sampler = RejectionSampler(
-                    self.sampler, self.speculative_config, self.device
+            if self.speculative_config.method == "custom_class":
+                self.drafter = create_custom_proposer(  # type: ignore[assignment]
+                    self.vllm_config
                 )
+            elif self.speculative_config.method == "ngram":
+                from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+
+                self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.uses_draft_model():
+                self.drafter = DraftModelProposer(
+                    vllm_config=self.vllm_config,
+                    device=self.device,
+                    runner=self,
+                )
+            elif self.speculative_config.use_ngram_gpu():
+                self.drafter = NgramProposerGPU(self.vllm_config, self.device, self)
+                self.num_tokens_no_spec_gpu = torch.zeros(
+                    self.max_num_reqs, dtype=torch.int32, device=device
+                )
+                self.token_ids_gpu_tensor = torch.zeros(
+                    self.max_num_reqs,
+                    self.max_model_len,
+                    dtype=torch.int32,
+                    device=device,
+                )
+                self._ngram_pinned_idx_buf = torch.zeros(
+                    self.max_num_reqs, dtype=torch.long, pin_memory=True
+                )
+                self._ngram_pinned_val_buf = torch.zeros(
+                    self.max_num_reqs, dtype=torch.int32, pin_memory=True
+                )
+            elif self.speculative_config.use_gemma4_mtp():
+                self.drafter = Gemma4Proposer(self.vllm_config, self.device, self)
+            elif self.speculative_config.use_step3p5_mtp():
+                self.drafter = Step3p5MTPProposer(self.vllm_config, self.device, self)
+            elif self.speculative_config.use_dflash():
+                self.drafter = DFlashProposer(self.vllm_config, self.device, self)
+                self.use_aux_hidden_state_outputs = True
+            elif self.speculative_config.method == "suffix":
+                self.drafter = SuffixDecodingProposer(self.vllm_config)
+            elif self.speculative_config.use_eagle():
+                self.drafter = EagleProposer(self.vllm_config, self.device, self)
+                if self.speculative_config.method == "eagle3":
+                    self.use_aux_hidden_state_outputs = (
+                        self.drafter.eagle3_use_aux_hidden_state
+                    )
+            elif self.speculative_config.method == "medusa":
+                self.drafter = MedusaProposer(
+                    vllm_config=self.vllm_config, device=self.device
+                )
+            elif self.speculative_config.method == "extract_hidden_states":
+                self.drafter = ExtractHiddenStatesProposer(
+                    vllm_config=self.vllm_config, device=self.device
+                )
+                self.use_aux_hidden_state_outputs = True
+            else:
+                raise ValueError(
+                    "Unknown speculative decoding method: "
+                    f"{self.speculative_config.method}"
+                )
+            self.rejection_sampler = RejectionSampler(
+                self.sampler, self.speculative_config, self.device
+            )
 
         self.num_spec_tokens = 0
         self.prev_num_spec_tokens = 0
@@ -754,36 +750,35 @@ class GPUModelRunner(
             self.parallel_config.cp_kv_cache_interleave_size
         )
         # Capture warmup providers registered by the initial placeholder InputBatch
-        with self.jit_warmup_registry.activate():
-            self.input_batch = InputBatch(
-                max_num_reqs=self.max_num_reqs,
-                # We need to use the encoder length for encoder-decoder
-                # because of KV cache for cross-attention.
-                max_model_len=max(self.max_model_len, self.max_encoder_len),
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=[placeholder_block_size],
-                kernel_block_sizes=[placeholder_block_size],
-                max_num_blocks_per_req=[placeholder_max_num_blocks],
-                num_spec_tokens=self.num_spec_tokens,
-                logitsprocs=build_logitsprocs(
-                    self.vllm_config,
-                    self.device,
-                    PIN_MEMORY,
-                    self.is_pooling_model,
-                    custom_logitsprocs,
-                ),
-                # We currently don't know whether a particular custom logits processor
-                # uses output token ids so we set this conservatively. Thinking-budget
-                # tracking is requested dynamically when a budgeted request is in the
-                # batch.
-                logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
-                is_pooling_model=self.is_pooling_model,
-                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
-                reasoning_config=self.vllm_config.reasoning_config,
-                use_replayssm=self.cache_config.use_replayssm,
-            )
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            # We need to use the encoder length for encoder-decoder
+            # because of KV cache for cross-attention.
+            max_model_len=max(self.max_model_len, self.max_encoder_len),
+            max_num_batched_tokens=self.max_num_tokens,
+            device=self.device,
+            vocab_size=self.model_config.get_vocab_size(),
+            block_sizes=[placeholder_block_size],
+            kernel_block_sizes=[placeholder_block_size],
+            max_num_blocks_per_req=[placeholder_max_num_blocks],
+            num_spec_tokens=self.num_spec_tokens,
+            logitsprocs=build_logitsprocs(
+                self.vllm_config,
+                self.device,
+                PIN_MEMORY,
+                self.is_pooling_model,
+                custom_logitsprocs,
+            ),
+            # We currently don't know whether a particular custom logits processor
+            # uses output token ids so we set this conservatively. Thinking-budget
+            # tracking is requested dynamically when a budgeted request is in the
+            # batch.
+            logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
+            is_pooling_model=self.is_pooling_model,
+            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+            reasoning_config=self.vllm_config.reasoning_config,
+            use_replayssm=self.cache_config.use_replayssm,
+        )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.

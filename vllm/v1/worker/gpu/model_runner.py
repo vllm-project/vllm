@@ -185,6 +185,7 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
+    @JitWarmupRegistry.capture
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -199,7 +200,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculative_config is not None and self.speculative_config.use_dspark()
         )
         self.observability_config = vllm_config.observability_config
-        self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         self.device = device
         self.dtype = self.model_config.dtype
@@ -276,8 +276,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.num_speculative_steps = vllm_config.num_speculative_tokens
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
-                with self.jit_warmup_registry.activate():
-                    self.speculator = init_speculator(self.vllm_config, self.device)
+                self.speculator = init_speculator(self.vllm_config, self.device)
 
             if self.speculative_config.method in (
                 "eagle3",

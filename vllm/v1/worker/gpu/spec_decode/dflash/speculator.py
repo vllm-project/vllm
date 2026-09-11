@@ -656,6 +656,7 @@ def _prepare_dflash_inputs_kernel(
         local_q_slot,
         PAD_SLOT_ID,
     )
+
     tl.store(out_input_ids_ptr + query_idx, input_id, mask=is_query)
     clamped_query_pos = tl.minimum(query_pos, max_model_len - 1)
     tl.store(out_query_positions_ptr + query_idx, clamped_query_pos, mask=is_query)
@@ -791,12 +792,19 @@ def prepare_dflash_inputs(
     temperature: torch.Tensor,
     seeds: torch.Tensor,
     input_batch: InputBatch,
+    # [num_reqs]
     num_sampled: torch.Tensor,
+    # [num_reqs]
     num_rejected: torch.Tensor,
+    # [max_num_reqs]
     last_sampled: torch.Tensor,
+    # [max_num_reqs]
     next_prefill_tokens: torch.Tensor,
+    # [max_num_reqs]
     input_temperature: torch.Tensor,
+    # [max_num_reqs]
     input_seeds: torch.Tensor,
+    # [max_num_reqs, max_num_blocks]
     block_table: torch.Tensor,
     block_size: int,
     cp_rank: int,
@@ -812,6 +820,8 @@ def prepare_dflash_inputs(
 ) -> DispatchSpec:
     num_reqs = input_batch.num_reqs
     assert num_reqs > 0
+    # Cover the longest possible per-request span (ctx + query). Use the max
+    # per-request query length, not the total token count across the batch.
     max_target_query_len = int(input_batch.num_scheduled_tokens.max())
     max_tokens_per_req = max_target_query_len + num_query_per_req
     block = min(256, triton.next_power_of_2(max(1, max_tokens_per_req)))

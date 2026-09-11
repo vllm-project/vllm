@@ -896,6 +896,7 @@ class SpecDecodeBaseProposer:
                 total_num_input_tokens, dtype=torch.int32, device=self.device
             )
 
+            # Kernel grid: one program per request (row)
             query_start_loc = cad.query_start_loc
             query_end_loc = cad.query_start_loc[1:] - 1
             if num_rejected_tokens_gpu is not None:
@@ -1088,6 +1089,8 @@ class SpecDecodeBaseProposer:
 
         next_token_ids = torch.empty(batch_size, dtype=torch.int32, device=device)
         valid_sampled_tokens_count = next_token_ids.new_empty(batch_size)
+
+        # Kernel grid: one program per request (row)
 
         # Find the next power of 2 for block sizes
         BLOCK_SIZE_TOKENS = next_power_of_2(num_tokens)
