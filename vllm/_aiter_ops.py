@@ -1995,9 +1995,6 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_fused_qk_rope_cache_mla_enabled(cls) -> bool:
-        # No dedicated switch: the fused rope + KV-cache + fp8-query path is a
-        # kernel substitution on the AITER MLA backend, gated by capability in
-        # MLAAttention; VLLM_ROCM_USE_AITER_MLA=0 is the opt-out.
         return cls._AITER_ENABLED and cls._MLA_ENABLED
 
     @staticmethod
