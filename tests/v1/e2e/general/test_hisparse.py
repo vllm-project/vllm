@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
 )
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 
 MODEL = "deepseek-ai/DeepSeek-V3.2"
@@ -178,7 +179,9 @@ def test_hisparse_spill_and_prefix_restore(
                 original_finish_forward()
                 if not full_replay_pending:
                     return
-                torch.accelerator.synchronize()
+                # Synchronize only the test's inspection, not finish_forward itself.
+                with gpu_sync_allowed():
+                    torch.accelerator.synchronize()
                 assert worker._row_mirrors
                 for layer_index, cache in enumerate(worker.cache_handles):
                     source_index = cache.runtime.resident_source_index
@@ -189,9 +192,10 @@ def test_hisparse_spill_and_prefix_restore(
                         source_block, source_offset = divmod(
                             source_row, worker.kernel_block_size
                         )
-                        gpu_rows = worker.resident_caches[layer_index][
-                            source_block, source_offset : source_offset + num_rows
-                        ].cpu()
+                        with gpu_sync_allowed():
+                            gpu_rows = worker.resident_caches[layer_index][
+                                source_block, source_offset : source_offset + num_rows
+                            ].cpu()
                         host_rows = worker.host_caches[layer_index][
                             destination_row : destination_row + num_rows
                         ]

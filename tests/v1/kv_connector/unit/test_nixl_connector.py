@@ -1935,6 +1935,7 @@ def test_mixed_memory_read_notifies_after_both_transfers_finish():
     worker._recving_metadata = {"request": MagicMock()}
     worker._recving_transfers = defaultdict(list)
     worker._pending_recv_notifs = {}
+    worker._failed_inflight_recvs = set()
     worker.xfer_stats = MagicMock()
     worker.nixl_wrapper = MagicMock()
     worker.nixl_wrapper.make_prepped_xfer.side_effect = [101, 102]
@@ -2846,9 +2847,11 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FailingNixlWrapper,
 )
-def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init):
-    """Test that transfer setup failures mark blocks invalid
-    and return via get_finished."""
+@pytest.mark.parametrize("is_hma", [False, True])
+def test_transfer_setup_failure_returns_finished(
+    default_vllm_config, dist_init, is_hma
+):
+    """Setup failures report the request; only non-HMA reports block IDs."""
     vllm_config = create_vllm_config()
 
     connector = NixlConnector(
@@ -2858,6 +2861,7 @@ def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init)
         vllm_config, connector.engine_id, hand_shake_latency=0
     )
     connector.connector_worker.nixl_wrapper.fail_transfer_setup = True
+    connector.connector_worker._is_hma_required = is_hma
 
     request_id = "test_transfer_fail"
     metadata = NixlConnectorMetadata()
@@ -2887,13 +2891,11 @@ def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init)
     time.sleep(0.1)
     connector.start_load_kv(dummy_ctx)
 
-    # check that blocks were marked invalid
+    results = connector.get_transfer_results(finished_req_ids=set())
+    assert request_id in results.finished_recving
+    assert results.failed_recving == {request_id}
     invalid_blocks = connector.get_block_ids_with_load_errors()
-    assert invalid_blocks == {7, 8, 9}
-
-    # ensure request appears in get_finished
-    _, done_recving = connector.get_finished(finished_req_ids=set())
-    assert request_id in done_recving
+    assert invalid_blocks == (set() if is_hma else {7, 8, 9})
 
 
 class _ScriptedXferWrapper(FakeNixlWrapper):
