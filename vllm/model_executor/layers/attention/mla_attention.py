@@ -2795,6 +2795,10 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         Returns:
             Tensor of shape [..., nope_dim + pe_dim]
         """
+        if k_pe.shape[-1] == 0:
+            # NoPE MLA: nothing to append, so no copy either.
+            return k_nope
+
         k = torch.empty(
             (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
             dtype=k_nope.dtype,
