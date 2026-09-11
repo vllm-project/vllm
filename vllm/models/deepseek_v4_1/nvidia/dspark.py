@@ -10,6 +10,7 @@ To implement non-causal attention, we leverage the sparse attention implementati
 include the future query tokens in the top-k indices for each query token.
 """
 
+import copy
 from collections.abc import Iterable
 
 import regex as re
@@ -65,6 +66,21 @@ logger = init_logger(__name__)
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
 
 
+def _get_dspark_vllm_config(vllm_config: VllmConfig) -> VllmConfig:
+    if not vllm_config.parallel_config.enable_eplb:
+        return vllm_config
+
+    draft_vllm_config = copy.deepcopy(vllm_config)
+    draft_vllm_config.parallel_config.enable_eplb = False
+    draft_vllm_config.parallel_config.eplb_config.num_redundant_experts = 0
+    logger.warning_once(
+        "EPLB is disabled for the DeepSeek V4.1 DSpark draft model because the "
+        "draft and target use different expert topologies. EPLB remains enabled "
+        "for the target model."
+    )
+    return draft_vllm_config
+
+
 class DSparkDeepseekV4Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -108,7 +124,7 @@ class DSparkDeepseekV4Model(nn.Module):
             dtype=torch.int32,
         )
 
-        current_vllm_config = get_current_vllm_config()
+        current_vllm_config = _get_dspark_vllm_config(get_current_vllm_config())
         self.layers = nn.ModuleList(
             [
                 DeepseekV4DecoderLayer(
