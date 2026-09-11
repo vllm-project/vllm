@@ -2765,6 +2765,9 @@ class VllmConfig:
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallel")
 
+        if self.model_config is not None and self.model_config.enable_word_timestamps:
+            unsupported.append("word-level timestamps")
+
         # DSpark is implemented only by the V2 GPU model runner.
         if self.speculative_config:
             if self.speculative_config.method == "dspark":
