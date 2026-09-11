@@ -2,6 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+    triton_warmup_inputs,
+)
 from vllm.triton_utils import HAS_TRITON, tl, tldevice, triton
 
 # Smallest positive value produced by Triton's fp32 `tl.rand`. Used to clamp
@@ -189,6 +195,74 @@ def gumbel_block_argmax(
     )
 
 
+def _gumbel_sample_warmup_inputs(vllm_config):
+    vocab_size = vllm_config.model_config.get_vocab_size()
+    logits_dtype: torch.dtype = WarmupChoices(
+        torch.float32, vllm_config.model_config.head_dtype
+    )
+    use_fp64: bool = WarmupChoices(False, True)
+    # (has cache, drafting, apply temperature, per-token column, col aligned)
+    mode = WarmupChoices(
+        (False, False, False, False, True),
+        (True, True, True, False, True),
+        (True, True, True, False, False),
+        (True, True, True, True, True),
+    )
+    has_cache = mode[0]
+    is_drafting = mode[1]
+    apply_temperature = mode[2]
+    per_token_col = mode[3]
+    col_aligned = mode[4]
+    block_size = 1024
+    num_blocks = triton.cdiv(vocab_size, block_size)
+    local_max_dtype = torch.float64 if use_fp64 else torch.float32
+    logits_cache = (
+        TritonWarmupTensor(
+            logits_dtype,
+            shape=(1, 2, vocab_size),
+            strides=(2 * vocab_size, vocab_size, 1),
+        )
+        if has_cache
+        else None
+    )
+    logits_cache_col = (
+        TritonWarmupTensor(torch.int32, aligned=col_aligned) if has_cache else None
+    )
+    return triton_warmup_inputs(
+        _gumbel_sample_kernel,
+        grid=(1, num_blocks),
+        local_argmax_ptr=TritonWarmupTensor(
+            torch.int64, shape=(1, num_blocks)
+        ),
+        local_argmax_stride=num_blocks,
+        local_max_ptr=TritonWarmupTensor(
+            local_max_dtype, shape=(1, num_blocks)
+        ),
+        local_max_stride=num_blocks,
+        logits_cache_ptr=logits_cache,
+        logits_cache_stride_0=2 * vocab_size if has_cache else 0,
+        logits_cache_stride_1=vocab_size if has_cache else 0,
+        logits_cache_col_ptr=logits_cache_col,
+        logits_ptr=TritonWarmupTensor(
+            logits_dtype, shape=(1, vocab_size)
+        ),
+        logits_stride=vocab_size,
+        expanded_idx_mapping_ptr=TritonWarmupTensor(torch.int32),
+        seeds_ptr=TritonWarmupTensor(torch.int64),
+        pos_ptr=TritonWarmupTensor(torch.int64),
+        temp_ptr=TritonWarmupTensor(torch.float32),
+        vocab_size=vocab_size,
+        BLOCK_SIZE=block_size,
+        IS_DRAFTING=is_drafting,
+        APPLY_TEMPERATURE=apply_temperature,
+        USE_FP64=use_fp64,
+        PER_TOKEN_COL=per_token_col,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    warmup_inputs=_gumbel_sample_warmup_inputs,
+)
 @triton.jit
 def _gumbel_sample_kernel(
     local_argmax_ptr,
@@ -246,6 +320,12 @@ def _gumbel_sample_kernel(
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
+
+
+def register_gumbel_warmup() -> None:
+    """Register every Gumbel sampling signature used by GPU model runners."""
+    if HAS_TRITON:
+        _gumbel_sample_kernel.register_warmup()
 
 
 def gumbel_sample(
