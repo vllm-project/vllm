@@ -3,11 +3,13 @@
 
 import os
 from dataclasses import dataclass
+from typing import Literal
 
 import safetensors
 import torch
 
 from vllm.logger import init_logger
+from vllm.lora.local_adapter import LocalLoRAPlan
 from vllm.lora.lora_weights import LoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import (
@@ -66,6 +68,7 @@ class LoRAModel:
         rank: int,
         loras: dict[str, LoRALayerWeights],
         is_3d_lora_weight: bool = False,
+        local_plan: LocalLoRAPlan | None = None,
     ) -> None:
         """
         Args:
@@ -76,6 +79,7 @@ class LoRAModel:
                 fused (gate_up_proj / down_proj) layout. Propagated from the
                 originating LoRARequest. Only consulted by the LoRA model
                 manager when enable_mixed_moe_lora_format is on.
+            local_plan: Receiver layout for prepacked, locally owned factors.
 
         """
         self.id = lora_model_id
@@ -86,6 +90,12 @@ class LoRAModel:
         self.rank = rank
         self.loras: dict[str, LoRALayerWeights] = loras
         self.is_3d_lora_weight = is_3d_lora_weight
+        self.local_plan = local_plan
+
+    @property
+    def tensor_extent(self) -> Literal["global", "local"]:
+        """Distinguish global PEFT tensors from plan-bound local factors."""
+        return "local" if self.local_plan is not None else "global"
 
     def clone(self, lora_model_id: int) -> "LoRAModel":
         """Return a copy of the object with different ids.
@@ -96,6 +106,7 @@ class LoRAModel:
             rank=self.rank,
             loras=self.loras.copy(),
             is_3d_lora_weight=self.is_3d_lora_weight,
+            local_plan=self.local_plan,
         )
 
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:

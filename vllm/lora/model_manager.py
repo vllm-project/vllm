@@ -13,13 +13,26 @@ from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
+    ColumnParallelLinearWithLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
     LoRAMapping,
     LoRAMappingType,
+    MergedColumnParallelLinearWithLoRA,
+    ReplicatedLinearWithLoRA,
+    RowParallelLinearWithLoRA,
+)
+from vllm.lora.layers.column_parallel_linear import (
+    MergedColumnParallelLinearVariableSliceWithLoRA,
+)
+from vllm.lora.local_adapter import (
+    LocalLoRAModulePlan,
+    LocalLoRAPlan,
+    LocalLoRASourceLayout,
 )
 from vllm.lora.lora_model import LoRAModel, MoEEPLoadSpec
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
+from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.punica_wrapper import PunicaWrapperBase, get_punica_wrapper
 from vllm.lora.utils import (
     from_layer,
@@ -312,6 +325,242 @@ class LoRAModelManager:
     def adapter_slots(self) -> int:
         return self.lora_slots
 
+    def get_local_adapter_plan(self, peft_helper: PEFTHelper) -> LocalLoRAPlan:
+        """Bind complete selected modules to their current local buffer layout."""
+        peft_helper.validate_legal(self.lora_config)
+        if (
+            self.lora_config.fully_sharded_loras
+            or peft_helper.use_rslora
+            or peft_helper.vllm_lora_scaling_factor
+            != peft_helper.lora_alpha / peft_helper.r
+        ):
+            raise NotImplementedError(
+                "Local adapters require ordinary alpha/r scaling and unsharded LoRA"
+            )
+        if (
+            not isinstance(peft_helper.target_modules, list)
+            or not peft_helper.target_modules
+        ):
+            raise ValueError("Local adapters require explicit target module names")
+        targets = sorted(set(peft_helper.target_modules))
+        plans = []
+        matched_targets: set[str] = set()
+        for name, module in sorted(self.modules.items()):
+            names = tuple(self.packed_modules.get(name, [name]))
+            selected = [is_in_target_modules(item, targets) for item in names]
+            if is_in_target_modules(name, targets):
+                selected = [True] * len(names)
+            if not any(selected):
+                continue
+            if not all(selected):
+                raise NotImplementedError(
+                    f"Local adapters require every packed target in {name!r}"
+                )
+            matched_targets.update(
+                target
+                for target in targets
+                if any(is_in_target_modules(item, [target]) for item in (*names, name))
+            )
+            plans.append(
+                self._build_local_module_plan(name, module, names, peft_helper.r)
+            )
+        if matched_targets != set(targets):
+            raise ValueError(
+                f"Unknown local adapter targets: {set(targets) - matched_targets}"
+            )
+        return LocalLoRAPlan(
+            peft_helper.r, peft_helper.lora_alpha, tuple(targets), tuple(plans)
+        )
+
+    def _build_local_module_plan(
+        self, name: str, module: BaseLayerWithLoRA, names: tuple[str, ...], rank: int
+    ) -> LocalLoRAModulePlan:
+        shapes = module.get_lora_shard_shapes(rank)
+        expert_ids: tuple[int, ...] = ()
+        source_names: tuple[tuple[str, ...], ...]
+        outputs: tuple[int, ...]
+        shard_ids: tuple[int, ...]
+        layout: LocalLoRASourceLayout
+        if type(module) not in (
+            FusedMoEWithLoRA,
+            FusedMoE3DWithLoRA,
+            RowParallelLinearWithLoRA,
+            ColumnParallelLinearWithLoRA,
+            ReplicatedLinearWithLoRA,
+            MergedColumnParallelLinearWithLoRA,
+            MergedColumnParallelLinearVariableSliceWithLoRA,
+        ):
+            raise NotImplementedError(
+                f"Unsupported local adapter wrapper {type(module).__name__}"
+            )
+        if isinstance(module, FusedMoEWithLoRA):
+            if module.use_ep or module.local_num_experts != module.global_num_experts:
+                raise NotImplementedError(
+                    "Local MoE plans currently require inference EP size 1"
+                )
+            if module.enable_moe_shared_loras:
+                raise NotImplementedError(
+                    "Local shared-outer MoE buffers are unsupported"
+                )
+            expert_ids = tuple(range(module.global_num_experts))
+            global_input = module.hidden_size
+            intermediate = module.intermediate_size_per_partition * module.tp_size
+            if type(module) is FusedMoE3DWithLoRA:
+                if module._base_model == "GptOssForCausalLM":
+                    raise NotImplementedError(
+                        "Local fused MoE plans require concatenated gate/up outputs"
+                    )
+                layout = "moe_3d"
+                source_names = ((name + ".base_layer",), (name,))
+                outputs = (2 * intermediate, global_input)
+                shard_ids = (module.tp_rank, 0)
+            else:
+                if module._w13_slices != 2 or len(names) != 3 * len(expert_ids):
+                    raise NotImplementedError(
+                        "Local MoE plans require complete gated expert triplets"
+                    )
+                layout = "moe"
+                source_names = tuple(tuple(names[index::3]) for index in range(3))
+                outputs = (intermediate, global_input, intermediate)
+                shard_ids = (module.tp_rank, 0, module.tp_rank)
+        elif isinstance(
+            module,
+            (
+                RowParallelLinearWithLoRA,
+                ColumnParallelLinearWithLoRA,
+                ReplicatedLinearWithLoRA,
+                MergedColumnParallelLinearWithLoRA,
+                MergedColumnParallelLinearVariableSliceWithLoRA,
+            ),
+        ):
+            if len(names) != len(shapes):
+                raise NotImplementedError(
+                    "Local plans do not support packed group expansion"
+                )
+            global_input = module.base_layer.input_size
+            source_names = tuple((item,) for item in names)
+            if isinstance(module, MergedColumnParallelLinearWithLoRA):
+                layout = "merged"
+                outputs = tuple(module.output_sizes)
+                shard_ids = tuple(module.output_ids)
+            else:
+                outputs = (module.base_layer.output_size,)
+                if type(module) is RowParallelLinearWithLoRA:
+                    layout, shard_ids = "row", (0,)
+                elif type(module) is ReplicatedLinearWithLoRA:
+                    layout, shard_ids = "replicated", (0,)
+                else:
+                    if module.is_merged_col_linear:
+                        raise NotImplementedError(
+                            "Local plans require an explicit merged-column wrapper"
+                        )
+                    layout, shard_ids = "column", (module.tp_rank,)
+        else:
+            raise NotImplementedError(
+                f"Local adapter plans do not support {type(module).__name__}"
+            )
+        return LocalLoRAModulePlan(
+            name,
+            type(module).__name__,
+            layout,
+            source_names,
+            shapes,
+            str(self.lora_config.lora_dtype),
+            module.tp_rank,
+            module.tp_size,
+            global_input,
+            outputs,
+            shard_ids,
+            expert_ids,
+        )
+
+    def add_local_adapter(
+        self,
+        lora_id: int,
+        plan: LocalLoRAPlan,
+        factors: dict[str, tuple[list[torch.Tensor], list[torch.Tensor]]],
+    ) -> bool:
+        """Own and scale unscaled local factors without packing or eviction."""
+        self._validate_local_factors(plan, factors)
+        if lora_id <= 0:
+            raise ValueError("Local adapter IDs must be positive")
+        if lora_id in self._registered_adapters:
+            raise ValueError(f"Adapter ID {lora_id} is already registered")
+        if len(self._registered_adapters) >= self.capacity:
+            raise RuntimeError("No free local adapter cache slots")
+        loras: dict[str, LoRALayerWeights] = {}
+        for name, (lora_a, lora_b) in factors.items():
+            owned_a = [tensor.detach().clone() for tensor in lora_a]
+            owned_b = [tensor.detach().clone() for tensor in lora_b]
+            weights = PackedLoRALayerWeights(
+                name,
+                plan.rank,
+                [plan.lora_alpha] * len(owned_a),
+                owned_a,
+                owned_b,
+            )
+            weights.optimize()
+            loras[name] = weights
+        self._registered_adapters[lora_id] = LoRAModel(
+            lora_id, plan.rank, loras, local_plan=plan
+        )
+        return True
+
+    def _validate_local_factors(
+        self,
+        plan: LocalLoRAPlan,
+        factors: dict[str, tuple[list[torch.Tensor], list[torch.Tensor]]],
+    ) -> None:
+        expected = self.get_local_adapter_plan(
+            PEFTHelper(
+                r=plan.rank,
+                lora_alpha=plan.lora_alpha,
+                target_modules=list(plan.target_modules),
+            )
+        )
+        if plan != expected:
+            raise ValueError("Local adapter plan does not match this receiver layout")
+        if set(factors) != {module.module_name for module in expected.modules}:
+            raise ValueError(
+                "Local adapter factors must match the complete selected module set"
+            )
+        for name, (lora_a, lora_b) in factors.items():
+            if not isinstance(lora_a, list) or not isinstance(lora_b, list):
+                raise ValueError("Local factors must use explicit packed lists")
+            self.modules[name].validate_lora_shard(plan.rank, lora_a, lora_b)
+
+    def _activate_local_adapter(self, lora: LoRAModel) -> bool:
+        plan = lora.local_plan
+        assert plan is not None
+        if lora.rank != plan.rank:
+            raise ValueError("Local adapter rank does not match its plan")
+        factors = {
+            name: (weights.lora_a, weights.lora_b)
+            for name, weights in lora.loras.items()
+        }
+        self._validate_local_factors(plan, factors)
+        if len(self._active_adapters) >= self.lora_slots:
+            raise RuntimeError("No free local adapter GPU slots")
+        try:
+            index = self.lora_index_to_id.index(None)
+        except ValueError:
+            raise RuntimeError("No free local adapter GPU slots") from None
+        try:
+            for name, module in self.modules.items():
+                if name in factors:
+                    lora_a, lora_b = factors[name]
+                    module.set_lora_shard(index, plan.rank, lora_a, lora_b)
+                else:
+                    module.reset_lora(index)
+        except (RuntimeError, ValueError, NotImplementedError):
+            for module in self.modules.values():
+                module.reset_lora(index)
+            raise
+        # The caller must fence GPU copies before acknowledging activation.
+        self._active_adapters[lora.id] = None
+        self.lora_index_to_id[index] = lora.id
+        return True
+
     def activate_adapter(
         self,
         lora_id: int,
@@ -319,6 +568,9 @@ class LoRAModelManager:
         """Move LoRA into a GPU buffer to be used in the forward pass."""
         if lora_id in self._active_adapters:
             return False
+        cached = self._registered_adapters.cache.get(lora_id)
+        if cached is not None and cached.tensor_extent == "local":
+            return self._activate_local_adapter(cached)
         first_free_slot = next(
             (
                 (i, lora_id)
@@ -361,6 +613,8 @@ class LoRAModelManager:
             pass
 
     def _add_adapter(self, lora: LoRAModel):
+        if lora.tensor_extent == "local":
+            raise ValueError("Use add_local_adapter to register local factors")
         self._create_merged_loras_inplace(lora)
         self._registered_adapters[lora.id] = lora
 
@@ -1208,6 +1462,9 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         self,
         lora_id: int,
     ) -> bool:
+        cached = self._registered_adapters.cache.get(lora_id)
+        if cached is not None and cached.tensor_extent == "local":
+            return super().activate_adapter(lora_id)
         if (
             lora_id not in self._active_adapters
             and len(self._active_adapters) >= self.lora_slots
