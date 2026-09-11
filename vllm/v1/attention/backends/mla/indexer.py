@@ -248,7 +248,18 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # Block sizes count uncompressed tokens: C4 indexer pages hold 64 rows.
         return [256]
+
+
+class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "DEEPSEEK_V41_INDEXER"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [64 if current_platform.is_device_capability_family(90) else 128]
 
 
 @dataclass(frozen=True)
@@ -1402,6 +1413,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     )
                     block_table = self.indexer_decode_block_table_buffer[:rows, :cols]
 
+            # Flattening always returns a buffer view, including single-token
+            # batches. Keep its address stable across varlen graph replays.
             seq_lens_is_buffer_view = not use_native or next_n > 1
 
             # DCP: localize the now-expanded per-token global bounds to this
