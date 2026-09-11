@@ -15,6 +15,10 @@ from vllm.v1.spec_decode.vocab_mapping import VocabMapping
 
 logger = init_logger(__name__)
 
+DRAFT_MODEL_PREFIX = "draft_model"
+"""Synthetic root the drafter loads under, so its layer names cannot collide
+with the target model's in the shared static forward context."""
+
 
 class DraftModelProposer(SpecDecodeBaseProposer):
     def __init__(
@@ -97,10 +101,15 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         from vllm.compilation.backends import set_model_tag
 
         draft_vllm_config = self._create_draft_vllm_config()
-        with set_model_tag("draft_model"):
+        # The draft checkpoint's quantization config names layers relative to
+        # itself, so the root has to be declared for target matching. Unlike
+        # e.g. "language_model", this root is not part of the checkpoint.
+        if draft_vllm_config.quant_config is not None:
+            draft_vllm_config.quant_config.model_root_prefix = DRAFT_MODEL_PREFIX
+        with set_model_tag(DRAFT_MODEL_PREFIX):
             model = get_model(
                 vllm_config=draft_vllm_config,
-                prefix="draft_model",
+                prefix=DRAFT_MODEL_PREFIX,
             )
         return model
 

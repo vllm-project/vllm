@@ -620,7 +620,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         alignment = (
             128
             if isinstance(self.quant_config, ModelOptMixedPrecisionConfig)
-            and self.quant_config._resolve_quant_algo(in_proj_prefix) == "FP8_PB_WO"
+            and self.quant_config._resolve_quant_algo(
+                self.quant_config.strip_model_root_prefix(in_proj_prefix)
+            )
+            == "FP8_PB_WO"
             else 16
         )
         self.in_proj_padding = -local_output_size % alignment
