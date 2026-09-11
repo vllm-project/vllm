@@ -99,9 +99,9 @@ steps:
     - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 4
 
-- label: ":nvidia: (H200 MIG 18GB) Multimodal Processor"
+- label: ":nvidia: (H200 MIG 18GB) Multimodal Processor Shard %N"
   key: multi-modal-processor
-  timeout_in_minutes: 98
+  timeout_in_minutes: 40
   device: h200_18gb
   source_file_dependencies:
   - vllm/
@@ -109,13 +109,17 @@ steps:
   - tests/models/multimodal
   - tests/models/registry.py
   commands:
-    - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+    # One parametrized case per multimodal model (160 cases, ~57m of pytest at
+    # ~21s each), so sharding by case count balances well: measured p95 of the
+    # slowest shard is 16.6m at 5 shards, and the slowest single case is 1.2m.
+    - pytest -v -s models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 5
   mirror:
     amd:
-      label: ":amd: (MI355) Multimodal Processor"
+      label: ":amd: (MI355) Multimodal Processor Shard %N"
       dind: false
       device: mi355_1
-      timeout_in_minutes: 115
+      timeout_in_minutes: 50
       depends_on:
       - image-build-amd
 
