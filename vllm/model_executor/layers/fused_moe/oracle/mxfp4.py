@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from enum import Enum
 from typing import TYPE_CHECKING, Literal, Union
 
@@ -65,7 +66,7 @@ if has_triton_kernels():
         )
 
 
-def _pack_deepgemm_mxfp4_scales(
+def pack_deepgemm_mxfp4_scales(
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
     w13_weight_scale: torch.Tensor,
@@ -112,6 +113,8 @@ class Mxfp4MoeBackend(Enum):
     # FlashInfer CUTLASS backends
     FLASHINFER_CUTLASS_MXFP4_MXFP8 = "FLASHINFER_CUTLASS_MXFP4_MXFP8"
     FLASHINFER_CUTLASS_MXFP4_BF16 = "FLASHINFER_CUTLASS_MXFP4_BF16"
+    # vLLM's own CUTLASS W4A4 kernel (not the FlashInfer CUTLASS ones above)
+    CUTLASS_MXFP4_MXFP4 = "CUTLASS_MXFP4_MXFP4"
     # Marlin
     BATCHED_MARLIN = "BATCHED_MARLIN"
     MARLIN = "MARLIN"
@@ -192,6 +195,13 @@ def backend_to_kernel_cls(
         )
 
         return [FlashInferExperts]
+
+    elif backend == Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4:
+        from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+            CutlassExpertsMxfp4,
+        )
+
+        return [CutlassExpertsMxfp4]
 
     elif backend == Mxfp4MoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (  # noqa: E501
@@ -329,6 +339,33 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
     )
 
 
+def narrow_mxfp4_candidates(
+    runner_backend: MoEBackend,
+    candidates: Sequence[Mxfp4MoeBackend],
+) -> list[Mxfp4MoeBackend]:
+    """Narrow ``candidates`` to the backends a non-auto ``moe_backend`` names.
+
+    ``map_mxfp4_backend`` deliberately omits ``"cutlass"``: the shared weight
+    converters do not swizzle scales for it, so honoring the flag would give
+    those callers silently wrong results. Quant methods that do their own
+    CUTLASS weight preparation call this instead.
+
+    Args:
+        runner_backend: Requested ``moe_backend``; never ``"auto"``.
+        candidates: Backends the caller prepares weights for, in preference
+            order.
+
+    Returns:
+        The subset of ``candidates`` the request names, order preserved. Empty
+        if the request names no backend the caller implements.
+    """
+    if runner_backend == "cutlass":
+        requested = [Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4]
+    else:
+        requested = map_mxfp4_backend(runner_backend)
+    return [b for b in candidates if b in requested]
+
+
 def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
     """Available backends in priority order, BF16-act variant before
     activation-quantized variant within each vendor family."""
@@ -391,7 +428,10 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
         return kMxfp8Dynamic
     if backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         return kFp8StaticTensorSym
-    if backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+    if backend in (
+        Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+        Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4,
+    ):
         return kMxfp4Dynamic
     return None  # BF16 activation
 
@@ -450,6 +490,59 @@ def _return_or_raise(
             logger.info_once(_make_log_backend(backend), scope=scope)
             return backend, k_cls
     raise ValueError(_make_log_unsupported(backend, reason))
+
+
+def select_mxfp4_moe_backend_from(
+    config: FusedMoEConfig,
+    candidates: list[Mxfp4MoeBackend],
+    activation_key: QuantKey | None = None,
+) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
+    """Select the first candidate backend whose kernel supports ``config``.
+
+    Args:
+        config: MoE configuration.
+        candidates: Backends in preference order. ``MARLIN`` is swapped for
+            ``BATCHED_MARLIN`` when the activation format is batched.
+        activation_key: Activation quantization key for ``EMULATION``; every
+            other backend uses its own default key.
+
+    Returns:
+        The selected backend and the expert class that serves it.
+
+    Raises:
+        ValueError: No candidate supports the deployment configuration.
+    """
+    activation_format = (
+        mk.FusedMoEActivationFormat.BatchedExperts
+        if config.moe_parallel_config.use_batched_activation_format
+        else mk.FusedMoEActivationFormat.Standard
+    )
+
+    if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        candidates = [
+            Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
+            for b in candidates
+        ]
+
+    last_error: Exception | None = None
+    for backend in candidates:
+        act_key = (
+            activation_key
+            if backend == Mxfp4MoeBackend.EMULATION
+            else _backend_activation_key(backend)
+        )
+        try:
+            return _return_or_raise(
+                backend,
+                config,
+                kMxfp4Static,
+                act_key,
+                activation_format,
+            )
+        except ValueError as e:
+            last_error = e
+    assert last_error is not None
+    raise last_error
 
 
 def _filter_by_activation(
@@ -557,25 +650,9 @@ def select_mxfp4_moe_backend(
                 f"moe_backend={runner_backend!r} does not support "
                 f"activation={requested_activation_key}"
             )
-        last_error: Exception | None = None
-        for requested_backend in requested_backends:
-            act_key = (
-                requested_activation_key
-                if requested_backend == Mxfp4MoeBackend.EMULATION
-                else _backend_activation_key(requested_backend)
-            )
-            try:
-                return _return_or_raise(
-                    requested_backend,
-                    config,
-                    kMxfp4Static,
-                    act_key,
-                    activation_format,
-                )
-            except ValueError as e:
-                last_error = e
-        assert last_error is not None
-        raise last_error
+        return select_mxfp4_moe_backend_from(
+            config, requested_backends, requested_activation_key
+        )
 
     if _requires_qwen38_tep8_emulation(config, requested_activation_key):
         backend = Mxfp4MoeBackend.EMULATION
@@ -809,7 +886,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     """Convert loaded weights into backend-specific kernel format."""
 
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
-        w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
+        w13_weight_scale, w2_weight_scale = pack_deepgemm_mxfp4_scales(
             w13_weight,
             w2_weight,
             w13_weight_scale,
@@ -1402,7 +1479,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
-        w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
+        w13_weight_scale, w2_weight_scale = pack_deepgemm_mxfp4_scales(
             w13_weight,
             w2_weight,
             w13_weight_scale,
@@ -1900,7 +1977,10 @@ def make_mxfp4_moe_quant_config(
             block_shape=None,
             gemm1_clamp_limit=swiglu_limit,
         )
-    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+    elif mxfp4_backend in (
+        Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+        Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4,
+    ):
         return ocp_mx_moe_quant_config(
             quant_dtype="mxfp4",
             w1_bias=w1_bias,

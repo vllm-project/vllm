@@ -13,23 +13,15 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
-    mxfp4_moe_quant_config,
-)
-from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
-    CutlassExpertsMxfp4,
-)
-from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
-    MarlinExperts,
-)
-from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
-    XPUExpertsMxFp4,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-    B12X_BACKENDS,
     Mxfp4MoeBackend,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
+    narrow_mxfp4_candidates,
+    pack_deepgemm_mxfp4_scales,
     select_mxfp4_moe_backend,
+    select_mxfp4_moe_backend_from,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
@@ -38,36 +30,47 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
 
 class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
+    # Candidate backends in preference order. Must stay in sync with the weight
+    # preparation below: CUTLASS swizzles scales, DeepGEMM packs them, XPU
+    # consumes the checkpoint packing, and Marlin repacks weights and scales.
+    # The oracle drops candidates the deployment cannot use (device, expert
+    # parallelism, activation format), which is how DeepEP V2's PaddedStandard
+    # dispatch reaches DeepGemmFP4Experts instead of a Standard-only kernel.
+    CANDIDATE_BACKENDS = (
+        Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4,
+        Mxfp4MoeBackend.DEEPGEMM_MXFP4,
+        Mxfp4MoeBackend.XPU,
+        Mxfp4MoeBackend.MARLIN,
+    )
+
     def __init__(self, moe):
         super().__init__(moe)
         self.group_size = 32
-        self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
-        # Backend selection must match the weight preparation below: CUTLASS
-        # swizzles scales, b12x and XPU consume checkpoint packing, and Marlin
-        # repacks weights and scales.
-        self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
         self.experts_cls: type[mk.FusedMoEExperts]
         if moe.moe_backend == "b12x":
+            # b12x has its own precision policy (VLLM_B12X_MOE_FP4_FORCE_A16).
             self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(moe)
             assert experts_cls is not None
             self.experts_cls = experts_cls
-            self.use_cutlass_mxfp4 = False
-        elif self.use_cutlass_mxfp4:
-            logger.info_once("Using CutlassExpertsMxfp4 for MXFP4 MoE")
-            self.experts_cls = CutlassExpertsMxfp4
-        elif current_platform.is_xpu():
-            self.mxfp4_backend = Mxfp4MoeBackend.XPU
-            self.experts_cls = XPUExpertsMxFp4
-            logger.info_once("Using XPUExpertsMxFp4 for MXFP4 MoE on XPU platform")
-        else:
-            logger.info_once("Using MarlinExperts for MXFP4 MoE")
-            self.experts_cls = MarlinExperts
+            return
+
+        candidates = list(self.CANDIDATE_BACKENDS)
+        if moe.moe_backend != "auto":
+            candidates = narrow_mxfp4_candidates(moe.moe_backend, candidates)
+            if not candidates:
+                raise ValueError(
+                    f"moe_backend={moe.moe_backend!r} is not supported for "
+                    "compressed-tensors MXFP4 MoE; expected one of "
+                    f"{[b.value for b in self.CANDIDATE_BACKENDS]}."
+                )
+        self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend_from(
+            moe, candidates
+        )
 
     def create_weights(
         self,
@@ -140,20 +143,14 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        if self.use_cutlass_mxfp4:
-            # W4A4: both weights and activations quantized to MXFP4
-            return mxfp4_moe_quant_config(
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-            )
-        else:
-            # b12x selects W4A8 or W4A16; XPU uses W4A4; Marlin uses W4A16.
-            return make_mxfp4_moe_quant_config(
-                mxfp4_backend=self.mxfp4_backend,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                layer=layer,
-            )
+        # CUTLASS and XPU use W4A4; DeepGEMM W4A8; b12x W4A8 or W4A16;
+        # Marlin W4A16.
+        return make_mxfp4_moe_quant_config(
+            mxfp4_backend=self.mxfp4_backend,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            layer=layer,
+        )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         layer.w13_weight = torch.nn.Parameter(
@@ -166,7 +163,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         )
         delattr(layer, "w2_weight_packed")
 
-        if self.use_cutlass_mxfp4:
+        if self.mxfp4_backend == Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4:
             # Swizzle weight scales from flat checkpoint layout [E, N, K//32]
             # to CUTLASS tiled layout [E, numMTiles*numKTiles*512].
             from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
@@ -197,9 +194,19 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_scale = torch.nn.Parameter(
                 torch.stack(swizzled_w2), requires_grad=False
             )
-        elif self.mxfp4_backend in B12X_BACKENDS or current_platform.is_xpu():
-            pass
-        else:
+        elif self.mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
+            w13_scale, w2_scale = pack_deepgemm_mxfp4_scales(
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+            )
+            layer.w13_weight_scale = torch.nn.Parameter(w13_scale, requires_grad=False)
+            layer.w2_weight_scale = torch.nn.Parameter(w2_scale, requires_grad=False)
+        elif self.mxfp4_backend in (
+            Mxfp4MoeBackend.MARLIN,
+            Mxfp4MoeBackend.BATCHED_MARLIN,
+        ):
             logger.warning_once(
                 "Your GPU does not have native support for FP4 computation "
                 "but FP4 quantization is being used. Weight-only FP4 "
