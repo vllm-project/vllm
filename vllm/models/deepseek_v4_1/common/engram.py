@@ -46,6 +46,7 @@ from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
+    get_dp_group,
     get_engram_dp_group,
     get_engram_dp_size,
     get_tensor_model_parallel_rank,
@@ -582,11 +583,17 @@ def engram_head_shard_rank() -> int:
 
 
 def engram_gathered_num_tokens() -> int:
-    """Per-replica token slot of the DP-gathered n-gram id stream."""
+    """Per-replica token slot for the node-local Engram DP group."""
     dp_metadata = get_forward_context().dp_metadata
     if dp_metadata is None:
         raise RuntimeError("a DP-shared engram table needs DP token metadata")
-    return int(dp_metadata.num_tokens_across_dp_cpu.max())
+    group = get_engram_dp_group()
+    assert group is not None
+    # Engram groups are contiguous slices of the full DP group.
+    start = get_dp_group().rank_in_group - group.rank_in_group
+    return int(
+        dp_metadata.num_tokens_across_dp_cpu[start : start + group.world_size].max()
+    )
 
 
 def gather_engram_hashes(

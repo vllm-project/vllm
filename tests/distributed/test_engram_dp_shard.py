@@ -433,3 +433,42 @@ def test_engram_hash_padding_has_no_valid_rows(num_tokens, monkeypatch):
     for replica in gathered:
         torch.testing.assert_close(replica[:num_tokens], ids)
         assert torch.all(replica[num_tokens:] == engram_ops.DEAD_ID)
+
+
+@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize("rank", range(8))
+@pytest.mark.parametrize("uniform", [False, True])
+def test_engram_hash_padding_ignores_other_nodes(tp_size, rank, uniform, monkeypatch):
+    """Two four-GPU nodes pad only to their own maximum, including TP x DP."""
+    dp_rank = rank // tp_size
+    group_size = 4 // tp_size
+    counts = (
+        [4] * (8 // tp_size)
+        if uniform
+        else [4096] + [2] * (group_size - 1) + [1, 3] + [0] * (group_size - 2)
+    )
+    slot = 4 if uniform else (4096 if rank < 4 else 3)
+    ids = torch.full((counts[dp_rank], 2, 3), 17, dtype=torch.int32)
+    monkeypatch.setattr(
+        engram_ops, "get_dp_group", lambda: SimpleNamespace(rank_in_group=dp_rank)
+    )
+    monkeypatch.setattr(
+        engram_ops,
+        "get_engram_dp_group",
+        lambda: SimpleNamespace(
+            rank_in_group=dp_rank % group_size,
+            world_size=group_size,
+            all_gather=lambda ids, dim: torch.cat([ids] * group_size, dim),
+        ),
+    )
+    monkeypatch.setattr(
+        engram_ops,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=torch.tensor(counts))
+        ),
+    )
+    gathered = gather_engram_hashes(ids)
+    expected = ids.new_full((slot, 2, 3), engram_ops.DEAD_ID)
+    expected[: ids.shape[0]] = ids
+    torch.testing.assert_close(gathered, expected.repeat(group_size, 1, 1))
