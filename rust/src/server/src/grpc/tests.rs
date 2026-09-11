@@ -1665,6 +1665,7 @@ async fn control_reports_server_and_model_info() {
     assert_eq!(parallelism.data_parallel_size, 1);
     assert_eq!(parallelism.data_parallel_rank, 0);
     assert_eq!(parallelism.decode_context_parallel_size, 1);
+    assert_eq!(parallelism.world_size, 1);
     let rl = server.rl_capabilities.expect("RL capabilities");
     assert!(!rl.weight_transfer_enabled);
     assert!(rl.weight_transfer_backend.is_empty());
