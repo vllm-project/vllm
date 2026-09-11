@@ -222,6 +222,7 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -996,6 +997,17 @@ class GPUModelRunner(
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
+        self.replayssm_state = (
+            RecoverSSMState()
+            if self.cache_config.use_replayssm_spec
+            and self.cache_config.mamba_cache_mode == "align"
+            else None
+        )
+        self.replayssm_idx_mapping = (
+            torch.arange(self.max_num_reqs, dtype=torch.int32, device=self.device)
+            if self.replayssm_state is not None
+            else None
+        )
         self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
         if self.cache_config.mamba_cache_mode == "all" and self.num_spec_tokens > 0:
             self.mamba_prev_last_scheduled_idx = self._make_buffer(
@@ -1638,12 +1650,24 @@ class GPUModelRunner(
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
         if self.cache_config.mamba_cache_mode == "align":
+            mamba_bufs = self._get_mamba_bufs()
+            if self.replayssm_state is not None:
+                ctx = mamba_bufs.postprocess_align
+                assert ctx is not None
+                assert ctx.mamba_state_idx_buf is not None
+                assert self.replayssm_idx_mapping is not None
+                self.replayssm_state.commit_step(
+                    self.num_accepted_tokens.gpu[:num_reqs],
+                    self.replayssm_idx_mapping[:num_reqs],
+                    state_indices=ctx.mamba_state_idx_buf.gpu,
+                    num_accepted_tokens=self.num_accepted_tokens.gpu,
+                )
             # Fused GPU postprocess: state copies + per-request accepted-token
             # update without CPU-GPU sync. The metadata
             # (num_scheduled_tokens, num_draft_tokens, num_computed_tokens) is
             # pre-staged to GPU buffers in _prepare_inputs.
             mamba_utils.postprocess_mamba_align_gpu(
-                bufs=self._get_mamba_bufs(),
+                bufs=mamba_bufs,
                 num_reqs=num_reqs,
                 num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
                 num_accepted_tokens_cpu_tensor=(
@@ -2605,6 +2629,19 @@ class GPUModelRunner(
                     extra_attn_metadata_args["prev_last_scheduled_idx"] = (
                         self.mamba_prev_last_scheduled_idx.gpu[:num_reqs_padded]
                     )
+                if (
+                    self.replayssm_state is not None
+                    and isinstance(builder, GDNAttentionMetadataBuilder)
+                ):
+                    ctx = self._get_mamba_bufs().postprocess_align
+                    assert ctx is not None
+                    assert ctx.precopy_src_col_buf is not None
+                    assert ctx.mamba_state_idx_buf is not None
+                    src_col = ctx.precopy_src_col_buf.gpu[:num_reqs_padded]
+                    dst_col = ctx.mamba_state_idx_buf.gpu[:num_reqs_padded]
+                    extra_attn_metadata_args["replayssm_boundary_reset"] = (
+                        (src_col >= 0) & (src_col != dst_col)
+                    ).to(torch.int8)
 
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(
@@ -4520,6 +4557,13 @@ class GPUModelRunner(
                     slot_mappings=slot_mappings_by_group,
                 )
             )
+            if self.replayssm_state is not None:
+                assert isinstance(attn_metadata, dict)
+                self.replayssm_state.record_step(
+                    attn_metadata,
+                    self.attn_groups,
+                    for_capture=False,
+                )
 
             (
                 input_ids,

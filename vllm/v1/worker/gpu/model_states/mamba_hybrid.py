@@ -34,6 +34,8 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    replayssm_reset_ring_cpu: torch.Tensor | None = None
+    replayssm_boundary_reset: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
         self,
@@ -56,7 +58,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             ),
         ):
             return {}
-        return {
+        result = {
             "num_accepted_tokens": None
             if self.num_accepted_tokens is None
             else self.num_accepted_tokens[:num_reqs],
@@ -64,6 +66,15 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             if self.num_decode_draft_tokens_cpu is None
             else self.num_decode_draft_tokens_cpu[:num_reqs],
         }
+        if (
+            isinstance(attn_metadata_builder, GDNAttentionMetadataBuilder)
+            and self.replayssm_reset_ring_cpu is not None
+        ):
+            result["replayssm_reset_ring_cpu"] = self.replayssm_reset_ring_cpu[
+                :num_reqs
+            ]
+            result["replayssm_boundary_reset"] = self.replayssm_boundary_reset
+        return result
 
 
 class MambaHybridModelState(DefaultModelState):
@@ -86,8 +97,24 @@ class MambaHybridModelState(DefaultModelState):
         # kernel reusing the postprocess copy machinery, so the per-step src
         # columns and the running state_idx are kept GPU-resident.
         self._align_mode = self.cache_config.mamba_cache_mode == "align"
+        self._use_replayssm = self.cache_config.use_replayssm_spec
+        if self._use_replayssm:
+            # CPU scheduling owns request admission, so keep the one-shot reset
+            # bit there as well.  It is consumed only by the first post-prefill
+            # step.  This avoids inferring admission from async num_computed
+            # counters, whose first decode value can differ by one depending on
+            # whether a sampled prompt token has already been accounted for.
+            self._replayssm_needs_reset = np.zeros(self.max_num_reqs, dtype=np.bool_)
         self.recoverssm = (
-            RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
+            RecoverSSMState()
+            if (
+                self.cache_config.use_kda_recoverssm
+                or (
+                    self.cache_config.use_replayssm_spec
+                    and self.cache_config.mamba_cache_mode == "align"
+                )
+            )
+            else None
         )
         if self._align_mode:
             self._mamba_state_idx_gpu = torch.zeros(
@@ -107,6 +134,10 @@ class MambaHybridModelState(DefaultModelState):
         super().add_request(req_index, new_req_data)
         # Must reset the speculative acceptance count in this idx which could be stale.
         self.num_accepted_tokens_gpu[req_index].fill_(1)
+        if self._use_replayssm:
+            # add_request is also called after preemption, when the restored
+            # checkpoint becomes the new ring origin.
+            self._replayssm_needs_reset[req_index] = True
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
             self._mamba_state_idx_gpu[req_index].fill_(
@@ -249,6 +280,8 @@ class MambaHybridModelState(DefaultModelState):
         # compute them during actual (non-capture) forward execution.
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None
+        replayssm_reset_ring_cpu = None
+        replayssm_boundary_reset = None
         if not for_capture and self.vllm_config.num_speculative_tokens > 0:
             num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
             num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[
@@ -270,6 +303,31 @@ class MambaHybridModelState(DefaultModelState):
                     spec_decode_mask, num_draft_tokens_per_req, -1
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
+
+        if self._use_replayssm and not for_capture:
+            # Consume each request's admission reset exactly once, on its first
+            # post-prefill step.  Keep padded rows at zero.  In particular, do
+            # not derive this from context <= prefill_len: that relation is true
+            # for two consecutive steps on one async-spec path and would discard
+            # the first accepted token from ReplaySSM's private ring.
+            actual_num_reqs = input_batch.num_reqs
+            reset_ring_np = np.zeros(num_reqs, dtype=np.int8)
+            request_indices = input_batch.idx_mapping_np
+            decode_mask = ~input_batch.is_prefilling_np
+            reset_ring_np[:actual_num_reqs] = (
+                self._replayssm_needs_reset[request_indices] & decode_mask
+            )
+            self._replayssm_needs_reset[request_indices[decode_mask]] = False
+            replayssm_reset_ring_cpu = torch.from_numpy(reset_ring_np)
+            if self._align_mode:
+                # preprocess_state has just advanced the running page.  Unlike
+                # comparing scheduled/context page numbers, this predicate is
+                # true on exactly the one step that performed the align copy.
+                src_col = self._mamba_src_col_gpu[input_batch.idx_mapping]
+                dst_col = self._mamba_state_idx_gpu[input_batch.idx_mapping]
+                replayssm_boundary_reset = ((src_col >= 0) & (src_col != dst_col)).to(
+                    torch.int8
+                )
 
         if self._align_mode:
             mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
@@ -293,6 +351,8 @@ class MambaHybridModelState(DefaultModelState):
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            replayssm_reset_ring_cpu=replayssm_reset_ring_cpu,
+            replayssm_boundary_reset=replayssm_boundary_reset,
         )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,

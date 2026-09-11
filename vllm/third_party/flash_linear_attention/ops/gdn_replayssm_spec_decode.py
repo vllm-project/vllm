@@ -53,6 +53,7 @@ def gdn_replayssm_spec_circular_kernel(
     SOFTPLUS_THRESHOLD: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
     IS_FLUSH: tl.constexpr,
+    ROUTE_BOTH: tl.constexpr,
     NULL_BLOCK_ID: tl.constexpr,
     DOT_PRECISION: tl.constexpr,
 ):
@@ -76,23 +77,21 @@ def gdn_replayssm_spec_circular_kernel(
     # output pointer (packed): token (bos + o_s), value-head i_hv, dim o_v
     p_o = o + (bos + o_s[:, None]) * stride_o_t + i_hv * V + o_v[None, :]
 
-    if IS_FLUSH:
-        if state_idx <= NULL_BLOCK_ID:
-            return
-        b_is_flush = tl.load(is_flush_flags + state_idx) != 0
-        if not b_is_flush:
-            return
-    else:
-        if state_idx <= NULL_BLOCK_ID:
+    if state_idx <= NULL_BLOCK_ID:
+        if not IS_FLUSH:
             full_mask = (o_s < spec_len)[:, None] & mask_v[None, :]
             tl.store(
                 p_o,
                 tl.zeros([BS, BV], dtype=tl.float32).to(p_o.dtype.element_ty),
                 mask=full_mask,
             )
-            return
-        b_is_flush = tl.load(is_flush_flags + state_idx) != 0
-        if b_is_flush:
+        return
+    b_is_flush = tl.load(is_flush_flags + state_idx) != 0
+    if ROUTE_BOTH:
+        run_flush = b_is_flush
+    else:
+        run_flush = IS_FLUSH
+        if b_is_flush != IS_FLUSH:
             return
 
     b_write_pos = tl.load(write_pos + state_idx).to(tl.int64)
@@ -181,9 +180,10 @@ def gdn_replayssm_spec_circular_kernel(
     # ------------------------------------------------------------------
     hw_q = tl.zeros([BV, BS], dtype=tl.float32)
     hw_k = tl.zeros([BV, BS], dtype=tl.float32)
-    if not IS_FLUSH:
-        scores_q = tl.zeros([BC, BS], dtype=tl.float32)
-        scores_k = tl.zeros([BC, BS], dtype=tl.float32)
+    # Define both accumulators for the unified runtime-routed kernel.  Triton
+    # then keeps the verify/flush bodies behind a scalar per-request branch.
+    scores_q = tl.zeros([BC, BS], dtype=tl.float32)
+    scores_k = tl.zeros([BC, BS], dtype=tl.float32)
     kk_mat = tl.zeros([BS, BS], dtype=tl.float32)
     kq_mat = tl.zeros([BS, BS], dtype=tl.float32)
 
@@ -235,7 +235,7 @@ def gdn_replayssm_spec_circular_kernel(
         kk_mat += tl.dot(k_tile, kT, input_precision=DOT_PRECISION)
         kq_mat += tl.dot(k_tile, qT, input_precision=DOT_PRECISION)
 
-        if IS_FLUSH:
+        if run_flush:
             sw_f = tl.dot(
                 b_d_scaled,
                 khist_tile,
@@ -278,7 +278,7 @@ def gdn_replayssm_spec_circular_kernel(
                 & ((b_write_pos + o_s[:, None]) < MAX_CACHE_LEN),
             )
 
-    if not IS_FLUSH:
+    if not run_flush:
         hw_q = b_total_decay * hw_q + tl.dot(
             b_d_scaled, scores_q, input_precision=DOT_PRECISION
         )
@@ -461,6 +461,7 @@ def _launch_gdn_spec(
     max_spec_len,
     use_qk_l2norm_in_kernel,
     is_flush_kernel,
+    route_both,
     block_v,
     num_warps,
     num_stages,
@@ -536,6 +537,7 @@ def _launch_gdn_spec(
         SOFTPLUS_THRESHOLD=20.0,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         IS_FLUSH=is_flush_kernel,
+        ROUTE_BOTH=route_both,
         NULL_BLOCK_ID=null_block_id,
         DOT_PRECISION=dot_precision,
         num_warps=num_warps,
@@ -593,6 +595,39 @@ def gdn_replayssm_spec_decode(
         head_k_dim=checkpoint_state.shape[-1],
     )
 
+    if launch_mode == "unified":
+        # A single per-request runtime branch replaces the two separately
+        # specialized launches.  Verify is the common case, so use its tuned
+        # launch geometry; flush rows take the alternate body in the kernel.
+        _launch_gdn_spec(
+            mixed_qkv,
+            a,
+            b,
+            A_log,
+            dt_bias,
+            out,
+            checkpoint_state,
+            d_cache,
+            k_cache,
+            g_cache,
+            query_start_loc,
+            ssm_state_indices,
+            write_pos,
+            cache_base,
+            is_flush,
+            scale,
+            max_cache_len,
+            max_spec_len,
+            use_qk_l2norm_in_kernel,
+            False,
+            True,
+            vb,
+            vw,
+            vns,
+            vnk,
+            null_block_id,
+            dot_precision,
+        )
     if launch_mode in ("both", "verify"):
         _launch_gdn_spec(
             mixed_qkv,
@@ -614,6 +649,7 @@ def gdn_replayssm_spec_decode(
             max_cache_len,
             max_spec_len,
             use_qk_l2norm_in_kernel,
+            False,
             False,
             vb,
             vw,
@@ -644,6 +680,7 @@ def gdn_replayssm_spec_decode(
             max_spec_len,
             use_qk_l2norm_in_kernel,
             True,
+            False,
             fb,
             fw,
             fns,

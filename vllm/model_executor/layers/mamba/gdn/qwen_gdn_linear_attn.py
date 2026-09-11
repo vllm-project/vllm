@@ -1470,6 +1470,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
 
             assert mixed_qkv_spec is not None
+            assert a_spec is not None
+            assert b_spec is not None
             num_spec_decodes = attn_metadata.num_spec_decodes
             d_cache, k_cache, g_cache = self_kv_cache[2:5]
             cs_out = torch.empty(
@@ -1481,8 +1483,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             gdn_replayssm_spec_decode(
                 mixed_qkv=mixed_qkv_spec,
-                a=a,
-                b=b,
+                a=a_spec,
+                b=b_spec,
                 A_log=self.A_log,
                 dt_bias=self.dt_bias,
                 checkpoint_state=ssm_state,
@@ -1503,6 +1505,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 max_spec_len=self.max_spec_len,
                 scale=self.head_k_dim**-0.5,
                 use_qk_l2norm_in_kernel=True,
+                launch_mode="unified",
             )
             core_attn_out_spec = cs_out.unsqueeze(0)
             last_recurrent_state = None
@@ -1616,14 +1619,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 3. Merge core attention output
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
-            merged_out = torch.empty(
-                (1, num_actual_tokens, *core_attn_out_spec.shape[2:]),
-                dtype=core_attn_out_non_spec.dtype,
-                device=core_attn_out_non_spec.device,
+            # Scatter directly into the caller-owned output.  The previous path
+            # allocated a full-size merged tensor, scattered both partitions
+            # into it, then copied the whole tensor into core_attn_out.
+            core_attn_out[:num_actual_tokens].index_copy_(
+                0, spec_token_indx, core_attn_out_spec.squeeze(0)
             )
-            merged_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
-            merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
-            core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
+            core_attn_out[:num_actual_tokens].index_copy_(
+                0, non_spec_token_indx, core_attn_out_non_spec.squeeze(0)
+            )
         elif spec_sequence_masks is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
@@ -1830,6 +1834,125 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             norm_eps=self.layer_norm_epsilon,
         )
 
+    def _can_use_replayssm_spec_fused_norm(
+        self, attn_metadata: GDNAttentionMetadata
+    ) -> bool:
+        """Return whether the decode-only ReplaySSM fast path is applicable.
+
+        ReplaySSM cannot use ``fused_gdn_decode_post_conv_mtp`` because that
+        kernel updates the checkpoint state directly instead of the ReplaySSM
+        ring.  It can still bypass the generic mixed prefill/decode dispatcher,
+        write directly into the caller-owned output buffer, and normalize the
+        result in place.
+        """
+        return (
+            self.use_replayssm_spec
+            and attn_metadata.spec_sequence_masks is not None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes == 0
+            and attn_metadata.num_spec_decodes > 0
+            and attn_metadata.spec_state_indices_tensor is not None
+            and attn_metadata.spec_query_start_loc is not None
+            and attn_metadata.num_accepted_tokens is not None
+            and attn_metadata.spec_write_pos_d is not None
+            and attn_metadata.spec_cache_base_d is not None
+            and attn_metadata.spec_is_flush_d is not None
+        )
+
+    def _forward_core_decode_replayssm_fused_norm(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        output_gate: torch.Tensor,
+        core_attn_out: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+    ) -> None:
+        """Decode-only ReplaySSM path without generic-dispatch temporaries.
+
+        The old path allocated a second recurrent-output tensor for every GDN
+        layer and copied it back into ``core_attn_out`` before launching RMS
+        normalization.  At 30 GDN layers this introduced allocator, copy and
+        Python launch overhead on every decode step.  The ReplaySSM kernel
+        already accepts a preallocated output, so write into the final buffer
+        directly and normalize it in place.
+        """
+        from vllm.third_party.flash_linear_attention.ops.gdn_replayssm_spec_decode import (  # noqa: E501
+            gdn_replayssm_spec_decode,
+        )
+
+        state_indices = attn_metadata.spec_state_indices_tensor
+        query_start_loc = attn_metadata.spec_query_start_loc
+        num_accepted_tokens = attn_metadata.num_accepted_tokens
+        write_pos = attn_metadata.spec_write_pos_d
+        cache_base = attn_metadata.spec_cache_base_d
+        is_flush = attn_metadata.spec_is_flush_d
+        assert state_indices is not None
+        assert query_start_loc is not None
+        assert num_accepted_tokens is not None
+        assert write_pos is not None
+        assert cache_base is not None
+        assert is_flush is not None
+
+        num_requests = attn_metadata.num_spec_decodes
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        # Compact these split views before the recurrent kernel.  Although the
+        # kernel supports arbitrary row strides, the packed source row also
+        # contains the other gate; reading it strided costs substantially more
+        # than the two compact copies at serving batch sizes.
+        b = b[:num_actual_tokens].contiguous()
+        a = a[:num_actual_tokens].contiguous()
+        conv_state = (
+            self.kv_cache[0]
+            if is_conv_state_dim_first()
+            else self.kv_cache[0].transpose(-1, -2)
+        )
+        conv_weights = self.conv1d.weight.view(
+            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+        )
+        mixed_qkv = causal_conv1d_update(
+            mixed_qkv[:num_actual_tokens],
+            conv_state,
+            conv_weights,
+            self.conv1d.bias,
+            self.activation,
+            conv_state_indices=state_indices[:num_requests, 0],
+            num_accepted_tokens=num_accepted_tokens[:num_requests],
+            query_start_loc=query_start_loc[: num_requests + 1],
+            max_query_len=self.max_spec_len,
+            validate_data=False,
+        )
+
+        d_cache, k_cache, g_cache = self.kv_cache[2:5]
+        out = core_attn_out[:num_actual_tokens]
+        gdn_replayssm_spec_decode(
+            mixed_qkv=mixed_qkv,
+            a=a,
+            b=b,
+            A_log=self.A_log,
+            dt_bias=self.dt_bias,
+            checkpoint_state=self.kv_cache[1],
+            d_cache=d_cache,
+            k_cache=k_cache,
+            g_cache=g_cache,
+            out=out,
+            query_start_loc=query_start_loc[: num_requests + 1],
+            ssm_state_indices=state_indices[:num_requests, 0],
+            write_pos=write_pos,
+            cache_base=cache_base,
+            is_flush=is_flush,
+            max_cache_len=self.replayssm_buffer_len + self.max_spec_len,
+            max_spec_len=self.max_spec_len,
+            scale=self.head_k_dim**-0.5,
+            use_qk_l2norm_in_kernel=True,
+            launch_mode="unified",
+        )
+        self._rms_norm_gated_cuda(
+            out,
+            output_gate[:num_actual_tokens],
+            out,
+        )
+
     def _forward_core_fused_norm_packed(
         self,
         mixed_qkvz: torch.Tensor,
@@ -1939,6 +2062,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
+        if self._can_use_replayssm_spec_fused_norm(attn_metadata):
+            self._forward_core_decode_replayssm_fused_norm(
+                mixed_qkv=mixed_qkv,
+                b=b,
+                a=a,
+                output_gate=output_gate,
+                core_attn_out=core_attn_out,
+                attn_metadata=attn_metadata,
+            )
+            return
         if (
             self._can_use_fused_gdn_mtp_decode(attn_metadata)
             and attn_metadata.num_prefills == 0
@@ -1952,10 +2085,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 attn_metadata=attn_metadata,
             )
             return
+        # A mixed speculative/non-spec batch immediately packs both partitions
+        # with index_select inside _forward_core.  Compacting the full gate
+        # views here first only adds two redundant device copies per GDN layer.
+        mixed_spec_batch = attn_metadata.spec_sequence_masks is not None and (
+            attn_metadata.num_prefills > 0 or attn_metadata.num_decodes > 0
+        )
         self._forward_core(
             mixed_qkv=mixed_qkv,
-            b=b.contiguous(),
-            a=a.contiguous(),
+            b=b if mixed_spec_batch else b.contiguous(),
+            a=a if mixed_spec_batch else a.contiguous(),
             core_attn_out=core_attn_out,
         )
         num_actual_tokens = attn_metadata.num_actual_tokens

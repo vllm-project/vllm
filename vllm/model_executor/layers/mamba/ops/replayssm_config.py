@@ -66,7 +66,7 @@ def _mamba2_spec_flush(dstate, base_block, is_blackwell):
     return 32, 1, _dstate_tile(dstate, 128), 2
 
 
-# GDN spec configs are (block_v, num_warps, block_s, num_stages), swept on
+# GDN spec configs are (block_v, num_warps, nk, num_stages), swept on
 # B300 at the Qwen3.5 geometry. The head_k_dim gate matters: these tuples
 # regress badly at K=64, which the default covers instead.
 _GDN_SPEC_VERIFY_BLACKWELL = {

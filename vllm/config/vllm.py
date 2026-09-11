@@ -2768,10 +2768,9 @@ class VllmConfig:
                 "--use-replayssm-spec requires speculative decoding "
                 "(num_speculative_tokens > 0)"
             )
-        if self.cache_config.mamba_cache_mode != "none":
+        if self.cache_config.mamba_cache_mode not in ("none", "align"):
             raise ValueError(
-                "--use-replayssm-spec does not support prefix caching; "
-                "pass --mamba-cache-mode none"
+                "--use-replayssm-spec supports only none and align Mamba cache modes"
             )
         if self.mamba_config.backend != MambaBackendEnum.TRITON:
             raise ValueError("--use-replayssm-spec requires --mamba-backend triton")
