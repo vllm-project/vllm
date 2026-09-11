@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.sse_keep_alive import with_sse_keep_alive
+from vllm.entrypoints.serve.utils.sse_keep_alive import with_sse_keep_alive
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
