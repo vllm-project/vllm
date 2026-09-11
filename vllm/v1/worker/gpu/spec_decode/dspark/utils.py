@@ -17,9 +17,9 @@ def _resolve_dspark_attention_backend(
 ) -> AttentionBackendEnum | None:
     if draft_backend is not None:
         return draft_backend
-    # DeepSeek-V4 draft layers share the target's KV-cache layout. Other
+    # DeepSeek-V4(.1) draft layers share the target's KV-cache layout. Other
     # DSpark architectures may use a different attention kind.
-    if draft_model_config.hf_config.model_type == "deepseek_v4":
+    if draft_model_config.hf_config.model_type in ("deepseek_v4", "deepseek_v41"):
         if target_backend is not None:
             logger.info_once(
                 "Using the target model's %s attention backend for the "
