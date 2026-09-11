@@ -34,6 +34,12 @@ class _LaunchBindingPlan:
     stride_targets: tuple[tuple[str, str, int], ...]
 
 
+class _TritonWarmupInputs(dict[str, Any]):
+    def __init__(self, kernel: Any, inputs: dict[str, Any]) -> None:
+        super().__init__(inputs)
+        self.kernel = kernel
+
+
 @cache
 def _launch_binding_plan(
     arg_names: tuple[str, ...],
@@ -87,7 +93,11 @@ def triton_warmup_inputs(
     ) = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Build launcher inputs from Triton's native positional argument order."""
+    """Build inputs that compile a Triton kernel without an owner adapter.
+
+    The returned mapping retains the native kernel so ``compile`` can bypass a
+    structured owner ``__call__`` whose signature may not match the kernel.
+    """
     arg_names = tuple(kernel.arg_names)
     if len(args) > len(arg_names):
         raise ValueError(
@@ -124,7 +134,7 @@ def triton_warmup_inputs(
         if missing_pointers:
             names = ", ".join(sorted(missing_pointers))
             raise ValueError(f"Missing Triton pointer inputs: {names}")
-    return {"grid": grid, **inputs}
+    return _TritonWarmupInputs(kernel, {"grid": grid, **inputs})
 
 
 def triton_scalar_specialization_rep(value: int) -> int:
@@ -220,7 +230,30 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         self._warming = True
         self._warming_compile_key = compile_key
         try:
-            cast(Callable[..., None], self)(**inputs)
+            if isinstance(inputs, _TritonWarmupInputs):
+                native_inputs = dict(inputs)
+                grid = native_inputs.pop("grid")
+                if self._run_autotune:
+                    inputs.kernel[grid](**native_inputs)
+                else:
+                    native_inputs = {
+                        name: _triton_metadata_arg(value)
+                        for name, value in native_inputs.items()
+                    }
+                    if (
+                        "launch_pdl" in native_inputs
+                        and hasattr(compile_key, "launch_pdl")
+                    ):
+                        native_inputs["launch_pdl"] = compile_key.launch_pdl
+                    warmup = getattr(inputs.kernel, "warmup", None)
+                    if warmup is None:
+                        raise TypeError(
+                            "Native Triton warmup inputs require a kernel with "
+                            "a warmup method"
+                        )
+                    warmup(grid=(1,), **native_inputs)
+            else:
+                cast(Callable[..., None], self)(**inputs)
         finally:
             self._warming = False
             self._warming_compile_key = None
