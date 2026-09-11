@@ -43,6 +43,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -136,6 +137,16 @@ class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
     """
 
     pass
+
+
+@dataclass
+class KVConnectorHandshakeEntry:
+    """One rank's encoded handshake metadata, served to peers by the frontend."""
+
+    pp_rank: int
+    tp_rank: int
+    payload: bytes
+    compatibility_hash: str | None = None
 
 
 class KVConnectorMetadata(ABC):  # noqa: B024
@@ -686,6 +697,22 @@ class KVConnectorBase_V1(ABC):
         self.set_xfer_handshake_metadata(
             {tp_rank: meta for (_, tp_rank), meta in metadata.items()}
         )
+
+    def get_xfer_handshake_entries(self) -> list[KVConnectorHandshakeEntry]:
+        """
+        Scheduler-side handshake metadata for every (pp_rank, tp_rank) worker,
+        encoded so the frontend can serve it to remote peers.
+        """
+        return []
+
+    def add_remote_handshake_entries(
+        self, remote_engine_id: str, entries: list[KVConnectorHandshakeEntry]
+    ) -> None:
+        """
+        Worker-side: register handshake metadata the frontend fetched from a
+        remote engine's control plane, so no side-channel fetch is needed.
+        """
+        return None
 
     @classmethod
     def build_prom_metrics(

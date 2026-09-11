@@ -37,6 +37,14 @@ pub struct KvEventsConfig {
     pub topic: String,
 }
 
+/// Identity of one engine in the KV transfer (P/D) topology.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KvTransferInfo {
+    pub engine_id: String,
+    pub kv_connector: String,
+    pub kv_role: String,
+}
+
 /// Post-initialization configuration sent from each engine on the input socket
 /// registration message, after the handshake completes.
 ///
@@ -104,6 +112,9 @@ pub struct EngineCoreReadyResponse {
     /// Whether the engine has a speculative draft model that can be updated.
     #[serde(default)]
     pub supports_draft_weight_updates: bool,
+    /// KV transfer identity, if a KV connector is configured.
+    #[serde(default)]
+    pub kv_transfer_info: Option<KvTransferInfo>,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

@@ -15,7 +15,7 @@ use vllm_text::{
     PromptTruncationLimit, SamplingParams, TextDecodeOptions, TextRequest, TruncationSide,
 };
 
-use super::pb;
+use crate::grpc::pb;
 
 pub fn media_parts_from_request(
     media: Vec<pb::MediaItem>,

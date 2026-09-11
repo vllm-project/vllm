@@ -102,7 +102,7 @@ def _make_connector_with_fake_worker(
     assert isinstance(worker.nixl_wrapper, FakeNixlWrapper)
     worker.kv_cache_layout = "LBHNC"
     if do_handshake:
-        remote_agents, _ = worker._nixl_handshake(
+        remote_agents = worker._nixl_handshake(
             host="localhost",
             port=1234,
             remote_tp_size=1,
@@ -922,31 +922,26 @@ _REMOTE = FakeNixlConnectorWorker.REMOTE_ENGINE_ID
 
 
 @pytest.mark.parametrize(
-    ("offset", "expiry_delta", "expect_declined"),
+    ("ttl", "expect_declined"),
     [
-        # offset known + deadline expired/near-expiry -> decline & recompute.
-        pytest.param(0.0, -10.0, True, id="expired"),
-        # offset applied before comparison: +50s in D's clock is expired locally
-        # when D is 100s ahead.
-        pytest.param(100.0, 50.0, True, id="offset_makes_expired"),
+        # TTL already elapsed -> decline & recompute.
+        pytest.param(-10.0, True, id="expired"),
         # within the default 5s safety margin -> treated as expired.
-        pytest.param(0.0, 2.0, True, id="near_expiry_within_margin"),
+        pytest.param(2.0, True, id="near_expiry_within_margin"),
         # far-future deadline -> read proceeds.
-        pytest.param(0.0, 1000.0, False, id="valid_far_deadline"),
-        # no deadline field (older peer / router did not forward) -> skipped.
-        pytest.param(0.0, None, False, id="missing_expiry_field"),
+        pytest.param(1000.0, False, id="valid_far_deadline"),
+        # no TTL field (older peer / router did not forward) -> skipped.
+        pytest.param(None, False, id="missing_ttl_field"),
     ],
 )
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_turn2_deadline_gate(dist_init, offset, expiry_delta, expect_declined):
-    """P declines on the turn-2 readback if the deadline is known,
-    near-expiry and a handshake clock offset is known"""
+def test_turn2_deadline_gate(dist_init, ttl, expect_declined):
+    """P declines on the turn-2 readback if D's remaining block TTL, rebased
+    onto P's clock when the request first arrives, is (nearly) elapsed."""
     connector, worker = _make_connector_with_fake_worker()
-    worker._engine_clock_offset[_REMOTE] = offset
-    expiry_time = None if expiry_delta is None else time.perf_counter() + expiry_delta
     meta = NixlConnectorMetadata()
     params = {
         "do_remote_prefill": False,
@@ -958,8 +953,8 @@ def test_turn2_deadline_gate(dist_init, offset, expiry_delta, expect_declined):
         "remote_port": 1234,
         "remote_tp_size": 1,
     }
-    if expiry_time is not None:
-        params["remote_blocks_expiry_time"] = expiry_time
+    if ttl is not None:
+        params["remote_blocks_ttl"] = ttl
     meta.add_new_req_to_recv(
         request_id="req",
         local_block_ids=([10, 11],),
@@ -981,7 +976,6 @@ def test_turn2_full_prefix_hit_with_expired_deadline_skips_gate(dist_init):
     """A full local prefix hit issues no READ. The expiry gate must be skipped
     even when D's deadline is expired."""
     connector, worker = _make_connector_with_fake_worker()
-    worker._engine_clock_offset[_REMOTE] = 0.0
 
     meta = NixlConnectorMetadata()
     meta.add_new_req_to_recv(
@@ -997,7 +991,7 @@ def test_turn2_full_prefix_hit_with_expired_deadline_skips_gate(dist_init):
             "remote_port": 1234,
             "remote_tp_size": 1,
             # Expired on D's clock; with offset 0 it is expired locally too.
-            "remote_blocks_expiry_time": time.perf_counter() - 10.0,
+            "remote_blocks_ttl": -10.0,
         },
     )
     # Must not raise, and the gate must not fire for a no-read prefix hit.
@@ -1006,8 +1000,8 @@ def test_turn2_full_prefix_hit_with_expired_deadline_skips_gate(dist_init):
     assert worker.xfer_stats.data["num_failed_transfers"] == []
 
 
-def test_d_node_request_finished_exports_blocks_expiry_time():
-    """D-node (do_remote_prefill request) exports a future float expiry time."""
+def test_d_node_request_finished_exports_blocks_ttl():
+    """D-node (do_remote_prefill request) exports how long it keeps the blocks."""
     vllm_config = create_vllm_config(kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG)
     scheduler = create_scheduler(vllm_config)
     BS = vllm_config.cache_config.block_size
@@ -1026,6 +1020,11 @@ def test_d_node_request_finished_exports_blocks_expiry_time():
     )
     kv = eco[0].outputs[0].kv_transfer_params
     assert kv["do_remote_decode"] is True
+    assert kv["remote_blocks_ttl"] == (
+        scheduler.get_kv_connector().connector_scheduler.decoder_kv_blocks_ttl
+    )
+    assert kv["remote_blocks_ttl"] > 0
+    # Deprecated companion key, emitted for one release.
     assert isinstance(kv["remote_blocks_expiry_time"], float)
     assert kv["remote_blocks_expiry_time"] > time.perf_counter()
 

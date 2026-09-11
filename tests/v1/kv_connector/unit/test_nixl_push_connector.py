@@ -671,7 +671,7 @@ def _eviction_worker(engine_ttl: float) -> NixlPushConnectorWorker:
     w = _StubWriterWorker.fresh()
     w._engine_ttl = engine_ttl
     w._engine_last_active = {}
-    w._engine_clock_offset = {}
+    w._pushed_handshake_payloads = {}
     w._handshake_lock = threading.RLock()
     # _cleanup_remote_engine touches these when reaping an engine.
     w.nixl_wrapper = MagicMock()

@@ -17,9 +17,51 @@ service Control {
   rpc UnloadLora (UnloadLoraRequest) returns (UnloadLoraResponse) {}
   rpc ListLoras (ListLorasRequest) returns (ListLorasResponse) {}
 
+  // The RPCs below moved to `KvTransfer` and `RlControl`. They stay on
+  // `Control` for one release so existing clients keep working, and answer
+  // `Unimplemented` when the service they moved to is not mounted.
+
+  // Deprecated: use KvTransfer.GetKvEventSources.
+  rpc GetKvEventSources (GetKvEventSourcesRequest) returns (GetKvEventSourcesResponse) { option deprecated = true; }
+
+  // Deprecated: use RlControl.PauseGeneration.
+  rpc PauseGeneration (PauseGenerationRequest) returns (PauseGenerationResponse) { option deprecated = true; }
+  // Deprecated: use RlControl.ResumeGeneration.
+  rpc ResumeGeneration (ResumeGenerationRequest) returns (ResumeGenerationResponse) { option deprecated = true; }
+  // Deprecated: use RlControl.IsPaused.
+  rpc IsPaused (IsPausedRequest) returns (IsPausedResponse) { option deprecated = true; }
+  // Deprecated: use RlControl.Sleep.
+  rpc Sleep (SleepRequest) returns (SleepResponse) { option deprecated = true; }
+  // Deprecated: use RlControl.WakeUp.
+  rpc WakeUp (WakeUpRequest) returns (WakeUpResponse) { option deprecated = true; }
+  // Deprecated: use RlControl.IsSleeping.
+  rpc IsSleeping (IsSleepingRequest) returns (IsSleepingResponse) { option deprecated = true; }
+  // Deprecated: use RlControl.InitWeightTransferEngine.
+  rpc InitWeightTransferEngine (InitWeightTransferEngineRequest) returns (InitWeightTransferEngineResponse) { option deprecated = true; }
+  // Deprecated: use RlControl.StartWeightUpdate.
+  rpc StartWeightUpdate (StartWeightUpdateRequest) returns (StartWeightUpdateResponse) { option deprecated = true; }
+  // Deprecated: use RlControl.StartDraftWeightUpdate.
+  rpc StartDraftWeightUpdate (StartDraftWeightUpdateRequest) returns (StartDraftWeightUpdateResponse) { option deprecated = true; }
+  // Deprecated: use RlControl.UpdateWeights.
+  rpc UpdateWeights (UpdateWeightsRequest) returns (UpdateWeightsResponse) { option deprecated = true; }
+  // Deprecated: use RlControl.FinishWeightUpdate.
+  rpc FinishWeightUpdate (FinishWeightUpdateRequest) returns (FinishWeightUpdateResponse) { option deprecated = true; }
+  // Deprecated: use RlControl.UpdateWeightVersion.
+  rpc UpdateWeightVersion (UpdateWeightVersionRequest) returns (UpdateWeightVersionResponse) { option deprecated = true; }
+  // Deprecated: use RlControl.GetWeightVersion.
+  rpc GetWeightVersion (GetWeightVersionRequest) returns (GetWeightVersionResponse) { option deprecated = true; }
+}
+
+service KvTransfer {
   // KV event discovery.
   rpc GetKvEventSources (GetKvEventSourcesRequest) returns (GetKvEventSourcesResponse) {}
 
+  // KV transfer (P/D disaggregation) discovery and peer handshake.
+  rpc GetKvTransferInfo (GetKvTransferInfoRequest) returns (GetKvTransferInfoResponse) {}
+  rpc GetKvHandshakeMetadata (GetKvHandshakeMetadataRequest) returns (GetKvHandshakeMetadataResponse) {}
+}
+
+service RlControl {
   // Reinforcement-learning lifecycle and weight updates.
   rpc PauseGeneration (PauseGenerationRequest) returns (PauseGenerationResponse) {}
   rpc ResumeGeneration (ResumeGenerationRequest) returns (ResumeGenerationResponse) {}
@@ -38,6 +80,17 @@ service Control {
 
 message GetServerInfoRequest {}
 
+// gRPC services this frontend serves. Each value names the service of the same
+// name in this package. Services outside the mounted set answer
+// `Unimplemented`.
+enum GrpcService {
+  GRPC_SERVICE_UNSPECIFIED = 0;
+  GRPC_SERVICE_INFERENCE = 1;
+  GRPC_SERVICE_CONTROL = 2;
+  GRPC_SERVICE_KV_TRANSFER = 3;
+  GRPC_SERVICE_RL_CONTROL = 4;
+}
+
 message ServerInfo {
   string engine_version = 1;
   string api_version = 2;
@@ -50,8 +103,14 @@ message ServerInfo {
   uint64 max_batched_tokens = 9;
   uint32 max_loras = 10;
   RlCapabilities rl_capabilities = 11;
+  // Services mounted on this port. Authoritative for whether an RPC is
+  // reachable; a service missing here answers `Unimplemented`. Only readable
+  // when `Control` itself is mounted.
+  repeated GrpcService services = 12;
 }
 
+// Engine configuration for the RL lifecycle. Independent of whether `RlControl`
+// is mounted: check `ServerInfo.services` for that.
 message RlCapabilities {
   bool weight_transfer_enabled = 1;
   string weight_transfer_backend = 2;
@@ -185,4 +244,38 @@ message KvEventSource {
   uint32 buffer_steps = 8;
   uint32 hwm = 9;
   uint32 max_queue_size = 10;
+}
+
+// ======================================================================================
+// KV transfer
+// ======================================================================================
+
+message GetKvTransferInfoRequest {}
+message GetKvTransferInfoResponse { repeated KvTransferEngine engines = 1; }
+
+// One data-parallel engine's identity in the KV transfer topology. A router
+// pairs prefill and decode engines whose `compatibility_hash` values match and
+// passes `engine_id` to the peer as `remote_engine_id`.
+message KvTransferEngine {
+  string engine_id = 1;
+  string connector = 2;
+  string role = 3;
+  uint32 data_parallel_rank = 4;
+  uint32 tensor_parallel_size = 5;
+  uint32 pipeline_parallel_size = 6;
+  uint32 kv_block_size = 7;
+  string compatibility_hash = 8;
+}
+
+message GetKvHandshakeMetadataRequest { string engine_id = 1; }
+message GetKvHandshakeMetadataResponse { repeated KvHandshakeRank ranks = 1; }
+
+// Connector-specific handshake payload for one (pp_rank, tp_rank) worker,
+// encoded with `encoding`. Opaque to the frontend and the router.
+message KvHandshakeRank {
+  uint32 pp_rank = 1;
+  uint32 tp_rank = 2;
+  string compatibility_hash = 3;
+  string encoding = 4;
+  bytes payload = 5;
 }

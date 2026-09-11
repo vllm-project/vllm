@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from vllm.config.kv_events import KVEventsConfig
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -70,6 +71,22 @@ class FinishReason(enum.IntEnum):
 
 
 @dataclass
+class KVTransferInfo:
+    """Identity of this engine in the KV transfer topology."""
+
+    engine_id: str
+    kv_connector: str
+    kv_role: str
+
+    @classmethod
+    def from_config(cls, config: KVTransferConfig | None) -> "KVTransferInfo | None":
+        if config is None or not config.is_kv_transfer_instance:
+            return None
+        assert config.engine_id and config.kv_connector and config.kv_role
+        return cls(config.engine_id, config.kv_connector, config.kv_role)
+
+
+@dataclass
 class EngineCoreReadyResponse:
     """Sent from EngineCore to each frontend at the end of engine startup.
 
@@ -102,6 +119,7 @@ class EngineCoreReadyResponse:
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
+    kv_transfer_info: KVTransferInfo | None = None
 
 
 class EngineCoreRequest(

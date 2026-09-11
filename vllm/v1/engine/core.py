@@ -27,6 +27,9 @@ from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeEntry,
+)
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -66,6 +69,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     EngineCoreRequestType,
     FinishReason,
+    KVTransferInfo,
     PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
@@ -977,6 +981,22 @@ class EngineCore:
         """Return the latest committed weight version."""
         return self._weight_version
 
+    def get_kv_connector_handshake_entries(self) -> list[KVConnectorHandshakeEntry]:
+        """Return this engine's KV connector handshake metadata per rank."""
+        kv_connector = self.scheduler.get_kv_connector()
+        if kv_connector is None:
+            return []
+        return kv_connector.get_xfer_handshake_entries()
+
+    def add_remote_kv_handshake(
+        self, remote_engine_id: str, entries: list[Any]
+    ) -> None:
+        """Hand a remote engine's handshake metadata to every worker."""
+        typed_entries = msgspec.convert(entries, list[KVConnectorHandshakeEntry])
+        self.model_executor.collective_rpc(
+            "add_remote_kv_handshake", args=(remote_engine_id, typed_entries)
+        )
+
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.
 
@@ -1680,6 +1700,9 @@ class EngineCoreProc(EngineCore):
             enable_sleep_mode=self.vllm_config.model_config.enable_sleep_mode,
             supports_draft_weight_updates=(
                 self.model_executor.supports_draft_weight_updates()
+            ),
+            kv_transfer_info=KVTransferInfo.from_config(
+                self.vllm_config.kv_transfer_config
             ),
         )
 

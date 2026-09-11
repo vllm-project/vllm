@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
     KVConnectorBase_V1,
+    KVConnectorHandshakeEntry,
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
@@ -486,6 +487,20 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         for c in self._connectors:
             c.set_xfer_handshake_metadata_pp_aware(metadata)
+
+    def get_xfer_handshake_entries(self) -> list[KVConnectorHandshakeEntry]:
+        """Returns the first non-empty entry list from sub-connectors."""
+        for c in self._connectors:
+            entries = c.get_xfer_handshake_entries()
+            if entries:
+                return entries
+        return []
+
+    def add_remote_handshake_entries(
+        self, remote_engine_id: str, entries: list[KVConnectorHandshakeEntry]
+    ) -> None:
+        for c in self._connectors:
+            c.add_remote_handshake_entries(remote_engine_id, entries)
 
     def _aggregate_request_finished(
         self,

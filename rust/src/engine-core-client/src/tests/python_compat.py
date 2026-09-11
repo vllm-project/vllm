@@ -397,6 +397,13 @@ class KVEventsConfig:
 
 
 @dataclass
+class KVTransferInfo:
+    engine_id: str
+    kv_connector: str
+    kv_role: str
+
+
+@dataclass
 class EngineCoreReadyResponse:
     max_model_len: int
     num_gpu_blocks: int
@@ -421,6 +428,7 @@ class EngineCoreReadyResponse:
     weight_transfer_backend: str | None = None
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
+    kv_transfer_info: KVTransferInfo | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -454,7 +462,28 @@ ready_response = EngineCoreReadyResponse(
         max_queue_size=100_000,
         topic="kv",
     ),
+    kv_transfer_info=KVTransferInfo(
+        engine_id="prefill-0_dp0",
+        kv_connector="NixlConnector",
+        kv_role="kv_producer",
+    ),
 )
+
+
+# Mirror of vllm.distributed.kv_transfer.kv_connector.v1.base.KVConnectorHandshakeEntry,
+# returned as a list by the get_kv_connector_handshake_entries utility call.
+@dataclass
+class KVConnectorHandshakeEntry:
+    pp_rank: int
+    tp_rank: int
+    payload: bytes
+    compatibility_hash: str | None = None
+
+
+handshake_entries = [
+    KVConnectorHandshakeEntry(0, 0, b"\x82\xa1a\x01", "abc123"),
+    KVConnectorHandshakeEntry(1, 0, b"\x00\xff"),
+]
 
 nixl_stats = {
     "transfer_duration": [0.01, 0.02],
@@ -505,3 +534,4 @@ print(msgspec.msgpack.encode(nixl_stats).hex())
 print(msgspec.msgpack.encode(mooncake_stats).hex())
 print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())
+print(msgspec.msgpack.encode(handshake_entries).hex())

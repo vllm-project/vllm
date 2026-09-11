@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
     KVConnectorBase_V1,
+    KVConnectorHandshakeEntry,
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
@@ -218,6 +219,10 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         self.connector_scheduler.set_xfer_handshake_metadata(metadata)
 
+    def get_xfer_handshake_entries(self) -> list[KVConnectorHandshakeEntry]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_xfer_handshake_entries()
+
     ############################################################
     # Worker Side Methods
     ############################################################
@@ -296,6 +301,15 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker.shutdown()
         if self.connector_scheduler is not None:
             self.connector_scheduler.shutdown()
+
+    def add_remote_handshake_entries(
+        self, remote_engine_id: str, entries: list[KVConnectorHandshakeEntry]
+    ) -> None:
+        assert self.connector_worker is not None
+        self.connector_worker.add_remote_handshake_payloads(
+            remote_engine_id,
+            {(entry.pp_rank, entry.tp_rank): entry.payload for entry in entries},
+        )
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """

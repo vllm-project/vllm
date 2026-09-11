@@ -158,6 +158,26 @@ steps:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_edge_case_test.sh
 
+- label: ":nvidia: (L4) NixlConnector gRPC handshake"
+  key: nixlconnector-grpc-handshake-2-gpus
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 2
+  source_file_dependencies:
+    - rust/proto/control.proto
+    - rust/src/server/src/grpc/
+    - rust/src/engine-core-client/
+    - vllm/distributed/kv_transfer/kv_connector/v1/
+    - vllm/v1/engine/core.py
+    - tests/v1/kv_connector/nixl_integration/
+  env:
+    PREFILL_GPU_ID: "0"
+    DECODE_GPU_ID: "1"
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/run_grpc_handshake_test.sh
+
 - label: ":nvidia: (L4) Hybrid SSM NixlConnector PD prefix cache"
   key: hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus
   timeout_in_minutes: 25

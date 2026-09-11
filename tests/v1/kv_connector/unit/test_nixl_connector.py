@@ -29,7 +29,10 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_current_attn_backend,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1 import nixl
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeEntry,
+    KVConnectorRole,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiKVConnectorStats,
@@ -411,6 +414,16 @@ def test_kv_transfer_handshake(dist_init):
         scheduler_connector = scheduler.get_kv_connector()
         scheduler_connector.set_xfer_handshake_metadata_pp_aware({(0, 0): metadata})
 
+        # The same metadata is exposed, encoded, for the frontend to serve.
+        assert scheduler_connector.get_xfer_handshake_entries() == [
+            KVConnectorHandshakeEntry(
+                pp_rank=0,
+                tp_rank=0,
+                payload=msgspec.msgpack.encode(metadata),
+                compatibility_hash=metadata.compatibility_hash,
+            )
+        ]
+
         # Simulate a request that finishes prefill, which returns
         # corresponding NixlConnectorMetadata for decode instance.
         BLOCK_SIZE = vllm_config.cache_config.block_size
@@ -459,6 +472,42 @@ def test_kv_transfer_handshake(dist_init):
             assert received_metadata[0] == expected_agent_metadata
             assert received_metadata[1] == 0  # remote_tp_rank
             assert received_metadata[2] == 1  # remote_tp_size
+
+        # The frontend can push the same payload it fetched over the prefill
+        # instance's control plane; the worker then never touches the side
+        # channel. With handshake_transport=grpc there is no fallback either.
+        pushed_connector = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+        pushed_connector.register_kv_caches(kv_caches)
+        pushed_worker = pushed_connector.connector_worker
+        pushed_worker._handshake_transport = "grpc"
+        with (
+            patch.object(pushed_worker, "add_remote_agent") as mock_add_remote_agent,
+            patch.object(
+                nixl.base_worker, "zmq_ctx", side_effect=AssertionError("zmq used")
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="handshake_transport=grpc"):
+                pushed_worker._nixl_handshake(
+                    kv_connector_metadata["remote_host"],
+                    kv_connector_metadata["remote_port"],
+                    kv_connector_metadata["tp_size"],
+                    kv_connector_metadata["remote_engine_id"],
+                )
+
+            pushed_connector.add_remote_handshake_entries(
+                kv_connector_metadata["remote_engine_id"],
+                scheduler_connector.get_xfer_handshake_entries(),
+            )
+            remote_agents = pushed_worker._nixl_handshake(
+                kv_connector_metadata["remote_host"],
+                kv_connector_metadata["remote_port"],
+                kv_connector_metadata["tp_size"],
+                kv_connector_metadata["remote_engine_id"],
+            )
+            assert list(remote_agents) == [(0, 0)]
+            assert mock_add_remote_agent.call_args.args[0] == expected_agent_metadata
 
         # Need to shutdown the background thread to release NIXL side channel port
         scheduler_connector.shutdown()
@@ -510,7 +559,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         remote_dcp_size: int = 1,
         remote_pp_size: int = 1,
         notif_agents_only: bool = False,
-    ) -> tuple[dict[tuple[int, int], str], float]:
+    ) -> dict[tuple[int, int], str]:
         # Mimic slow _nixl_handshake, as well as bypass zmq communication.
         time.sleep(self._hand_shake_latency)
         # These should've been done in register_kv_caches(), called by
@@ -571,8 +620,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                 remote_tp_size=remote_tp_size,
             )
             remote_agents[(0, remote_tp_rank)] = remote_agent_name
-        # Handshake bypasses zmq, so report a zero clock offset to the peer.
-        return remote_agents, 0.0
+        return remote_agents
 
 
 class TestNixlHandshake:
@@ -843,7 +891,7 @@ class TestNixlHandshake:
                 range(tp_ratio)
             )
 
-        remote_agents, _ = worker._nixl_handshake(
+        remote_agents = worker._nixl_handshake(
             host="localhost",
             port=1234,
             remote_tp_size=4,
@@ -855,7 +903,7 @@ class TestNixlHandshake:
         # discovered. This is not a scenario we actively support right now, but
         # the connector allows it.
         worker.REMOTE_ENGINE_ID = "remote_engine_2"
-        remote_agents, _ = worker._nixl_handshake(
+        remote_agents = worker._nixl_handshake(
             host="localhost",
             port=1234,
             remote_tp_size=6,
@@ -3370,7 +3418,7 @@ def test_compatibility_hash_validation(
                     expected_engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                 )
         else:
-            result, _ = decode_worker._nixl_handshake(
+            result = decode_worker._nixl_handshake(
                 host="localhost",
                 port=1234,
                 remote_tp_size=1,

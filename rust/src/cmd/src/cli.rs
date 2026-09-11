@@ -30,8 +30,8 @@ use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig,
-    RendererSelection,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, GrpcServiceSelection, HttpListenerMode, LoraModulePath,
+    ParserSelection, RenderConfig, RendererSelection,
 };
 
 use crate::cli::ssl::SslArgs;
@@ -239,6 +239,21 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub grpc_port: Option<u16>,
+    /// gRPC services to mount on `--grpc-port`: `all` (the default) mounts
+    /// every service, `configured` derives them from the engine configuration,
+    /// or pass a comma-separated list of `inference`, `control`,
+    /// `kv-transfer`, `rl-control`. A list naming a service the engines are not
+    /// configured for fails startup.
+    #[arg(long, default_value_t)]
+    #[serde(default)]
+    pub grpc_services: GrpcServiceSelection,
+    /// Host name or address that peer frontends should dial to reach this
+    /// gRPC control plane, advertised as `remote_control_host` in returned
+    /// `kv_transfer_params`. Defaults to the KV connector's side-channel host.
+    /// Set it to a Service name when a service mesh must originate mTLS.
+    #[arg(long)]
+    #[serde(default)]
+    pub kv_control_advertise_host: Option<String>,
     /// Maximum time to wait for active requests to drain during shutdown.
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
@@ -500,6 +515,8 @@ impl SharedRuntimeArgs {
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
+            grpc_services: self.grpc_services,
+            kv_control_advertise_host: self.kv_control_advertise_host.clone(),
             shutdown_timeout,
             keep_alive_timeout,
             profiler,
@@ -555,6 +572,8 @@ impl SharedRuntimeArgs {
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
+            grpc_services: self.grpc_services,
+            kv_control_advertise_host: self.kv_control_advertise_host.clone(),
             shutdown_timeout,
             keep_alive_timeout,
             profiler,
