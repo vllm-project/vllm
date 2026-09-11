@@ -58,6 +58,11 @@ steps:
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
+      source_file_dependencies:
+      - tests/models/test_hyv4_rocm.py
+      commands:
+      - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
+      - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
 
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
