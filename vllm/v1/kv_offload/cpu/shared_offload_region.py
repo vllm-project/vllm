@@ -155,7 +155,7 @@ class SharedOffloadRegion:
                     self.mmap_path,
                     self.total_size_bytes,
                     self.total_size_bytes / 1e9,
-                    self.num_blocks,
+                    self.num_chunks,
                     self._row_stride,
                     cpu_page_size,
                 )

@@ -21,7 +21,6 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
-    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
@@ -280,106 +279,45 @@ def test_profiling_cleanup_releases_tp_shared_region_once(monkeypatch):
     assert released == [([runtime], [], region)]
 
 
-def test_allocate_hisparse_kv_cache_rolls_back_on_device_failure(monkeypatch):
+@pytest.mark.parametrize("failure_phase", ["allocation", "binding", "buffers"])
+def test_init_hisparse_rolls_back_shared_region(monkeypatch, failure_phase):
+    """A failure after mmap allocation must not leak the shared registration."""
     region = _FakeSharedHostRegion()
-    spec = FullAttentionSpec(
-        block_size=2,
-        num_kv_heads=1,
-        head_size=2,
-        dtype=torch.float32,
-    )
-    page_size = spec.page_size_bytes
-    host_group = KVCacheGroupSpec(
-        ["host"],
-        spec,
-        block_pool_id=None,
-        role=KVCacheGroupRole.HISPARSE_SOURCE,
-    )
-    device_group = KVCacheGroupSpec(["device"], spec)
-    kv_cache_config = KVCacheConfig(
-        num_blocks=1,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=page_size,
-                layers=["host"],
-                layer_stride=page_size,
-                block_stride=page_size,
-                host_resident=True,
-                block_pool_id=None,
-            ),
-            KVCacheTensor(
-                size=page_size,
-                layers=["device"],
-                layer_stride=page_size,
-                block_stride=page_size,
-            ),
-        ],
-        kv_cache_groups=[host_group, device_group],
-        hisparse_host_num_blocks=1,
-        hisparse_host_block_stride=4096,
-        hisparse_shared_host_pool=True,
-    )
-    host_tensor = torch.empty(page_size, dtype=torch.int8)
-    monkeypatch.setattr(
-        attn_utils_module,
-        "allocate_hisparse_host_pools",
-        lambda *args, **kwargs: ([host_tensor], [], region),
-    )
-
-    def fail_device_allocation(*args, **kwargs):
-        raise RuntimeError("device allocation failed")
-
-    monkeypatch.setattr(attn_utils_module.torch, "zeros", fail_device_allocation)
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(
-            get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBHNC
-        )
-    )
-
-    with pytest.raises(RuntimeError, match="device allocation failed"):
-        attn_utils_module._allocate_hisparse_kv_cache(
-            kv_cache_config,
-            torch.device("cpu"),
-            [spec.block_size, spec.block_size],
-            vllm_config,
-        )
-
-    assert region.cleanup_calls == 1
-
-
-def test_init_kv_cache_rolls_back_shared_region_on_bind_failure(monkeypatch):
-    region = _FakeSharedHostRegion()
-    vllm_config = SimpleNamespace(
-        attention_config=SimpleNamespace(hisparse_config=SimpleNamespace()),
-        scheduler_config=SimpleNamespace(
-            max_num_seqs=1,
-            max_num_batched_tokens=1,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
         ),
+        scheduler_config=SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=1),
     )
+
+    def allocate(*args):
+        args[-1].shared_region = region
+        if failure_phase == "allocation":
+            raise RuntimeError("initialization failed")
+        return {}
+
+    def bind(**kwargs):
+        if failure_phase == "binding":
+            raise RuntimeError("initialization failed")
+        return []
+
+    def buffers(*args, **kwargs):
+        raise RuntimeError("initialization failed")
+
+    monkeypatch.setattr(attn_utils_module, "allocate_hisparse_kv_caches", allocate)
+    monkeypatch.setattr(attn_utils_module, "bind_hisparse_kv_caches", bind)
     monkeypatch.setattr(
-        attn_utils_module,
-        "_allocate_hisparse_kv_cache",
-        lambda *args, **kwargs: ({}, {}, {}, region),
+        attn_utils_module, "initialize_hisparse_runtime_buffers", buffers
     )
-
-    def fail_cache_binding(**kwargs):
-        raise RuntimeError("cache binding failed")
-
-    monkeypatch.setattr(
-        attn_utils_module, "_bind_hisparse_kv_caches", fail_cache_binding
-    )
-
-    with pytest.raises(RuntimeError, match="cache binding failed"):
-        attn_utils_module.init_kv_cache(
-            runner_kv_caches=[],
-            forward_context={},
-            kv_cache_config=SimpleNamespace(),
-            device=torch.device("cpu"),
-            kernel_block_sizes=[],
-            vllm_config=vllm_config,
-            block_tables=SimpleNamespace(),
+    with pytest.raises(RuntimeError, match="initialization failed"):
+        attn_utils_module.init_hisparse_kv_cache(
+            SimpleNamespace(),
+            torch.device("cpu"),
+            [],
+            vllm_config,
+            {},
+            SimpleNamespace(),
         )
-
     assert region.cleanup_calls == 1
 
 
