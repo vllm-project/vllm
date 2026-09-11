@@ -1717,9 +1717,3 @@ def reset_buffer_cache():
     _TRITON_TABLE_CACHE.clear()
     _TRITON_SPLIT_CACHE.clear()
     torch.accelerator.empty_cache()
-
-
-_TOPK_TOPP_KERNEL = TopKTopPKernel()
-_TOPP_SPLIT_STATS_KERNEL = TopPSplitStatsKernel()
-_TOPP_SPLIT_STEP_KERNEL = TopPSplitStepKernel()
-_TOPP_SPLIT_MASK_KERNEL = TopPSplitMaskKernel()

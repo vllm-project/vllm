@@ -319,6 +319,8 @@ def kernel_launcher(
             self.launch(grid, tuple(inputs), tuple(inputs.values()), **launch_kwargs)
         return outputs
 
+    return wrapper
+
 
 @dataclass(frozen=True)
 class TritonJitKey:
