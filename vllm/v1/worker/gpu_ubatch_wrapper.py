@@ -22,6 +22,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.v1.worker.ubatch_inputs import (
+    slice_lookback_token_ids,
+    update_captured_lookback,
+)
 from vllm.v1.worker.ubatch_utils import create_sm_control_context
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
@@ -53,12 +57,18 @@ class UbatchMetadata:
     inputs_embeds: torch.Tensor | None
     intermediate_tensors: IntermediateTensors | None
     num_tokens: int
+    lookback_token_ids: torch.Tensor | None = None
+
+    def model_kwargs(self) -> dict[str, torch.Tensor]:
+        if self.lookback_token_ids is None:
+            return {}
+        return {"lookback_token_ids": self.lookback_token_ids}
 
 
 @dataclass
 class CUDAGraphMetaData:
     cudagraph: torch.cuda.CUDAGraph
-    ubatch_metadata: UbatchMetadata
+    ubatch_metadata: list[UbatchMetadata]
     outputs: Any | None = None
 
 
@@ -155,6 +165,7 @@ class UBatchWrapper:
                     positions=ubatch_metadata.positions,
                     intermediate_tensors=ubatch_metadata.intermediate_tensors,
                     inputs_embeds=ubatch_metadata.inputs_embeds,
+                    **ubatch_metadata.model_kwargs(),
                 )
 
             results.append((ubatch_metadata.context.id, model_output))
@@ -220,6 +231,7 @@ class UBatchWrapper:
                     positions=ubatch_metadata.positions,
                     intermediate_tensors=ubatch_metadata.intermediate_tensors,
                     inputs_embeds=ubatch_metadata.inputs_embeds,
+                    **ubatch_metadata.model_kwargs(),
                 )
             results.append((ubatch_metadata.context.id, model_output))
 
@@ -262,6 +274,7 @@ class UBatchWrapper:
         dp_metadata,
         batch_descriptor,
         cudagraph_runtime_mode,
+        lookback_inputs: list[torch.Tensor | None] | None = None,
     ) -> list[UbatchMetadata]:
         # Create one forward context per ubatch
         forward_contexts = []
@@ -311,6 +324,9 @@ class UBatchWrapper:
                     intermediate_tensors=sliced_intermediate_tensors,
                     num_tokens=ubatch_slice.token_slice.stop
                     - ubatch_slice.token_slice.start,
+                    lookback_token_ids=(
+                        lookback_inputs[i] if lookback_inputs is not None else None
+                    ),
                 )
             )
 
@@ -348,6 +364,7 @@ class UBatchWrapper:
         )
 
     def __call__(self, *args, **kwargs):
+        lookback_query_start_loc = kwargs.pop("lookback_query_start_loc", None)
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
         ubatch_slices = forward_context.ubatch_slices
@@ -380,6 +397,24 @@ class UBatchWrapper:
         intermediate_tensors = kwargs["intermediate_tensors"]
         inputs_embeds = kwargs["inputs_embeds"]
         compute_stream = torch.cuda.current_stream()
+        history = kwargs.get("lookback_token_ids")
+        lookback_inputs: list[torch.Tensor | None] = [None] * len(ubatch_slices)
+        if history is not None:
+            if lookback_query_start_loc is None or input_ids is None:
+                raise ValueError(
+                    "Microbatch lookbacks require input_ids and "
+                    "lookback_query_start_loc"
+                )
+            lookback_inputs = [
+                slice_lookback_token_ids(
+                    history,
+                    input_ids,
+                    lookback_query_start_loc,
+                    ubatch_slice.request_slice,
+                    ubatch_slice.token_slice,
+                )
+                for ubatch_slice in ubatch_slices
+            ]
 
         dp_metadata = forward_context.dp_metadata
 
@@ -415,6 +450,7 @@ class UBatchWrapper:
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                lookback_inputs=lookback_inputs,
             )
             with self.sm_control:
                 return self._capture_ubatches(ubatch_metadata, self.runnable)
@@ -423,6 +459,10 @@ class UBatchWrapper:
             and cudagraph_runtime_mode is CUDAGraphMode.FULL
         ):
             cudagraph_metadata = self.cudagraphs[num_tokens]
+            for metadata, lookback in zip(
+                cudagraph_metadata.ubatch_metadata, lookback_inputs, strict=True
+            ):
+                update_captured_lookback(metadata.lookback_token_ids, lookback)
             # Sync offloader before replay - ensures any external dependencies
             # from pre-capture prefetches are satisfied.
             get_offloader().sync_prev_onload()
@@ -441,6 +481,7 @@ class UBatchWrapper:
                 dp_metadata=ubatch_dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                lookback_inputs=lookback_inputs,
             )
             with self.sm_control:
                 return self._run_ubatches(ubatch_metadata, self.runnable)

@@ -53,6 +53,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -939,14 +940,41 @@ class Engram(nn.Module):
             layout.head_dim,
             dtype=torch.bfloat16,
         )
+        parallel_config = get_current_vllm_config().parallel_config
+        self._init_lookup_staging(
+            parallel_config.num_ubatches if parallel_config.use_ubatching else 1,
+        )
 
-    def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
-        """Gather this layer's rows on the main stream before decoder layers."""
-        self.embed_tokens.lookup(hash_ids, self.staged_rows[: hash_ids.shape[0]])
+    def _init_lookup_staging(self, num_slots: int) -> None:
+        self._lookup_rows = [self.staged_rows] + [
+            torch.empty_like(self.staged_rows) for _ in range(num_slots - 1)
+        ]
 
-    def embed(self, hash_ids: torch.Tensor) -> torch.Tensor:
+    def _lookup_slot(self) -> int:
+        rows = getattr(self, "_lookup_rows", None)
+        return dbo_current_ubatch_id() if rows is not None and len(rows) > 1 else 0
+
+    def prepare_embeddings(self, hash_ids: torch.Tensor) -> torch.Tensor:
+        """Stage lookup rows in the current microbatch's own buffer."""
+        buffers = getattr(self, "_lookup_rows", None)
+        rows = (
+            buffers[self._lookup_slot()] if buffers is not None else self.staged_rows
+        )[: hash_ids.shape[0]]
+        self.embed_tokens.lookup(hash_ids, rows)
+        return rows
+
+    def embed(
+        self, hash_ids: torch.Tensor, prepared_rows: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Gather heads, returning only local tokens when SP is enabled."""
-        rows = self.staged_rows[: hash_ids.shape[0]]
+        if prepared_rows is None:
+            buffers = getattr(self, "_lookup_rows", None)
+            prepared_rows = (
+                buffers[self._lookup_slot()]
+                if buffers is not None
+                else self.staged_rows
+            )
+        rows = prepared_rows[: hash_ids.shape[0]]
         if self.embed_tokens.tp_size == 1:
             return rows
         if self.use_sequence_parallel:
@@ -974,11 +1002,12 @@ class Engram(nn.Module):
         hidden_states: torch.Tensor,
         hash_ids: torch.Tensor,
         token_mask: torch.Tensor | None = None,
+        prepared_rows: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """hidden_states: [T, hc_mult, dim]; hash_ids: [T, n_hash_cols] (all
         tokens, pre sequence-parallel shard); token_mask: [T], False shuts
         the gate so those positions pass through untouched."""
-        kv = self.wkv(self.embed(hash_ids).flatten(-2))
+        kv = self.wkv(self.embed(hash_ids, prepared_rows).flatten(-2))
         num_kv_tokens = hash_ids.shape[0]
         assert token_mask is None or token_mask.shape == (num_kv_tokens,)
         if self.use_sequence_parallel:
