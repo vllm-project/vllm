@@ -5074,6 +5074,50 @@ def test_waiting_kv_blocked_request_does_not_block_lighter_request():
     assert scheduled_ids == ["light"]
 
 
+def test_kv_blocked_head_bypass_cap_pauses_new_admissions():
+    """After MAX_KV_BLOCKED_BYPASSES younger requests have been admitted
+    ahead of a KV-blocked head, further admission from `self.waiting`
+    pauses -- even though blocks remain free -- until the head is served.
+    This bounds how long a sustained stream of younger arrivals can starve
+    it. See: https://github.com/vllm-project/vllm/issues/31731"""
+    scheduler = create_scheduler(
+        max_num_batched_tokens=64,
+        max_num_seqs=16,
+        num_blocks=12,
+        block_size=4,
+        enable_chunked_prefill=True,
+    )
+    (heavy,) = create_requests(
+        num_requests=1, num_tokens=80, block_size=4, req_ids=["heavy"]
+    )
+    scheduler.add_request(heavy)
+
+    num_lights = scheduler.MAX_KV_BLOCKED_BYPASSES + 1
+    lights = create_requests(
+        num_requests=num_lights,
+        num_tokens=4,
+        block_size=4,
+        req_ids=[f"light{i}" for i in range(num_lights)],
+    )
+    for light in lights:
+        scheduler.add_request(light)
+
+    output = scheduler.schedule()
+    scheduled_ids = {req.req_id for req in output.scheduled_new_reqs}
+
+    assert "heavy" not in scheduled_ids
+    # Only the capped number of lights got in this step, not all of them,
+    # even though blocks remained free for at least one more (12 blocks
+    # available vs. 1 block per light and MAX_KV_BLOCKED_BYPASSES + 1 of
+    # them waiting).
+    assert len(scheduled_ids) == scheduler.MAX_KV_BLOCKED_BYPASSES
+    assert lights[-1].request_id not in scheduled_ids
+    assert (
+        scheduler._kv_blocked_bypass_counts[heavy.request_id]
+        == scheduler.MAX_KV_BLOCKED_BYPASSES
+    )
+
+
 def test_abort_request_waiting_for_remote_kvs():
     scheduler = create_scheduler(use_kv_connector=True)
 
