@@ -22,6 +22,7 @@ fn is_false(v: &bool) -> bool {
     !v
 }
 
+mod array_like;
 pub mod dtype;
 pub mod handshake;
 pub mod logprobs;
