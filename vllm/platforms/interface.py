@@ -3,6 +3,7 @@
 import contextlib
 import enum
 import functools
+import itertools
 import math
 import os
 import platform
@@ -625,32 +626,62 @@ class Platform:
     ) -> int:
         """Pick the smallest block size supported by every backend.
 
-        A block size satisfies a backend when it is a multiple of one of the
-        backend's supported kernel block sizes, so extending a candidate by
-        the least common multiple of an unsatisfied backend's own preference
-        preserves the already-satisfied backends.
+        ``supports_block_size`` is the contract, and a backend may override it
+        to accept exact sizes only (CPU_MLA accepts 16 and no multiple of it),
+        so no size is assumed to stay valid for a backend because it is a
+        multiple of one that was. A size every backend accepts is a multiple of
+        one supported kernel block size per backend, so the least common
+        multiples of those choices include the smallest such size; each is
+        checked against every backend.
+
+        Raises:
+            ValueError: If the backends share no supported block size.
         """
         from vllm.config.vllm import set_current_vllm_config
+        from vllm.v1.attention.backend import MultipleOf
 
         # Backends may read the current config to decide a preference, so every
         # query runs inside the same context the single-backend path uses.
         with set_current_vllm_config(vllm_config):
-            preferred = backend_classes[0].get_preferred_block_size(default_block_size)
-            for backend_cls in backend_classes[1:]:
-                if not backend_cls.supports_block_size(preferred):
-                    preferred = math.lcm(
-                        preferred,
-                        backend_cls.get_preferred_block_size(default_block_size),
-                    )
-        return preferred
+            if len(backend_classes) == 1:
+                return backend_classes[0].get_preferred_block_size(default_block_size)
+            if all(b.supports_block_size(default_block_size) for b in backend_classes):
+                return default_block_size
+            # A backend declaring no sizes accepts any, so it contributes 1.
+            per_backend_sizes = [
+                [
+                    s.base if isinstance(s, MultipleOf) else s
+                    for s in b.get_supported_kernel_block_sizes()
+                ]
+                or [1]
+                for b in backend_classes
+            ]
+            candidates = sorted(
+                {math.lcm(*sizes) for sizes in itertools.product(*per_backend_sizes)}
+            )
+            for candidate in candidates:
+                if all(b.supports_block_size(candidate) for b in backend_classes):
+                    return candidate
+        raise ValueError(
+            "The attention backends share no supported KV cache block size ("
+            + "; ".join(
+                f"{b.get_name()}: {b.get_supported_kernel_block_sizes()}"
+                for b in backend_classes
+            )
+            + ")."
+        )
 
     @classmethod
     def _kernel_block_granularity(
         cls, backend_classes: "list[type[AttentionBackend]]"
     ) -> int:
         """Least common multiple of every backend's smallest supported kernel
-        block size — the granularity a shared block size must be a multiple of
-        to satisfy all backends."""
+        block size, the step alignment rounds a shared block size up by.
+
+        Rounding in these steps keeps the result valid only for backends that
+        accept multiples of their kernel block sizes; a backend that accepts
+        exact sizes only has none. Callers check the rounded result with
+        ``_check_aligned_block_size``."""
         from vllm.v1.attention.backend import MultipleOf
 
         mins = []
@@ -661,6 +692,36 @@ class Platform:
                     min(s.base if isinstance(s, MultipleOf) else s for s in supported)
                 )
         return math.lcm(*mins) if mins else 1
+
+    @classmethod
+    def _check_aligned_block_size(
+        cls,
+        vllm_config: "VllmConfig",
+        backend_classes: "list[type[AttentionBackend]]",
+        block_size: int,
+    ) -> None:
+        """Raise if alignment produced a block size some backend rejects.
+
+        Raises:
+            ValueError: If any backend's ``supports_block_size`` rejects
+                ``block_size``.
+        """
+        from vllm.config.vllm import set_current_vllm_config
+
+        with set_current_vllm_config(vllm_config):
+            rejecting = [
+                b for b in backend_classes if not b.supports_block_size(block_size)
+            ]
+        if rejecting:
+            raise ValueError(
+                f"Aligning the KV cache produced block size {block_size}, which "
+                "the following attention backends do not support: "
+                + "; ".join(
+                    f"{b.get_name()} (supports {b.get_supported_kernel_block_sizes()})"
+                    for b in rejecting
+                )
+                + "."
+            )
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
@@ -806,6 +867,9 @@ class Platform:
             required_page, block_alignment * primary_page
         )
         if cache_config.block_size < primary_block_size:
+            cls._check_aligned_block_size(
+                vllm_config, backend_classes, primary_block_size
+            )
             cache_config.block_size = primary_block_size
             logger.info(
                 "Setting attention block size to %d tokens so the quantized "
@@ -966,6 +1030,7 @@ class Platform:
             )
 
         if cache_config.block_size < attn_block_size:
+            cls._check_aligned_block_size(vllm_config, backend_classes, attn_block_size)
             cache_config.block_size = attn_block_size
             logger.info(
                 "Setting attention block size to %d tokens "

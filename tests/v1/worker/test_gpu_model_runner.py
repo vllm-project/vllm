@@ -462,6 +462,145 @@ def test_preferred_block_size_extends_to_common_multiple():
     )
 
 
+def _make_exact_backend_cls(sizes: list[int]):
+    """A backend accepting only the listed block sizes, as CPU_MLA does."""
+    from vllm.v1.attention.backend import AttentionBackend
+
+    class _ExactBackendCls(AttentionBackend):
+        @staticmethod
+        def get_name() -> str:
+            return "MOCK_EXACT"
+
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return list(sizes)
+
+        @classmethod
+        def supports_block_size(cls, block_size: int | None) -> bool:
+            return block_size is None or block_size in sizes
+
+    return _ExactBackendCls
+
+
+def test_preferred_block_size_rejects_backends_with_no_common_size():
+    # Extending 16 to lcm(16, 64) = 64 satisfies the second backend but not
+    # the first, which accepts exactly 16 and no multiple of it.
+    from vllm.platforms.interface import Platform
+
+    exact_16 = _make_exact_backend_cls([16])
+    multiple_of_64 = _make_backend_cls_for_kernel_block_size([MultipleOf(64)])
+
+    with pytest.raises(ValueError, match="share no supported KV cache block size"):
+        Platform._preferred_block_size_for_backends(
+            [exact_16, multiple_of_64], 16, None
+        )
+
+
+def test_preferred_block_size_searches_past_an_exact_size_backend():
+    # Extending greedily from the first backend picks lcm(16, 32) = 32, which
+    # the exact backend rejects; 96 is accepted by both.
+    from vllm.platforms.interface import Platform
+
+    exact = _make_exact_backend_cls([16, 96])
+    multiple_of_32 = _make_backend_cls_for_kernel_block_size([MultipleOf(32)])
+
+    assert (
+        Platform._preferred_block_size_for_backends([exact, multiple_of_32], 16, None)
+        == 96
+    )
+
+
+@pytest.mark.parametrize("exact", [False, True])
+def test_hybrid_alignment_checks_every_backend_accepts_the_result(monkeypatch, exact):
+    # Hybrid alignment rounds the attention block up to cover the mamba page,
+    # in multiples of the smallest kernel block. A backend that accepts only an
+    # exact size has no multiple to round to, so the result must be refused
+    # rather than handed to a kernel that cannot run it.
+    from vllm.model_executor.models import ModelRegistry
+    from vllm.platforms.interface import Platform
+
+    class _HybridModel:
+        @staticmethod
+        def get_mamba_state_shape_from_config(vllm_config):
+            return ((1, 4096),)
+
+        @staticmethod
+        def get_mamba_state_dtype_from_config(vllm_config):
+            return (torch.float32,)
+
+    monkeypatch.setattr(
+        ModelRegistry, "resolve_model_cls", lambda *_a, **_k: (_HybridModel, "")
+    )
+    cache_config = SimpleNamespace(
+        cache_dtype="auto",
+        block_size=16,
+        mamba_block_size=None,
+        user_specified_mamba_block_size=False,
+        mamba_cache_mode="none",
+        mamba_page_size_padded=None,
+        kv_cache_dtype_skip_layers=None,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=cache_config,
+        model_config=SimpleNamespace(
+            use_mla=False,
+            dtype=torch.float16,
+            architecture="HybridForTest",
+            get_num_kv_heads=lambda _parallel_config: 1,
+            get_head_size=lambda: 64,
+        ),
+        parallel_config=SimpleNamespace(),
+    )
+    backend = (
+        _make_exact_backend_cls([16])
+        if exact
+        else _make_backend_cls_for_kernel_block_size([MultipleOf(16)])
+    )
+
+    if exact:
+        with pytest.raises(ValueError, match="block size 64"):
+            Platform._align_hybrid_block_size(vllm_config, [backend])
+    else:
+        Platform._align_hybrid_block_size(vllm_config, [backend])
+        assert cache_config.block_size == 64
+
+
+@pytest.mark.parametrize("exact", [False, True])
+def test_heterogeneous_kv_alignment_checks_every_backend_accepts_the_result(exact):
+    # An fp8 primary sharing the pool with unquantized skip layers grows the
+    # primary block until its page covers the wider skip page, in multiples of
+    # the smallest kernel block, so an exact-size backend must refuse it too.
+    from vllm.platforms.interface import Platform
+
+    cache_config = SimpleNamespace(
+        cache_dtype="fp8",
+        block_size=16,
+        kv_cache_dtype_skip_layers=["model.layers.0.self_attn.attn"],
+        mamba_page_size_padded=None,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=cache_config,
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            get_num_kv_heads=lambda _parallel_config: 1,
+            get_head_size=lambda: 64,
+        ),
+        parallel_config=SimpleNamespace(),
+    )
+    backend = (
+        _make_exact_backend_cls([16])
+        if exact
+        else _make_backend_cls_for_kernel_block_size([MultipleOf(16)])
+    )
+
+    if exact:
+        with pytest.raises(ValueError, match="block size 32"):
+            Platform._align_heterogeneous_kv_block_size(vllm_config, [backend])
+    else:
+        Platform._align_heterogeneous_kv_block_size(vllm_config, [backend])
+        assert cache_config.block_size == 32
+
+
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     model = Mock()
     model.get_mm_lora_token_counts.side_effect = (
