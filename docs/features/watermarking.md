@@ -155,12 +155,6 @@ random vectors are not treated as independent evidence. Keep
 `deduplicate_contexts=True` unless the detector's calibration has been adjusted
 for correlated scores.
 
-Detection does not require the prompt or the generation-time context
-deduplication scope. It operates on the supplied token sequence and tests for
-the watermark on a best-effort basis. When generation used `"all"`, ordinary
-sampling at positions whose contexts occurred in earlier turns can reduce
-detection power.
-
 The reported p-value is calibrated under the assumption that scored PRF inputs
 are independent. A deployment uses one fixed key, so repeated structures across
 documents reuse the same PRF values and can make the realized false-positive
