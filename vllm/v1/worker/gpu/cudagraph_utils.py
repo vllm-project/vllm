@@ -38,7 +38,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup, clear_layer_kv_caches
@@ -299,7 +299,11 @@ class CudaGraphManager:
                     if desc not in descs_by_mode[decode_mode]:
                         descs_by_mode[decode_mode].append(desc)
 
-            if mixed_mode:
+            # recoverSSM cannot capture a dummy query wider than its workspace.
+            if mixed_mode and (
+                not self.vllm_config.cache_config.use_kda_recoverssm
+                or num_tokens <= max_decode_tokens
+            ):
                 # for PIECEWISE graphs there is no limit on requests when replaying
                 # i.e. no request padding is needed, so we leave it as None.
                 # For breakable PW graphs, break-point kernels read the real batch
@@ -688,23 +692,22 @@ def prepare_inputs_to_capture(
     )
     if pcp_manager is not None:
         input_batch = pcp_manager.prepare_inputs_to_capture(input_batch)
-    elif block_tables.cp_size > 1:
-        # HACK(woosuk): Special handling for DCP.
-        prepare_dcp_local_seq_lens(
-            input_buffers.dcp_local_seq_lens,
-            input_batch.seq_lens,
-            num_reqs,
-            block_tables.cp_size,
-            block_tables.cp_rank,
-            block_tables.cp_interleave,
-        )
-        input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
 
     block_table_provider = pcp_manager or block_tables
     input_block_tables = block_table_provider.get_dummy_block_tables(num_reqs)
     slot_mappings = block_table_provider.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
+    )
+
+    input_batch.dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
+        input_buffers.dcp_local_seq_lens,
+        input_batch.seq_lens,
+        input_batch.num_reqs,
+        block_tables.cp_size,
+        block_tables.cp_rank,
+        block_tables.cp_interleave,
+        num_reqs_padded=input_batch.num_reqs_after_padding,
     )
 
     # NOTE(woosuk): Attention metadata is required not just by standard attention

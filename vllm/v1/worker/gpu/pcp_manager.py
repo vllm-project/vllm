@@ -13,7 +13,6 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -576,20 +575,6 @@ class PCPManager:
             local_start_pos_np + local_num_scheduled_tokens
         )
 
-        dcp_local_seq_lens = None
-        if self.dcp_world_size > 1:
-            prepare_dcp_local_seq_lens(
-                input_buffers.dcp_local_seq_lens,
-                seq_lens,
-                num_reqs_after_padding,
-                self.dcp_world_size,
-                self.dcp_rank,
-                self.cp_interleave,
-            )
-            dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[
-                :num_reqs_after_padding
-            ]
-
         return replace(
             input_batch,
             req_ids=local_req_ids,
@@ -610,7 +595,7 @@ class PCPManager:
             query_start_loc_np=local_query_start_loc_np[: num_reqs_after_padding + 1],
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_cpu_upper_bound_np),
-            dcp_local_seq_lens=dcp_local_seq_lens,
+            dcp_local_seq_lens=None,
             num_computed_tokens_np=local_start_pos_np,
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
@@ -642,16 +627,6 @@ class PCPManager:
             ),
             seq_lens=input_buffers.seq_lens[:num_reqs].copy_(input_batch.seq_lens),
         )
-        if self.dcp_world_size > 1:
-            prepare_dcp_local_seq_lens(
-                input_buffers.dcp_local_seq_lens,
-                input_batch.seq_lens,
-                num_reqs,
-                self.dcp_world_size,
-                self.dcp_rank,
-                self.cp_interleave,
-            )
-            input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
         return input_batch
 
     def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
