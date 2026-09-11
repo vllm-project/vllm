@@ -87,6 +87,19 @@ class BaseSpeculator(ABC):
 
 class DraftModelSpeculator(BaseSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        # Under PCP the drafter runs replicated over the global batch on
+        # every rank, so its attention groups, forward context, and
+        # cudagraphs must not see PCP.
+        target_parallel_config = vllm_config.parallel_config
+        self.replicated_pcp = target_parallel_config.prefill_context_parallel_size > 1
+        if self.replicated_pcp:
+            vllm_config = replace(
+                vllm_config,
+                parallel_config=replace(
+                    target_parallel_config,
+                    prefill_context_parallel_size=1,
+                ),
+            )
         self.vllm_config = vllm_config
         self.device = device
 
