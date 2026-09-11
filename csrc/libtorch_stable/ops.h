@@ -654,12 +654,12 @@ void concat_and_cache_mla(torch::stable::Tensor& kv_c,
                           const std::string& kv_cache_dtype,
                           torch::stable::Tensor& scale);
 
-void concat_and_cache_mla_grouped(torch::stable::Tensor& kv_c,
-                                  torch::stable::Tensor& k_pe,
-                                  torch::stable::Tensor& kv_cache_ptrs,
-                                  torch::stable::Tensor& slot_mapping,
-                                  int64_t block_size, int64_t block_stride,
-                                  int64_t entry_stride);
+void concat_and_cache_mla_grouped(
+    torch::stable::Tensor& kv_c, torch::stable::Tensor& k_pe,
+    torch::stable::Tensor& kv_cache_ptrs, torch::stable::Tensor& slot_mapping,
+    int64_t block_size, int64_t block_stride, int64_t entry_stride,
+    std::optional<torch::stable::Tensor> kv_scales,
+    const std::string& kv_cache_dtype);
 
 #ifndef USE_ROCM
 // HiSparse kernels use raw PTX in the row copy; CUDA-only.

@@ -99,8 +99,8 @@ class FlashAttnMLASparseBackend(AttentionBackend):
             if vllm_config.parallel_config.decode_context_parallel_size > 1:
                 return "FlashAttention MLA Sparse does not support DCP for now"
 
-            hf_config = vllm_config.model_config.hf_config
-            if not hasattr(hf_config, "index_topk"):
+            hf_text_config = vllm_config.model_config.hf_text_config
+            if not hasattr(hf_text_config, "index_topk"):
                 return "FlashAttention MLA Sparse requires model with index_topk"
         return None
 
