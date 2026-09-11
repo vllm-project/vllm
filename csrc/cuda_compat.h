@@ -68,6 +68,28 @@ struct Utils {
 #endif
 
 #ifndef USE_ROCM
+  #define VLLM_SHFL_UP_SYNC(var, lane_delta) \
+    __shfl_up_sync(uint32_t(-1), var, lane_delta)
+#else
+  #define VLLM_SHFL_UP_SYNC(var, lane_delta) __shfl_up(var, lane_delta)
+#endif
+
+// Full-wavefront ballot. The mask/result width is the wavefront width, so
+// VLLM_BALLOT_MASK_T is 32-bit under CUDA and 64-bit under ROCm. Always store
+// the result in VLLM_BALLOT_MASK_T and count with VLLM_POPC -- assigning to
+// `unsigned int` on ROCm silently truncates lanes 32-63 and halves every
+// derived prefix-sum offset.
+#ifndef USE_ROCM
+  #define VLLM_BALLOT_MASK_T uint32_t
+  #define VLLM_BALLOT(pred) __ballot_sync(uint32_t(-1), pred)
+  #define VLLM_POPC(mask) __popc(mask)
+#else
+  #define VLLM_BALLOT_MASK_T uint64_t
+  #define VLLM_BALLOT(pred) __ballot(pred)
+  #define VLLM_POPC(mask) __popcll(mask)
+#endif
+
+#ifndef USE_ROCM
   #define VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(FUNC, VAL) \
     cudaFuncSetAttribute(FUNC, cudaFuncAttributeMaxDynamicSharedMemorySize, VAL)
 #else

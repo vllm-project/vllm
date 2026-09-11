@@ -454,7 +454,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/custom_all_gather_reduce_scatter_ops.cpp"
     "csrc/libtorch_stable/custom_all_reduce.cu"
     "csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu"
-    "csrc/libtorch_stable/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu")
+    "csrc/libtorch_stable/fused_kimi_k3_mla_key_concat_kv_cache_kernel.cu"
+    "csrc/libtorch_stable/hisparse_kernels.cu")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA" AND
      DEFINED CMAKE_CUDA_COMPILER_VERSION AND
@@ -478,7 +479,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
-      "csrc/libtorch_stable/hisparse_kernels.cu"
       "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_a2a_lse_reduce.cu"
       "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_kv_gather.cu"
       "csrc/libtorch_stable/attention/dcp_utils/dcp_direct_q_gather.cu")
