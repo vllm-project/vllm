@@ -157,8 +157,8 @@ class ForwardPassMetricsTimer:
         self._drain_lock = threading.Lock()
 
     @staticmethod
-    def _make_event() -> torch.cuda.Event:
-        return torch.cuda.Event(enable_timing=True)
+    def _make_event() -> torch.Event:
+        return torch.Event(enable_timing=True)
 
     def start(self, scheduler_output: SchedulerOutput) -> None:
         if self._active is not None:
