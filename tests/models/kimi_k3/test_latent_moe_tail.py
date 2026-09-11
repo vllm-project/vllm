@@ -8,6 +8,7 @@ import ray
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from torch import nn
 
 from tests.utils import (
     init_test_distributed_environment,
@@ -21,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
-from vllm.models.kimi_k3.nvidia import latent_moe_runner
+from vllm.models.kimi_k3.nvidia import latent_moe_runner, model
 from vllm.models.kimi_k3.nvidia.ops.latent_moe_tail import KimiK3LatentMoETailOp
 from vllm.platforms import current_platform
 
@@ -29,6 +30,36 @@ HIDDEN_SIZE = 7168
 LATENT_SIZE = 3584
 EPS = 0.1
 TOP_K = 8
+
+
+class _Linear(nn.Linear):
+    def forward(self, x: torch.Tensor):
+        return super().forward(x), None
+
+
+def test_kimi_mlp_accepts_precomputed_gate_up(default_vllm_config) -> None:
+    mlp = object.__new__(model.KimiMLP)
+    nn.Module.__init__(mlp)
+    mlp.gate_up_proj = _Linear(5, 4, bias=False)
+    mlp.down_proj = _Linear(4, 3, bias=False)
+    mlp.act_fn = nn.Identity()
+    mlp.gemm_rs_ar = None
+    mlp.shard_sequence_parallel = False
+    gate_up = torch.randn(6, 4)
+
+    torch.testing.assert_close(mlp(gate_up), F.linear(gate_up, mlp.down_proj.weight))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+def test_fused_moe_front_matches_separate_router() -> None:
+    sizes = (300, 257, 513)
+    hidden_states = torch.randn(7, 128, dtype=torch.bfloat16, device="cuda")
+    merged_weight = torch.randn(sum(sizes), 128, dtype=torch.bfloat16, device="cuda")
+
+    actual = model._fused_moe_front(hidden_states, merged_weight, sizes)
+    expected = torch.mm(hidden_states, merged_weight.t(), out_dtype=torch.float32)
+    shared, router, routed = expected.split(sizes, dim=-1)
+    torch.testing.assert_close(actual, (shared.bfloat16(), router, routed.bfloat16()))
 
 
 def test_deferred_finalize_enabled_before_moe_kernel_setup(

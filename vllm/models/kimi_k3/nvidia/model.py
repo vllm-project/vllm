@@ -135,6 +135,17 @@ logger = init_logger(__name__)
 _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD = 256
 
 
+def _fused_moe_front(
+    hidden_states: torch.Tensor,
+    merged_weight: torch.Tensor,
+    sizes: tuple[int, int, int],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    output = torch.mm(hidden_states, merged_weight.t(), out_dtype=torch.float32)
+    shared, router, routed = output.split(sizes, dim=-1)
+    dtype = hidden_states.dtype
+    return shared.to(dtype), router.contiguous(), routed.to(dtype)
+
+
 def shard_sequence_parallel_mlp(
     hidden_size: int,
     intermediate_size: int,
@@ -299,13 +310,15 @@ class KimiMLP(nn.Module):
             )
 
     def forward(self, x):
+        gate_up = None if x.shape[-1] == self.gate_up_proj.weight.shape[1] else x
         if self.shard_sequence_parallel:
             # Each rank holds a weight shard but only its own tokens, so it
             # cannot finish those tokens alone: gather the full token set,
             # compute this rank's partial for all of them, then reduce-scatter,
             # which sums across TP and restores the sequence sharding.
             x = sp_all_gather(x)
-        gate_up, _ = self.gate_up_proj(x)
+        if gate_up is None:
+            gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
 
         if self.gemm_rs_ar is not None and self.gemm_rs_ar.should_run(x):
@@ -599,6 +612,12 @@ class KimiMoE(nn.Module):
         self.use_mega_moe = (
             vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         )
+        self._fused_front_weight: torch.Tensor | None = None
+        self._fused_front_config_eligible = (
+            not use_sequence_parallel
+            and not vllm_config.parallel_config.enable_expert_parallel
+            and not vllm_config.model_config.enable_sleep_mode
+        )
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
             raise NotImplementedError(
                 "Kimi K3 MegaMoE requires expert parallel. Enable it with "
@@ -775,6 +794,39 @@ class KimiMoE(nn.Module):
                 moe_intermediate_size // self.tp_size
             )
 
+    def merge_fused_front_weights(self) -> None:
+        down_proj = self.routed_expert_down_proj
+        if (
+            not self._fused_front_config_eligible
+            or self.shared_experts is None
+            or down_proj is None
+            or not isinstance(self.experts, LatentMoERunner)
+            or not self.experts._use_fused_path()
+            or self.experts.do_naive_dispatch_combine
+            or self.experts.moe_config.pcp_size > 1
+            or self.experts.moe_config.hidden_dim != self.moe_hidden_size
+            or self.experts._quant_method.has_unpadded_output
+        ):
+            return
+        weights = [
+            self.shared_experts.gate_up_proj.weight,
+            self.gate.weight,
+            down_proj.weight,
+        ]
+        if (
+            any(
+                weight.ndim != 2 or weight.dtype != torch.bfloat16 or not weight.is_cuda
+                for weight in weights
+            )
+            or len({weight.shape[1] for weight in weights}) != 1
+        ):
+            return
+
+        merged = torch.cat([weight.data for weight in weights])
+        for weight, view in zip(weights, merged.split([w.shape[0] for w in weights])):
+            weight.data = view
+        self._fused_front_weight = merged
+
     def _maybe_overlap_router_and_down_proj(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
@@ -835,6 +887,27 @@ class KimiMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
+        down_proj = self.routed_expert_down_proj
+        if (
+            self._fused_front_weight is not None
+            and down_proj is not None
+            and 0 < num_tokens <= _ROUTED_DOWN_PROJ_STREAM_TOKEN_THRESHOLD
+        ):
+            sizes = (
+                self.shared_experts.gate_up_proj.weight.shape[0],
+                self.gate.weight.shape[0],
+                down_proj.weight.shape[0],
+            )
+            shared_gate_up, router_logits, routed_hidden_states = _fused_moe_front(
+                hidden_states, self._fused_front_weight, sizes
+            )
+            final_hidden_states = self.experts(
+                routed_hidden_states,
+                router_logits,
+                shared_experts_input=shared_gate_up,
+            )
+            return final_hidden_states.view(num_tokens, hidden_size)
+
         # Overlap the gate with the routed down projection; the returned hidden
         # states are already down-projected. Keep the original ``hidden_states``
         # for the shared experts.
@@ -1732,6 +1805,9 @@ class KimiLinearForCausalLM(
         # A parent AutoWeightsLoader may invoke load_weights repeatedly for
         # non-contiguous streamed prefixes. Finalize only after the full stream.
         self.model.finalize_mega_moe_weights()
+        for module in self.model.modules():
+            if isinstance(module, KimiMoE):
+                module.merge_fused_front_weights()
         # The fused MultiHeadLatentAttention's process_weights_after_loading
         # (W_UK_T / W_UV absorption) is driven by the loader's generic post-load
         # hook for any AttentionLayerBase, so no manual trigger is needed here.
