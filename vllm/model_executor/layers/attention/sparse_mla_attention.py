@@ -32,6 +32,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.torch_utils import (
+    PIN_MEMORY,
     is_quantized_kv_cache,
     np_to_pinned_tensor,
 )
@@ -186,6 +187,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             vllm_config.scheduler_config.max_num_seqs,
             dtype=torch.int32,
             device="cpu",
+            pin_memory=PIN_MEMORY,
         )
         parallel_config = vllm_config.parallel_config
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
