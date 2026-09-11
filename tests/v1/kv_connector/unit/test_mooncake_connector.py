@@ -893,6 +893,68 @@ def test_resolve_need_send_accounts_for_remote_tp_fanout():
 
 
 @pytest.mark.asyncio
+async def test_heterogeneous_pp_waits_for_consumer_without_shared_layers():
+    """P4/D2 must retain KV until both D stages finish, including a no-op pull."""
+    config = create_vllm_config(kv_connector="MooncakeConnector", kv_role="kv_producer")
+    with (
+        set_current_vllm_config(config),
+        patch_worker_dependencies(),
+        patch.object(MooncakeConnectorWorker, "_sync_block_size_with_kernel"),
+    ):
+        worker = MooncakeConnector(
+            config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+        try:
+            worker.pp_size = 4
+            worker.kv_caches_base_addr = [0x1000]
+            worker.block_len_per_layer = [256]
+            worker.kv_block_len_per_layer = [256]
+            worker.registered_layer_names = ["model.layers.0.self_attn"]
+            worker.registered_layer_indices = [0]
+            send_meta = SendBlockMeta(
+                p_req_id="p-req",
+                transfer_id="transfer",
+                local_block_ids=[[1]],
+                ready=asyncio.Event(),
+            )
+            send_meta.ready.set()
+            worker.reqs_need_send["transfer"] = send_meta
+            sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
+            with (
+                patch.object(worker, "sender_loop", asyncio.get_running_loop()),
+                patch.object(worker, "_send_blocks", return_value=0) as send,
+            ):
+                for pp_rank in range(2):
+                    metadata = MooncakeXferMetadata(
+                        remote_hostname="consumer",
+                        remote_port=1234 + pp_rank,
+                        remote_tp_size=1,
+                        remote_tp_rank=0,
+                        remote_pp_size=2,
+                        req_blocks={"d-req": ("transfer", [[2]])},
+                        kv_caches_base_addr=[0x2000],
+                        block_lens=[256],
+                        kv_block_lens=[256],
+                        registered_layer_names=[f"model.layers.{pp_rank}.self_attn"],
+                        registered_layer_indices=[pp_rank],
+                    )
+                    await worker.send_kv_to_decode(b"consumer", sock, metadata)
+                    response = worker._xfer_resp_decoder.decode(
+                        sock.send_multipart.call_args.args[0][1]
+                    )
+                    assert response.status == MooncakeXferResponseStatus.FINISH
+                    assert response.ok_reqs == ["d-req"]
+                    assert ("transfer" in worker.reqs_need_send) == (pp_rank == 0)
+                    assert worker.finished_sending_reqs == (
+                        set() if pp_rank == 0 else {"p-req"}
+                    )
+                send.assert_called_once_with("consumer:1234", [0x1100], [0x2200], [256])
+        finally:
+            worker.shutdown()
+            worker.is_kv_consumer = True
+
+
+@pytest.mark.asyncio
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.TransferEngine",
     FakeMooncakeWrapper,

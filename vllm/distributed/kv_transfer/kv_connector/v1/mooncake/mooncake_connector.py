@@ -307,6 +307,8 @@ def _validate_asymmetric_region_lengths(
 def _align_transfer_regions(
     local_regions: list[TransferRegion],
     remote_regions: list[TransferRegion],
+    *,
+    allow_partial_layers: bool = False,
 ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
     """Align KV transfer regions by registered layer-name occurrence.
 
@@ -335,6 +337,11 @@ def _align_transfer_regions(
     for key, local_region in local_keyed:
         remote_region = remote_by_key.get(key)
         if remote_region is None:
+            if (
+                allow_partial_layers
+                and (local_region.layer_name, 0) not in remote_by_key
+            ):
+                continue
             return (
                 [],
                 [],
@@ -393,6 +400,7 @@ class MooncakeXferMetadata(
     registered_layer_names: list[str] = msgspec.field(default_factory=list)
     registered_layer_indices: list[int] = msgspec.field(default_factory=list)
     registered_group_indices: list[int] = msgspec.field(default_factory=list)
+    remote_pp_size: int = 1
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -1232,7 +1240,11 @@ class MooncakeConnectorWorker:
             meta.registered_group_indices,
         )
         local_regions, remote_regions, align_err = _align_transfer_regions(
-            local_regions, remote_regions
+            local_regions,
+            remote_regions,
+            allow_partial_layers=(
+                meta.remote_pp_size > 1 and meta.remote_pp_size != self.pp_size
+            ),
         )
         if align_err is not None:
             response = MooncakeXferResponse(
@@ -1322,7 +1334,9 @@ class MooncakeConnectorWorker:
                     # Mark it sending to avoid expiration.
                     send_meta.sending += 1
                     if not send_meta.need_send:
-                        self.resolve_need_send(send_meta, remote_tp_ranks)
+                        self.resolve_need_send(
+                            send_meta, remote_tp_ranks, meta.remote_pp_size
+                        )
                     ready_reqs.append((d_req_id, send_meta))
                 else:
                     # Otherwise (expired, very unlikely), just forget it.
@@ -1398,11 +1412,16 @@ class MooncakeConnectorWorker:
         self,
         send_meta: SendBlockMeta,
         remote_tp_ranks: list[int],
+        remote_pp_size: int = 1,
     ):
         # Prepare for heterogeneous TP (one P pairs to multiple D)
         send_meta.need_send = len(remote_tp_ranks)
+        if remote_pp_size > 1 and remote_pp_size != self.pp_size:
+            # Each consumer PP stage pulls every producer stage, including
+            # peers with no shared layers.
+            send_meta.need_send *= remote_pp_size
         logger.debug(
-            "Mooncake request %s will be served by %d consumer TP workers: TP ranks=%s",
+            "Mooncake request %s will be served by %d consumer workers: TP ranks=%s",
             send_meta.transfer_id,
             send_meta.need_send,
             remote_tp_ranks,
@@ -1851,6 +1870,7 @@ class MooncakeConnectorWorker:
             remote_port=self.rpc_port,
             remote_tp_size=self.tp_size,
             remote_tp_rank=self.tp_rank,
+            remote_pp_size=self.pp_size,
             req_blocks={
                 req_id: (pull_meta.transfer_id, pull_meta.local_block_ids)
                 for req_id, pull_meta in pull_metas.items()
