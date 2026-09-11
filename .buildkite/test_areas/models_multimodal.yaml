@@ -172,6 +172,7 @@ steps:
   optional: true
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal/generation_ppl_test/
   commands:
     - pytest -v -s models/multimodal/generation_ppl_test/
@@ -238,7 +239,7 @@ steps:
       label: ":amd: (MI300) Multimodal Models (Extended Pooling)"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 60
+      timeout_in_minutes: 75
       depends_on:
       - image-build-amd
       source_file_dependencies:

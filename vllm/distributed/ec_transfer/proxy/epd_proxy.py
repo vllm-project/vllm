@@ -12,16 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import json
 import os
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
 import aiohttp
-import pybase64 as base64
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -69,19 +68,6 @@ def content_uuid(item: dict) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def _b64_tensor(values: list) -> str:
-    import torch
-
-    buf = io.BytesIO()
-    flat = [v for item in values for v in (item if isinstance(item, list) else [item])]
-    # Floats stay float64 so timestamp strings format exactly as the encoder
-    # computed them.
-    dtype = torch.float64 if any(isinstance(v, float) for v in flat) else None
-    # Downstream stacks per item, so hand over a flat vector.
-    torch.save(torch.tensor(flat, dtype=dtype), buf)
-    return base64.b64encode(buf.getvalue()).decode()
-
-
 def extract_mm_items(request_data: dict) -> list[dict]:
     """Return every image/audio item appearing anywhere in ``messages``."""
     items: list[dict] = []
@@ -102,6 +88,7 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
     derivation could disagree with the encoder's.
     """
     rewritten = 0
+    transfer_items = []
     idx = 0
     new_messages = []
     for msg in req_data.get("messages", []):
@@ -117,23 +104,40 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
             meta = dict(item_meta.get(idx) or {})
             idx += 1
             item_uuid = meta.pop("mm_hash", None)
+            ec_mm_hash = meta.pop("ec_mm_hash", None) or item_uuid
+            transfer_id = meta.pop("transfer_id", None)
             embeds_type = EMBEDS_TYPES[item["type"]]
-            metadata = {key: _b64_tensor(value) for key, value in meta.items()}
+            metadata = {
+                key: [
+                    v
+                    for item in value
+                    for v in (item if isinstance(item, list) else [item])
+                ]
+                for key, value in meta.items()
+            }
             if not metadata or not item_uuid:
-                # The encoder reported no metadata (the item came from its
-                # processor cache); let the decoder process the media itself.
+                # Without published metadata, retain the original media.
                 new_content.append(item)
                 continue
             new_content.append(
                 {"type": embeds_type, embeds_type: metadata, "uuid": item_uuid}
             )
+            if transfer_id is not None:
+                transfer_items.append(
+                    {"mm_hash": ec_mm_hash, "transfer_id": transfer_id}
+                )
             rewritten += 1
         new_messages.append({**msg, "content": new_content})
 
     if not rewritten:
         return req_data
     logger.info("Rewrote %d media item(s) as metadata references", rewritten)
-    return {**req_data, "messages": new_messages}
+    rewritten_request = {**req_data, "messages": new_messages}
+    if transfer_items:
+        params = dict(req_data.get("ec_transfer_params") or {})
+        params["ec_items"] = transfer_items
+        rewritten_request["ec_transfer_params"] = params
+    return rewritten_request
 
 
 @dataclass
@@ -212,19 +216,21 @@ class EPDProxy:
     # ---------------------------------------------------------------- #
     async def encode(
         self, req_data: dict, route: _Route, req_id: str
-    ) -> dict[int, dict]:
+    ) -> tuple[dict[int, dict], dict[str, Any]]:
         """Send one text-free request per media item and collect the metadata."""
         mm_items = extract_mm_items(req_data)
         if not mm_items:
-            return {}
+            return {}, {}
 
         logger.info("[%s] Encoding %d media item(s)", req_id, len(mm_items))
         item_uuids: list[str] = []
+        transfer_ids: list[str] = []
         tasks = []
         for idx, (item, encoder) in enumerate(zip(mm_items, route.encoders)):
             child_req_id = f"{req_id}:{idx}:{uuid.uuid4().hex[:6]}"
             item_uuid = content_uuid(item)
             item_uuids.append(item_uuid)
+            transfer_ids.append(child_req_id)
             encoder_req: dict = {
                 "model": req_data.get("model"),
                 "messages": [
@@ -237,7 +243,7 @@ class EPDProxy:
             if route.consumer_zmq is not None:
                 encoder_req["ec_transfer_params"] = {
                     "consumer_zmq": route.consumer_zmq,
-                    "ec_items": [{"mm_hash": item_uuid}],
+                    "ec_items": [{"transfer_id": child_req_id}],
                 }
             tasks.append(
                 self.http.post(
@@ -248,12 +254,15 @@ class EPDProxy:
             )
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        return await self._collect_encoder_metadata(results, item_uuids, req_id)
+        return await self._collect_encoder_metadata(
+            results, item_uuids, transfer_ids, req_id
+        )
 
     async def _collect_encoder_metadata(
-        self, results: list, item_uuids: list[str], req_id: str
-    ) -> dict[int, dict]:
+        self, results: list, item_uuids: list[str], transfer_ids: list[str], req_id: str
+    ) -> tuple[dict[int, dict], dict[str, Any]]:
         item_meta: dict[int, dict] = {}
+        ec_params: dict[str, Any] = {}
         for idx, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.error(
@@ -277,14 +286,24 @@ class EPDProxy:
                 )
             try:
                 params = (await result.json()).get("ec_transfer_params") or {}
-                reported = params.get("ec_items") or []
             except Exception:
                 logger.warning("[%s] Unreadable encoder metadata #%d", req_id, idx)
-                reported = []
+                params = {}
+            ec_mm_hash = item_uuids[idx]
+            reported = params.get(ec_mm_hash)
+            if reported is None and len(params) == 1:
+                ((ec_mm_hash, reported),) = params.items()
             if reported:
-                # One item per encoder request, so the first entry is this one's.
-                item_meta[idx] = {**reported[0], "mm_hash": item_uuids[idx]}
-        return item_meta
+                metadata = reported.get("metadata") or {}
+                if metadata:
+                    item_meta[idx] = {
+                        **metadata,
+                        "mm_hash": item_uuids[idx],
+                        "ec_mm_hash": ec_mm_hash,
+                        "transfer_id": transfer_ids[idx],
+                    }
+                ec_params[item_uuids[idx]] = reported
+        return item_meta, ec_params
 
     @staticmethod
     async def _raise_for_upstream(resp: aiohttp.ClientResponse, stage: str) -> None:
@@ -345,13 +364,21 @@ class EPDProxy:
         # about the transport.
         kv_transfer_params = body.get("kv_transfer_params") or {}
         if kv_transfer_params:
-            req_data["kv_transfer_params"] = kv_transfer_params
+            return {**req_data, "kv_transfer_params": kv_transfer_params}
         return req_data
 
     async def _through_encode_and_prefill(
         self, req_data: dict, route: _Route, req_id: str
     ) -> dict:
-        item_meta = await self.encode(req_data, route, req_id)
+        item_meta, ec_params = await self.encode(req_data, route, req_id)
+        if ec_params:
+            req_data = {
+                **req_data,
+                "ec_transfer_params": {
+                    **(req_data.get("ec_transfer_params") or {}),
+                    **ec_params,
+                },
+            }
         req_data = rewrite_for_decode(req_data, item_meta)
         return await self.prefill(req_data, route, req_id)
 

@@ -12,7 +12,9 @@ A dynamic roster adds a second way to lose that cursor: rebuilding an
 position, which is the same hot spot arriving on every registration.
 """
 
+import importlib.util
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
@@ -34,6 +36,18 @@ def _with_encoders(registry, count):
     for index in range(count):
         registry.register(InstanceRecord(ENCODE, f"E{index}"))
     return registry
+
+
+@pytest.fixture(scope="module")
+def proxy():
+    path = Path(__file__).parents[4] / (
+        "examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py"
+    )
+    spec = importlib.util.spec_from_file_location("legacy_epd_proxy", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _drive(registry, counts):
@@ -90,3 +104,47 @@ def test_an_evicted_encoder_drops_out_of_the_rotation(registry):
 def test_no_encoder_yields_nothing(registry):
     assert registry.pick_many(ENCODE, 2) == []
     assert registry.pick(ENCODE) is None
+
+
+def test_generic_e_p_d_routing_without_mooncake_is_supported(proxy):
+    proxy.validate_ec_consumer_routing(["http://prefill"], [])
+
+
+def test_mooncake_e_pd_routing_is_supported(proxy):
+    proxy.validate_ec_consumer_routing([], ["tcp://decode:19019"])
+
+
+def test_mooncake_independent_prefill_routing_fails_fast(proxy):
+    with pytest.raises(ValueError, match=r"supports E\+PD only"):
+        proxy.validate_ec_consumer_routing(["http://prefill"], ["tcp://decode:19019"])
+
+
+def test_decode_rewrite_preserves_engine_reported_ec_hash(proxy):
+    request = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "image_url", "image_url": {"url": "image"}}],
+            }
+        ]
+    }
+
+    rewritten = proxy.rewrite_for_decode(
+        request,
+        {
+            0: {
+                "mm_hash": "proxy-uuid",
+                "ec_mm_hash": "engine-derived-hash",
+                "transfer_id": "transfer",
+                "image_grid_thw": [1, 2, 3],
+            }
+        },
+    )
+
+    assert rewritten["messages"][0]["content"][0]["uuid"] == "proxy-uuid"
+    assert rewritten["messages"][0]["content"][0]["image_embeds"] == {
+        "image_grid_thw": [1, 2, 3]
+    }
+    assert rewritten["ec_transfer_params"]["ec_items"] == [
+        {"mm_hash": "engine-derived-hash", "transfer_id": "transfer"}
+    ]

@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Routing and registration behaviour of the EPD proxy."""
 
+import asyncio
+from unittest.mock import AsyncMock, Mock
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -10,6 +13,7 @@ from vllm.distributed.ec_transfer.proxy.epd_proxy import (
     EPDProxy,
     EPDProxyConfig,
     build_app,
+    content_uuid,
     extract_mm_items,
 )
 from vllm.distributed.ec_transfer.proxy.registry import (
@@ -143,3 +147,43 @@ def test_extract_mm_items_finds_media_across_messages():
         ]
     }
     assert extract_mm_items(req) == [IMAGE_ITEM, IMAGE_ITEM]
+
+
+@pytest.mark.parametrize("push", [False, True])
+def test_encoder_handles_and_json_metadata_survive_rewrite(proxy, push):
+    """Keep main's hash-keyed handles and per-item push IDs after the proxy move."""
+    proxy.registry.register(InstanceRecord(ENCODE, "http://encoder"))
+    proxy.registry.register(
+        InstanceRecord(
+            DECODE,
+            "http://decode",
+            ec_zmq_addrs=["tcp://decode:14579"] if push else [],
+        )
+    )
+    handle = {"metadata": {"image_grid_thw": [[1, 2, 3]]}, "peer_port": 5601}
+    response = Mock(
+        status=200,
+        json=AsyncMock(return_value={"ec_transfer_params": {"engine-hash": handle}}),
+    )
+    proxy.session = Mock(post=AsyncMock(return_value=response))
+    original = {"messages": [{"role": "user", "content": [IMAGE_ITEM, IMAGE_ITEM]}]}
+    prepared = asyncio.run(
+        proxy._through_encode_and_prefill(original, proxy.route(2), "request")
+    )
+    assert "ec_transfer_params" not in original
+    assert prepared["ec_transfer_params"][content_uuid(IMAGE_ITEM)] == handle
+    items = prepared["ec_transfer_params"]["ec_items"]
+    assert [item["mm_hash"] for item in items] == ["engine-hash", "engine-hash"]
+    assert items[0]["transfer_id"] != items[1]["transfer_id"]
+    for index, call in enumerate(proxy.session.post.call_args_list):
+        sent = call.kwargs["json"].get("ec_transfer_params")
+        if push:
+            assert sent == {
+                "consumer_zmq": "tcp://decode:14579",
+                "ec_items": [{"transfer_id": items[index]["transfer_id"]}],
+            }
+        else:
+            assert sent is None
+        assert prepared["messages"][0]["content"][index]["image_embeds"] == {
+            "image_grid_thw": [1, 2, 3]
+        }
