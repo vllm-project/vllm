@@ -450,10 +450,11 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             assert out.dtype == out_dtype
             assert out.is_contiguous()
 
-        # Q/K/V are cast to FP8 with no additional rescaling for now, which relies on
-        # activations staying within the e4m3 range. Since gfx950 uses e4m3fn, larger
-        # values clamp to 488 instead of producing inf. Accuracy has been validated on
-        # DeepSeek-V3 on GSM8k with no regressions.
+        # Q/K/V arrive already in FP8, and unit scales mean the kernel does no
+        # rescaling, which relies on activations staying within the e4m3 range.
+        # gfx950 uses e4m3fn, so larger values clamp to 448 rather than producing
+        # inf. Accuracy has been validated on DeepSeek-V3 on GSM8k with no
+        # regressions.
         one_scale = self._get_one_scale(q.device)
         self._mla_prefill_ps_asm_fwd(
             q,
