@@ -30,7 +30,29 @@ def pin_tensor(tensor: torch.Tensor) -> None:
     """
     err = torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.nbytes, 0)
     if err.value != 0:
-        raise RuntimeError(f"cudaHostRegister failed: {err}")
+        # The runtime latches the failure as the per-thread last error; drain
+        # it so it cannot ambush an unrelated CUDA call later in this thread.
+        last = torch.cuda.cudart().cudaGetLastError()
+        raise RuntimeError(
+            f"cudaHostRegister failed: {err} (pending last-error: {last})"
+        )
+
+
+def unpin_tensor(tensor: torch.Tensor) -> None:
+    """Release a previous ``pin_tensor`` registration (cudaHostUnregister).
+
+    Cleanup sits on shutdown/failure paths where raising would mask the real
+    problem, so a failed unregister only logs (matching
+    SharedOffloadRegion.cleanup).
+    """
+    err = torch.cuda.cudart().cudaHostUnregister(tensor.data_ptr())
+    if err.value != 0:
+        # Same latching hazard as a failed cudaHostRegister: drain so it cannot
+        # surface later as an unrelated call's error.
+        last = torch.cuda.cudart().cudaGetLastError()
+        logger.warning(
+            "cudaHostUnregister failed: %s (pending last-error: %s)", err, last
+        )
 
 
 class _CUmemLocation(ctypes.Structure):
