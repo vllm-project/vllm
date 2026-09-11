@@ -17,13 +17,15 @@ from vllm.model_executor.warmup.jit_warmup import (
 
 CompileKeyT = TypeVar("CompileKeyT")
 P = ParamSpec("P")
-# ``(grid, launch_kwargs)`` or ``(grid, launch_kwargs, outputs)`` for
-# self-allocating kernels.
+# ``kernel_launcher`` also supports a ``None`` grid when no launch is needed.
 LaunchSpec = (
     tuple[tuple[int, ...] | None, dict[str, Any]]
     | tuple[tuple[int, ...] | None, dict[str, Any], Any]
 )
-DispatchSpec = LaunchSpec
+# Dispatchers select a concrete launch configuration for a Triton kernel.
+DispatchSpec = (
+    tuple[tuple[int, ...], dict[str, Any]] | tuple[tuple[int, ...], dict[str, Any], Any]
+)
 
 
 @dataclass(frozen=True)
