@@ -28,7 +28,11 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
-from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
+from vllm.utils.torch_utils import (
+    PIN_MEMORY,
+    is_quantized_kv_cache,
+    np_to_pinned_tensor,
+)
 from vllm.v1.attention.backend import AttentionMetadata, AttentionMetadataBuilder
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
@@ -128,7 +132,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self.device = device
         self.model_config = vllm_config.model_config
         self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens: int = vllm_config.model_config.hf_config.index_topk
+        self.topk_tokens: int = vllm_config.model_config.hf_text_config.index_topk
         self.req_id_per_token_buffer = torch.empty(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -198,7 +202,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         scheduler_config = vllm_config.scheduler_config
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
-        topk_tokens = model_config.hf_config.index_topk
+        topk_tokens = model_config.hf_text_config.index_topk
 
         workspace_size = min(
             max(
@@ -241,9 +245,13 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
 
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         assert seq_lens_cpu is not None
-        context_lens_cpu = (
-            seq_lens_cpu[num_decodes : num_decodes + num_prefills]
-            - prefill_query_lens_cpu
+        context_lens_cpu = torch.empty(
+            num_prefills, dtype=seq_lens_cpu.dtype, pin_memory=PIN_MEMORY
+        )
+        torch.subtract(
+            seq_lens_cpu[num_decodes : num_decodes + num_prefills],
+            prefill_query_lens_cpu,
+            out=context_lens_cpu,
         )
         qsl_cpu = common_attn_metadata.query_start_loc_cpu
         prefill_query_start_loc_cpu = qsl_cpu[num_decodes:] - qsl_cpu[num_decodes]
@@ -493,7 +501,40 @@ def _build_topk_mask(
     return out[:batch_size, :max_q_len]
 
 
-class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
+class SharedTopkIndicesBuffer:
+    """Resolves the shared top-k index buffer for sparse MLA implementations.
+
+    The indexer owns the buffer, but `LLMBaseProposer.load_model` repoints the
+    draft's indexers at the target's buffer after the impls are constructed, so
+    it must be resolved per read rather than snapshotted. Backbone skip-topk
+    layers have no indexer and pass the buffer explicitly.
+    """
+
+    _indexer: object | None = None
+    _topk_indices_buffer: torch.Tensor | None = None
+
+    def init_topk_indices_buffer(
+        self,
+        indexer: object | None,
+        topk_indices_buffer: torch.Tensor | None,
+    ) -> None:
+        self._indexer = indexer
+        self._topk_indices_buffer = topk_indices_buffer
+
+    @property
+    def topk_indices_buffer(self) -> torch.Tensor | None:
+        if self._indexer is not None:
+            return self._indexer.topk_indices_buffer  # type: ignore[attr-defined]
+        return self._topk_indices_buffer
+
+    @topk_indices_buffer.setter
+    def topk_indices_buffer(self, buffer: torch.Tensor | None) -> None:
+        # An explicit assignment supersedes the indexer.
+        self._indexer = None
+        self._topk_indices_buffer = buffer
+
+
+class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic[T]):
     """Sparse MLA base with dense and masked-MHA prefill paths."""
 
     is_sparse = True
@@ -535,14 +576,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             kv_b_proj,
         )
 
-        # The indexer carries the shared buffer for normal layers and tests;
-        # the explicitly-passed buffer covers backbone skip layers, whose
-        # indexer is not constructed (see deepseek_v2.py).
-        self.topk_indices_buffer: torch.Tensor | None = (
-            indexer.topk_indices_buffer  # type: ignore[attr-defined]
-            if indexer is not None
-            else topk_indices_buffer
-        )
+        self.init_topk_indices_buffer(indexer, topk_indices_buffer)
         self._use_flashinfer_concat_mla_k = (
             has_flashinfer()
             and which("ninja") is not None
