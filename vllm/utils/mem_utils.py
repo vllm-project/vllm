@@ -43,11 +43,6 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     return int(max_shared_mem)
 
 
-def get_cpu_memory() -> int:
-    """Returns the total CPU memory of the node in bytes."""
-    return psutil.virtual_memory().total
-
-
 _UMA_PRESSURE_THRESHOLD = 0.8
 _UMA_MIN_RELEASE_BYTES = 512 * MiB_bytes
 

@@ -14,18 +14,17 @@ from .common import (
     Matches,
     custom_ops_combos,
     is_blackwell,
+    nvfp4_kernel_exposes_input_quant_key,
 )
 from .models import (
     FLASHINFER_ATTN,
     FLASHINFER_MLA_ATTN,
-    FLASHMLA_SPARSE_ATTN,
     ROCM_AITER_UNIFIED_ATTN,
     ROCM_ATTN,
     TRITON_ATTN,
     deepseek_coder_v2_lite_fp8,
     deepseek_r1_fp4,
     deepseek_v3_fp8,
-    deepseek_v32_fp4,
     gpt_oss_20b,
     llama3_8b,
     llama3_8b_fp4,
@@ -70,7 +69,6 @@ def test_tp2_ar_rms_fp8_fusions(
     custom_ops: str,
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
-    monkeypatch,
 ):
     matches = matches_fn(n_layers)
 
@@ -91,7 +89,7 @@ def test_tp2_ar_rms_fp8_fusions(
         custom_ops=custom_ops.split(","),
         pass_config=PassConfig(
             fuse_norm_quant=True,
-            fuse_act_quant=True,
+            fuse_act_quant=False,
             fuse_attn_quant=True,
             enable_qk_norm_rope_fusion=True,
             fuse_allreduce_rms=True,
@@ -100,7 +98,6 @@ def test_tp2_ar_rms_fp8_fusions(
 
     matches_check = [
         "rms_quant_fusion",
-        "act_quant_fusion",
         "norm_rope_fusion",
         "attn_quant_fusion",
         "ar_rms_fusion",
@@ -120,11 +117,11 @@ def test_tp2_ar_rms_fp8_fusions(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b_fp4, llama4_scout_fp4, deepseek_r1_fp4, deepseek_v32_fp4],
+    [llama3_8b_fp4, llama4_scout_fp4, deepseek_r1_fp4],
 )
 @pytest.mark.parametrize(
     "attn_backend",
-    [FLASHINFER_ATTN, FLASHINFER_MLA_ATTN, FLASHMLA_SPARSE_ATTN],
+    [FLASHINFER_ATTN, FLASHINFER_MLA_ATTN],
 )
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("rms_norm"))
@@ -141,8 +138,13 @@ def test_tp2_ar_rms_fp4_fusions(
     custom_ops: str,
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
-    monkeypatch,
 ):
+    if nvfp4_kernel_exposes_input_quant_key():
+        pytest.skip(
+            "NVFP4 kernel exposes input_quant_key; manual fusion fires "
+            "instead of compiler pass-based fusion"
+        )
+
     matches = matches_fn(n_layers)
 
     # Reduce size of model and skip weight loading time
@@ -156,14 +158,13 @@ def test_tp2_ar_rms_fp4_fusions(
         use_inductor_graph_partition=inductor_graph_partition,
         custom_ops=custom_ops.split(","),
         pass_config=PassConfig(
-            fuse_act_quant=True,
+            fuse_act_quant=False,
             fuse_attn_quant=True,
             fuse_allreduce_rms=True,
         ),
     )
 
     matches_check = [
-        "act_quant_fusion",
         "attn_quant_fusion",
         "ar_rms_fusion",
     ]

@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import torch
-
 from tests.evals.gsm8k.gsm8k_eval import _build_gsm8k_prompts
-from vllm import LLM, SamplingParams
-from vllm.distributed import cleanup_dist_env_and_memory
+from vllm import SamplingParams
+from vllm.config import CompilationConfig
 
 from ...utils import compute_acceptance_rate
 
 
 def test_medusa_acceptance_rate(
     sampling_config: SamplingParams,
+    vllm_runner,
 ):
     """Verify a trained Medusa checkpoint achieves nonzero acceptance rate.
 
@@ -23,8 +22,10 @@ def test_medusa_acceptance_rate(
     medusa_model = "FasterDecoding/medusa-vicuna-7b-v1.3"
     prompts = _build_gsm8k_prompts(num_questions=10, num_shots=1)[0]
 
-    spec_llm = LLM(
-        model=target_model,
+    with vllm_runner(
+        target_model,
+        block_size=None,
+        trust_remote_code=False,
         speculative_config={
             "method": "medusa",
             "model": medusa_model,
@@ -32,14 +33,13 @@ def test_medusa_acceptance_rate(
         },
         max_model_len=1024,
         enforce_eager=True,
+        enable_chunked_prefill=None,
         disable_log_stats=False,
-    )
-    spec_llm.generate(prompts, sampling_config)
-    metrics = spec_llm.get_metrics()
-    acceptance_rate = compute_acceptance_rate(metrics)
-    del spec_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+        compilation_config=CompilationConfig(),
+    ) as spec_runner:
+        spec_runner.llm.generate(prompts, sampling_config)
+        metrics = spec_runner.llm.get_metrics()
+        acceptance_rate = compute_acceptance_rate(metrics)
 
     min_acceptance_rate = 0.198
     print(f"Medusa acceptance rate: {acceptance_rate:.4f} (min {min_acceptance_rate})")

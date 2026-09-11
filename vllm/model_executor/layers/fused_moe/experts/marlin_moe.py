@@ -10,8 +10,11 @@ import torch
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
     MoEActivation,
     apply_moe_activation,
+    apply_moe_activation_masked_supported,
+    apply_moe_activation_supported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -72,16 +75,12 @@ def _fused_marlin_moe(
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor,
     activation: MoEActivation = MoEActivation.SILU,
-    activation_func: Callable[..., None] = apply_moe_activation,
+    activation_func: Callable[..., None] | None = None,
     topk_ids: torch.Tensor | None = None,
     input_global_scale1: torch.Tensor | None = None,
     input_global_scale2: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
     global_scale2: torch.Tensor | None = None,
-    g_idx1: torch.Tensor | None = None,
-    g_idx2: torch.Tensor | None = None,
-    sort_indices1: torch.Tensor | None = None,
-    sort_indices2: torch.Tensor | None = None,
     w1_zeros: torch.Tensor | None = None,
     w2_zeros: torch.Tensor | None = None,
     workspace: torch.Tensor | None = None,
@@ -89,12 +88,7 @@ def _fused_marlin_moe(
     intermediate_cache2: torch.Tensor | None = None,
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
-    is_k_full: bool = True,
-    clamp_limit: float | None = None,
-    gemm1_alpha: float = 1.0,
-    gemm1_beta: float = 0.0,
-    activation_situ_beta: float | None = None,
-    activation_situ_linear_beta: float | None = None,
+    activation_config: ApplyMoEActivationConfig | None = None,
 ) -> torch.Tensor:
     assert hidden_states.ndim == 2
     M, K = hidden_states.size()
@@ -143,8 +137,6 @@ def _fused_marlin_moe(
         a_scales1,
         global_scale1,
         w1_zeros,
-        g_idx1,
-        sort_indices1,
         workspace,
         sorted_token_ids,
         expert_ids,
@@ -157,25 +149,33 @@ def _fused_marlin_moe(
         size_m=M,
         size_n=w13_num_shards * N,
         size_k=K,
-        is_k_full=is_k_full,
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
     )
-    # apply_moe_activation fuses the clamp/gate params: SILU + clamp_limit and
-    # SWIGLUOAI_UNINTERLEAVE both map to the silu_and_mul_with_clamp kernel.
-    activation_func(
-        activation,
-        intermediate_cache2,
-        intermediate_cache1.view(-1, w13_num_shards * N),
-        clamp_limit=clamp_limit,
-        alpha=gemm1_alpha,
-        beta=gemm1_beta,
-        topk_ids=topk_ids,
-        expert_map=expert_map,
-        activation_situ_beta=activation_situ_beta,
-        activation_situ_linear_beta=activation_situ_linear_beta,
-    )
+    activation_input = intermediate_cache1.view(-1, w13_num_shards * N)
+    if activation_func is None:
+        config = (
+            ApplyMoEActivationConfig()
+            if activation_config is None
+            else activation_config
+        )
+        apply_moe_activation(
+            activation,
+            intermediate_cache2,
+            activation_input,
+            activation_config=config,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
+    else:
+        activation_func(
+            activation,
+            intermediate_cache2,
+            activation_input,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
 
     if output is None:
         output = intermediate_cache3
@@ -201,8 +201,6 @@ def _fused_marlin_moe(
         a_scales2,
         global_scale2,
         w2_zeros,
-        g_idx2,
-        sort_indices2,
         workspace,
         sorted_token_ids,
         expert_ids,
@@ -215,7 +213,6 @@ def _fused_marlin_moe(
         size_m=M * num_topk,
         size_n=K,
         size_k=N,
-        is_k_full=is_k_full,
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
@@ -238,30 +235,21 @@ def fused_marlin_moe(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     activation: MoEActivation = MoEActivation.SILU,
-    activation_func: Callable[..., None] = apply_moe_activation,
+    activation_func: Callable[..., None] | None = None,
     moe_sum: Callable[..., torch.Tensor | None] | None = None,
     expert_map: torch.Tensor | None = None,
     input_global_scale1: torch.Tensor | None = None,
     input_global_scale2: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
     global_scale2: torch.Tensor | None = None,
-    g_idx1: torch.Tensor | None = None,
-    g_idx2: torch.Tensor | None = None,
-    sort_indices1: torch.Tensor | None = None,
-    sort_indices2: torch.Tensor | None = None,
     w1_zeros: torch.Tensor | None = None,
     w2_zeros: torch.Tensor | None = None,
     workspace: torch.Tensor | None = None,
     intermediate_cache13: torch.Tensor | None = None,
     intermediate_cache2: torch.Tensor | None = None,
-    is_k_full: bool = True,
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
-    clamp_limit: float | None = None,
-    gemm1_alpha: float = 1.0,
-    gemm1_beta: float = 0.0,
-    activation_situ_beta: float | None = None,
-    activation_situ_linear_beta: float | None = None,
+    activation_config: ApplyMoEActivationConfig | None = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -273,12 +261,6 @@ def fused_marlin_moe(
     - w2 (torch.Tensor): The second set of expert weights.
     - w1_scale (torch.Tensor): Scale to be used for w1.
     - w2_scale (torch.Tensor): Scale to be used for w2.
-    - g_idx1 (torch.Tensor|None): The first set of act_order indices.
-    - g_idx2 (torch.Tensor|None): The second set of act_order indices.
-    - sort_indices1 (torch.Tensor|None): The first act_order input
-        permutation.
-    - sort_indices2 (torch.Tensor|None): The second act_order input
-        permutation.
     - topk_weights (torch.Tensor): Top-k weights.
     - topk_ids (torch.Tensor): Indices of topk-k elements.
     - w1_zeros (torch.Tensor|None): Optional zero points to be used for w1.
@@ -363,16 +345,11 @@ def fused_marlin_moe(
         num_tokens_post_padded=num_tokens_post_padded,
         activation=activation,
         activation_func=activation_func,
-        activation_situ_beta=activation_situ_beta,
-        activation_situ_linear_beta=activation_situ_linear_beta,
+        activation_config=activation_config,
         input_global_scale1=input_global_scale1,
         input_global_scale2=input_global_scale2,
         global_scale1=global_scale1,
         global_scale2=global_scale2,
-        g_idx1=g_idx1,
-        g_idx2=g_idx2,
-        sort_indices1=sort_indices1,
-        sort_indices2=sort_indices2,
         w1_zeros=w1_zeros,
         w2_zeros=w2_zeros,
         workspace=workspace,
@@ -380,10 +357,6 @@ def fused_marlin_moe(
         intermediate_cache2=intermediate_cache2,
         output=None,
         input_dtype=input_dtype,
-        is_k_full=is_k_full,
-        clamp_limit=clamp_limit,
-        gemm1_alpha=gemm1_alpha,
-        gemm1_beta=gemm1_beta,
     ).view(-1, topk, K)
 
     if output is None:
@@ -416,24 +389,15 @@ def batched_fused_marlin_moe(
     input_global_scale2: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
     global_scale2: torch.Tensor | None = None,
-    g_idx1: torch.Tensor | None = None,
-    g_idx2: torch.Tensor | None = None,
-    sort_indices1: torch.Tensor | None = None,
-    sort_indices2: torch.Tensor | None = None,
     w1_zeros: torch.Tensor | None = None,
     w2_zeros: torch.Tensor | None = None,
     workspace: torch.Tensor | None = None,
     intermediate_cache13: torch.Tensor | None = None,
     intermediate_cache2: torch.Tensor | None = None,
-    is_k_full: bool = True,
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
-    clamp_limit: float | None = None,
-    gemm1_alpha: float = 1.0,
-    gemm1_beta: float = 0.0,
-    activation_func: Callable[..., None] = apply_moe_activation,
-    activation_situ_beta: float | None = None,
-    activation_situ_linear_beta: float | None = None,
+    activation_func: Callable[..., None] | None = None,
+    activation_config: ApplyMoEActivationConfig | None = None,
 ) -> torch.Tensor:
     """
     This function massages the inputs so the batched hidden_states can be
@@ -542,8 +506,7 @@ def batched_fused_marlin_moe(
         apply_router_weight_on_input=apply_router_weight_on_input,
         activation=activation,
         activation_func=activation_func,
-        activation_situ_beta=activation_situ_beta,
-        activation_situ_linear_beta=activation_situ_linear_beta,
+        activation_config=activation_config,
         expert_map=expert_map,
         block_size_m=block_size_m,
         sorted_token_ids=sorted_token_ids,
@@ -553,10 +516,6 @@ def batched_fused_marlin_moe(
         input_global_scale2=input_global_scale2,
         global_scale1=global_scale1,
         global_scale2=global_scale2,
-        g_idx1=g_idx1,
-        g_idx2=g_idx2,
-        sort_indices1=sort_indices1,
-        sort_indices2=sort_indices2,
         w1_zeros=w1_zeros,
         w2_zeros=w2_zeros,
         workspace=workspace,
@@ -564,10 +523,6 @@ def batched_fused_marlin_moe(
         intermediate_cache2=intermediate_cache2,
         output=output.view(-1, K) if output is not None else output,
         input_dtype=input_dtype,
-        is_k_full=is_k_full,
-        clamp_limit=clamp_limit,
-        gemm1_alpha=gemm1_alpha,
-        gemm1_beta=gemm1_beta,
     )
 
     output = output.view(B, BATCH_TOKENS_MAX, K)
@@ -582,11 +537,6 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         quant_config: FusedMoEQuantConfig,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
-        w13_g_idx: torch.Tensor | None = None,
-        w2_g_idx: torch.Tensor | None = None,
-        w13_g_idx_sort_indices: torch.Tensor | None = None,
-        w2_g_idx_sort_indices: torch.Tensor | None = None,
-        is_k_full: bool = True,
     ):
         # TODO (varun) : Enable activation quantization
         assert (
@@ -596,22 +546,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             or quant_config.use_int8_w8a16
             or quant_config.use_fp8_w8a16
         ), "Supports only {mxfp,nvfp,int}4_w4a16, int8_w8a16 or fp8_w8a16"
-        self.w13_g_idx = w13_g_idx
-        self.w2_g_idx = w2_g_idx
-        self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
-        self.w2_g_idx_sort_indices = w2_g_idx_sort_indices
-        self.is_k_full = is_k_full
         self.input_dtype = get_marlin_input_dtype()
-        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
-        # Gated-activation params (used by SWIGLUOAI_UNINTERLEAVE on packed w13).
-        # silu == swigluoai with alpha=1, beta=0; configs that don't set these
-        # (plain silu) fall back to the silu identity.
-        self.gemm1_alpha = (
-            quant_config.gemm1_alpha if quant_config.gemm1_alpha is not None else 1.0
-        )
-        self.gemm1_beta = (
-            quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
-        )
 
         super().__init__(
             moe_config=moe_config,
@@ -655,19 +590,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
     def _supports_activation(activation: MoEActivation) -> bool:
         # Marlin uses apply_moe_activation() callback for activation,
         # so any activation supported there can be used here.
-        return activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.GELU_TANH,
-            MoEActivation.SITU,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
-            MoEActivation.SWIGLUSTEP,
-            MoEActivation.SILU_NO_MUL,
-            MoEActivation.GELU_NO_MUL,
-            MoEActivation.GELU_TANH_NO_MUL,
-            MoEActivation.RELU2_NO_MUL,
-        ]
+        return apply_moe_activation_supported(activation)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -808,10 +731,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 global_num_experts=global_num_experts,
                 activation=activation,
                 activation_func=self.activation,
-                activation_situ_beta=self.moe_config.activation_situ_beta,
-                activation_situ_linear_beta=(
-                    self.moe_config.activation_situ_linear_beta
-                ),
+                activation_config=self.activation_config,
                 moe_sum=self.moe_sum,
                 expert_map=expert_map,
                 output=output,
@@ -819,15 +739,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 # output buffer allocation. Please refer to workspace_shapes().
                 intermediate_cache13=workspace2,
                 intermediate_cache2=workspace13,
-                g_idx1=self.w13_g_idx,
-                g_idx2=self.w2_g_idx,
-                sort_indices1=self.w13_g_idx_sort_indices,
-                sort_indices2=self.w2_g_idx_sort_indices,
-                is_k_full=self.is_k_full,
                 input_dtype=self.input_dtype,
-                clamp_limit=self.gemm1_clamp_limit,
-                gemm1_alpha=self.gemm1_alpha,
-                gemm1_beta=self.gemm1_beta,
             )
             return
 
@@ -847,13 +759,8 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             act_output: torch.Tensor,
             act_input: torch.Tensor,
             *,
-            clamp_limit: float | None = None,
-            alpha: float = 1.0,
-            beta: float = 0.0,
             topk_ids: torch.Tensor | None = None,
             expert_map: torch.Tensor | None = None,
-            activation_situ_beta: float | None = None,
-            activation_situ_linear_beta: float | None = None,
         ) -> None:
             # act_input  = intermediate_cache1 (M*topk, 2N for gated)
             # act_output = intermediate_cache2 (M*topk, N)
@@ -887,13 +794,8 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 act_enum,
                 act_output,
                 act_input,
-                clamp_limit=clamp_limit,
-                alpha=alpha,
-                beta=beta,
                 topk_ids=topk_ids,
                 expert_map=expert_map,
-                activation_situ_beta=activation_situ_beta,
-                activation_situ_linear_beta=activation_situ_linear_beta,
             )
             lora_state["cache2"] = act_output
 
@@ -941,22 +843,13 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             global_num_experts=global_num_experts,
             activation=activation,
             activation_func=activation_with_lora,
-            activation_situ_beta=self.moe_config.activation_situ_beta,
-            activation_situ_linear_beta=self.moe_config.activation_situ_linear_beta,
+            activation_config=self.activation_config,
             moe_sum=moe_sum_with_lora,
             expert_map=expert_map,
             output=output,
             intermediate_cache13=workspace2,
             intermediate_cache2=workspace13,
-            g_idx1=self.w13_g_idx,
-            g_idx2=self.w2_g_idx,
-            sort_indices1=self.w13_g_idx_sort_indices,
-            sort_indices2=self.w2_g_idx_sort_indices,
-            is_k_full=self.is_k_full,
             input_dtype=self.input_dtype,
-            clamp_limit=self.gemm1_clamp_limit,
-            gemm1_alpha=self.gemm1_alpha,
-            gemm1_beta=self.gemm1_beta,
         )
 
     def moe_sum(
@@ -981,22 +874,12 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         quant_config: FusedMoEQuantConfig,
         max_num_tokens: int,
         num_dispatchers: int,
-        w13_g_idx: torch.Tensor | None = None,
-        w2_g_idx: torch.Tensor | None = None,
-        w13_g_idx_sort_indices: torch.Tensor | None = None,
-        w2_g_idx_sort_indices: torch.Tensor | None = None,
-        is_k_full: bool = True,
     ):
         super().__init__(
             moe_config=moe_config,
             quant_config=quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
-            w13_g_idx=w13_g_idx,
-            w2_g_idx=w2_g_idx,
-            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-            is_k_full=is_k_full,
         )
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
@@ -1005,6 +888,10 @@ class BatchedMarlinExperts(MarlinExpertsBase):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return apply_moe_activation_masked_supported(activation)
 
     def workspace_shapes(
         self,
@@ -1052,30 +939,17 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             act_output: torch.Tensor,
             act_input: torch.Tensor,
             *,
-            activation_situ_beta: float | None = None,
-            activation_situ_linear_beta: float | None = None,
-            **kwargs,
+            topk_ids: torch.Tensor | None = None,
+            expert_map: torch.Tensor | None = None,
         ) -> None:
-            if act != MoEActivation.SITU:
-                self.activation(
-                    act,
-                    act_output,
-                    act_input,
-                    activation_situ_beta=activation_situ_beta,
-                    activation_situ_linear_beta=activation_situ_linear_beta,
-                    **kwargs,
-                )
-                return
-
             num_experts, max_num_tokens = hidden_states.shape[:2]
-            beta = 1.0 if activation_situ_beta is None else activation_situ_beta
-            linear_beta = activation_situ_linear_beta
-            torch.ops._C.masked_situ_and_mul(
+            self.activation(
+                act,
                 act_output.view(num_experts, max_num_tokens, -1),
                 act_input.view(num_experts, max_num_tokens, -1),
-                expert_tokens_meta.expert_num_tokens,
-                beta,
-                -1.0 if linear_beta is None else linear_beta,
+                topk_ids=topk_ids,
+                expert_map=expert_map,
+                valid_token_counts=expert_tokens_meta.expert_num_tokens,
             )
 
         return batched_fused_marlin_moe(
@@ -1097,18 +971,9 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             output=output,
             intermediate_cache13=workspace13,
             intermediate_cache2=workspace2,
-            g_idx1=self.w13_g_idx,
-            g_idx2=self.w2_g_idx,
-            sort_indices1=self.w13_g_idx_sort_indices,
-            sort_indices2=self.w2_g_idx_sort_indices,
             w1_zeros=self.w1_zp,
             w2_zeros=self.w2_zp,
             input_dtype=self.input_dtype,
-            is_k_full=self.is_k_full,
-            clamp_limit=self.gemm1_clamp_limit,
-            gemm1_alpha=self.gemm1_alpha,
-            gemm1_beta=self.gemm1_beta,
             activation_func=activation_func,
-            activation_situ_beta=self.moe_config.activation_situ_beta,
-            activation_situ_linear_beta=self.moe_config.activation_situ_linear_beta,
+            activation_config=self.activation_config,
         )

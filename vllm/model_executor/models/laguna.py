@@ -132,7 +132,6 @@ class LagunaMoE(nn.Module):
 
         self.tp_size = get_tensor_model_parallel_world_size()
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
 
         self.n_routed_experts = config.num_experts
@@ -160,11 +159,6 @@ class LagunaMoE(nn.Module):
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
-
         # Router gate
         self.gate = ReplicatedLinear(
             config.hidden_size,
@@ -323,6 +317,7 @@ class LagunaAttention(nn.Module):
         # config.gating may be:
         #   - True / "per-element": one gate per (head, head_dim) channel
         #   - "per-head":           one gate per head, broadcast across head_dim
+        self.g_proj: ColumnParallelLinear | None
         if self.gating:
             # v5 LagunaConfig uses ``gating=True`` for per-head; older configs
             # used ``"per-head"``. Accept both. ``"per-element"`` (or legacy
@@ -769,8 +764,5 @@ class LagunaForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

@@ -699,6 +699,10 @@ def test_set_adapter_mapping_refreshes_after_slot_reassignment(
     manager.set_adapter_mapping(LoRAMapping((1, 2), (1, 2)))
     assert punica_wrapper.token_lora_indices.tolist() == [1, 0]
 
+    manager.remove_all_adapters()
+    assert manager._last_mapping is None
+    assert manager._last_slot_layout is None
+
 
 @pytest.mark.parametrize("device", DEVICES)
 def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_path):
