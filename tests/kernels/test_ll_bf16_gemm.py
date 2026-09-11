@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for cuteDSL low-latency router GEMM (dot-product + split-K)."""
 
-from dataclasses import replace
-
 import pytest
 import torch
 import torch.nn.functional as F

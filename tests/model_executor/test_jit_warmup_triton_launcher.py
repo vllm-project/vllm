@@ -156,7 +156,9 @@ def test_triton_structured_warmup_inputs_may_include_grid() -> None:
             )
 
         @kernel_launcher
-        def __call__(self, first: str, second: int, grid: tuple[int, ...]) -> LaunchSpec:
+        def __call__(
+            self, first: str, second: int, grid: tuple[int, ...]
+        ) -> LaunchSpec:
             return grid, dict(first=first, second=second, CONST=11)
 
     owner = StructuredGridKernel()

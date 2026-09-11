@@ -18,6 +18,7 @@ from vllm.inputs import TokensPrompt
 from ..models.utils import dummy_hf_overrides
 from ..utils import create_new_process_for_each_test
 
+
 @dataclass(frozen=True)
 class JitModel:
     model: str

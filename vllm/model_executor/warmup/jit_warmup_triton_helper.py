@@ -240,9 +240,8 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
                         name: _triton_metadata_arg(value)
                         for name, value in native_inputs.items()
                     }
-                    if (
-                        "launch_pdl" in native_inputs
-                        and hasattr(compile_key, "launch_pdl")
+                    if "launch_pdl" in native_inputs and hasattr(
+                        compile_key, "launch_pdl"
                     ):
                         native_inputs["launch_pdl"] = compile_key.launch_pdl
                     warmup = getattr(inputs.kernel, "warmup", None)
@@ -352,6 +351,7 @@ def kernel_launcher(
         return self.launch(launch_spec, inputs)
 
     return wrapper
+
 
 @dataclass(frozen=True)
 class TritonJitKey:

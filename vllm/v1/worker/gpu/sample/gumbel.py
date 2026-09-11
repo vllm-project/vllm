@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 import torch
 
 from vllm.model_executor.warmup.jit_warmup import WarmupChoices
@@ -197,12 +199,12 @@ def gumbel_block_argmax(
 
 def _gumbel_sample_warmup_inputs(vllm_config):
     vocab_size = vllm_config.model_config.get_vocab_size()
-    logits_dtype: torch.dtype = WarmupChoices(
+    logits_dtype: Any = WarmupChoices(
         torch.float32, vllm_config.model_config.head_dtype
     )
-    use_fp64: bool = WarmupChoices(False, True)
+    use_fp64: Any = WarmupChoices(False, True)
     # (has cache, drafting, apply temperature, per-token column, col aligned)
-    mode = WarmupChoices(
+    mode: Any = WarmupChoices(
         (False, False, False, False, True),
         (True, True, True, False, True),
         (True, True, True, False, False),
@@ -231,21 +233,15 @@ def _gumbel_sample_warmup_inputs(vllm_config):
     return triton_warmup_inputs(
         _gumbel_sample_kernel,
         grid=(1, num_blocks),
-        local_argmax_ptr=TritonWarmupTensor(
-            torch.int64, shape=(1, num_blocks)
-        ),
+        local_argmax_ptr=TritonWarmupTensor(torch.int64, shape=(1, num_blocks)),
         local_argmax_stride=num_blocks,
-        local_max_ptr=TritonWarmupTensor(
-            local_max_dtype, shape=(1, num_blocks)
-        ),
+        local_max_ptr=TritonWarmupTensor(local_max_dtype, shape=(1, num_blocks)),
         local_max_stride=num_blocks,
         logits_cache_ptr=logits_cache,
         logits_cache_stride_0=2 * vocab_size if has_cache else 0,
         logits_cache_stride_1=vocab_size if has_cache else 0,
         logits_cache_col_ptr=logits_cache_col,
-        logits_ptr=TritonWarmupTensor(
-            logits_dtype, shape=(1, vocab_size)
-        ),
+        logits_ptr=TritonWarmupTensor(logits_dtype, shape=(1, vocab_size)),
         logits_stride=vocab_size,
         expanded_idx_mapping_ptr=TritonWarmupTensor(torch.int32),
         seeds_ptr=TritonWarmupTensor(torch.int64),

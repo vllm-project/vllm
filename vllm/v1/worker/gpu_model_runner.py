@@ -590,11 +590,10 @@ class GPUModelRunner(
         self._pp_recv_work: torch.distributed.Work | None = None
 
         # Sampler
-        with self.jit_warmup_registry.activate():
-            self.sampler = Sampler(
-                logprobs_mode=self.model_config.logprobs_mode,
-                use_fp64_gumbel=self.model_config.use_fp64_gumbel,
-            )
+        self.sampler = Sampler(
+            logprobs_mode=self.model_config.logprobs_mode,
+            use_fp64_gumbel=self.model_config.use_fp64_gumbel,
+        )
 
         self.eplb_state: EplbState | None = None
         self._moe_model: MixtureOfExperts | None = None

@@ -984,8 +984,8 @@ class DeepseekV4MoE(nn.Module):
                 _SWIGLU_LIMIT_PAD_AWARE_KERNEL.register_warmup()
 
                 from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (  # noqa: E501
-                    _fused_moe_nvfp4_emulation,
                     Nvfp4QuantizationEmulationTritonExperts,
+                    _fused_moe_nvfp4_emulation,
                 )
 
                 if isinstance(experts_cls, type) and issubclass(
