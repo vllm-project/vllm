@@ -434,7 +434,7 @@ def test_gate_linear_uses_ll_bf16_for_bf16_fast_path(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16._LL_BF16_GEMM_KERNEL",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
         fake_ll_bf16_gemm,
     )
     out, bias = gate(x)
@@ -455,7 +455,7 @@ def test_gate_linear_fp32_weight_falls_back(monkeypatch):
         raise AssertionError("ll_bf16_gemm should not run for fp32 weights")
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16._LL_BF16_GEMM_KERNEL",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
         fail_ll_bf16_gemm,
     )
     out, _ = gate(x)
@@ -471,7 +471,7 @@ def test_gate_linear_non_bf16_activation_falls_back(monkeypatch):
         raise AssertionError("ll_bf16_gemm should not run for non-bf16 activations")
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16._LL_BF16_GEMM_KERNEL",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
         fail_ll_bf16_gemm,
     )
     out, _ = gate(x)
@@ -500,7 +500,7 @@ def test_gate_linear_m_gt_16_falls_back(monkeypatch):
         raise AssertionError("ll_bf16_gemm should not run for M > 16")
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16._LL_BF16_GEMM_KERNEL",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
         fail_ll_bf16_gemm,
     )
     out, _ = gate(x)

@@ -4,6 +4,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm._custom_ops as ops
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.platforms import current_platform
@@ -134,15 +135,18 @@ class GateLinear(ReplicatedLinear):
             )
 
         if self.allow_bf16x3_router_gemm:
-            assert vllm_config is not None
             from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
                 _BF16X3_ROUTER_GEMM_KERNEL,
                 _BF16X3_SPLITK_REDUCE_KERNEL,
             )
 
+            vllm_config = get_current_vllm_config()
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            num_sms = current_platform.num_compute_units()
             _BF16X3_ROUTER_GEMM_KERNEL.register_warmup(
                 K=input_size,
+                M=output_size,
+                num_sms=num_sms,
                 max_tokens=max_tokens,
             )
             _BF16X3_SPLITK_REDUCE_KERNEL.register_warmup(
@@ -216,14 +220,10 @@ class GateLinear(ReplicatedLinear):
         # Tier 1: cuteDSL ll_bf16_gemm (SM90+, any dims)
         if self.allow_ll_bf16_gemm and x.shape[0] <= 16 and x.dtype == torch.bfloat16:
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-                _LL_BF16_GEMM_C1_PDL_KERNEL,
-                _LL_BF16_GEMM_KERNEL,
+                ll_bf16_gemm,
             )
 
-            kernel = (
-                _LL_BF16_GEMM_C1_PDL_KERNEL if x.shape[0] == 1 else _LL_BF16_GEMM_KERNEL
-            )
-            output = kernel(x, self.weight)
+            output = ll_bf16_gemm(x, self.weight)
             return output, None
 
         # Tier 2: fp32 specialized kernel (model-specific shapes, M<=32)
@@ -241,10 +241,10 @@ class GateLinear(ReplicatedLinear):
         # Tier 3: bf16x3 CuteDSL kernel for fp32 router weights
         if self.allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
             from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
-                _BF16X3_ROUTER_GEMM_KERNEL,
+                bf16x3_router_gemm,
             )
 
-            output = _BF16X3_ROUTER_GEMM_KERNEL(x, self.weight)
+            output = bf16x3_router_gemm(x, self.weight)
             return output, None
 
         # Tier 4: cuBLAS bf16→fp32
@@ -291,10 +291,10 @@ def fp32_router_gemm_dispatch_impl(
 
     if allow_bf16x3_router_gemm and x.dtype == torch.bfloat16:
         from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
-            _BF16X3_ROUTER_GEMM_KERNEL,
+            _bf16x3_router_gemm,
         )
 
-        return _BF16X3_ROUTER_GEMM_KERNEL(x, weight)
+        return _bf16x3_router_gemm(x, weight)
 
     return torch.nn.functional.linear(x.float(), weight)
 

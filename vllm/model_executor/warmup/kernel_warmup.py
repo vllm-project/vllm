@@ -123,12 +123,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         spec_decode_rejection_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
 
-    if enable_jit_warmup and current_platform.is_device_capability_family(100):
-        _warmup_bf16x3_router_gemm(
-            worker.get_model(),
-            worker.scheduler_config.max_num_batched_tokens,
-        )
-
     _warmup_kimi_k3_gemm_rs_ar()
 
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:

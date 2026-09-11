@@ -13,6 +13,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_BLOCK_SIZE,
+    swizzle_mxfp8_scale,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import (

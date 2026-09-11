@@ -44,7 +44,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils import math_utils
 from vllm.utils.torch_utils import direct_register_custom_op
 
-__all__ = ["_BF16X3_ROUTER_GEMM_KERNEL"]
+__all__ = ["bf16x3_router_gemm"]
 
 
 @dsl_user_op
@@ -98,11 +98,65 @@ def _decompose_fp32x2_to_3xbf16x2(
     )
 
 
+# Accuracy-constrained (BN, split_k) configs from GB300 sweeps.
+_TILE_CONFIG_OVERRIDES = {
+    (2816, 256): {  # Hunyuan-V4
+        64: (16, 16),
+        128: (32, 16),
+        256: (64, 16),
+        512: (128, 16),
+    },
+    (3072, 256): {  # MiniMax-M2
+        64: (16, 16),
+        128: (32, 16),
+        256: (64, 16),
+        512: (128, 16),
+    },
+    (4096, 192): {  # Hunyuan-V3
+        64: (32, 32),
+        128: (64, 32),
+        256: (128, 32),
+        512: (128, 19),
+    },
+    (6144, 128): {  # MiniMax-M3
+        64: (32, 64),
+        128: (64, 64),
+        256: (64, 32),
+        512: (128, 32),
+    },
+}
+
+
+def _pick_tile_config(N: int, K: int, M: int, num_sms: int) -> tuple[int, int]:
+    """Return (BN, split_k): tuned table mid-range, generic rule otherwise."""
+    k_tiles = math_utils.cdiv(K, 64)
+
+    if 32 < N <= 512:
+        token_bucket = triton.next_power_of_2(N)
+        overrides = _TILE_CONFIG_OVERRIDES.get((K, M))
+        if overrides is not None:
+            BN, split_k = overrides[token_bucket]
+            return BN, min(split_k, k_tiles)
+
+    # next power of 2 within 8 and 128
+    BN = triton.next_power_of_2(N)
+    BN = min(max(BN, 8), 128)
+
+    grid_m = math_utils.cdiv(M, 128)
+    grid_n = math_utils.cdiv(N, BN)
+    base_ctas = grid_m * grid_n
+    split_k = min(k_tiles, max(1, num_sms // base_ctas))
+    return BN, split_k
+
+
+
+
 class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.CompileKey"]):
     block_m = 128
     block_k = 64
     num_stages = 2
     num_warps = 10
+    num_tmem_acc = 8
 
     @dataclass(frozen=True)
     class CompileKey:
@@ -117,6 +171,7 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
         BK = BF16x3RouterGemmKernel.block_k
         num_stages_value = BF16x3RouterGemmKernel.num_stages
         num_warps = BF16x3RouterGemmKernel.num_warps
+        num_tmem_acc_value = BF16x3RouterGemmKernel.num_tmem_acc
         use_pdl = compile_key.use_pdl
         cta_tile = (BN, BM, BK)
 
@@ -134,6 +189,7 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
 
         @cute.kernel
         def kernel(
+            self,
             X_tma: cpasync.TmaInfo,
             W_tma: cpasync.TmaInfo,
             out: cute.Tensor,
@@ -147,6 +203,7 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
 
             BN, BM, BK = cta_tile
             num_stages = num_stages_value
+            num_tmem_acc = num_tmem_acc_value
 
             N, K = X_tma.tma_tensor.shape
             M, _ = W_tma.tma_tensor.shape
@@ -169,7 +226,8 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
             tma_full_mbar = smem.allocate_array(Int64, num_stages)
             tma_empty_mbar = smem.allocate_array(Int64, num_stages)
             w_full_mbar = smem.allocate_array(Int64, num_stages)
-            mma_mbar = smem.allocate_array(Int64, 1)
+            acc_full_mbar = smem.allocate_array(Int64, 1)
+            acc_empty_mbar = smem.allocate_array(Int64, 1)
             taddr = smem.allocate(Int32, 4)
 
             BAR_TMEM_ALLOC = 1
@@ -189,7 +247,8 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
                         cute.arch.mbarrier_init(tma_full_mbar + i, 1)
                         cute.arch.mbarrier_init(tma_empty_mbar + i, 1)
                         cute.arch.mbarrier_init(w_full_mbar + i, 128)
-                    cute.arch.mbarrier_init(mma_mbar, 1)
+                    cute.arch.mbarrier_init(acc_full_mbar, 1)
+                    cute.arch.mbarrier_init(acc_empty_mbar, 128)
                     cute.arch.mbarrier_init_fence()
             elif warp_id == 1:
                 cpasync.prefetch_descriptor(X_tma.atom)
@@ -232,40 +291,54 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
 
             elif warp_id == 8:
                 # MMA warp
-                stage_id = 0
-                parity = 0
+                tma_stage_id = 0
+                tma_parity = 0
+
+                tmem_acc_count = 0
+                tmem_parity = 1
 
                 idesc = _tcgen05.make_bf16_idesc(BM, BN)
                 sdesc = _tcgen05.make_sdesc_128B_swizzle(0)
 
                 for tile_k in cutlass.range(bid_k, k_tiles, split_k, unroll=1):
-                    cute.arch.mbarrier_wait(tma_full_mbar + stage_id, parity)
-                    cute.arch.mbarrier_wait(w_full_mbar + stage_id, parity)
+                    if tmem_acc_count == 0:
+                        cute.arch.mbarrier_wait(acc_empty_mbar, tmem_parity)
+                    cute.arch.mbarrier_wait(tma_full_mbar + tma_stage_id, tma_parity)
+                    cute.arch.mbarrier_wait(w_full_mbar + tma_stage_id, tma_parity)
                     _tcgen05.fence_after_thread_sync()
 
-                    w_tmem = w_tmem_base + stage_id * (BK // 2 * 3)
-                    x_desc = sdesc | (sX[None, None, stage_id].iterator.toint() >> 4)
+                    w_tmem = w_tmem_base + tma_stage_id * (BK // 2 * 3)
+                    x_desc = sdesc | (
+                        sX[None, None, tma_stage_id].iterator.toint() >> 4
+                    )
 
                     for k in cutlass.range_constexpr(BK // 16):
-                        enable_d = (tile_k > bid_k) or (k > 0)
+                        enable_d_main = (tmem_acc_count > 0) or (k > 0)
+                        enable_d_res = (tile_k > bid_k) or (k > 0)
                         _tcgen05.mma_ts_f16(
-                            acc_main, w_tmem + k * 8, x_desc, idesc, enable_d
+                            acc_main, w_tmem + k * 8, x_desc, idesc, enable_d_main
                         )
                         _tcgen05.mma_ts_f16(
-                            acc_res, w_tmem + 32 + k * 8, x_desc, idesc, enable_d
+                            acc_res, w_tmem + 32 + k * 8, x_desc, idesc, enable_d_res
                         )
                         _tcgen05.mma_ts_f16(
                             acc_res, w_tmem + 64 + k * 8, x_desc, idesc, True
                         )
                         x_desc += 32 >> 4
 
-                    _tcgen05.commit(tma_empty_mbar + stage_id)
+                    _tcgen05.commit(tma_empty_mbar + tma_stage_id)
 
-                    stage_id = (stage_id + 1) % num_stages_value
-                    if stage_id == 0:
-                        parity ^= 1
+                    tma_stage_id = (tma_stage_id + 1) % num_stages
+                    if tma_stage_id == 0:
+                        tma_parity ^= 1
 
-                _tcgen05.commit(mma_mbar)
+                    tmem_acc_count = (tmem_acc_count + 1) % num_tmem_acc
+                    if tmem_acc_count == 0:
+                        _tcgen05.commit(acc_full_mbar)
+                        tmem_parity ^= 1
+
+                if tmem_acc_count != 0:
+                    _tcgen05.commit(acc_full_mbar)
 
             elif warp_id >= 4:
                 # prep warps: decompose FP32 W into 3xBF16
@@ -322,39 +395,94 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
                     _tcgen05.alloc(taddr)
                 cute.arch.barrier(barrier_id=BAR_TMEM_ALLOC, number_of_threads=128)
 
-                if warp_id == 0:
-                    cute.arch.mbarrier_wait(mma_mbar, 0)
-                cute.arch.barrier(barrier_id=BAR_EPI, number_of_threads=128)
-                _tcgen05.fence_after_thread_sync()
+                tiles_local = cute.ceil_div(k_tiles - bid_k, split_k)
+                num_chunks = cute.ceil_div(tiles_local, num_tmem_acc)
+
+                WIDTH = 8
+                main_regs = cute.make_rmem_tensor(WIDTH, Float32)
+                res_regs = cute.make_rmem_tensor(WIDTH, Float32)
+
+                if num_chunks == 1:
+                    # single chunk
+                    cute.arch.mbarrier_wait(acc_full_mbar, 0)
+                    _tcgen05.fence_after_thread_sync()
+                    w_row_idx = bid_m * BM + tid
+                    for i in cutlass.range_constexpr(BN // WIDTH):
+                        tcol = i * WIDTH
+                        main_regs.store(
+                            _tcgen05.ld(warp_id * 32, tcol, "32x32b", WIDTH)
+                        )
+                        res_regs.store(
+                            _tcgen05.ld(warp_id * 32, BN + tcol, "32x32b", WIDTH)
+                        )
+                        _tcgen05.wait_ld()
+
+                        # CuteDSL will codegen add.f32x2
+                        for j in cutlass.range(WIDTH, vectorize=True):
+                            main_regs[j] += res_regs[j]
+
+                        for j in cutlass.range_constexpr(WIDTH):
+                            x_row_idx = bid_n * BN + i * WIDTH + j
+                            if x_row_idx < N and w_row_idx < M:
+                                out[bid_k, x_row_idx, w_row_idx] = main_regs[j]
+
+                else:
+                    # multiple chunks
+                    master_acc = cute.make_rmem_tensor(BN, Float32)
+
+                    # chunk 0: pure TMEM load, no accumulation.
+                    cute.arch.mbarrier_wait(acc_full_mbar, 0)
+                    _tcgen05.fence_after_thread_sync()
+                    master_acc.store(_tcgen05.ld(warp_id * 32, 0, "32x32b", BN))
+                    _tcgen05.wait_ld()
+                    _tcgen05.fence_before_thread_sync()
+                    cute.arch.mbarrier_arrive(acc_empty_mbar)
+
+                    # accumulate main tmem acc
+                    for chunk in cutlass.range(1, num_chunks, unroll=1):
+                        cute.arch.mbarrier_wait(acc_full_mbar, chunk & 1)
+                        _tcgen05.fence_after_thread_sync()
+
+                        for i in cutlass.range_constexpr(BN // WIDTH):
+                            tcol = i * WIDTH
+                            main_regs.store(
+                                _tcgen05.ld(warp_id * 32, tcol, "32x32b", WIDTH)
+                            )
+                            _tcgen05.wait_ld()
+                            # CuteDSL refuses to compile
+                            # master_acc[i * WIDTH + j] += main_regs[j]
+                            # when vectorize=True
+                            master_view = cute.local_tile(master_acc, (WIDTH,), (i,))
+                            for j in cutlass.range(WIDTH, vectorize=True):
+                                master_view[j] += main_regs[j]
+
+                        _tcgen05.fence_before_thread_sync()
+                        cute.arch.mbarrier_arrive(acc_empty_mbar)
+
+                    # fold in the residual accumulator
+                    for i in cutlass.range_constexpr(BN // WIDTH):
+                        tcol = i * WIDTH
+                        res_regs.store(
+                            _tcgen05.ld(warp_id * 32, BN + tcol, "32x32b", WIDTH)
+                        )
+                        _tcgen05.wait_ld()
+                        master_view = cute.local_tile(master_acc, (WIDTH,), (i,))
+                        for j in cutlass.range(WIDTH, vectorize=True):
+                            master_view[j] += res_regs[j]
+
+                        w_row_idx = bid_m * BM + tid
+                        for j in cutlass.range_constexpr(WIDTH):
+                            x_row_idx = bid_n * BN + i * WIDTH + j
+                            if x_row_idx < N and w_row_idx < M:
+                                out[bid_k, x_row_idx, w_row_idx] = master_acc[
+                                    i * WIDTH + j
+                                ]
 
                 if const_expr(use_pdl):
                     cute.arch.griddepcontrol_launch_dependents()
-
-                WIDTH = 8
-                for i in cutlass.range_constexpr(BN // WIDTH):
-                    tcol = i * WIDTH
-                    main_regs = cute.make_rmem_tensor(WIDTH, Float32)
-                    res_regs = cute.make_rmem_tensor(WIDTH, Float32)
-                    main_regs.store(_tcgen05.ld(warp_id * 32, tcol, "32x32b", WIDTH))
-                    res_regs.store(
-                        _tcgen05.ld(warp_id * 32, BN + tcol, "32x32b", WIDTH)
-                    )
-                    _tcgen05.wait_ld()
-
-                    # CuteDSL will codegen add.f32x2
-                    for j in cutlass.range(WIDTH, vectorize=True):
-                        main_regs[j] += res_regs[j]
-
-                    w_row_idx = bid_m * BM + tid
-                    for j in cutlass.range_constexpr(WIDTH):
-                        x_row_idx = bid_n * BN + i * WIDTH + j
-                        if x_row_idx < N and w_row_idx < M:
-                            out[bid_k, x_row_idx, w_row_idx] = main_regs[j]
-
                 cute.arch.barrier(barrier_id=BAR_EPI, number_of_threads=128)
                 if warp_id == 0:
                     _tcgen05.dealloc()
-
         @cute.jit
         def host_entrypoint(
             X: cute.Tensor,
@@ -384,25 +512,28 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
         *,
         num_tokens: int,
         K: int,
+        M: int,
+        num_sms: int,
         use_pdl: bool,
     ) -> CompileKey:
-        # next power of 2 within 8 and 128
-        raw_BN = triton.next_power_of_2(num_tokens)
-        BN = 8 if raw_BN < 8 else 128 if raw_BN > 128 else raw_BN
+        BN, _ = _pick_tile_config(num_tokens, K, M, num_sms)
         return self.CompileKey(bn=BN, k=K, use_pdl=use_pdl)
 
     def get_warmup_keys(
         self,
         *,
         K: int,
+        M: int,
+        num_sms: int,
         max_tokens: int,
     ) -> list[CompileKey]:
-        max_tokens = min(max_tokens, 128)
-        if K <= 0 or max_tokens <= 0:
+        if K <= 0 or M <= 0 or num_sms <= 0 or max_tokens <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(
             num_tokens=WarmupIntRange(1, max_tokens + 1),
             K=K,
+            M=M,
+            num_sms=num_sms,
             use_pdl=current_platform.is_arch_support_pdl(),
         )
 
@@ -425,13 +556,13 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
         M, _ = W.shape
         num_sms = torch.cuda.get_device_properties(X.device).multi_processor_count
         compile_key = self.dispatch(
-            num_tokens=N, K=K, use_pdl=current_platform.is_arch_support_pdl()
+            num_tokens=N,
+            K=K,
+            M=M,
+            num_sms=num_sms,
+            use_pdl=current_platform.is_arch_support_pdl(),
         )
-
-        k_tiles = math_utils.cdiv(K, self.block_k)
-        grid_m = math_utils.cdiv(M, self.block_m)
-        grid_n = math_utils.cdiv(N, compile_key.bn)
-        split_k = min(k_tiles, max(1, num_sms // (grid_m * grid_n)))
+        _, split_k = _pick_tile_config(N, K, M, num_sms)
         partials = X.new_empty(split_k, N, M, dtype=torch.float32)
         out = (
             partials.squeeze(0)
@@ -547,3 +678,25 @@ def _BF16X3_SPLITK_REDUCE_KERNEL(
 
 
 _BF16X3_ROUTER_GEMM_KERNEL = BF16x3RouterGemmKernel()
+
+
+def _bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
+    return _BF16X3_ROUTER_GEMM_KERNEL(X, W)
+
+
+def _bf16x3_router_gemm_fake(
+    X: torch.Tensor,
+    W: torch.Tensor,
+) -> torch.Tensor:
+    return X.new_empty((X.shape[0], W.shape[0]), dtype=torch.float32)
+
+
+direct_register_custom_op(
+    op_name="bf16x3_router_gemm",
+    op_func=_bf16x3_router_gemm,
+    fake_impl=_bf16x3_router_gemm_fake,
+)
+
+
+def bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
+    return torch.ops.vllm.bf16x3_router_gemm(X, W)

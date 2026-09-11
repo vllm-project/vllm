@@ -118,8 +118,17 @@ def dsv4_topk(
     correction_bias: torch.Tensor,
     indices_dtype: torch.dtype,
     routed_scaling_factor: float,
+    input_ids: torch.Tensor | None = None,
+    bias_vl: torch.Tensor | None = None,
+    image_sentinel_lo: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens, num_experts = gating_output.shape
+    has_vl = bias_vl is not None and image_sentinel_lo > 0
+    if bias_vl is not None:
+        assert input_ids is not None, "bias_vl routing requires input_ids"
+        assert bias_vl.dtype == torch.float32 and bias_vl.is_contiguous()
+        assert bias_vl.shape == (num_experts,)
+        assert input_ids.is_contiguous()
     shape = (num_tokens, _TOPK)
     topk_weights = gating_output.new_empty(shape, dtype=torch.float32)
     topk_ids = gating_output.new_empty(shape, dtype=indices_dtype)
@@ -130,8 +139,12 @@ def dsv4_topk(
             topk_weights,
             topk_ids,
             routed_scaling_factor,
+            input_ids,
+            bias_vl,
+            image_sentinel_lo,
             NUM_EXPERTS=num_experts,
             BLOCK_N=triton.next_power_of_2(num_experts),
+            HAS_VL=has_vl,
             num_warps=1,
             launch_pdl=current_platform.is_arch_support_pdl(),
         )
