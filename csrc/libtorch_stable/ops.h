@@ -43,9 +43,6 @@ void per_token_group_quant_int8(const torch::stable::Tensor& input,
                                 int64_t group_size, double eps, double int8_min,
                                 double int8_max);
 
-torch::stable::Tensor permute_cols(torch::stable::Tensor const& A,
-                                   torch::stable::Tensor const& perm);
-
 #ifndef USE_ROCM
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
@@ -267,14 +264,14 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
     torch::stable::Tensor const& position_ids,
     torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
-    double eps, int64_t cache_block_size);
+    double eps, int64_t cache_block_size, bool apply_q_norm);
 
 void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
     torch::stable::Tensor& q, torch::stable::Tensor const& kv,
     torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
     torch::stable::Tensor const& position_ids,
     torch::stable::Tensor const& cos_sin_cache, double eps,
-    int64_t cache_block_size);
+    int64_t cache_block_size, bool apply_q_norm);
 
 void fused_kimi_k3_mla_key_concat_kv_cache_insert(
     torch::stable::Tensor& q, torch::stable::Tensor const& k_nope,
@@ -349,7 +346,7 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
     torch::stable::Tensor const& cos_sin_cache,
     torch::stable::Tensor const& fp8_scale,
     torch::stable::Tensor const& q_fp8_scale_inv, double eps,
-    int64_t cache_block_size);
+    int64_t cache_block_size, bool apply_q_norm);
 
 #ifndef USE_ROCM
 std::tuple<torch::stable::Tensor, torch::stable::Tensor>
@@ -405,19 +402,53 @@ void fused_gdn_decode_post_conv_mtp(
     torch::stable::Tensor const& num_accepted_tokens,
     torch::stable::Tensor& state, torch::stable::Tensor const& output_gate,
     torch::stable::Tensor const& norm_weight, torch::stable::Tensor& out,
-    double scale, double norm_eps);
+    double scale, double norm_eps, const std::string& output_gate_activation);
 
+#endif
+
+#ifdef VLLM_ENABLE_FUSED_KDA_CHUNK
+void fused_kda_prologue(
+    torch::stable::Tensor const& q, torch::stable::Tensor const& k,
+    torch::stable::Tensor const& v, torch::stable::Tensor const& raw_g,
+    torch::stable::Tensor const& raw_beta, torch::stable::Tensor const& a_log,
+    torch::stable::Tensor const& dt_bias, torch::stable::Tensor& qg,
+    torch::stable::Tensor& w, torch::stable::Tensor& u,
+    torch::stable::Tensor& kg_t, torch::stable::Tensor& aqk,
+    torch::stable::Tensor& decay, torch::stable::Tensor const& cu_seqlens,
+    torch::stable::Tensor const& chunk_indices,
+    std::optional<torch::stable::Tensor> conv_weight,
+    std::optional<torch::stable::Tensor> conv_state,
+    std::optional<torch::stable::Tensor> conv_state_indices,
+    std::optional<torch::stable::Tensor> conv_has_initial_state, double scale,
+    double lower_bound);
+
+void fused_kda_chunk(
+    torch::stable::Tensor const& qg, torch::stable::Tensor const& w,
+    torch::stable::Tensor const& u, torch::stable::Tensor const& kg_t,
+    torch::stable::Tensor const& aqk, torch::stable::Tensor const& decay,
+    std::optional<torch::stable::Tensor> initial_state,
+    std::optional<torch::stable::Tensor> final_state,
+    torch::stable::Tensor& out, torch::stable::Tensor const& cu_seqlens,
+    torch::stable::Tensor const& chunk_offsets, double scale,
+    std::optional<torch::stable::Tensor> group_state, int64_t groups,
+    std::optional<torch::stable::Tensor> checkpoint_state,
+    std::optional<torch::stable::Tensor> checkpoint_offsets,
+    std::optional<torch::stable::Tensor> checkpoint_state_indices,
+    std::optional<torch::stable::Tensor> state_cache,
+    std::optional<torch::stable::Tensor> state_indices,
+    std::optional<torch::stable::Tensor> has_initial_state);
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
 void kimi_k3_attn_res(torch::stable::Tensor& prefix,
-                      torch::stable::Tensor const& delta,
-                      torch::stable::Tensor const& blocks,
+                      std::optional<torch::stable::Tensor> delta,
+                      torch::stable::Tensor& blocks,
                       torch::stable::Tensor const& norm_weight,
                       torch::stable::Tensor const& qk_weight,
-                      torch::stable::Tensor const& output_norm_weight,
+                      std::optional<torch::stable::Tensor> output_norm_weight,
                       torch::stable::Tensor& output, int64_t num_blocks,
-                      double eps, double output_norm_eps);
+                      int64_t block_write_idx, double eps,
+                      double output_norm_eps);
 #endif
 
 // Sampler kernels (shared CUDA/ROCm)
@@ -529,20 +560,25 @@ void fatrelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                      double threshold);
 void swigluoai_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
                        double alpha = 1.702, double limit = 7.0);
-void situ_and_mul(
-    torch::stable::Tensor& out, torch::stable::Tensor& input, double beta = 1.0,
-    double linear_beta = -1.0,
-    std::optional<torch::stable::Tensor> valid_rows = std::nullopt);
+void situ_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
+                  double beta = 1.0, double linear_beta = -1.0);
 void situ_and_mul_quant(
     torch::stable::Tensor& out, torch::stable::Tensor& scale,
     torch::stable::Tensor& input, double beta = 1.0, double linear_beta = -1.0,
     int64_t group_size = 0,
-    std::optional<torch::stable::Tensor> valid_rows = std::nullopt,
+    std::optional<torch::stable::Tensor> num_valid_tokens = std::nullopt,
     int64_t topk = 1);
 void masked_situ_and_mul(torch::stable::Tensor& out,
                          torch::stable::Tensor& input,
                          const torch::stable::Tensor& expert_num_tokens,
                          double beta = 1.0, double linear_beta = -1.0);
+void masked_moe_activation(torch::stable::Tensor& out,
+                           torch::stable::Tensor& input,
+                           const torch::stable::Tensor& valid_token_counts,
+                           const std::string& activation,
+                           double clamp_limit = 0.0, double alpha = 1.0,
+                           double beta = 0.0, double situ_beta = 1.0,
+                           double situ_linear_beta = -1.0);
 void gelu_new(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_fast(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_quick(torch::stable::Tensor& out, torch::stable::Tensor& input);
@@ -581,11 +617,10 @@ torch::stable::Tensor gptq_gemm(torch::stable::Tensor a,
                                 torch::stable::Tensor b_q_weight,
                                 torch::stable::Tensor b_gptq_qzeros,
                                 torch::stable::Tensor b_gptq_scales,
-                                torch::stable::Tensor b_g_idx, bool use_exllama,
-                                bool use_v2_format, int64_t bit);
+                                bool use_exllama, bool use_v2_format,
+                                int64_t bit);
 
-void gptq_shuffle(torch::stable::Tensor q_weight, torch::stable::Tensor q_perm,
-                  int64_t bit);
+void gptq_shuffle(torch::stable::Tensor q_weight, int64_t bit);
 
 // Cache ops (shared CUDA/ROCm)
 void swap_blocks(torch::stable::Tensor& src, torch::stable::Tensor& dst,
@@ -671,6 +706,15 @@ void cp_gather_and_upconvert_fp8_kv_cache(
     int64_t batch_size,
     std::optional<torch::stable::Tensor> seq_starts = std::nullopt);
 
+// Gather and upconvert an nvfp4_ds_mla KV cache to a BF16 workspace
+void cp_gather_and_upconvert_nvfp4_kv_cache(
+    torch::stable::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE,
+                                                    // 352]
+    torch::stable::Tensor const& dst,               // [TOT_TOKENS, 576]
+    torch::stable::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
+    torch::stable::Tensor const& workspace_starts,  // [BATCH]
+    int64_t batch_size);
+
 // Indexer K quantization and cache function
 void indexer_k_quant_and_cache(
     torch::stable::Tensor& k,             // [num_tokens, head_dim]
@@ -696,6 +740,14 @@ void cp_gather_indexer_k_quant_cache(
                                                 // quant_block_size * 4]
     const torch::stable::Tensor& block_table,   // [batch_size, num_blocks]
     const torch::stable::Tensor& cu_seq_lens);  // [batch_size + 1]
+
+// Fused vocab-parallel embedding lookup (see
+// vocab_parallel_embedding_kernels.cu).
+void vocab_parallel_embedding(
+    torch::stable::Tensor& out, const torch::stable::Tensor& input_ids,
+    const torch::stable::Tensor& weight, int64_t org_vocab_start_index,
+    int64_t org_vocab_end_index, int64_t num_org_vocab_padding,
+    int64_t added_vocab_start_index, int64_t added_vocab_end_index);
 
 // LongCat n-gram embedding index kernel (see ngram_embedding_kernels.cu).
 void ngram_compute_n_gram_ids(

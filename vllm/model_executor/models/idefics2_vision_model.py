@@ -38,7 +38,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .utils import AutoWeightsLoader, WeightsMapper
 from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
@@ -75,53 +75,79 @@ class Idefics2VisionEmbeddings(nn.Module):
         self.num_positions = self.num_patches
         self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
 
+    def get_position_ids(
+        self,
+        patch_attention_mask: torch.BoolTensor,
+        tgt_sizes: torch.IntTensor | None = None,
+    ) -> torch.Tensor:
+        batch_size = patch_attention_mask.shape[0]
+        device = patch_attention_mask.device
+        boundaries = torch.arange(
+            1 / self.num_patches_per_side,
+            1.0,
+            1 / self.num_patches_per_side,
+            device=device,
+        )
+
+        flat_patch_attention_mask = patch_attention_mask.view(batch_size, -1)
+        max_patches = flat_patch_attention_mask.shape[-1]
+
+        if tgt_sizes is not None:
+            # tgt_sizes may come from CPU-side mm_kwargs; use a pinned async
+            # copy to stay clean under VLLM_GPU_SYNC_CHECK.
+            if tgt_sizes.device != device:
+                tgt_sizes = async_tensor_h2d(tgt_sizes, device)
+            nb_patches_h = tgt_sizes[:, 0]
+            nb_patches_w = tgt_sizes[:, 1]
+        else:
+            if patch_attention_mask.dim() == 3:
+                nb_patches_h = patch_attention_mask[:, :, 0].sum(dim=1)
+                nb_patches_w = patch_attention_mask[:, 0, :].sum(dim=1)
+            else:
+                # Fallback for unexpected 2D masks without tgt_sizes
+                nb_patches_h = torch.ones(batch_size, device=device)
+                nb_patches_w = patch_attention_mask.sum(dim=1)
+
+        nb_h = nb_patches_h.clamp(min=1).unsqueeze(1)
+        nb_w = nb_patches_w.clamp(min=1).unsqueeze(1)
+
+        i = torch.arange(max_patches, device=device)
+
+        if patch_attention_mask.dim() == 3 and patch_attention_mask.shape[1] > 1:
+            stride_w = patch_attention_mask.shape[2]  # padded 2D grid width
+        else:
+            stride_w = nb_w  # (batch, 1) — per-item actual patch width
+
+        h_idx = i.unsqueeze(0) // stride_w
+        w_idx = i.unsqueeze(0) % stride_w
+
+        fractional_h = h_idx / nb_h
+        fractional_w = w_idx / nb_w
+
+        bucket_h = torch.bucketize(fractional_h, boundaries, right=True)
+        bucket_w = torch.bucketize(fractional_w, boundaries, right=True)
+
+        pos_ids = bucket_h * self.num_patches_per_side + bucket_w
+
+        position_ids = torch.where(flat_patch_attention_mask, pos_ids.to(torch.long), 0)
+
+        target_device = self.position_embedding.weight.device
+        if position_ids.device != target_device:
+            position_ids = async_tensor_h2d(position_ids, target_device)
+        return position_ids
+
     def forward(
         self,
         pixel_values: torch.FloatTensor,
         patch_attention_mask: torch.BoolTensor,
         tgt_sizes: torch.IntTensor | None = None,
+        position_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        batch_size, _, max_im_h, max_im_w = pixel_values.shape
         target_dtype = self.patch_embedding.weight.dtype
         patch_embeds = self.patch_embedding(pixel_values.to(target_dtype))
         embeddings = patch_embeds.flatten(2).transpose(1, 2)
-        max_nb_patches_h, max_nb_patches_w = (
-            max_im_h // self.patch_size,
-            max_im_w // self.patch_size,
-        )
-        boundaries = torch.arange(
-            1 / self.num_patches_per_side, 1.0, 1 / self.num_patches_per_side
-        )
-        position_ids = torch.full(
-            size=(batch_size, max_nb_patches_h * max_nb_patches_w), fill_value=0
-        )
-
-        with gpu_sync_allowed():
-            patch_attention_mask_cpu = patch_attention_mask.cpu()
-            tgt_sizes_cpu = tgt_sizes.cpu() if tgt_sizes is not None else None
-
-        for batch_idx, p_attn_mask in enumerate(patch_attention_mask_cpu):
-            if tgt_sizes_cpu is not None:
-                nb_patches_h = tgt_sizes_cpu[batch_idx][0]
-                nb_patches_w = tgt_sizes_cpu[batch_idx][1]
-            else:
-                nb_patches_h = p_attn_mask[:, 0].sum()
-                nb_patches_w = p_attn_mask[0].sum()
-            fractional_coords_h = torch.arange(0, 1 - 1e-6, 1 / nb_patches_h)
-            fractional_coords_w = torch.arange(0, 1 - 1e-6, 1 / nb_patches_w)
-            bucket_coords_h = torch.bucketize(
-                fractional_coords_h, boundaries, right=True
-            )
-            bucket_coords_w = torch.bucketize(
-                fractional_coords_w, boundaries, right=True
-            )
-            pos_ids = (
-                bucket_coords_h[:, None] * self.num_patches_per_side + bucket_coords_w
-            ).flatten()
-            position_ids[batch_idx][p_attn_mask.view(-1)] = pos_ids
-        position_ids = position_ids.to(
-            self.position_embedding.weight.device, non_blocking=True
-        )
+        if position_ids is None:
+            position_ids = self.get_position_ids(patch_attention_mask, tgt_sizes)
         embeddings += self.position_embedding(position_ids)
         return embeddings
 
@@ -423,6 +449,7 @@ class Idefics2VisionTransformer(nn.Module):
         pixel_values,
         patch_attention_mask: torch.BoolTensor | None = None,
         tgt_sizes: torch.IntTensor | None = None,
+        position_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = pixel_values.size(0)
 
@@ -446,19 +473,14 @@ class Idefics2VisionTransformer(nn.Module):
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask,
             tgt_sizes=tgt_sizes,
+            position_ids=position_ids,
         )
 
         # Align with HuggingFace NaViT SigLIP in MiniCPMV/O:
         # - if apply_encoder_attention_mask is False, skip (not all models
         #   sharing this encoder apply masking in attention, e.g. Aria, Phi4)
         # - if patch_attention_mask was None, skip attention masking
-        # - if any padding exists, create an additive 4D mask and pass it
-        #   to attention; else skip mask for performance.
-        if (
-            not self.apply_encoder_attention_mask
-            or flat_patch_mask is None
-            or not torch.any(~flat_patch_mask)
-        ):
+        if not self.apply_encoder_attention_mask or flat_patch_mask is None:
             attention_mask = None
         else:
             # Additive mask: masked positions receive a large negative value.

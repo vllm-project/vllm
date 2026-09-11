@@ -296,8 +296,8 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
             device=x.device,
         )
         rows_per_expert = self._get_rows_per_expert(self.local_num_experts, x.device)
-        unpermuted_row_to_permuted_row = (
-            self._get_unpermuted_row_to_permuted_row(num_rows, topk, x.device)
+        unpermuted_row_to_permuted_row = self._get_unpermuted_row_to_permuted_row(
+            num_rows, topk, x.device
         )
 
         self.remap_hidden_states_op(
@@ -377,19 +377,22 @@ class INCWNA16MoEScheme:
             check_moe_marlin_supports_layer,
         )
 
+        group_size = self.layer_config.group_size
+        assert isinstance(group_size, int), "WNA16 only supports integer group_size."
+
         use_marlin = (self.layer_config.bits, self.layer_config.sym) in {
             (4, True),
             (8, True),
         } and check_moe_marlin_supports_layer(
             layer,
-            self.layer_config.group_size,
+            group_size,
         )
 
         if use_marlin:
             return AutoGPTQMoEMethod(
                 AutoGPTQConfig(
                     weight_bits=self.layer_config.bits,
-                    group_size=self.layer_config.group_size,
+                    group_size=group_size,
                     desc_act=False,
                     is_sym=self.layer_config.sym,
                     lm_head_quantized=False,
@@ -403,7 +406,7 @@ class INCWNA16MoEScheme:
             {
                 "quant_method": "gptq",
                 "bits": self.layer_config.bits,
-                "group_size": self.layer_config.group_size,
+                "group_size": group_size,
                 "sym": self.layer_config.sym,
                 "lm_head": False,
             }
@@ -420,19 +423,22 @@ class INCWNA16MoEScheme:
             check_moe_marlin_supports_layer,
         )
 
+        group_size = self.layer_config.group_size
+        assert isinstance(group_size, int), "WNA16 only supports integer group_size."
+
         use_marlin = self.layer_config.bits in (
             4,
             8,
         ) and check_moe_marlin_supports_layer(
             layer,
-            self.layer_config.group_size,
+            group_size,
         )
 
         if use_marlin:
             return AutoAWQMoEMethod(
                 AutoAWQConfig(
                     weight_bits=self.layer_config.bits,
-                    group_size=self.layer_config.group_size,
+                    group_size=group_size,
                     zero_point=not self.layer_config.sym,
                     lm_head_quantized=False,
                     modules_to_not_convert=[],
@@ -445,7 +451,7 @@ class INCWNA16MoEScheme:
             {
                 "quant_method": "awq",
                 "bits": self.layer_config.bits,
-                "group_size": self.layer_config.group_size,
+                "group_size": group_size,
                 "zero_point": not self.layer_config.sym,
                 "lm_head": False,
             }
