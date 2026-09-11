@@ -2166,13 +2166,15 @@ class rocm_aiter_ops:
             if not current_platform.is_rocm():
                 return
 
-            from vllm.platforms.rocm import on_gfx11
+            from vllm.platforms.rocm import on_gfx11, on_gfx950
 
-            if on_gfx11() and not _OPS_REGISTERED:
+            # This op has self-contained Triton/C++ implementations on gfx11
+            # and gfx950.  Only its optional top-k fast path comes from aiter.
+            if (on_gfx11() or on_gfx950()) and not _OPS_REGISTERED:
                 direct_register_custom_op(
                     op_name="rocm_aiter_sparse_attn_indexer",
                     op_func=rocm_aiter_sparse_attn_indexer,
-                    mutates_args=["topk_indices_buffer"],
+                    mutates_args=["topk_indices_buffer", "candidate_blocks"],
                     fake_impl=rocm_aiter_sparse_attn_indexer_fake,
                     dispatch_key=current_platform.dispatch_key,
                 )
@@ -2350,7 +2352,7 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_sparse_attn_indexer",
                 op_func=rocm_aiter_sparse_attn_indexer,
-                mutates_args=["topk_indices_buffer"],
+                mutates_args=["topk_indices_buffer", "candidate_blocks"],
                 fake_impl=rocm_aiter_sparse_attn_indexer_fake,
                 dispatch_key=current_platform.dispatch_key,
             )

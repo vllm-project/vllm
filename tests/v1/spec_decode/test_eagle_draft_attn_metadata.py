@@ -48,6 +48,7 @@ def _make_fake_speculator(
     )
     return SimpleNamespace(
         arange=torch.arange(max_num_reqs + 1, dtype=torch.int32, device="cpu"),
+        draft_is_prefilling=torch.zeros(max_num_reqs, dtype=torch.bool),
         block_tables=fake_block_tables,
         input_buffers=fake_input_buffers,
         attn_groups=[],
