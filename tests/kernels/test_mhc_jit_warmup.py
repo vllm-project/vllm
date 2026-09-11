@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Validate JIT dispatch against pre-contract behavior."""
 
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -19,6 +18,7 @@ from vllm.model_executor.kernels.mhc.tilelang_kernels import (
     MhcPostTileLangKernel,
     MhcPreBigFuseTileLangKernel,
 )
+from vllm.model_executor.warmup import jit_warmup_tilelang_helper
 
 
 @pytest.mark.parametrize(
@@ -32,7 +32,7 @@ from vllm.model_executor.kernels.mhc.tilelang_kernels import (
                 hc_mult=2,
                 n_out=128,
             ),
-            (2048, 2, 128, 1024, 4, 1, False, 1, False),
+            (2048, 2, 128, 1024, 4, 1, False, 1),
         ),
         (
             dict(
@@ -42,7 +42,7 @@ from vllm.model_executor.kernels.mhc.tilelang_kernels import (
                 hc_mult=2,
                 n_out=128,
             ),
-            (2048, 2, 128, 512, 12, 1, True, 2, False),
+            (2048, 2, 128, 512, 12, 1, True, 2),
         ),
         (
             dict(
@@ -55,17 +55,17 @@ from vllm.model_executor.kernels.mhc.tilelang_kernels import (
                 tile_n=8,
                 n_splits=4,
             ),
-            (2048, 2, 128, 256, 8, 4, False, 1, False),
+            (2048, 2, 128, 256, 8, 4, False, 1),
         ),
     ],
 )
 def test_hc_prenorm_gemm_dispatch_matches_legacy_runtime_config(
     kwargs: dict[str, Any],
-    expected: tuple[int, int, int, int, int, int, bool, int, bool],
+    expected: tuple[int, int, int, int, int, int, bool, int],
 ) -> None:
     kernel = HcPrenormGemmTileLangKernel()
 
-    assert kernel.dispatch(**kwargs, launch_pdl=False) == kernel.CompileKey(*expected)
+    assert kernel.dispatch(**kwargs) == kernel.CompileKey(*expected)
 
 
 @pytest.mark.parametrize(
@@ -97,7 +97,6 @@ def test_mhc_pre_big_fuse_dispatch_matches_legacy_runtime_config(
         sinkhorn_repeat=3,
         norm_eps=1.0e-5,
         broadcast_norm_eps=2.0e-5,
-        launch_pdl=False,
     ) == kernel.CompileKey(
         hidden_size=4096,
         hc_mult=4,
@@ -110,7 +109,6 @@ def test_mhc_pre_big_fuse_dispatch_matches_legacy_runtime_config(
         hc_post_mult_value=0.5,
         sinkhorn_repeat=3,
         norm_eps=expected_eps,
-        launch_pdl=False,
     )
 
 
@@ -130,37 +128,64 @@ def test_mhc_fused_dispatch_matches_legacy_runtime_config(
         num_tokens=num_tokens,
         hidden_size=hidden_size,
         hc_mult=4,
-        launch_pdl=False,
     ) == kernel.CompileKey(
         hidden_size=hidden_size,
         hc_mult=4,
         n_splits=expected_n_splits,
         tile_n=expected_tile_n,
-        launch_pdl=False,
     )
 
 
-def test_mhc_tilelang_warmup_covers_pdl_variants() -> None:
-    config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=16)
-    )
-    owners_and_keys = (
+@pytest.mark.parametrize(
+    ("kernel", "compile_key"),
+    [
         (
             HcPrenormGemmTileLangKernel(),
-            dict(
-                vllm_config=config,
-                hidden_size=4096,
-                hc_mult=4,
-                n_out=24,
+            HcPrenormGemmTileLangKernel.CompileKey(
+                hidden_size=2048,
+                hc_mult=2,
+                n_out=128,
+                n_thr=1024,
+                tile_n=4,
+                n_splits=1,
+                use_block_m=False,
+                block_m=1,
+            ),
+        ),
+        (
+            HcPrenormGemmTileLangKernel(),
+            HcPrenormGemmTileLangKernel.CompileKey(
+                hidden_size=2048,
+                hc_mult=2,
+                n_out=128,
+                n_thr=512,
+                tile_n=12,
+                n_splits=1,
+                use_block_m=False,
+                block_m=1,
+            ),
+        ),
+        (
+            HcPrenormGemmTileLangKernel(),
+            HcPrenormGemmTileLangKernel.CompileKey(
+                hidden_size=2048,
+                hc_mult=2,
+                n_out=128,
+                n_thr=512,
+                tile_n=12,
+                n_splits=1,
+                use_block_m=True,
+                block_m=2,
             ),
         ),
         (
             MhcPreBigFuseTileLangKernel(),
-            dict(
-                vllm_config=config,
+            MhcPreBigFuseTileLangKernel.CompileKey(
                 hidden_size=4096,
                 hc_mult=4,
+                n_splits=2,
                 use_norm_weight=True,
+                is_broadcast=False,
                 rms_eps=1.0e-6,
                 hc_pre_eps=2.0e-6,
                 hc_sinkhorn_eps=3.0e-6,
@@ -169,23 +194,103 @@ def test_mhc_tilelang_warmup_covers_pdl_variants() -> None:
                 norm_eps=1.0e-5,
             ),
         ),
-        (MhcPostTileLangKernel(), dict(hidden_size=4096, hc_mult=4)),
+        (
+            MhcPreBigFuseTileLangKernel(),
+            MhcPreBigFuseTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                n_splits=1,
+                use_norm_weight=False,
+                is_broadcast=False,
+                rms_eps=1.0e-6,
+                hc_pre_eps=2.0e-6,
+                hc_sinkhorn_eps=3.0e-6,
+                hc_post_mult_value=0.5,
+                sinkhorn_repeat=3,
+                norm_eps=0.0,
+            ),
+        ),
+        (
+            MhcPreBigFuseTileLangKernel(),
+            MhcPreBigFuseTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                n_splits=2,
+                use_norm_weight=True,
+                is_broadcast=True,
+                rms_eps=1.0e-6,
+                hc_pre_eps=2.0e-6,
+                hc_sinkhorn_eps=3.0e-6,
+                hc_post_mult_value=0.5,
+                sinkhorn_repeat=3,
+                norm_eps=1.0e-5,
+            ),
+        ),
+        (
+            MhcPostTileLangKernel(),
+            MhcPostTileLangKernel.CompileKey(hidden_size=4096, hc_mult=4),
+        ),
         (
             MhcFusedTileLangKernel(),
-            dict(vllm_config=config, hidden_size=4096, hc_mult=4),
+            MhcFusedTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                n_splits=4,
+                tile_n=3,
+            ),
+        ),
+        (
+            MhcFusedTileLangKernel(),
+            MhcFusedTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                n_splits=8,
+                tile_n=2,
+            ),
+        ),
+        (
+            MhcFusedTileLangKernel(),
+            MhcFusedTileLangKernel.CompileKey(
+                hidden_size=8192,
+                hc_mult=4,
+                n_splits=4,
+                tile_n=2,
+            ),
         ),
         (
             HcHeadFusedTileLangKernel(),
-            dict(
+            HcHeadFusedTileLangKernel.CompileKey(
                 hidden_size=4096,
                 hc_mult=4,
                 rms_eps=1.0e-6,
                 hc_eps=2.0e-6,
             ),
         ),
+    ],
+)
+def test_tilelang_warmup_inputs_reproduce_compile_key(
+    monkeypatch: pytest.MonkeyPatch,
+    kernel: Any,
+    compile_key: Any,
+) -> None:
+    compiled: list[Any] = []
+    single_kernel = isinstance(
+        kernel,
+        (MhcPostTileLangKernel, MhcFusedTileLangKernel, HcHeadFusedTileLangKernel),
+    )
+    expected_kernel = kernel.kernel() if single_kernel else kernel.kernel(compile_key)
+    if single_kernel:
+        monkeypatch.setattr(
+            kernel,
+            "dispatch",
+            lambda **kwargs: pytest.fail("single-kernel launch must not dispatch"),
+        )
+    monkeypatch.setattr(
+        jit_warmup_tilelang_helper,
+        "compile_tilelang",
+        lambda jit_impl, *args, **kwargs: compiled.append(jit_impl),
     )
 
-    for owner, kwargs in owners_and_keys:
-        keys = owner.get_warmup_keys(**kwargs)
-        assert keys
-        assert {key.launch_pdl for key in keys} == {False, True}
+    kernel.compile(compile_key)
+
+    assert compiled == [expected_kernel]
