@@ -70,10 +70,16 @@ A `summary` response's `metrics` looks like:
 | `num_spec_tokens` | Configured `num_speculative_tokens` (`k`), i.e. the maximum draft length per step. |
 
 For variable-length drafting, `acceptance_histogram_by_draft_length[k][j]`
-counts steps that accepted `j` of `k` proposed drafts. This preserves whether
-acceptance reached the proposal limit at each budget without retaining every
-step. Only observed draft lengths allocate rows, so storage is bounded by the
-configured draft length rather than the number of verification steps.
+counts verification steps that accepted `j` of `k` draft tokens. The length
+`k` is measured after grammar validation, so steps with the same configured
+budget can appear in different rows.
+
+Steps with no scheduled draft tokens are omitted, so the histogram does not
+show how often drafting is skipped. A `k = 0` row means a verification step
+had no valid drafts left after adjustment.
+
+Only observed draft lengths allocate rows. Storage depends on the maximum
+configured draft length and does not grow with the number of verification steps.
 
 With `detailed`, two ordered arrays are added, one entry per verification step:
 
