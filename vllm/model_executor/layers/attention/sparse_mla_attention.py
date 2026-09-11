@@ -28,7 +28,11 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
-from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
+from vllm.utils.torch_utils import (
+    PIN_MEMORY,
+    is_quantized_kv_cache,
+    np_to_pinned_tensor,
+)
 from vllm.v1.attention.backend import AttentionMetadata, AttentionMetadataBuilder
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
@@ -241,9 +245,13 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
 
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         assert seq_lens_cpu is not None
-        context_lens_cpu = (
-            seq_lens_cpu[num_decodes : num_decodes + num_prefills]
-            - prefill_query_lens_cpu
+        context_lens_cpu = torch.empty(
+            num_prefills, dtype=seq_lens_cpu.dtype, pin_memory=PIN_MEMORY
+        )
+        torch.subtract(
+            seq_lens_cpu[num_decodes : num_decodes + num_prefills],
+            prefill_query_lens_cpu,
+            out=context_lens_cpu,
         )
         qsl_cpu = common_attn_metadata.query_start_loc_cpu
         prefill_query_start_loc_cpu = qsl_cpu[num_decodes:] - qsl_cpu[num_decodes]
