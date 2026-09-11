@@ -1097,6 +1097,8 @@ class GPUModelRunner(
             model_kwargs["lookback_token_ids"] = self._prepare_lookback_token_ids(
                 num_reqs
             )
+            if self.parallel_config.use_ubatching:
+                model_kwargs["lookback_query_start_loc"] = self.query_start_loc.gpu
 
         if not self.is_pooling_model:
             return model_kwargs

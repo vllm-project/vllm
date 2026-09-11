@@ -107,8 +107,10 @@ def test_make_metadata_with_slice_decode_batch(small_decode_metadata):
     """Test slicing decode batch metadata"""
     # Split first request only
     ubatch_slice = UBatchSlice(slice(0, 1), slice(0, 1))
+    small_decode_metadata.positions = small_decode_metadata.seq_lens - 1
 
     result = _make_metadata_with_slice(ubatch_slice, small_decode_metadata)
+    torch.testing.assert_close(result.positions, small_decode_metadata.positions[:1])
 
     # Check sliced results
     assert result.num_reqs == 1  # slice(0, 1) gives 1 requests
@@ -330,6 +332,9 @@ def test_prefill_split_across_ubatches(
     device = torch.device("cpu")
     batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
     common = create_common_attn_metadata(batch_spec, block_size=16, device=device)
+    common.positions = torch.cat(
+        [torch.arange(seq - query, seq) for seq, query in zip(seq_lens, query_lens)]
+    )
 
     num_scheduled_tokens = np.array(query_lens, dtype=np.int32)
     qsl_np = common.query_start_loc_cpu.numpy()
@@ -347,10 +352,16 @@ def test_prefill_split_across_ubatches(
 
     first_meta = _make_metadata_with_slice(ubatch_slices[0], common)
     second_meta = _make_metadata_with_slice(ubatch_slices[1], common)
+    # Compressor ring slots depend on absolute positions, even inside a request.
+    torch.testing.assert_close(first_meta.positions, common.positions[:split_point])
+    torch.testing.assert_close(second_meta.positions, common.positions[split_point:])
 
     # Token counts match the split
     assert first_meta.num_actual_tokens == split_point
     assert second_meta.num_actual_tokens == num_tokens - split_point
+    # These counts are passed directly to Triton kernels.
+    assert isinstance(first_meta.num_actual_tokens, int)
+    assert isinstance(second_meta.num_actual_tokens, int)
 
     # Number of requests per ubatch
     assert first_meta.num_reqs == expected_first_reqs
