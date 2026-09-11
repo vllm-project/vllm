@@ -24,6 +24,7 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.attention.mla_attention import _use_masked_mha
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
+    SparseMLACommonImpl,
     _masked_mha_workspace_fits,
     _topk_mask_shape,
 )
@@ -44,6 +45,9 @@ import vllm.v1.attention.backends.mla.flashinfer_mla_sparse as flashinfer_sparse
 from vllm.model_executor.layers.attention.mla_attention import (
     _canonicalize_sparse_mla_kv_cache_dtype,
 )
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SharedTopkIndicesBuffer,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseImpl,
@@ -56,7 +60,7 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseMetadataBuilder,
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
     split_prefill_chunks,
@@ -419,6 +423,7 @@ def test_sparse_backend_decode_correctness(
     )
     model_config = vllm_config.model_config
     model_config.hf_text_config = SimpleNamespace(
+        index_topk=topk_tokens,
         q_lora_rank=None,
         kv_lora_rank=kv_lora_rank,
         qk_nope_head_dim=qk_nope_head_dim,
@@ -426,6 +431,7 @@ def test_sparse_backend_decode_correctness(
         v_head_dim=v_head_dim,
         model_type="deepseek_v2",
     )
+    del model_config.hf_config.index_topk  # Composite configs only nest this field.
     model_config.dtype = dtype
     model_config.get_num_attention_heads = MethodType(
         lambda self, parallel_config: num_heads,
@@ -587,7 +593,7 @@ def test_sparse_backend_decode_correctness(
     sdpa_reference = torch.cat(reference_outputs, dim=0)
 
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
-    vllm_config.model_config.hf_config.index_topk = topk_tokens
+    vllm_config.model_config.hf_text_config.index_topk = topk_tokens
 
     common_attn_metadata = create_common_attn_metadata(
         batch_spec,
@@ -1145,6 +1151,7 @@ def test_sparse_backend_prefill_correctness(
     )
     model_config = vllm_config.model_config
     model_config.hf_text_config = SimpleNamespace(
+        index_topk=topk_tokens,
         q_lora_rank=None,
         kv_lora_rank=kv_lora_rank,
         qk_nope_head_dim=qk_nope_head_dim,
@@ -1152,6 +1159,7 @@ def test_sparse_backend_prefill_correctness(
         v_head_dim=v_head_dim,
         model_type="deepseek_v2",
     )
+    del model_config.hf_config.index_topk  # Composite configs only nest this field.
     model_config.dtype = dtype
     model_config.model_arch_config.total_num_attention_heads = num_heads
     model_config.get_num_attention_heads = MethodType(
@@ -1251,7 +1259,7 @@ def test_sparse_backend_prefill_correctness(
     ref_output = torch.cat(reference_outputs, dim=0)
 
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
-    vllm_config.model_config.hf_config.index_topk = topk_tokens
+    vllm_config.model_config.hf_text_config.index_topk = topk_tokens
 
     common_attn_metadata = create_common_attn_metadata(
         batch_spec,
@@ -1424,7 +1432,7 @@ def test_sparse_backend_prefill_correctness(
 def test_split_indexer_prefill_chunks(
     seq_lens, query_lens, workspace_size, max_logits_bytes, expected
 ):
-    out = split_indexer_prefill_chunks(
+    out = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
         seq_lens,
         query_lens,
         workspace_size,
@@ -1438,7 +1446,9 @@ def test_split_indexer_prefill_chunks_single_request_overflow():
     seq_lens = torch.tensor([1000, 50])
     query_lens = torch.tensor([100, 5])
 
-    out = split_indexer_prefill_chunks(seq_lens, query_lens, 2000, 1000)
+    out = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
+        seq_lens, query_lens, 2000, 1000
+    )
     # max_logits_elems = 250, N=1000 -> max_q = 1 -> 100 query sub-chunks
     expected = [(slice(0, 1), slice(i, i + 1)) for i in range(100)]
     # req1: M=5, N=50 -> 250 elems fits budget
@@ -1741,6 +1751,7 @@ def _build_sparse_dcp_vllm_config(
     model_config = vllm_config.model_config
     model_config.dtype = torch.bfloat16
     model_config.hf_text_config = SimpleNamespace(
+        index_topk=topk_tokens,
         q_lora_rank=None,
         kv_lora_rank=kv_lora_rank,
         qk_nope_head_dim=qk_nope_head_dim,
@@ -1748,6 +1759,7 @@ def _build_sparse_dcp_vllm_config(
         v_head_dim=v_head_dim,
         model_type="deepseek_v2",
     )
+    del model_config.hf_config.index_topk  # Composite configs only nest this field.
     model_config.get_num_attention_heads = MethodType(
         lambda self, parallel_config: local_heads, model_config
     )
@@ -1862,3 +1874,44 @@ def test_fp8_mixed_batch_dcp_neutralizes_empty_rows(monkeypatch):
     assert out.is_contiguous()
     assert not out.isnan().any()
     assert not lse.isnan().any()
+
+
+def test_sparse_impl_observes_repointed_indexer_buffer():
+    """The MTP proposer repoints the draft's indexer at the target model's buffer
+    after the backend impl is built, so the impl must resolve the buffer per read.
+    Snapshotting it in __init__ leaves the layer reading indices nothing writes."""
+    impl = object.__new__(FlashInferMLASparseImpl)
+    own = torch.zeros(4, 8, dtype=torch.int32)
+    target = torch.ones(4, 8, dtype=torch.int32)
+    indexer = SimpleNamespace(topk_indices_buffer=own)
+    impl.init_topk_indices_buffer(indexer, None)
+
+    assert impl.topk_indices_buffer is own
+
+    indexer.topk_indices_buffer = target
+
+    assert impl.topk_indices_buffer is target
+
+
+def test_explicit_topk_buffer_supersedes_indexer():
+    """Backbone skip-topk layers have no indexer, and the proposer also assigns the
+    shared buffer directly onto draft submodules."""
+    impl = object.__new__(FlashInferMLASparseImpl)
+    indexer = SimpleNamespace(
+        topk_indices_buffer=torch.zeros(2, 2, dtype=torch.int32),
+    )
+    impl.init_topk_indices_buffer(indexer, None)
+    explicit = torch.ones(2, 2, dtype=torch.int32)
+
+    impl.topk_indices_buffer = explicit
+
+    assert impl.topk_indices_buffer is explicit
+
+
+def test_sparse_mla_common_impl_resolves_buffer_lazily():
+    """Guards the whole SparseMLACommonImpl family at once: a backend that
+    snapshots the buffer instead silently loses MTP buffer sharing."""
+    assert issubclass(SparseMLACommonImpl, SharedTopkIndicesBuffer)
+    assert isinstance(SparseMLACommonImpl.topk_indices_buffer, property), (
+        "topk_indices_buffer must stay a lazily-resolved property"
+    )
