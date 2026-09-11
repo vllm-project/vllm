@@ -70,6 +70,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -104,6 +105,72 @@ from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl
 
 logger = init_logger(__name__)
+
+
+def split_to_interleaved(x):
+    # Split halves:  x0 x1 x2 x3 ... y0 y1 y2 y3 ...
+    # Interleaved:   x0 y0 x1 y1 x2 y2 x3 y3 ...
+    return x.reshape(*x.shape[:-1], 2, -1).transpose(-1, -2).reshape(*x.shape[:-1], -1)
+
+
+def interleaved_to_split(x):
+    # Interleaved:   x0 y0 x1 y1 x2 y2 x3 y3 ...
+    # Split halves:  x0 x1 x2 x3 ... y0 y1 y2 y3 ...
+    return x.reshape(*x.shape[:-1], -1, 2).transpose(-1, -2).reshape(*x.shape[:-1], -1)
+
+
+def _is_dense_qk_proj(layer: nn.Module) -> bool:
+    """Whether ``layer`` holds *dense* (unquantized) q/k projection weights.
+
+    The partial-RoPE weight-fold only produces correct numerics on dense
+    weights: it permutes the projection's output channels, which would
+    misalign any per-output-channel quant scales/zero-points (fp8 per-channel,
+    MXFP4/MXFP8 block scales, GPTQ/AWQ, ...) or silently no-op on packed
+    tensors. For such layers we keep the runtime channel-permutation path.
+    """
+    return isinstance(getattr(layer, "quant_method", None), UnquantizedLinearMethod)
+
+
+def apply_partial_rope(
+    rotary_emb,
+    positions: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    rope_head_dim: int,
+    fold_rope_weights: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if fold_rope_weights or rope_head_dim == head_dim:
+        return rotary_emb(positions, q, k)
+
+    q = q.reshape(*q.shape[:-1], num_heads, head_dim)
+    k = k.reshape(*k.shape[:-1], num_kv_heads, head_dim)
+
+    q_rope, q_nope = torch.split(
+        split_to_interleaved(q),
+        split_size_or_sections=[rope_head_dim, head_dim - rope_head_dim],
+        dim=-1,
+    )
+    k_rope, k_nope = torch.split(
+        split_to_interleaved(k),
+        split_size_or_sections=[rope_head_dim, head_dim - rope_head_dim],
+        dim=-1,
+    )
+
+    q_rope, k_rope = rotary_emb(
+        positions, interleaved_to_split(q_rope), interleaved_to_split(k_rope)
+    )
+
+    q = interleaved_to_split(
+        torch.cat([split_to_interleaved(q_rope), q_nope], dim=-1)
+    ).reshape(*q.shape[:-2], -1)
+    k = interleaved_to_split(
+        torch.cat([split_to_interleaved(k_rope), k_nope], dim=-1)
+    ).reshape(*k.shape[:-2], -1)
+
+    return q, k
 
 
 def _rope_weight_perm(head_dim: int, rope_head_dim: int) -> torch.Tensor:
@@ -542,19 +609,32 @@ class K2HorizonAttention(nn.Module):
         )
 
         self.rope_head_dim = rope_head_dim or self.head_dim
-        assert dual_chunk_attention_config is None, (
-            "K2Horizon partial-RoPE weight-fold path has not been validated with "
-            "dual-chunk attention; re-derive P.RoPE equivalence before enabling."
-        )
-        rope_parameters = dict(rope_parameters)
-        rope_parameters["rope_dim"] = self.rope_head_dim
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=max_position_embeddings,
-            is_neox_style=True,
-            rope_parameters=rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
-        )
+        # Fold the partial-RoPE channel permutation into the q/k weights only
+        # when they are dense; packed/quantized projections keep the runtime
+        # channel-permutation path (see ``_is_dense_qk_proj``).
+        self.fold_rope_weights = _is_dense_qk_proj(self.qkv_proj)
+        if self.fold_rope_weights:
+            assert dual_chunk_attention_config is None, (
+                "K2Horizon partial-RoPE weight-fold path has not been validated "
+                "with dual-chunk attention; re-derive P.RoPE equivalence before "
+                "enabling."
+            )
+            rope_parameters = dict(rope_parameters)
+            rope_parameters["rope_dim"] = self.rope_head_dim
+            self.rotary_emb = get_rope(
+                self.head_dim,
+                max_position=max_position_embeddings,
+                is_neox_style=True,
+                rope_parameters=rope_parameters,
+                dual_chunk_attention_config=dual_chunk_attention_config,
+            )
+        else:
+            self.rotary_emb = get_rope(
+                self.rope_head_dim,
+                max_position=max_position_embeddings,
+                rope_parameters=rope_parameters,
+                dual_chunk_attention_config=dual_chunk_attention_config,
+            )
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -604,7 +684,17 @@ class K2HorizonAttention(nn.Module):
             q = self.q_norm(q)
             k = self.k_norm(k)
 
-        q, k = self.rotary_emb(positions, q, k)
+        q, k = apply_partial_rope(
+            self.rotary_emb,
+            positions,
+            q,
+            k,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.rope_head_dim,
+            self.fold_rope_weights,
+        )
 
         attn_output = self.attn(q, k, v)
 
@@ -719,19 +809,32 @@ class K2HorizonMoVAAttention(nn.Module):
         )
 
         self.rope_head_dim = rope_head_dim or self.head_dim
-        assert dual_chunk_attention_config is None, (
-            "K2Horizon partial-RoPE weight-fold path has not been validated with "
-            "dual-chunk attention; re-derive P.RoPE equivalence before enabling."
-        )
-        rope_parameters = dict(rope_parameters)
-        rope_parameters["rope_dim"] = self.rope_head_dim
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=max_position_embeddings,
-            is_neox_style=True,
-            rope_parameters=rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
-        )
+        # Fold the partial-RoPE channel permutation into the q/k weights only
+        # when they are dense; packed/quantized projections keep the runtime
+        # channel-permutation path.
+        self.fold_rope_weights = _is_dense_qk_proj(self.qk_proj)
+        if self.fold_rope_weights:
+            assert dual_chunk_attention_config is None, (
+                "K2Horizon partial-RoPE weight-fold path has not been validated "
+                "with dual-chunk attention; re-derive P.RoPE equivalence before "
+                "enabling."
+            )
+            rope_parameters = dict(rope_parameters)
+            rope_parameters["rope_dim"] = self.rope_head_dim
+            self.rotary_emb = get_rope(
+                self.head_dim,
+                max_position=max_position_embeddings,
+                is_neox_style=True,
+                rope_parameters=rope_parameters,
+                dual_chunk_attention_config=dual_chunk_attention_config,
+            )
+        else:
+            self.rotary_emb = get_rope(
+                self.rope_head_dim,
+                max_position=max_position_embeddings,
+                rope_parameters=rope_parameters,
+                dual_chunk_attention_config=dual_chunk_attention_config,
+            )
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -832,7 +935,17 @@ class K2HorizonMoVAAttention(nn.Module):
             q = self.q_norm(q)
             k = self.k_norm(k)
 
-        q, k = self.rotary_emb(positions, q, k)
+        q, k = apply_partial_rope(
+            self.rotary_emb,
+            positions,
+            q,
+            k,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.rope_head_dim,
+            self.fold_rope_weights,
+        )
 
         attn_output = self.attn(q, k, v)
 
@@ -1079,6 +1192,18 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
         rope_head_dim = self.config.rope_head_dim or head_dim
         rope_perm_idx = _rope_weight_perm(head_dim, rope_head_dim)
 
+        # Attention modules whose q/k projections are dense: only these fold the
+        # RoPE channel permutation into their q/k weights, biases and q/k norm
+        # scales at load time. Attentions with packed/quantized q/k projections
+        # keep the runtime channel-permutation path, so their weights must be
+        # loaded verbatim (folding would misalign per-channel scales).
+        rope_fold_prefixes = tuple(
+            f"{module_name}."
+            for module_name, module in self.named_modules()
+            if isinstance(module, (K2HorizonAttention, K2HorizonMoVAAttention))
+            and getattr(module, "fold_rope_weights", False)
+        )
+
         # Skip loading extra parameters for GPTQ/modelopt models.
         # ignore_suffixes = (
         #     ".bias",
@@ -1110,7 +1235,7 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                     continue
 
                 # Fold the per-head RoPE channel permutation into the norm scales.
-                if self.config.query_key_norm:
+                if self.config.query_key_norm and name.startswith(rope_fold_prefixes):
                     loaded_weight = (
                         loaded_weight.view(-1, head_dim)[:, rope_perm_idx]
                         .reshape(-1)
@@ -1182,16 +1307,25 @@ class K2HorizonModel(nn.Module, EagleModelMixin):
                     assert weight_name == "gate_proj"
                     continue
 
-                # Fold the per-head RoPE channel permutation into the q_proj /
-                # k_proj rows (W' = P W) before TP sharding. Applies to both the
-                # standard qkv_proj path and the MoVA qk_proj path below.
-                if shard_id in ("q", "k"):
-                    hidden = loaded_weight.shape[-1]
-                    loaded_weight = (
-                        loaded_weight.view(-1, head_dim, hidden)[:, rope_perm_idx, :]
-                        .reshape(-1, hidden)
-                        .contiguous()
-                    )
+                # Fold the per-head RoPE channel permutation into the dense
+                # q_proj / k_proj rows (W' = P W), and biases, before TP
+                # sharding.
+                if shard_id in ("q", "k") and name.startswith(rope_fold_prefixes):
+                    if name.endswith(".weight"):
+                        hidden = loaded_weight.shape[-1]
+                        loaded_weight = (
+                            loaded_weight.view(-1, head_dim, hidden)[
+                                :, rope_perm_idx, :
+                            ]
+                            .reshape(-1, hidden)
+                            .contiguous()
+                        )
+                    elif self.config.attention_bias and name.endswith(".bias"):
+                        loaded_weight = (
+                            loaded_weight.view(-1, head_dim)[:, rope_perm_idx]
+                            .reshape(-1)
+                            .contiguous()
+                        )
 
                 if (
                     ".self_attn." in name
