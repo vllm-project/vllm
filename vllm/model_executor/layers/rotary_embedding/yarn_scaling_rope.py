@@ -23,8 +23,6 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         scaling_factor: float,
         dtype: torch.dtype,
         *,
-        extrapolation_factor: float = 1,
-        attn_factor: float = 1,
         beta_fast: int = 32,
         beta_slow: int = 1,
         attention_factor: float | None = None,
@@ -32,8 +30,6 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         truncate: bool = True,
     ) -> None:
         self.scaling_factor = scaling_factor
-        self.extrapolation_factor = extrapolation_factor
-        self.attn_factor = attn_factor
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         self.truncate = truncate
@@ -41,9 +37,9 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         if attention_factor is not None:
             self.mscale = float(attention_factor)
         elif apply_yarn_scaling:
-            self.mscale = float(yarn_get_mscale(self.scaling_factor) * attn_factor)
+            self.mscale = float(yarn_get_mscale(self.scaling_factor))
         else:
-            self.mscale = float(attn_factor)
+            self.mscale = 1.0
         super().__init__(
             head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
         )
@@ -64,10 +60,9 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
             self.truncate,
         )
         # Get n-d rotational scaling corrected for extrapolation
-        inv_freq_mask = (
-            1
-            - yarn_linear_ramp_mask(low, high, self.rotary_dim // 2, dtype=torch.float)
-        ) * self.extrapolation_factor
+        inv_freq_mask = 1 - yarn_linear_ramp_mask(
+            low, high, self.rotary_dim // 2, dtype=torch.float
+        )
         inv_freq = (
             inv_freq_interpolation * (1 - inv_freq_mask)
             + inv_freq_extrapolation * inv_freq_mask

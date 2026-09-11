@@ -245,8 +245,6 @@ def get_rope(
             for k, v in rope_parameters.items()
             if k
             in (
-                "extrapolation_factor",
-                "attn_factor",
                 "beta_fast",
                 "beta_slow",
                 "attention_factor",
@@ -288,8 +286,6 @@ def get_rope(
             for k, v in rope_parameters.items()
             if k
             in (
-                "extrapolation_factor",
-                "attn_factor",
                 "beta_fast",
                 "beta_slow",
                 "mscale",
