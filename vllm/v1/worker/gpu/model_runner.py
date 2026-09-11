@@ -69,7 +69,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
-    UniformTypeKVCacheSpecs,
+    uses_generic_slot_mapping,
 )
 from vllm.v1.outputs import (
     DraftTokenIds,
@@ -603,10 +603,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
-            layer_spec = (
-                spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
-            )
-            slot_mapping_enabled.append(layer_spec.uses_slot_mapping)
+            # Builder-managed groups (CircularBufferSpec, KpoolTailSpec) hold
+            # one circular block per request and compute their slot mapping
+            # in their own attention metadata builder; the generic
+            # position-indexed kernel would index past their one-column
+            # block-table rows on chunked prefill (#56380).
+            slot_mapping_enabled.append(uses_generic_slot_mapping(spec))
             # Let each cache type account for CP. Attention KV is DCP-sharded,
             # while Mamba/GDN recurrent state is replicated across DCP ranks.
             max_num_blocks = spec.max_num_blocks_per_req(
