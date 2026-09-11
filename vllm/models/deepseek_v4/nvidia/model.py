@@ -911,7 +911,13 @@ class DeepseekV4MoE(nn.Module):
                 )
 
                 _EPLB_MAP_AND_RECORD_KERNEL.register_warmup()
-            _DSV4_TOPK_KERNEL.register_warmup()
+            if (
+                config.n_routed_experts in (256, 384)
+                and config.num_experts_per_tok == 6
+                and config.norm_topk_prob
+                and config.scoring_func == "sqrtsoftplus"
+            ):
+                _DSV4_TOPK_KERNEL.register_warmup()
             if self.use_mega_moe:
                 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
                     _DEEPGEMM_EP_GATHER_KERNEL,
@@ -977,12 +983,15 @@ class DeepseekV4MoE(nn.Module):
                 _COUNT_EXPERT_NUM_TOKENS_KERNEL.register_warmup()
                 _SWIGLU_LIMIT_PAD_AWARE_KERNEL.register_warmup()
 
-                if vllm_config.kernel_config.moe_backend == "emulation":
-                    from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (  # noqa: E501
-                        _FUSED_MOE_NVFP4_EMULATION_KERNEL,
-                    )
+                from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (  # noqa: E501
+                    _fused_moe_nvfp4_emulation,
+                    Nvfp4QuantizationEmulationTritonExperts,
+                )
 
-                    _FUSED_MOE_NVFP4_EMULATION_KERNEL.register_warmup()
+                if isinstance(experts_cls, type) and issubclass(
+                    experts_cls, Nvfp4QuantizationEmulationTritonExperts
+                ):
+                    _fused_moe_nvfp4_emulation.register_warmup()
 
                 if vllm_config.lora_config is not None:
                     from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (  # noqa: E501
@@ -1312,53 +1321,6 @@ class DeepseekV4DecoderLayer(nn.Module):
             requires_grad=False,
         )
 
-        if vllm_config.kernel_config.enable_jit_warmup:
-            from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-                _HC_PRENORM_GEMM_TILELANG_KERNEL,
-                _MHC_FUSED_TILELANG_KERNEL,
-                _MHC_POST_TILELANG_KERNEL,
-                _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
-            )
-            from vllm.utils.deep_gemm import is_deep_gemm_supported
-
-            include_pre_gemm_splits = is_deep_gemm_supported()
-            _MHC_PRE_BIG_FUSE_TILELANG_KERNEL.register_warmup(
-                vllm_config,
-                hidden_size=self.hidden_size,
-                hc_mult=self.hc_mult,
-                use_norm_weight=True,
-                include_pre_gemm_splits=include_pre_gemm_splits,
-                include_broadcast_splits=(
-                    get_pp_group().is_first_rank and extract_layer_index(prefix) == 0
-                ),
-                rms_eps=float(self.rms_norm_eps),
-                hc_pre_eps=float(self.hc_eps),
-                hc_sinkhorn_eps=float(self.hc_eps),
-                hc_post_mult_value=float(self.hc_post_alpha),
-                sinkhorn_repeat=int(self.hc_sinkhorn_iters),
-                norm_eps=(
-                    float(self.attn_norm.variance_epsilon),
-                    float(self.ffn_norm.variance_epsilon),
-                ),
-                broadcast_norm_eps=float(self.attn_norm.variance_epsilon),
-            )
-            if not include_pre_gemm_splits:
-                _HC_PRENORM_GEMM_TILELANG_KERNEL.register_warmup(
-                    vllm_config,
-                    hidden_size=self.hidden_size,
-                    hc_mult=self.hc_mult,
-                    n_out=self.hc_mult * (2 + self.hc_mult),
-                )
-            _MHC_POST_TILELANG_KERNEL.register_warmup(
-                hidden_size=self.hidden_size,
-                hc_mult=self.hc_mult,
-            )
-            _MHC_FUSED_TILELANG_KERNEL.register_warmup(
-                vllm_config,
-                hidden_size=self.hidden_size,
-                hc_mult=self.hc_mult,
-            )
-
     def forward(
         self,
         x: torch.Tensor,
@@ -1550,18 +1512,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
         else:
             self._mtp_hidden_buffer = None
-
-        if vllm_config.kernel_config.enable_jit_warmup:
-            from vllm.model_executor.kernels.mhc.tilelang_kernels import (
-                _HC_HEAD_FUSED_TILELANG_KERNEL,
-            )
-
-            _HC_HEAD_FUSED_TILELANG_KERNEL.register_warmup(
-                hidden_size=int(config.hidden_size),
-                hc_mult=int(self.hc_mult),
-                rms_eps=float(self.rms_norm_eps),
-                hc_eps=float(self.hc_eps),
-            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

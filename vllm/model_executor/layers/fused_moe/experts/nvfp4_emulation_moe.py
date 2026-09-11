@@ -11,7 +11,6 @@ Weights are dequantized on the fly during each forward, we fall back to calling
 is applied on `a13`, `a2`.
 """
 
-from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -47,504 +46,340 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
     WarmupIntRange,
-    zip_inputs,
 )
-from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    LaunchSpec,
+    DispatchSpec,
     TritonWarmupTensor,
-    VllmTritonJitKernel,
-    triton_scalar_specialization_rep,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
 
 
-class FusedMoeNvfp4EmulationKernel(
-    VllmTritonJitKernel["FusedMoeNvfp4EmulationKernel.CompileKey"]
+@triton.jit
+def fused_moe_nvfp4_emulation_kernel(
+    a_ptr,
+    b_ptr,
+    c_ptr,
+    b_scale_ptr,
+    w_global_scale_ptr,
+    topk_weights_ptr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    num_tokens_post_padded_ptr,
+    N: tl.constexpr,
+    K: tl.constexpr,
+    EM,
+    num_valid_tokens,
+    # Strides — A [M, K]
+    stride_am,
+    stride_ak,
+    # Strides — B [E, N, K//2], passed as (expert, K-packed, N)
+    stride_be,
+    stride_bk,
+    stride_bn,
+    # Strides — C [M, topk, N]
+    stride_cm,
+    stride_cn,
+    # Strides — B_scale [E, N, K//BLOCK], passed as (expert, K-scale, N)
+    stride_bse,
+    stride_bsk,
+    stride_bsn,
+    block_k_diviable: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    MUL_ROUTED_WEIGHT: tl.constexpr,
+    top_k: tl.constexpr,
+    compute_type: tl.constexpr,
+    group_size: tl.constexpr,
 ):
-    @dataclass(frozen=True)
-    class CompileKey:
-        dtype: torch.dtype
-        num_experts: int
-        n: int
-        k: int
-        em: int
-        num_valid_tokens: int
-        top_k: int
-        block_size_m: int
-        block_size_n: int
-        block_size_k: int
-        group_size_m: int
-        mul_routed_weight: bool
-        block_k_divisible: bool
-        compute_type: tl.dtype
+    """
+    Fused MoE kernel for emulated NVFP4 weight-only dequantization + GEMM.
 
-    @staticmethod
-    @triton.jit
-    def kernel(
-        a_ptr,
-        b_ptr,
-        c_ptr,
-        b_scale_ptr,
-        w_global_scale_ptr,
-        topk_weights_ptr,
-        sorted_token_ids_ptr,
-        expert_ids_ptr,
-        num_tokens_post_padded_ptr,
-        N: tl.constexpr,
-        K: tl.constexpr,
-        EM,
-        num_valid_tokens,
-        # Strides — A [M, K]
-        stride_am,
-        stride_ak,
-        # Strides — B [E, N, K//2], passed as (expert, K-packed, N)
-        stride_be,
-        stride_bk,
-        stride_bn,
-        # Strides — C [M, topk, N]
-        stride_cm,
-        stride_cn,
-        # Strides — B_scale [E, N, K//BLOCK], passed as (expert, K-scale, N)
-        stride_bse,
-        stride_bsk,
-        stride_bsn,
-        block_k_diviable: tl.constexpr,
-        BLOCK_SIZE_M: tl.constexpr,
-        BLOCK_SIZE_N: tl.constexpr,
-        BLOCK_SIZE_K: tl.constexpr,
-        GROUP_SIZE_M: tl.constexpr,
-        MUL_ROUTED_WEIGHT: tl.constexpr,
-        top_k: tl.constexpr,
-        compute_type: tl.constexpr,
-        group_size: tl.constexpr,
-    ):
-        """
-        Fused MoE kernel for emulated NVFP4 weight-only dequantization + GEMM.
+    Activations A are BF16 (already QDQ'd externally).
+    Weights B are packed uint8 NVFP4 [E, N, K//2] — two FP4 values per byte
+    along the K dimension.
+    B_scale holds per-block FP8-E4M3 scales [E, N, K // group_size].
+    w_global_scale is a per-expert scalar global scale.
 
-        Activations A are BF16 (already QDQ'd externally).
-        Weights B are packed uint8 NVFP4 [E, N, K//2] — two FP4 values per byte
-        along the K dimension.
-        B_scale holds per-block FP8-E4M3 scales [E, N, K // group_size].
-        w_global_scale is a per-expert scalar global scale.
+    The dequantization formula per element is:
+        w_float = e2m1_decode(nibble) * (block_scale_fp8 * global_scale)
 
-        The dequantization formula per element is:
-            w_float = e2m1_decode(nibble) * (block_scale_fp8 * global_scale)
+    Weight loading optimization: each packed byte is loaded exactly once as
+    a [BLOCK_SIZE_N, BLOCK_SIZE_K // 2] tile (N-major), both nibbles are
+    extracted, decoded and scaled, then tl.interleave produces the
+    [BLOCK_SIZE_N, BLOCK_SIZE_K] dequantized tile which is transposed to
+    [BLOCK_SIZE_K, BLOCK_SIZE_N] for tl.dot.
+    """
+    BLOCK_SIZE_K_PACKED: tl.constexpr = BLOCK_SIZE_K // 2
 
-        Weight loading optimization: each packed byte is loaded exactly once as
-        a [BLOCK_SIZE_N, BLOCK_SIZE_K // 2] tile (N-major), both nibbles are
-        extracted, decoded and scaled, then tl.interleave produces the
-        [BLOCK_SIZE_N, BLOCK_SIZE_K] dequantized tile which is transposed to
-        [BLOCK_SIZE_K, BLOCK_SIZE_N] for tl.dot.
-        """
-        BLOCK_SIZE_K_PACKED: tl.constexpr = BLOCK_SIZE_K // 2
+    # Map program ids to the block of C it should compute.
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
+    group_id = pid // num_pid_in_group
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
+    pid_n = (pid % num_pid_in_group) // group_size_m
 
-        # Map program ids to the block of C it should compute.
-        pid = tl.program_id(axis=0)
-        num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
-        num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = pid // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-        pid_n = (pid % num_pid_in_group) // group_size_m
+    # Token / expert setup
+    num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
+    if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
+        return
 
-        # Token / expert setup
-        num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
-        if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
-            return
+    offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
+    offs_token = tl.load(sorted_token_ids_ptr + offs_token_id).to(tl.int64)
+    token_mask = offs_token < num_valid_tokens
 
-        offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
-        offs_token = tl.load(sorted_token_ids_ptr + offs_token_id).to(tl.int64)
-        token_mask = offs_token < num_valid_tokens
-
-        off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
-        if off_experts == -1:
-            write_zeros_to_output(
-                c_ptr,
-                stride_cm,
-                stride_cn,
-                pid_n,
-                N,
-                offs_token,
-                token_mask,
-                BLOCK_SIZE_M,
-                BLOCK_SIZE_N,
-                compute_type,
-            )
-            return
-
-        # Pointer setup
-        offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
-        offs_k = tl.arange(0, BLOCK_SIZE_K)
-        offs_k_packed = tl.arange(0, BLOCK_SIZE_K_PACKED)
-
-        # A pointers: [BLOCK_SIZE_M, BLOCK_SIZE_K]
-        a_ptrs = a_ptr + (
-            offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
-        )
-
-        # B pointers: [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED] — N-major so that
-        # tl.interleave (which operates on the last dim) produces a
-        # [BLOCK_SIZE_N, BLOCK_SIZE_K] tile that we transpose for tl.dot.
-        # Each unique byte is loaded exactly once.
-        b_ptrs = (
-            b_ptr
-            + off_experts * stride_be
-            + offs_bn[:, None] * stride_bn
-            + offs_k_packed[None, :] * stride_bk
-        )
-
-        # B_scale pointers: [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED] — same
-        # N-major layout.  Each packed byte index covers 2 K elements that
-        # always fall within the same group (group_size=16, so each group
-        # spans 8 packed bytes).  We can therefore index the scale using
-        # offs_k_packed directly.
-        # Note: group_size_packed = group_size // 2 maps packed indices to
-        # scale indices the same way unpacked indices map via group_size.
-        group_size_packed: tl.constexpr = group_size // 2
-
-        # Load per-expert global scale (scalar).
-        w_global_scale = tl.load(w_global_scale_ptr + off_experts).to(tl.float32)
-
-        # K-loop with FP32 accumulation
-        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-
-        for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-            # Load A tile [BLOCK_SIZE_M, BLOCK_SIZE_K].
-            if block_k_diviable:
-                a = tl.load(
-                    a_ptrs,
-                    mask=token_mask[:, None],
-                    other=0.0,
-                )
-            else:
-                a = tl.load(
-                    a_ptrs,
-                    mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
-                    other=0.0,
-                )
-
-            # Load packed weight tile [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED].
-            if block_k_diviable:
-                raw_bytes = tl.load(b_ptrs)
-            else:
-                kp_mask = offs_k_packed[None, :] < (K // 2) - k * BLOCK_SIZE_K_PACKED
-                raw_bytes = tl.load(b_ptrs, mask=kp_mask, other=0)
-
-            # Extract both nibbles from each byte (each [N, K_packed]).
-            low_nibble = raw_bytes & 0x0F
-            high_nibble = (raw_bytes >> 4) & 0x0F
-
-            low_decoded = _e2m1_inline(low_nibble)
-            high_decoded = _e2m1_inline(high_nibble)
-
-            # Load and apply per-block FP8 scales.
-            # Scale shape: [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED], one scale per
-            # group_size_packed packed elements.
-            b_scale_ptrs = (
-                b_scale_ptr
-                + off_experts * stride_bse
-                + offs_bn[:, None] * stride_bsn
-                + (
-                    (offs_k_packed[None, :] + BLOCK_SIZE_K_PACKED * k)
-                    // group_size_packed
-                )
-                * stride_bsk
-            )
-            if block_k_diviable:
-                b_scale_raw = tl.load(b_scale_ptrs)
-            else:
-                b_scale_raw = tl.load(b_scale_ptrs, mask=kp_mask, other=0.0)
-
-            b_scale = tl.cast(b_scale_raw, tl.float8e4nv, bitcast=True).to(tl.float32)
-            b_scale = b_scale * w_global_scale
-
-            # Scale both halves with the same per-block scale (the two
-            # elements packed in one byte always belong to the same group).
-            low_scaled = low_decoded * b_scale
-            high_scaled = high_decoded * b_scale
-
-            # Interleave along last dim: [N, K_packed] x2 -> [N, K],
-            # then transpose to [K, N] for tl.dot.
-            b = tl.trans(tl.interleave(low_scaled, high_scaled)).to(compute_type)
-
-            accumulator = tl.dot(a, b, acc=accumulator)
-
-            # Advance pointers along K.
-            a_ptrs += BLOCK_SIZE_K * stride_ak
-            b_ptrs += BLOCK_SIZE_K_PACKED * stride_bk
-
-        # Router weight multiplication (in float32 for stability)
-        if MUL_ROUTED_WEIGHT:
-            moe_weight = tl.load(
-                topk_weights_ptr + offs_token, mask=token_mask, other=0
-            )
-            accumulator = accumulator * moe_weight[:, None]
-
-        accumulator = accumulator.to(compute_type)
-
-        # Write output
-        offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-        c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
-        c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
-        tl.store(c_ptrs, accumulator, mask=c_mask)
-
-    def dispatch(  # type: ignore[override]
-        self,
-        *,
-        batch_tokens: int,
-        routed_multiplier: int,
-        num_experts: int,
-        hidden_size: int,
-        intermediate_size: int,
-        config_top_k: int,
-        launch_n: int,
-        launch_k: int,
-        top_k: int,
-        dtype: torch.dtype,
-        mul_routed_weight: bool,
-        runtime_a_rows: int | None = None,
-        runtime_em: int | None = None,
-        runtime_num_valid_tokens: int | None = None,
-        runtime_block_size_m: int | None = None,
-        runtime_block_size_n: int | None = None,
-        runtime_block_size_k: int | None = None,
-        runtime_group_size_m: int | None = None,
-        runtime_block_k_divisible: bool | None = None,
-        runtime_compute_type: Any | None = None,
-    ) -> CompileKey:
-        config = _triton_moe_config(
-            num_experts=num_experts,
-            hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            top_k=config_top_k,
-            config_dtype=None,
-            num_tokens=batch_tokens,
-            group_n=0,
-            group_k=0,
-        )
-        a_rows = (
-            runtime_a_rows
-            if runtime_a_rows is not None
-            else batch_tokens * routed_multiplier
-        )
-        block_size_m = (
-            runtime_block_size_m
-            if runtime_block_size_m is not None
-            else config["BLOCK_SIZE_M"]
-        )
-        block_size_n = (
-            runtime_block_size_n
-            if runtime_block_size_n is not None
-            else config["BLOCK_SIZE_N"]
-        )
-        block_size_k = (
-            runtime_block_size_k
-            if runtime_block_size_k is not None
-            else config["BLOCK_SIZE_K"]
-        )
-        group_size_m = (
-            runtime_group_size_m
-            if runtime_group_size_m is not None
-            else config["GROUP_SIZE_M"]
-        )
-        em = (
-            runtime_em
-            if runtime_em is not None
-            else _triton_moe_em(
-                num_tokens=a_rows,
-                top_k=top_k,
-                block_size_m=block_size_m,
-                naive_block_assignment=False,
-            )
-        )
-        num_valid_tokens = (
-            runtime_num_valid_tokens
-            if runtime_num_valid_tokens is not None
-            else a_rows * top_k
-        )
-        block_k_divisible = (
-            runtime_block_k_divisible
-            if runtime_block_k_divisible is not None
-            else launch_k % block_size_k == 0
-        )
-        compute_type = (
-            runtime_compute_type
-            if runtime_compute_type is not None
-            else _triton_moe_compute_type(dtype)
-        )
-        return self.CompileKey(
-            dtype=dtype,
-            num_experts=num_experts,
-            n=launch_n,
-            k=launch_k,
-            em=triton_scalar_specialization_rep(em),
-            num_valid_tokens=triton_scalar_specialization_rep(num_valid_tokens),
-            top_k=top_k,
-            block_size_m=block_size_m,
-            block_size_n=block_size_n,
-            block_size_k=block_size_k,
-            group_size_m=group_size_m,
-            mul_routed_weight=mul_routed_weight,
-            block_k_divisible=block_k_divisible,
-            compute_type=compute_type,
-        )
-
-    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if vllm_config.kernel_config.moe_backend != "emulation":
-            return []
-
-        hidden_size = vllm_config.model_config.hf_config.hidden_size
-        intermediate_size = vllm_config.model_config.hf_config.moe_intermediate_size
-        num_experts = vllm_config.model_config.hf_config.n_routed_experts
-        top_k = vllm_config.model_config.hf_config.num_experts_per_tok
-        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        dtype = vllm_config.model_config.dtype
-        if (
-            hidden_size <= 0
-            or intermediate_size <= 0
-            or num_experts <= 0
-            or top_k <= 0
-            or max_tokens <= 0
-        ):
-            return []
-
-        return self._trace_dispatch(self.dispatch)(
-            zip_inputs(
-                dict(
-                    routed_multiplier=1,
-                    launch_n=2 * intermediate_size,
-                    launch_k=hidden_size,
-                    top_k=top_k,
-                    mul_routed_weight=False,
-                ),
-                dict(
-                    routed_multiplier=top_k,
-                    launch_n=hidden_size,
-                    launch_k=intermediate_size,
-                    top_k=1,
-                    mul_routed_weight=True,
-                ),
-            ),
-            batch_tokens=WarmupIntRange(1, max_tokens + 1),
-            num_experts=num_experts,
-            hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            config_top_k=top_k,
-            dtype=dtype,
-        )
-
-    def warmup_inputs(
-        self, compile_key: CompileKey
-    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-        k_packed = compile_key.k // 2
-        k_scale = max(1, compile_key.k // 16)
-        c_top_k = max(1, compile_key.top_k)
-        c_rows = max(1, compile_key.num_valid_tokens // c_top_k)
-        a_ptr = TritonWarmupTensor(
-            compile_key.dtype,
-            shape=(1, compile_key.k),
-        )
-        b_ptr = TritonWarmupTensor(
-            torch.uint8,
-            shape=(compile_key.num_experts, compile_key.n, k_packed),
-        )
-        c_ptr = TritonWarmupTensor(
-            compile_key.dtype,
-            shape=(c_rows, c_top_k, compile_key.n),
-        )
-        b_scale_ptr = TritonWarmupTensor(
-            torch.uint8,
-            shape=(compile_key.num_experts, compile_key.n, k_scale),
-        )
-        w_global_scale_ptr = TritonWarmupTensor(
-            torch.float32,
-            shape=(compile_key.num_experts,),
-        )
-        topk_weights_ptr = (
-            TritonWarmupTensor(torch.float32, shape=(compile_key.num_valid_tokens,))
-            if compile_key.mul_routed_weight
-            else None
-        )
-        sorted_token_ids_ptr = TritonWarmupTensor(
-            torch.int32,
-            shape=(compile_key.em,),
-        )
-        expert_ids_ptr = TritonWarmupTensor(
-            torch.int32,
-            shape=(triton.cdiv(compile_key.em, compile_key.block_size_m),),
-        )
-        num_tokens_post_padded_ptr = TritonWarmupTensor(torch.int32)
-        args = (
-            a_ptr,
-            b_ptr,
+    off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
+    if off_experts == -1:
+        write_zeros_to_output(
             c_ptr,
-            b_scale_ptr,
-            w_global_scale_ptr,
-            topk_weights_ptr,
-            sorted_token_ids_ptr,
-            expert_ids_ptr,
-            num_tokens_post_padded_ptr,
-            compile_key.n,
-            compile_key.k,
-            compile_key.em,
-            compile_key.num_valid_tokens,
-            compile_key.k,
-            1,
-            compile_key.n * k_packed,
-            1,
-            k_packed,
-            compile_key.top_k * compile_key.n,
-            1,
-            compile_key.n * k_scale,
-            1,
-            k_scale,
+            stride_cm,
+            stride_cn,
+            pid_n,
+            N,
+            offs_token,
+            token_mask,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            compute_type,
         )
-        return args, dict(
-            block_k_diviable=compile_key.block_k_divisible,
-            MUL_ROUTED_WEIGHT=compile_key.mul_routed_weight,
-            top_k=compile_key.top_k,
-            compute_type=compile_key.compute_type,
-            group_size=16,
-            BLOCK_SIZE_M=compile_key.block_size_m,
-            BLOCK_SIZE_N=compile_key.block_size_n,
-            BLOCK_SIZE_K=compile_key.block_size_k,
-            GROUP_SIZE_M=compile_key.group_size_m,
-        )
+        return
 
-    @kernel_launcher
-    def __call__(
-        self,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        C: torch.Tensor,
-        B_scale: torch.Tensor,
-        w_global_scale: torch.Tensor,
-        topk_weights: torch.Tensor | None,
-        sorted_token_ids: torch.Tensor,
-        expert_ids: torch.Tensor,
-        num_tokens_post_padded: torch.Tensor,
-        N: int,
-        K: int,
-        EM: int,
-        *args: Any,
-        block_k_diviable: bool,
-        MUL_ROUTED_WEIGHT: bool,
-        top_k: int,
-        compute_type: tl.dtype,
-        group_size: int,
-        BLOCK_SIZE_M: int,
-        BLOCK_SIZE_N: int,
-        BLOCK_SIZE_K: int,
-        GROUP_SIZE_M: int,
-    ) -> LaunchSpec:
-        grid = (triton.cdiv(EM, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
-        return grid, dict(a_ptr=A, b_ptr=B, c_ptr=C, b_scale_ptr=B_scale)
+    # Pointer setup
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    offs_k_packed = tl.arange(0, BLOCK_SIZE_K_PACKED)
+
+    # A pointers: [BLOCK_SIZE_M, BLOCK_SIZE_K]
+    a_ptrs = a_ptr + (
+        offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
+    )
+
+    # B pointers: [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED] — N-major so that
+    # tl.interleave (which operates on the last dim) produces a
+    # [BLOCK_SIZE_N, BLOCK_SIZE_K] tile that we transpose for tl.dot.
+    # Each unique byte is loaded exactly once.
+    b_ptrs = (
+        b_ptr
+        + off_experts * stride_be
+        + offs_bn[:, None] * stride_bn
+        + offs_k_packed[None, :] * stride_bk
+    )
+
+    # B_scale pointers: [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED] — same
+    # N-major layout.  Each packed byte index covers 2 K elements that
+    # always fall within the same group (group_size=16, so each group
+    # spans 8 packed bytes).  We can therefore index the scale using
+    # offs_k_packed directly.
+    # Note: group_size_packed = group_size // 2 maps packed indices to
+    # scale indices the same way unpacked indices map via group_size.
+    group_size_packed: tl.constexpr = group_size // 2
+
+    # Load per-expert global scale (scalar).
+    w_global_scale = tl.load(w_global_scale_ptr + off_experts).to(tl.float32)
+
+    # K-loop with FP32 accumulation
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        # Load A tile [BLOCK_SIZE_M, BLOCK_SIZE_K].
+        if block_k_diviable:
+            a = tl.load(
+                a_ptrs,
+                mask=token_mask[:, None],
+                other=0.0,
+            )
+        else:
+            a = tl.load(
+                a_ptrs,
+                mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+                other=0.0,
+            )
+
+        # Load packed weight tile [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED].
+        if block_k_diviable:
+            raw_bytes = tl.load(b_ptrs)
+        else:
+            kp_mask = offs_k_packed[None, :] < (K // 2) - k * BLOCK_SIZE_K_PACKED
+            raw_bytes = tl.load(b_ptrs, mask=kp_mask, other=0)
+
+        # Extract both nibbles from each byte (each [N, K_packed]).
+        low_nibble = raw_bytes & 0x0F
+        high_nibble = (raw_bytes >> 4) & 0x0F
+
+        low_decoded = _e2m1_inline(low_nibble)
+        high_decoded = _e2m1_inline(high_nibble)
+
+        # Load and apply per-block FP8 scales.
+        # Scale shape: [BLOCK_SIZE_N, BLOCK_SIZE_K_PACKED], one scale per
+        # group_size_packed packed elements.
+        b_scale_ptrs = (
+            b_scale_ptr
+            + off_experts * stride_bse
+            + offs_bn[:, None] * stride_bsn
+            + ((offs_k_packed[None, :] + BLOCK_SIZE_K_PACKED * k) // group_size_packed)
+            * stride_bsk
+        )
+        if block_k_diviable:
+            b_scale_raw = tl.load(b_scale_ptrs)
+        else:
+            b_scale_raw = tl.load(b_scale_ptrs, mask=kp_mask, other=0.0)
+
+        b_scale = tl.cast(b_scale_raw, tl.float8e4nv, bitcast=True).to(tl.float32)
+        b_scale = b_scale * w_global_scale
+
+        # Scale both halves with the same per-block scale (the two
+        # elements packed in one byte always belong to the same group).
+        low_scaled = low_decoded * b_scale
+        high_scaled = high_decoded * b_scale
+
+        # Interleave along last dim: [N, K_packed] x2 -> [N, K],
+        # then transpose to [K, N] for tl.dot.
+        b = tl.trans(tl.interleave(low_scaled, high_scaled)).to(compute_type)
+
+        accumulator = tl.dot(a, b, acc=accumulator)
+
+        # Advance pointers along K.
+        a_ptrs += BLOCK_SIZE_K * stride_ak
+        b_ptrs += BLOCK_SIZE_K_PACKED * stride_bk
+
+    # Router weight multiplication (in float32 for stability)
+    if MUL_ROUTED_WEIGHT:
+        moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
+        accumulator = accumulator * moe_weight[:, None]
+
+    accumulator = accumulator.to(compute_type)
+
+    # Write output
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+    tl.store(c_ptrs, accumulator, mask=c_mask)
+
+
+def _fused_moe_nvfp4_emulation_kernel_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    hf = vllm_config.model_config.hf_config
+    hidden_size = hf.hidden_size
+    intermediate_size = hf.moe_intermediate_size
+    num_experts = hf.n_routed_experts
+    config_top_k = hf.num_experts_per_tok
+    batch_tokens: Any = WarmupIntRange(
+        1, vllm_config.scheduler_config.max_num_batched_tokens + 1
+    )
+    second_gemm: Any = WarmupChoices(False, True)
+    routed_multiplier = config_top_k if second_gemm else 1
+    n = hidden_size if second_gemm else 2 * intermediate_size
+    k = intermediate_size if second_gemm else hidden_size
+    top_k = 1 if second_gemm else config_top_k
+    mul_routed_weight = second_gemm
+    config = _triton_moe_config(
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        top_k=config_top_k,
+        config_dtype=None,
+        num_tokens=batch_tokens,
+        group_n=0,
+        group_k=0,
+    )
+    block_m = config["BLOCK_SIZE_M"]
+    block_n = config["BLOCK_SIZE_N"]
+    block_k = config["BLOCK_SIZE_K"]
+    em = _triton_moe_em(batch_tokens * routed_multiplier, top_k, block_m, False)
+    valid = batch_tokens * routed_multiplier * top_k
+    k_packed = k // 2
+    k_scale = max(1, k // 16)
+    return dict(
+        A=TritonWarmupTensor(vllm_config.model_config.dtype, shape=(1, k)),
+        B=TritonWarmupTensor(torch.uint8, shape=(num_experts, n, k_packed)),
+        C=TritonWarmupTensor(
+            vllm_config.model_config.dtype,
+            shape=(batch_tokens * routed_multiplier, top_k, n),
+        ),
+        B_scale=TritonWarmupTensor(torch.uint8, shape=(num_experts, n, k_scale)),
+        w_global_scale=TritonWarmupTensor(torch.float32, shape=(num_experts,)),
+        topk_weights=TritonWarmupTensor(torch.float32, shape=(valid,))
+        if mul_routed_weight
+        else None,
+        sorted_token_ids=TritonWarmupTensor(torch.int32, shape=(em,)),
+        expert_ids=TritonWarmupTensor(torch.int32, shape=(triton.cdiv(em, block_m),)),
+        num_tokens_post_padded=TritonWarmupTensor(torch.int32),
+        N=n,
+        K=k,
+        EM=em,
+        num_valid_tokens=valid,
+        stride_am=k,
+        stride_ak=1,
+        stride_be=n * k_packed,
+        stride_bk=1,
+        stride_bn=k_packed,
+        stride_cm=n,
+        stride_cn=1,
+        stride_bse=n * k_scale,
+        stride_bsk=1,
+        stride_bsn=k_scale,
+        block_k_diviable=k % block_k == 0,
+        MUL_ROUTED_WEIGHT=mul_routed_weight,
+        top_k=top_k,
+        compute_type=_triton_moe_compute_type(vllm_config.model_config.dtype),
+        group_size=16,
+        BLOCK_SIZE_M=block_m,
+        BLOCK_SIZE_N=block_n,
+        BLOCK_SIZE_K=block_k,
+        GROUP_SIZE_M=config["GROUP_SIZE_M"],
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=fused_moe_nvfp4_emulation_kernel,
+    warmup_inputs=_fused_moe_nvfp4_emulation_kernel_warmup_inputs,
+)
+def _fused_moe_nvfp4_emulation(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    B_scale: torch.Tensor,
+    w_global_scale: torch.Tensor,
+    topk_weights: torch.Tensor | None,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    N: int,
+    K: int,
+    EM: int,
+    num_valid_tokens: int,
+    stride_am: int,
+    stride_ak: int,
+    stride_be: int,
+    stride_bk: int,
+    stride_bn: int,
+    stride_cm: int,
+    stride_cn: int,
+    stride_bse: int,
+    stride_bsk: int,
+    stride_bsn: int,
+    *,
+    block_k_diviable: bool,
+    MUL_ROUTED_WEIGHT: bool,
+    top_k: int,
+    compute_type: tl.dtype,
+    group_size: int,
+    BLOCK_SIZE_M: int,
+    BLOCK_SIZE_N: int,
+    BLOCK_SIZE_K: int,
+    GROUP_SIZE_M: int,
+) -> DispatchSpec:
+    grid = (triton.cdiv(EM, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
+    return grid, dict(a_ptr=A, b_ptr=B, c_ptr=C, b_scale_ptr=B_scale)
 
 
 def invoke_fused_moe_nvfp4_emulation_kernel(
@@ -583,7 +418,7 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
             A.size(0) * top_k * config["BLOCK_SIZE_M"],
         )
 
-    return _FUSED_MOE_NVFP4_EMULATION_KERNEL(
+    return _fused_moe_nvfp4_emulation(
         A,
         B,
         C,
@@ -833,6 +668,3 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
         )
 
         self.moe_sum(intermediate_cache3, output)
-
-
-_FUSED_MOE_NVFP4_EMULATION_KERNEL = FusedMoeNvfp4EmulationKernel()

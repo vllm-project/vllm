@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any
 
 import deep_ep
@@ -20,14 +19,13 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     swizzle_mxfp8_scale,
 )
 from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
     WarmupIntRange,
 )
-from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    LaunchSpec,
+    DispatchSpec,
     TritonWarmupTensor,
-    VllmTritonJitKernel,
-    triton_scalar_specialization_rep,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
@@ -527,120 +525,72 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         )
 
 
-class GlobalizeRecvTopkIdxKernel(
-    VllmTritonJitKernel["GlobalizeRecvTopkIdxKernel.CompileKey"]
+@triton.jit
+def _globalize_recv_topk_idx_kernel(
+    topk_idx_ptr,  # [N*topk] local expert IDs (-1 = non-local), modified in place
+    psum_ptr,  # [P] per-scaleup-rank recv prefix sum; num_recv = psum[P-1]
+    P,
+    rank_expert_offset,
+    num_experts,
+    n_elements,  # N * topk
+    topk: tl.constexpr,
+    BLOCK: tl.constexpr,
 ):
-    @dataclass(frozen=True)
-    class CompileKey:
-        n_elements: int
-        topk: int
-        p: int
-        rank_expert_offset: int
-        num_experts: int
-        block: int
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    # num_recv_tokens read on-device (no host sync) -> cudagraph-safe.
+    num_recv = tl.load(psum_ptr + P - 1)
+    val = tl.load(topk_idx_ptr + offs, mask=mask, other=-1)
+    g = val + rank_expert_offset
+    row = offs // topk
+    # Keep a slot iff: it is a local expert (val >= 0), its global id is in
+    # range, and its row is a real received token (< num_recv). Otherwise -1.
+    valid = (val >= 0) & (g < num_experts) & (row < num_recv)
+    tl.store(topk_idx_ptr + offs, tl.where(valid, g, -1), mask=mask)
 
-    @staticmethod
-    @triton.jit
-    def kernel(
-        topk_idx_ptr,  # [N*topk] local expert IDs (-1 = non-local), modified in place
-        psum_ptr,  # [P] per-scaleup-rank recv prefix sum; num_recv = psum[P-1]
-        P,
-        rank_expert_offset,
-        num_experts,
-        n_elements,  # N * topk
-        topk: tl.constexpr,
-        BLOCK: tl.constexpr,
-    ):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK + tl.arange(0, BLOCK)
-        mask = offs < n_elements
-        # num_recv_tokens read on-device (no host sync) -> cudagraph-safe.
-        num_recv = tl.load(psum_ptr + P - 1)
-        val = tl.load(topk_idx_ptr + offs, mask=mask, other=-1)
-        g = val + rank_expert_offset
-        row = offs // topk
-        # Keep a slot iff: it is a local expert (val >= 0), its global id is in
-        # range, and its row is a real received token (< num_recv). Otherwise -1.
-        valid = (val >= 0) & (g < num_experts) & (row < num_recv)
-        tl.store(topk_idx_ptr + offs, tl.where(valid, g, -1), mask=mask)
 
-    def dispatch(  # type: ignore[override]
-        self,
-        *,
-        num_tokens: int,
-        topk: int,
-        P: int,
-        rank_expert_offset: int,
-        num_experts: int,
-    ) -> CompileKey:
-        return self.CompileKey(
-            n_elements=triton_scalar_specialization_rep(num_tokens * topk),
-            topk=topk,
-            p=triton_scalar_specialization_rep(P),
-            rank_expert_offset=triton_scalar_specialization_rep(rank_expert_offset),
-            num_experts=triton_scalar_specialization_rep(num_experts),
-            block=1024,
-        )
+def _globalize_recv_topk_idx_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    topk = vllm_config.model_config.hf_config.num_experts_per_tok
+    num_experts = vllm_config.model_config.hf_config.n_routed_experts
+    num_tokens: Any = WarmupIntRange(
+        1, vllm_config.scheduler_config.max_num_batched_tokens + 1
+    )
+    rank_expert_offset: Any = WarmupChoices(0, 1, 2)
+    return dict(
+        recv_topk_idx=TritonWarmupTensor(torch.int64, shape=(num_tokens, topk)),
+        psum_recv_per_rank=TritonWarmupTensor(
+            torch.int32, shape=(vllm_config.parallel_config.data_parallel_size,)
+        ),
+        rank_expert_offset=rank_expert_offset,
+        num_experts=num_experts,
+    )
 
-    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        parallel_config = vllm_config.parallel_config
-        if getattr(parallel_config, "all2all_backend", None) != "deepep_v2":
-            return []
 
-        topk = vllm_config.model_config.hf_config.num_experts_per_tok
-        num_experts = vllm_config.model_config.hf_config.n_routed_experts
-        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        P = vllm_config.parallel_config.data_parallel_size
-        if topk <= 0 or num_experts <= 0 or max_tokens <= 0:
-            return []
-
-        return self._trace_dispatch(self.dispatch)(
-            num_tokens=WarmupIntRange(1, max_tokens + 1),
-            topk=topk,
-            P=P,
-            rank_expert_offset=(0, 1, 2),
-            num_experts=num_experts,
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        return dict(
-            recv_topk_idx=TritonWarmupTensor(
-                torch.int64,
-                shape=(compile_key.n_elements // compile_key.topk, compile_key.topk),
-            ),
-            psum_recv_per_rank=TritonWarmupTensor(
-                torch.int32,
-                shape=(compile_key.p,),
-            ),
-            rank_expert_offset=compile_key.rank_expert_offset,
-            num_experts=compile_key.num_experts,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        recv_topk_idx: torch.Tensor,
-        psum_recv_per_rank: torch.Tensor,
-        rank_expert_offset: int,
-        num_experts: int,
-    ) -> LaunchSpec:
-        num_tokens, topk = recv_topk_idx.shape
-        compile_key = self.dispatch(
-            num_tokens=num_tokens,
-            topk=topk,
-            P=psum_recv_per_rank.shape[0],
-            rank_expert_offset=rank_expert_offset,
-            num_experts=num_experts,
-        )
-        grid = (triton.cdiv(compile_key.n_elements, compile_key.block),)
-        return grid, dict(
-            topk_idx_ptr=recv_topk_idx,
-            psum_ptr=psum_recv_per_rank,
-            P=compile_key.p,
-            n_elements=compile_key.n_elements,
-            topk=topk,
-            BLOCK=compile_key.block,
-        )
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_globalize_recv_topk_idx_kernel,
+    warmup_inputs=_globalize_recv_topk_idx_warmup_inputs,
+)
+def _GLOBALIZE_RECV_TOPK_IDX_KERNEL(
+    recv_topk_idx: torch.Tensor,
+    psum_recv_per_rank: torch.Tensor,
+    rank_expert_offset: int,
+    num_experts: int,
+    *,
+    n_elements: int | None = None,
+    block: int = 1024,
+) -> DispatchSpec:
+    topk = recv_topk_idx.shape[1]
+    if n_elements is None:
+        n_elements = recv_topk_idx.shape[0] * topk
+    return (triton.cdiv(n_elements, block),), dict(
+        topk_idx_ptr=recv_topk_idx,
+        psum_ptr=psum_recv_per_rank,
+        P=psum_recv_per_rank.shape[0],
+        n_elements=n_elements,
+        topk=topk,
+        BLOCK=block,
+    )
 
 
 def _globalize_recv_topk_idx(
@@ -656,6 +606,3 @@ def _globalize_recv_topk_idx(
         num_experts,
     )
     return recv_topk_idx
-
-
-_GLOBALIZE_RECV_TOPK_IDX_KERNEL = GlobalizeRecvTopkIdxKernel()
