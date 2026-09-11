@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
+import torch
 
 from vllm import envs
 from vllm.model_executor.models.nano_nemotron_vl import (
@@ -12,6 +13,17 @@ from vllm.model_executor.models.nano_nemotron_vl import (
     NemotronH_Nano_VL_V2,
 )
 from vllm.multimodal.parse import MultiModalDataItems, VideoProcessorItems
+
+
+@pytest.mark.parametrize("input_key", ["image_embeds", "video_embeds"])
+def test_precomputed_multimodal_embeddings(input_key: str):
+    model = object.__new__(NemotronH_Nano_VL_V2)
+    embeds = torch.randn(2, 4, 8)
+
+    outputs = model.embed_multimodal(**{input_key: embeds})
+
+    assert len(outputs) == len(embeds)
+    assert all(torch.equal(output, embed) for output, embed in zip(outputs, embeds))
 
 
 class _TextOnlyMultiModalConfig:
