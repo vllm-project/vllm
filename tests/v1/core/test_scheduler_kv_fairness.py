@@ -7,7 +7,8 @@ from tests.v1.core.utils import create_requests, create_scheduler
 def test_waiting_kv_blocked_request_does_not_block_lighter_request():
     scheduler = create_scheduler(
         max_num_batched_tokens=8,
-        num_blocks=1,
+        max_num_seqs=2,
+        num_blocks=2,
         block_size=4,
         enable_chunked_prefill=True,
     )
