@@ -15,7 +15,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _preshuffled_fp8_linear(holder: str = "quant_method") -> nn.Module:
+def _preshuffled_fp8_linear(
+    holder: str = "quant_method", weight_shape: tuple[int, int] = (256, 128)
+) -> nn.Module:
     pytest.importorskip("aiter")
     from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
         AiterPreshuffledFp8BlockScaledMMKernel,
@@ -33,15 +35,19 @@ def _preshuffled_fp8_linear(holder: str = "quant_method") -> nn.Module:
         activation_quant_key=kFp8Dynamic128Sym,
         input_dtype=torch.bfloat16,
         out_dtype=torch.bfloat16,
-        weight_shape=(256, 128),
+        weight_shape=weight_shape,
     )
     layer = nn.Module()
     layer.weight = nn.Parameter(
-        torch.randn(256, 128, device="cuda").to(current_platform.fp8_dtype()),
+        torch.randn(*weight_shape, device="cuda").to(current_platform.fp8_dtype()),
         requires_grad=False,
     )
-    layer.weight_scale_inv = nn.Parameter(
-        torch.ones(2, 1, device="cuda"), requires_grad=False
+    layer.register_parameter(
+        "weight_scale" if holder == "scheme" else "weight_scale_inv",
+        nn.Parameter(
+            torch.ones(*(dim // 128 for dim in weight_shape), device="cuda"),
+            requires_grad=False,
+        ),
     )
     setattr(
         layer,
@@ -52,35 +58,27 @@ def _preshuffled_fp8_linear(holder: str = "quant_method") -> nn.Module:
 
 
 @pytest.mark.parametrize("holder", ["quant_method", "scheme"])
-def test_rocm_custom_fp8_consumers_keep_row_major_weights(
-    holder: str, default_vllm_config
-) -> None:
-    from vllm.models.deepseek_v4.amd.rocm import _use_unshuffled_fp8_weights
+def test_rocm_wo_a_keeps_row_major_weights(holder: str, default_vllm_config) -> None:
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _get_cached_wo_a_bf16
 
     layer = _preshuffled_fp8_linear(holder)
+    layer.is_bmm = True
     original = layer.weight.detach().clone()
-    _use_unshuffled_fp8_weights(layer)
     kernel = getattr(layer, holder).fp8_linear
     kernel.process_weights_after_loading(layer)
 
     actual = _get_cached_wo_a_bf16(layer, 2, 128, 128)
     torch.testing.assert_close(actual, original.to(torch.bfloat16).view(2, 128, 128))
-    inputs = torch.ones(4, 128, dtype=current_platform.fp8_dtype(), device="cuda")
-    output = kernel.apply_block_scaled_mm(
-        inputs, layer.weight, torch.ones(4, 1, device="cuda"), layer.weight_scale_inv
-    )
-    expected = inputs.float() @ original.float().T
-    torch.testing.assert_close(output.float(), expected, atol=0.125, rtol=0.01)
 
 
+@pytest.mark.parametrize("holder", ["quant_method", "scheme"])
 def test_rocm_gateup_shuffles_once_and_down_proj_keeps_preshuffled_backend(
-    monkeypatch: pytest.MonkeyPatch, default_vllm_config
+    holder: str, monkeypatch: pytest.MonkeyPatch, default_vllm_config
 ) -> None:
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.models.deepseek_v4.amd import model as rocm_model
 
-    gate_up, down = _preshuffled_fp8_linear(), _preshuffled_fp8_linear()
+    gate_up, down = _preshuffled_fp8_linear(holder), _preshuffled_fp8_linear(holder)
     original_gate_up = gate_up.weight.detach().clone()
     original_down = down.weight.detach().clone()
     monkeypatch.setattr(
@@ -90,7 +88,7 @@ def test_rocm_gateup_shuffles_once_and_down_proj_keeps_preshuffled_backend(
     monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
     model = rocm_model.DeepseekV4MLP(128, 128, "silu")
     for linear in (gate_up, down):
-        linear.quant_method.fp8_linear.process_weights_after_loading(linear)
+        getattr(linear, holder).fp8_linear.process_weights_after_loading(linear)
     model.prepare_gateup_preshuffle()
 
     for linear, original in ((gate_up, original_gate_up), (down, original_down)):
@@ -98,6 +96,48 @@ def test_rocm_gateup_shuffles_once_and_down_proj_keeps_preshuffled_backend(
         torch.testing.assert_close(
             linear.weight.view(torch.uint8), expected.view(torch.uint8)
         )
+
+
+def test_rocm_fused_qkv_quant_matches_preshuffled_gemm_scale_layout(
+    monkeypatch: pytest.MonkeyPatch, default_vllm_config
+) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.deepseek_v4.amd.rocm import (
+        DeepseekV4ROCMAiterMLAAttention,
+        apply_pre_quantized_block_scaled_mm,
+    )
+
+    if not rocm_aiter_ops.is_blockscale_bpreshuffle_tuned(1024, 256):
+        pytest.skip("Requires a tuned AITER preshuffled FP8 GEMM")
+    linear = _preshuffled_fp8_linear(weight_shape=(1024, 256))
+    original = linear.weight.detach().clone()
+    linear.quant_method.fp8_linear.process_weights_after_loading(linear)
+    attention = DeepseekV4ROCMAiterMLAAttention.__new__(DeepseekV4ROCMAiterMLAAttention)
+    nn.Module.__init__(attention)
+    attention.wq_b = linear
+    attention.indexer = None
+    attention.q_lora_rank, attention.head_dim = 256, 128
+    attention.eps = 1e-5
+    attention.q_norm = SimpleNamespace(
+        weight=torch.ones(256, dtype=torch.bfloat16, device="cuda")
+    )
+    attention.kv_norm = SimpleNamespace(
+        weight=torch.ones(128, dtype=torch.bfloat16, device="cuda")
+    )
+    monkeypatch.setattr(rocm_aiter_ops, "is_linear_fp8_enabled", lambda: True)
+    # Multiple rows and groups with different ranges expose byte-order errors.
+    inputs = torch.randn(16, 384, dtype=torch.bfloat16, device="cuda")
+    inputs[:, :128] *= 4
+    quantized, scales, _ = attention._split_qkv_and_norm(inputs)
+    assert scales is not None
+    output = apply_pre_quantized_block_scaled_mm(linear, quantized, scales)
+    q = inputs[:, :256].float()
+    normalized = q * torch.rsqrt(q.square().mean(dim=-1, keepdim=True) + attention.eps)
+    reference_scales = normalized.view(16, 2, 128).abs().amax(dim=-1)
+    reference_scales /= torch.finfo(current_platform.fp8_dtype()).max
+    dequantized = quantized.float() * reference_scales.repeat_interleave(128, dim=1)
+    expected = dequantized @ original.float().T
+    torch.testing.assert_close(output.float(), expected, atol=0.125, rtol=0.01)
 
 
 def test_rocm_packed_kv_cache_auto_uses_ds_mla_layout() -> None:

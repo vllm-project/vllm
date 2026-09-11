@@ -73,7 +73,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.models.deepseek_v4.amd.rocm import (
     DeepseekV4ROCMAiterMLAAttention,
-    _use_unshuffled_fp8_weights,
+    weight_already_preshuffled,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
@@ -110,7 +110,6 @@ class DeepseekV4MLP(nn.Module):
             disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.gate_up_proj",
         )
-        _use_unshuffled_fp8_weights(self.gate_up_proj)
         self.down_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
@@ -153,11 +152,13 @@ class DeepseekV4MLP(nn.Module):
             return
         if ws.dtype == torch.float8_e8m0fnu:
             ws = _upcast_e8m0_to_fp32(ws).contiguous()
-        replace_parameter(
-            self.gate_up_proj,
-            "weight",
-            rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
-        )
+        # Skip if the linear's kernel already shuffled it.
+        if not weight_already_preshuffled(self.gate_up_proj):
+            replace_parameter(
+                self.gate_up_proj,
+                "weight",
+                rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+            )
         self._gateup_scale = ws
 
     def forward(self, x):
