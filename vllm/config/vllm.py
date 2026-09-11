@@ -34,6 +34,7 @@ from .device import DeviceConfig
 from .diffusion import DiffusionConfig
 from .ec_manager_config import EncoderCacheManagerConfig
 from .ec_transfer import ECTransferConfig
+from .engram import EngramConfig
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
@@ -50,6 +51,7 @@ from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, replace
+from .watermarking import WatermarkConfig
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
@@ -72,17 +74,14 @@ ROCM_DEFAULT_MRV1_ARCHITECTURES = frozenset(
     {"DeepseekV32ForCausalLM", "DeepseekV4ForCausalLM", "GlmMoeDsaForCausalLM"}
 )
 
-# At least one platform implementation of each architecture below has no
-# active torch.compile boundary and uses breakable graphs for PIECEWISE
-# capture. Platform-specific compiled implementations are carved out by
-# _uses_noncompiled_cudagraph_path(), including compatibility-policy exceptions.
-NON_COMPILED_CUDAGRAPH_FALLBACK_ARCHITECTURES = frozenset(
+DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
         "DeepseekV32MTPModel",
         "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
         "DeepseekV4ForConditionalGeneration",
         "DeepSeekV4MTPModel",
+        "DeepseekV41ForCausalLM",
         "Dots3NoteForCausalLM",
         "Dots3NoteMTPModel",
         "Glm5NextForCausalLM",
@@ -98,22 +97,9 @@ NON_COMPILED_CUDAGRAPH_FALLBACK_ARCHITECTURES = frozenset(
         "KimiLinearForCausalLM",
         "MiniMaxM3SparseForCausalLM",
         "MiniMaxM3SparseForConditionalGeneration",
-    }
-)
-
-# These implementations also define the current default policy. Keep the
-# capability set separately named because policy can change independently.
-DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = (
-    NON_COMPILED_CUDAGRAPH_FALLBACK_ARCHITECTURES
-)
-
-# DeepSeek V3.2 and its MTP model use their noncompiled implementations on
-# CUDA, but the shared implementations selected elsewhere are compiled.
-NON_CUDA_COMPILED_CUDAGRAPH_ARCHITECTURES = frozenset(
-    {
-        "DeepseekV32MTPModel",
-        "DeepseekV32ForCausalLM",
-        "GlmMoeDsaForCausalLM",
+        "Qwen4ExpForCausalLM",
+        "Qwen4ExpForConditionalGeneration",
+        "Qwen4ExpMTP",
     }
 )
 
@@ -387,6 +373,8 @@ class VllmConfig:
     """Model weight offloading configuration."""
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
+    engram_config: EngramConfig | None = None
+    """Optional Engram configuration, only valid for supported PLE models."""
     mamba_config: MambaConfig = Field(default_factory=MambaConfig)
     """Mamba configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
@@ -395,6 +383,8 @@ class VllmConfig:
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
+    watermark_config: WatermarkConfig | None = None
+    """Text watermarking configuration."""
     diffusion_config: DiffusionConfig | None = None
     """Diffusion LLM (dLLM) configuration."""
 
@@ -523,6 +513,11 @@ class VllmConfig:
             vllm_factors.append(self.attention_config.compute_hash())
         else:
             vllm_factors.append("None")
+        vllm_factors.append(
+            self.engram_config.compute_hash()
+            if self.engram_config is not None
+            else "None"
+        )
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
         else:
@@ -671,6 +666,14 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
+        if getattr(self, "watermark_config", None) is not None:
+            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
+                logger.info_once(
+                    "Watermarking requires Model Runner V2 and overrides "
+                    "VLLM_USE_V2_MODEL_RUNNER=0."
+                )
+            return True
+
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner
@@ -735,33 +738,6 @@ class VllmConfig:
         architectures = set(model_config.architectures)
         return bool(architectures & default_breakable_cudagraph_architectures())
 
-    def _uses_noncompiled_cudagraph_path(self) -> bool:
-        """Whether the selected path needs the noncompiled graph fallback."""
-        model_config = self.model_config
-        if model_config is None:
-            return False
-
-        architecture = model_config.architecture
-        if architecture not in NON_COMPILED_CUDAGRAPH_FALLBACK_ARCHITECTURES:
-            return False
-
-        from vllm.platforms import current_platform
-
-        if (
-            not current_platform.is_cuda()
-            and architecture in NON_CUDA_COMPILED_CUDAGRAPH_ARCHITECTURES
-        ):
-            return False
-
-        # Compatibility policy: keep DeepSeek V4's existing ROCm MRV1 graph
-        # defaults unchanged. MRV2 adds a runtime provider guard and therefore
-        # needs the fallback when explicitly selected.
-        return not (
-            current_platform.is_rocm()
-            and architecture == "DeepseekV4ForCausalLM"
-            and not self.use_v2_model_runner
-        )
-
     def _maybe_enable_breakable_cudagraph(self) -> bool:
         if (
             "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
@@ -780,52 +756,6 @@ class VllmConfig:
         enabled = is_breakable_cudagraph_enabled()
         if enabled:
             self.compilation_config.mode = CompilationMode.NONE
-        elif self._uses_noncompiled_cudagraph_path():
-            # These architectures do not have an active torch.compile wrapper,
-            # so PIECEWISE capture is unavailable without breakable graphs. Keep
-            # full graphs for uniform decode at O2/O3 and run other batches
-            # eagerly. This also handles platforms such as ROCm that deliberately
-            # leave breakable graphs disabled by default for performance.
-            compilation_config = self.compilation_config
-            cudagraph_mode = compilation_config.cudagraph_mode
-            if compilation_config.mode == CompilationMode.VLLM_COMPILE and (
-                cudagraph_mode is None
-                or cudagraph_mode.requires_piecewise_compilation()
-            ):
-                raise ValueError(
-                    f"{self.model_config.architecture} does not expose an active "
-                    "torch.compile boundary, so compilation mode VLLM_COMPILE "
-                    "cannot be honored and later CUDA graph resolution can require "
-                    "unavailable piecewise capture. Use compilation mode NONE with "
-                    "cudagraph mode NONE/FULL_DECODE_ONLY, or enable breakable CUDA "
-                    "graphs."
-                )
-            if compilation_config.cudagraph_mode is None:
-                from vllm.platforms import current_platform
-
-                architecture = self.model_config.architecture
-                unsafe_full_graph = (
-                    current_platform.is_rocm()
-                    and current_platform.is_device_capability(95)
-                    and self.use_v2_model_runner
-                    and architecture
-                    in {
-                        "DeepseekV4ForCausalLM",
-                        "DeepseekV4ForConditionalGeneration",
-                    }
-                )
-                compilation_config.cudagraph_mode = (
-                    CUDAGraphMode.FULL_DECODE_ONLY
-                    if self.optimization_level >= OptimizationLevel.O2
-                    and not unsafe_full_graph
-                    else CUDAGraphMode.NONE
-                )
-                logger.info_once(
-                    "Breakable CUDA graphs are disabled for a model without "
-                    "torch.compile support; defaulting cudagraph mode to %s.",
-                    compilation_config.cudagraph_mode.name,
-                )
-
         return enabled
 
     @property
@@ -1062,31 +992,16 @@ class VllmConfig:
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
 
-    def _normalize_unavailable_piecewise_cudagraphs(
+    def _normalize_piecewise_cudagraph_mode(
         self, *, breakable_cudagraph_enabled: bool
     ) -> None:
-        """Remove piecewise graphs when no capture implementation is active."""
         compilation_config = self.compilation_config
-        if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-            compilation_config.max_cudagraph_capture_size = 0
-            compilation_config.cudagraph_capture_sizes = []
-            return
-
-        piecewise_capture_available = (
-            VllmConfig._piecewise_cudagraph_provider_available(
-                self,
-                breakable_cudagraph_enabled=breakable_cudagraph_enabled,
-            )
-        )
         if (
             compilation_config.cudagraph_mode.requires_piecewise_compilation()
-            and not piecewise_capture_available
+            and compilation_config.mode != CompilationMode.VLLM_COMPILE
+            and not breakable_cudagraph_enabled
         ):
-            fallback_mode = (
-                CUDAGraphMode.FULL_DECODE_ONLY
-                if compilation_config.cudagraph_mode.has_full_cudagraphs()
-                else CUDAGraphMode.NONE
-            )
+            fallback_mode = compilation_config.cudagraph_mode.without_piecewise()
             logger.info_once(
                 "Cudagraph mode %s is not compatible with compilation mode %s. "
                 "Overriding to %s.",
@@ -1098,14 +1013,6 @@ class VllmConfig:
             if fallback_mode == CUDAGraphMode.NONE:
                 compilation_config.max_cudagraph_capture_size = 0
                 compilation_config.cudagraph_capture_sizes = []
-
-    def _piecewise_cudagraph_provider_available(
-        self, *, breakable_cudagraph_enabled: bool
-    ) -> bool:
-        return breakable_cudagraph_enabled or (
-            self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-            and not self._uses_noncompiled_cudagraph_path()
-        )
 
     def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.
@@ -1218,6 +1125,49 @@ class VllmConfig:
         if not self.use_v2_model_runner:
             raise ValueError("trace replay requires Model Runner V2")
 
+    def _check_watermarking_unsupported(
+        self,
+        *,
+        beam_search: bool = False,
+        custom_sampler: bool = False,
+    ) -> None:
+        watermark_config = getattr(self, "watermark_config", None)
+        if watermark_config is None:
+            return
+        if (
+            self.speculative_config is not None
+            and not watermark_config.supports_speculative_decoding
+        ):
+            raise ValueError(
+                f"The {watermark_config.algorithm} watermarking algorithm "
+                "does not support speculative decoding."
+            )
+        if beam_search:
+            raise ValueError("Beam search is not supported with watermarking.")
+        if custom_sampler:
+            raise ValueError(
+                "Model-specific custom samplers are not supported with watermarking."
+            )
+
+    def _resolve_and_verify_engram_config(self) -> None:
+        """Resolve legacy offload settings and validate model and parallel configs."""
+        if self.engram_config is None:
+            if not envs.VLLM_PLE_CPU_OFFLOAD:
+                return
+            self.engram_config = EngramConfig()
+        model_config = self.model_config
+        speculative_config = self.speculative_config
+        # Draft configs inherit the target's communication groups and settings.
+        # Qwen4Exp MTP itself disables PLE, so validate its target instead.
+        if (
+            speculative_config is not None
+            and model_config is speculative_config.draft_model_config
+        ):
+            model_config = speculative_config.target_model_config
+        self.engram_config.verify_model_config(model_config)
+        self.engram_config.verify_parallel_config(self.parallel_config)
+        logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1230,7 +1180,9 @@ class VllmConfig:
             logger.info_once("Performance mode set to '%s'.", self.performance_mode)
 
         self.try_verify_and_update_config()
+        self._resolve_and_verify_engram_config()
 
+        self._check_watermarking_unsupported()
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()
@@ -1308,11 +1260,6 @@ class VllmConfig:
                     "PD with decode_context_parallel_size > 1 is only "
                     "supported for MLA models."
                 )
-                assert not (self.model_config.is_hybrid and dcp_size > 1), (
-                    "PD with decode_context_parallel_size > 1 is not "
-                    "supported for hybrid Mamba/SSM models."
-                )
-
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
 
@@ -1550,7 +1497,7 @@ class VllmConfig:
             )
         ):
             logger.warning_once(
-                "Inductor compilation is disabled by configuration, "
+                "Inductor compilation was disabled by user settings, "
                 "optimizations settings that are only active during "
                 "inductor compilation will be ignored."
             )
@@ -1611,6 +1558,10 @@ class VllmConfig:
 
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
+
+        self._normalize_piecewise_cudagraph_mode(
+            breakable_cudagraph_enabled=breakable_cudagraph_enabled
+        )
 
         # async tp is built on top of sequence parallelism and requires it.
         pass_config = self.compilation_config.pass_config
@@ -1723,9 +1674,6 @@ class VllmConfig:
             else:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
-            self._normalize_unavailable_piecewise_cudagraphs(
-                breakable_cudagraph_enabled=breakable_cudagraph_enabled
-            )
             self._set_cudagraph_sizes()
 
         else:
@@ -1782,14 +1730,11 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        # Platform and connector compatibility checks above can replace a full
-        # graph mode with PIECEWISE. Re-normalize after those late updates and
-        # before validating consumers of the resolved mode.
-        self._normalize_unavailable_piecewise_cudagraphs(
+        self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
         )
 
-        self._resolve_allow_missing_mm_embeddings()
+        self._resolve_mm_embedding_inputs()
         self._resolve_mm_processor_device()
         self._validate_mm_processor_device()
 
@@ -2570,8 +2515,8 @@ class VllmConfig:
             f"kernel_config={self.kernel_config!r}"
         )
 
-    def _resolve_allow_missing_mm_embeddings(self) -> None:
-        """Allow `*_embeds` tensors to be omitted on disaggregated consumers.
+    def _resolve_mm_embedding_inputs(self) -> None:
+        """Accept embedding inputs, tensor optional, on disaggregated consumers.
 
         An EC consumer loads embeddings from its connector. A KV consumer
         receives the prompt KV produced from those embeddings, so it does not
@@ -2592,11 +2537,21 @@ class VllmConfig:
         mm_config.allow_missing_mm_embeddings = (
             ec_config is not None and ec_config.is_ec_consumer
         ) or (kv_config is not None and kv_config.is_kv_consumer)
-        if mm_config.allow_missing_mm_embeddings:
+        if not mm_config.allow_missing_mm_embeddings:
+            return
+
+        if not mm_config.enable_mm_embeds:
+            # Allowing missing tensors still requires enabling embedding inputs
+            # for the frontend to accept metadata-only requests.
+            mm_config.enable_mm_embeds = True
             logger.info_once(
-                "EC/KV consumer: pre-computed-embedding inputs may "
-                "omit the embedding tensor."
+                "EC/KV consumer: accepting pre-computed-embedding inputs, "
+                "which this role is sent by definition."
             )
+        logger.info_once(
+            "EC/KV consumer: pre-computed-embedding inputs may "
+            "omit the embedding tensor."
+        )
 
     def _resolve_mm_encoder_only(self) -> None:
         """Enable encoder-only mode for a dedicated EC producer."""
@@ -2725,14 +2680,8 @@ class VllmConfig:
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 
-            if (
-                speculative_config.method == "eagle3"
-                and self.parallel_config.pipeline_parallel_size > 1
-            ):
-                unsupported.append("EAGLE3 with pipeline parallelism")
-
-        if self.parallel_config.enable_dbo:
-            unsupported.append("dual batch overlap")
+        if self.parallel_config.use_ubatching:
+            unsupported.extend(self._get_dbo_unsupported_features())
 
         if self.parallel_config.enable_elastic_ep:
             unsupported.append("elastic expert parallelism")
@@ -2747,10 +2696,6 @@ class VllmConfig:
             model_config.logits_processors or has_logitsproc_plugins
         ):
             unsupported.append("custom logits processors")
-
-        if self.cache_config.kv_sharing_fast_prefill:
-            # Will be added by https://github.com/vllm-project/vllm/pull/35045
-            unsupported.append("KV sharing fast prefill")
 
         if self.cache_config.mamba_cache_mode == "all":
             unsupported.append("mamba cache mode 'all'")
@@ -2873,6 +2818,47 @@ class VllmConfig:
                 f"{'; '.join(blockers)}."
             )
 
+    def _get_dbo_unsupported_features(self) -> list[str]:
+        """Collect what the V2 model runner cannot combine with DBO.
+
+        The V2 runner microbatches a plain decoder forward pass. Anything that
+        slices or replays the batch differently (drafting, adapters, pipeline
+        stages, context parallelism, encoders) is not handled yet.
+        """
+        # TODO: DBO with model runner V2 is under development.
+        # It should be enabled with explicit VLLM_USE_V2_MODEL_RUNNER environ.
+        # Remove it when stable.
+        if envs.VLLM_USE_V2_MODEL_RUNNER is None:
+            return ["dual batch overlap"]
+
+        unsupported: list[str] = []
+        model_config = self.model_config
+        parallel_config = self.parallel_config
+
+        if self.lora_config is not None:
+            unsupported.append("dual batch overlap with LoRA")
+        if self.speculative_config is not None:
+            unsupported.append("dual batch overlap with speculative decoding")
+        if parallel_config.pipeline_parallel_size > 1:
+            unsupported.append("dual batch overlap with pipeline parallelism")
+        if (
+            parallel_config.decode_context_parallel_size > 1
+            or parallel_config.prefill_context_parallel_size > 1
+        ):
+            unsupported.append("dual batch overlap with context parallelism")
+        if model_config is not None and (
+            model_config.is_multimodal_model or model_config.is_encoder_decoder
+        ):
+            unsupported.append("dual batch overlap with multimodal models")
+        if model_config is not None and model_config.is_hybrid:
+            unsupported.append("dual batch overlap with hybrid models")
+        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            unsupported.append("dual batch overlap with CUDA graphs")
+        if self.is_mm_encoder_only:
+            unsupported.append("dual batch overlap with encoder only models")
+
+        return unsupported
+
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
         if not HAS_TRITON:
@@ -2918,6 +2904,8 @@ class VllmConfig:
         if self.kv_transfer_config is None or not self.kv_transfer_config.has_connector(
             "NixlConnector"
         ):
+            return
+        if not self.parallel_config._allow_auto_resolve_cp_interleave_size:
             return
 
         # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid

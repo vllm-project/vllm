@@ -15,6 +15,91 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _preshuffled_fp8_linear(holder: str = "quant_method") -> nn.Module:
+    pytest.importorskip("aiter")
+    from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+        AiterPreshuffledFp8BlockScaledMMKernel,
+    )
+    from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+        FP8ScaledMMLinearLayerConfig,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8Dynamic128Sym,
+        kFp8Static128BlockSym,
+    )
+
+    config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=kFp8Static128BlockSym,
+        activation_quant_key=kFp8Dynamic128Sym,
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+        weight_shape=(256, 128),
+    )
+    layer = nn.Module()
+    layer.weight = nn.Parameter(
+        torch.randn(256, 128, device="cuda").to(current_platform.fp8_dtype()),
+        requires_grad=False,
+    )
+    layer.weight_scale_inv = nn.Parameter(
+        torch.ones(2, 1, device="cuda"), requires_grad=False
+    )
+    setattr(
+        layer,
+        holder,
+        SimpleNamespace(fp8_linear=AiterPreshuffledFp8BlockScaledMMKernel(config)),
+    )
+    return layer
+
+
+@pytest.mark.parametrize("holder", ["quant_method", "scheme"])
+def test_rocm_custom_fp8_consumers_keep_row_major_weights(
+    holder: str, default_vllm_config
+) -> None:
+    from vllm.models.deepseek_v4.amd.rocm import _use_unshuffled_fp8_weights
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _get_cached_wo_a_bf16
+
+    layer = _preshuffled_fp8_linear(holder)
+    original = layer.weight.detach().clone()
+    _use_unshuffled_fp8_weights(layer)
+    kernel = getattr(layer, holder).fp8_linear
+    kernel.process_weights_after_loading(layer)
+
+    actual = _get_cached_wo_a_bf16(layer, 2, 128, 128)
+    torch.testing.assert_close(actual, original.to(torch.bfloat16).view(2, 128, 128))
+    inputs = torch.ones(4, 128, dtype=current_platform.fp8_dtype(), device="cuda")
+    output = kernel.apply_block_scaled_mm(
+        inputs, layer.weight, torch.ones(4, 1, device="cuda"), layer.weight_scale_inv
+    )
+    expected = inputs.float() @ original.float().T
+    torch.testing.assert_close(output.float(), expected, atol=0.125, rtol=0.01)
+
+
+def test_rocm_gateup_shuffles_once_and_down_proj_keeps_preshuffled_backend(
+    monkeypatch: pytest.MonkeyPatch, default_vllm_config
+) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.deepseek_v4.amd import model as rocm_model
+
+    gate_up, down = _preshuffled_fp8_linear(), _preshuffled_fp8_linear()
+    original_gate_up = gate_up.weight.detach().clone()
+    original_down = down.weight.detach().clone()
+    monkeypatch.setattr(
+        rocm_model, "MergedColumnParallelLinear", lambda *a, **k: gate_up
+    )
+    monkeypatch.setattr(rocm_model, "RowParallelLinear", lambda *a, **k: down)
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", lambda: True)
+    model = rocm_model.DeepseekV4MLP(128, 128, "silu")
+    for linear in (gate_up, down):
+        linear.quant_method.fp8_linear.process_weights_after_loading(linear)
+    model.prepare_gateup_preshuffle()
+
+    for linear, original in ((gate_up, original_gate_up), (down, original_down)):
+        expected = rocm_aiter_ops.shuffle_weight(original, layout=(16, 16))
+        torch.testing.assert_close(
+            linear.weight.view(torch.uint8), expected.view(torch.uint8)
+        )
+
+
 def test_rocm_packed_kv_cache_auto_uses_ds_mla_layout() -> None:
     from vllm.config import CacheConfig
     from vllm.models.deepseek_v4.attention import _resolve_dsv4_kv_cache_dtype
@@ -154,7 +239,9 @@ def test_rocm_mtp_forwards_input_ids_for_vision_routing(
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return inputs_embeds, previous_hidden_states
 
-    monkeypatch.setattr(rocm_mtp, "fused_mtp_input_rmsnorm", passthrough_mtp_input)
+    monkeypatch.setattr(
+        rocm_mtp, "_FUSED_MTP_INPUT_RMSNORM_KERNEL", passthrough_mtp_input
+    )
 
     layer = object.__new__(rocm_mtp.DeepSeekV4MultiTokenPredictorLayer)
     nn.Module.__init__(layer)

@@ -61,6 +61,24 @@ def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
     return indptr
 
 
+def _use_unshuffled_fp8_weights(linear: torch.nn.Module) -> None:
+    """Preserve row-major weights for DeepSeek's custom FP8 consumers."""
+    from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+        AiterFp8BlockScaledMMKernel,
+        AiterPreshuffledFp8BlockScaledMMKernel,
+    )
+
+    for method in (
+        getattr(linear, "quant_method", None),
+        getattr(linear, "scheme", None),
+    ):
+        kernel = getattr(method, "fp8_linear", None)
+        if method is not None and isinstance(
+            kernel, AiterPreshuffledFp8BlockScaledMMKernel
+        ):
+            method.fp8_linear = AiterFp8BlockScaledMMKernel(kernel.config)
+
+
 def apply_pre_quantized_block_scaled_mm(
     linear: torch.nn.Module,
     x_fp8: torch.Tensor,
@@ -548,6 +566,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     def __init__(self, *args, **kwargs):
         vllm_config = args[0] if args else kwargs["vllm_config"]
         super().__init__(*args, **kwargs)
+        # These paths consume row-major weights or apply their own preshuffle.
+        for linear in (self.fused_wqa_wkv, self.wq_b, self.wo_a, self.wo_b):
+            _use_unshuffled_fp8_weights(linear)
+        if self.indexer is not None:
+            _use_unshuffled_fp8_weights(self.indexer.wq_b)
         self._has_kv_transfer = vllm_config.kv_transfer_config is not None
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
@@ -567,6 +590,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             return
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             _upcast_e8m0_to_fp32,
+            get_fp8_block_weight_scale,
         )
         from vllm.model_executor.utils import replace_parameter
 
@@ -577,7 +601,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             # K % 128 (group-128 quant) and N % 16 (shuffle_weight) must hold.
             if w.shape[-1] % 128 != 0 or w.shape[0] % 16 != 0:
                 return None
-            ws = getattr(linear, "weight_scale_inv", None)  # per-block scale
+            ws = get_fp8_block_weight_scale(linear)
             if ws is None:
                 return None
             if ws.dtype == torch.float8_e8m0fnu:
