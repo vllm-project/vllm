@@ -35,6 +35,112 @@ from vllm.v1.request import RequestStatus
 
 pytestmark = pytest.mark.skip_global_cleanup
 
+
+@pytest.mark.parametrize("count", [2, 10_000, 2**64 - 1])
+def test_subscriber_sample_fits_two_80_column_lines(count, capsys):
+    from examples.features.forward_pass_metrics.forward_pass_metrics_subscriber import (
+        print_metrics,
+    )
+
+    metrics = ForwardPassMetrics(
+        worker_id="long-worker-identity" * 10,
+        wall_time=1.234567e100,
+        scheduled_requests=ScheduledRequestMetrics(
+            count, count, 1.234567e200, count, count, count, 1.234567e200
+        ),
+        queued_requests=QueuedRequestMetrics(
+            count, count, 1.234567e200, count, count, 1.234567e200
+        ),
+    )
+    print_metrics(count, metrics)
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 2
+    assert all(len(line) <= 80 for line in lines)
+    assert " S " in lines[0] and " Q " in lines[1]
+    assert "/-/" in lines[1]  # Queued prefill has no KV-read metric.
+
+
+@pytest.mark.parametrize("interval", [0.0, 1.0])
+def test_subscriber_refresh_keeps_latest_sample_and_idle_tail(
+    interval, monkeypatch, capsys
+):
+    from examples.features.forward_pass_metrics import (
+        forward_pass_metrics_subscriber as subscriber,
+    )
+
+    clock = [0.0]
+    monkeypatch.setattr(subscriber, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    display = subscriber.MetricsDisplay(interval)
+    metrics = ForwardPassMetrics(worker_id="worker\n\x1b[31m" * 20, wall_time=0.012)
+    display.update(1, metrics)
+    initial = capsys.readouterr().out
+    assert all(len(line) <= 80 for line in initial.splitlines())
+    assert "\x1b" not in initial
+    for seq in range(2, 102):
+        display.update(seq, metrics)
+    updates = capsys.readouterr().out
+    assert len(updates.splitlines()) == (100 if interval == 0 else 0)
+    if interval:
+        assert display.poll_timeout_ms() == 1000
+        clock[0] = 1.0
+        assert display.poll_timeout_ms() == 0
+        display.flush()  # The last sample is visible even without more messages.
+        lines = capsys.readouterr().out.splitlines()
+        assert len(lines) == 1 and lines[0].lstrip().startswith("101 ")
+    assert display.poll_timeout_ms() == subscriber.POLL_TIMEOUT_MS
+    clock[0] = 2.0
+    display.update(102, msgspec.structs.replace(metrics, wall_time=0.0))
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1 and "idle (heartbeat)" in lines[0]
+
+
+def test_subscriber_validates_messages_hidden_by_refresh(monkeypatch, capsys):
+    from examples.features.forward_pass_metrics import (
+        forward_pass_metrics_subscriber as subscriber,
+    )
+
+    frames = deque(
+        [
+            b"",
+            seq.to_bytes(8, "big"),
+            encode_forward_pass_metrics(
+                ForwardPassMetrics(counter_id=99 if seq == 1 else seq, wall_time=0.012)
+            ),
+        ]
+        for seq in range(3)
+    )
+
+    def poll(_timeout):
+        if not frames:
+            raise KeyboardInterrupt
+        return True
+
+    socket = SimpleNamespace(
+        connect=lambda _: None,
+        setsockopt=lambda *args: None,
+        poll=poll,
+        recv_multipart=frames.popleft,
+        close=lambda **kwargs: None,
+    )
+    monkeypatch.setattr(subscriber, "time", SimpleNamespace(monotonic=lambda: 0.0))
+    monkeypatch.setattr(
+        subscriber,
+        "parse_args",
+        lambda: SimpleNamespace(interval=1.0, endpoint="tcp://localhost:20380"),
+    )
+    monkeypatch.setattr(
+        subscriber.zmq,
+        "Context",
+        lambda: SimpleNamespace(socket=lambda _: socket, term=lambda: None),
+    )
+    subscriber.main()
+    out = capsys.readouterr()
+    assert "payload counter 99" in out.err
+    assert "Sequence gap" not in out.err
+    assert not any(line.lstrip().startswith("1 ") for line in out.out.splitlines())
+    assert any(line.lstrip().startswith("2 ") for line in out.out.splitlines())
+
+
 # Golden wire payload for the model-step timing scope.
 _GOLDEN_FPM_V1 = {
     "version": 1,
