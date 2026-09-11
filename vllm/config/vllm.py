@@ -2937,10 +2937,12 @@ class VllmConfig:
         # The ds_mla layouts are MLA-only by construction; the plain nvfp4
         # layout (head_size//2 + head_size//16) does not apply to MLA.
         if (
-            self.cache_config.cache_dtype.startswith("nvfp4")
-            and not self.cache_config.cache_dtype.endswith("_ds_mla")
-            and self.model_config.use_mla
-        ):
+            (
+                self.cache_config.cache_dtype.startswith("nvfp4")
+                and not self.cache_config.cache_dtype.endswith("_ds_mla")
+            )
+            or self.cache_config.cache_dtype == "fp8_k_nvfp4_v"
+        ) and self.model_config.use_mla:
             raise ValueError(
                 "nvfp4 KV cache is not supported with MLA (Multi-head Latent "
                 "Attention) backends. Please use a different --kv-cache-dtype "
