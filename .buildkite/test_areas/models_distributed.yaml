@@ -42,6 +42,13 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/models/hy_v4/
+      - vllm/config/
+      - vllm/v1/worker/
+      - vllm/v1/attention/ops/
+      - vllm/v1/attention/backend.py
+      - tests/conftest.py
+      - tests/utils.py
       - vllm/model_executor/model_loader/sharded_state_loader.py
       - vllm/model_executor/models/
       - vllm/model_executor/layers/
@@ -60,8 +67,9 @@ steps:
             HIP_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
             ;;
           1)
-            pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
-            pytest models/language -v -s -m 'distributed(num_gpus=2)'
+            pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' &&
+            pytest models/language -v -s -m 'distributed(num_gpus=2)' &&
+            VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)'
             ;;
           2)
             pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
