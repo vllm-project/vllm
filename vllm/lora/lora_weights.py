@@ -201,8 +201,9 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         w1_lora_b = torch.stack(w1_lora_b_lst, dim=0)  # (num_experts,output_size,rank)
         w2_lora_b = torch.stack(w2_lora_b_lst, dim=0)
 
-        # All w1, w2, w3 have the same scaling factor.
-        scaling = lora_alpha / rank
+        # All w1, w2, w3 have the same scaling factor. Use the per-adapter
+        # scaling (e.g. alpha/sqrt(r) for rsLoRA) instead of alpha/rank.
+        scaling = first_lora.scaling
         last_scaling = scaling
 
         if is_non_gated_moe:
@@ -250,7 +251,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         assert w1_lora is not None and w2_lora is not None and w3_lora is not None
         rank = w1_lora.rank
         lora_alpha = w1_lora.lora_alpha
-        scaling = lora_alpha / rank
+        scaling = w1_lora.scaling
         return cls(
             module_name,
             rank,
