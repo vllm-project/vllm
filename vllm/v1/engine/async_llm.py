@@ -1152,7 +1152,12 @@ class AsyncLLM(EngineClient):
                 logger.info("Engines are idle, requests have been drained")
                 return
 
-            logger.info("Engines are still running, waiting for requests to drain...")
+            logger.info(
+                "Waiting for requests to drain "
+                "(engines_running=%s, frontend_unfinished=%s)",
+                dp_engines_running,
+                has_unfinished_requests,
+            )
             await asyncio.sleep(1)  # Wait 1 second before checking again
 
         raise TimeoutError(
