@@ -38,6 +38,13 @@ class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size > 1:
+            vllm_config = copy.copy(vllm_config)
+            vllm_config.parallel_config = replace(
+                parallel_config,
+                prefill_context_parallel_size=1,
+            )
         super().__init__(vllm_config, device)
 
         self.hidden_states = torch.zeros(
@@ -387,6 +394,11 @@ class DFlashSpeculator(DraftModelSpeculator):
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )
             return self.draft_tokens[:num_reqs]
+
+        if self.pcp_manager is not None and not dummy_run:
+            self.block_tables.gather_block_tables(
+                input_batch.idx_mapping, num_reqs_padded=num_reqs
+            )
 
         # The query slot mapping is written into the shared BlockTables slot_mappings.
         # That buffer's address is what the captured CUDA graph reads from at replay.
