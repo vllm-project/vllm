@@ -157,8 +157,10 @@ def test_cpu_mla_backend_smoke(tmp_path) -> None:
 def test_cpu_mla_prefill_backend_selected() -> None:
     # On CPU (no device capability) the MLA prefill backend must be the
     # SDPA-based CPU backend, not flash-attn which is unavailable on CPU.
+    # Accelerator-specific subclasses (e.g. the zentorch-backed Zen CPU
+    # backend) are also valid selections.
     backend_cls = get_mla_prefill_backend(None)
-    assert backend_cls is CPUSDPAMLAPrefillBackend
+    assert issubclass(backend_cls, CPUSDPAMLAPrefillBackend)
 
 
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")

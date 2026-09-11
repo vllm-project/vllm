@@ -110,8 +110,18 @@ def get_mla_prefill_backend(
     from vllm.platforms import current_platform
 
     if current_platform.is_cpu():
-        logger.info_once("Using CPU SDPA MLA prefill backend.")
-        return MLAPrefillBackendEnum.CPU.get_class()
+        # CPUs have no compute capability, so the capability-driven priority
+        # path below does not apply. Prefer an accelerator-specific CPU backend
+        # when its kernels are present, else the generic SDPA one.
+        for backend_enum in (MLAPrefillBackendEnum.ZEN_CPU, MLAPrefillBackendEnum.CPU):
+            try:
+                backend_cls = backend_enum.get_class()
+            except ImportError:
+                continue
+            if backend_cls.is_available():
+                logger.info_once("Using %s MLA prefill backend.", backend_enum.name)
+                return backend_cls
+        raise ValueError("No valid CPU MLA prefill backend found.")
 
     device_capability = current_platform.get_device_capability()
     if device_capability is None:
