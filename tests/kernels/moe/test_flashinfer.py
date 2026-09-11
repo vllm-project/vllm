@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import multiprocessing
 from dataclasses import dataclass
 
 import pytest
@@ -606,19 +607,46 @@ def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
         assert torch.equal(kernel_w2, expected_w2)
 
 
+def _check_flashinfer_ipc_weights(entries, expected, is_gated, mode, device_index):
+    from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
+    from vllm.model_executor.utils import weights_already_processed
+
+    torch.accelerator.set_device_index(device_index)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        method, layer = _make_unquantized_flashinfer_test_layer(
+            monkeypatch, 192, is_gated, device="meta"
+        )
+        loader = object.__new__(IpcModelLoader)
+        loader.mode = mode
+        loader._apply_entries(layer, entries, {}, device_index)
+        pointers = (layer.w13_weight.data_ptr(), layer.w2_weight.data_ptr())
+
+        # Like ipc_cache: a fresh method, only tensor metadata, no _setup_kernel.
+        with weights_already_processed():
+            method.process_weights_after_loading(layer)
+        assert method.moe_kernel is not None
+        actual = method._kernel_weights(layer)
+        for weight, reference, pointer in zip(actual, expected, pointers):
+            assert weight.data_ptr() == pointer
+            assert torch.equal(weight.cpu(), reference)
+        # Cross-process addresses need not match; writes prove sharing/isolation.
+        with torch.no_grad():
+            for weight in actual:
+                weight.fill_(1.0)
+        torch.accelerator.synchronize()
+
+
 @pytest.mark.parametrize("is_gated", [True, False])
 @pytest.mark.parametrize("cache_ndim", [3, 4])
 @pytest.mark.parametrize("mode", ["copy", "zero_copy"])
 def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
     monkeypatch, is_gated, cache_ndim, mode
 ):
-    """Tensor-only IPC restores must preserve packed values and kernel views."""
+    """A spawned IPC consumer restores views without transient method state."""
     from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
         convert_moe_weights_to_flashinfer_trtllm_block_layout,
     )
-    from vllm.model_executor.model_loader.weight_cache.ipc_loader import IpcModelLoader
     from vllm.model_executor.model_loader.weight_cache.protocol import TensorEntry
-    from vllm.model_executor.utils import weights_already_processed
 
     method, layer = _make_unquantized_flashinfer_test_layer(
         monkeypatch, 192, is_gated, device="meta"
@@ -629,27 +657,40 @@ def test_unquantized_flashinfer_trtllm_cached_weights_need_no_method_state(
         torch.randn_like(layer.w2_weight, device="cuda"),
         is_gated_act_gemm=is_gated,
     )
-    expected = [weight.clone() for weight in packed]
+    expected = [weight.cpu() for weight in packed]
     entries = {}
     for name, weight in zip(("w13_weight", "w2_weight"), packed):
         cached = weight.view_as(getattr(layer, name)) if cache_ndim == 3 else weight
         entries[name] = TensorEntry.from_tensor(cached, kind="param")
-    loader = object.__new__(IpcModelLoader)
-    loader.mode = mode
-    loader._apply_entries(layer, entries, {}, torch.accelerator.current_device_index())
-    pointers = (layer.w13_weight.data_ptr(), layer.w2_weight.data_ptr())
-
-    # Like ipc_cache: a fresh method, only tensor metadata, no _setup_kernel.
-    with weights_already_processed():
-        method.process_weights_after_loading(layer)
-    assert method.moe_kernel is not None
-    actual = method._kernel_weights(layer)
-    for weight, reference, pointer in zip(actual, expected, pointers):
-        assert weight.data_ptr() == pointer
-        assert torch.equal(weight, reference)
-    for source, reference, pointer in zip(packed, expected, pointers):
-        assert torch.equal(source, reference)
-        assert (source.data_ptr() == pointer) == (mode == "zero_copy")
+    consumer = multiprocessing.get_context("spawn").Process(
+        target=_check_flashinfer_ipc_weights,
+        args=(
+            entries,
+            expected,
+            is_gated,
+            mode,
+            torch.accelerator.current_device_index(),
+        ),
+    )
+    consumer.start()
+    try:
+        # Keep producer allocations alive until the consumer releases its views.
+        consumer.join(timeout=180)
+        assert not consumer.is_alive(), "IPC consumer timed out"
+        assert consumer.exitcode == 0, "IPC consumer failed; see child traceback"
+        for source, reference in zip(packed, expected):
+            expected_source = (
+                torch.ones_like(reference) if mode == "zero_copy" else reference
+            )
+            assert torch.equal(source.cpu(), expected_source)
+    finally:
+        if consumer.is_alive():
+            consumer.terminate()
+            consumer.join(timeout=10)
+            if consumer.is_alive():
+                consumer.kill()
+                consumer.join(timeout=10)
+        consumer.close()
 
 
 @pytest.mark.parametrize(
