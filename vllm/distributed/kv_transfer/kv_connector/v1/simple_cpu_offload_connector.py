@@ -232,6 +232,11 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             return self.worker_handler.build_connector_worker_meta()
         return None
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        if self.worker_handler is not None:
+            return self.worker_handler.get_block_ids_with_load_errors()
+        return set()
+
     # --- Scheduler-side methods ---
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:

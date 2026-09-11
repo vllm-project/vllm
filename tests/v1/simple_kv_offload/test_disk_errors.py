@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Disk I/O failures must reach the worker instead of stranding transfers."""
+"""Disk failures must drain DMA, fail transfers and allow subsequent work."""
 
 import errno
 import threading
@@ -93,7 +93,7 @@ def join_failed_thread(backend, is_store):
 
 
 @pytest.mark.parametrize("is_store", [False, True], ids=["load", "store"])
-@pytest.mark.parametrize("failure", [None, "os_error", "short_io", "dma_error"])
+@pytest.mark.parametrize("failure", [None, "os_error", "short_io"])
 def test_disk_io_result_reaches_worker(monkeypatch, disk_worker, is_store, failure):
     worker, backend = disk_worker
     error: Exception = OSError(
@@ -108,80 +108,127 @@ def test_disk_io_result_reaches_worker(monkeypatch, disk_worker, is_store, failu
     monkeypatch.setattr(
         disk_module.os, "pwritev" if is_store else "preadv", io_call, raising=False
     )
-    if failure == "dma_error":
-        error = RuntimeError("DMA submission failed")
-        disk_module.copy_blocks.side_effect = error
     submit(worker, is_store)
-
-    if failure is not None:
-        join_failed_thread(backend, is_store)
-        other_thread = backend._load_thread if is_store else backend._store_thread
-        assert other_thread.is_alive()
-        operation = "store" if is_store else "load"
-        # Poll repeatedly while the backend is running: errors must remain visible.
-        for _ in range(2):
-            with pytest.raises(
-                RuntimeError, match=f"{operation} failed.*event 7"
-            ) as exc:
-                worker.get_finished(set())
-            assert backend._disk_path in str(exc.value)
-            if failure == "short_io":
-                assert isinstance(exc.value.__cause__, OSError)
-                assert "Short" in str(exc.value)
-            else:
-                assert exc.value.__cause__ is error
-                assert str(error) in str(exc.value)
-        assert not worker._load_events and not worker._store_events
-        assert worker.build_connector_worker_meta() is None
-        if failure != "dma_error":
-            assert io_call.call_count == 2
-        for direction in (False, True):
-            with pytest.raises(RuntimeError, match=f"{operation} failed"):
-                backend.launch_copy([1], [0], direction, 8, [])
+    events = worker._store_events if is_store else worker._load_events
+    assert events.ready.wait(timeout=5), "Transfer did not complete"
+    assert backend._store_thread.is_alive() and backend._load_thread.is_alive()
+    assert io_call.call_count == 2
+    sending, receiving = worker.get_finished(set())
+    assert sending is None
+    assert receiving == (None if is_store else {"request-0"})
+    assert worker.get_block_ids_with_load_errors() == (
+        {1} if failure and not is_store else set()
+    )
+    meta = worker.build_connector_worker_meta()
+    if is_store:
+        assert meta is not None and meta.completed_store_events == {7: 1}
+        assert meta.failed_store_events == ({7} if failure else set())
     else:
-        events = worker._store_events if is_store else worker._load_events
-        assert events.ready.wait(timeout=5), "Transfer did not complete"
-        assert backend._store_thread.is_alive() and backend._load_thread.is_alive()
-        assert io_call.call_count == 2
-        sending, receiving = worker.get_finished(set())
-        assert sending is None
-        assert receiving == (None if is_store else {"request-0"})
-        meta = worker.build_connector_worker_meta()
-        if is_store:
-            assert meta is not None and meta.completed_store_events == {7: 1}
-        else:
-            assert meta is None
+        assert meta is None
+    assert worker.get_finished(set()) == (None, None)
+    assert worker.get_block_ids_with_load_errors() == set()
+    assert worker.build_connector_worker_meta() is None
+
+    # A later transfer uses the same buffers/threads and completes normally.
+    io_call.side_effect = None
+    events.ready.clear()
+    metadata = SimpleCPUOffloadMetadata(
+        store_event=8 if is_store else -1,
+        load_event=-1 if is_store else 8,
+        load_event_to_reqs={8: ["request-1"]},
+    )
+    worker.bind_connector_metadata(metadata)
+    backend.launch_copy([0], [1], is_store, 8, events)
+    assert events.ready.wait(timeout=5)
+    assert worker.get_finished(set()) == (None, None if is_store else {"request-1"})
+    assert worker.get_block_ids_with_load_errors() == set()
+    meta = worker.build_connector_worker_meta()
+    if is_store:
+        assert meta.completed_store_events == {8: 1}
+        assert meta.failed_store_events == set()
+
+
+@pytest.mark.parametrize("is_store", [False, True], ids=["load", "store"])
+def test_disk_failure_drains_dma_before_completion_and_buffer_reuse(
+    monkeypatch, disk_worker, is_store
+):
+    worker, backend = disk_worker
+    entered, release = threading.Event(), threading.Event()
+    stream = backend._store_stream if is_store else backend._load_stream
+
+    def drain():
+        entered.set()
+        assert release.wait(timeout=5)
+
+    stream.synchronize.side_effect = drain
+    io_call = MagicMock(side_effect=[4096, OSError(errno.EIO, "I/O error"), 4096])
+    monkeypatch.setattr(
+        disk_module.os, "pwritev" if is_store else "preadv", io_call, raising=False
+    )
+    submit(worker, is_store)
+    events = worker._store_events if is_store else worker._load_events
+    try:
+        assert entered.wait(timeout=5)
+        worker.bind_connector_metadata(
+            SimpleCPUOffloadMetadata(
+                store_event=8 if is_store else -1,
+                load_event=-1 if is_store else 8,
+                load_event_to_reqs={7: ["request-0"], 8: ["request-1"]},
+            )
+        )
+        backend.launch_copy([0], [1], is_store, 8, events)
         assert worker.get_finished(set()) == (None, None)
+        assert worker.get_block_ids_with_load_errors() == set()
         assert worker.build_connector_worker_meta() is None
+        assert not events
+        assert io_call.call_count == 2
+        # Only a barrier in the other queue releases the blocked DMA drain.
+        # Flushing just the already-published CUDA events would return early.
+        other_stream = backend._load_stream if is_store else backend._store_stream
+        other_stream.synchronize.side_effect = release.set
+        worker.handle_preemptions(SimpleCPUOffloadMetadata(need_flush=True))
+        assert release.is_set()
+        assert io_call.call_count == 3
+    finally:
+        release.set()
+    assert worker.get_finished(set()) == (
+        None,
+        None if is_store else {"request-0", "request-1"},
+    )
+    assert worker.get_block_ids_with_load_errors() == (set() if is_store else {1})
+    meta = worker.build_connector_worker_meta()
+    if is_store:
+        assert meta.completed_store_events == {7: 1, 8: 1}
+        assert meta.failed_store_events == {7}
 
 
 @pytest.mark.parametrize(
     "first_store", [False, True], ids=["load-first", "store-first"]
 )
-def test_first_disk_failure_survives_other_thread_failure(
+def test_first_fatal_failure_survives_other_thread_failure(
     monkeypatch, disk_worker, first_store
 ):
     worker, backend = disk_worker
     entered = [threading.Event(), threading.Event()]
     release = [threading.Event(), threading.Event()]
-    errors = [OSError(errno.EIO, "read failed"), OSError(errno.ENOSPC, "write failed")]
+    errors = [RuntimeError("load DMA failed"), RuntimeError("store DMA failed")]
 
     def fail(is_store):
         entered[is_store].set()
         assert release[is_store].wait(timeout=5)
         raise errors[is_store]
 
-    for direction, syscall in ((False, "preadv"), (True, "pwritev")):
-        monkeypatch.setattr(
-            disk_module.os,
-            syscall,
-            lambda *args, direction=direction: fail(direction),
-            raising=False,
+    for direction, stream in (
+        (False, backend._load_stream),
+        (True, backend._store_stream),
+    ):
+        stream.wait_event.side_effect = lambda *args, direction=direction: fail(
+            direction
         )
     try:
         completions: list[tuple[int, torch.Event]] = []
         for direction in (False, True):
-            backend.launch_copy([0], [0], direction, 9, completions)
+            backend.launch_copy([0], [0], direction, 9, completions, MagicMock())
         assert all(event.wait(timeout=5) for event in entered)
         assert worker.get_finished(set()) == (None, None)
         for direction in (False, True):
@@ -215,8 +262,11 @@ def test_disk_thread_initialization_failure_reaches_worker(disk_worker):
 
 
 @pytest.mark.parametrize("runner", ["v1", "v2", "v2-no-forward"])
-def test_disk_error_escapes_model_runner(monkeypatch, disk_worker, runner):
-    """A later idle step must surface the failure even without a new transfer."""
+@pytest.mark.parametrize("is_store", [False, True], ids=["load", "store"])
+def test_disk_failure_reaches_model_runner_output(
+    monkeypatch, disk_worker, runner, is_store
+):
+    """A later idle step must report failed transfers without raising."""
     from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
         SimpleCPUOffloadConnector,
     )
@@ -224,12 +274,15 @@ def test_disk_error_escapes_model_runner(monkeypatch, disk_worker, runner):
     from vllm.v1.worker.gpu import kv_connector as v2
 
     worker, backend = disk_worker
-    error = OSError(errno.ENOSPC, "No space left on device")
     monkeypatch.setattr(
-        disk_module.os, "pwritev", MagicMock(side_effect=error), raising=False
+        disk_module.os,
+        "pwritev" if is_store else "preadv",
+        MagicMock(side_effect=OSError(errno.EIO, "I/O error")),
+        raising=False,
     )
-    submit(worker, is_store=True)
-    join_failed_thread(backend, is_store=True)
+    submit(worker, is_store)
+    events = worker._store_events if is_store else worker._load_events
+    assert events.ready.wait(timeout=5)
 
     # Bypass distributed initialization, keeping the real connector methods.
     connector = object.__new__(SimpleCPUOffloadConnector)
@@ -238,24 +291,185 @@ def test_disk_error_escapes_model_runner(monkeypatch, disk_worker, runner):
     monkeypatch.setattr(module, "get_kv_transfer_group", lambda: connector)
     monkeypatch.setattr(module, "get_forward_context", lambda: None)
     scheduler_output = MagicMock(
-        kv_connector_metadata=SimpleCPUOffloadMetadata(),
+        kv_connector_metadata=SimpleCPUOffloadMetadata(
+            load_event_to_reqs={7: ["request-0"]}
+        ),
         finished_req_ids=set(),
         has_sync_kv_loads=False,
     )
-    with pytest.raises(RuntimeError, match="store failed.*event 7") as exc:
-        if runner == "v1":
-            with v1.KVConnectorModelRunnerMixin._get_kv_connector_output(
-                scheduler_output, wait_for_save=False
-            ):
-                pass
+    if runner == "v1":
+        with v1.KVConnectorModelRunnerMixin._get_kv_connector_output(
+            scheduler_output, wait_for_save=False
+        ) as output:
+            pass
+    else:
+        monkeypatch.setattr(v2, "is_forward_context_available", lambda: True)
+        active = v2.ActiveKVConnector(MagicMock(), {})
+        if runner == "v2-no-forward":
+            output = active.no_forward(scheduler_output).kv_connector_output
         else:
-            monkeypatch.setattr(v2, "is_forward_context_available", lambda: True)
-            active = v2.ActiveKVConnector(MagicMock(), {})
-            if runner == "v2-no-forward":
-                active.no_forward(scheduler_output)
-            else:
-                active.pre_forward(scheduler_output)
-                active.post_forward(set())
-    assert exc.value.__cause__ is error
-    assert "No space left on device" in str(exc.value)
+            active.pre_forward(scheduler_output)
+            output = active.post_forward(set())
+    assert output.finished_recving == (None if is_store else {"request-0"})
+    assert output.invalid_block_ids == (set() if is_store else {0, 1})
+    if is_store:
+        assert output.kv_connector_worker_meta.completed_store_events == {7: 1}
+        assert output.kv_connector_worker_meta.failed_store_events == {7}
     assert worker.build_connector_worker_meta() is None
+
+
+@pytest.mark.parametrize("is_store", [False, True], ids=["load", "store"])
+@pytest.mark.parametrize("failure", ["dma", "drain"])
+def test_unsafe_device_failure_remains_fatal(
+    monkeypatch, disk_worker, is_store, failure
+):
+    worker, backend = disk_worker
+    error = RuntimeError("CUDA failure")
+    if failure == "dma":
+        disk_module.copy_blocks.side_effect = error
+        monkeypatch.setattr(
+            disk_module.os, "preadv", MagicMock(return_value=4096), raising=False
+        )
+    else:
+        stream = backend._store_stream if is_store else backend._load_stream
+        stream.synchronize.side_effect = error
+        monkeypatch.setattr(
+            disk_module.os,
+            "pwritev" if is_store else "preadv",
+            MagicMock(side_effect=OSError(errno.EIO, "I/O error")),
+            raising=False,
+        )
+    submit(worker, is_store)
+    join_failed_thread(backend, is_store)
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="failed.*event 7") as exc:
+            worker.get_finished(set())
+        assert exc.value.__cause__ is error
+        assert backend._disk_path in str(exc.value)
+    assert not worker._load_events and not worker._store_events
+    assert worker.get_block_ids_with_load_errors() == set()
+    assert worker.build_connector_worker_meta() is None
+    with pytest.raises(RuntimeError):
+        backend.synchronize()
+    with pytest.raises(RuntimeError):
+        backend.launch_copy([0], [0], is_store, 8, [])
+
+
+@pytest.mark.parametrize("num_groups", [1, 2])
+@pytest.mark.parametrize("policy", ["recompute", "fail"])
+@pytest.mark.parametrize("failure", ["os_error", "short_io"])
+def test_disk_read_failure_isolates_request_in_shared_batch(
+    monkeypatch, disk_worker, num_groups, policy, failure
+):
+    """Healthy requests before and after a failed read keep their loaded KV."""
+    from tests.v1.kv_connector.unit.utils import (
+        create_model_runner_output,
+        create_scheduler,
+    )
+    from tests.v1.simple_kv_offload.test_scheduler import (
+        BLOCK_SIZE,
+        _make_kv_cache_config,
+        _make_vllm_config,
+        make_request,
+    )
+    from vllm.v1.request import RequestStatus
+
+    config = _make_vllm_config()
+    config.kv_transfer_config.kv_load_failure_policy = policy
+    config.kv_transfer_config.kv_connector_extra_config = {
+        "cpu_bytes_to_use": 32768,
+        "kv_offload_backend": "disk",
+        "disk_path": "/unused-worker-path",
+        "disk_capacity_bytes": 32768,
+    }
+    scheduler = create_scheduler(
+        config, num_blocks=32, kv_cache_config=_make_kv_cache_config(32, num_groups)
+    )
+    manager = scheduler.connector.scheduler_manager
+    requests = [make_request(num_blocks=2) for _ in range(3)]
+    for request in requests:
+        for group in range(num_groups):
+            blocks = manager.cpu_block_pool.get_new_blocks(2)
+            manager.cpu_block_pool.cache_full_blocks(
+                request, blocks, 0, 2, BLOCK_SIZE, group
+            )
+            manager.cpu_block_pool.free_blocks(blocks)
+        scheduler.add_request(request)
+    scheduled = scheduler.schedule()
+    metadata = scheduled.kv_connector_metadata
+    assert metadata.load_event_to_reqs == {
+        metadata.load_event: [request.request_id for request in requests]
+    }
+    for request in requests:
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert request.num_computed_tokens == 2 * BLOCK_SIZE
+
+    failed_request = requests[1]
+    transfer = manager._reqs_to_load[failed_request.request_id].transfer_meta
+    # Fail the last block of the middle request, after some of its DMA succeeds.
+    failed_gpu_block = transfer.gpu_block_ids[-1]
+    failed_disk_slot = transfer.cpu_block_ids[-1]
+    cpu_blocks = {
+        req_id: state.transfer_meta.cpu_block_ids
+        for req_id, state in manager._reqs_to_load.items()
+    }
+    worker, backend = disk_worker
+
+    def read_block(fd, views, offset):
+        if offset == failed_disk_slot * backend._total_block_bytes:
+            if failure == "os_error":
+                raise OSError(errno.EIO, "read failed")
+            return 0
+        return backend._total_block_bytes
+
+    io_call = MagicMock(side_effect=read_block)
+    monkeypatch.setattr(disk_module.os, "preadv", io_call, raising=False)
+    worker.bind_connector_metadata(metadata)
+    worker.start_load_kv()
+    assert worker._load_events.ready.wait(timeout=5)
+    _, received = worker.get_finished(set())
+    assert received == {request.request_id for request in requests}
+    failed = worker.get_block_ids_with_load_errors()
+    assert failed == {failed_gpu_block}
+    assert io_call.call_count == len(metadata.load_cpu_blocks)
+    copied_gpu_blocks = [
+        call.args[1][0] for call in disk_module.copy_blocks.call_args_list
+    ]
+    assert copied_gpu_blocks == [
+        block for block in metadata.load_gpu_blocks if block != failed_gpu_block
+    ]
+    scheduler.update_from_output(
+        scheduled,
+        create_model_runner_output(
+            [], finished_recving=received, invalid_block_ids=failed
+        ),
+    )
+    assert manager.get_num_new_matched_tokens(failed_request, 0) == (0, False)
+    assert not manager._reqs_to_load
+    for request in requests:
+        for bid in cpu_blocks[request.request_id]:
+            block = manager.cpu_block_pool.blocks[bid]
+            assert block.ref_cnt == 0
+            assert (block.block_hash is None) == (request is failed_request)
+    for healthy in (requests[0], requests[2]):
+        assert healthy.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert healthy.num_computed_tokens == 2 * BLOCK_SIZE
+    valid_tokens = BLOCK_SIZE if num_groups == 1 else 0
+    if policy == "recompute":
+        assert failed_request.num_computed_tokens == valid_tokens
+    else:
+        assert failed_request.status == RequestStatus.FINISHED_ERROR
+    retried = scheduler.schedule()
+    for healthy in (requests[0], requests[2]):
+        assert healthy.status == RequestStatus.RUNNING
+        assert retried.num_scheduled_tokens[healthy.request_id] == 1
+    if policy == "recompute":
+        assert failed_request.status == RequestStatus.RUNNING
+        assert (
+            retried.num_scheduled_tokens[failed_request.request_id]
+            == failed_request.num_prompt_tokens - valid_tokens
+        )
+    else:
+        assert failed_request.request_id not in retried.num_scheduled_tokens
+    assert not retried.kv_connector_metadata.load_gpu_blocks
+    assert not scheduler.failed_recving_kv_req_ids

@@ -3068,14 +3068,28 @@ class Scheduler(SchedulerInterface):
             is_affected = False
             marked_invalid_block = False
             req_id = request.request_id
-            # TODO (davidb): add support for hybrid memory allocator
-            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+            block_ids_by_group = self.kv_cache_manager.get_block_ids(req_id)
             # We iterate only over blocks that may contain externally computed
             # tokens
             req_num_computed_tokens = (
                 request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0)
             )
 
+            if len(block_ids_by_group) > 1:
+                all_block_ids = {bid for group in block_ids_by_group for bid in group}
+                if not invalid_block_ids.intersection(all_block_ids):
+                    continue
+                if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                    # Async loads haven't published their blocks. Discard all
+                    # groups on completion, including recurrent state and null
+                    # sliding-window blocks, before allocating for recompute.
+                    request.num_computed_tokens = 0
+                    affected_req_ids.add(req_id)
+                    total_affected_tokens += req_num_computed_tokens
+                    continue
+
+            # TODO: support synchronous load recovery with multiple KV groups.
+            (req_block_ids,) = block_ids_by_group
             req_num_computed_blocks = (
                 req_num_computed_tokens + self.block_size - 1
             ) // self.block_size

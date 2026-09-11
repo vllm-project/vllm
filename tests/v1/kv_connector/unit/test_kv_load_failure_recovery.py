@@ -34,6 +34,68 @@ def scheduler():
     return create_scheduler(vllm_config)
 
 
+@pytest.mark.parametrize("failed_group", [0, 1])
+@pytest.mark.parametrize("external_tokens", [32, 128])
+def test_hybrid_load_failure_recomputes_only_affected_request(
+    failed_group, external_tokens
+):
+    """A failure in any KV group invalidates the request's whole hybrid state."""
+    from tests.v1.simple_kv_offload.test_scheduler import (
+        _make_kv_cache_config,
+        _make_vllm_config,
+    )
+
+    config = _make_vllm_config()
+    config.kv_transfer_config.kv_load_failure_policy = "recompute"
+    config.kv_transfer_config.kv_connector_extra_config = {"cpu_bytes_to_use": 32768}
+    scheduler = create_scheduler(
+        config, num_blocks=32, kv_cache_config=_make_kv_cache_config(32, 2)
+    )
+    requests = [
+        create_request(num_tokens=external_tokens + 1),
+        create_request(num_tokens=33),
+    ]
+    for request in requests:
+        scheduler.add_request(request)
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        lambda request, _: (external_tokens, True)
+        if request.request_id == requests[0].request_id
+        else (0, False)
+    )
+    scheduler.connector.take_events.return_value = ()
+    scheduler.connector.request_finished_all_groups.return_value = (False, None)
+    scheduled = scheduler.schedule()
+    failed, healthy = requests
+    block_ids = scheduler.kv_cache_manager.get_block_ids(failed.request_id)
+    null_id = scheduler.kv_cache_manager.block_pool.null_block.block_id
+    if external_tokens > 64:
+        assert null_id in block_ids[1]
+    failed_block_id = next(
+        block_id
+        for block_id in reversed(block_ids[failed_group])
+        if block_id != null_id
+    )
+    output = create_model_runner_output(
+        [healthy],
+        finished_recving={failed.request_id},
+        invalid_block_ids={failed_block_id},
+    )
+    scheduler.update_from_output(scheduled, output)
+    assert failed.num_computed_tokens == 0
+    assert healthy.num_computed_tokens >= 32
+    scheduler.connector.get_num_new_matched_tokens.side_effect = None
+    scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
+    resumed = scheduler.schedule()
+    assert resumed.num_scheduled_tokens[healthy.request_id] == 1
+    assert resumed.num_scheduled_tokens[failed.request_id] == min(failed.num_tokens, 63)
+    # The first recompute chunk needs real blocks where the old window had nulls.
+    assert all(
+        null_id not in group
+        for group in scheduler.kv_cache_manager.get_block_ids(failed.request_id)
+    )
+
+
 @pytest.mark.parametrize(
     "num_prompt_blocks,num_external_computed_blocks,invalid_block_idxs",
     [

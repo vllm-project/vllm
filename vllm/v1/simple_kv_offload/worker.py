@@ -77,6 +77,8 @@ class SimpleCPUOffloadWorker:
         self._pending_store_event_indices: set[int] = set()
         # Completed store events to report via build_connector_worker_meta
         self._completed_store_events: dict[int, int] = {}
+        self._failed_store_events: set[int] = set()
+        self._invalid_block_ids: set[int] = set()
 
     def register_kv_caches(
         self,
@@ -312,6 +314,9 @@ class SimpleCPUOffloadWorker:
 
         if self._pending_load_event_indices:
             load_wm = self._poll_stream_events(is_store=False)
+            if isinstance(self._backend, DiskBackend):
+                for blocks in self._backend.pop_failed_events(False, load_wm).values():
+                    self._invalid_block_ids.update(blocks)
             for j in [j for j in self._pending_load_event_indices if j <= load_wm]:
                 self._pending_load_event_indices.discard(j)
                 req_ids = (
@@ -322,11 +327,20 @@ class SimpleCPUOffloadWorker:
 
         if self._pending_store_event_indices:
             store_wm = self._poll_stream_events(is_store=True)
+            if isinstance(self._backend, DiskBackend):
+                self._failed_store_events.update(
+                    self._backend.pop_failed_events(True, store_wm)
+                )
             for j in [j for j in self._pending_store_event_indices if j <= store_wm]:
                 self._pending_store_event_indices.discard(j)
                 self._completed_store_events[j] = 1
 
         return None, finished_recving or None
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        invalid_block_ids = self._invalid_block_ids
+        self._invalid_block_ids = set()
+        return invalid_block_ids
 
     def build_connector_worker_meta(self) -> SimpleCPUOffloadWorkerMetadata | None:
         """Return completed store events since the last call."""
@@ -334,8 +348,10 @@ class SimpleCPUOffloadWorker:
             return None
         meta = SimpleCPUOffloadWorkerMetadata(
             completed_store_events=self._completed_store_events,
+            failed_store_events=self._failed_store_events,
         )
         self._completed_store_events = {}
+        self._failed_store_events = set()
         return meta
 
     def handle_preemptions(
@@ -348,6 +364,8 @@ class SimpleCPUOffloadWorker:
 
     def _flush_and_sync_all(self) -> None:
         """Synchronize all in-flight transfer events."""
+        if isinstance(self._backend, DiskBackend):
+            self._backend.synchronize()
         for event_idx, event in self._load_events:
             event.synchronize()
             self._load_hwm = event_idx

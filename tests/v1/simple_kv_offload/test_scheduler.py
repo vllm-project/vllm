@@ -430,6 +430,101 @@ def test_eager_store_and_load_roundtrip() -> None:
     assert len(meta2.load_cpu_blocks) == len(meta2.load_gpu_blocks)
 
 
+@pytest.mark.parametrize("reports", ["together", "failure-first", "failure-last"])
+@pytest.mark.parametrize("reset", [False, True])
+def test_failed_store_waits_for_all_ranks_without_caching(reports, reset):
+    """A rank failure must survive aggregation, later steps and cache reset."""
+    from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+    from vllm.v1.outputs import ModelRunnerOutput
+
+    fix = make_scheduler()
+    sched = fix.scheduler
+    sched._expected_worker_count = 2
+    sched.enable_kv_cache_events = True
+    sched.cpu_block_pool.enable_kv_cache_events = True
+    req = make_request(num_blocks=2)
+    blocks = _alloc_and_register(fix, req, 2)
+    sched.update_state_after_alloc(req, blocks, num_external_tokens=0)
+    meta = sched.build_connector_meta(
+        make_scheduler_output(
+            {req.request_id: 2 * BLOCK_SIZE},
+            new_reqs={req.request_id: blocks.get_block_ids()},
+        )
+    )
+    gpu_blocks = [fix.gpu_block_pool.blocks[bid] for bid in meta.store_gpu_blocks]
+    cpu_blocks = [sched.cpu_block_pool.blocks[bid] for bid in meta.store_cpu_blocks]
+    gpu_refs = [block.ref_cnt for block in gpu_blocks]
+    success = SimpleCPUOffloadWorkerMetadata({meta.store_event: 1})
+    failure = SimpleCPUOffloadWorkerMetadata(
+        {meta.store_event: 1}, failed_store_events={meta.store_event}
+    )
+    if reports == "together":
+        outputs = [
+            ModelRunnerOutput.with_kv_conn_output_only(
+                KVConnectorOutput(kv_connector_worker_meta=meta)
+            )
+            for meta in (success, failure)
+        ]
+        aggregated = KVOutputAggregator(expected_finished_count=2).aggregate(outputs)
+        batches = [aggregated.kv_connector_output.kv_connector_worker_meta]
+    else:
+        batches = (
+            [failure, success] if reports == "failure-first" else [success, failure]
+        )
+    for idx, batch in enumerate(batches):
+        if reset and idx == len(batches) - 1:
+            assert sched.reset() is False
+        sched.update_connector_output(KVConnectorOutput(kv_connector_worker_meta=batch))
+        if idx < len(batches) - 1:
+            assert [block.ref_cnt for block in gpu_blocks] == gpu_refs
+            assert all(block.ref_cnt == 1 for block in cpu_blocks)
+            assert sched.has_pending_stores()
+        assert all(block.block_hash is None for block in cpu_blocks)
+    assert [block.ref_cnt for block in gpu_blocks] == [n - 1 for n in gpu_refs]
+    assert all(block.ref_cnt == 0 for block in cpu_blocks)
+    assert sched.get_num_new_matched_tokens(req, 0) == (0, False)
+    assert not list(sched.take_events())
+    assert not sched.has_pending_stores()
+    assert not sched._failed_store_events
+    assert not sched._store_event_pending_counts
+
+
+@pytest.mark.parametrize("reset", [False, True])
+def test_failed_load_evicts_disk_cache_before_all_ranks_finish(reset):
+    """Failure removes bad cache hits but keeps DMA refs until every rank is done."""
+    fix = make_scheduler()
+    sched = fix.scheduler
+    req = make_request(num_blocks=2)
+    blocks = _alloc_and_register(fix, req, 2)
+    sched.update_state_after_alloc(req, blocks, num_external_tokens=0)
+    store = sched.build_connector_meta(
+        make_scheduler_output(
+            {req.request_id: 2 * BLOCK_SIZE},
+            new_reqs={req.request_id: blocks.get_block_ids()},
+        )
+    )
+    simulate_store_completion(sched, store.store_event)
+    hit, is_async = sched.get_num_new_matched_tokens(req, 0)
+    assert (hit, is_async) == (2 * BLOCK_SIZE, True)
+    destination = fix.gpu_block_pool.get_new_blocks(2)
+    sched.update_state_after_alloc(req, KVCacheBlocks((destination,)), hit)
+    load = sched.build_connector_meta(make_scheduler_output({}))
+    cpu_blocks = [sched.cpu_block_pool.blocks[bid] for bid in load.load_cpu_blocks]
+    refs = [block.ref_cnt for block in destination]
+    if reset:
+        assert sched.reset() is False
+    sched.update_connector_output(
+        KVConnectorOutput(invalid_block_ids=set(load.load_gpu_blocks))
+    )
+    assert sched.get_num_new_matched_tokens(req, 0) == (0, False)
+    assert all(block.block_hash is None and block.ref_cnt == 1 for block in cpu_blocks)
+    assert [block.ref_cnt for block in destination] == refs
+    sched.update_connector_output(KVConnectorOutput(finished_recving={req.request_id}))
+    assert all(block.ref_cnt == 0 for block in cpu_blocks)
+    assert [block.ref_cnt for block in destination] == [n - 1 for n in refs]
+    assert not sched._reqs_to_load and not sched._abandoned_reqs_to_load
+
+
 def test_prompt_logprobs_skip_cpu_cache_lookup() -> None:
     """Prompt logprobs require every prompt token to be recomputed."""
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
