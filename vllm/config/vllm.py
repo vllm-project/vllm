@@ -1468,8 +1468,39 @@ class VllmConfig:
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        if self.profiler_config.profiler == "proton" and not current_platform.is_cuda():
-            raise ValueError("The Proton profiler currently supports NVIDIA CUDA only")
+        if self.profiler_config.profiler == "proton":
+            if not current_platform.is_cuda():
+                raise ValueError(
+                    "The Proton profiler currently supports NVIDIA CUDA only"
+                )
+            if (
+                self.profiler_config.proton_graph_attribution
+                and not self.use_v2_model_runner
+            ):
+                raise ValueError(
+                    "Proton CUDA graph attribution requires the V2 model runner. "
+                    "Set VLLM_USE_V2_MODEL_RUNNER=1."
+                )
+            if (
+                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                and not self.use_v2_model_runner
+            ):
+                raise ValueError(
+                    "The Proton profiler requires CUDA graphs to be disabled "
+                    "on the V1 model runner. Use --enforce-eager or set "
+                    "VLLM_USE_V2_MODEL_RUNNER=1."
+                )
+            mode = self.profiler_config.proton_mode
+            if (
+                mode
+                and mode.split(":", 1)[0] == "pcsampling"
+                and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            ):
+                raise ValueError(
+                    "Proton PC sampling requires CUDA graphs to be disabled. "
+                    "Use --enforce-eager or set "
+                    "--compilation-config.cudagraph_mode=none."
+                )
 
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(

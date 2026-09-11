@@ -92,15 +92,16 @@ Chrome trace and works through the same vLLM profiling controls as the PyTorch
 and CUDA profilers. Proton currently supports NVIDIA GPUs through CUPTI and
 supports CUDA graph attribution.
 
-Start a server with a local output directory:
+Start an MRV2 server with a local output directory and graph attribution:
 
 ```bash
-vllm serve meta-llama/Llama-3.1-8B-Instruct \
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --profiler-config '{
         "profiler": "proton",
         "proton_profiler_dir": "./proton_profile",
         "proton_output_format": "hatchet",
-        "proton_hook": "triton"
+        "proton_hook": "triton",
+        "proton_graph_attribution": true
     }'
 ```
 
@@ -110,7 +111,7 @@ rank-qualified output name, such as
 `proton_dp0_pp0_tp0_dcp0_ep0_rank0_pid1234_0123456789abcdef0123456789abcdef_run0.hatchet`,
 so distributed workers, restarted servers, and repeated profiling runs do not
 overwrite one another. A `profile_prefix` is included when supplied. Each
-profile is finalized by `/stop_profile` and is ready to inspect immediately.
+profile is written by `/stop_profile` and is ready to inspect immediately.
 
 The Proton-specific options are:
 
@@ -142,8 +143,14 @@ runs. Each stop flushes and writes one tree-data phase while preserving the
 graph-aware session. Without `proton_graph_attribution`, each `stop_profile`
 instead finalizes and writes an independent Proton session.
 
-Proton profiling requires Triton 3.7 or newer. CUDA graph attribution uses its
-phase data API to discard graph-capture activity and separate profiling runs.
+CUDA graph attribution requires the V2 model runner
+(`VLLM_USE_V2_MODEL_RUNNER=1`) and Triton 3.7 or newer. It uses the phase data API
+to discard graph-capture activity and separate profiling runs. The `hatchet_msgpack`
+output format and `periodic_flushing` mode also require Triton 3.7 or newer.
+Ordinary Proton profiling remains available with Triton 3.6.
+
+Graph attribution retains capture metadata for the worker lifetime. With eager
+execution or no graphs to capture, profiling uses ordinary independent sessions.
 
 Inspect tree profiles with:
 

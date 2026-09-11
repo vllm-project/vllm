@@ -78,7 +78,7 @@ class ProfilerConfig:
 
     proton_graph_attribution: bool = False
     """Observe CUDA graph capture so replayed kernels can be attributed.
-    Requires ``proton_data='tree'``."""
+    Requires the V2 model runner, Triton >= 3.7 and ``proton_data='tree'``."""
 
     torch_profiler_with_stack: bool = True
     """If `True`, enables stack tracing in the torch profiler. Enabled by default

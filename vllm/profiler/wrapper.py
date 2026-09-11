@@ -7,13 +7,13 @@ import json
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from glob import glob
 from typing import Literal
 from uuid import uuid4
 
 import torch
-from packaging.version import Version
+from packaging.version import InvalidVersion, Version
 from typing_extensions import override
 
 import vllm.version
@@ -159,6 +159,10 @@ class WorkerProfiler(ABC):
         logger.info_once("Shutting down profiler")
         if self._running:
             self.stop()
+
+    def capture_cuda_graphs(self) -> AbstractContextManager[None]:
+        """Observe graph creation for backends that attribute replay activity."""
+        return nullcontext()
 
     def annotate_context_manager(self, name: str):
         """Return a context manager to annotate profiler traces."""
@@ -382,10 +386,12 @@ class ProtonProfilerWrapper(WorkerProfiler):
         self._mode = profiler_config.proton_mode
         self._hook = profiler_config.proton_hook
         self._output_format = profiler_config.proton_output_format
-        self._triton_version = Version(triton.__version__)
-        assert self._triton_version >= _TRITON_PROTON_3_7_VERSION, (
-            "Proton profiling requires Triton >= 3.7"
-        )
+        self._graph_attribution = profiler_config.proton_graph_attribution
+        self._triton_version_string = getattr(triton, "__version__", "unknown")
+        try:
+            self._triton_version = Version(self._triton_version_string)
+        except InvalidVersion:
+            self._triton_version = None
         self._validate_capabilities()
         self._session_id: int | None = None
         # Qualify output names by process and wrapper instance so a new
@@ -405,7 +411,18 @@ class ProtonProfilerWrapper(WorkerProfiler):
             self._output_dir,
         )
 
+    def _require_triton_version(self, feature: str, minimum: Version) -> None:
+        if self._triton_version is None or self._triton_version < minimum:
+            raise RuntimeError(
+                f"Proton {feature} requires Triton >= {minimum}; found "
+                f"{self._triton_version_string}."
+            )
+
     def _validate_capabilities(self) -> None:
+        if self._graph_attribution:
+            self._require_triton_version(
+                "CUDA graph attribution", _TRITON_PROTON_3_7_VERSION
+            )
         if self._output_format is not None:
             parameters = inspect.signature(self._proton.finalize).parameters
             supports_output_format = "output_format" in parameters or any(
@@ -417,6 +434,15 @@ class ProtonProfilerWrapper(WorkerProfiler):
                     "The installed Triton Proton does not support selecting "
                     "an output format during finalize."
                 )
+
+        if self._output_format == "hatchet_msgpack":
+            self._require_triton_version(
+                "hatchet_msgpack output", _TRITON_PROTON_3_7_VERSION
+            )
+        if self._mode and self._mode.split(":", 1)[0] == "periodic_flushing":
+            self._require_triton_version(
+                "periodic flushing", _TRITON_PROTON_3_7_VERSION
+            )
 
     def _create_session(self, output_path: str) -> int:
         os.makedirs(self._output_dir, exist_ok=True)
@@ -438,19 +464,17 @@ class ProtonProfilerWrapper(WorkerProfiler):
 
     def set_output_name(self, worker_name: str) -> None:
         """Set the next run's output name after startup graph capture."""
-        if self._running:
-            raise RuntimeError("Cannot change Proton output while profiling")
+        if self._active:
+            return
         self._output_path = os.path.join(self._output_dir, f"proton_{worker_name}")
 
+    @override
     @contextmanager
     def capture_cuda_graphs(self) -> Iterator[None]:
         """Keep a Proton session active while vLLM captures CUDA graphs."""
-        assert self._data == "tree"
-        if self._mode and self._mode.split(":", 1)[0] == "pcsampling":
-            raise ValueError(
-                "Proton PC sampling is incompatible with CUDA graph capture; "
-                "enable eager execution or disable CUDA graphs."
-            )
+        if not self._graph_attribution:
+            yield
+            return
         if self._session_id is None:
             self._session_id = self._create_session(self._session_storage_path)
         else:
@@ -508,9 +532,11 @@ class ProtonProfilerWrapper(WorkerProfiler):
                 self._phase = self._proton.data.advance_phase(session_id)
             finally:
                 self._proton.deactivate(session=session_id, flushing=True)
-            self._write_graph_phase(completed_phase)
-            self._proton.data.clear(session_id, completed_phase)
-            self._active_output_path = None
+            try:
+                self._write_graph_phase(completed_phase)
+            finally:
+                self._proton.data.clear(session_id, completed_phase)
+                self._active_output_path = None
             return
 
         try:

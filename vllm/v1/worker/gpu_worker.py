@@ -943,16 +943,13 @@ class Worker(WorkerBase):
 
     def _get_cudagraph_capture_context(self) -> AbstractContextManager[None]:
         """Prepare annotations for CUDA graph capture."""
-        if (
-            self.profiler_config.profiler != "proton"
-            or not self.profiler_config.proton_graph_attribution
-            or self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-        ):
-            return nullcontext()
-
         if not self.use_v2_model_runner:
             return nullcontext()
-
+        if self.profiler is None and not (
+            self.profiler_config.profiler == "proton"
+            and self.profiler_config.proton_graph_attribution
+        ):
+            return nullcontext()
         cudagraph_manager = getattr(self.model_runner, "cudagraph_manager", None)
         assert cudagraph_manager is not None
         if not cudagraph_manager.needs_capture():
@@ -961,12 +958,10 @@ class Worker(WorkerBase):
         if self.profiler is None:
             from vllm.distributed.utils import get_worker_rank_suffix
 
-            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
             self.profiler = ProtonProfilerWrapper(
                 self.profiler_config,
-                worker_name=rank_suffix,
+                worker_name=get_worker_rank_suffix(global_rank=self.rank),
             )
-        assert isinstance(self.profiler, ProtonProfilerWrapper)
         return self.profiler.capture_cuda_graphs()
 
     def reset_mm_cache(self) -> None:

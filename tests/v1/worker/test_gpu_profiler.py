@@ -505,6 +505,41 @@ class TestProtonConfig:
 
         assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
+    @pytest.mark.parametrize("attribution", [False, True])
+    @pytest.mark.parametrize("mode", ["pcsampling", "pcsampling:interval=100"])
+    def test_pcsampling_requires_graphs_disabled(self, tmp_path, attribution, mode):
+        with pytest.raises(ValueError, match="PC sampling requires CUDA graphs"):
+            VllmConfig(
+                profiler_config=ProfilerConfig(
+                    profiler="proton",
+                    proton_profiler_dir=str(tmp_path),
+                    proton_graph_attribution=attribution,
+                    proton_mode=mode,
+                ),
+                compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL),
+            )
+
+    def test_ordinary_proton_keeps_mrv1_graph_restriction(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+        with pytest.raises(ValueError, match="disabled on the V1 model runner"):
+            VllmConfig(
+                profiler_config=ProfilerConfig(
+                    profiler="proton", proton_profiler_dir=str(tmp_path)
+                ),
+                compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL),
+            )
+
+    def test_graph_attribution_rejects_mrv1(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+        with pytest.raises(ValueError, match="requires the V2 model runner"):
+            VllmConfig(
+                profiler_config=ProfilerConfig(
+                    profiler="proton",
+                    proton_profiler_dir=str(tmp_path),
+                    proton_graph_attribution=True,
+                )
+            )
+
 
 @_requires_cuda_for_proton
 class TestProtonProfilerWrapper:
@@ -571,9 +606,29 @@ class TestProtonProfilerWrapper:
         assert first_name.endswith(f"_{UUID(int=1).hex}_run0")
         assert second_name.endswith(f"_{UUID(int=2).hex}_run0")
 
-    def test_rejects_triton_3_6(self, tmp_path):
-        with pytest.raises(AssertionError, match="requires Triton >= 3.7"):
-            make_proton_wrapper(tmp_path, triton_version="3.6.0")
+    @pytest.mark.parametrize(
+        ("option", "value", "feature"),
+        [
+            ("proton_output_format", "hatchet_msgpack", "hatchet_msgpack"),
+            ("proton_mode", "periodic_flushing", "periodic flushing"),
+        ],
+    )
+    def test_newer_features_reject_triton_3_6(self, tmp_path, option, value, feature):
+        with pytest.raises(RuntimeError, match=feature):
+            make_proton_wrapper(tmp_path, triton_version="3.6.0", **{option: value})
+
+    @pytest.mark.parametrize("version", ["3.6.0", "unknown"])
+    def test_graph_attribution_requires_phase_api(self, tmp_path, version):
+        with pytest.raises(RuntimeError, match="requires Triton >= 3.7"):
+            make_proton_wrapper(
+                tmp_path, triton_version=version, proton_graph_attribution=True
+            )
+
+    def test_ordinary_profiling_still_supports_triton_3_6(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(tmp_path, triton_version="3.6.0")
+        wrapper.start()
+        wrapper.stop()
+        proton.finalize.assert_called_once_with(session=7)
 
     @pytest.mark.parametrize(
         ("option", "value"),
@@ -621,19 +676,50 @@ class TestProtonProfilerWrapper:
         assert output_names[0].name.endswith("_run0.hatchet")
         assert output_names[1].name.endswith("_run1.hatchet")
 
-    def test_pcsampling_rejects_cuda_graph_capture(self, tmp_path):
-        wrapper, proton = make_proton_wrapper(tmp_path, proton_mode="pcsampling")
-
-        with (
-            pytest.raises(ValueError, match="disable CUDA graphs"),
-            wrapper.capture_cuda_graphs(),
-        ):
+    def test_capture_is_noop_without_opt_in(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(tmp_path)
+        with wrapper.capture_cuda_graphs():
             pass
-
         proton.start.assert_not_called()
 
+    @pytest.mark.parametrize("delay", [0, 2])
+    def test_duplicate_start_preserves_output_prefix(self, tmp_path, delay):
+        wrapper, proton = make_proton_wrapper(
+            tmp_path, proton_graph_attribution=True, delay_iterations=delay
+        )
+        with wrapper.capture_cuda_graphs():
+            pass
+        wrapper.set_output_name("first")
+        wrapper.start()
+        wrapper.set_output_name("duplicate")
+        wrapper.start()
+        for _ in range(delay):
+            wrapper.step()
+        wrapper.stop()
+        assert len(list(tmp_path.glob("proton_first_*.hatchet"))) == 1
+        assert not list(tmp_path.glob("proton_duplicate_*"))
+        wrapper.set_output_name("second")
+        wrapper.start()
+        for _ in range(delay):
+            wrapper.step()
+        wrapper.stop()
+        assert len(list(tmp_path.glob("proton_second_*.hatchet"))) == 1
+
+    def test_failed_export_clears_activity_and_allows_next_interval(self, tmp_path):
+        wrapper, proton = make_proton_wrapper(tmp_path, proton_graph_attribution=True)
+        with wrapper.capture_cuda_graphs():
+            pass
+        proton.data.get.side_effect = [OSError("disk full"), []]
+        wrapper.start()
+        wrapper.stop()
+        proton.data.clear.assert_called_with(7, 1)
+        wrapper.start()
+        wrapper.stop()
+        proton.data.clear.assert_called_with(7, 2)
+        assert len(list(tmp_path.glob("*_run1.hatchet"))) == 1
+
     def test_cuda_graph_context_deactivates_after_capture_error(self, tmp_path):
-        wrapper, proton = make_proton_wrapper(tmp_path, triton_version="3.7.0")
+        wrapper, proton = make_proton_wrapper(tmp_path, proton_graph_attribution=True)
 
         with (
             pytest.raises(RuntimeError, match="capture failed"),
@@ -644,7 +730,7 @@ class TestProtonProfilerWrapper:
         proton.deactivate.assert_called_once_with(session=7, flushing=True)
 
     def test_cuda_graph_capture_deactivates_when_phase_advance_fails(self, tmp_path):
-        wrapper, proton = make_proton_wrapper(tmp_path)
+        wrapper, proton = make_proton_wrapper(tmp_path, proton_graph_attribution=True)
         proton.data.advance_phase.side_effect = RuntimeError("advance failed")
 
         with (
@@ -671,7 +757,7 @@ class TestProtonProfilerWrapper:
         proton.data.clear.assert_not_called()
 
     def test_shutdown_finalizes_cuda_graph_capture_session(self, tmp_path):
-        wrapper, proton = make_proton_wrapper(tmp_path, triton_version="3.7.0")
+        wrapper, proton = make_proton_wrapper(tmp_path, proton_graph_attribution=True)
         with wrapper.capture_cuda_graphs():
             pass
 
@@ -781,7 +867,7 @@ def test_proton_is_not_initialized_without_cuda_graph_capture(runner):
         CUDAGraphMode.NONE if runner == "disabled" else CUDAGraphMode.FULL
     )
     worker.use_v2_model_runner = runner != "v1"
-    if runner == "no_capture":
+    if runner in ("disabled", "no_capture"):
         worker.model_runner.cudagraph_manager.needs_capture.return_value = False
 
     context = Worker._get_cudagraph_capture_context(worker)
@@ -826,3 +912,80 @@ def test_proton_initializes_before_cuda_graph_capture():
     assert worker.profiler.config is worker.profiler_config
     assert worker.profiler.worker_name == "rank2"
     assert context is worker.profiler.capture_context
+
+
+@_requires_cuda_for_proton
+@pytest.mark.parametrize("context", ["shadow", "python"])
+@pytest.mark.parametrize("output_format", ["hatchet", "hatchet_msgpack"])
+def test_proton_cuda_graph_replay_attribution_on_gpu(tmp_path, context, output_format):
+    """Both intervals contain replay kernels, without capture-only activity."""
+    import json
+
+    import torch
+    import triton
+    import triton.profiler as proton
+    from packaging.version import Version
+
+    if Version(triton.__version__) < Version("3.7"):
+        pytest.skip("Graph attribution requires Triton >= 3.7")
+
+    wrapper = ProtonProfilerWrapper(
+        ProfilerConfig(
+            profiler="proton",
+            proton_profiler_dir=str(tmp_path),
+            proton_graph_attribution=True,
+            proton_context=context,
+            proton_output_format=output_format,
+        ),
+        worker_name="gpu",
+    )
+    x = torch.ones(1024, device="cuda")
+    graph = torch.cuda.CUDAGraph()
+
+    def capture_only():
+        x.add_(1)
+
+    def captured_add():
+        x.add_(1)
+
+    def kernel_metrics(value):
+        if isinstance(value, list):
+            return [metric for child in value for metric in kernel_metrics(child)]
+        if isinstance(value, dict):
+            metrics = value.get("metrics", {})
+            return ([metrics] if metrics.get("count", 0) else []) + [
+                metric for child in value.values() for metric in kernel_metrics(child)
+            ]
+        return []
+
+    try:
+        with wrapper.capture_cuda_graphs():
+            with proton.scope("capture_only"):
+                capture_only()
+            torch.accelerator.synchronize()
+            with torch.cuda.graph(graph), proton.scope("captured_add"):
+                captured_add()
+        for run in range(2):
+            wrapper.start()
+            with wrapper.annotate_context_manager(f"replay_{run}"):
+                graph.replay()
+            wrapper.stop()
+            (path,) = tmp_path.glob(f"*_run{run}.{output_format}")
+            if output_format == "hatchet_msgpack":
+                import msgpack
+
+                data = msgpack.unpackb(path.read_bytes())
+            else:
+                data = json.loads(path.read_text())
+            serialized = json.dumps(data)
+            assert "<captured_at>" in serialized
+            assert "captured_add" in serialized
+            assert "capture_only" not in serialized
+            assert f"replay_{1 - run}" not in serialized
+            metrics = kernel_metrics(data)
+            assert sum(metric["count"] for metric in metrics) == 1
+            assert sum(metric["time (ns)"] for metric in metrics) > 0
+        torch.testing.assert_close(x, torch.full_like(x, 4))
+    finally:
+        wrapper.shutdown()
+    assert not list(tmp_path.glob(".proton_cuda_graph_session*"))
