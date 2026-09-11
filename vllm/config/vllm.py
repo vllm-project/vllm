@@ -81,6 +81,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "DeepseekV4ForCausalLM",
         "DeepseekV4ForConditionalGeneration",
         "DeepSeekV4MTPModel",
+        "DeepseekV41ForCausalLM",
         "Dots3NoteForCausalLM",
         "Dots3NoteMTPModel",
         "Glm5NextForCausalLM",

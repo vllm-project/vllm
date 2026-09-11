@@ -12,7 +12,10 @@ import vllm.model_executor.layers.mhc as mhc_layers
 from vllm.model_executor.kernels.mhc.tilelang import (
     _tilelang_hc_prenorm_gemm,
     _torch_hc_prenorm_gemm,
+    mhc_pre_delayed_tilelang,
 )
+from vllm.model_executor.kernels.mhc.torch import mhc_pre_delayed_torch
+from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
 from vllm.model_executor.layers.mhc import (
     HAS_AITER_MHC,
     HAS_AITER_MHC_FUSED,
@@ -26,10 +29,291 @@ from vllm.models.deepseek_v4.nvidia.model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
 )
+from vllm.models.deepseek_v4_1.nvidia.model import (
+    DeepseekV4DecoderLayer as DeepseekV41DecoderLayer,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "num_tokens,hc_mult,hidden_size",
+    [
+        (0, 4, 5120),
+        (1, 4, 5120),
+        (33, 4, 5137),
+        (128, 4, 5120),
+        (1024, 4, 5120),
+        (2, 1, 513),
+        (7, 8, 5137),
+        (65537, 4, 65),
+    ],
+)
+@pytest.mark.parametrize("strided", [False, True])
+def test_hc_collapse_preserves_weighted_residual_sum(
+    num_tokens, hc_mult, hidden_size, strided
+):
+    """Handle tile tails and strided streams without changing FP32 mixing."""
+    set_random_seed(0)
+    x = torch.randn(
+        num_tokens,
+        hc_mult,
+        hidden_size * (2 if strided else 1),
+        dtype=torch.bfloat16,
+        device=DEVICE,
+    )
+    pre = torch.rand(num_tokens, hc_mult, device=DEVICE)
+    if strided:
+        x = x[..., ::2]
+        pre = pre.t().contiguous().t()
+    if num_tokens:
+        pre[0].zero_()
+        pre[0, -1] = 1
+    if num_tokens > 1 and hc_mult == 4:
+        pre[1].fill_(1)
+        x[1, 1] = -x[1, 0]
+        x[1, 3] = -x[1, 2]
+    expected = (pre.unsqueeze(-1) * x.float()).sum(dim=1).to(x.dtype)
+    actual = hc_collapse_triton(x, pre)
+    assert actual.is_contiguous()
+    # BF16 rounding only: ptxas <13.1 contracts the FP32 mix into FFMA despite
+    # enable_fp_fusion=False, so compare within a ULP and pin the exact cases below.
+    torch.testing.assert_close(actual, expected, atol=1.6e-2, rtol=1e-2)
+    if num_tokens:
+        torch.testing.assert_close(actual[0], x[0, -1], atol=0, rtol=0)
+    if num_tokens > 1 and hc_mult == 4:
+        torch.testing.assert_close(
+            actual[1], torch.zeros_like(actual[1]), atol=0, rtol=0
+        )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+def test_hc_collapse_custom_op_supports_compile():
+    x = torch.randn(2, 4, 5120, dtype=torch.bfloat16, device=DEVICE)
+    pre = torch.rand(2, 4, device=DEVICE)
+    torch.library.opcheck(torch.ops.vllm.hc_collapse_triton.default, (x, pre))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize("num_tokens", [1, 7])
+def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
+    """Match reference DSparkBlock.forward_head's hc_pre before its RMSNorm."""
+    from vllm.models.deepseek_v4_1.nvidia import dspark
+
+    set_random_seed(0)
+    hidden_size, hc_mult = 5120, 4
+    streams = torch.randn(
+        num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE
+    )
+    mixes = [torch.rand(num_tokens, hc_mult, device=DEVICE) for _ in range(2)]
+    carried_mixes = []
+
+    def make_layer(mix):
+        def forward(hidden, positions, ids, pre, post, res, residual):
+            carried_mixes.append(pre)
+            return hidden, None, None, None, mix
+
+        return forward
+
+    monkeypatch.setattr(dspark, "mhc_post_tilelang", lambda *args: streams)
+    draft = SimpleNamespace(
+        use_sequence_parallel=False,
+        hc_mult=hc_mult,
+        layers=[make_layer(mix) for mix in mixes],
+    )
+    actual = dspark.DSparkDeepseekV4Model.forward(
+        draft,
+        input_ids=torch.zeros(num_tokens, dtype=torch.long, device=DEVICE),
+        positions=torch.arange(num_tokens, device=DEVICE),
+        inputs_embeds=torch.zeros(
+            num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE
+        ),
+    )
+    expected = (streams.float() * mixes[-1].unsqueeze(-1)).sum(dim=1)
+    assert carried_mixes[0] is None
+    assert carried_mixes[1] is mixes[0]
+    torch.testing.assert_close(
+        actual, expected.to(streams.dtype), atol=1.6e-2, rtol=1e-2
+    )
+
+
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize(
+    "num_tokens,sinkhorn_repeat,norm_eps",
+    [
+        (0, 20, 1e-6),
+        (1, 1, 1e-6),
+        (1, 20, 1e-6),
+        (33, 20, 1e-20),
+        (128, 20, 1e-6),
+        (1024, 20, 1e-6),
+    ],
+)
+@pytest.mark.parametrize("entry", ["broadcast", "identity", "carried"])
+@pytest.mark.parametrize("use_deep_gemm", [False, True])
+@pytest.mark.parametrize("fused_norm", [False, True])
+def test_deepseek_v41_mhc_pre_delayed(
+    num_tokens,
+    sinkhorn_repeat,
+    norm_eps,
+    entry,
+    use_deep_gemm,
+    fused_norm,
+    monkeypatch,
+):
+    """Collapse with the carried pre-mix and save the new one for the next sublayer."""
+    from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+    if use_deep_gemm and not is_deep_gemm_supported():
+        pytest.skip("DeepGEMM not available")
+    monkeypatch.setattr(
+        "vllm.utils.deep_gemm.is_deep_gemm_supported", lambda: use_deep_gemm
+    )
+    set_random_seed(0)
+    hc_mult, hidden_size = 4, 5120
+    residual = torch.randn(
+        num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE
+    )
+    if num_tokens > 1:
+        residual[0].zero_()
+    fn = torch.randn(24, hc_mult, hidden_size, device=DEVICE) * 0.02
+    x = None
+    pre_mix = None
+    if entry == "broadcast":
+        x = residual[:, 0].contiguous()
+        residual = x.unsqueeze(1).expand(-1, hc_mult, -1).contiguous()
+        fn = fn.sum(1)
+    else:
+        fn = fn.flatten(1)
+        if entry == "carried":
+            pre_mix = torch.rand(num_tokens, hc_mult, device=DEVICE)
+            if num_tokens > 1:
+                # A constant collapse just above 1 rounds to BF16 1 before RMSNorm.
+                residual[1].fill_(1)
+                pre_mix[1].zero_()
+                pre_mix[1, 0] = 1.003
+    scale = torch.tensor([0.5, 0.25, 1.0], device=DEVICE)
+    base = torch.randn(24, device=DEVICE)
+    args = (residual, fn, scale, base, 1e-20, 1e-6, 1e-6, 2.0, sinkhorn_repeat)
+    expected = mhc_pre_delayed_torch(*args, pre_mix=pre_mix, x=x)
+    norm_kwargs = {}
+    if fused_norm:
+        weight = torch.empty(hidden_size, dtype=torch.bfloat16, device=DEVICE)
+        weight.uniform_(0.5, 1.5)
+        norm_kwargs = dict(norm_weight=weight, norm_eps=norm_eps)
+        # Compare to the original collapse + CUDA RMSNorm, including BF16 rounding.
+        unfused = mhc_pre_delayed_tilelang(*args, pre_mix=pre_mix, x=x)
+        normalized = torch.empty_like(unfused[2])
+        if num_tokens:
+            torch.ops._C.rms_norm(normalized, unfused[2], weight, norm_eps)
+        expected = (*unfused[:2], normalized, unfused[3])
+    actual = mhc_pre_delayed_tilelang(*args, pre_mix=pre_mix, x=x, **norm_kwargs)
+    if fused_norm and num_tokens:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = mhc_pre_delayed_tilelang(
+                *args, pre_mix=pre_mix, x=x, **norm_kwargs
+            )
+        graph.replay()
+        for eager, replayed in zip(actual, captured, strict=True):
+            torch.testing.assert_close(eager, replayed, atol=0, rtol=0)
+    if fused_norm and entry == "carried" and num_tokens > 1:
+        torch.testing.assert_close(actual[2][1], expected[2][1], atol=0, rtol=0)
+    # DeepGEMM uses TF32 for the projection; the TileLang fallback uses FP32.
+    atol, rtol = (1e-3, 1e-3) if use_deep_gemm else (1e-5, 1e-4)
+    for i in (0, 1, 3):
+        torch.testing.assert_close(actual[i], expected[i], atol=atol, rtol=rtol)
+    if pre_mix is None and not fused_norm:
+        torch.testing.assert_close(actual[2], expected[2], atol=0, rtol=0)
+    else:
+        torch.testing.assert_close(actual[2], expected[2], atol=1.6e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("entry", ["broadcast", "pipeline", "residual", "engram"])
+def test_deepseek_v41_decoder_mixes_match_torch(
+    entry, monkeypatch, default_vllm_config
+):
+    """Preserve carried pre-mixes and Engram ordering at every decoder entry."""
+    set_random_seed(0)
+    decoder = DeepseekV41DecoderLayer.__new__(DeepseekV41DecoderLayer)
+    nn.Module.__init__(decoder)
+    decoder.hc_mult = 4
+    decoder.hc_sinkhorn_iters = 20
+    decoder.hc_eps = 1e-6
+    decoder.rms_norm_eps = 1e-20
+    decoder.hc_post_alpha = 2.0
+    decoder.use_sequence_parallel = False
+    decoder.engram = None
+    from vllm.model_executor.layers.layernorm import RMSNorm
+
+    decoder.attn_norm = decoder.ffn_norm = RMSNorm(5120, 1e-6).to(
+        device=DEVICE, dtype=torch.bfloat16
+    )
+    decoder.attn = lambda positions, x, _: x * 0.5
+    decoder.ffn = lambda x, input_ids: x * 0.25
+    with torch.device(DEVICE):
+        decoder.hc_attn_fn = torch.randn(24, 20480) * 0.02
+        decoder.hc_ffn_fn = torch.randn(24, 20480) * 0.02
+        decoder.hc_attn_fn_broadcast = decoder.hc_attn_fn.view(24, 4, 5120).sum(1)
+        decoder.hc_attn_scale = decoder.hc_ffn_scale = torch.ones(3)
+        decoder.hc_attn_base = torch.randn(24)
+        decoder.hc_ffn_base = torch.randn(24)
+        x = torch.randn(3, 5120, dtype=torch.bfloat16)
+        positions = torch.arange(3)
+        kwargs = {}
+        if entry != "broadcast":
+            kwargs["pre_mix"] = torch.rand(3, 4)
+        if entry == "pipeline":
+            x = torch.randn(3, 4, 5120, dtype=torch.bfloat16)
+        if entry in ("residual", "engram"):
+            kwargs.update(
+                residual=torch.randn(3, 4, 5120, dtype=torch.bfloat16),
+                post_mix=torch.rand(3, 4, 1),
+                res_mix=torch.rand(3, 4, 4),
+            )
+        if entry == "engram":
+
+            class FakeEngram(nn.Module):
+                layer_hash_index = 0
+
+                def forward(self, residual, hashes, mask):
+                    return residual + 0.125
+
+            decoder.engram = FakeEngram()
+            kwargs["engram_hashes"] = torch.zeros(3, 1, 1, dtype=torch.int32)
+
+    actual = decoder(x, positions, None, **kwargs)
+
+    def reference(*args, norm_weight, norm_eps, **kwargs):
+        post, res, collapsed, pre = mhc_pre_delayed_torch(*args, **kwargs)
+        return post, res, decoder.attn_norm(collapsed), pre
+
+    monkeypatch.setattr(
+        "vllm.models.deepseek_v4_1.nvidia.model.mhc_pre_delayed_tilelang",
+        reference,
+    )
+    expected = decoder(x, positions, None, **kwargs)
+    for result, ref in zip(actual, expected, strict=True):
+        torch.testing.assert_close(result, ref, atol=2e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("carried", [False, True])
+def test_mhc_pre_delayed_custom_op_supports_compile(carried):
+    set_random_seed(0)
+    x = torch.randn(2, 4, 5120, dtype=torch.bfloat16, device=DEVICE)
+    fn = torch.randn(24, 20480, device=DEVICE) * 0.02
+    pre_mix = torch.rand(2, 4, device=DEVICE) if carried else None
+    scale = torch.ones(3, device=DEVICE)
+    base = torch.zeros(24, device=DEVICE)
+    torch.library.opcheck(
+        torch.ops.vllm.mhc_pre_delayed_tilelang.default,
+        (x, fn, scale, base, 1e-20, 1e-6, 1e-6, 2.0, 20, pre_mix),
+    )
 
 
 def sinkhorn_normalize_ref(x: torch.Tensor, repeat: int, eps: float) -> torch.Tensor:
@@ -203,7 +487,7 @@ def test_hc_prenorm_gemm_tilelang(num_tokens, hidden_size):
     _tilelang_hc_prenorm_gemm(x, fn, out, sqrsum, hidden_size, hc_mult)
 
     torch.testing.assert_close(out, out_ref, atol=1e-5, rtol=1e-4)
-    torch.testing.assert_close(sqrsum, sqrsum_ref, atol=8.0, rtol=5e-4)
+    torch.testing.assert_close(sqrsum, sqrsum_ref, atol=1e-2, rtol=1e-6)
 
 
 @pytest.mark.skipif(

@@ -1268,6 +1268,31 @@ def test_get_cached_wo_a_bf16_plain_caches() -> None:
     torch.testing.assert_close(out2, expected, atol=0, rtol=0)
 
 
+@pytest.mark.parametrize("scale_attr", ["weight_scale", "weight_scale_inv"])
+@torch.inference_mode()
+def test_get_cached_wo_a_bf16_dequantized_ignores_retained_scale(
+    scale_attr: str,
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _get_cached_wo_a_bf16
+
+    device = torch.device("cuda")
+    torch.manual_seed(6)
+    n_local_groups, o_lora_rank, hidden_dim = 2, 4, 8
+    weight = torch.randn(
+        n_local_groups * o_lora_rank, hidden_dim, dtype=torch.bfloat16, device=device
+    )
+    retained_scale = torch.full(
+        (n_local_groups, 1), 0.25, dtype=torch.float32, device=device
+    )
+    wo_a = _FakeWoA(weight)
+    setattr(wo_a, scale_attr, retained_scale)
+
+    out = _get_cached_wo_a_bf16(wo_a, n_local_groups, o_lora_rank, hidden_dim)
+
+    expected = weight.view(n_local_groups, o_lora_rank, hidden_dim)
+    torch.testing.assert_close(out, expected, atol=0, rtol=0)
+
+
 @torch.inference_mode()
 def test_get_cached_wo_a_bf16_fp8_blockscale_caches() -> None:
     from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _get_cached_wo_a_bf16

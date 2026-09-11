@@ -333,6 +333,57 @@ def test_decorator_breaks_when_invoked_inside_capture(cuda_capture_stream):
     assert torch.equal(x, torch.full((4,), 15.0, device="cuda"))
 
 
+@pytest.mark.parametrize("keyword", [False, True])
+def test_quantized_activation_replay_does_not_retain_tensors(
+    cuda_capture_stream, keyword
+):
+    """Release the producer tensors while preserving both buffers on replay."""
+    import gc
+    import weakref
+
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphCapture,
+        eager_break_during_capture,
+    )
+    from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
+
+    @eager_break_during_capture
+    def consume(x, data_out, scale_out):
+        data_out.copy_(x.data)
+        scale_out.copy_(x.scale)
+
+    source = torch.ones((128, 128), device="cuda", dtype=torch.bfloat16)
+    data_out = source.to(torch.float8_e4m3fn)
+    scale_out = source[:, ::32].to(torch.uint8)
+    output = torch.empty_like(source)
+    cap = BreakableCUDAGraphCapture()
+    with cap:
+        data = source.to(torch.float8_e4m3fn)
+        scale = source[:, ::32].to(torch.uint8)
+        activation = QuantizedActivation(
+            data, scale, source.dtype, source.shape, kMxfp8Dynamic
+        )
+        data_ref, scale_ref = weakref.ref(data), weakref.ref(scale)
+        if keyword:
+            consume(x=activation, data_out=data_out, scale_out=scale_out)
+        else:
+            consume(activation, data_out, scale_out)
+        output.copy_(data_out)
+
+    del data, scale, activation
+    gc.collect()
+    assert data_ref() is None
+    assert scale_ref() is None
+
+    for value in (1, 2, 3):
+        source.fill_(value)
+        cap.replay()
+        cuda_capture_stream.synchronize()
+        torch.testing.assert_close(output, source, rtol=0, atol=0)
+        torch.testing.assert_close(scale_out, source[:, ::32].to(torch.uint8))
+
+
 def test_eager_attention_inside_multistream_overlap(cuda_capture_stream):
     """Handle an eager attention break inside a multi-stream overlap region."""
     from vllm.compilation.breakable_cudagraph import (

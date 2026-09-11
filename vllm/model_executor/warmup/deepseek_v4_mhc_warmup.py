@@ -173,7 +173,10 @@ def deepseek_v4_mhc_warmup(
     # large checkpoints; bail out for any model that is not DeepSeek V4.
     config = getattr(model, "config", None)
     model_type = getattr(config, "model_type", None) if config is not None else None
-    if model_type is not None and model_type != "deepseek_v4":
+    if model_type is not None and model_type not in (
+        "deepseek_v4",
+        "deepseek_v41",
+    ):
         return
 
     layer = _find_first_mhc_layer(model)

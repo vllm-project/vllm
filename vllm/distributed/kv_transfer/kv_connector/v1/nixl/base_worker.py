@@ -460,11 +460,13 @@ class NixlBaseConnectorWorker:
                     for spec in iter_layer_specs(group.kv_cache_spec)
                 )
             ]
-            if len(ple_groups) != 1 or len(ple_groups[0][1].layer_names) != 1:
+            if len(ple_groups) > 1 or any(
+                len(group.layer_names) != 1 for _, group in ple_groups
+            ):
                 raise ValueError(
-                    "CSA-linear NIXL requires exactly one PLE cache owner."
+                    "CSA-linear NIXL requires at most one PLE cache owner."
                 )
-            self._ple_group_index = ple_groups[0][0]
+            self._ple_group_index = ple_groups[0][0] if ple_groups else None
 
         if self._has_mamba:
             assert self._is_hma_required
