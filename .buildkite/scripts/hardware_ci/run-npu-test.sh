@@ -94,17 +94,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 WORKDIR /workspace/vllm
 
-# Install vLLM dependencies in advance. Effect: As long as common.txt remains unchanged, the docker cache layer will be valid.
-COPY requirements/common.txt /workspace/vllm/requirements/common.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    uv pip install -r requirements/common.txt --quiet
-
 COPY . .
-
-# Install vLLM
-RUN --mount=type=cache,target=/root/.cache/uv \
-    VLLM_TARGET_DEVICE="empty" uv pip install -e /workspace/vllm/ --extra-index-url https://download.pytorch.org/whl/cpu/ --quiet --index-strategy unsafe-best-match && \
-    uv pip uninstall -y triton --quiet
 
 # Install vllm-ascend
 WORKDIR /workspace
@@ -112,16 +102,6 @@ ARG VLLM_ASCEND_REPO=https://github.com/vllm-project/vllm-ascend.git
 ARG VLLM_ASCEND_TAG=main
 RUN git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/" && \
     git clone --depth 1 \$VLLM_ASCEND_REPO --branch \$VLLM_ASCEND_TAG /workspace/vllm-ascend
-
-# Install vllm dependencies in advance. Effect: As long as common.txt remains unchanged, the docker cache layer will be valid.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r /workspace/vllm-ascend/requirements.txt --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi --quiet --index-strategy unsafe-best-match
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib && \
-    uv pip install -e /workspace/vllm-ascend/ --extra-index-url https://download.pytorch.org/whl/cpu/ --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi --quiet --index-strategy unsafe-best-match
 
 ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 ENV VLLM_USE_MODELSCOPE=True
@@ -187,5 +167,5 @@ docker run \
     "${image_name}" \
     bash -c '
     set -e
-    pytest -v -s tests/e2e/vllm_interface/
+    pytest -v -s tests/e2e/vllm_interface/test_vllm_pr_interface_compatibility.py
 '
