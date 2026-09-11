@@ -313,7 +313,11 @@ impl SchedulerMetrics {
         let lora_info = Family::default();
         registry.register(
             "vllm:lora_requests_info",
-            "Running stats on lora requests.",
+            "Running stats on lora requests. \
+             DEPRECATED: encodes adapter names into comma-separated \
+             label values; superseded by vllm:lora_adapter_loaded, \
+             vllm:num_gpu_loaded_lora_adapters and \
+             vllm:num_cpu_loaded_lora_adapters.",
             lora_info.clone(),
         );
 
