@@ -1162,12 +1162,14 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     # junction (absolute) and stops the chunk there (req_2 has num_computed 0).
     # Create minimal mock with just the needed attributes
     mock = SimpleNamespace(
+        block_size=block_size,
         cache_config=SimpleNamespace(block_size=block_size),
         max_num_scheduled_tokens=3 * block_size,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         use_eagle_block_drop=False,
         hash_block_size=block_size,
         mamba_partial_cache_hit=False,
+        mamba_fine_grained_prefix_cache=False,
         mamba_has_prefill_checkpoint_blocks=False,
     )
     req_2.shared_prefix_boundary = shared_prefix_boundary
@@ -3606,9 +3608,10 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
         use_eagle=True,
     )
 
-    # 127 tokens: latest replay boundary is floor((127 - 1) / 32) * 32 = 96.
-    # The EAGLE/MTP SWA lookup group must cache the local tail ending at
-    # 104 tokens, and that tail is two 8-token blocks wide: hashes 11 and 12.
+    # 127 tokens: eagle proves a boundary only if an aligned unit exists past
+    # it, so the replay boundary rewinds one unit to
+    # floor(127 / 32) * 32 - 32 = 64. The SWA tail plus its proof block then
+    # ends at 72, two 8-token blocks wide: hashes 7 and 8.
     token_ids = [i for i in range(15) for _ in range(block_size)] + [15] * 7
     req0 = make_request("0", token_ids, block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
@@ -3622,7 +3625,7 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
     assert blocks is not None
 
     pool = manager.block_pool
-    expected_swa_cached = {11, 12}
+    expected_swa_cached = {7, 8}
     for i in range(15):
         cached = pool.get_cached_block(req0.block_hashes[i], kv_cache_group_ids=[1])
         if i in expected_swa_cached:
@@ -3634,8 +3637,106 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary():
 
     req1 = make_request("1", token_ids, block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
-    assert num_computed_tokens == 12 * block_size
-    assert [len(blocks) for blocks in computed_blocks.blocks] == [3, 12]
+    assert num_computed_tokens == 8 * block_size
+    assert [len(blocks) for blocks in computed_blocks.blocks] == [2, 8]
+
+
+def test_hybrid_mamba_retention_mtp_resend_of_aligned_prompt():
+    """An identical resend and a longer sibling resume at DIFFERENT positions.
+
+    How far a lookup matches depends on who is asking. A resend of the same
+    prompt caps its lookup at ``num_tokens - 1`` (the last token is recomputed
+    for logits), while a sibling whose prompt merely starts with this one caps
+    above the prompt. The two coincide unless the prompt length is an exact
+    multiple of the alignment -- there they differ by one alignment unit, and
+    under the EAGLE drop BOTH are reachable.
+
+    Retaining only the higher one leaves the resend with every retained state
+    above every candidate its lookup can produce, and the reconciled hit
+    collapses to 0 -- the same zero-hit failure sparse retention already fixes
+    at unaligned prompt lengths.
+    """
+    block_size = 32
+    num_spec = 3
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba_mtp"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                    num_speculative_blocks=num_spec,
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        retention_interval=0,
+        use_eagle=True,
+    )
+
+    # 128 tokens, an exact multiple of the 32-token alignment. A longer sibling
+    # matches 128 and drops to 96; this prompt's own resend caps at 127, matches
+    # 96 and drops to 64. Both states must survive retention.
+    token_ids = [i for i in range(4) for _ in range(block_size)]
+    req0 = make_request("0", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    # Prefill in block-aligned chunks the way the align-mode scheduler does: a
+    # state only materializes as a chunk's running-state block, so a
+    # single-shot prefill could not retain the lower one.
+    for chunk_end in (32, 64, 96, 128):
+        blocks = manager.allocate_slots(
+            req0,
+            chunk_end - req0.num_computed_tokens,
+            num_computed_tokens,
+            computed_blocks,
+            num_lookahead_tokens=num_spec,
+        )
+        assert blocks is not None
+        req0.num_computed_tokens = chunk_end
+
+    # Block ``i`` ends at token ``(i + 1) * 32``, so positions 64 and 96 are
+    # mamba blocks 1 and 2.
+    pool = manager.block_pool
+    expected_mamba_cached = {1, 2}
+    for i in range(4):
+        cached = pool.get_cached_block(req0.block_hashes[i], kv_cache_group_ids=[1])
+        if i in expected_mamba_cached:
+            assert cached is not None, f"mamba hash {i} should be cached"
+        else:
+            assert cached is None, f"mamba hash {i} should not be cached"
+    manager.free(req0)
+
+    # The identical resend: full attention matches blocks 0-2 (96 tokens, capped
+    # by num_tokens - 1) and the EAGLE drop caps the candidate at 64. Without
+    # the lower state retained the reconciled hit would be 0.
+    req1 = make_request("1", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
+    assert num_computed_tokens == 2 * block_size
+    assert [len(blocks) for blocks in computed_blocks.blocks] == [2, 2]
+
+    # The longer sibling resumes one alignment unit higher, off the same prompt.
+    longer = make_request("2", token_ids + [9] * block_size, block_size, sha256)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(longer)
+    assert num_computed_tokens == 3 * block_size
 
 
 def test_block_lookup_cache_single_block_per_key():
@@ -4386,6 +4487,41 @@ def test_mamba_shared_prefix_reuse_under_zero_retention():
     assert last_req_hit(retention=0, pin=False) == 0
     # retention=0 with the pin keeps the junction -> reuse restored.
     assert last_req_hit(retention=0, pin=True) == 2 * block_size
+
+
+@pytest.mark.skip_global_cleanup
+def test_swa_reachable_block_mask_final_partial_segment():
+    """Only a final SWA horizon makes its incomplete segment tail reachable."""
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    spec = SlidingWindowSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=16,
+    )
+    start_block = 243
+    end_block = 250
+
+    def reachable_blocks(
+        final_segment_end_block: int, *, use_eagle: bool = False
+    ) -> set[int]:
+        mask = SlidingWindowManager.reachable_block_mask(
+            start_block=start_block,
+            end_block=end_block,
+            alignment_tokens=36,
+            kv_cache_spec=spec,
+            use_eagle=use_eagle,
+            final_segment_end_block=final_segment_end_block,
+        )
+        assert mask is not None
+        return {start_block + i for i, reachable in enumerate(mask) if reachable}
+
+    assert reachable_blocks(300) == {248, 249}
+    assert reachable_blocks(250) == {246, 247, 248, 249}
+    assert reachable_blocks(300, use_eagle=True) == {243, 248, 249}
+    assert reachable_blocks(250, use_eagle=True) == {243, 248, 249}
 
 
 def test_swa_reachable_block_mask_pins_shared_prefix():

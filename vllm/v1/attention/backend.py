@@ -227,6 +227,13 @@ class AttentionBackend(ABC):
             return False
 
     @classmethod
+    def supports_dcp(cls) -> bool:
+        try:
+            return cls.get_impl_cls().supports_dcp
+        except NotImplementedError:
+            return False
+
+    @classmethod
     def supports_non_causal_dcp(cls) -> bool:
         builder_cls = cls.get_builder_cls()
         return bool(getattr(builder_cls, "supports_non_causal_multi_token_dcp", False))
@@ -324,6 +331,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("KV connector not supported")
         if use_pcp and not cls.supports_pcp():
             invalid_reasons.append("PCP not supported")
+        if use_dcp and not cls.supports_dcp():
+            invalid_reasons.append("DCP not supported")
         if (
             use_adaptive_verification
             and not cls.supports_device_cpu_query_lens_mismatch()
@@ -810,7 +819,7 @@ class AttentionImplBase(ABC, Generic[T]):
     # Whether the attention impl supports Prefill Context Parallelism.
     supports_pcp: bool = False
     # Whether the attention impl supports Decode Context Parallelism.
-    supports_dcp: bool = True
+    supports_dcp: bool = False
     # Whether the attention impl(or ops) supports MTP
     # when cp_kv_cache_interleave_size > 1
     supports_mtp_with_cp_non_trivial_interleave_size: bool = False

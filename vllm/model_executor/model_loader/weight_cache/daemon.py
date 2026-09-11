@@ -17,8 +17,8 @@ Engines then load from the daemons with:
     vllm serve /path/to/model --tensor-parallel-size 4 \\
         --load-format ipc_cache
 
-Only tensor parallelism is supported; pipeline, data, and expert parallelism
-are rejected at launch.
+Only tensor and expert parallelism are supported; pipeline and data
+parallelism are rejected at launch.
 """
 
 import contextlib
@@ -45,6 +45,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorEntry,
     WeightCacheKey,
     WeightCacheUnavailableError,
+    check_ipc_platform_support,
     check_ipc_quant_support,
     ensure_private_socket_dir,
     get_physical_device_id,
@@ -56,23 +57,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-logger = init_logger(__name__)
-
-
-def _report_ready(message: str) -> None:
-    """Write a readiness message straight to the original stderr descriptor.
-
-    Loading the model pulls in FlashInfer's CuTeDSL JIT compiler, which swaps
-    ``sys.stdout``/``sys.stderr`` for in-memory buffers while compiling kernels
-    across worker threads. That save/restore races on the interpreter-global
-    streams and can leave them (and vLLM's logging handler, which caches the
-    original stream object) detached, silently swallowing everything logged
-    afterwards -- including the daemon's readiness announcement. Since operators
-    rely on that line to know the daemon is serving, write it directly to file
-    descriptor 2 so it bypasses the logging machinery entirely.
-    """
-    with contextlib.suppress(OSError):
-        os.write(2, (message + "\n").encode())
+logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
 
 
 def export_entries(
@@ -227,12 +212,14 @@ class WeightCacheDaemon:
                         self._handle_connection(conn)
                     except (ConnectionError, EOFError):
                         logger.warning("Client disconnected mid-request")
-                    except Exception:
-                        # A single malformed or malicious request must not take
-                        # down the daemon for every other engine on this GPU.
+                    except Exception as e:
+                        # Report the error back instead of just closing the
+                        # socket, but don't let it take the daemon down.
                         logger.exception(
                             "Error handling weight cache client; continuing"
                         )
+                        with contextlib.suppress(OSError):
+                            send_msg(conn, {"status": "error", "message": str(e)})
         finally:
             server.close()
             if os.path.exists(socket_path):
@@ -296,6 +283,12 @@ class WeightCacheDaemon:
                 "gpu_uuid": self._gpu_uuid(),
             },
         )
+        logger.info_once(
+            "Weight cache daemon rank %d sent %d tensors (+%d aliases) to engine",
+            self.tp_rank,
+            len(self.entries),
+            len(self.aliases),
+        )
 
     def _handle_release(self, conn: socket.socket) -> None:
         self.entries.clear()
@@ -327,17 +320,16 @@ def _run_daemon(
 
 
 def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
-    """Reject every parallelism mode other than tensor parallelism."""
+    """Reject parallelism modes other than tensor/expert parallelism."""
     unsupported = {
         "pipeline parallelism": parallel_config.pipeline_parallel_size > 1,
         "data parallelism": parallel_config.data_parallel_size > 1,
-        "expert parallelism": parallel_config.enable_expert_parallel,
     }
     for name, enabled in unsupported.items():
         if enabled:
             raise ValueError(
-                f"The weight cache daemon only supports tensor parallelism; "
-                f"{name} is not supported"
+                f"The weight cache daemon only supports tensor and expert "
+                f"parallelism; {name} is not supported"
             )
 
 
@@ -364,6 +356,9 @@ def main() -> None:
             "The weight cache daemon itself must load from disk; use the "
             "default --load-format"
         )
+    # Config-only so it can fail before any model loading; the quant method
+    # check needs the created model and runs in get_daemon_model.
+    check_ipc_platform_support(where="daemon")
     parallel_config = vllm_config.parallel_config
     _reject_unsupported_parallelism(parallel_config)
     tp_size = parallel_config.tensor_parallel_size
@@ -412,16 +407,11 @@ def main() -> None:
                 for proc in procs:
                     proc.join()
                 sys.exit(max((p.exitcode or 0) for p in procs))
-    logger.info_once(
-        "===== Weight cache daemon READY: all %d ranks serving in %s =====",
+    logger.info(
+        "Weight cache daemon ready: all %d ranks serving in %s",
         tp_size,
         args.weight_cache_socket_dir or "the default socket dir",
     )
-    _report_ready(
-        f"===== Weight cache daemon READY: all {tp_size} rank(s) serving in "
-        f"{args.weight_cache_socket_dir or 'the default socket dir'} ====="
-    )
-
     for proc in procs:
         proc.join()
     sys.exit(max(proc.exitcode or 0 for proc in procs))

@@ -168,6 +168,19 @@ mod tests {
     }
 
     #[test]
+    fn invalid_reasoning_effort_maps_to_invalid_request() {
+        let error = vllm_chat::Error::InvalidReasoningEffort(
+            "DeepSeek V4.1 reasoning_effort must be within [1, 100]".to_string(),
+        );
+        let api_error = chat_submit_error("failed to submit chat request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            api_error.to_error_response().error.error_type,
+            "invalid_request_error"
+        );
+    }
+
+    #[test]
     fn llm_wrapped_empty_prompt_maps_to_invalid_request() {
         let error = vllm_text::Error::Llm(vllm_llm::Error::EmptyPromptTokenIds {
             request_id: "req-1".to_string(),

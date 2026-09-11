@@ -25,6 +25,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     UnsupportedQuantForIPCError,
     WeightCacheKey,
     WeightCacheUnavailableError,
+    check_ipc_platform_support,
     check_ipc_quant_support,
     get_physical_device_id,
     get_socket_path,
@@ -118,6 +119,9 @@ class IpcModelLoader(BaseModelLoader):
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
+        # An unsupported platform is a permanent misconfiguration rather than
+        # a transient daemon outage, so it is raised even when fallback is on.
+        check_ipc_platform_support(where="engine")
         state_fetched = False
         try:
             entries, aliases = self._fetch_entries(model_config)
