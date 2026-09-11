@@ -7,24 +7,130 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import multiprocessing
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+import torch
 
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
-from vllm.model_executor.model_loader.weight_cache.protocol import get_socket_path
+from vllm.model_executor.model_loader.weight_cache.protocol import (
+    WeightCacheKey,
+    get_socket_path,
+    recv_msg,
+    send_msg,
+)
 from vllm.platforms import current_platform
 
 DAEMON_TIMEOUT_S = 600
+
+
+def _weight_cache_consumer(conn, copy_weights: bool) -> None:
+    with conn:
+        response = recv_msg(conn)
+        tensor = response["entries"]["weight"].rebuild(0)
+        if copy_weights:
+            tensor = tensor.clone()
+        send_msg(conn, "ready")
+        try:
+            if recv_msg(conn) == "check":
+                send_msg(conn, bool(torch.all(tensor == 7).item()))
+        except (ConnectionError, EOFError):
+            pass
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA IPC requires a GPU")
+@pytest.mark.parametrize("zero_copy_consumer", [False, True], ids=["copy", "mixed"])
+def test_ipc_cache_release_keeps_live_consumers(monkeypatch, zero_copy_consumer):
+    """Release preserves live IPC weights and frees them after the last consumer."""
+    from vllm.model_executor import model_loader
+    from vllm.model_executor.model_loader.weight_cache import daemon as daemon_module
+
+    def get_model(**kwargs):
+        model = torch.nn.Linear(1024, 1, bias=False, device="cuda")
+        model.weight.data.fill_(7)
+        return model
+
+    monkeypatch.setattr(model_loader, "get_model", get_model)
+    monkeypatch.setattr(
+        daemon_module, "set_current_vllm_config", lambda _: nullcontext()
+    )
+    monkeypatch.setattr(daemon_module, "init_distributed_environment", lambda **_: None)
+    monkeypatch.setattr(
+        daemon_module, "ensure_model_parallel_initialized", lambda *_: None
+    )
+    daemon = daemon_module.WeightCacheDaemon.__new__(daemon_module.WeightCacheDaemon)
+    daemon.vllm_config = None
+    daemon.tp_rank = 0
+    daemon.distributed_init_method = "unused"
+    daemon.cache_config = WeightCacheKey(
+        checkpoint="test",
+        model_arch="Linear",
+        tp_size=1,
+        tp_rank=0,
+        dtype="torch.float32",
+        quantization=None,
+        quant_config_hash="",
+        revision=None,
+        vllm_version="test",
+    )
+    torch.accelerator.set_device_index(0)
+    torch.cuda.ipc_collect()
+    before_load = torch.accelerator.memory_allocated()
+    daemon.load_model()
+    after_load = torch.accelerator.memory_allocated()
+    assert after_load > before_load
+
+    ctx = multiprocessing.get_context("spawn")
+    consumers = []
+    try:
+        for copy_weights in ([False] if zero_copy_consumer else []) + [True]:
+            parent_conn, child_conn = socket.socketpair()
+            parent_conn.settimeout(120)
+            process = ctx.Process(
+                target=_weight_cache_consumer, args=(child_conn, copy_weights)
+            )
+            process.start()
+            child_conn.close()
+            consumers.append((parent_conn, process))
+            daemon._handle_get_state(parent_conn, {"cache_config": daemon.cache_config})
+            assert recv_msg(parent_conn) == "ready"
+
+        release_conn, response_conn = socket.socketpair()
+        with release_conn, response_conn:
+            daemon._handle_release(release_conn)
+            assert recv_msg(response_conn)["status"] == "ok"
+
+        # Check ownership before allowing a consumer to read potentially freed memory.
+        expected = after_load if zero_copy_consumer else before_load
+        assert torch.accelerator.memory_allocated() == expected
+        for conn, process in consumers:
+            send_msg(conn, "check")
+            assert recv_msg(conn) is True
+            process.join(timeout=30)
+            assert process.exitcode == 0
+        torch.cuda.ipc_collect()
+        assert torch.accelerator.memory_allocated() == before_load
+    finally:
+        for conn, process in consumers:
+            conn.close()
+            process.join(timeout=10)
+            if process.is_alive():
+                process.kill()
+                process.join()
+        daemon.model = None
+        torch.cuda.ipc_collect()
 
 
 class WeightCacheDaemon:
