@@ -404,6 +404,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         v: torch.Tensor,
         ps: dict,
         is_causal: bool,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the PS ASM kernel + reduce, returning `(out, lse)`.
 
@@ -437,11 +438,17 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             ((partial_q, nhead), torch.float32),
             ((total_q, nhead), torch.float32),
         )
-        out = torch.empty(
-            (total_q, nhead, self.v_head_dim),
-            dtype=out_dtype,
-            device=q.device,
-        )
+        if out is None:
+            out = torch.empty(
+                (total_q, nhead, self.v_head_dim),
+                dtype=out_dtype,
+                device=q.device,
+            )
+        else:
+            assert not pad
+            assert out.shape == (total_q, nhead, self.v_head_dim)
+            assert out.dtype == out_dtype
+            assert out.is_contiguous()
 
         # Q/K/V are cast to FP8 with no additional rescaling for now, which relies on
         # activations staying within the e4m3 range. Since gfx950 uses e4m3fn, larger
@@ -488,6 +495,10 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         # triton_merge_attn_states wants it as (num_heads, total_q)
         return out, final_lse.transpose(0, 1).contiguous()
 
+    def supports_out(self) -> bool:
+        # Can't be used with padding
+        return self._kernel_num_heads == self.num_heads
+
     def run_prefill_new_tokens(
         self,
         q: torch.Tensor,
@@ -500,11 +511,16 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         assert self._new_tokens_ps is not None, (
             "prepare_metadata must be called before run_prefill_new_tokens"
         )
-        assert out is None and output_scale is None, (
-            "fused/in-place FP8 output not supported by the AITER ASM "
-            "MLA prefill backend"
+        assert output_scale is None, (
+            "fused FP8 output not supported by the AITER ASM MLA prefill backend"
         )
-        out, lse = self._run_kernel(q, k, v, self._new_tokens_ps, is_causal=True)
+        assert out is None or self.supports_out(), (
+            "AITER ASM MLA prefill pads the head count to a multiple of "
+            f"{_HEAD_ALIGNMENT}, so it cannot write into a caller `out`"
+        )
+        out, lse = self._run_kernel(
+            q, k, v, self._new_tokens_ps, is_causal=True, out=out
+        )
         if return_softmax_lse:
             return out, lse
         return out
@@ -517,13 +533,13 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         v: torch.Tensor,
         out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert out is None, (
-            "fused/in-place FP8 output not supported by the AITER ASM "
-            "MLA prefill backend"
+        assert out is None or self.supports_out(), (
+            "AITER ASM MLA prefill pads the head count to a multiple of "
+            f"{_HEAD_ALIGNMENT}, so it cannot write into a caller `out`"
         )
         assert 0 <= chunk.index < len(self._context_ps), (
             f"context chunk {chunk.index} requested but prepare_metadata built "
             f"{len(self._context_ps)} chunk(s). Call prepare_metadata first."
         )
         ps = self._context_ps[chunk.index]
-        return self._run_kernel(q, k, v, ps, is_causal=False)
+        return self._run_kernel(q, k, v, ps, is_causal=False, out=out)
