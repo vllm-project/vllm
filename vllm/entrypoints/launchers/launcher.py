@@ -15,10 +15,6 @@ from fastapi import FastAPI
 from vllm import envs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.launchers.utils.ssl import SSLCertRefresher
-from vllm.entrypoints.serve.utils.api_utils import (
-    log_non_default_args,
-    log_version_and_model,
-)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
@@ -31,6 +27,7 @@ from .utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
+from .utils.setup_utils import log_non_default_args, log_version_and_model
 
 logger = init_logger(__name__)
 

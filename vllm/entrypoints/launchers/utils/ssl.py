@@ -4,8 +4,15 @@
 import asyncio
 from collections.abc import Callable
 from ssl import SSLContext
+from typing import TYPE_CHECKING
 
 from watchfiles import Change, awatch
+
+if TYPE_CHECKING:
+    import argparse
+    import contextlib
+
+    import uvicorn
 
 from vllm.logger import init_logger
 
@@ -76,3 +83,24 @@ class SSLCertRefresher:
         if self.watch_ssl_ca_task:
             self.watch_ssl_ca_task.cancel()
             self.watch_ssl_ca_task = None
+
+
+def start_ssl_refresher_if_needed(
+    args: "argparse.Namespace",
+    config: "uvicorn.Config",
+    exit_stack: "contextlib.ExitStack",
+) -> None:
+    """Start the background SSL certificate refresher if requested."""
+    if not args.enable_ssl_refresh:
+        return
+
+    if config.ssl is None:
+        raise ValueError("--enable-ssl-refresh requires SSL to be configured")
+
+    ssl_cert_refresher = SSLCertRefresher(
+        ssl_context=config.ssl,
+        key_path=config.ssl_keyfile,
+        cert_path=config.ssl_certfile,
+        ca_path=config.ssl_ca_certs,
+    )
+    exit_stack.callback(ssl_cert_refresher.stop)
