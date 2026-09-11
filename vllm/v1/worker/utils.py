@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import Any
@@ -24,7 +24,7 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadataBuilder,
-    select_common_block_size_from_constraints,
+    MultipleOf,
 )
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
@@ -349,13 +349,41 @@ def select_common_block_size(
         ValueError: If no valid block size found.
     """
 
-    if not backends:
+    def block_size_is_supported(
+        backends: list[type[AttentionBackend]], block_size: int
+    ) -> bool:
+        """Check if the block size is supported by all backends."""
+        for backend in backends:
+            is_supported = False
+            for supported_size in backend.get_supported_kernel_block_sizes():
+                if isinstance(supported_size, int):
+                    if block_size == supported_size:
+                        is_supported = True
+                elif isinstance(supported_size, MultipleOf):
+                    if block_size % supported_size.base == 0:
+                        is_supported = True
+                else:
+                    raise ValueError(f"Unknown supported size: {supported_size}")
+            if not is_supported:
+                return False
+        return True
+
+    if block_size_is_supported(backends, kv_manager_block_size):
         return kv_manager_block_size
 
-    return select_common_block_size_from_constraints(
-        kv_manager_block_size,
-        [backend.get_supported_kernel_block_sizes() for backend in backends],
-    )
+    # MultipleOf constraints also accept the manager size if they accept a divisor.
+    # Any remaining candidate must therefore be an explicit size from a backend.
+    candidates = {
+        size
+        for backend in backends
+        for size in backend.get_supported_kernel_block_sizes()
+        if isinstance(size, int) and kv_manager_block_size % size == 0
+    }
+
+    for size in sorted(candidates, reverse=True):
+        if block_size_is_supported(backends, size):
+            return size
+    raise ValueError(f"No common block size for {kv_manager_block_size}.")
 
 
 def allocate_kv_cache(
@@ -363,21 +391,17 @@ def allocate_kv_cache(
     device: torch.device,
     layout: KVCacheLayout,
     kernel_block_sizes: list[int] | None = None,
-    host_allocator: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
 
     Every KVCacheTensor places its layers in the same backing allocation: layer ``l`` of
     block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
-    groups overlay each other, so tensors may address the same bytes. Host-resident
-    tensors share a second backing, taken from ``host_allocator`` when given.
-    Layers whose spec has no per-layer view map to their backing tensor instead.
+    groups overlay each other, so tensors may address the same bytes.
     """
-    tensors = kv_cache_config.kv_cache_tensors
-    if not tensors:
+    if not kv_cache_config.kv_cache_tensors:
         return {}
 
-    sizes = {tensor.size for tensor in tensors if not tensor.host_resident}
+    sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
     assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
     raw_size = sizes.pop()
     # wvSplitKrc's process-lifetime static workspaces (csrc/rocm/skinny_gemms.cu)
@@ -394,21 +418,10 @@ def allocate_kv_cache(
         buf_size = ((raw_size + page_size - 1) // page_size) * page_size
     else:
         buf_size = raw_size
-    backings = {False: torch.zeros(buf_size, dtype=torch.int8, device=device)}
-
-    host_sizes = {tensor.size for tensor in tensors if tensor.host_resident}
-    assert len(host_sizes) <= 1, "Host KV cache tensors must share one backing."
-    if host_sizes:
-        host_size = host_sizes.pop()
-        backings[True] = (
-            host_allocator(host_size)
-            if host_allocator is not None
-            else torch.zeros(host_size, dtype=torch.int8, device="cpu")
-        )
+    buf = torch.zeros(buf_size, dtype=torch.int8, device=device)
 
     kv_caches: dict[str, torch.Tensor] = {}
-    for tensor in tensors:
-        buf = backings[tensor.host_resident]
+    for tensor in kv_cache_config.kv_cache_tensors:
         layer_name = tensor.layers[0]
         group_id, group = next(
             (group_id, group)
@@ -418,6 +431,7 @@ def allocate_kv_cache(
         spec = group.kv_cache_spec
         if isinstance(spec, UniformTypeKVCacheSpecs):
             spec = spec.kv_cache_specs[layer_name]
+
         if not spec.has_layer_views:
             kv_caches.update((name, buf) for name in tensor.layers)
             continue

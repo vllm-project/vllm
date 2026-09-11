@@ -18,7 +18,10 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
-from vllm.v1.hisparse.binding import init_hisparse_kv_cache
+from vllm.v1.hisparse.binding import (
+    init_hisparse_kv_cache,
+    resolve_hisparse_block_size,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -134,6 +137,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             if isinstance(spec, AttentionSpec):
                 spec = attn_module.get_attn_backend().customize_spec(spec)
             kv_cache_spec[layer_name] = spec
+    resolve_hisparse_block_size(vllm_config, kv_cache_spec, attn_layers)
     return kv_cache_spec
 
 

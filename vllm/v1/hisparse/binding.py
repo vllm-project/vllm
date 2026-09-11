@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side wiring of HiSparse caches to attention layers."""
 
+from collections.abc import Mapping
+from copy import copy
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -13,19 +15,100 @@ from vllm.v1.hisparse.layout import (
 )
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
-    allocate_pinned_host_pool,
-    check_hisparse_host_memory,
+    HiSparseHostPool,
+    initialize_hisparse_runtime_buffers,
     release_pinned_state,
 )
 from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheLayout,
+    KVCacheSpec,
+    MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
+    create_kv_cache_views,
 )
-from vllm.v1.worker.utils import allocate_kv_cache
+from vllm.v1.worker.utils import allocate_kv_cache, select_common_block_size
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
     from vllm.v1.worker.gpu.block_table import BlockTables
+
+
+def resolve_hisparse_block_size(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+    attn_layers: Mapping[str, "AttentionLayerBase"],
+) -> None:
+    """Resolve a common kernel block size in-place for HiSparse MLA specs."""
+    if vllm_config.attention_config.hisparse_config is None:
+        return
+    mla_specs = {
+        name: spec
+        for name, spec in kv_cache_spec.items()
+        if isinstance(spec, MLAAttentionSpec)
+    }
+    if not mla_specs:
+        return
+    block_sizes = {spec.block_size for spec in mla_specs.values()}
+    if len(block_sizes) != 1:
+        raise ValueError("HiSparse requires one scheduler block size.")
+    backends = [attn_layers[name].get_attn_backend() for name in mla_specs]
+    try:
+        block_size = select_common_block_size(block_sizes.pop(), backends)
+    except ValueError as error:
+        raise ValueError(
+            "HiSparse requires a GPU block size supported by every sparse "
+            f"attention and indexer backend: {error}"
+        ) from error
+    kv_cache_spec.update(
+        (name, spec.copy_with_new_block_size(block_size))
+        for name, spec in mla_specs.items()
+    )
+
+
+def allocate_hisparse_kv_caches(
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    layout: KVCacheLayout,
+    kernel_block_sizes: list[int],
+    host_pool: HiSparseHostPool,
+) -> dict[str, torch.Tensor]:
+    """Allocate the host pool separately from the shared device backing."""
+    device_config = copy(kv_cache_config)
+    device_config.kv_cache_tensors = [
+        tensor
+        for tensor in kv_cache_config.kv_cache_tensors
+        if not tensor.host_resident
+    ]
+    kv_caches = allocate_kv_cache(device_config, device, layout, kernel_block_sizes)
+    host_tensors = [
+        tensor for tensor in kv_cache_config.kv_cache_tensors if tensor.host_resident
+    ]
+    (host_size,) = {tensor.size for tensor in host_tensors}
+    backing = host_pool.allocate(host_size)
+    (host_group_id,) = kv_cache_config.host_group_ids
+    host_spec = kv_cache_config.kv_cache_groups[host_group_id].kv_cache_spec
+    for tensor in host_tensors:
+        spec = (
+            host_spec.kv_cache_specs[tensor.layers[0]]
+            if isinstance(host_spec, UniformTypeKVCacheSpecs)
+            else host_spec
+        )
+        kernel_block_size = kernel_block_sizes[host_group_id]
+        if isinstance(spec, MLAAttentionSpec) and spec.storage_block_size is not None:
+            kernel_block_size = spec.storage_block_size
+        views = create_kv_cache_views(
+            backing,
+            spec,
+            kv_cache_config.num_blocks_of(tensor),
+            layout,
+            tensor,
+            kernel_block_size=kernel_block_size,
+        )
+        kv_caches.update(zip(tensor.layers, views))
+    return kv_caches
 
 
 def init_hisparse_kv_cache(
@@ -37,46 +120,27 @@ def init_hisparse_kv_cache(
     block_tables: "BlockTables",
 ) -> dict[str, torch.Tensor]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
-    host_allocator = HiSparseHostAllocator(kv_cache_config)
-    kv_caches = allocate_kv_cache(
+    host_pool = HiSparseHostPool()
+    kv_caches = allocate_hisparse_kv_caches(
         kv_cache_config,
         device,
         vllm_config.cache_config.get_resolved_kv_cache_layout(),
         kernel_block_sizes,
-        host_allocator=host_allocator,
+        host_pool,
     )
     cache_handles = bind_hisparse_kv_caches(
         forward_context=forward_context,
         kv_cache_config=kv_cache_config,
         kv_caches=kv_caches,
         block_tables=block_tables,
-        pinned_host_pools=host_allocator.registered_pools,
+        host_pool=host_pool,
     )
-    _init_runtime_buffers(
+    initialize_hisparse_runtime_buffers(
         cache_handles,
         max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
         max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
     )
     return kv_caches
-
-
-class HiSparseHostAllocator:
-    """Allocate the registered pinned host pool and remember it by storage."""
-
-    def __init__(self, kv_cache_config: KVCacheConfig) -> None:
-        host_sizes = {
-            tensor.size
-            for tensor in kv_cache_config.kv_cache_tensors
-            if tensor.host_resident
-        }
-        assert len(host_sizes) <= 1
-        check_hisparse_host_memory(sum(host_sizes))
-        self.registered_pools: dict[int, torch.Tensor] = {}
-
-    def __call__(self, size: int) -> torch.Tensor:
-        backing, registered = allocate_pinned_host_pool(size)
-        self.registered_pools[registered.untyped_storage().data_ptr()] = registered
-        return backing
 
 
 def _get_hisparse_cache(
@@ -120,9 +184,10 @@ def bind_hisparse_kv_caches(
     kv_cache_config: KVCacheConfig,
     kv_caches: dict[str, torch.Tensor],
     block_tables: "BlockTables",
-    pinned_host_pools: dict[int, torch.Tensor],
+    host_pool: HiSparseHostPool,
 ) -> list[HiSparseCacheHandle]:
     """Bind existing cache storage and block tables; return the bound handles."""
+    assert host_pool.registered is not None
     tensor_configs = {
         name: tensor_config
         for tensor_config in kv_cache_config.kv_cache_tensors
@@ -189,11 +254,12 @@ def bind_hisparse_kv_caches(
             ):
                 raise RuntimeError("HiSparse resident and hot layouts must match.")
             source_cache = kv_caches[layer_name]
+            assert source_cache.untyped_storage().data_ptr() == (
+                host_pool.registered.untyped_storage().data_ptr()
+            )
             cache_handle.runtime.bind_source_cache(
                 source_cache,
-                registered_host_pool=pinned_host_pools[
-                    source_cache.untyped_storage().data_ptr()
-                ],
+                registered_host_pool=host_pool.registered,
             )
             cache_handles.append(cache_handle)
             # The hot slab is raw storage owned by the runtime, not a layer
@@ -209,38 +275,3 @@ def bind_hisparse_kv_caches(
         ]
         cache_handle.mirror_slot_mapping = block_tables.slot_mappings[source_group_id]
     return cache_handles
-
-
-def _init_runtime_buffers(
-    cache_handles: list[HiSparseCacheHandle],
-    *,
-    max_num_reqs: int,
-    max_num_batched_tokens: int,
-) -> None:
-    """Allocate shared request indices and per-layer mirror staging buffers."""
-    resident = cache_handles[0].view
-    assert resident is not None
-    request_state_indices = torch.full(
-        (max_num_reqs,), -1, dtype=torch.int32, device=resident.cache.device
-    )
-    for cache_handle in cache_handles:
-        cache_handle.runtime.request_state_indices = request_state_indices
-    staging_blocks = (
-        max_num_batched_tokens + resident.block_size - 1
-    ) // resident.block_size
-    mirror_staging_caches = torch.empty(
-        (
-            len(cache_handles),
-            staging_blocks,
-            resident.block_size,
-            resident.cache.shape[-1],
-        ),
-        dtype=resident.cache.dtype,
-        device=resident.cache.device,
-    )
-    mirror_staging_slots = torch.arange(
-        max_num_batched_tokens, dtype=torch.int64, device=resident.cache.device
-    )
-    for layer_index, cache_handle in enumerate(cache_handles):
-        cache_handle.mirror_staging_cache = mirror_staging_caches[layer_index]
-        cache_handle.mirror_staging_slots = mirror_staging_slots

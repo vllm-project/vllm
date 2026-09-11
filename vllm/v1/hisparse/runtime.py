@@ -182,6 +182,20 @@ def allocate_pinned_host_pool(size: int) -> tuple[torch.Tensor, torch.Tensor]:
     return registered[:size], registered
 
 
+class HiSparseHostPool:
+    """Keep the single host backing and its exact CUDA registration range."""
+
+    def __init__(self) -> None:
+        self.backing: torch.Tensor | None = None
+        self.registered: torch.Tensor | None = None
+
+    def allocate(self, size: int) -> torch.Tensor:
+        assert self.backing is None, "HiSparse host pool is already allocated."
+        check_hisparse_host_memory(size)
+        self.backing, self.registered = allocate_pinned_host_pool(size)
+        return self.backing
+
+
 def release_pinned_state(
     runtimes: list[HiSparseRuntime], pinned_host_pools: list[torch.Tensor]
 ) -> None:
@@ -987,6 +1001,42 @@ class HiSparseCacheHandle:
             attention_indices_out=attention_indices_out,
             valid_counts_out=valid_counts_out,
         )
+
+
+def initialize_hisparse_runtime_buffers(
+    cache_handles: list[HiSparseCacheHandle],
+    *,
+    max_num_reqs: int,
+    max_num_batched_tokens: int,
+) -> None:
+    """Allocate shared request state and per-layer prefill staging buffers."""
+    assert cache_handles
+    resident = cache_handles[0].view
+    assert resident is not None
+    device = resident.cache.device
+    request_state_indices = torch.full(
+        (max_num_reqs,), -1, dtype=torch.int32, device=device
+    )
+    staging_blocks = (
+        max_num_batched_tokens + resident.block_size - 1
+    ) // resident.block_size
+    mirror_staging_caches = torch.empty(
+        (
+            len(cache_handles),
+            staging_blocks,
+            resident.block_size,
+            resident.cache.shape[-1],
+        ),
+        dtype=resident.cache.dtype,
+        device=device,
+    )
+    mirror_staging_slots = torch.arange(
+        max_num_batched_tokens, dtype=torch.int64, device=device
+    )
+    for layer_index, cache_handle in enumerate(cache_handles):
+        cache_handle.runtime.request_state_indices = request_state_indices
+        cache_handle.mirror_staging_cache = mirror_staging_caches[layer_index]
+        cache_handle.mirror_staging_slots = mirror_staging_slots
 
 
 def create_hisparse_cache_handle(

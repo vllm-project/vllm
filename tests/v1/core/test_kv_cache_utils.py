@@ -89,31 +89,21 @@ from vllm.v1.request import Request
 pytestmark = pytest.mark.cpu_test
 
 
-@pytest.mark.parametrize(
-    ("block_size", "main_sizes", "indexer_sizes", "gpu_block_size"),
-    [
-        (256, (64,), (64,), 64),
-        (64, (32, 64), (16, 32), 32),
-    ],
-)
-def test_hisparse_hma_uses_backend_gpu_block_size(
-    monkeypatch, block_size, main_sizes, indexer_sizes, gpu_block_size
-):
+@pytest.mark.parametrize("gpu_block_size", [32, 64])
+def test_hisparse_hma_uses_resolved_gpu_block_size(monkeypatch, gpu_block_size):
     specs = {
         "model.layers.0.self_attn": MLAAttentionSpec(
-            block_size=block_size,
+            block_size=gpu_block_size,
             num_kv_heads=1,
             head_size=576,
             dtype=torch.bfloat16,
-            supported_kernel_block_sizes=main_sizes,
             is_index_group_leader=True,
         ),
         "model.layers.0.self_attn.indexer": MLAAttentionSpec(
-            block_size=block_size,
+            block_size=gpu_block_size,
             num_kv_heads=1,
             head_size=128,
             dtype=torch.bfloat16,
-            supported_kernel_block_sizes=indexer_sizes,
             cache_role=SparseCacheRole.INDEXER,
         ),
     }
@@ -124,7 +114,7 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(index_topk=128),
-            max_model_len=block_size,
+            max_model_len=gpu_block_size,
         ),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(
