@@ -42,7 +42,9 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
     build_params,
     pin_tensor,
+    unpin_tensor,
 )
+from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
 from vllm.v1.worker.utils import allocate_kv_cache
@@ -69,6 +71,13 @@ def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
         torch.cuda.Stream(priority=low_pri),
     )
     return backend, gpu["k"], cpu["k"]
+
+
+def _teardown_backend(backend: DmaCopyBackend, cpu: torch.Tensor) -> None:
+    backend.shutdown()
+    # Freeing a still-registered tensor strands a VA registration that a later
+    # cudaHostRegister may land on; always unpin after shutdown.
+    unpin_tensor(cpu)
 
 
 def _drive_store(
@@ -140,7 +149,7 @@ def test_store_orders_after_compute_write():
         control = _drive_store(backend, gpu, cpu, with_barrier=False)
         fixed = _drive_store(backend, gpu, cpu, with_barrier=True)
     finally:
-        backend.shutdown()
+        _teardown_backend(backend, cpu)
 
     assert control > 0, (
         "no-barrier store did not race the compute write; the test no longer "
@@ -519,3 +528,170 @@ def test_mixed_page_byte_placement_is_dcp_invariant():
         )
 
     assert placements[0] == placements[1]
+
+
+def _init_disk_backend(
+    backend: DiskBackend, gpu: dict[str, torch.Tensor], disk_path: str
+) -> None:
+    backend.init(
+        gpu,
+        gpu["k"].device,
+        torch.cuda.Stream(),
+        torch.cuda.Stream(),
+        disk_path,
+        4,
+        4096,
+        use_page_cache=True,
+    )
+
+
+def test_disk_backend_teardown_releases_pins_for_reinit(tmp_path):
+    """Two full init/shutdown cycles on one DiskBackend in one process.
+
+    shutdown() must unregister the pinned staging buffers, not just stop the
+    threads: a freed-but-still-registered VA range crashes the next
+    cudaHostRegister that lands on it (cudaErrorHostMemoryAlreadyRegistered),
+    so re-init only works if teardown released the first cycle's pins.
+    """
+    gpu = {"k": torch.zeros((4, 4096), dtype=torch.int8, device="cuda")}
+    backend = DiskBackend()
+    disk_path = str(tmp_path / "kv-offload.bin")
+    for _ in range(2):
+        _init_disk_backend(backend, gpu, disk_path)
+        backend.shutdown()
+    assert backend._fd == -1
+    assert not backend._store_buffer_caches and not backend._load_buffer_caches
+    assert not backend._store_slot_views and not backend._load_slot_views
+    for thread in (backend._store_thread, backend._load_thread):
+        assert thread is not None
+        assert not thread.is_alive()
+
+
+def test_disk_backend_init_pin_failure_unwinds_registrations(tmp_path, monkeypatch):
+    """A mid-init pin failure must release registrations already taken."""
+    pins = {"n": 0}
+
+    def fail_second_pin(buf: torch.Tensor) -> None:
+        pins["n"] += 1
+        if pins["n"] == 2:
+            raise RuntimeError("cudaHostRegister failed: induced")
+        pin_tensor(buf)
+
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.disk_backend.pin_tensor", fail_second_pin
+    )
+    gpu = {"k": torch.zeros((4, 4096), dtype=torch.int8, device="cuda")}
+    backend = DiskBackend()
+    with pytest.raises(RuntimeError, match="induced"):
+        _init_disk_backend(backend, gpu, str(tmp_path / "kv-offload.bin"))
+    assert not backend._store_buffer_caches and not backend._load_buffer_caches
+    backend.shutdown()  # must be safe after a failed init
+
+
+def test_disk_backend_init_failure_after_views_unwinds(tmp_path, monkeypatch):
+    """Failure after slot views are built must release buffers and views."""
+
+    def fail_build_params(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("induced")
+
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.disk_backend.build_params", fail_build_params
+    )
+    gpu = {"k": torch.zeros((4, 4096), dtype=torch.int8, device="cuda")}
+    backend = DiskBackend()
+    with pytest.raises(RuntimeError, match="induced"):
+        _init_disk_backend(backend, gpu, str(tmp_path / "kv-offload.bin"))
+    assert not backend._store_buffer_caches and not backend._load_buffer_caches
+    assert not backend._store_slot_views and not backend._load_slot_views
+    assert backend._fd == -1
+    backend.shutdown()
+
+
+def test_disk_backend_live_after_failed_init_shutdown_reinit(tmp_path, monkeypatch):
+    """Failed init after a clean cycle must not poison the next re-init.
+
+    A shutdown that follows a failed init sees leftover thread refs from the
+    earlier cycle; if it still queues stop sentinels for those dead threads,
+    the next re-init's fresh threads eat the stale sentinels and exit.
+    """
+    gpu = {"k": torch.zeros((4, 4096), dtype=torch.int8, device="cuda")}
+    backend = DiskBackend()
+    disk_path = str(tmp_path / "kv-offload.bin")
+    _init_disk_backend(backend, gpu, disk_path)
+    backend.shutdown()
+
+    pins = {"n": 0}
+
+    def fail_second_pin(buf: torch.Tensor) -> None:
+        pins["n"] += 1
+        if pins["n"] == 2:
+            raise RuntimeError("cudaHostRegister failed: induced")
+        pin_tensor(buf)
+
+    monkeypatch.setattr(
+        "vllm.v1.simple_kv_offload.disk_backend.pin_tensor", fail_second_pin
+    )
+    with pytest.raises(RuntimeError, match="induced"):
+        _init_disk_backend(backend, gpu, disk_path)
+    backend.shutdown()
+    monkeypatch.undo()
+
+    _init_disk_backend(backend, gpu, disk_path)
+    events: list[tuple[int, torch.Event]] = []
+    backend.launch_copy([], [], is_store=True, event_idx=0, events_list=events)
+    deadline = time.time() + 10.0
+    while not events and time.time() < deadline:
+        time.sleep(0.0005)
+    assert events, "store thread consumed a stale shutdown sentinel and exited"
+    backend.shutdown()
+
+
+def test_disk_backend_reinit_after_early_store_thread_exit(tmp_path, monkeypatch):
+    """A store thread that died before shutdown must not poison re-init.
+
+    init() starts each lifecycle with fresh queues, so a stop sentinel that a
+    dead thread never consumed cannot reach the re-init's fresh threads.
+    """
+
+    def stub_store_loop(*args: object, **kwargs: object) -> None:
+        return
+
+    monkeypatch.setattr(DiskBackend, "_store_loop", stub_store_loop)
+    gpu = {"k": torch.zeros((4, 4096), dtype=torch.int8, device="cuda")}
+    backend = DiskBackend()
+    disk_path = str(tmp_path / "kv-offload.bin")
+    _init_disk_backend(backend, gpu, disk_path)
+    assert backend._store_thread is not None
+    backend._store_thread.join(timeout=10.0)
+    assert not backend._store_thread.is_alive()
+    monkeypatch.undo()
+    backend.shutdown()
+
+    _init_disk_backend(backend, gpu, disk_path)
+    events: list[tuple[int, torch.Event]] = []
+    backend.launch_copy([], [], is_store=True, event_idx=1, events_list=events)
+    deadline = time.time() + 10.0
+    while not events and time.time() < deadline:
+        time.sleep(0.0005)
+    assert events, "store thread consumed a stale shutdown sentinel and exited"
+    backend.shutdown()
+
+
+def test_pin_tensor_double_register_cuda_errors_without_poisoning():
+    """Re-registering a pinned range errors on CUDA and stays contained.
+
+    pin_tensor must drain the per-thread last error on failure so the next
+    CUDA call in this thread does not die with the previous call's error.
+    """
+    buf = torch.zeros(4096, dtype=torch.int8, device="cpu")
+    pin_tensor(buf)
+    try:
+        if not current_platform.is_rocm():
+            # HIP silently allows re-registering the same range; CUDA errors.
+            with pytest.raises(RuntimeError, match="cudaHostRegister failed"):
+                pin_tensor(buf)
+            torch.zeros(1, device="cuda")
+    finally:
+        unpin_tensor(buf)
+    pin_tensor(buf)  # a properly unregistered range registers again
+    unpin_tensor(buf)

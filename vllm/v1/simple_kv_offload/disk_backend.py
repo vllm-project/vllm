@@ -25,6 +25,7 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     build_params,
     copy_blocks,
     pin_tensor,
+    unpin_tensor,
 )
 
 logger = init_logger(__name__)
@@ -90,6 +91,17 @@ class DiskBackend:
         num_buffer_slots: int = 2,
         use_page_cache: bool = False,
     ) -> None:
+        # A second init on a live backend would orphan the registrations in
+        # the caches dicts.
+        assert not (self._store_buffer_caches or self._load_buffer_caches), (
+            "DiskBackend.init() called on a live backend; call shutdown() first"
+        )
+        self._shutdown = False
+        # Fresh queues per lifecycle: a thread that died before shutdown can
+        # leave an unconsumed stop sentinel behind, which a re-init's fresh
+        # threads would otherwise eat on arrival.
+        self._store_queue = queue.SimpleQueue()
+        self._load_queue = queue.SimpleQueue()
         self._load_stream = load_stream
         self._store_stream = store_stream
         self._total_block_bytes = total_block_bytes
@@ -103,61 +115,73 @@ class DiskBackend:
             f"total_block_bytes={total_block_bytes} not aligned to {_ALIGNMENT}"
         )
 
-        # Separate buffer pools for store and load threads
-        self._store_buffer_caches = {}
-        self._load_buffer_caches = {}
-        for name, gpu_t in gpu_caches.items():
-            bpb = gpu_t.stride(0) * gpu_t.element_size()
-            store_buf = _alloc_aligned(num_buffer_slots, bpb)
-            pin_tensor(store_buf)
-            self._store_buffer_caches[name] = store_buf
-            load_buf = _alloc_aligned(num_buffer_slots, bpb)
-            pin_tensor(load_buf)
-            self._load_buffer_caches[name] = load_buf
+        # Release registrations taken so far if anything fails after a pin;
+        # the buffers are about to be freed while the driver still holds them.
+        try:
+            # Separate buffer pools for store and load threads
+            for name, gpu_t in gpu_caches.items():
+                bpb = gpu_t.stride(0) * gpu_t.element_size()
+                store_buf = _alloc_aligned(num_buffer_slots, bpb)
+                pin_tensor(store_buf)
+                self._store_buffer_caches[name] = store_buf
+                load_buf = _alloc_aligned(num_buffer_slots, bpb)
+                pin_tensor(load_buf)
+                self._load_buffer_caches[name] = load_buf
 
-        # Pre-built iovec views per slot (avoid per-transfer .numpy() calls)
-        self._store_slot_views = [
-            [
-                memoryview(self._store_buffer_caches[name][slot].numpy())
-                for name in self._tensor_names
+            # Pre-built iovec views per slot (avoid per-transfer .numpy() calls)
+            self._store_slot_views = [
+                [
+                    memoryview(self._store_buffer_caches[name][slot].numpy())
+                    for name in self._tensor_names
+                ]
+                for slot in range(num_buffer_slots)
             ]
-            for slot in range(num_buffer_slots)
-        ]
-        self._load_slot_views = [
-            [
-                memoryview(self._load_buffer_caches[name][slot].numpy())
-                for name in self._tensor_names
+            self._load_slot_views = [
+                [
+                    memoryview(self._load_buffer_caches[name][slot].numpy())
+                    for name in self._tensor_names
+                ]
+                for slot in range(num_buffer_slots)
             ]
-            for slot in range(num_buffer_slots)
-        ]
 
-        self._store_params = build_params(
-            gpu_caches,
-            self._store_buffer_caches,
-            store_stream,
-            src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
-        )
-        self._load_params = build_params(
-            self._load_buffer_caches,
-            gpu_caches,
-            load_stream,
-            src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
-        )
+            self._store_params = build_params(
+                gpu_caches,
+                self._store_buffer_caches,
+                store_stream,
+                src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
+            )
+            self._load_params = build_params(
+                self._load_buffer_caches,
+                gpu_caches,
+                load_stream,
+                src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
+            )
 
-        os.makedirs(os.path.dirname(disk_path) or ".", exist_ok=True)
-        # Slot contents never outlive the process, so unlink then O_EXCL rather
-        # than reopening: a pre-existing file would otherwise keep its own
-        # (possibly world-readable) mode, and blocks may encode user prompts.
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(disk_path)
-        # O_DIRECT by default: page cache would consume the very host DRAM this
-        # backend exists to conserve, and doubles the copy on the store path.
-        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-        if not use_page_cache:
-            flags |= O_DIRECT
-        self._fd = os.open(disk_path, flags, 0o600)
-        self._disk_path = disk_path
-        os.ftruncate(self._fd, num_disk_slots * total_block_bytes)
+            os.makedirs(os.path.dirname(disk_path) or ".", exist_ok=True)
+            # Slot contents never outlive the process, so unlink then O_EXCL
+            # rather than reopening: a pre-existing file would otherwise keep
+            # its own (possibly world-readable) mode, and blocks may encode
+            # user prompts.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(disk_path)
+            # O_DIRECT by default: page cache would consume the very host DRAM
+            # this backend exists to conserve, and doubles the store-path copy.
+            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            if not use_page_cache:
+                flags |= O_DIRECT
+            self._fd = os.open(disk_path, flags, 0o600)
+            self._disk_path = disk_path
+            os.ftruncate(self._fd, num_disk_slots * total_block_bytes)
+        except Exception:
+            self._unpin_staging_buffers()
+            self._store_slot_views.clear()
+            self._load_slot_views.clear()
+            if self._fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.unlink(self._disk_path)
+                os.close(self._fd)
+                self._fd = -1
+            raise
 
         logger.info(
             "DiskBackend: path=%s, slots=%d, total=%.2f GB, buf=%dx%d bytes"
@@ -195,6 +219,19 @@ class DiskBackend:
         q = self._store_queue if is_store else self._load_queue
         q.put((src_blocks, dst_blocks, event_idx, events_list, wait_event))
 
+    def _unpin_staging_buffers(self) -> None:
+        """Unregister the buffers pinned by init(). Idempotent.
+
+        Unregisters the same aligned views that were pinned (their data_ptr,
+        not the raw allocation's base, is what cudaHostRegister recorded). On
+        the partial-init failure path only the successfully pinned buffers are
+        in the dicts, which is exactly the set to release.
+        """
+        for caches in (self._store_buffer_caches, self._load_buffer_caches):
+            for buf in caches.values():
+                unpin_tensor(buf)
+            caches.clear()
+
     def shutdown(self) -> None:
         if self._shutdown:
             return
@@ -205,27 +242,31 @@ class DiskBackend:
             self._store_thread.join(timeout=10.0)
         if self._load_thread is not None:
             self._load_thread.join(timeout=10.0)
-        if self._fd < 0:
-            return
-        # Slot contents can encode user prompts, so drop the name now rather
-        # than leaving them readable until the next run overwrites the file.
-        # Unlinking only removes the directory entry: any thread still holding
-        # the fd keeps writing to the (now anonymous) inode, which the kernel
-        # frees once the last fd goes away.
+        # Slot contents can encode user prompts, so drop the name even when
+        # the rest of teardown must bail out. Unlinking only removes the
+        # directory entry: any thread still holding the fd keeps writing to
+        # the (now anonymous) inode until the last fd goes away.
         with contextlib.suppress(OSError):
             os.unlink(self._disk_path)
-        # Closing under a still-running IO thread would let the fd number be
-        # reused by an unrelated open(), turning its next pwritev into a write
-        # into that file. Leaking one fd for the remaining process lifetime is
-        # the cheaper failure.
         if any(
             t is not None and t.is_alive()
             for t in (self._store_thread, self._load_thread)
         ):
+            # A still-running IO thread may DMA through the staging buffers or
+            # pwritev through self._fd (whose number a later open() could then
+            # reuse for an unrelated file). Leaking the registrations and the
+            # fd for the thread's remaining lifetime is the cheaper failure.
             logger.warning(
-                "IO thread still running after shutdown timeout; leaking fd %d",
+                "IO thread still running after shutdown timeout; leaking fd %d"
+                " and %d pinned staging buffers",
                 self._fd,
+                len(self._store_buffer_caches) + len(self._load_buffer_caches),
             )
+            return
+        self._unpin_staging_buffers()
+        self._store_slot_views.clear()
+        self._load_slot_views.clear()
+        if self._fd < 0:
             return
         os.close(self._fd)
         self._fd = -1
