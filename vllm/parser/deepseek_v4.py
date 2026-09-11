@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -32,7 +33,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
-from vllm.tool_parsers.utils import find_tool_schema, get_schema_properties
+from vllm.tool_parsers.utils import find_tool_properties
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -108,6 +109,7 @@ def _unwrap_wrapper_args(
     args_json: str,
     tools: list[Tool] | None,
     func_name: str | None,
+    get_properties: Callable[[str], Mapping[str, object]] | None = None,
 ) -> str:
     if not tools or not func_name:
         return args_json
@@ -115,23 +117,28 @@ def _unwrap_wrapper_args(
         args = json.loads(args_json)
     except (json.JSONDecodeError, ValueError):
         return args_json
-    if not isinstance(args, dict):
+    if not isinstance(args, dict) or len(args) != 1:
         return args_json
-    properties = get_schema_properties(find_tool_schema(tools, func_name))
+    wrapper = next(iter(args))
+    if wrapper not in ("arguments", "input"):
+        return args_json
+    properties = (
+        get_properties(func_name)
+        if get_properties is not None
+        else find_tool_properties(tools, func_name)
+    )
     if not properties:
         return args_json
-    allowed = set(properties.keys())
-    for wrapper in ("arguments", "input"):
-        if set(args.keys()) != {wrapper} or wrapper in allowed:
-            continue
-        inner = args[wrapper]
-        if isinstance(inner, str):
-            try:
-                inner = json.loads(inner)
-            except json.JSONDecodeError:
-                return args_json
-        if isinstance(inner, dict) and set(inner.keys()).issubset(allowed):
-            return json.dumps(inner, ensure_ascii=False)
+    if wrapper in properties:
+        return args_json
+    inner = args[wrapper]
+    if isinstance(inner, str):
+        try:
+            inner = json.loads(inner)
+        except json.JSONDecodeError:
+            return args_json
+    if isinstance(inner, dict) and set(inner.keys()).issubset(properties):
+        return json.dumps(inner, ensure_ascii=False)
     return args_json
 
 
@@ -265,4 +272,6 @@ class DeepSeekV4Parser(ParserEngine):
         if not self._tools:
             return result
         func_name = next((s.name for s in self._tool_slots if s.args == raw_args), None)
-        return _unwrap_wrapper_args(result, self._tools, func_name)
+        return _unwrap_wrapper_args(
+            result, self._tools, func_name, self._get_tool_type_hints
+        )

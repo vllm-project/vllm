@@ -669,6 +669,12 @@ class TestFixArgTypes:
         result = engine._fix_arg_types('{"val": null}', "f")
         assert '"val": "null"' in result
 
+    def test_int_param_not_changed(self):
+        tool = _make_tool("f", {"count": {"type": "integer"}})
+        engine = _make_engine(tools=[tool])
+        original = '{"count": 42}'
+        assert engine._fix_arg_types(original, "f") == original
+
     def test_integer_type_preserved_with_value_alternatives(self):
         tool = _make_tool(
             "f",
@@ -751,6 +757,43 @@ class TestFixArgTypes:
         assert parsed["active"] is True
         assert parsed["score"] == 3.14
 
+    def test_nested_object_coercion(self):
+        tool = _make_tool(
+            "f",
+            {"inner": {"type": "object", "properties": {"count": {"type": "integer"}}}},
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"inner": {"count": "42"}}', "f")
+        assert json.loads(result) == {"inner": {"count": 42}}
+
+    @pytest.mark.parametrize("combinator", ["anyOf", "oneOf"])
+    @pytest.mark.parametrize("encoded", [False, True])
+    @pytest.mark.parametrize("kind, expected", [("text", "1"), ("number", 1)])
+    def test_object_alternatives_preserve_property_constraints(
+        self, combinator, encoded, kind, expected
+    ):
+        schema = {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string"},
+                "value": {"type": ["string", "integer"]},
+            },
+            combinator: [
+                {
+                    "properties": {
+                        "kind": {"const": tag},
+                        "value": {"type": value_type},
+                    }
+                }
+                for tag, value_type in (("text", "string"), ("number", "integer"))
+            ],
+        }
+        engine = _make_engine(tools=[_make_tool("f", {"payload": schema})])
+        payload = {"kind": kind, "value": "1"}
+        args = {"payload": json.dumps(payload) if encoded else payload}
+        result = engine._fix_arg_types(json.dumps(args), "f")
+        assert json.loads(result) == {"payload": {"kind": kind, "value": expected}}
+
     def test_openai_strict_nested_anyof_coercion(self):
         """Coerce fields in OpenAI's user-or-address anyOf example."""
         tool = _make_tool(
@@ -794,10 +837,9 @@ class TestFixArgTypes:
             Draft202012Validator(schema).validate(parsed)
 
     @pytest.mark.parametrize("combinator", ["anyOf", "oneOf"])
-    def test_nested_root_alternative_branch_properties(self, combinator):
-        """A property declared by one branch is coerced, one the branches type
-        differently is left alone since no branch is selected, and one all
-        branches agree on refines the direct schema."""
+    @pytest.mark.parametrize("closed", [False, True])
+    def test_nested_root_alternative_branch_properties(self, combinator, closed):
+        """Omitted properties supply hints only when the other branch forbids them."""
         tool = ChatCompletionToolsParam(
             type="function",
             function=FunctionDefinition(
@@ -829,6 +871,8 @@ class TestFixArgTypes:
                 },
             ),
         )
+        for branch in tool.function.parameters["allOf"][0][combinator]:
+            branch["additionalProperties"] = not closed
         engine = _make_engine(tools=[tool])
         result = engine._fix_arg_types(
             '{"kind": "a", "payload": "{\\"n\\": 1}", "value": "123", "count": "7"}',
@@ -836,7 +880,7 @@ class TestFixArgTypes:
         )
         assert json.loads(result) == {
             "kind": "a",
-            "payload": {"n": 1},
+            "payload": {"n": 1} if closed else '{"n": 1}',
             "value": "123",
             "count": "7",
         }
@@ -861,6 +905,13 @@ class TestFixArgTypes:
         "schema, value",
         [
             ({"anyOf": [{"type": "string"}, {"const": 42}]}, "123"),
+            (
+                {
+                    "type": ["string", "integer"],
+                    "anyOf": [{"enum": ["42"]}, False],
+                },
+                "42",
+            ),
             (
                 {
                     "$defs": {"Text": {"type": "string"}},
@@ -942,9 +993,17 @@ class TestFixArgTypes:
         }
         engine = _make_engine(tools=[tool])
         result = engine._fix_arg_types('{"count": "42", "value": "42"}', "f")
-        assert json.loads(result) == {"count": 42, "value": "42"}
+        assert json.loads(result) == {"count": 42, "value": 42}
 
     def test_array_item_coercion(self):
+        tool = _make_tool(
+            "f", {"nums": {"type": "array", "items": {"type": "integer"}}}
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"nums": ["42", "5"]}', "f")
+        assert json.loads(result) == {"nums": [42, 5]}
+
+    def test_array_item_coercion_through_combinators(self):
         for combinator in ("allOf", "anyOf", "oneOf"):
             tool = _make_tool(
                 "f",
@@ -965,6 +1024,49 @@ class TestFixArgTypes:
             parsed = json.loads(result)
             assert parsed["nums"] == [42, 5]
 
+    @pytest.mark.parametrize("combinator", ["anyOf", "oneOf"])
+    @pytest.mark.parametrize("encoded", [False, True])
+    @pytest.mark.parametrize(
+        "value, expected", [(["1", "x"], ["1", "x"]), (["1", "2"], [1, 2])]
+    )
+    def test_array_alternatives_keep_a_compatible_branch(
+        self, combinator, encoded, value, expected
+    ):
+        tool = _make_tool(
+            "f",
+            {
+                "value": {
+                    combinator: [
+                        {"type": "array", "items": {"type": item_type}}
+                        for item_type in ("string", "integer")
+                    ]
+                }
+            },
+        )
+        engine = _make_engine(tools=[tool])
+        args = {"value": json.dumps(value) if encoded else value}
+        result = engine._fix_arg_types(json.dumps(args), "f")
+        assert json.loads(result) == {"value": expected}
+
+    @pytest.mark.parametrize("combinator", ["anyOf", "oneOf"])
+    @pytest.mark.parametrize("encoded", [False, True])
+    def test_array_alternatives_preserve_false_items(self, combinator, encoded):
+        tool = _make_tool(
+            "f",
+            {
+                "value": {
+                    "type": "array",
+                    "items": {"type": ["string", "integer"]},
+                    combinator: [{"items": False}, {"items": {"type": "string"}}],
+                }
+            },
+        )
+        engine = _make_engine(tools=[tool])
+        value = ["1"]
+        args = {"value": json.dumps(value) if encoded else value}
+        result = engine._fix_arg_types(json.dumps(args), "f")
+        assert json.loads(result) == {"value": value}
+
     def test_draft7_tuple_array_decoding(self):
         tool = _make_tool(
             "f",
@@ -982,7 +1084,8 @@ class TestFixArgTypes:
         assert parsed == {"value": [42]}
         Draft7Validator(tool.function.parameters).validate(parsed)
 
-    def test_array_mixed_item_types(self):
+    @pytest.mark.parametrize("nullable", [False, True])
+    def test_array_mixed_item_types(self, nullable):
         tool = _make_tool(
             "f",
             {
@@ -994,10 +1097,102 @@ class TestFixArgTypes:
                 },
             },
         )
+        if not nullable:
+            tool.function.parameters["properties"]["vals"] = {
+                "type": "array",
+                "items": {"type": "number"},
+            }
         engine = _make_engine(tools=[tool])
         result = engine._fix_arg_types('{"vals": ["42", "3.14"]}', "f")
         parsed = json.loads(result)
         assert parsed["vals"] == [42, 3.14]
+
+    @pytest.mark.parametrize(
+        "schema, value, expected",
+        [
+            ({"type": "object", "required": ["a", "b"]}, '{"a": 1}', {"a": 1}),
+            ({"type": "integer", "minimum": 1}, "0", 0),
+            ({"type": "array", "minItems": 2}, "[1]", [1]),
+            ({"type": "object", "additionalProperties": False}, '{"z": 2}', {"z": 2}),
+            ({"type": "string", "maxLength": 2}, 12345, "12345"),
+        ],
+        ids=["required", "minimum", "minItems", "additionalProperties", "maxLength"],
+    )
+    def test_value_constraints_do_not_prevent_type_correction(
+        self, schema, value, expected
+    ):
+        engine = _make_engine(tools=[_make_tool("f", {"value": schema})])
+        result = engine._fix_arg_types(json.dumps({"value": value}), "f")
+        assert json.loads(result) == {"value": expected}
+
+    @pytest.mark.parametrize(
+        "schema, value, expected",
+        [
+            ({"type": "array", "items": [{"type": "integer"}]}, "[42]", [42]),
+            ({"type": "array", "items": []}, "[42]", [42]),
+            ({"type": "object", "properties": [1]}, '{"a": 1}', {"a": 1}),
+            ({"type": "string", "pattern": "["}, 42, "42"),
+        ],
+        ids=[
+            "undeclared_tuple",
+            "empty_tuple",
+            "malformed_properties",
+            "invalid_pattern",
+        ],
+    )
+    def test_unsupported_validation_keywords_do_not_raise(
+        self, schema, value, expected
+    ):
+        engine = _make_engine(tools=[_make_tool("f", {"value": schema})])
+        result = engine._fix_arg_types(json.dumps({"value": value}), "f")
+        assert json.loads(result) == {"value": expected}
+
+    def test_wide_allof_does_not_create_deep_property_schemas(self):
+        tool = _make_tool("f", {"count": {"type": "integer"}})
+        tool.function.parameters["allOf"] = [
+            {"properties": {"count": {"type": "integer"}}}
+        ] * 600
+        engine = _make_engine(tools=[tool])
+        assert json.loads(engine._fix_arg_types('{"count": "1"}', "f")) == {"count": 1}
+
+    def test_request_tools_replace_cached_type_hints(self):
+        engine = _make_engine(tools=[_make_tool("f", {"count": {"type": "integer"}})])
+        original = '{"count": "42"}'
+        assert json.loads(engine._fix_arg_types(original, "f")) == {"count": 42}
+        request = ChatCompletionRequest(
+            model="test",
+            messages=[],
+            tools=[_make_tool("f", {"count": {"type": "string"}})],
+        )
+        engine._check_skip_tool_parsing(request)
+        assert engine._fix_arg_types(original, "f") == original
+
+    @pytest.mark.parametrize(
+        "before, after",
+        [(1, True), (1, 1.0), (0.0, -0.0), ({"n": 1}, {"n": True})],
+    )
+    def test_coercion_cache_distinguishes_json_representations(self, before, after):
+        tool = _make_tool("f", {"value": {"type": "string"}})
+        engine = _make_engine(tools=[tool])
+        cache: dict = {}
+        engine._fix_arg_types(json.dumps({"value": before}), "f", cache)
+        args = json.dumps({"value": after})
+        assert engine._fix_arg_types(args, "f", cache) == engine._fix_arg_types(
+            args, "f"
+        )
+
+    def test_coercion_cache_invalidates_with_tool_schema(self):
+        engine = _make_engine(tools=[_make_tool("f", {"value": {"type": "integer"}})])
+        cache: dict = {}
+        args = '{"value": "42"}'
+        assert json.loads(engine._fix_arg_types(args, "f", cache)) == {"value": 42}
+        request = ChatCompletionRequest(
+            model="test",
+            messages=[],
+            tools=[_make_tool("f", {"value": {"type": "string"}})],
+        )
+        engine._check_skip_tool_parsing(request)
+        assert engine._fix_arg_types(args, "f", cache) == args
 
 
 # ── TestBuildExtractedResult ─────────────────────────────────────────
@@ -1680,26 +1875,28 @@ def _collect_arg_deltas(deltas: list) -> str:
     return "".join(parts)
 
 
-def _run_streaming_tool(engine, name: str, chunks: list[str]) -> dict:
+def _run_streaming_tool(engine, name: str, chunks: list[str], index: int = 0) -> dict:
     deltas = []
     deltas.append(
         engine._events_to_delta(
-            [SemanticEvent(EventType.TOOL_CALL_START, tool_index=0)]
+            [SemanticEvent(EventType.TOOL_CALL_START, tool_index=index)]
         )
     )
     deltas.append(
         engine._events_to_delta(
-            [SemanticEvent(EventType.TOOL_NAME, name, tool_index=0)]
+            [SemanticEvent(EventType.TOOL_NAME, name, tool_index=index)]
         )
     )
     for chunk in chunks:
         deltas.append(
             engine._events_to_delta(
-                [SemanticEvent(EventType.ARG_VALUE_CHUNK, chunk, tool_index=0)]
+                [SemanticEvent(EventType.ARG_VALUE_CHUNK, chunk, tool_index=index)]
             )
         )
     deltas.append(
-        engine._events_to_delta([SemanticEvent(EventType.TOOL_CALL_END, tool_index=0)])
+        engine._events_to_delta(
+            [SemanticEvent(EventType.TOOL_CALL_END, tool_index=index)]
+        )
     )
     return json.loads(_collect_arg_deltas(deltas))
 
@@ -1717,6 +1914,28 @@ class TestArgDeltaWithConverter:
         tool.function.parameters = {"oneOf": [{"properties": {"value": {"const": 42}}}]}
         engine = _make_engine(_converter_config(), tools=[tool])
         assert _run_streaming_tool(engine, "f", ["value=4", "2"]) == {"value": 42}
+
+    @pytest.mark.parametrize("tool_calls", [1, 2])
+    def test_streaming_reuses_unchanged_nested_argument(self, monkeypatch, tool_calls):
+        tool = _make_tool(
+            "f",
+            {
+                "payload": {"type": "object", "properties": {"n": {"type": "integer"}}},
+                "note": {"type": "string"},
+            },
+        )
+        engine = _make_engine(_converter_config(), tools=[tool])
+        coerce = MagicMock(wraps=ParserEngine._coerce_value)
+        monkeypatch.setattr(ParserEngine, "_coerce_value", coerce)
+        for index in range(tool_calls):
+            result = _run_streaming_tool(
+                engine, "f", ['payload={"n":"1"} ', "note=a", "bc"], index
+            )
+            assert result == {"payload": {"n": 1}, "note": "abc"}
+        assert (
+            sum(call.args[0] == '{"n":"1"}' for call in coerce.call_args_list)
+            == tool_calls
+        )
 
     def test_streaming_arg_deltas_prefix_monotonic(self):
         engine = _make_engine(_converter_config())
@@ -1846,7 +2065,7 @@ class TestArgDeltaWithConverter:
         calls: list[dict] = []
 
         def wrapped(properties: dict) -> set[str] | None:
-            calls.append(properties)
+            calls.append({key: hints.types for key, hints in properties.items()})
             return original(properties)
 
         monkeypatch.setattr(
@@ -1863,8 +2082,8 @@ class TestArgDeltaWithConverter:
 
         assert calls == [
             {
-                "name": {"type": "string"},
-                "count": {"type": "integer"},
+                "name": ["string"],
+                "count": ["integer"],
             }
         ]
 

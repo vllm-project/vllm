@@ -7,16 +7,11 @@ extraction with a single :class:`StreamingParserEngine`.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING
 
 import regex as re
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import UnknownType
-from jsonschema.validators import validator_for
-from referencing import Registry
-from referencing.exceptions import Unresolvable
 
 from vllm.entrypoints.chat_utils import get_tool_call_id_type, make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
@@ -33,16 +28,13 @@ from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine_config import ParserEngineConfig, ParserState
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.tool_parsers.utils import (
+    SchemaTypeHints,
     coerce_to_schema_type,
-    extract_types_from_schema,
     find_tool_name,
-    find_tool_schema,
-    get_schema_properties,
+    find_tool_properties,
 )
 
 if TYPE_CHECKING:
-    from jsonschema.protocols import Validator
-
     from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
     )
@@ -51,6 +43,8 @@ if TYPE_CHECKING:
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
 logger = init_logger(__name__)
+
+_CoercionCache = dict[str, tuple[SchemaTypeHints, type, str, object, bool]]
 
 
 class ToolCallSlot:
@@ -62,6 +56,7 @@ class ToolCallSlot:
         "name_sent",
         "string_keys",
         "streamed_json",
+        "coercions",
     )
 
     def __init__(self) -> None:
@@ -72,6 +67,7 @@ class ToolCallSlot:
         self.name_sent: bool = False
         self.string_keys: set[str] | None = None
         self.streamed_json: str = ""
+        self.coercions: _CoercionCache = {}
 
     @property
     def args(self) -> str:
@@ -102,6 +98,7 @@ class ParserEngine(Parser):
     ) -> None:
         self.model_tokenizer = tokenizer
         self._tools = tools
+        self._tool_type_hints: dict[str, dict[str, SchemaTypeHints | None]] = {}
         self._stream_state = StreamState(
             tool_call_id_type=(
                 get_tool_call_id_type(model_config)
@@ -249,90 +246,68 @@ class ParserEngine(Parser):
     # ── Schema-aware type correction ─────────────────────────────────
 
     @staticmethod
-    def _coerce_value(value: object, validator: Validator) -> tuple[object, bool]:
+    def _coerce_value(value: object, hints: SchemaTypeHints) -> tuple[object, bool]:
         """Coerce a single value according to its schema.
 
         Returns ``(coerced_value, changed)``.
         """
-        schema = validator.schema
+        original = value
+        changed = False
         if isinstance(value, str):
-            types = extract_types_from_schema(schema)
-            coerced = coerce_to_schema_type(value, types) if types else value
-            if coerced is not value:
-                if isinstance(coerced, (dict, list)):
-                    coerced, _ = ParserEngine._coerce_value(coerced, validator)
-                return coerced, True
-            return value, False
+            value = coerce_to_schema_type(value, hints.types) if hints.types else value
+            changed = value is not original
 
+        decoded = value
         if isinstance(value, dict):
-            return ParserEngine._coerce_dict(value, validator)
+            value, nested_changed = ParserEngine._coerce_dict(value, hints.properties)
+            changed |= nested_changed
+        elif isinstance(value, list) and hints.items is not None:
+            value = value.copy()
+            for i, item in enumerate(value):
+                value[i], item_changed = ParserEngine._coerce_value(item, hints.items)
+                changed |= item_changed
+        elif not isinstance(original, (str, dict, list)) and hints.types:
+            value = coerce_to_schema_type(
+                json.dumps(value, ensure_ascii=False), hints.types
+            )
+            changed = type(value) is not type(original) or value != original
 
-        if isinstance(value, list):
-            # Preserve alternatives when projecting array schemas onto item hints.
-            items_schema: dict = {}
-            pending = [(schema, items_schema)]
-            while pending:
-                member, hints = pending.pop()
-                if not isinstance(member, dict):
-                    continue
-                if isinstance(items := member.get("items"), dict):
-                    hints["allOf"] = [items]
-                for keyword in ("allOf", "anyOf", "oneOf"):
-                    if not isinstance(branches := member.get(keyword), list):
-                        continue
-                    branches = [
-                        branch
-                        for branch in branches
-                        if keyword == "allOf"
-                        or not (types := extract_types_from_schema(branch))
-                        or "array" in types
-                    ]
-                    branch_hints: list[dict] = [{} for _ in branches]
-                    hints.setdefault(keyword, []).extend(branch_hints)
-                    pending.extend(zip(branches, branch_hints))
-            if items_schema:
-                item_validator = validator.evolve(schema=items_schema)
-                value = value.copy()
-                changed = False
-                for i, item in enumerate(value):
-                    coerced, item_changed = ParserEngine._coerce_value(
-                        item, item_validator
-                    )
-                    if item_changed:
-                        value[i] = coerced
-                        changed = True
-                return value, changed
-            return value, False
-
-        types = extract_types_from_schema(schema)
-        if not types:
-            return value, False
-        as_str = json.dumps(value, ensure_ascii=False)
-        coerced = coerce_to_schema_type(as_str, types)
-        if type(coerced) is not type(value) or coerced != value:
-            return coerced, True
-        return value, False
+        if (
+            changed
+            and hints.validator is not None
+            and not hints.validator.is_valid(value)
+        ):
+            if decoded is not original and hints.validator.is_valid(decoded):
+                return decoded, True
+            return original, False
+        return value, changed
 
     @staticmethod
-    def _coerce_dict(args: dict, validator: Validator) -> tuple[dict, bool]:
-        """Coerce properties while retaining the validator's draft and root context."""
-        properties = get_schema_properties(validator.schema)
+    def _coerce_dict(
+        args: dict,
+        properties: Mapping[str, SchemaTypeHints | None],
+        cache: _CoercionCache | None = None,
+    ) -> tuple[dict, bool]:
+        """Coerce properties, optionally reusing per-tool-call results."""
         args = args.copy()
         changed = False
         for key, value in args.items():
             prop = properties.get(key)
-            if not isinstance(prop, dict):
+            if prop is None:
                 continue
-            prop_validator = validator.evolve(schema=prop)
-            coerced, val_changed = ParserEngine._coerce_value(value, prop_validator)
+            raw = ""
+            cached = None
+            if cache is not None:
+                # JSON spelling distinguishes nested bool/int values and signed zero.
+                raw = value if isinstance(value, str) else json.dumps(value)
+                cached = cache.get(key)
+            if cached is not None and cached[:3] == (prop, type(value), raw):
+                coerced, val_changed = cached[3:]
+            else:
+                coerced, val_changed = ParserEngine._coerce_value(value, prop)
+                if cache is not None:
+                    cache[key] = (prop, type(value), raw, coerced, val_changed)
             if val_changed:
-                try:
-                    valid = prop_validator.is_valid(coerced)
-                except (Unresolvable, UnknownType, TypeError):
-                    # Malformed schema keyword values can raise TypeError.
-                    valid = False
-                if not valid:
-                    continue
                 args[key] = coerced
                 changed = True
         return args, changed
@@ -403,7 +378,9 @@ class ParserEngine(Parser):
         return json_str
 
     @staticmethod
-    def _streamable_string_keys(properties: dict) -> set[str] | None:
+    def _streamable_string_keys(
+        properties: Mapping[str, SchemaTypeHints | None],
+    ) -> set[str] | None:
         """Return keys whose trailing string values can safely stream.
 
         ``None`` means there is no schema, so all string values keep their
@@ -411,16 +388,27 @@ class ParserEngine(Parser):
         remain strings are safe to emit before the value is closed; fields
         coerced to bool/number/null/object/array may serialize differently.
         """
-        if not properties:
+        if not any(properties.values()):
             return None
 
         streamable: set[str] = set()
-        for key, schema in properties.items():
-            if set(extract_types_from_schema(schema)) <= {"string"}:
+        for key, hints in properties.items():
+            if hints is not None and set(hints.types) <= {"string"}:
                 streamable.add(key)
         return streamable
 
-    def _fix_arg_types(self, args_json: str, func_name: str) -> str:
+    def _get_tool_type_hints(self, name: str) -> dict[str, SchemaTypeHints | None]:
+        """Cache coercion hints and retain declared names for wrapper detection."""
+        if name not in self._tool_type_hints:
+            self._tool_type_hints[name] = {
+                key: SchemaTypeHints(schema) if isinstance(schema, dict) else None
+                for key, schema in find_tool_properties(self._tools, name).items()
+            }
+        return self._tool_type_hints[name]
+
+    def _fix_arg_types(
+        self, args_json: str, func_name: str, cache: _CoercionCache | None = None
+    ) -> str:
         """Correct parameter types using the tool schema.
 
         String values are coerced via :func:`coerce_to_schema_type`.
@@ -437,15 +425,11 @@ class ParserEngine(Parser):
         if not isinstance(args, dict):
             return args_json
 
-        schema = find_tool_schema(self._tools, func_name)
-        if not schema:
+        properties = self._get_tool_type_hints(func_name)
+        if not properties:
             return args_json
 
-        # Keep the declared draft and root references without fetching external schemas.
-        validator = validator_for(schema, default=Draft202012Validator)(
-            schema, registry=Registry()
-        )
-        args, changed = self._coerce_dict(args, validator)
+        args, changed = self._coerce_dict(args, properties, cache)
 
         if changed:
             return json.dumps(args, ensure_ascii=False)
@@ -468,8 +452,9 @@ class ParserEngine(Parser):
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> None:
         tools = getattr(request, "tools", None)
-        if tools:
+        if tools and tools is not self._tools:
             self._tools = tools
+            self._tool_type_hints.clear()
         if not self.skip_tool_parsing and not self._suppress_tool_calls:
             tool_choice = getattr(request, "tool_choice", None)
             if tool_choice == "none" and tools:
@@ -912,9 +897,7 @@ class ParserEngine(Parser):
         slot = self._tool_slots[idx]
         slot.name = name
         slot.name_sent = True
-        slot.string_keys = self._streamable_string_keys(
-            get_schema_properties(find_tool_schema(self._tools, name))
-        )
+        slot.string_keys = self._streamable_string_keys(self._get_tool_type_hints(name))
         self._ensure_tool_id(slot, name)
         deltas.append(
             DeltaToolCall(
@@ -971,7 +954,7 @@ class ParserEngine(Parser):
                 slot.name = name
                 slot.name_sent = True
                 slot.string_keys = self._streamable_string_keys(
-                    get_schema_properties(find_tool_schema(self._tools, name))
+                    self._get_tool_type_hints(name)
                 )
                 self._ensure_tool_id(slot, name)
                 deltas.append(
@@ -1052,7 +1035,7 @@ class ParserEngine(Parser):
             return None
 
         if slot.name:
-            current_json = self._fix_arg_types(current_json, slot.name)
+            current_json = self._fix_arg_types(current_json, slot.name, slot.coercions)
 
         prev = slot.streamed_json
         safe_json = self._safe_arg_prefix(current_json, slot.string_keys)
@@ -1085,7 +1068,7 @@ class ParserEngine(Parser):
             return None
 
         if final_json:
-            final_json = self._fix_arg_types(final_json, slot.name)
+            final_json = self._fix_arg_types(final_json, slot.name, slot.coercions)
 
         prev = slot.streamed_json
         if final_json and len(final_json) > len(prev):

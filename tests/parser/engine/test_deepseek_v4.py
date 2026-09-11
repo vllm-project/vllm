@@ -3,6 +3,7 @@
 """Tests for DeepSeek V4-specific parser engine semantics."""
 
 import json
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -647,6 +648,48 @@ class TestImplicitReasoningEnd:
 
 
 class TestWrapperUnwrapping:
+    @pytest.mark.parametrize(
+        "args", ['{"city":"Berlin"}', '{"arguments":{},"city":"Berlin"}']
+    )
+    def test_ordinary_arguments_skip_property_lookup(self, args):
+        get_properties = MagicMock(side_effect=AssertionError("unnecessary lookup"))
+        assert (
+            _unwrap_wrapper_args(args, [_make_tool("f", {})], "f", get_properties)
+            == args
+        )
+        get_properties.assert_not_called()
+
+    @pytest.mark.parametrize("declared_wrapper", [False, True])
+    def test_streaming_wrapper_reuses_cached_declared_names(
+        self, monkeypatch, declared_wrapper
+    ):
+        from vllm.parser import deepseek_v4
+        from vllm.parser.engine import parser_engine
+
+        tool = _make_tool("f", {"city": {"type": "string"}})
+        if declared_wrapper:
+            tool.function.parameters["anyOf"] = [
+                {"properties": {"arguments": {"type": "object"}}},
+                {},
+            ]
+        lookup = MagicMock(wraps=parser_engine.find_tool_properties)
+        monkeypatch.setattr(parser_engine, "find_tool_properties", lookup)
+        monkeypatch.setattr(deepseek_v4, "find_tool_properties", lookup)
+        request = _test_request(tools=[tool])
+        parser = DeepSeekV4Parser(
+            make_mock_tokenizer({}),
+            tools=[tool],
+            chat_template_kwargs={"thinking": False},
+        )
+        text = _tool_calls(_invoke("f", ("arguments", "false", '{"city":"Berlin"}')))
+        results = simulate_tool_streaming(parser, request, list(text))
+        results.append((parser.finish_streaming(), text))
+        expected: dict = {"city": "Berlin"}
+        if declared_wrapper:
+            expected = {"arguments": expected}
+        assert json.loads(collect_tool_arguments(results)) == expected
+        assert lookup.call_count == 1
+
     def test_unwrap_arguments_wrapper(self):
         from vllm.entrypoints.openai.chat_completion.protocol import (
             ChatCompletionToolsParam,
@@ -723,6 +766,31 @@ class TestWrapperUnwrapping:
             "get_weather",
         )
         assert json.loads(result) == {"arguments": {"location": "Beijing"}}
+
+    @pytest.mark.parametrize("combinator", ["anyOf", "oneOf"])
+    @pytest.mark.parametrize("wrapper", ["arguments", "input"])
+    def test_no_unwrap_when_wrapper_declared_in_alternative(self, combinator, wrapper):
+        tool = _make_tool("f", {"city": {"type": "string"}})
+        tool.function.parameters[combinator] = [
+            {"properties": {wrapper: {"type": "object"}}, "required": [wrapper]},
+            {"required": ["city"]},
+        ]
+        args = json.dumps({wrapper: {"city": "Berlin"}})
+        assert _unwrap_wrapper_args(args, [tool], "f") == args
+
+    @pytest.mark.parametrize("combinator", ["anyOf", "oneOf"])
+    def test_unwrap_when_inner_names_declared_in_nested_alternatives(self, combinator):
+        tool = _make_tool("f", {})
+        tool.function.parameters["allOf"] = [
+            {
+                combinator: [
+                    {"properties": {name: {"type": "string"}}, "required": [name]}
+                    for name in ("city", "zip_code")
+                ]
+            }
+        ]
+        result = _unwrap_wrapper_args('{"arguments": {"city": "Berlin"}}', [tool], "f")
+        assert json.loads(result) == {"city": "Berlin"}
 
     def test_unwrap_json_string_inner(self):
         from vllm.entrypoints.openai.chat_completion.protocol import (
