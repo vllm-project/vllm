@@ -820,7 +820,6 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
                 block_table_tensor=table,
                 slot_mapping=torch.arange(previous, end, device=DEVICE),
                 mm_req_doc_ranges={0: spans},
-                _seq_lens_cpu=lengths,
             )
             metadata = builder.build(0, common)
             assert isinstance(metadata, metadata_type)
