@@ -36,7 +36,11 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    is_weights_pre_processed,
+    replace_parameter,
+    set_weight_attrs,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -474,6 +478,8 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
 class Mxfp4MoEMethod(FusedMoEMethodBase):
     """MXFP4 MoE quantization method."""
 
+    supports_pre_processed_weights = True
+
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
 
@@ -760,9 +766,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             replace_parameter(layer, "w2_bias", w2_bias)
 
         # Build quant config
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        self._build_moe_kernel(layer)
 
-        # Build kernel (modular or monolithic)
+    def _build_moe_kernel(self, layer: RoutedExperts) -> None:
+        """Build the modular MoE kernel from the (already in-format) weights."""
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None and self.experts_cls is not None:
             self.moe_kernel = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
@@ -774,15 +782,24 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def process_weights_after_loading(self, layer):
+        if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
+            return
+
+        if is_weights_pre_processed():
+            if self.mxfp4_backend != Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:
+                raise RuntimeError(
+                    "pre-processed weights require FLASHINFER_TRTLLM_MXFP4_MXFP8 "
+                    f"moe backend, got {self.mxfp4_backend}"
+                )
+            self._build_moe_kernel(layer)
+            return
+
         w13 = layer.w13_weight
         w2 = layer.w2_weight
         w13_scale = layer.w13_weight_scale
         w2_scale = layer.w2_weight_scale
         w13_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
-
-        if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
-            return
 
         self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
 
