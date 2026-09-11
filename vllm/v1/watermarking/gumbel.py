@@ -71,7 +71,7 @@ class GumbelWatermarker(Watermarker):
         noise = -torch.log(-torch.log(uniforms))
         return WatermarkSample(torch.argmax(logits + noise, dim=-1), logits)
 
-    def _sample_mixed(
+    def _try_sample_mixed(
         self,
         logits: torch.Tensor,
         contexts: torch.Tensor,
