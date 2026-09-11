@@ -80,6 +80,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     # Distinguishes push from pull in the NIXL compatibility hash.
     _TRANSFER_MODE: str = "push"
 
+    _supports_pp_hma = True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
