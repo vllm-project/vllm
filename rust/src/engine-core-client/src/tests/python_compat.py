@@ -51,6 +51,19 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     output_kind: RequestOutputKind = RequestOutputKind.DELTA
 
 
+class KvHintAction(msgspec.Struct, frozen=True):
+    action_id: str
+    action_type: str
+    action_version: str
+    payload: dict[str, object]
+
+
+class KvHintsEnvelope(msgspec.Struct, frozen=True):
+    protocol_version: str
+    message_id: str
+    actions: list[KvHintAction]
+
+
 class EngineCoreRequest(
     msgspec.Struct,
     array_like=True,
@@ -77,6 +90,7 @@ class EngineCoreRequest(
     reasoning_parser_kwargs: dict[str, object] | None = None
     abort_immediately: bool = False
     session_id: str | None = None
+    kv_hints: KvHintsEnvelope | None = None
 
 
 class EngineCoreOutput(
@@ -143,6 +157,18 @@ request = EngineCoreRequest(
     arrival_time=42.5,
     client_index=0,
     session_id="session-1",
+    kv_hints=KvHintsEnvelope(
+        protocol_version="0.1",
+        message_id="msg-1",
+        actions=[
+            KvHintAction(
+                action_id="action-1",
+                action_type="example.action",
+                action_version="1.0",
+                payload={"key": "value"},
+            )
+        ],
+    ),
 )
 
 # All defaults -> empty map. Regression guard for the sparse-map decode.
