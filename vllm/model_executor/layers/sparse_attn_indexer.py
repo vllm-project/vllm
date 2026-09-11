@@ -451,7 +451,6 @@ def sparse_attn_indexer(
             values_spec,
             scales_spec,
         )
-        num_prefill_tokens = attn_metadata_narrowed.num_prefill_tokens
         # Contiguous window of prefill rows this rank scores. The builder emits
         # row_shard_sizes from replicated scheduler metadata, so every TP rank
         # agrees on whether the exchange below runs.
@@ -556,7 +555,8 @@ def sparse_attn_indexer(
             # Every row was scored and ranked end to end by one rank, so this is
             # a layout-preserving concatenation, not a top-k merge. all_gatherv
             # allocates its output, so the source may alias the destination.
-            prefill_end = num_decode_tokens + num_prefill_tokens
+            # Metadata token counts can include graph padding, unlike the shard.
+            prefill_end = num_decode_tokens + sum(shard_sizes)
             local_topk = topk_indices_buffer[
                 shard_start:shard_stop, :topk_tokens
             ].contiguous()

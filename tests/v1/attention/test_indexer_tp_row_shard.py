@@ -8,12 +8,14 @@ over that row's ``[ks, ke)``), so each rank can own a disjoint slice and the
 group exchanges ``index_topk`` int32s per row instead of the logits.
 """
 
+import importlib
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
+import vllm.utils.deep_gemm as deep_gemm
 import vllm.v1.attention.backends.mla.indexer as indexer
 from vllm.config import CUDAGraphMode
 from vllm.v1.attention.backends.mla.indexer import (
@@ -91,7 +93,18 @@ def _bound_tables(chunks, num_tokens):
 
 
 def _run_rank(
-    monkeypatch, *, world, rank, chunks, num_tokens, logits, exchange, split=None
+    monkeypatch,
+    *,
+    world,
+    rank,
+    chunks,
+    num_tokens,
+    logits,
+    exchange,
+    split=None,
+    padded_rows=0,
+    index_kpool=1,
+    metadata_includes_padding=False,
 ):
     """Drive the real ``sparse_attn_indexer`` prefill path for one TP rank.
 
@@ -110,8 +123,14 @@ def _run_rank(
         # placing the prefill rows behind a decode offset in the buffer.
         num_decode_tokens=_DECODE_ROWS,
         num_prefills=len(chunks),
-        num_prefill_tokens=num_tokens - _DECODE_ROWS,
-        prefill=SimpleNamespace(chunks=chunks, row_shard_sizes=split),
+        num_prefill_tokens=(
+            num_tokens
+            - _DECODE_ROWS
+            + (padded_rows if metadata_includes_padding else 0)
+        ),
+        prefill=SimpleNamespace(
+            chunks=chunks, row_shard_sizes=split, max_prefill_seq_len=2048
+        ),
     )
 
     set_ = monkeypatch.setattr
@@ -158,16 +177,71 @@ def _run_rank(
 
     set_(sparse_indexer, "fp8_fp4_mqa_logits", fake_mqa_logits)
 
-    row_ids = torch.arange(num_tokens, dtype=torch.float32)
-    buffer = torch.full((num_tokens, _TOPK), 17, dtype=torch.int32)
+    row_ids = torch.arange(num_tokens + padded_rows, dtype=torch.float32)
+    width = _TOPK + index_kpool - 1
+    buffer = torch.full((num_tokens + padded_rows, width), 17, dtype=torch.int32)
+    if index_kpool > 1:
+        # Initialize the model package first, as in model loading, to avoid
+        # its existing circular import through the k-pool layer.
+        from vllm.models.glm5next.nvidia.ops import kpool_compress
+
+        kpool_indexer = importlib.import_module(
+            "vllm.model_executor.layers.sparse_attn_indexer_kpool"
+        )
+
+        for name in (
+            "get_forward_context",
+            "get_tensor_model_parallel_rank",
+            "get_tp_group",
+            "current_workspace_manager",
+        ):
+            set_(kpool_indexer, name, getattr(sparse_indexer, name))
+        set_(kpool_indexer.current_platform, "is_rocm", lambda: False)
+        set_(deep_gemm, "fp8_fp4_mqa_logits", fake_mqa_logits)
+        set_(torch.ops._C, "top_k_per_row_prefill", _ref_top_k_per_row_prefill)
+
+        def expand(pool_ids, seq_lens, pool_size):
+            offsets = torch.arange(pool_size)
+            tokens = pool_ids[..., None] * pool_size + offsets
+            tokens = torch.where(pool_ids[..., None] >= 0, tokens, -1)
+            tail_offsets = torch.arange(pool_size - 1)
+            tail = (seq_lens // pool_size)[:, None] * pool_size + tail_offsets
+            tail = torch.where(tail_offsets < (seq_lens % pool_size)[:, None], tail, -1)
+            return torch.cat((tokens.flatten(1), tail), dim=1).int()
+
+        set_(kpool_compress, "expand_pools_and_append_tail", expand)
+        positions = torch.zeros(num_tokens + padded_rows, dtype=torch.int64)
+        positions[:num_tokens] = (
+            ke_table * index_kpool + (torch.arange(num_tokens) % index_kpool) - 1
+        )
+        kpool_indexer.sparse_attn_indexer_kpool(
+            torch.zeros(num_tokens + padded_rows, 1),
+            INDEXER_LAYER,
+            torch.empty(1),
+            row_ids.reshape(-1, 1, 1),
+            None,
+            torch.zeros(num_tokens + padded_rows, 4),
+            row_ids.reshape(-1, 1),
+            128,
+            "ue8m0",
+            _TOPK,
+            4,
+            4096,
+            _NUM_KV,
+            buffer,
+            True,
+            index_kpool=index_kpool,
+            positions=positions,
+        )
+        return buffer, len(gathers)
     sparse_indexer.sparse_attn_indexer(
-        torch.zeros(num_tokens, 1),  # hidden_states
+        torch.zeros(num_tokens + padded_rows, 1),  # hidden_states
         INDEXER_LAYER,
         torch.empty(1),  # kv_cache
-        row_ids.reshape(num_tokens, 1, 1),  # q_quant carries its global row id
+        row_ids.reshape(-1, 1, 1),  # q_quant carries its global row id
         None,  # q_scale
         None,  # k
-        row_ids.reshape(num_tokens, 1),  # weights carry it too
+        row_ids.reshape(-1, 1),  # weights carry it too
         128,
         "ue8m0",
         _TOPK,
@@ -182,7 +256,7 @@ def _run_rank(
     return buffer, len(gathers)
 
 
-def _run_group(monkeypatch, world, chunks, num_tokens, logits, split=None):
+def _run_group(monkeypatch, world, chunks, num_tokens, logits, split=None, **kwargs):
     """Collect every rank's slice, then replay the concatenation each rank
     would receive. There is exactly one exchange per forward."""
     rows = num_tokens - _DECODE_ROWS
@@ -199,7 +273,7 @@ def _run_group(monkeypatch, world, chunks, num_tokens, logits, split=None):
                 assert local.shape[0] == sizes[rank]
                 slices[rank] = local.clone()
                 if not replay:
-                    return torch.zeros(sum(sizes), _TOPK, dtype=torch.int32)
+                    return torch.zeros(sum(sizes), local.shape[1], dtype=torch.int32)
                 return torch.cat([slices[r] for r in range(world)])
 
             with monkeypatch.context() as m:
@@ -213,9 +287,59 @@ def _run_group(monkeypatch, world, chunks, num_tokens, logits, split=None):
                         logits=logits,
                         exchange=exchange,
                         split=split,
+                        **kwargs,
                     )
                 )
     return results
+
+
+@pytest.mark.parametrize("index_kpool", [1, 4])
+@pytest.mark.parametrize("metadata_includes_padding", [False, True])
+def test_sharded_prefill_preserves_padding_and_kpool_tail(
+    monkeypatch, index_kpool, metadata_includes_padding
+):
+    """Gather only scored rows, including incomplete pools and excluding padding.
+
+    GPU kernels use row-independent CPU references here; the real forward and
+    collective slicing run unchanged, including the GLM k-pool implementation.
+    """
+    chunks, num_tokens = _build_chunks([19, 11, 13, 3])
+    logits = torch.randn(
+        num_tokens, _NUM_KV, generator=torch.Generator().manual_seed(54951)
+    )
+    options = dict(
+        padded_rows=13,
+        index_kpool=index_kpool,
+        metadata_includes_padding=metadata_includes_padding,
+    )
+
+    def no_exchange(*args, **kwargs):
+        pytest.fail("Unsharded reference must not exchange rows")
+
+    baseline, gathers = _run_rank(
+        monkeypatch,
+        world=1,
+        rank=0,
+        chunks=chunks,
+        num_tokens=num_tokens,
+        logits=logits,
+        exchange=no_exchange,
+        **options,
+    )
+    for output, shard_gathers in _run_group(
+        monkeypatch, 4, chunks, num_tokens, logits, split=[7, 17, 9, 13], **options
+    ):
+        torch.testing.assert_close(output, baseline)
+        assert shard_gathers == gathers
+        assert torch.all(output[num_tokens:] == -1)
+        assert torch.all(output[:_DECODE_ROWS] == -1)
+        if index_kpool > 1:
+            # All four phases occur, so a gather of only topk columns fails.
+            expected_tail_count = torch.arange(_DECODE_ROWS, num_tokens) % index_kpool
+            torch.testing.assert_close(
+                (output[_DECODE_ROWS:num_tokens, _TOPK:] >= 0).sum(1),
+                expected_tail_count,
+            )
 
 
 @pytest.mark.parametrize("world", [2, 3, 8])
@@ -485,3 +609,112 @@ def test_row_sharding_gate_follows_the_mixed_batch_cudagraph_mode(
         tp_size=4,
     )
     assert supported is expected
+
+
+@pytest.mark.parametrize("rows", [8192, 65535, 65536, 65539])
+@pytest.mark.parametrize("compress_ratio", [1, 4])
+@pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE])
+@pytest.mark.parametrize("decode_rows", [0, 1])
+def test_runner_v2_builds_shards_from_scheduled_rows(
+    monkeypatch, rows, compress_ratio, mode, decode_rows
+):
+    """V2 eager/piecewise metadata excludes padding and gates on query rows.
+
+    Exercise the real V2 prepare_attn -> shared builder -> planner path on CPU;
+    replace only the device metadata kernels. A 1M history alone must not
+    activate sharding when the scheduler gives the batch fewer than 64K rows.
+    """
+    from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+
+    builder = object.__new__(indexer.DeepseekV32IndexerMetadataBuilder)
+    builder.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=2048)),
+        attention_config=SimpleNamespace(sparse_mla_force_mqa=False),
+        speculative_config=None,
+    )
+    for name, value in dict(
+        decode_threshold=1,
+        use_flattening=False,
+        supports_varlen=False,
+        num_speculative_tokens=0,
+        decode_lens_buffer=torch.empty(4, dtype=torch.int32),
+        per_req_decode_lens_buffer=torch.empty(4, dtype=torch.int32),
+        expanded_seq_lens_buffer=torch.empty(4, dtype=torch.int32),
+        scheduler_metadata_buffer=torch.empty(1, dtype=torch.int32),
+        use_pcp=False,
+        compress_ratio=compress_ratio,
+        kernel_block_size=None,
+        pcp_world_size=1,
+        dcp_world_size=1,
+        dcp_rank=0,
+        cp_kv_cache_interleave_size=1,
+        max_prefill_buffer_size=2_000_000,
+        enable_tp_prefill_row_sharding=True,
+        kv_cache_spec=SimpleNamespace(num_states=64),
+        compressed_slot_mapping_buffer=torch.empty(rows + 13, dtype=torch.int64),
+    ).items():
+        setattr(builder, name, value)
+    monkeypatch.setattr(indexer, "get_tensor_model_parallel_world_size", lambda: 4)
+    monkeypatch.setattr(indexer, "has_deep_gemm", lambda: False)
+    monkeypatch.setattr(
+        indexer,
+        "get_compressed_slot_mapping",
+        lambda num_tokens, *args, out: out[:num_tokens],
+    )
+
+    def chunk(start, end, query_start, query_start_cpu, *args, query_slice, **kwargs):
+        token_start = int(query_start_cpu[start]) + query_slice.start
+        return SimpleNamespace(
+            token_start=token_start,
+            token_end=token_start + query_slice.stop - query_slice.start,
+        )
+
+    monkeypatch.setattr(indexer, "build_prefill_chunk_metadata", chunk)
+    query_lens = [1] * decode_rows + [rows - 7, 7] + [0] * (2 - decode_rows)
+    query_start = torch.tensor([0, *query_lens], dtype=torch.int32).cumsum(0).int()
+    seq_lens = [4096] * decode_rows + [800_000, 1_000_000]
+    lengths = torch.tensor(seq_lens + [0] * (2 - decode_rows), dtype=torch.int32)
+    num_tokens = rows + decode_rows
+    batch = SimpleNamespace(
+        num_reqs=2 + decode_rows,
+        num_reqs_after_padding=4,
+        num_tokens=num_tokens,
+        num_tokens_after_padding=num_tokens + 13,
+        query_start_loc_np=query_start.numpy(),
+        query_start_loc=query_start,
+        max_query_len=rows - 7,
+        seq_lens=lengths,
+        seq_lens_cpu_upper_bound=lengths,
+        dcp_local_seq_lens=None,
+        positions=torch.zeros(num_tokens + 13, dtype=torch.int64),
+        is_prefilling_np=torch.tensor(
+            [False] * decode_rows + [True, True] + [False] * (2 - decode_rows)
+        ).numpy(),
+        prompt_lens=None,
+    )
+    group = SimpleNamespace(
+        layer_names=[INDEXER_LAYER], get_metadata_builder=lambda _: builder
+    )
+    result = DefaultModelState.prepare_attn(
+        SimpleNamespace(supports_mm_inputs=False),
+        batch,
+        mode,
+        (torch.zeros(4, 8, dtype=torch.int32),),
+        torch.zeros(1, num_tokens + 13, dtype=torch.int64),
+        [[group]],
+        SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=[INDEXER_LAYER])]),
+    )[INDEXER_LAYER]
+    assert result.num_prefill_tokens == rows
+    assert result.num_prefills == 2
+    assert result.num_decode_tokens == decode_rows
+    assert result.seq_lens.tolist() == seq_lens
+    if decode_rows:
+        assert result.decode.seq_lens.tolist() == [[4096 // compress_ratio]]
+    assert result.prefill.chunks[0].token_start == decode_rows
+    assert sum(c.token_end - c.token_start for c in result.prefill.chunks) == rows
+    sizes = result.prefill.row_shard_sizes
+    if rows < 65536:
+        assert sizes is None
+    else:
+        assert len(sizes) == 4 and min(sizes) > 0
+        assert sum(sizes) == rows
