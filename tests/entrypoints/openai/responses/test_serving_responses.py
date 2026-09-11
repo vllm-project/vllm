@@ -712,6 +712,7 @@ class TestInitializeToolSessions:
             pass
 
         assert serving_responses_instance.engine_client.generate.call_count == 2
+        assert context.request_metrics_cover_all_generation_turns is False
         followup_engine_input = (
             serving_responses_instance.engine_client.generate.call_args_list[1].args[0]
         )
