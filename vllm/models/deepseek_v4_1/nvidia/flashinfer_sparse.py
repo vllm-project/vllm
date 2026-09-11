@@ -13,7 +13,7 @@ from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
     deep_gemm_fp8_o_proj,
 )
-from vllm.models.deepseek_v4_1.attention import DeepseekV4Attention
+from vllm.models.deepseek_v4_1.attention import AttentionOutput, DeepseekV4Attention
 from vllm.models.deepseek_v4_1.common.ops import (
     build_flashinfer_mixed_sparse_indices,
     compute_global_topk_indices_and_lens,
@@ -253,8 +253,9 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
-        output: torch.Tensor,
+        output: AttentionOutput,
     ) -> None:
+        assert isinstance(output, torch.Tensor)
         # The TRTLLM-gen kernel requires h_q in {64, 128}, so the output buffer
         # is allocated at the padded head count while q arrives at the local
         # head count; _forward pads q to match before the launcher.
@@ -658,8 +659,9 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
-        output: torch.Tensor,
+        output: AttentionOutput,
     ) -> None:
+        assert isinstance(output, torch.Tensor)
         # Output may be padded to backend-supported head counts.
         assert output.shape[0] == q.shape[0] and output.shape[-1] == q.shape[-1], (
             f"output buffer shape {output.shape} incompatible with q shape {q.shape}"

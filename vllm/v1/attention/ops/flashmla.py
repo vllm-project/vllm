@@ -183,6 +183,9 @@ def flash_mla_fused_sparse_prefill(
     n_wv_group: int,
     attn_sink: torch.Tensor | None = None,
     topk_length: torch.Tensor | None = None,
+    *,
+    out_fp8: torch.Tensor | None = None,
+    out_sf: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fused sparse prefill over a non-paged bf16 ``kv`` (DeepSeek V4.1).
 
@@ -224,6 +227,8 @@ def flash_mla_fused_sparse_prefill(
             True,
             True,
             True,
+            out_fp8,
+            out_sf,
         )
     )
     return out_fp8, out_sf, max_logits, lse
@@ -242,6 +247,9 @@ def flash_mla_fused_sparse_decode(
     extra_k_cache: torch.Tensor | None = None,
     extra_indices: torch.Tensor | None = None,
     extra_topk_length: torch.Tensor | None = None,
+    *,
+    out_fp8: torch.Tensor | None = None,
+    out_sf: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fused sparse decode over paged quantized caches (batch flattened).
 
@@ -276,5 +284,7 @@ def flash_mla_fused_sparse_decode(
         True,
         True,
         True,
+        out_fp8,
+        out_sf,
     )
     return out_fp8, out_sf, lse

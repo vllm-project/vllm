@@ -10,7 +10,7 @@ from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
     deep_gemm_fp8_o_proj,
 )
-from vllm.models.deepseek_v4_1.attention import DeepseekV4Attention
+from vllm.models.deepseek_v4_1.attention import AttentionOutput, DeepseekV4Attention
 from vllm.models.deepseek_v4_1.common.ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
@@ -89,8 +89,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
-        output: torch.Tensor,
+        output: AttentionOutput,
     ) -> None:
+        assert isinstance(output, torch.Tensor)
         assert output.shape == q.shape, (
             f"output buffer shape {output.shape} must match q shape {q.shape}"
         )

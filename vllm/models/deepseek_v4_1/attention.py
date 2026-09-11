@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias, cast
 
 import regex as re
 import torch
@@ -71,6 +71,8 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+AttentionOutput: TypeAlias = torch.Tensor | QuantizedActivation
 
 
 def _replace_layer_index(prefix: str, layer_id: int) -> str:
@@ -227,7 +229,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
-        output: torch.Tensor,
+        output: AttentionOutput,
     ) -> None:
         """Platform-specific sparse MLA forward; writes attention into ``output``."""
         raise NotImplementedError
@@ -627,7 +629,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
     def _alloc_attn_out(
         self, num_tokens: int, hidden_states: torch.Tensor
-    ) -> torch.Tensor:
+    ) -> AttentionOutput:
         """Attention output buffer: ``[N, padded_heads, head_dim]`` bf16."""
         return torch.empty(
             (num_tokens, self.padded_heads, self.head_dim),
@@ -636,9 +638,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
 
     def _finish_o_proj(
-        self, attn_out: torch.Tensor, positions: torch.Tensor
+        self, attn_out: AttentionOutput, positions: torch.Tensor
     ) -> torch.Tensor:
         """Inverse-RoPE + wo_a + wo_b on the real heads of ``attn_out``."""
+        assert isinstance(attn_out, torch.Tensor)
         return self._o_proj(attn_out[:, : self.n_local_heads, :], positions)
 
     def _prepare_q_and_insert_kv(
@@ -705,7 +708,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         kv_score: torch.Tensor,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
-        attn_out: torch.Tensor,
+        attn_out: AttentionOutput,
     ) -> None:
         """Wide eager region: the whole of ``_prepare_and_attn`` runs eagerly.
 
@@ -732,7 +735,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         kv_score: torch.Tensor,
         indexer_weights: torch.Tensor,
         positions: torch.Tensor,
-        attn_out: torch.Tensor,
+        attn_out: AttentionOutput,
     ) -> None:
         """Attention input preparation followed by the sparse indexer and MLA.
 
@@ -886,7 +889,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
-        out: torch.Tensor,
+        out: AttentionOutput,
     ) -> None:
         if self.indexer is not None and index_q is not None:
             assert index_weights is not None
