@@ -99,6 +99,8 @@ class EngineCoreOutput(
     num_nans_in_logits: int = 0
     mm_cache_miss_hashes: list[str] | None = None
     new_sampling_mask: object | None = None
+    spec_decode_metrics: object | None = None
+    routed_experts_payload: object | None = None
 
 
 class EngineCoreOutputs(
@@ -198,6 +200,8 @@ outputs = EngineCoreOutputs(
             request_id="req-1",
             new_token_ids=[7, 8],
             finish_reason=FinishReason.LENGTH,
+            spec_decode_metrics={"accepted": 1},
+            routed_experts_payload={"format": "test"},
         )
     ],
     finished_requests={"req-1"},
