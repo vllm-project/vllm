@@ -1,16 +1,16 @@
 ARG BASE_IMAGE=ubuntu:24.04
 ARG ROCM_WHEEL_INDEX=https://rocm.nightlies.amd.com/whl-multi-arch/
-ARG ROCM_SDK_VERSION=10.1.0a20260811+bkc.20260820
-ARG TORCH_VERSION=2.11.0+rocm10.1.0a20260811.bkc.20260820
-ARG TORCHVISION_VERSION=0.26.0+rocm10.1.0a20260811.bkc.20260820
-ARG TORCHAUDIO_VERSION=2.11.0+rocm10.1.0a20260811.bkc.20260820
-ARG TRITON_VERSION=3.8.0+git4cff872c.rocm10.1.0a20260811.bkc.20260820
-ARG APEX_VERSION=1.11.0+rocm10.1.0a20260811.bkc.20260820
+ARG ROCM_SDK_VERSION=10.1.0a20260822
+ARG TORCH_VERSION=2.11.0+rocm10.1.0a20260822
+ARG TORCHVISION_VERSION=0.26.0+rocm10.1.0a20260822
+ARG TORCHAUDIO_VERSION=2.11.0+rocm10.1.0a20260822
+ARG TRITON_VERSION=3.8.0+git4cff872c.rocm10.1.0a20260822
+ARG APEX_VERSION=1.11.0+rocm10.1.0a20260822
 
 
 ARG FA_BRANCH="jpvillam/gfx1250_wip"
 ARG FA_REPO="https://github.com/jpvillam-amd/flash-attention.git"
-ARG AITER_BRANCH="main"
+ARG AITER_BRANCH="7bb449982"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.1.0"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
@@ -244,7 +244,10 @@ FROM base AS build_aiter
 ARG AITER_BRANCH
 ARG AITER_REPO
 ARG USE_SCCACHE
-RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
+
+RUN git clone ${AITER_REPO} \
+    && cd aiter \
+    && git checkout --detach ${AITER_BRANCH}
 RUN cd aiter \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt
