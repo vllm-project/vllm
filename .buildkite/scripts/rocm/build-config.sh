@@ -1,23 +1,18 @@
 #!/usr/bin/env bash
 # Shared Dockerfile selection for the normal AMD CI build chain.
 # CI_ROCM_DOCKERFILE_BASE and CI_ROCM_DOCKERFILE accept repository-relative paths.
-# VLLM_USE_ROCK=1 remains a shorthand; explicit Dockerfile settings take priority.
+# For Rock, set CI_ROCM_DOCKERFILE_BASE=docker/Dockerfile.rock_base and
+# CI_ROCM_DOCKERFILE=docker/Dockerfile.rock.
 # Custom recipes must preserve the CI targets and artifact layout. Additional
 # COPY inputs also need the corresponding *_CONTENT_FILES overrides.
 
 rocm_base_dockerfile() {
     local default="docker/Dockerfile.rocm_base"
-    if [[ "${VLLM_USE_ROCK:-0}" == "1" ]]; then
-        default="docker/Dockerfile.rock_base"
-    fi
     printf '%s\n' "${CI_ROCM_DOCKERFILE_BASE:-${ROCM_BASE_DOCKERFILE:-${default}}}"
 }
 
 rocm_ci_dockerfile() {
     local default="docker/Dockerfile.rocm"
-    if [[ "${VLLM_USE_ROCK:-0}" == "1" ]]; then
-        default="docker/Dockerfile.rock"
-    fi
     printf '%s\n' "${CI_ROCM_DOCKERFILE:-${CI_BASE_DOCKERFILE:-${default}}}"
 }
 
@@ -74,14 +69,6 @@ validate_rocm_dockerfile() {
 }
 
 configure_rocm_build() {
-    case "${VLLM_USE_ROCK:-0}" in
-        0|1) ;;
-        *)
-            echo "VLLM_USE_ROCK must be 0 or 1" >&2
-            return 2
-            ;;
-    esac
-
     ROCM_BASE_DOCKERFILE=$(rocm_base_dockerfile)
     CI_BASE_DOCKERFILE=$(rocm_ci_dockerfile)
     export ROCM_BASE_DOCKERFILE CI_BASE_DOCKERFILE
