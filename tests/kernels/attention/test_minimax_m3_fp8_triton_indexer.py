@@ -13,6 +13,7 @@ everywhere else (e.g. SM120), for both the decode and prefill scorers.
 import pytest
 import torch
 
+from vllm.models.minimax_m3.common.indexer import select_indexer_impl_cls
 from vllm.models.minimax_m3.common.ops.index_topk import (
     SPARSE_BLOCK_SIZE,
     minimax_m3_index_decode,
@@ -21,6 +22,7 @@ from vllm.models.minimax_m3.common.ops.index_topk import (
 )
 from vllm.platforms import current_platform
 
+FP8_CUDA_SUPPORTED = current_platform.is_cuda() and current_platform.supports_fp8()
 PAGE = SPARSE_BLOCK_SIZE
 HEAD_DIM = 128
 HEADS = 1
@@ -50,7 +52,28 @@ def _check_selection(top_bf16: set[int], top_fp8: set[int]) -> None:
     assert len(top_bf16 & top_fp8) >= TOPK - 2
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize("indexer_kv_dtype", ["fp8", "fp8_e4m3"])
+@pytest.mark.parametrize(
+    ("is_cuda", "supports_fp8"),
+    [(False, True), (True, False)],
+)
+def test_fp8_indexer_requires_supported_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+    indexer_kv_dtype,
+    is_cuda: bool,
+    supports_fp8: bool,
+) -> None:
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
+    monkeypatch.setattr(current_platform, "supports_fp8", lambda: supports_fp8)
+
+    with pytest.raises(NotImplementedError, match="requires CUDA fp8 support"):
+        select_indexer_impl_cls(
+            topk_blocks=TOPK,
+            indexer_kv_dtype=indexer_kv_dtype,
+        )
+
+
+@pytest.mark.skipif(not FP8_CUDA_SUPPORTED, reason="CUDA FP8 support required")
 @torch.inference_mode()
 def test_fp8_index_query_and_cache_decode_topk_matches_bf16() -> None:
     dev = "cuda"
@@ -78,7 +101,7 @@ def test_fp8_index_query_and_cache_decode_topk_matches_bf16() -> None:
     _check_selection(select(keys), select(keys.to(torch.float8_e4m3fn)))
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not FP8_CUDA_SUPPORTED, reason="CUDA FP8 support required")
 @torch.inference_mode()
 def test_fp8_index_query_and_cache_prefill_topk_matches_bf16() -> None:
     dev = "cuda"

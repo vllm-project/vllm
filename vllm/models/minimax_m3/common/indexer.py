@@ -472,17 +472,21 @@ def select_indexer_impl_cls(
 
     On Blackwell (SM100) with ``topk_blocks`` in ``(4, 8, 16, 32)`` (matching the
     main MSA attend), the fmha_sm100 score path + Triton top-k is used for both
-    bf16 and fp8 index caches. Everything else falls back to the Triton indexer
-    (bf16 only).
+    bf16 and fp8 index caches. Everything else falls back to the Triton indexer,
+    with fp8 restricted to CUDA platforms that advertise fp8 support.
     """
     if indexer_kv_dtype in ("mxfp4", "nvfp4"):
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} needs the (not-yet-added) "
             "CuteDSL indexer impl."
         )
-    is_sm100 = (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    )
+    is_cuda = current_platform.is_cuda()
+    is_fp8 = indexer_kv_dtype in ("fp8", "fp8_e4m3")
+    if is_fp8 and not (is_cuda and current_platform.supports_fp8()):
+        raise NotImplementedError(
+            f"indexer_kv_dtype={indexer_kv_dtype!r} requires CUDA fp8 support."
+        )
+    is_sm100 = is_cuda and current_platform.is_device_capability_family(100)
     use_msa = (
         is_sm100
         and topk_blocks in (4, 8, 16, 32)
