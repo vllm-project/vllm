@@ -4,6 +4,7 @@
 
 from typing import TYPE_CHECKING
 
+from vllm.utils.math_utils import round_up
 from vllm.v1.core.kv_cache_utils import (
     resolve_dcp_kv_block_size,
     resolve_kv_cache_block_sizes,
@@ -108,8 +109,16 @@ def build_offloading_config(
         )
 
         tokens_per_block = unique_tokens_per_block.pop()
-        assert tokens_per_chunk_int % tokens_per_block == 0
-        blocks_per_chunk = tokens_per_chunk_int // tokens_per_block
+        if tokens_per_chunk_int % tokens_per_block == 0:
+            blocks_per_chunk = tokens_per_chunk_int // tokens_per_block
+        else:
+            raise ValueError(
+                f"'block_size'={tokens_per_chunk_int} in kv_connector_extra_config "
+                f"must be a multiple of the GPU KV cache block size "
+                f"({tokens_per_block} tokens). Use "
+                f"{round_up(tokens_per_chunk_int, tokens_per_block)} instead, or set "
+                f"'blocks_per_chunk' to express the chunk size in blocks."
+            )
 
     worker_kv_bytes_per_block = 0
     all_groups_selected = len(selected_groups) == len(kv_cache_config.kv_cache_groups)
