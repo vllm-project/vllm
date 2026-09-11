@@ -149,8 +149,6 @@ def _pick_tile_config(N: int, K: int, M: int, num_sms: int) -> tuple[int, int]:
     return BN, split_k
 
 
-
-
 class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.CompileKey"]):
     block_m = 128
     block_k = 64
@@ -483,6 +481,7 @@ class BF16x3RouterGemmKernel(VllmCuTeDSLJitKernel["BF16x3RouterGemmKernel.Compil
                 cute.arch.barrier(barrier_id=BAR_EPI, number_of_threads=128)
                 if warp_id == 0:
                     _tcgen05.dealloc()
+
         @cute.jit
         def host_entrypoint(
             X: cute.Tensor,
