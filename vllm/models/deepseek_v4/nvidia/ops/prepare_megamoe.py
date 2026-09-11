@@ -175,8 +175,10 @@ def _prepare_megamoe_inputs_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
         ),
     )
     has_padding: Any = WarmupChoices(False, True)
+    padding_aligned: Any = WarmupChoices(False, True)
     x_scale_width = hidden_size // _PREPARE_MEGAMOE_BLOCK_K
     shared_rows = triton.cdiv(shared_block_m, 128) * 128
+    # Mirrors DeepGEMM's get_num_max_shared_sf_tokens buffer layout.
     shared_stride_k = triton.cdiv(max_tokens, 384) * 384 * 16
     return dict(
         hidden_states=TritonWarmupTensor(torch.bfloat16, shape=(1, hidden_size)),
@@ -186,7 +188,11 @@ def _prepare_megamoe_inputs_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
         x_sf=TritonWarmupTensor(torch.int32, shape=(1, x_scale_width)),
         topk_idx_out=TritonWarmupTensor(torch.int64, shape=(1, top_k)),
         topk_weights_out=TritonWarmupTensor(torch.float32, shape=(1, top_k)),
-        is_padding=TritonWarmupTensor(torch.bool) if has_padding else None,
+        is_padding=(
+            TritonWarmupTensor(torch.bool, aligned=padding_aligned)
+            if has_padding
+            else None
+        ),
         shared_x_sf=TritonWarmupTensor(
             torch.int32,
             shape=(shared_rows, x_scale_width),
