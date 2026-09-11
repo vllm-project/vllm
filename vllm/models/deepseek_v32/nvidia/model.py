@@ -125,6 +125,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         attn_in: torch.Tensor | None = None,
+        aux_hidden_states: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         full_num_tokens = positions.shape[0]
 
@@ -144,6 +145,11 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
             hidden_states, residual = fused_allreduce_rms_norm(
                 hidden_states, residual, self.input_layernorm
             )
+        if aux_hidden_states is not None:
+            # The preceding MLP output was TP-partial until the input norm.
+            # Its returned residual is the complete pre-norm block output.
+            # Norm kernels may reuse residual buffers later in this forward.
+            aux_hidden_states.append(residual.clone())
         if self.use_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
@@ -281,16 +287,20 @@ class DeepseekV32Model(torch.nn.Module):
                 attn_in = sp_shard(attn_in)
             assert residual is None, "Currently, SP is not supported with PP"
 
-        aux_hidden_states = []
+        aux_hidden_states: list[torch.Tensor] = []
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(
-                    hidden_states if residual is None else hidden_states + residual
-                )
-            hidden_states, residual = layer(positions, hidden_states, residual, attn_in)
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+                attn_in,
+                aux_hidden_states=(
+                    aux_hidden_states if idx in self.aux_hidden_state_layers else None
+                ),
+            )
             attn_in = None
 
         if not get_pp_group().is_last_rank:
@@ -302,7 +312,9 @@ class DeepseekV32Model(torch.nn.Module):
             )
 
         if self.use_sequence_parallel:
-            hidden_states, _ = self.norm(hidden_states, residual)
+            hidden_states, residual = self.norm(hidden_states, residual)
+            if self.end_layer in self.aux_hidden_state_layers:
+                aux_hidden_states.append(residual.clone())
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
                 packed_hidden_states = torch.cat(
@@ -316,9 +328,11 @@ class DeepseekV32Model(torch.nn.Module):
             else:
                 hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
         else:
-            hidden_states, _ = fused_allreduce_rms_norm(
+            hidden_states, residual = fused_allreduce_rms_norm(
                 hidden_states, residual, self.norm
             )
+            if self.end_layer in self.aux_hidden_state_layers:
+                aux_hidden_states.append(residual.clone())
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
