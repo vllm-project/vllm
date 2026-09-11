@@ -631,6 +631,19 @@ def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeyp
         monkeypatch.setattr(
             engram_ops, "get_tensor_model_parallel_rank", lambda rank=rank: rank
         )
+
+        def exchange(rows, rank=rank):
+            return torch.cat(
+                [
+                    torch.nn.functional.pad(
+                        shard, (0, 0, 0, 0, 0, (-len(ids)) % tp_size)
+                    )[rank * chunk : (rank + 1) * chunk]
+                    for shard in shards
+                ],
+                dim=0,
+            )
+
+        monkeypatch.setattr(engram_ops, "_engram_sp_exchange", exchange)
         torch.testing.assert_close(
             module.embed(ids), padded[rank * chunk : (rank + 1) * chunk], rtol=0, atol=0
         )
