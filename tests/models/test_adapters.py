@@ -19,6 +19,7 @@ from vllm.model_executor.models.adapters import (
     _resolve_num_labels,
     as_seq_cls_model,
 )
+from vllm.model_executor.models.bert import BertEmbeddingModel
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling,
@@ -401,6 +402,39 @@ class NativeCrossEncoder(ExistingEmbeddingModel, SupportsCrossEncoding):
     pass
 
 
+class _CapturingBertBackbone(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(vocab_size=32)
+        self.input_ids = None
+
+    def forward(self, input_ids, **_kwargs):
+        self.input_ids = input_ids.clone()
+        return input_ids
+
+
+def test_sequence_classification_adapted_bert_preserves_token_type_ids():
+    model_cls = as_seq_cls_model(BertEmbeddingModel)
+    model = model_cls.__new__(model_cls)
+    torch.nn.Module.__init__(model)
+    backbone = _CapturingBertBackbone()
+    model.model = backbone
+
+    input_ids = torch.tensor([2, 5, 3, 6, 3], dtype=torch.int32)
+    positions = torch.arange(input_ids.shape[0], dtype=torch.int32)
+    token_type_ids = torch.tensor([0, 0, 0, 1, 1], dtype=torch.int32)
+    expected = input_ids | (token_type_ids << 30)
+
+    actual = model(
+        input_ids.clone(),
+        positions,
+        token_type_ids=token_type_ids,
+    )
+
+    assert torch.equal(actual, expected)
+    assert torch.equal(backbone.input_ids, expected)
+
+
 def test_sequence_classification_preserves_native_cross_encoder():
     assert as_seq_cls_model(NativeCrossEncoder) is NativeCrossEncoder
 
@@ -559,7 +593,7 @@ def test_sentence_transformers_cross_encoder_pooling_order():
     from vllm.pooling_params import PoolingParams
     from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 
-    hf_config = Qwen2Config(num_labels=1)
+    hf_config = Qwen2Config(num_labels=2)
     hf_config.sentence_transformers = {
         "activation_fn": "torch.nn.modules.activation.Sigmoid"
     }
@@ -572,12 +606,12 @@ def test_sentence_transformers_cross_encoder_pooling_order():
     vllm_config = SimpleNamespace(model_config=model_config)
 
     score = torch.nn.Sequential(
-        torch.nn.Linear(3, 1, bias=True),
+        torch.nn.Linear(3, 2, bias=True),
         torch.nn.Tanh(),
     )
     with torch.no_grad():
-        score[0].weight.copy_(torch.tensor([[0.2, -0.4, 0.6]]))
-        score[0].bias.copy_(torch.tensor([0.1]))
+        score[0].weight.copy_(torch.tensor([[0.2, -0.4, 0.6], [-0.3, 0.5, 0.1]]))
+        score[0].bias.copy_(torch.tensor([0.1, -0.2]))
 
     hidden_states = torch.tensor(
         [

@@ -2038,12 +2038,13 @@ class ModelConfig:
         return self.get_hidden_size()
 
     def get_and_verify_max_len(self, max_model_len: int):
-        # Consider max_model_len in tokenizer_config only when
-        # pooling models use absolute position_embedding.
+        # Sentence Transformers CrossEncoders save their processing limit in
+        # tokenizer_config.json, including for configs that omit the default
+        # absolute position_embedding_type.
         tokenizer_config = None
-        if (
-            self.runner_type == "pooling"
-            and getattr(self.hf_config, "position_embedding_type", "") == "absolute"
+        if self.runner_type == "pooling" and (
+            getattr(self.hf_config, "position_embedding_type", "") == "absolute"
+            or hasattr(self.hf_config, "sentence_transformers")
         ):
             tokenizer_config = try_get_tokenizer_config(
                 self.tokenizer,

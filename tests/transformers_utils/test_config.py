@@ -319,9 +319,6 @@ def _write_sentence_transformers_cross_encoder(path):
         json.dumps(
             {
                 "transformer_task": "feature-extraction",
-                "max_seq_length": 32,
-                "do_lower_case": False,
-                "processing_kwargs": {},
                 "module_output_name": "token_embeddings",
                 "modality_config": {
                     "text": {
@@ -331,6 +328,10 @@ def _write_sentence_transformers_cross_encoder(path):
                 },
             }
         ),
+        encoding="utf-8",
+    )
+    (path / "tokenizer_config.json").write_text(
+        json.dumps({"model_max_length": 16}),
         encoding="utf-8",
     )
     (path / "modules.json").write_text(
@@ -423,6 +424,7 @@ def test_current_sentence_transformers_cross_encoder_config(tmp_path):
     assert model_config.pooler_config is not None
     assert model_config.pooler_config.seq_pooling_type == "MEAN"
     assert model_config.pooler_config.use_activation
+    assert model_config.max_model_len == 16
 
     from vllm.model_executor.model_loader import get_model_cls
     from vllm.model_executor.models.interfaces_base import get_score_type

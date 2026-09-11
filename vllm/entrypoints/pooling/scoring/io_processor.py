@@ -613,6 +613,12 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         arrival_time = time.time()
 
         tok_params = render_params["tok_params"]
+        if (
+            self.sentence_transformers_config is not None
+            and tok_params.truncate_prompt_tokens is None
+        ):
+            tok_params = tok_params.with_kwargs(truncate_prompt_tokens=-1)
+
         params = render_params["params"]
         prompt_extras = render_params["prompt_extras"]
 

@@ -478,11 +478,17 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        token_type_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if token_type_ids is not None:
+            assert self.model.config.vocab_size < (1 << TOKEN_TYPE_SHIFT)
+            assert input_ids is not None
+            _encode_token_type_ids(input_ids, token_type_ids)
+
         return self.model(
             input_ids=input_ids,
             positions=positions,
