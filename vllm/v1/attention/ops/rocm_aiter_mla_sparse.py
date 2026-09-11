@@ -1324,7 +1324,11 @@ def _get_cached_wo_a_bf16(
         # ModelOpt MXFP8 stores the multiplicative E8M0 scale without the
         # historical ``_inv`` suffix.
         wo_a_scale_param = getattr(wo_a, "weight_scale", None)
-    if wo_a_scale_param is not None:
+    # Emulated MXFP8 kernels can replace the original one-byte weight with an
+    # already-dequantized BF16 tensor while retaining the scale attribute for
+    # metadata. Applying that retained scale again would double-dequantize the
+    # weight. Block scaling is only valid while the one-byte FP8 storage remains.
+    if wo_a_scale_param is not None and wo_a.weight.element_size() == 1:
         wo_a_weight = wo_a.weight.view(n_local_groups, o_lora_rank, hidden_dim).to(
             torch.float32
         )
