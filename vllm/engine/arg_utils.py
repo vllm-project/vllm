@@ -1665,6 +1665,11 @@ class EngineArgs:
         linear_backend_kwargs = kernel_kwargs["linear_backend"]
         linear_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--linear-backend", **linear_backend_kwargs)
+        sparse_indexer_topk_kwargs = kernel_kwargs["sparse_indexer_topk_backend"]
+        sparse_indexer_topk_kwargs["type"] = lambda s: s.lower().replace("-", "_")
+        kernel_group.add_argument(
+            "--sparse-indexer-topk-backend", **sparse_indexer_topk_kwargs
+        )
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)

@@ -159,6 +159,16 @@ FLASHINFER_MOE_EP_BACKENDS = frozenset(
 # moe_ep variants.
 MEGA_MOE_BACKENDS = frozenset({"deep_gemm_mega_moe"}) | FLASHINFER_MOE_EP_BACKENDS
 
+SparseIndexerTopkBackend = Literal[
+    "auto",
+    "deep_select",
+    "cooperative",
+    "persistent",
+    "per_row",
+    "flashinfer",
+    "torch",
+]
+
 # Architectures whose model code wires up the flashinfer moe_ep experts. MTP
 # and DSpark draft variants inherit the setting from these target models.
 FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
@@ -267,6 +277,28 @@ class KernelConfig:
                    running QDQ on activations.
     """
 
+    sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
+    """Backend for the DSA sparse attention indexer decode top-k kernel.
+    Available options:
+
+    - "auto": Pick the fastest applicable implementation, in the order
+      "deep_select" (SM100a/SM103a only, topk <= 4096, fp32/bf16 logits,
+      1024B-aligned row stride, at least 32 rows) -> "cooperative"
+      (topk in {512, 1024, 2048}, <= 64 rows, SM90+ non-SM12x) ->
+      "persistent" (topk in {512, 1024, 2048}) -> "per_row"
+    - "deep_select": Force the DeepSelect top-k kernel (vllm._deepselect_C).
+      Same constraints as "auto" except the 32-row threshold
+    - "cooperative": Force vLLM's cooperative_topk kernel
+    - "persistent": Force vLLM's persistent_topk kernel
+    - "per_row": Force vLLM's top_k_per_row_decode kernel (no constraints)
+    - "flashinfer": Force FlashInfer's top_k_ragged_transform kernel
+      (debug/benchmark)
+    - "torch": Force a plain torch.topk implementation (debug reference)
+
+    Explicit (non-"auto") values raise RuntimeError when their constraints
+    are not met.
+    """
+
     linear_backend: LinearBackend = "auto"
     """Backend for linear layer GEMM kernels. Available options:
 
@@ -306,6 +338,13 @@ class KernelConfig:
     @field_validator("linear_backend", mode="before")
     @classmethod
     def _normalize_linear_backend(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.lower().replace("-", "_")
+        return value
+
+    @field_validator("sparse_indexer_topk_backend", mode="before")
+    @classmethod
+    def _normalize_sparse_indexer_topk_backend(cls, value: Any) -> Any:
         if isinstance(value, str):
             return value.lower().replace("-", "_")
         return value
