@@ -459,6 +459,9 @@ steps:
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
   - tests/reasoning
+  - tools/pre_commit/check_test_tethering.py
+  - tools/pre_commit/test_tethering_allowlist.txt
+  - tests/tools/test_check_test_tethering.py
   - tests/tool_parsers
   - tests/tokenizers_
   - tests/parser
@@ -486,6 +489,7 @@ steps:
   commands:
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s config
+  - pytest -v -s tools/test_check_test_tethering.py
 
 - label: ":computer: (CPU) Reasoning + Renderers"
   key: cpu-reasoning-renderers
