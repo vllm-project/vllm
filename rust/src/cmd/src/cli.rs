@@ -23,8 +23,8 @@ use serde_json::Value;
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
+use vllm_chat::GenerationConfigMode;
 use vllm_chat::multimodal::MmLimitPerPrompt;
-use vllm_chat::{GenerationConfigMode, ReasoningParserFactory};
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
@@ -139,9 +139,10 @@ pub struct RenderArgs {
     /// How message content is exposed to the chat template.
     #[arg(long, default_value_t)]
     chat_template_content_format: ChatTemplateContentFormatOption,
-    /// Maximum model context length used for request validation.
+    /// Maximum model context length used for request validation. When not set,
+    /// prompt-length validation is skipped and the engine enforces its own limit in later stage.
     #[arg(long)]
-    max_model_len: u32,
+    max_model_len: Option<u32>,
     /// Maximum accepted logprobs count; -1 disables the cap.
     #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
     max_logprobs: Option<i32>,
@@ -755,13 +756,7 @@ impl ServeArgs {
 }
 
 fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -> Option<String> {
-    match selection {
-        ParserSelection::Auto => ReasoningParserFactory::global()
-            .resolve_name_for_model(model)
-            .map(str::to_string),
-        ParserSelection::None => None,
-        ParserSelection::Explicit(name) => Some(name.clone()),
-    }
+    selection.resolve_reasoning_name(model).map(str::to_owned)
 }
 
 /// Allocate fresh IPC endpoints for one managed frontend instance.
