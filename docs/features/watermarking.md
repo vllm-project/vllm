@@ -34,8 +34,8 @@ Deployments that require watermarking must restrict this field to trusted
 callers, or strip and validate it at the ingress boundary, so untrusted clients
 cannot opt out.
 
-`context_width` controls how many prior output tokens seed each watermark
-decision and defaults to 4. Larger values make the watermark less robust to
+`context_width` controls how many prior tokens seed each watermark decision
+and defaults to 4. Larger values make the watermark less robust to
 edits because an insertion, deletion, or substitution changes more subsequent
 contexts. Values above 16 are allowed but emit a warning.
 
@@ -75,23 +75,29 @@ watermarked, this does not reduce the watermarking signal unless a user tampers
 with the output and removes that occurrence while leaving an unwatermarked
 repetition.
 
-`deduplicate_contexts` controls the generation history scope:
+`deduplicate_contexts` controls which history is searched for a repeated
+context:
 
 - `"none"` disables context deduplication.
-- `"single_turn"` enables context deduplication within the generation of a
-  single request. This allows for single-turn non-distortion.
-- `"all"` enables context deduplication across the entire request context. This
-  allows for non-distortion in a multi-turn setting. For large contexts this may
-  impact inference speed and may lead to substantially fewer generated tokens
-  being watermarked. It is only recommended when single-sequence non-distortion
-  over multiple turns is strictly required.
+- `"single_turn"`, the default, searches the tokens generated for the current
+  request. This gives single-turn non-distortion.
+- `"all"` also searches the prompt, which extends non-distortion across the
+  turns of a conversation. The first `context_width` generated tokens are then
+  keyed on the prompt rather than on padding, and a generated position whose
+  context already occurs in the prompt is not watermarked. When the prompt
+  already contains the structure of the answer, for example a tool result the
+  model extends, little of the answer may be watermarked. The detector needs
+  the prompt for this scope; see [Detection](#detection). Use `"all"` only when
+  non-distortion across turns is required.
 
-`deduplicate_contexts_max_history` limits deduplication to the most recent
-positions and defaults to 8,192. A smaller value reduces scanning cost but only
-provides the guarantee within that window. Set it to `null` to remove the limit
-and scan to the beginning of the current generation for `"single_turn"`, or the
-beginning of the supplied request context for `"all"`. An unbounded scan can
-increase inference latency as the sequence grows.
+`deduplicate_contexts_max_history` limits the search to the most recent
+positions and defaults to 8,192. Each position is compared over the
+`context_width` tokens before it, so the window of tokens read is that much
+longer. A smaller value reduces scanning cost but only provides the guarantee
+within that window. Set it to `null` to search back to the start of the
+generation for `"single_turn"`, or of the request for `"all"`; an unbounded
+search costs more as the sequence grows. The setting has no effect when
+`deduplicate_contexts` is `"none"`.
 
 For example, this checks prompt and completion history within the default
 8,192-position window:
