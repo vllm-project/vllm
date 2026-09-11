@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Mamba conv-state sub-projection decomposition for NIXL transfer.
+"""Mamba conv-state sub-projection decomposition for KV transfer.
 
 With DS conv state layout (dim, state_len), sub-projections are
 contiguous in memory.  Each D rank reads its slices via separate
@@ -27,7 +27,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 class MambaConvSplitInfo:
     """Per-rank byte sizes of the conv sub-projections.
 
-    Used by both P and D sides for NIXL descriptor registration.
+    Used to build TP-aware transfer descriptors.
     All fields are LOCAL to this engine's TP (already divided by TP size).
 
     DS memory layout within one page (contiguous):
@@ -106,6 +106,8 @@ class MambaConvSplitInfo:
 def derive_mamba_conv_split(
     mamba_spec: MambaSpec,
     local_tp: int,
+    *,
+    require_dim_first: bool = True,
 ) -> MambaConvSplitInfo:
     """Derive per-rank sub-projection byte sizes from a MambaSpec.
 
@@ -114,9 +116,10 @@ def derive_mamba_conv_split(
 
     Args:
         mamba_spec: MambaSpec whose shapes are:
-            shapes[0] = conv state: (conv_dim_local, conv_rows) in DS layout.
+            shapes[0] = conv state in the configured DS or SD layout.
             shapes[1] = temporal state (model-specific shape).
         local_tp: this engine's tensor-parallel size.
+        require_dim_first: Require the DS layout used by NIXL 3-read transfer.
 
     Returns:
         MambaConvSplitInfo with per-rank sub-projection dims, conv_rows,
@@ -136,11 +139,13 @@ def derive_mamba_conv_split(
     conv_shape = mamba_spec.shapes[0]
     assert len(conv_shape) == 2, f"Expected 2D conv state shape, got {conv_shape}"
 
-    # NOTE (ZhanqiuHu): 3-read requires DS layout, which is already asserted
-    # in nixl worker __init__.  Use it directly instead of heuristic detection.
-    assert is_conv_state_dim_first(), "3-read requires DS conv state layout"
-    local_conv_dim = conv_shape[0]  # DS: (conv_dim_local, conv_rows)
-    conv_rows = conv_shape[1]
+    dim_first = is_conv_state_dim_first()
+    if require_dim_first:
+        assert dim_first, "3-read requires DS conv state layout"
+    if dim_first:
+        local_conv_dim, conv_rows = conv_shape
+    else:
+        conv_rows, local_conv_dim = conv_shape
 
     conv_dtype_size = torch.tensor(
         [],

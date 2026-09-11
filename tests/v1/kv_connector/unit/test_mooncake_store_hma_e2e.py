@@ -779,7 +779,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         group_participates=[True, True, False],
     )
 
-    # Persist the sub-block partial tail at boundary 12 (keyed by hs[12//8-1]).
+    # Persist a hash-aligned tail within the 16-token physical block.
     hs = [BlockHash(bytes([i + 1]) * 8) for i in range(3)]
     req = ReqMeta(
         req_id="r0",
@@ -788,7 +788,7 @@ def test_worker_setup_tolerates_finer_scratch_group():
         block_hashes=hs,
         can_save=True,
         num_prompt_tokens=20,
-        boundary_state_offloads=[(1, 7, 12)],
+        boundary_state_offloads=[(1, 7, 8)],
     )
     send_thread._maybe_offload_boundary_states(req)
 

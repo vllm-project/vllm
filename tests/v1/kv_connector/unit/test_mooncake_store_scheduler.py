@@ -33,6 +33,7 @@ def _make_bare_scheduler(
     scheduler.lookup_async = False
     scheduler.enable_lookup = True
     scheduler._block_size = 16
+    scheduler._store_job_block_size = scheduler._block_size
     scheduler._hash_block_size = hash_block_size
     scheduler.enable_partial_hash_hits = enable_partial_hash_hits
     scheduler.kv_cache_config = SimpleNamespace(
@@ -1301,6 +1302,23 @@ def test_boundary_state_never_claimed_without_a_send_thread():
     assert scheduler.build_connector_meta(out).requests == []
     assert scheduler._pinned_saves == {}
     assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 0
+
+
+def test_decode_consumer_claims_only_decode_boundary_state():
+    scheduler = _make_bare_scheduler(
+        hash_block_size=4,
+        enable_partial_hash_hits=True,
+        kv_role="kv_consumer",
+        save_decode_cache=True,
+    )
+    _register_offload_request(scheduler, prefill_end_tokens=12, num_prompt_tokens=12)
+    out = _make_offload_only_output([(1, 7, 8), (1, 9, 16)])
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert meta.requests[0].boundary_state_offloads == [(1, 9, 16)]
+    store_job_id = meta.requests[0].store_job_id
+    assert scheduler._pinned_saves[store_job_id][0] == [9]
 
 
 def test_resumed_partial_tail_uses_exact_boundary():
