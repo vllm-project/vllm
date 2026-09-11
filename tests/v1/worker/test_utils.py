@@ -147,3 +147,47 @@ def test_bind_kv_cache_draft_model(default_vllm_config):
     assert runner_kv_caches[1] is kv_cache["draft_model.layers.0.attn"]
     assert runner_kv_caches[2] is kv_cache["model.layers.1.attn"]
     assert runner_kv_caches[3] is kv_cache["draft_model.layers.1.attn"]
+
+
+def test_propagate_kv_sharing_scales_copies_target_scales():
+    # A KV-sharing layer reads the cache its target wrote with the target's
+    # k/v scales; quantized-KV checkpoints have no scales for sharing layers
+    # (no K/V projections), which left them at the 1.0 default and made
+    # Gemma-4 E2B/E4B NVFP4 KV dequantize 20 of 35 layers wrongly.
+    from vllm.v1.worker.utils import propagate_kv_sharing_scales
+
+    def layer(k, v):
+        return SimpleNamespace(
+            _k_scale=torch.tensor(k),
+            _v_scale=torch.tensor(v),
+            _k_scale_cpu=torch.tensor(k),
+            _v_scale_cpu=torch.tensor(v),
+            _k_scale_float=k,
+            _v_scale_float=v,
+        )
+
+    target = layer(0.25, 2.5)
+    sharing = layer(1.0, 1.0)
+    untouched = layer(1.0, 1.0)
+    ctx = {
+        "layers.13.attn": target,
+        "layers.15.attn": sharing,
+        "layers.3.attn": untouched,
+    }
+
+    propagate_kv_sharing_scales(ctx, {"layers.15.attn": "layers.13.attn"})
+
+    assert sharing._k_scale_float == 0.25 and sharing._v_scale_float == 2.5
+    assert sharing._k_scale.item() == 0.25 and sharing._v_scale.item() == 2.5
+    assert sharing._k_scale_cpu.item() == 0.25 and sharing._v_scale_cpu.item() == 2.5
+    assert untouched._k_scale_float == 1.0 and untouched._v_scale.item() == 1.0
+    # unknown / unquantized layers are skipped without error
+    propagate_kv_sharing_scales(
+        {"a": SimpleNamespace(), "b": SimpleNamespace()}, {"b": "a", "c": "missing"}
+    )
+    # scales that live in nn.Parameters (requires_grad) must still be writable
+    param_dst = layer(1.0, 1.0)
+    param_dst._k_scale = torch.nn.Parameter(torch.tensor(1.0))
+    param_dst._v_scale = torch.nn.Parameter(torch.tensor(1.0))
+    propagate_kv_sharing_scales({"t": target, "s": param_dst}, {"s": "t"})
+    assert param_dst._k_scale.item() == 0.25 and param_dst._v_scale.item() == 2.5
