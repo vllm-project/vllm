@@ -173,7 +173,7 @@ class PackDCPTopkCandidatesKernel(
         if dcp_world_size <= 1:
             return []
         cp_interleave = vllm_config.parallel_config.cp_kv_cache_interleave_size
-        topk = vllm_config.model_config.hf_config.index_topk
+        topk = vllm_config.model_config.hf_text_config.index_topk
         if topk <= 0:
             return []
 
@@ -546,7 +546,7 @@ class StableTopKFromGatheredCandidatesKernel(
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         if dcp_world_size <= 1:
             return []
-        topk = vllm_config.model_config.hf_config.index_topk
+        topk = vllm_config.model_config.hf_text_config.index_topk
         if topk <= 0:
             return []
         return self._trace_dispatch(self.dispatch)(
