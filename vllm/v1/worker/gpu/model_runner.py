@@ -89,6 +89,7 @@ from vllm.v1.worker.gpu.async_utils import (
     StepTimingCollector,
 )
 from vllm.v1.worker.gpu.attn_utils import (
+    FastPrefillHelper,
     build_slot_mappings_by_layer,
     get_kv_cache_spec,
     init_attn_backend,
@@ -321,6 +322,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
+        self.fast_prefill: FastPrefillHelper | None = None
         if self.use_pp:
             self.pp_handler = PPHandler(
                 max_num_reqs=self.max_num_reqs,
@@ -610,10 +612,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for group in self.kv_cache_config.kv_cache_groups
                 for layer_name in group.layer_names
             } - self.speculator.draft_attn_layer_names
+        draft_attn_layer_names = None
+        if isinstance(self.speculator, DraftModelSpeculator):
+            draft_attn_layer_names = self.speculator.draft_attn_layer_names
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
             self.kv_cache_config,
             self.vllm_config,
             self.device,
+            draft_layer_names=draft_attn_layer_names,
         )
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
@@ -650,7 +656,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config,
             self.device,
             self.supports_mm_inputs,
-            self.req_states,
             self.block_tables,
             cls=self.pcp_manager_cls,
         )
@@ -662,10 +667,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config,
             self.max_num_reqs,
         )
+        if self.speculator is not None:
+            self.speculator.pcp_manager = self.pcp_manager
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config,
             self.kv_cache_config,
-            use_replayssm=self.vllm_config.cache_config.use_replayssm,
+            use_replayssm=self.cache_config.use_replayssm,
         )
         if self.adaptive_verification is not None:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
@@ -687,7 +694,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             lora_capture_cases=self.lora_capture_cases,
             varlen_decode=self.adaptive_verification is not None,
         )
-        check_attention_cp_compatibility(self.vllm_config)
+        if self.cache_config.kv_sharing_fast_prefill and self.pcp_manager is None:
+            self.fast_prefill = FastPrefillHelper(
+                self.cudagraph_manager, self.max_num_tokens
+            )
+        check_attention_cp_compatibility(self.vllm_config, target_attn_layer_names)
         if isinstance(self.speculator, DraftModelSpeculator):
             # HACK(woosuk)
             self.speculator.set_attn(
@@ -1339,6 +1350,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model_state.num_new_sampled_tokens_per_step,
         )
 
+        fast_prefill = None
+        if self.fast_prefill is not None:
+            fast_prefill = self.fast_prefill.prepare(
+                logits_indices,
+                num_reqs,
+                cu_num_logits_np,
+                batch_req_state.has_prefill,
+                batch_desc,
+            )
+
         # CPU upper bound on seq_lens; padded entries left at zero.
         num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
         seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
@@ -1385,6 +1406,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
             prompt_lens=prompt_lens,
+            fast_prefill=fast_prefill,
             max_query_len=(
                 int(num_scheduled_tokens_upper_bound.max())
                 if adaptive_verification is not None
@@ -1943,9 +1965,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
         # Last rank: sample tokens
+        draft_hidden_states = hidden_states
+        assert draft_hidden_states is not None
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
             self.pcp_manager, hidden_states, input_batch
         )
+        if self.pcp_manager is not None and aux_hidden_states is not None:
+            aux_hidden_states = [
+                self.pcp_manager.restore_hidden_states(states)
+                for states in aux_hidden_states
+            ]
 
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
@@ -2022,10 +2051,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
             # target returns a persistent buffer sized at max_num_batched_tokens;
             # slice to the active token count that propose() expects.
-            spec_hidden_states = hidden_states
+            spec_hidden_states = draft_hidden_states
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+                spec_hidden_states = pre_hc_hidden_states[: draft_hidden_states.size(0)]
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,
@@ -2127,6 +2156,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
         self.cudagraph_manager = None
+        self.fast_prefill = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "attn_groups"):

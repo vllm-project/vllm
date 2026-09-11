@@ -1237,11 +1237,6 @@ class VllmConfig:
                     "PD with decode_context_parallel_size > 1 is only "
                     "supported for MLA models."
                 )
-                assert not (self.model_config.is_hybrid and dcp_size > 1), (
-                    "PD with decode_context_parallel_size > 1 is not "
-                    "supported for hybrid Mamba/SSM models."
-                )
-
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
 
@@ -1721,7 +1716,7 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        self._resolve_allow_missing_mm_embeddings()
+        self._resolve_mm_embedding_inputs()
         self._resolve_mm_processor_device()
         self._validate_mm_processor_device()
 
@@ -2502,8 +2497,8 @@ class VllmConfig:
             f"kernel_config={self.kernel_config!r}"
         )
 
-    def _resolve_allow_missing_mm_embeddings(self) -> None:
-        """Allow `*_embeds` tensors to be omitted on disaggregated consumers.
+    def _resolve_mm_embedding_inputs(self) -> None:
+        """Accept embedding inputs, tensor optional, on disaggregated consumers.
 
         An EC consumer loads embeddings from its connector. A KV consumer
         receives the prompt KV produced from those embeddings, so it does not
@@ -2524,11 +2519,21 @@ class VllmConfig:
         mm_config.allow_missing_mm_embeddings = (
             ec_config is not None and ec_config.is_ec_consumer
         ) or (kv_config is not None and kv_config.is_kv_consumer)
-        if mm_config.allow_missing_mm_embeddings:
+        if not mm_config.allow_missing_mm_embeddings:
+            return
+
+        if not mm_config.enable_mm_embeds:
+            # Allowing missing tensors still requires enabling embedding inputs
+            # for the frontend to accept metadata-only requests.
+            mm_config.enable_mm_embeds = True
             logger.info_once(
-                "EC/KV consumer: pre-computed-embedding inputs may "
-                "omit the embedding tensor."
+                "EC/KV consumer: accepting pre-computed-embedding inputs, "
+                "which this role is sent by definition."
             )
+        logger.info_once(
+            "EC/KV consumer: pre-computed-embedding inputs may "
+            "omit the embedding tensor."
+        )
 
     def _resolve_mm_encoder_only(self) -> None:
         """Enable encoder-only mode for a dedicated EC producer."""
@@ -2673,10 +2678,6 @@ class VllmConfig:
             model_config.logits_processors or has_logitsproc_plugins
         ):
             unsupported.append("custom logits processors")
-
-        if self.cache_config.kv_sharing_fast_prefill:
-            # Will be added by https://github.com/vllm-project/vllm/pull/35045
-            unsupported.append("KV sharing fast prefill")
 
         if self.cache_config.mamba_cache_mode == "all":
             unsupported.append("mamba cache mode 'all'")
@@ -2886,6 +2887,8 @@ class VllmConfig:
         if self.kv_transfer_config is None or not self.kv_transfer_config.has_connector(
             "NixlConnector"
         ):
+            return
+        if not self.parallel_config._allow_auto_resolve_cp_interleave_size:
             return
 
         # Get the kernel block_size, but don't use resolve_kv_cache_block_size to avoid
