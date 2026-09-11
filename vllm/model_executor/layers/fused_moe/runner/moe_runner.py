@@ -280,6 +280,35 @@ class MoERunner(MoERunnerInterface):
             else torch.ops.vllm.moe_forward_shared
         )
 
+    def enable_decomposed_forward(self, layer: torch.nn.Module) -> None:
+        """Expose the runner implementation to a graph backend.
+
+        Out-of-tree platforms may opt into this path when their compiler can
+        lower the tensor operations inside MoE.  Store the owner without going
+        through ``nn.Module.__setattr__``: registering the parent layer as a
+        child of its runner would create a cyclic module hierarchy.
+        """
+        object.__setattr__(self, "_decomposed_layer", layer)
+        self._forward_entry = self._decomposed_forward
+
+    def _decomposed_forward(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+        input_ids: torch.Tensor | None,
+        layer_name: _layer_name_type,
+        hidden_dim_unpadded: int,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        layer = self._decomposed_layer
+        return self._forward_impl(
+            layer,
+            hidden_states,
+            router_logits,
+            shared_experts_input,
+            input_ids,
+        )
+
     @property
     def shared_experts(self) -> SharedExperts | None:
         return self._shared_experts
