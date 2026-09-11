@@ -238,7 +238,7 @@ __global__ void Marlin(
     bool has_bias,
     bool use_atomic_add,   // whether to use atomic add to reduce
     bool use_fp32_reduce,  // whether to use fp32 global reduce
-    int max_shared_mem) {
+    int max_shared_mem, bool group_m_tiles) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
   // same size, which might involve multiple column "slices" (of width 16 *
   // `thread_n_blocks`). Stripes are defined as shown in the 3x3 matrix 5 SM
@@ -466,6 +466,21 @@ __global__ void Marlin(
       part1_mn_iters--;
       par_id = slice_col_par / n_tiles;
       slice_col = slice_col_par % n_tiles;
+      if constexpr (a_type == vllm::kBFloat16 && b_type == vllm::kFE4M3fn &&
+                    group_blocks == 8) {
+        if (group_m_tiles) {
+          // Reorder only complete M rows; leave the Stream-K tail unchanged.
+          int full_m = (global_mn_tiles - part2_mn_tiles) / n_tiles;
+          if (full_m > 1 && slice_col_par < full_m * n_tiles) {
+            constexpr int group_size_m = 8;
+            int group = slice_col_par / (group_size_m * n_tiles);
+            int group_m = min(group_size_m, full_m - group * group_size_m);
+            int tile = slice_col_par - group * group_size_m * n_tiles;
+            par_id = group * group_size_m + tile % group_m;
+            slice_col = tile / group_m;
+          }
+        }
+      }
       slice_iters = k_tiles;
       A = A0 + 16 * thread_m_blocks / (is_a_8bit ? 16 : 8) * par_id * lda;
       C = C0 + 16 * thread_m_blocks / 8 * par_id * prob_n;
