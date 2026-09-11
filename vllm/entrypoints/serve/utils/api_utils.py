@@ -268,7 +268,7 @@ def jsonify_non_default_args(
 
 
 # Fields whose values must never be logged verbatim.
-_SENSITIVE_ARG_FIELDS = frozenset({"api_key", "hf_token"})
+_SENSITIVE_ARG_FIELDS = frozenset({"api_key", "hf_token", "watermark_config"})
 
 
 def redact_sensitive_args(args: dict[str, Any]) -> dict[str, Any]:

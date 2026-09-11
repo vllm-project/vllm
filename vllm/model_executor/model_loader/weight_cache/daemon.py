@@ -54,6 +54,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     TensorEntry,
     WeightCacheKey,
     WeightCacheUnavailableError,
+    check_ipc_platform_support,
     check_ipc_quant_support,
     ensure_private_socket_dir,
     get_physical_device_id,
@@ -232,12 +233,14 @@ class WeightCacheDaemon:
                         self._handle_connection(conn)
                     except (ConnectionError, EOFError):
                         logger.warning("Client disconnected mid-request")
-                    except Exception:
-                        # A single malformed or malicious request must not take
-                        # down the daemon for every other engine on this GPU.
+                    except Exception as e:
+                        # Report the error back instead of just closing the
+                        # socket, but do not let it take the daemon down.
                         logger.exception(
                             "Error handling weight cache client; continuing"
                         )
+                        with contextlib.suppress(OSError):
+                            send_msg(conn, {"status": "error", "message": str(e)})
         finally:
             server.close()
             if os.path.exists(socket_path):
@@ -345,17 +348,16 @@ def _run_daemon(
 
 
 def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
-    """Reject every parallelism mode other than tensor parallelism."""
+    """Reject parallelism modes other than tensor/expert parallelism."""
     unsupported = {
         "pipeline parallelism": parallel_config.pipeline_parallel_size > 1,
         "data parallelism": parallel_config.data_parallel_size > 1,
-        "expert parallelism": parallel_config.enable_expert_parallel,
     }
     for name, enabled in unsupported.items():
         if enabled:
             raise ValueError(
-                f"The weight cache daemon only supports tensor parallelism; "
-                f"{name} is not supported"
+                f"The weight cache daemon only supports tensor and expert "
+                f"parallelism; {name} is not supported"
             )
 
 
@@ -385,6 +387,7 @@ def main() -> None:
     # Checked before loading anything: an unsupported quantization method would
     # otherwise only surface in the engine, after a full load. MTP has a
     # separate draft model config and therefore needs its own check as well.
+    check_ipc_platform_support(where="daemon")
     for model_config in _get_cached_model_configs(vllm_config):
         check_ipc_quant_support(model_config, where="daemon")
     target_parallel_config = vllm_config.parallel_config
