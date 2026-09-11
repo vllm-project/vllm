@@ -603,7 +603,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     if engram is not None:
                         engram_rows[engram.layer_hash_index] = (
                             engram.prepare_embeddings(
-                                engram_hashes[:, engram.layer_hash_index]
+                                engram_hashes[:, engram.layer_hash_index],
+                                allow_overlap=swa_metadata.engram_lookup_overlap,
                             )
                         )
 

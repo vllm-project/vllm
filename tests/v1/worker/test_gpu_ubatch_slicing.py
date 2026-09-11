@@ -178,6 +178,25 @@ def test_slicing_matches_v1_split_attn_metadata(batch_name: str):
         )
 
 
+@pytest.mark.parametrize("allowed", [False, True])
+def test_engram_lookup_decision_survives_metadata_slicing(allowed):
+    """A microbatch inherits the conservative decision for the whole batch."""
+    metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[64, 2048], query_lens=[1, 1]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    metadata.engram_lookup_overlap = allowed
+    unpadded = metadata.unpadded(num_actual_tokens=2, num_actual_reqs=2)
+    assert unpadded.engram_lookup_overlap is allowed
+    slices = [
+        UBatchSlice(slice(0, 1), slice(0, 1)),
+        UBatchSlice(slice(1, 2), slice(1, 2)),
+    ]
+    for microbatch in split_attn_metadata(slices, metadata):
+        assert microbatch.engram_lookup_overlap is allowed
+
+
 def test_microbatches_do_not_share_buffers():
     """Both microbatches are live at once, so their buffers must be distinct."""
     query_lens, seq_lens = BATCHES["split_request"]

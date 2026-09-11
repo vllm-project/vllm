@@ -224,6 +224,7 @@ class DeepseekSparseSWAMetadata:
     flashinfer_sparse_index_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = field(
         default_factory=dict
     )
+    engram_lookup_overlap: bool = False
 
     def get_prefill_chunk_plan(
         self,
@@ -693,6 +694,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         return DeepseekSparseSWAMetadata(
             seq_lens=seq_lens,
+            engram_lookup_overlap=common_attn_metadata.engram_lookup_overlap,
             query_start_loc=query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             block_table=block_table,
