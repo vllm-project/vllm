@@ -94,6 +94,7 @@ def _make_speculator(
 
     speculator = object.__new__(_TestSpeculator)
     speculator.supports_mm_inputs = False
+    speculator.pcp_manager = None
     speculator.vllm_config = None
     speculator.input_buffers = SimpleNamespace(
         input_ids=torch.arange(4),
