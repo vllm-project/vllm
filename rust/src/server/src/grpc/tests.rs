@@ -48,10 +48,10 @@ use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
-use super::control::kv_event_source;
 use super::convert::json_to_proto_struct;
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
+use super::rl_control::kv_event_source;
 use super::{ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, pb};
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::state::AppState;
