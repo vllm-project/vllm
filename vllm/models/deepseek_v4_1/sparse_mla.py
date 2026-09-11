@@ -139,6 +139,7 @@ class DeepseekV4FlashMLAMetadata(AttentionMetadata):
     req_id_per_token: torch.Tensor
     block_size: int
     topk_tokens: int
+    block_table_cpu: torch.Tensor | None = None
 
 
 class DeepseekV4SparseMLAMetadataBuilder(
@@ -214,6 +215,11 @@ class DeepseekV4SparseMLAMetadataBuilder(
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            block_table_cpu=(
+                cm.block_table_cpu.clamp(min=0)
+                if self.compress_ratio > 1 and cm.block_table_cpu is not None
+                else cm.block_table_cpu
+            ),
         )
 
 

@@ -49,8 +49,8 @@ def snapshot_cache_blocks(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Snapshot all referenced blocks, including prefix hits and quantization data.
 
-    This deliberately uses dynamic tensors and GPU-to-CPU synchronization. It is
-    an eager correctness path; a delta protocol and graph capture are separate work.
+    Scheduler-owned CPU tables keep ID selection and validation on the host.
+    GPU tables retain the eager fallback, which synchronizes to select IDs.
     """
     if block_tables:
         ids = torch.cat([table.reshape(-1) for table in block_tables]).to(torch.int64)
@@ -62,7 +62,8 @@ def snapshot_cache_blocks(
     block_bytes = cache[0].numel() * cache.element_size() if cache.shape[0] else 0
     if ids.numel() * (block_bytes + ids.element_size()) > max_bytes:
         raise ValueError("Pipeline sharing snapshot exceeds its configured byte budget")
-    return ids, cache.index_select(0, ids)
+    device_ids = ids.to(device=cache.device, non_blocking=True)
+    return ids, cache.index_select(0, device_ids)
 
 
 def restore_cache_blocks(
@@ -75,4 +76,5 @@ def restore_cache_blocks(
         raise ValueError("Pipeline cache block ids must be an int64 vector")
     if ids.numel() and (int(ids.min()) < 0 or int(ids.max()) >= cache.shape[0]):
         raise ValueError("Pipeline snapshot refers to an unallocated replica block")
-    cache.index_copy_(0, ids, blocks)
+    device_ids = ids.to(device=cache.device, non_blocking=True)
+    cache.index_copy_(0, device_ids, blocks)

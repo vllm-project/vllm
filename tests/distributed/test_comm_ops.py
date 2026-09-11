@@ -536,6 +536,48 @@ def test_isend_tensor_dict_self_retains_for_fire_and_forget(
     assert handles0[0]._retained == ()
 
 
+def test_isend_cpu_buffers_wait_even_when_gloo_reports_completed(monkeypatch):
+    """A premature Gloo completion report must not release live CPU buffers."""
+    works = []
+
+    def fake_isend(t, *args, **kwargs):
+        work = _DummyWork()
+        work.completed = True
+        works.append(work)
+        return work
+
+    monkeypatch.setattr(torch.distributed, "isend", fake_isend)
+    group = _make_group_for_unit_test()
+    data = {"ids": torch.arange(4)}
+    handles = group.isend_tensor_dict(data, dst=1)
+    assert handles[1]._retained == (data["ids"],)
+    assert works[-1].wait_calls == 0
+    group._reap_completed_isends()
+    assert not group._pending_isends
+    assert handles[1]._retained == ()
+    assert all(work.wait_calls == 1 for work in works)
+    for handle in handles:
+        handle.wait()
+    assert all(work.wait_calls == 1 for work in works)
+
+
+def test_isend_cpu_buffers_retained_while_device_send_is_pending():
+    """A mixed payload keeps CPU refs until the device payload completes."""
+    group = _make_group_for_unit_test()
+    metadata, cpu, device = _DummyWork(), _DummyWork(), _DummyWork()
+    cpu.completed = True
+    cpu_tensor = torch.arange(4)
+    device_tensor = torch.empty(4, device="meta")
+    group._pending_isends.append(([metadata, cpu, device], [cpu_tensor, device_tensor]))
+    group._reap_completed_isends()
+    assert len(group._pending_isends) == 1
+    assert cpu.wait_calls == metadata.wait_calls == 0
+    device.completed = True
+    group._reap_completed_isends()
+    assert not group._pending_isends
+    assert cpu.wait_calls == metadata.wait_calls == 1
+
+
 def test_send_tensor_dict_sync_path_does_not_self_retain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

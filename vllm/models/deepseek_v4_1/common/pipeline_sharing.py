@@ -121,7 +121,10 @@ class PipelineSharing(nn.Module):
                 prefix = self._cache_prefix(route)
                 layer = self._context[prefix]
                 meta = metadata[prefix]
-                if route.kind == "kv":
+                host_table = getattr(meta, "block_table_cpu", None)
+                if host_table is not None:
+                    tables = [host_table]
+                elif route.kind == "kv":
                     tables = [meta.block_table[: meta.num_reqs]]
                 else:
                     tables = []
