@@ -215,6 +215,24 @@ vllm bench serve \
 
 With `--profile`, vLLM will capture a profile for each run of `vllm bench serve`. Once the server is killed, the profiles will all be saved.
 
+To align iteration-bounded captures across ranks that share a data-parallel
+model-forward cadence, enable synchronized profiler iterations on every rank:
+
+```bash
+vllm serve mistralai/Mixtral-8x7B-Instruct-v0.1 \
+    --data-parallel-size 2 \
+    --enable-expert-parallel \
+    --profiler-config '{"profiler":"cuda","delay_iterations":100,"max_iterations":20,"synchronize_iterations_across_dp":true}'
+```
+
+Arm profiling on every participating rank before sending traffic. The profiler
+starts after all ranks report ready through vLLM's existing DP coordination.
+`delay_iterations` and `max_iterations` then count those shared execution
+boundaries, including dummy model forwards on locally idle ranks. This adds one
+readiness field to the existing coordination only while the option is enabled;
+it does not add a profiling-only collective. Independent data-parallel replicas
+without a shared forward cadence retain rank-local iteration counting.
+
 #### Analysis
 
 You can view these profiles either as summaries in the CLI, using `nsys stats [profile-file]`, or in the GUI by installing Nsight [locally following the directions here](https://developer.nvidia.com/nsight-systems/get-started).

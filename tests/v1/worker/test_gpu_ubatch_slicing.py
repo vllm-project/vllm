@@ -272,6 +272,7 @@ def _sync_dp(
     num_tokens_per_rank: list[int],
     uniform_token_count_per_rank: list[int] | None = None,
     allow_ubatching: bool = True,
+    profiler_ready_per_rank: list[bool] | None = None,
 ) -> tuple[BatchExecutionDescriptor, dp_utils.DPSyncState | None]:
     """Run the DP handshake with the all-reduce stubbed out.
 
@@ -282,19 +283,26 @@ def _sync_dp(
     """
     dp_size = len(num_tokens_per_rank)
     uniform_token_counts = uniform_token_count_per_rank or [0] * dp_size
-    reduced = torch.zeros(6, dp_size, dtype=torch.int32)
+    num_fields = 7 if profiler_ready_per_rank is not None else 6
+    reduced = torch.zeros(num_fields, dp_size, dtype=torch.int32)
     reduced[0] = torch.tensor(num_tokens_per_rank, dtype=torch.int32)
     reduced[1] = CUDAGraphMode.NONE.value
     reduced[2] = torch.tensor(uniform_token_counts, dtype=torch.int32)
     reduced[3] = -1  # max_query_len, -1 means None
     reduced[4] = int(allow_ubatching)
     reduced[5] = 8  # num_reqs
+    if profiler_ready_per_rank is not None:
+        reduced[6] = torch.tensor(profiler_ready_per_rank, dtype=torch.int32)
 
     with (
-        patch.object(dp_utils.dist, "all_reduce", lambda t, group: t.copy_(reduced)),
+        patch.object(
+            dp_utils.dist,
+            "all_reduce",
+            side_effect=lambda t, group: t.copy_(reduced),
+        ) as all_reduce,
         patch.object(dp_utils, "get_dp_group", lambda: SimpleNamespace(cpu_group=None)),
     ):
-        return dp_utils.sync_cudagraph_and_dp_padding(
+        result = dp_utils.sync_cudagraph_and_dp_padding(
             cudagraph_manager=None,
             desired_batch_desc=BatchExecutionDescriptor(
                 cg_mode=CUDAGraphMode.NONE,
@@ -313,7 +321,14 @@ def _sync_dp(
             ),
             allow_ubatching=allow_ubatching,
             uniform_decode=uniform_token_counts[0] == DECODE_QUERY_LEN,
+            profiler_ready=(
+                profiler_ready_per_rank[0]
+                if profiler_ready_per_rank is not None
+                else None
+            ),
         )
+    all_reduce.assert_called_once()
+    return result
 
 
 def test_every_dp_rank_must_agree_to_microbatch():
@@ -342,6 +357,28 @@ def test_microbatching_pads_all_ranks_to_the_largest():
     assert desc.num_tokens == 256
     assert dp_sync is not None
     assert dp_sync.num_tokens_across_dp.tolist() == [256, 256]
+
+
+def test_profiler_readiness_uses_existing_dp_agreement():
+    _, waiting = _sync_dp([64, 64], profiler_ready_per_rank=[True, False])
+    _, ready = _sync_dp([64, 64], profiler_ready_per_rank=[True, True])
+
+    assert waiting is not None and waiting.profiler_ready is False
+    assert ready is not None and ready.profiler_ready is True
+
+
+def test_profiler_readiness_includes_locally_idle_rank():
+    _, dp_sync = _sync_dp([0, 64], profiler_ready_per_rank=[True, True])
+
+    assert dp_sync is not None
+    assert dp_sync.num_tokens_across_dp.tolist() == [0, 64]
+    assert dp_sync.profiler_ready is True
+
+
+def test_all_rank_idle_poll_is_not_a_profiler_boundary():
+    _, dp_sync = _sync_dp([0, 0], profiler_ready_per_rank=[True, True])
+
+    assert dp_sync is None
 
 
 def test_microbatching_survives_a_rank_that_cannot_fill_it():

@@ -125,6 +125,16 @@ class ProfilerConfig:
     Defaults to 0, meaning no limit.
     """
 
+    synchronize_iterations_across_dp: bool = False
+    """If `True`, count profiler iterations at DP execution boundaries.
+
+    This makes `delay_iterations` and `max_iterations` count the shared
+    model-forward cadence, including dummy execution on locally idle ranks.
+    The existing DP coordination carries profiler readiness, so this does not
+    add a profiling-only collective. This option has no effect when data
+    parallel size is one.
+    """
+
     warmup_iterations: int = Field(default=0, ge=0)
     """Number of warmup iterations for PyTorch profiler schedule.
     During warmup, the profiler runs but data is discarded. This helps reduce
@@ -232,6 +242,11 @@ class ProfilerConfig:
             raise ValueError(
                 "capture_torch_profiler is only applicable when profiler is "
                 "set to 'torch'"
+            )
+
+        if self.synchronize_iterations_across_dp and self.profiler is None:
+            raise ValueError(
+                "synchronize_iterations_across_dp requires profiler to be set"
             )
 
         return self

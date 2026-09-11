@@ -208,7 +208,7 @@ class ExtractHiddenStatesProposer:
         # TODO(Flechman): support DBO ubatching
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
-            should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
+            should_ubatch, num_tokens_across_dp, synced_cudagraph_mode, _ = (
                 coordinate_batch_across_dp(
                     num_tokens_unpadded=num_tokens,
                     parallel_config=self.vllm_config.parallel_config,
