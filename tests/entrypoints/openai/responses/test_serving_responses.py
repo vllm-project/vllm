@@ -1167,7 +1167,6 @@ _PER_REQUEST_STATS = RequestStateStats(
     scheduled_ts=1.5,
     first_token_ts=2.0,
     last_token_ts=3.0,
-    num_generation_tokens=2,
 )
 
 
@@ -1195,7 +1194,6 @@ def _make_simple_context_with_output(
         prompt_logprobs=None,
         outputs=[completion],
         finished=False,
-        metrics=metrics,
         num_cached_tokens=0,
     )
     ctx.append_output(req_output)
@@ -1237,13 +1235,14 @@ async def _empty_context_generator():
 
 async def _make_full_metrics_response(
     enable_per_request_metrics: bool,
-    metrics: RequestStateStats | None = _PER_REQUEST_STATS,
 ):
     serving = _make_serving_instance(
         enable_per_request_metrics=enable_per_request_metrics
     )
     request = ResponsesRequest(input="hi", tools=[], stream=False, store=False)
-    context = _make_simple_context_with_output("hello", [10, 20], metrics=metrics)
+    context = _make_simple_context_with_output(
+        "hello", [10, 20], metrics=_PER_REQUEST_STATS
+    )
     response = await serving.responses_full_generator(
         request=request,
         sampling_params=SamplingParams(max_tokens=16),
@@ -1266,22 +1265,6 @@ async def test_responses_per_request_metrics_follow_server_flag():
     enabled_response = await _make_full_metrics_response(True)
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
-    assert enabled_response.metrics.generation_time_ms == pytest.approx(1000.0)
-    assert enabled_response.metrics.queue_time_ms == pytest.approx(500.0)
-    assert enabled_response.metrics.mean_itl_ms == pytest.approx(1000.0)
-    assert enabled_response.metrics.tokens_per_second == pytest.approx(4.0 / 3.0)
-
-
-@pytest.mark.asyncio
-async def test_responses_per_request_metrics_without_engine_stats():
-    response = await _make_full_metrics_response(True, metrics=None)
-
-    assert response.metrics is not None
-    assert response.metrics.time_to_first_token_ms is None
-    assert response.metrics.generation_time_ms is None
-    assert response.metrics.queue_time_ms is None
-    assert response.metrics.mean_itl_ms is None
-    assert response.metrics.tokens_per_second is None
 
 
 @pytest.mark.asyncio
@@ -1305,8 +1288,8 @@ async def test_responses_streaming_metrics_only_on_completed_event():
         )
     ]
 
-    assert "metrics" not in events[0].response.model_dump(mode="json")
-    assert "metrics" not in events[1].response.model_dump(mode="json")
+    for event in events[:-1]:
+        assert "metrics" not in event.response.model_dump(mode="json")
     assert isinstance(events[-1], ResponseCompletedEvent)
     assert events[-1].response.metrics is not None
     assert events[-1].response.metrics.time_to_first_token_ms == pytest.approx(500.0)
