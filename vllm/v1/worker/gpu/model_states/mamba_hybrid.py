@@ -74,6 +74,38 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
         }
 
 
+def compute_num_decode_draft_tokens(
+    num_padded_reqs: int,
+    num_scheduled_tokens: np.ndarray,
+    num_draft_tokens_per_req: np.ndarray | None,
+    is_prefilling: np.ndarray,
+) -> np.ndarray:
+    """Per-request draft count for the recurrent backends, -1 for other rows.
+
+    The builders select speculative rows with `>= 0`, and that path is the only
+    one that applies a row's accepted-token offset to the recurrent state. So a
+    decode row that happened to get no drafts this step must be marked 0 rather
+    than left at the -1 sentinel: it still carries the offset from the step
+    before, and the plain decode path would read the state at column 0 instead.
+    That also covers the batch where no row was given drafts at all, which is
+    otherwise indistinguishable from speculative decoding being off.
+
+    A one-token chunked-prefill tail schedules exactly one token and has no
+    drafts either, so the token count alone cannot tell it apart from a
+    zero-draft decode row; it carries no accepted-token offset and must keep
+    the sentinel, hence the explicit `is_prefilling` exclusion.
+    """
+    num_reqs = num_scheduled_tokens.shape[0]
+    num_decode_draft_tokens = np.full(num_padded_reqs, -1, dtype=np.int32)
+    if num_draft_tokens_per_req is None:
+        num_draft_tokens_per_req = np.zeros(num_reqs, dtype=np.int32)
+    is_decode = (num_scheduled_tokens == num_draft_tokens_per_req + 1) & ~is_prefilling
+    num_decode_draft_tokens[:num_reqs] = np.where(
+        is_decode, num_draft_tokens_per_req, -1
+    )
+    return num_decode_draft_tokens
+
+
 class MambaHybridModelState(DefaultModelState):
     """Model state for hybrid attention + Mamba / linear-attention models."""
 
@@ -271,21 +303,14 @@ class MambaHybridModelState(DefaultModelState):
                 input_batch.idx_mapping
             ]
 
-            # GDN uses >= 0 to select spec-decode rows, so non-decode rows
-            # need the -1 sentinel rather than a raw zero draft count.
-            num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
-            num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
-            if num_draft_tokens_per_req is not None:
-                # A row is a spec-decode row only when its whole prompt is already
-                # computed, i.e. exactly one non-draft (decode) token is scheduled.
-                is_decode = (
-                    input_batch.num_scheduled_tokens == num_draft_tokens_per_req + 1
+            num_decode_draft_tokens_cpu = torch.from_numpy(
+                compute_num_decode_draft_tokens(
+                    num_reqs,
+                    input_batch.num_scheduled_tokens,
+                    input_batch.num_draft_tokens_per_req,
+                    input_batch.is_prefilling_np,
                 )
-                spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
-                num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
-                    spec_decode_mask, num_draft_tokens_per_req, -1
-                )
-            num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
+            )
 
         if self._align_mode:
             mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
