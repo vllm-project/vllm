@@ -176,8 +176,8 @@ def mhc_pre_delayed_tilelang(
             fn,
             mixes,
             sqrsum,
-            hidden_size,
-            hc_mult,
+            input_size,
+            1,
         )
     if norm_weight is not None:
         assert norm_weight.shape == (hidden_size,)

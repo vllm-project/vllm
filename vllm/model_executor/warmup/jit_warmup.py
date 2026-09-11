@@ -296,6 +296,27 @@ class _DispatchExprEvaluator(ast.NodeVisitor):
     def visit_Constant(self, node: ast.Constant) -> Any:
         return node.value
 
+    def visit_Lambda(self, node: ast.Lambda) -> Callable[..., Any]:
+        arguments = node.args
+        if (
+            arguments.posonlyargs
+            or arguments.vararg is not None
+            or arguments.kwonlyargs
+            or arguments.kwarg is not None
+            or arguments.defaults
+        ):
+            raise _dispatch_expr_error(node, "Traced lambdas require positional args")
+        names = tuple(argument.arg for argument in arguments.args)
+
+        def evaluate(*values: Any) -> Any:
+            if len(values) != len(names):
+                raise TypeError(f"Expected {len(names)} lambda arguments")
+            return type(self)(
+                dict(self.values) | dict(zip(names, values)), self.globals
+            ).eval(node.body)
+
+        return evaluate
+
     def visit_IfExp(self, node: ast.IfExp) -> Any:
         return self.visit(node.body if self.visit(node.test) else node.orelse)
 
@@ -416,6 +437,9 @@ def _validate_dispatch_expr(node: ast.AST) -> None:
     allowed_nodes = (
         ast.Name,
         ast.Constant,
+        ast.Lambda,
+        ast.arguments,
+        ast.arg,
         ast.IfExp,
         ast.Tuple,
         ast.List,
@@ -1062,9 +1086,10 @@ class JitWarmupRegistry:
                 if (
                     not args
                     and not kwargs
-                    and inspect.signature(kernel.get_warmup_keys).parameters
+                    and "vllm_config"
+                    in inspect.signature(kernel.get_warmup_keys).parameters
                 ):
-                    args = (self.vllm_config,)
+                    kwargs = {"vllm_config": self.vllm_config}
                 for compile_key in kernel.get_warmup_keys(*args, **kwargs):
                     compile_keys[compile_key] = None
             if compile_keys:

@@ -596,10 +596,14 @@ class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
     def __getattr__(self, name: str) -> Any:
         return getattr(self.kernel, name)
 
-    def get_warmup_keys(self, *args: Any, **kwargs: Any) -> list[TritonCompileKey]:
+    def get_warmup_keys(
+        self, *, vllm_config: Any | None = None, **kwargs: Any
+    ) -> list[TritonCompileKey]:
         keys: list[TritonCompileKey] = []
         seen_jit_keys: set[frozenset[TritonJitKey]] = set()
-        cases = self._provider_cases(self._warmup_inputs_fn, *args, **kwargs)
+        if "vllm_config" in inspect.signature(self._warmup_inputs_fn).parameters:
+            kwargs.setdefault("vllm_config", vllm_config)
+        cases = self._provider_cases(self._warmup_inputs_fn, **kwargs)
         derive_keys = _triton_key_deriver(self.kernel)
         materialize = self._run_autotune
         mode: Any = nullcontext() if self._run_autotune else None

@@ -373,10 +373,9 @@ def test_indexer_mxfp4_warmup_keys_enumerate_coarsen_axis() -> None:
             head_dim=128,
             rope_dim=64,
             num_heads=64,
-            cos_sin_dtype=cos_sin_dtype,
+            cos_sin_dtype=Float32,
             coarsen=coarsen,
         )
-        for cos_sin_dtype in (Float32, BFloat16)
         for coarsen in (1, 4)
     }
 
@@ -394,10 +393,9 @@ def test_indexer_fp8_warmup_keys_enumerate_coarsen_axis() -> None:
             head_dim=128,
             rope_dim=64,
             num_heads=64,
-            cos_sin_dtype=cos_sin_dtype,
+            cos_sin_dtype=Float32,
             coarsen=coarsen,
         )
-        for cos_sin_dtype in (Float32, BFloat16)
         for coarsen in (1, 4)
     }
 

@@ -7,7 +7,6 @@ requires = [
     "setuptools>=77.0.3,<81.0.0",
     "setuptools-scm>=8.0",
     "setuptools-rust>=1.9.0",
-    "torch == 2.13.0",
     "wheel",
     "jinja2",
 ]
@@ -196,4 +195,3 @@ WHT = "WHT"
 CANN = "CANN"
 
 [tool.uv]
-no-build-isolation-package = ["torch"]

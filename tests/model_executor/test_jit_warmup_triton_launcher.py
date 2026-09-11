@@ -115,6 +115,60 @@ def test_triton_launcher_supports_compile_and_runtime_adapters() -> None:
     assert runtime_calls == [(owner.kernel, (2,), ("runtime", 2), {"CONST": 7})]
 
 
+def test_triton_native_warmup_inputs_bypass_structured_call() -> None:
+    class StructuredKernel(_TestTritonKernel):
+        warmup_kernel = _FakeTritonKernel()
+
+        def warmup_inputs(
+            self, compile_key: _TestTritonKernel.CompileKey
+        ) -> dict[str, Any]:
+            return triton_warmup_inputs(
+                self.warmup_kernel,
+                "warmup",
+                compile_key.value,
+                CONST=9,
+                grid=(3,),
+            )
+
+        @kernel_launcher
+        def __call__(self, runtime_only: str) -> LaunchSpec:
+            raise AssertionError(f"unexpected runtime call: {runtime_only}")
+
+    owner = StructuredKernel()
+    owner.warmup_kernel.warmup_calls.clear()
+
+    owner.compile(owner.CompileKey(value=1))
+
+    assert owner.warmup_kernel.warmup_calls == [
+        {"grid": (1,), "first": "warmup", "second": 1, "CONST": 9}
+    ]
+
+
+def test_triton_structured_warmup_inputs_may_include_grid() -> None:
+    class StructuredGridKernel(_TestTritonKernel):
+        def warmup_inputs(
+            self, compile_key: _TestTritonKernel.CompileKey
+        ) -> dict[str, Any]:
+            return dict(
+                first="warmup",
+                second=compile_key.value,
+                grid=(3,),
+            )
+
+        @kernel_launcher
+        def __call__(self, first: str, second: int, grid: tuple[int, ...]) -> LaunchSpec:
+            return grid, dict(first=first, second=second, CONST=11)
+
+    owner = StructuredGridKernel()
+    owner.kernel.warmup_calls.clear()
+
+    owner.compile(owner.CompileKey(value=1))
+
+    assert owner.kernel.warmup_calls == [
+        {"grid": (1,), "first": "warmup", "second": 1, "CONST": 11}
+    ]
+
+
 def test_triton_launcher_supports_cpu_function_wrappers() -> None:
     calls: list[tuple[Any, ...]] = []
 
@@ -166,6 +220,8 @@ def test_triton_kernel_decorator_returns_launcher(
     _patch_key_deriver(monkeypatch, fake_keys)
 
     keys = launch.get_warmup_keys()
+    keys_with_config = launch.get_warmup_keys(vllm_config=object())
+    assert keys_with_config == keys
     assert [dict(key.inputs)["second"] for key in keys] == [1, 2]
     launch.compile(keys[0])
     assert kernel.warmup_calls == [

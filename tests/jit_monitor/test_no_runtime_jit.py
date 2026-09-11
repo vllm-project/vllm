@@ -35,7 +35,7 @@ JIT_MONITOR_MODELS = [
 ]
 
 
-def _run_shape_battery(llm: LLM) -> None:
+def _run_shape_battery(llm: LLM, *, speculative: bool) -> None:
     """Exercise diverse compile keys so missing warmup keys surface.
 
     Token-id prompts keep shapes exact and avoid depending on a tokenizer.
@@ -62,18 +62,26 @@ def _run_shape_battery(llm: LLM) -> None:
             temperature=0.8, top_k=20, top_p=0.9, min_p=0.1, max_tokens=8, seed=0
         ),
     ):
+        # min_p is currently rejected with speculative decoding.
+        if speculative and sampling_params.min_p > 0:
+            continue
         llm.generate(medium, sampling_params)
 
     # Heterogeneous SamplingParams in one step, where missing sampler warmup
     # keys most often hide.
+    heterogeneous_params = [
+        SamplingParams(temperature=0.0, max_tokens=8),
+        SamplingParams(temperature=0.8, top_k=20, max_tokens=8, seed=0),
+        SamplingParams(temperature=0.8, top_p=0.9, max_tokens=8, seed=0),
+        SamplingParams(temperature=0.8, min_p=0.1, max_tokens=8, seed=0),
+    ]
+    if speculative:
+        heterogeneous_params = [
+            params for params in heterogeneous_params if params.min_p == 0.0
+        ]
     llm.generate(
-        [medium] * 4,
-        [
-            SamplingParams(temperature=0.0, max_tokens=8),
-            SamplingParams(temperature=0.8, top_k=20, max_tokens=8, seed=0),
-            SamplingParams(temperature=0.8, top_p=0.9, max_tokens=8, seed=0),
-            SamplingParams(temperature=0.8, min_p=0.1, max_tokens=8, seed=0),
-        ],
+        [medium] * len(heterogeneous_params),
+        heterogeneous_params,
     )
 
 
@@ -106,7 +114,7 @@ def can_run_without_jit(spec: JitModel):
     )
 
     try:
-        _run_shape_battery(llm)
+        _run_shape_battery(llm, speculative=spec.draft is not None)
     except Exception as e:
         # The monitor's message contains "during inference"; distinguish a real
         # JIT miss from an unrelated crash.
