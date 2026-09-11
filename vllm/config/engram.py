@@ -47,6 +47,9 @@ class EngramConfig:
     """Shard embeddings across TP and all DP ranks when enabled.
     Otherwise, each DP rank has a separate TP-sharded embedding replica."""
 
+    lookup_overlap: bool = False
+    """Prefetch Engram rows on a separate CUDA stream while decoder layers run."""
+
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
         """Reject Engram configuration for models without n-gram embeddings."""
         from vllm.platforms import current_platform

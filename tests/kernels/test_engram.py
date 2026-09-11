@@ -662,13 +662,14 @@ def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("capture", ["eager", "full", "breakable"])
-def test_engram_prepared_rows_survive_graph_breaks(cpu_offload, capture):
+@pytest.mark.parametrize("overlap", [False, True])
+def test_engram_prepared_rows_survive_graph_breaks(cpu_offload, capture, overlap):
     """Consume early lookup results after a break, with fresh IDs each replay."""
-    _run_engram_prepared_rows(cpu_offload, capture)
+    _run_engram_prepared_rows(cpu_offload, capture, overlap=overlap)
 
 
 def _run_engram_prepared_rows(
-    cpu_offload, capture, tp_size=1, rank=0, use_sequence_parallel=False
+    cpu_offload, capture, tp_size=1, rank=0, use_sequence_parallel=False, overlap=False
 ):
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
@@ -689,6 +690,7 @@ def _run_engram_prepared_rows(
         dtype=torch.bfloat16,
         device="cuda",
     )
+    engram._init_lookup_staging(1, overlap)
     # Match the non-contiguous per-layer slice of the model hash tensor.
     hashes = torch.randint(
         0,
@@ -762,17 +764,28 @@ def _engram_tp_worker(rank, tp_size, port):
         for cpu_offload in (False, True):
             for sp in (False, True):
                 for capture in ("eager", "compiled", "full", "breakable"):
-                    _run_engram_prepared_rows(cpu_offload, capture, tp_size, rank, sp)
+                    for overlap in (False, True):
+                        _run_engram_prepared_rows(
+                            cpu_offload, capture, tp_size, rank, sp, overlap=overlap
+                        )
     finally:
         cleanup_dist_env_and_memory()
 
 
-@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.parametrize(
+    "tp_size",
+    [
+        pytest.param(2, marks=pytest.mark.distributed(num_gpus=2)),
+        pytest.param(4, marks=pytest.mark.distributed(num_gpus=4)),
+    ],
+)
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-def test_engram_head_collectives_survive_graph_breaks():
-    """All-gather preserves head order and local SP tokens across graph replay."""
+def test_engram_head_collectives_survive_graph_breaks(tp_size):
+    """All-gather preserves staged SP tokens across graph and compile replay."""
     from vllm.utils.network_utils import get_open_port
 
-    if torch.accelerator.device_count() < 2:
-        pytest.skip("Requires two GPUs")
-    torch.multiprocessing.spawn(_engram_tp_worker, args=(2, get_open_port()), nprocs=2)
+    if torch.accelerator.device_count() < tp_size:
+        pytest.skip(f"Requires {tp_size} GPUs")
+    torch.multiprocessing.spawn(
+        _engram_tp_worker, args=(tp_size, get_open_port()), nprocs=tp_size
+    )

@@ -40,6 +40,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -53,6 +54,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
 
@@ -939,14 +941,70 @@ class Engram(nn.Module):
             layout.head_dim,
             dtype=torch.bfloat16,
         )
+        parallel_config = get_current_vllm_config().parallel_config
+        self._init_lookup_staging(
+            parallel_config.num_ubatches if parallel_config.use_ubatching else 1,
+            engram_config.lookup_overlap if engram_config else False,
+        )
 
-    def prepare_embeddings(self, hash_ids: torch.Tensor) -> None:
-        """Gather this layer's rows on the main stream before decoder layers."""
-        self.embed_tokens.lookup(hash_ids, self.staged_rows[: hash_ids.shape[0]])
+    def _init_lookup_staging(self, num_slots: int, overlap: bool) -> None:
+        self._lookup_rows = [self.staged_rows] + [
+            torch.empty_like(self.staged_rows) for _ in range(num_slots - 1)
+        ]
+        self._lookup_streams = (
+            [
+                torch.cuda.Stream(device=self.staged_rows.device)
+                for _ in range(num_slots)
+            ]
+            if overlap
+            else []
+        )
+        self._lookup_ready = [torch.cuda.Event() for _ in self._lookup_streams]
 
-    def embed(self, hash_ids: torch.Tensor) -> torch.Tensor:
+    def _lookup_slot(self) -> int:
+        rows = getattr(self, "_lookup_rows", None)
+        return dbo_current_ubatch_id() if rows is not None and len(rows) > 1 else 0
+
+    def wait_for_embeddings(self) -> None:
+        if (
+            getattr(self, "_lookup_streams", None)
+            and not BreakableCUDAGraphCapture.is_active()
+        ):
+            torch.cuda.current_stream().wait_event(
+                self._lookup_ready[self._lookup_slot()]
+            )
+
+    def prepare_embeddings(self, hash_ids: torch.Tensor) -> torch.Tensor:
+        """Stage local heads after hashing, optionally overlapping decoder compute."""
+        slot = self._lookup_slot()
+        buffers = getattr(self, "_lookup_rows", None)
+        rows = (buffers[slot] if buffers is not None else self.staged_rows)[
+            : hash_ids.shape[0]
+        ]
+        streams = getattr(self, "_lookup_streams", None)
+        if streams and not BreakableCUDAGraphCapture.is_active():
+            stream = streams[slot]
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                self.embed_tokens.lookup(hash_ids, rows, background=True)
+                self._lookup_ready[slot].record(stream)
+        else:
+            self.embed_tokens.lookup(hash_ids, rows)
+        return rows
+
+    def embed(
+        self, hash_ids: torch.Tensor, prepared_rows: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Gather heads, returning only local tokens when SP is enabled."""
-        rows = self.staged_rows[: hash_ids.shape[0]]
+        if prepared_rows is None:
+            self.wait_for_embeddings()
+            buffers = getattr(self, "_lookup_rows", None)
+            prepared_rows = (
+                buffers[self._lookup_slot()]
+                if buffers is not None
+                else self.staged_rows
+            )
+        rows = prepared_rows[: hash_ids.shape[0]]
         if self.embed_tokens.tp_size == 1:
             return rows
         if self.use_sequence_parallel:
@@ -974,11 +1032,12 @@ class Engram(nn.Module):
         hidden_states: torch.Tensor,
         hash_ids: torch.Tensor,
         token_mask: torch.Tensor | None = None,
+        prepared_rows: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """hidden_states: [T, hc_mult, dim]; hash_ids: [T, n_hash_cols] (all
         tokens, pre sequence-parallel shard); token_mask: [T], False shuts
         the gate so those positions pass through untouched."""
-        kv = self.wkv(self.embed(hash_ids).flatten(-2))
+        kv = self.wkv(self.embed(hash_ids, prepared_rows).flatten(-2))
         num_kv_tokens = hash_ids.shape[0]
         assert token_mask is None or token_mask.shape == (num_kv_tokens,)
         if self.use_sequence_parallel:
