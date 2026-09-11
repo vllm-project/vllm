@@ -34,6 +34,10 @@ schema, generated Rust API, or dependencies require a new version. Review both
 Rust API and protobuf wire compatibility when choosing the version bump;
 a wire-compatible schema addition can still break Rust callers.
 
+On pull requests and releases, `cargo-semver-checks` compares the crate with its
+latest published version. Include any required version bump in the protocol
+change PR. This check becomes available after the first manual publication.
+
 1. Update the crate version and the `vllm-proto` workspace dependency together,
    and update `rust/Cargo.lock`.
 2. Run `cargo publish --manifest-path rust/proto/Cargo.toml --locked --dry-run`

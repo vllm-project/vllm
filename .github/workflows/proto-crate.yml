@@ -21,6 +21,15 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  semver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
+        with:
+          manifest-path: rust/proto/Cargo.toml
+          package: vllm-proto
+
   check:
     runs-on: ubuntu-latest
     steps:
@@ -39,7 +48,7 @@ jobs:
         run: cargo publish --manifest-path rust/proto/Cargo.toml --locked --dry-run
 
   publish:
-    needs: check
+    needs: [check, semver]
     if: github.repository == 'vllm-project/vllm' && github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: crates-io
