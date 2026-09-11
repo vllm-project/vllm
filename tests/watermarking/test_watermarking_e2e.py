@@ -36,4 +36,7 @@ def test_llm_generated_sequence_is_watermarked(vllm_runner):
     result_no_wm = detector.detect(list(output_no_wm[0].outputs[0].token_ids))
 
     assert result_use_wm.is_watermarked, result_use_wm
+    recorded_p_value = 9.83e-20
+    assert result_use_wm.p_value < recorded_p_value * 10  # tolerance
+
     assert not result_no_wm.is_watermarked, result_no_wm
