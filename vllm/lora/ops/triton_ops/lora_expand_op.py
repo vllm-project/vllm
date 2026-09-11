@@ -7,9 +7,6 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from dataclasses import dataclass
-from typing import Any
-
 import torch
 
 from vllm import envs
@@ -18,13 +15,6 @@ from vllm.lora.ops.triton_ops.utils import (
     _get_lora_b_ptr,
     get_lora_op_configs,
     supports_pdl,
-)
-from vllm.model_executor.warmup.jit_warmup import WarmupIntRange, kernel_launcher
-from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    LaunchSpec,
-    TritonWarmupTensor,
-    VllmTritonJitKernel,
-    triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -141,203 +131,6 @@ def _lora_expand_kernel(
         USE_GDC,
     )
 
-class LoRAExpandKernel(VllmTritonJitKernel["LoRAExpandKernel.CompileKey"]):
-    @dataclass(frozen=True)
-    class CompileKey:
-        input_dtype: torch.dtype
-        weight_dtype: torch.dtype
-        output_dtype: torch.dtype
-        m: int
-        n: int
-        k: int
-        input_d0_stride: int
-        input_d1_stride: int
-        input_d2_stride: int
-        lora_d0_stride: int
-        lora_d1_stride: int
-        lora_d2_stride: int
-        output_d0_stride: int
-        output_d1_stride: int
-        block_m: int
-        block_n: int
-        block_k: int
-        even_k: bool
-        add_inputs: bool
-        cast_type: bool
-        slice_num: int
-        same_stride: bool
-        lora_pointer_table: bool
-        metadata_table: bool
-        use_gdc: bool
-        num_warps: int
-        num_ctas: int
-        num_stages: int
-
-    kernel = staticmethod(_lora_expand_kernel)
-
-
-    def dispatch(
-        self,
-        *,
-        m: int,
-        n: int,
-        k: int,
-        max_loras: int,
-        input_dtype: torch.dtype,
-        weight_dtype: torch.dtype,
-        output_dtype: torch.dtype,
-        lora_d0_stride: int,
-        lora_d1_stride: int,
-        lora_d2_stride: int,
-        output_d0_stride: int,
-        output_d1_stride: int,
-        add_inputs: bool,
-        cast_type: bool,
-        slice_num: int,
-        same_stride: bool,
-        lora_pointer_table: bool,
-        metadata_table: bool,
-        use_gdc: bool,
-    ) -> "LoRAExpandKernel.CompileKey":
-        config = get_lora_op_configs(
-            op_type="expand",
-            max_loras=max_loras,
-            batch=m,
-            hidden_size=n,
-            rank=k,
-            num_slices=slice_num,
-            add_inputs=add_inputs,
-        )
-        return self.CompileKey(
-            input_dtype=input_dtype,
-            weight_dtype=weight_dtype,
-            output_dtype=output_dtype,
-            m=triton_scalar_specialization_rep(m),
-            n=triton_scalar_specialization_rep(n),
-            k=triton_scalar_specialization_rep(k),
-            input_d0_stride=triton_scalar_specialization_rep(m * k),
-            input_d1_stride=triton_scalar_specialization_rep(k),
-            input_d2_stride=1,
-            lora_d0_stride=triton_scalar_specialization_rep(lora_d0_stride),
-            lora_d1_stride=triton_scalar_specialization_rep(lora_d1_stride),
-            lora_d2_stride=triton_scalar_specialization_rep(lora_d2_stride),
-            output_d0_stride=triton_scalar_specialization_rep(output_d0_stride),
-            output_d1_stride=triton_scalar_specialization_rep(output_d1_stride),
-            block_m=config["block_m"],
-            block_n=config["block_n"],
-            block_k=config["block_k"],
-            even_k=k % config["block_k"] == 0,
-            add_inputs=add_inputs,
-            cast_type=cast_type,
-            slice_num=slice_num,
-            same_stride=same_stride,
-            lora_pointer_table=lora_pointer_table,
-            metadata_table=metadata_table,
-            use_gdc=use_gdc,
-            num_warps=config["num_warps"],
-            num_ctas=config["num_ctas"],
-            num_stages=config["num_stages"],
-        )
-
-    def get_warmup_keys(
-        self,
-        *,
-        max_tokens: int,
-        max_loras: int,
-        **compile_key_fields: Any,
-    ) -> list["LoRAExpandKernel.CompileKey"]:
-        return self._trace_dispatch(self.dispatch)(
-            m=WarmupIntRange(1, max_tokens + 1, advance=lambda value: value * 2),
-            max_loras=max_loras,
-            use_gdc=(False, True),
-            **compile_key_fields,
-        )
-
-    def warmup_inputs(
-        self, compile_key: "LoRAExpandKernel.CompileKey"
-    ) -> dict[str, Any]:
-        metadata = TritonWarmupTensor(torch.int32)
-        lora_metadata: int | TritonWarmupTensor
-        lora_metadata = (
-            TritonWarmupTensor(torch.int64)
-            if compile_key.metadata_table
-            else compile_key.lora_d0_stride
-        )
-        return dict(
-            input_ptr=TritonWarmupTensor(
-                compile_key.input_dtype,
-                shape=(1, 1, 1),
-                strides=(
-                    compile_key.input_d0_stride,
-                    compile_key.input_d1_stride,
-                    compile_key.input_d2_stride,
-                ),
-            ),
-            lora_ptr=TritonWarmupTensor(
-                torch.uint64
-                if compile_key.lora_pointer_table
-                else compile_key.weight_dtype
-            ),
-            out_ptr=TritonWarmupTensor(
-                compile_key.output_dtype,
-                shape=(1, 1),
-                strides=(
-                    compile_key.output_d0_stride,
-                    compile_key.output_d1_stride,
-                ),
-            ),
-            M=compile_key.m,
-            N=compile_key.n,
-            K=compile_key.k,
-            token_indices_sorted_by_lora_ids=metadata,
-            num_tokens_per_lora=metadata,
-            lora_token_start_loc=metadata,
-            lora_ids=metadata,
-            slice_start_loc=lora_metadata,
-            input_d0_stride=compile_key.input_d0_stride,
-            input_d1_stride=compile_key.input_d1_stride,
-            input_d2_stride=compile_key.input_d2_stride,
-            ls_d0_ptr=lora_metadata,
-            ls_d1_ptr=lora_metadata,
-            ls_d2_ptr=lora_metadata,
-            output_d0_stride=compile_key.output_d0_stride,
-            output_d1_stride=compile_key.output_d1_stride,
-            output_hs_ptr=lora_metadata,
-            BLOCK_M=compile_key.block_m,
-            BLOCK_N=compile_key.block_n,
-            BLOCK_K=compile_key.block_k,
-            EVEN_K=compile_key.even_k,
-            ADD_INPUTS=compile_key.add_inputs,
-            CAST_TYPE=compile_key.cast_type,
-            SLICE_NUM=compile_key.slice_num,
-            SAME_STRIDE=compile_key.same_stride,
-            USE_GDC=compile_key.use_gdc,
-            launch_pdl=compile_key.use_gdc,
-            grid=(1, 1, 1),
-            num_warps=compile_key.num_warps,
-            num_ctas=compile_key.num_ctas,
-            num_stages=compile_key.num_stages,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        *args: Any,
-        grid: tuple[int, ...],
-        num_warps: int,
-        num_ctas: int,
-        num_stages: int,
-        **kwargs: Any,
-    ) -> LaunchSpec:
-        return grid, dict(
-            num_warps=num_warps,
-            num_ctas=num_ctas,
-            num_stages=num_stages,
-        )
-
-
-_LORA_EXPAND_KERNEL = LoRAExpandKernel()
-
 
 @torch.inference_mode()
 def _lora_expand(
@@ -452,7 +245,7 @@ def _lora_expand(
 
     # PDL only works when dual-stream is being used.
     use_gdc = supports_pdl(inputs.device) and envs.VLLM_LORA_ENABLE_DUAL_STREAM
-    _LORA_EXPAND_KERNEL(
+    _lora_expand_kernel[grid](
         inputs,
         lora_ptr_tensor,
         output_tensor,
@@ -482,7 +275,6 @@ def _lora_expand(
         NUM_SLICES,
         same_stride,
         use_gdc,
-        grid=grid,
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,

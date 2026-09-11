@@ -146,12 +146,6 @@ class LoRAModelManager:
         )
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
         self._create_lora_modules()
-        for module in self.modules.values():
-            module.register_jit_warmups(
-                max_tokens=self.max_num_batched_tokens,
-                lora_slots=self.lora_slots,
-                output_dtype=vllm_config.model_config.dtype,
-            )
 
         self.moe_ep_load_spec: MoEEPLoadSpec | None = self._build_moe_ep_load_spec()
 

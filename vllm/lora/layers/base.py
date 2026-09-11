@@ -9,16 +9,12 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config.lora import LoRAConfig
-from vllm.triton_utils import HAS_TRITON
 
 if TYPE_CHECKING:
     from vllm.lora.punica_wrapper import PunicaWrapperBase
 
 
 class BaseLayerWithLoRA(nn.Module):
-    _expand_input_uses_lora_dtype = False
-    _uses_lora_shrink = True
-
     def __getattr__(self, name):
         d = self.__dict__
         if name in d.get("_parameters", ()):
@@ -81,88 +77,6 @@ class BaseLayerWithLoRA(nn.Module):
     ) -> None:
         """Initializes lora matrices."""
         ...
-
-    def register_jit_warmups(
-        self,
-        *,
-        max_tokens: int,
-        lora_slots: int,
-        output_dtype: torch.dtype,
-    ) -> None:
-        """Register the standard Punica kernels used by this LoRA layer."""
-        if not HAS_TRITON:
-            return
-
-        lora_a_weights = getattr(self, "lora_a_stacked", ())
-        lora_b_weights = getattr(self, "lora_b_stacked", ())
-        if isinstance(lora_a_weights, torch.Tensor):
-            lora_a_weights = (lora_a_weights,)
-        if isinstance(lora_b_weights, torch.Tensor):
-            lora_b_weights = (lora_b_weights,)
-        if not lora_a_weights or not lora_b_weights:
-            return
-
-        from vllm.lora.ops.triton_ops.lora_expand_op import _LORA_EXPAND_KERNEL
-        from vllm.lora.ops.triton_ops.lora_shrink_op import _LORA_SHRINK_KERNEL
-
-        lora_a_weights_3d = tuple(weight.squeeze(1) for weight in lora_a_weights)
-        lora_b_weights_3d = tuple(weight.squeeze(1) for weight in lora_b_weights)
-        expand_input_dtype = (
-            lora_a_weights_3d[0].dtype
-            if self._expand_input_uses_lora_dtype
-            else torch.float32
-        )
-        same_stride = (
-            len(
-                {
-                    (
-                        weight.shape[1],
-                        weight.stride(0),
-                        weight.stride(1),
-                        weight.stride(2),
-                    )
-                    for weight in lora_b_weights_3d
-                }
-            )
-            == 1
-        )
-
-        if self._uses_lora_shrink:
-            _LORA_SHRINK_KERNEL.register_warmup(
-                max_tokens=max_tokens,
-                max_loras=lora_slots + 1,
-                input_dtype=lora_a_weights_3d[0].dtype,
-                weight_dtype=lora_a_weights_3d[0].dtype,
-                n=lora_a_weights_3d[0].shape[1],
-                k=lora_a_weights_3d[0].shape[2],
-                lora_d0_stride=lora_a_weights_3d[0].stride(0),
-                lora_d1_stride=lora_a_weights_3d[0].stride(1),
-                lora_d2_stride=lora_a_weights_3d[0].stride(2),
-                slice_num=len(lora_a_weights_3d),
-                lora_pointer_table=len(lora_a_weights_3d) > 1,
-            )
-
-        for add_inputs in (False, True):
-            _LORA_EXPAND_KERNEL.register_warmup(
-                max_tokens=max_tokens,
-                max_loras=lora_slots + 1,
-                input_dtype=expand_input_dtype,
-                weight_dtype=lora_b_weights_3d[0].dtype,
-                output_dtype=output_dtype,
-                n=max(weight.shape[1] for weight in lora_b_weights_3d),
-                k=lora_b_weights_3d[0].shape[2],
-                lora_d0_stride=lora_b_weights_3d[0].stride(0),
-                lora_d1_stride=lora_b_weights_3d[0].stride(1),
-                lora_d2_stride=lora_b_weights_3d[0].stride(2),
-                output_d0_stride=sum(weight.shape[1] for weight in lora_b_weights_3d),
-                output_d1_stride=1,
-                add_inputs=add_inputs,
-                cast_type=True,
-                slice_num=len(lora_b_weights_3d),
-                same_stride=same_stride,
-                lora_pointer_table=len(lora_b_weights_3d) > 1,
-                metadata_table=not same_stride,
-            )
 
     def reset_lora(self, index: int):
         """Resets the lora weights at index back to 0."""

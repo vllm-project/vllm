@@ -1,20 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
-from typing import Any
-
 import torch
+
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
-)
-from vllm.model_executor.warmup.jit_warmup import WarmupIntRange, kernel_launcher
-from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    LaunchSpec,
-    TritonWarmupTensor,
-    VllmTritonJitKernel,
-    triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -22,7 +13,7 @@ from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op
 
-from .utils import get_lora_op_configs, supports_pdl, supports_tma
+from .utils import supports_pdl, supports_tma
 
 
 @triton.jit
@@ -467,7 +458,7 @@ def _run_fused_moe_lora_one_shot(
 
     grid = (M_blocks * npid, num_slices, grid_lora_dim)
 
-    _FUSED_MOE_LORA_ONE_SHOT_KERNEL(
+    _fused_moe_lora_one_shot_kernel[grid](
         qcurr_hidden_states,
         A_ptrs,
         B_ptrs,
@@ -509,7 +500,6 @@ def _run_fused_moe_lora_one_shot(
         BLOCK_N=block_n,
         BLOCK_K=block_k,
         ADD_INPUTS=add_inputs,
-        grid=grid,
         num_warps=nw,
         num_stages=ns,
     )
@@ -818,7 +808,7 @@ def _run_fused_moe_lora_small_batch(
     grid_size = min(work_total, max(1, 2 * sm_count))
     grid = (grid_size,)
 
-    _FUSED_MOE_LORA_SMALL_BATCH_KERNEL(
+    _fused_moe_lora_small_batch_kernel[grid](
         qcurr_hidden_states,
         A_ptrs,
         B_ptrs,
@@ -856,7 +846,6 @@ def _run_fused_moe_lora_small_batch(
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         NUM_SLICES=num_slices,
-        grid=grid,
         num_warps=nw,
         num_stages=ns,
     )
@@ -1245,7 +1234,7 @@ def _fused_moe_lora_shrink(
             [1, 1, shrink_config["BLOCK_SIZE_N"], shrink_config["BLOCK_SIZE_K"]],
         )
 
-    _FUSED_MOE_LORA_TWO_STAGE_KERNEL(
+    _fused_moe_lora_kernel[grid](
         qcurr_hidden_states,
         a_desc,
         b_ptr,
@@ -1286,7 +1275,6 @@ def _fused_moe_lora_shrink(
         USE_B_L2_CACHE=True,
         sort_c=use_tma and sorted_token_ids is not None,
         IS_PRIMARY=True,
-        grid=grid,
         **shrink_config,
     )
 
@@ -1382,7 +1370,7 @@ def _fused_moe_lora_expand(
     else:
         b_desc = None
 
-    _FUSED_MOE_LORA_TWO_STAGE_KERNEL(
+    _fused_moe_lora_kernel[grid](
         a_intermediate_cache1,
         a_desc,
         b_ptr,
@@ -1423,586 +1411,8 @@ def _fused_moe_lora_expand(
         USE_B_L2_CACHE=True,
         sort_c=False,
         IS_PRIMARY=False,
-        grid=grid,
         **expand_config,
     )
-
-
-class FusedMoELoRAOneShotKernel(
-    VllmTritonJitKernel["FusedMoELoRAOneShotKernel.CompileKey"]
-):
-    kernel = staticmethod(_fused_moe_lora_one_shot_kernel)
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        input_dtype: torch.dtype
-        output_dtype: torch.dtype
-        n: int
-        k: int
-        num_valid_tokens: int
-        top_k_num: int
-        max_loras: int
-        stride_xm: int
-        stride_a_lora: int
-        stride_a_expert: int
-        stride_a_r: int
-        stride_a_k: int
-        stride_b_lora: int
-        stride_b_expert: int
-        stride_b_n: int
-        stride_b_r: int
-        stride_om: int
-        stride_tl: int
-        stride_el: int
-        naive: bool
-        mul_routed_weight: bool
-        block_m: int
-        block_r: int
-        actual_rank: int
-        npid_factor: int
-        block_k: int
-        even_k: bool
-        add_inputs: bool
-        num_warps: int
-        num_stages: int
-
-    def dispatch(
-        self,
-        *,
-        num_tokens: int,
-        top_k_num: int,
-        max_loras: int,
-        num_experts: int,
-        num_slices: int,
-        n: int,
-        k: int,
-        rank: int,
-        input_dtype: torch.dtype,
-        output_dtype: torch.dtype,
-        stride_a_lora: int,
-        stride_a_expert: int,
-        stride_a_r: int,
-        stride_a_k: int,
-        stride_b_lora: int,
-        stride_b_expert: int,
-        stride_b_n: int,
-        stride_b_r: int,
-        num_slices_output: int,
-        config_op_type: str,
-        config_hidden_size: int,
-        moe_intermediate_size: int,
-        npid_factor: int,
-        naive: bool,
-        mul_routed_weight: bool,
-        add_inputs: bool,
-        max_shared_memory: int,
-    ) -> CompileKey:
-        config = get_lora_op_configs(
-            config_op_type,
-            max_loras=max_loras,
-            batch=num_tokens,
-            hidden_size=config_hidden_size,
-            rank=rank,
-            num_slices=num_slices,
-            moe_intermediate_size=moe_intermediate_size,
-        )
-        block_m = int(config["block_m"])
-        block_r = max(triton.next_power_of_2(rank), 16)
-        block_k = (
-            128
-            if k >= 256 or num_tokens * top_k_num / max(num_experts, 1) >= 16
-            else 64
-        )
-        num_warps = 8 if npid_factor > 1 else 4
-        num_stages = 2 if max_shared_memory < 68 * 1024 else 3
-        return self.CompileKey(
-            input_dtype=input_dtype,
-            output_dtype=output_dtype,
-            n=triton_scalar_specialization_rep(n),
-            k=triton_scalar_specialization_rep(k),
-            num_valid_tokens=triton_scalar_specialization_rep(num_tokens * top_k_num),
-            top_k_num=triton_scalar_specialization_rep(top_k_num),
-            max_loras=triton_scalar_specialization_rep(max_loras),
-            stride_xm=triton_scalar_specialization_rep(k),
-            stride_a_lora=triton_scalar_specialization_rep(stride_a_lora),
-            stride_a_expert=triton_scalar_specialization_rep(stride_a_expert),
-            stride_a_r=triton_scalar_specialization_rep(stride_a_r),
-            stride_a_k=triton_scalar_specialization_rep(stride_a_k),
-            stride_b_lora=triton_scalar_specialization_rep(stride_b_lora),
-            stride_b_expert=triton_scalar_specialization_rep(stride_b_expert),
-            stride_b_n=triton_scalar_specialization_rep(stride_b_n),
-            stride_b_r=triton_scalar_specialization_rep(stride_b_r),
-            stride_om=triton_scalar_specialization_rep(num_slices_output * n),
-            stride_tl=16,
-            stride_el=16,
-            naive=naive,
-            mul_routed_weight=mul_routed_weight,
-            block_m=16 if naive else block_m,
-            block_r=block_r,
-            actual_rank=rank,
-            npid_factor=npid_factor,
-            block_k=block_k,
-            even_k=k % block_k == 0,
-            add_inputs=add_inputs,
-            num_warps=num_warps,
-            num_stages=num_stages,
-        )
-
-    def get_warmup_keys(
-        self,
-        *,
-        max_tokens: int,
-        max_npid_factor: int,
-        **compile_key_fields: Any,
-    ) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            num_tokens=WarmupIntRange(
-                1, max_tokens + 1, advance=lambda value: value * 2
-            ),
-            npid_factor=WarmupIntRange(1, max_npid_factor + 1),
-            naive=(False, True),
-            mul_routed_weight=(False, True),
-            add_inputs=(False, True),
-            **compile_key_fields,
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        metadata = TritonWarmupTensor(torch.int32)
-        return dict(
-            x_ptr=TritonWarmupTensor(
-                compile_key.input_dtype,
-                shape=(1, 1),
-                strides=(compile_key.stride_xm, 1),
-            ),
-            A_ptrs=TritonWarmupTensor(torch.uint64),
-            B_ptrs=TritonWarmupTensor(torch.uint64),
-            out_ptr=TritonWarmupTensor(
-                compile_key.output_dtype,
-                shape=(1, 1),
-                strides=(compile_key.stride_om, 1),
-            ),
-            topk_weights_ptr=TritonWarmupTensor(torch.float32),
-            sorted_token_ids_ptr=None if compile_key.naive else metadata,
-            expert_ids_ptr=metadata,
-            num_tokens_post_padded_ptr=None if compile_key.naive else metadata,
-            token_lora_mapping_ptr=metadata,
-            lora_ids_ptr=metadata,
-            adapter_enabled_ptr=metadata,
-            N=compile_key.n,
-            K=compile_key.k,
-            num_valid_tokens=compile_key.num_valid_tokens,
-            top_k_num=compile_key.top_k_num,
-            max_loras=compile_key.max_loras,
-            stride_xm=compile_key.stride_xm,
-            stride_xk=1,
-            stride_A_lora=compile_key.stride_a_lora,
-            stride_A_expert=compile_key.stride_a_expert,
-            stride_A_r=compile_key.stride_a_r,
-            stride_A_k=compile_key.stride_a_k,
-            stride_B_lora=compile_key.stride_b_lora,
-            stride_B_expert=compile_key.stride_b_expert,
-            stride_B_n=compile_key.stride_b_n,
-            stride_B_r=compile_key.stride_b_r,
-            stride_om=compile_key.stride_om,
-            stride_on=1,
-            stride_tl_=compile_key.stride_tl,
-            stride_el=compile_key.stride_el,
-            slice_n_offset=compile_key.n,
-            token_mapping_factor=1
-            if compile_key.mul_routed_weight
-            else compile_key.top_k_num,
-            naive_block_assignment=compile_key.naive,
-            MUL_ROUTED_WEIGHT=compile_key.mul_routed_weight,
-            BLOCK_M=compile_key.block_m,
-            BLOCK_R=compile_key.block_r,
-            actual_rank=compile_key.actual_rank,
-            NPID_FACTOR=compile_key.npid_factor,
-            BLOCK_N=128,
-            BLOCK_K=compile_key.block_k,
-            EVEN_K=compile_key.even_k,
-            ADD_INPUTS=compile_key.add_inputs,
-            grid=(1, 1, 1),
-            num_warps=compile_key.num_warps,
-            num_stages=compile_key.num_stages,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        *args: Any,
-        grid: tuple[int, ...],
-        num_warps: int,
-        num_stages: int,
-        **kwargs: Any,
-    ) -> LaunchSpec:
-        return grid, dict(num_warps=num_warps, num_stages=num_stages)
-
-
-class FusedMoELoRASmallBatchKernel(
-    VllmTritonJitKernel["FusedMoELoRASmallBatchKernel.CompileKey"]
-):
-    kernel = staticmethod(_fused_moe_lora_small_batch_kernel)
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        input_dtype: torch.dtype
-        output_dtype: torch.dtype
-        n: int
-        k: int
-        top_k_num: int
-        max_loras: int
-        work_total: int
-        pair_slices: int
-        stride_a_lora: int
-        stride_a_expert: int
-        stride_a_r: int
-        stride_a_k: int
-        stride_b_lora: int
-        stride_b_expert: int
-        stride_b_n: int
-        stride_b_r: int
-        stride_om: int
-        n_tiles_per_program: int
-        n_chunks: int
-        token_mapping_factor: int
-        mul_routed_weight: bool
-        add_inputs: bool
-        block_r: int
-        actual_rank: int
-        num_slices: int
-
-    def dispatch(
-        self,
-        *,
-        num_tokens: int,
-        top_k_num: int,
-        max_loras: int,
-        num_slices: int,
-        n: int,
-        k: int,
-        rank: int,
-        input_dtype: torch.dtype,
-        output_dtype: torch.dtype,
-        stride_a_lora: int,
-        stride_a_expert: int,
-        stride_a_r: int,
-        stride_a_k: int,
-        stride_b_lora: int,
-        stride_b_expert: int,
-        stride_b_n: int,
-        stride_b_r: int,
-        num_slices_output: int,
-        sm_count: int,
-        mul_routed_weight: bool,
-        add_inputs: bool,
-    ) -> CompileKey:
-        n_tiles = triton.cdiv(n, 128)
-        pair_slices = num_tokens * top_k_num * num_slices
-        n_tiles_per_program = _pick_small_batch_chunk(pair_slices, n_tiles, sm_count)
-        n_chunks = triton.cdiv(n_tiles, n_tiles_per_program)
-        return self.CompileKey(
-            input_dtype=input_dtype,
-            output_dtype=output_dtype,
-            n=triton_scalar_specialization_rep(n),
-            k=triton_scalar_specialization_rep(k),
-            top_k_num=triton_scalar_specialization_rep(top_k_num),
-            max_loras=triton_scalar_specialization_rep(max_loras),
-            work_total=triton_scalar_specialization_rep(pair_slices * n_chunks),
-            pair_slices=triton_scalar_specialization_rep(pair_slices),
-            stride_a_lora=triton_scalar_specialization_rep(stride_a_lora),
-            stride_a_expert=triton_scalar_specialization_rep(stride_a_expert),
-            stride_a_r=triton_scalar_specialization_rep(stride_a_r),
-            stride_a_k=triton_scalar_specialization_rep(stride_a_k),
-            stride_b_lora=triton_scalar_specialization_rep(stride_b_lora),
-            stride_b_expert=triton_scalar_specialization_rep(stride_b_expert),
-            stride_b_n=triton_scalar_specialization_rep(stride_b_n),
-            stride_b_r=triton_scalar_specialization_rep(stride_b_r),
-            stride_om=triton_scalar_specialization_rep(num_slices_output * n),
-            n_tiles_per_program=triton_scalar_specialization_rep(n_tiles_per_program),
-            n_chunks=triton_scalar_specialization_rep(n_chunks),
-            token_mapping_factor=1 if mul_routed_weight else top_k_num,
-            mul_routed_weight=mul_routed_weight,
-            add_inputs=add_inputs,
-            block_r=max(triton.next_power_of_2(rank), 16),
-            actual_rank=rank,
-            num_slices=num_slices,
-        )
-
-    def get_warmup_keys(
-        self, *, max_tokens: int, rank: int, **compile_key_fields: Any
-    ) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            num_tokens=WarmupIntRange(1, max_tokens + 1),
-            rank=rank,
-            mul_routed_weight=(False, True),
-            add_inputs=(False, True),
-            _when=lambda *, num_tokens, top_k_num, rank: num_tokens
-            * top_k_num
-            * rank
-            <= 1024,
-            **compile_key_fields,
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        metadata = TritonWarmupTensor(torch.int32)
-        return dict(
-            x_ptr=TritonWarmupTensor(compile_key.input_dtype),
-            A_ptrs=TritonWarmupTensor(torch.uint64),
-            B_ptrs=TritonWarmupTensor(torch.uint64),
-            out_ptr=TritonWarmupTensor(compile_key.output_dtype),
-            topk_weights_ptr=TritonWarmupTensor(torch.float32),
-            expert_ids_ptr=metadata,
-            token_lora_mapping_ptr=metadata,
-            adapter_enabled_ptr=metadata,
-            N=compile_key.n,
-            K=compile_key.k,
-            top_k_num=compile_key.top_k_num,
-            max_loras=compile_key.max_loras,
-            work_total=compile_key.work_total,
-            pair_slices=compile_key.pair_slices,
-            stride_xm=compile_key.k,
-            stride_xk=1,
-            stride_A_lora=compile_key.stride_a_lora,
-            stride_A_expert=compile_key.stride_a_expert,
-            stride_A_r=compile_key.stride_a_r,
-            stride_A_k=compile_key.stride_a_k,
-            stride_B_lora=compile_key.stride_b_lora,
-            stride_B_expert=compile_key.stride_b_expert,
-            stride_B_n=compile_key.stride_b_n,
-            stride_B_r=compile_key.stride_b_r,
-            stride_om=compile_key.stride_om,
-            stride_on=1,
-            slice_n_offset=compile_key.n,
-            n_tiles_per_program=compile_key.n_tiles_per_program,
-            n_chunks_per_pair_slice=compile_key.n_chunks,
-            token_mapping_factor=compile_key.token_mapping_factor,
-            MUL_ROUTED_WEIGHT=compile_key.mul_routed_weight,
-            ADD_INPUTS=compile_key.add_inputs,
-            BLOCK_R=compile_key.block_r,
-            actual_rank=compile_key.actual_rank,
-            BLOCK_N=128,
-            BLOCK_K=128,
-            NUM_SLICES=compile_key.num_slices,
-            grid=(1,),
-            num_warps=4,
-            num_stages=3,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        *args: Any,
-        grid: tuple[int, ...],
-        num_warps: int,
-        num_stages: int,
-        **kwargs: Any,
-    ) -> LaunchSpec:
-        return grid, dict(num_warps=num_warps, num_stages=num_stages)
-
-
-class FusedMoELoRATwoStageKernel(
-    VllmTritonJitKernel["FusedMoELoRATwoStageKernel.CompileKey"]
-):
-    kernel = staticmethod(_fused_moe_lora_kernel)
-
-    @dataclass(frozen=True)
-    class CompileKey:
-        a_dtype: torch.dtype
-        c_dtype: torch.dtype
-        n: int
-        k: int
-        em: int
-        num_valid_tokens: int
-        num_experts: int
-        top_k_num: int
-        max_loras: int
-        stride_am: int
-        stride_ak: int
-        stride_bl: int
-        stride_be: int
-        stride_bk: int
-        stride_bn: int
-        stride_cm: int
-        stride_cn: int
-        num_slice_a: int
-        num_slice_c: int
-        token_mapping_factor: int
-        naive: bool
-        mul_routed_weight: bool
-        add_inputs: bool
-        block_m: int
-        block_n: int
-        block_k: int
-        group_m: int
-        split_k: int
-        is_primary: bool
-        num_warps: int
-        num_stages: int
-
-    def dispatch(
-        self,
-        *,
-        num_tokens: int,
-        top_k_num: int,
-        max_loras: int,
-        num_experts: int,
-        n: int,
-        k: int,
-        a_dtype: torch.dtype,
-        c_dtype: torch.dtype,
-        stride_am: int,
-        stride_ak: int,
-        stride_bl: int,
-        stride_be: int,
-        stride_bk: int,
-        stride_bn: int,
-        stride_cm: int,
-        stride_cn: int,
-        num_slice_a: int,
-        num_slice_c: int,
-        config_op_type: str,
-        config_hidden_size: int,
-        moe_intermediate_size: int,
-        is_primary: bool,
-        sorted_tokens: bool,
-        mul_routed_weight: bool,
-    ) -> CompileKey:
-        config = get_lora_op_configs(
-            config_op_type,
-            max_loras=max_loras,
-            batch=num_tokens,
-            hidden_size=config_hidden_size,
-            rank=n if is_primary else k,
-            num_slices=num_slice_c if is_primary else num_slice_a,
-            moe_intermediate_size=moe_intermediate_size,
-        )
-        block_m = int(config["block_m"])
-        block_n = int(config["block_n"])
-        block_k = int(config["block_k"])
-        group_m = int(config.get("group_size_m", 8))
-        split_k = int(config["split_k"])
-        em = num_tokens * top_k_num * block_m
-        return self.CompileKey(
-            a_dtype=a_dtype,
-            c_dtype=c_dtype,
-            n=triton_scalar_specialization_rep(n),
-            k=triton_scalar_specialization_rep(k),
-            em=triton_scalar_specialization_rep(em),
-            num_valid_tokens=triton_scalar_specialization_rep(
-                num_tokens * top_k_num
-            ),
-            num_experts=triton_scalar_specialization_rep(num_experts),
-            top_k_num=triton_scalar_specialization_rep(top_k_num),
-            max_loras=triton_scalar_specialization_rep(max_loras),
-            stride_am=triton_scalar_specialization_rep(stride_am),
-            stride_ak=triton_scalar_specialization_rep(stride_ak),
-            stride_bl=triton_scalar_specialization_rep(stride_bl),
-            stride_be=triton_scalar_specialization_rep(stride_be),
-            stride_bk=triton_scalar_specialization_rep(stride_bk),
-            stride_bn=triton_scalar_specialization_rep(stride_bn),
-            stride_cm=triton_scalar_specialization_rep(stride_cm),
-            stride_cn=triton_scalar_specialization_rep(stride_cn),
-            num_slice_a=num_slice_a,
-            num_slice_c=num_slice_c,
-            token_mapping_factor=(
-                1 if not is_primary or mul_routed_weight else top_k_num
-            ),
-            naive=not sorted_tokens,
-            mul_routed_weight=mul_routed_weight if not is_primary else False,
-            add_inputs=not is_primary,
-            block_m=block_m,
-            block_n=block_n,
-            block_k=block_k,
-            group_m=group_m,
-            split_k=split_k if is_primary else 1,
-            is_primary=is_primary,
-            num_warps=4,
-            num_stages=3,
-        )
-
-    def get_warmup_keys(
-        self, *, max_tokens: int, **compile_key_fields: Any
-    ) -> list[CompileKey]:
-        return self._trace_dispatch(self.dispatch)(
-            num_tokens=WarmupIntRange(
-                1, max_tokens + 1, advance=lambda value: value * 2
-            ),
-            sorted_tokens=(False, True),
-            mul_routed_weight=(False, True),
-            **compile_key_fields,
-        )
-
-    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        metadata = TritonWarmupTensor(torch.int32)
-        return dict(
-            a_ptr=TritonWarmupTensor(compile_key.a_dtype),
-            a_desc=None,
-            b_ptr=TritonWarmupTensor(torch.uint64),
-            b_desc=None,
-            c_ptr=TritonWarmupTensor(compile_key.c_dtype),
-            topk_weights_ptr=TritonWarmupTensor(torch.float32),
-            sorted_token_ids_ptr=None if compile_key.naive else metadata,
-            expert_ids_ptr=metadata,
-            num_tokens_post_padded_ptr=None if compile_key.naive else metadata,
-            token_lora_mapping_ptr=metadata,
-            N=compile_key.n,
-            K=compile_key.k,
-            EM=compile_key.em,
-            num_valid_tokens=compile_key.num_valid_tokens,
-            num_experts=compile_key.num_experts,
-            top_k_num=compile_key.top_k_num,
-            lora_ids=metadata,
-            adapter_enabled=metadata,
-            max_loras=compile_key.max_loras,
-            stride_am=compile_key.stride_am,
-            stride_ak=compile_key.stride_ak,
-            stride_bl=compile_key.stride_bl,
-            stride_be=compile_key.stride_be,
-            stride_bk=compile_key.stride_bk,
-            stride_bn=compile_key.stride_bn,
-            stride_cm=compile_key.stride_cm,
-            stride_cn=compile_key.stride_cn,
-            stride_tl=16,
-            stride_el=16,
-            slice_a_size=16,
-            slice_c_size=16,
-            num_slice_a=compile_key.num_slice_a,
-            num_slice_c=compile_key.num_slice_c,
-            token_mapping_factor=compile_key.token_mapping_factor,
-            naive_block_assignment=compile_key.naive,
-            MUL_ROUTED_WEIGHT=compile_key.mul_routed_weight,
-            ADD_INPUTS=compile_key.add_inputs,
-            USE_B_L2_CACHE=True,
-            BLOCK_SIZE_M=compile_key.block_m,
-            BLOCK_SIZE_N=compile_key.block_n,
-            BLOCK_SIZE_K=compile_key.block_k,
-            GROUP_SIZE_M=compile_key.group_m,
-            SPLIT_K=compile_key.split_k,
-            USE_GDC=False,
-            launch_pdl=False,
-            IS_PRIMARY=compile_key.is_primary,
-            USE_TMA=False,
-            sort_c=False,
-            grid=(1, 1, 1),
-            num_warps=compile_key.num_warps,
-            num_stages=compile_key.num_stages,
-        )
-
-    @kernel_launcher
-    def __call__(
-        self,
-        *args: Any,
-        grid: tuple[int, ...],
-        num_warps: int,
-        num_stages: int,
-        **kwargs: Any,
-    ) -> LaunchSpec:
-        return grid, dict(num_warps=num_warps, num_stages=num_stages)
-
-
-_FUSED_MOE_LORA_ONE_SHOT_KERNEL = FusedMoELoRAOneShotKernel()
-_FUSED_MOE_LORA_SMALL_BATCH_KERNEL = FusedMoELoRASmallBatchKernel()
-_FUSED_MOE_LORA_TWO_STAGE_KERNEL = FusedMoELoRATwoStageKernel()
 
 
 @torch.inference_mode()

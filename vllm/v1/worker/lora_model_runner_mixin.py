@@ -5,7 +5,7 @@ Define LoRA functionality mixin for model runners.
 """
 
 from collections.abc import Callable
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from typing import TypeAlias
 
 import numpy as np
@@ -59,11 +59,7 @@ class LoRAModelRunnerMixin:
             device,
             model.embedding_modules,
         )
-        # Capture providers selected while constructing LoRA layers.
-        registry = getattr(self, "jit_warmup_registry", None)
-        context = registry.activate() if registry is not None else nullcontext()
-        with context:
-            return self.lora_manager.create_lora_manager(model, vllm_config)
+        return self.lora_manager.create_lora_manager(model, vllm_config)
 
     def _set_active_loras(
         self,

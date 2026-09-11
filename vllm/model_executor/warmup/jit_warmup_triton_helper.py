@@ -5,7 +5,7 @@ import inspect
 from abc import abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, wraps
 from typing import Any, ClassVar, Generic, TypeVar, cast
 
 from vllm.model_executor.warmup.jit_warmup import (
@@ -22,28 +22,6 @@ LaunchSpec = (
     tuple[tuple[int, ...] | None, dict[str, Any]]
     | tuple[tuple[int, ...] | None, dict[str, Any], Any]
 )
-
-
-def triton_warmup_inputs(
-    kernel: Any,
-    *args: Any,
-    grid: tuple[int, ...],
-    **kwargs: Any,
-) -> dict[str, Any]:
-    """Build launcher inputs from Triton's native positional argument order."""
-    arg_names = tuple(kernel.arg_names)
-    if len(args) > len(arg_names):
-        raise ValueError(
-            f"Received {len(args)} positional inputs for {len(arg_names)} "
-            "Triton kernel arguments"
-        )
-    inputs = dict(zip(arg_names, args))
-    duplicate_names = inputs.keys() & kwargs.keys()
-    if duplicate_names:
-        raise ValueError(
-            f"Triton inputs passed twice: {', '.join(sorted(duplicate_names))}"
-        )
-    return {"kernel": kernel, "grid": grid, **inputs, **kwargs}
 
 
 def triton_scalar_specialization_rep(value: int) -> int:
@@ -131,11 +109,7 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         self._warming = True
         self._warming_compile_key = compile_key
         try:
-            if "kernel" in inputs:
-                grid = inputs.pop("grid")
-                self.launch((grid, inputs), {})
-            else:
-                cast(Callable[..., None], self)(**inputs)
+            cast(Callable[..., None], self)(**inputs)
         finally:
             self._warming = False
             self._warming_compile_key = None
@@ -154,16 +128,14 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
 
     def launch(
         self,
-        launch_spec: LaunchSpec,
+        grid: tuple[int, ...] | None,
         inputs: Mapping[str, Any],
+        /,
+        *,
+        kernel: Any = None,
+        **kwargs: Any,
     ) -> Any:
-        if len(launch_spec) == 3:
-            grid, launch_kwargs, outputs = launch_spec
-        else:
-            grid, launch_kwargs = launch_spec
-            outputs = None
-        kwargs = dict(launch_kwargs)
-        kernel = kwargs.pop("kernel", None) or self.kernel
+        kernel = kernel if kernel is not None else self.kernel
         runtime_launcher = kwargs.pop("_runtime_launcher", None)
         runtime_launcher_arg_count = kwargs.pop("_runtime_launcher_arg_count", 0)
         for name, value in inputs.items():
@@ -179,20 +151,51 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
                 kwargs["launch_pdl"] = self._warming_compile_key.launch_pdl
             warmup = getattr(kernel, "warmup", None)
             assert warmup is not None
-            warmup(grid=(1,), **kwargs)
-            return outputs
+            return warmup(grid=(1,), **kwargs)
         if grid is None:
-            return outputs
+            return None
         if runtime_launcher is not None:
             regular_args = [
                 kwargs.pop(name)
                 for name in self._kernel_arg_names[:runtime_launcher_arg_count]
             ]
-            runtime_launcher(kernel, grid, *regular_args, **kwargs)
+            return runtime_launcher(kernel, grid, *regular_args, **kwargs)
+        return kernel[grid](**kwargs)
+
+
+def kernel_launcher(
+    call_fn: Callable[..., LaunchSpec],
+) -> Callable[..., Any]:
+    """Launch a Triton kernel from a declarative ``__call__`` specification.
+
+    ``call_fn`` returns either ``(grid, launch_kwargs)`` or, when it allocates
+    its own outputs, ``(grid, launch_kwargs, outputs)``. The declared outputs are
+    returned to the caller. A ``grid`` of ``None`` skips the launch (e.g. an
+    empty-token batch) while still returning the outputs.
+    """
+    signature = inspect.signature(call_fn)
+
+    @wraps(call_fn)
+    def wrapper(
+        self: VllmTritonJitKernel[Any],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        spec = call_fn(self, *args, **kwargs)
+        if len(spec) == 3:
+            grid, launch_kwargs, outputs = spec
         else:
-            kernel[grid](**kwargs)
+            grid, launch_kwargs = spec
+            outputs = None
+        bound = signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        inputs = {
+            name: value for name, value in bound.arguments.items() if name != "self"
+        }
+        self.launch(grid, inputs, **launch_kwargs)
         return outputs
 
+    return wrapper
 
 
 @dataclass(frozen=True)
