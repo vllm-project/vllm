@@ -24,6 +24,12 @@ elif current_platform.is_rocm():
     from .amd.linear import KimiLinearForCausalLM  # type: ignore[assignment]
     from .amd.model import KimiK3ForConditionalGeneration  # type: ignore[assignment]
     from .amd.mtp import KimiK3MTP  # type: ignore[assignment]
+elif current_platform.is_xpu():
+    from .xpu.model import (  # type: ignore[assignment]
+        KimiK3ForConditionalGeneration,
+        KimiLinearForCausalLM,
+    )
+    from .xpu.mtp import KimiK3MTP  # type: ignore[assignment]
 else:
     from .nvidia.model import KimiK3ForConditionalGeneration, KimiLinearForCausalLM
     from .nvidia.mtp import KimiK3MTP
