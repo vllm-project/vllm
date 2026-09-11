@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from argparse import ArgumentError
 from unittest.mock import patch
 
@@ -12,8 +11,6 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.hashing import _xxhash
-
-MODEL_NAME = os.getenv("MODEL_NAME", "facebook/opt-125m")
 
 
 def test_prefix_caching_from_cli():
@@ -130,7 +127,7 @@ def test_data_parallel_start_rank_zero_infers_hybrid_lb():
 
 def test_external_lb_preserves_explicit_rank_when_dp_exceeds_nodes():
     engine_args = EngineArgs(
-        model=MODEL_NAME,
+        model="facebook/opt-125m",
         data_parallel_size=4,
         data_parallel_rank=3,
         data_parallel_external_lb=True,
@@ -152,7 +149,7 @@ def test_external_lb_requires_explicit_rank_when_nodes_are_not_evenly_partitione
     data_parallel_size, nnodes, tensor_parallel_size
 ):
     engine_args = EngineArgs(
-        model=MODEL_NAME,
+        model="facebook/opt-125m",
         data_parallel_size=data_parallel_size,
         data_parallel_external_lb=True,
         tensor_parallel_size=tensor_parallel_size,
@@ -172,7 +169,7 @@ def test_external_lb_requires_explicit_rank_when_nodes_are_not_evenly_partitione
 
 def test_external_lb_infers_rank_when_dp_does_not_exceed_nodes():
     engine_args = EngineArgs(
-        model=MODEL_NAME,
+        model="facebook/opt-125m",
         data_parallel_size=2,
         data_parallel_external_lb=True,
         nnodes=2,
@@ -187,10 +184,10 @@ def test_external_lb_infers_rank_when_dp_does_not_exceed_nodes():
 
 def test_external_lb_infers_rank_for_multinode_replicas():
     engine_args = EngineArgs(
-        model=MODEL_NAME,
+        model="facebook/opt-125m",
         data_parallel_size=2,
         data_parallel_external_lb=True,
-        tensor_parallel_size=16,
+        tensor_parallel_size=12,
         nnodes=4,
         node_rank=1,
     )
