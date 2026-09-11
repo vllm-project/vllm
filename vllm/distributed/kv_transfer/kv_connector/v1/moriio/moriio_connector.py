@@ -425,10 +425,9 @@ class MoRIIOConnectorScheduler:
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
         # Deadlines for requests whose block freeing was deferred.
-        # Survives across scheduler steps. If the worker never reports
-        # finished_sending before the deadline, we inject them into
-        # connector_output.finished_sending so the scheduler frees the blocks to avoid
-        # hanging indefinitely waiting for a free notification that never comes.
+        # Survives across scheduler steps. Blocks stay allocated until a
+        # finished_sending ACK arrives; a timeout must not force-free them
+        # while a consumer READ may still reference the source blocks.
         # Value: (deadline, transfer_id) for unmapping after mutation.
         self._deferred_send_deadlines: dict[ReqId, tuple[float, TransferId | None]] = {}
         self._defer_timeout = float(
@@ -436,6 +435,8 @@ class MoRIIOConnectorScheduler:
                 "defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT
             )
         )
+        # Expired deferred sends already logged; still waiting for an ACK.
+        self._stale_deferred_sends: set[ReqId] = set()
         # Buffer for early ACKs that arrive before request_finished.
         self._pending_sent_acks: dict[ReqId, float] = {}
         self.paths: dict[str, zmq.Socket] = {}
@@ -1003,11 +1004,11 @@ class MoRIIOConnectorScheduler:
         * An ACK that arrives BEFORE its request finished is parked in
           ``_pending_sent_acks`` and released on a later step once the
           request enters ``_deferred_send_deadlines``.
-        * A deferred send whose ACK never arrives is reaped after
-          ``_defer_timeout`` and surfaced, so leaked blocks are freed.
+        * A deferred send whose ACK never arrives is held past
+          ``_defer_timeout``. Force-freeing would return blocks to the
+          pool while a consumer READ may still reference them.
         * A parked ACK that never matches a deferral before its own
-          deadline is a stale duplicate (e.g. a real ACK landing after the
-          send was already reaped) and is dropped.
+          deadline is a stale duplicate and is dropped.
 
         Consumers never populate finished_sending (they report
         finished_recving), and they unmap in request_finished, so this is a
@@ -1033,19 +1034,25 @@ class MoRIIOConnectorScheduler:
             if req_id in self._deferred_send_deadlines:
                 safe.add(req_id)
 
-        # Reap deferred sends whose ACK never arrived (avoid leaking blocks).
+        # Hold expired deferred sends. Do not surface them as
+        # finished_sending: the scheduler would return the blocks to
+        # BlockPool while a still-pending READ may observe the reused
+        # physical blocks of a later request.
         expired = [
             req_id
             for req_id, (deadline, _) in self._deferred_send_deadlines.items()
             if now >= deadline
         ]
-        if expired:
-            safe.update(expired)
+        newly_stale = [
+            req_id for req_id in expired if req_id not in self._stale_deferred_sends
+        ]
+        if newly_stale:
+            self._stale_deferred_sends.update(newly_stale)
             logger.warning(
-                "Reaped %d deferred sends with no finished_sending "
-                "notification after %.0fs. This indicates lost async KV "
-                "completion notifications from the KV connector.",
-                len(expired),
+                "Holding %d deferred sends with no finished_sending "
+                "notification after %.0fs. Blocks stay allocated until "
+                "an ACK arrives.",
+                len(newly_stale),
                 self._defer_timeout,
             )
 
@@ -1055,6 +1062,7 @@ class MoRIIOConnectorScheduler:
             deferred_info = self._deferred_send_deadlines.pop(req_id, None)
             transfer_id = deferred_info[1] if deferred_info else None
             self._pending_sent_acks.pop(req_id, None)
+            self._stale_deferred_sends.discard(req_id)
             self.unmap_request_id(req_id, transfer_id=transfer_id)
 
         # Drop stale parked ACKs that never matched a deferral in time.
@@ -2068,11 +2076,30 @@ class MoRIIOConnectorWorker:
                     if _age > _xfer_timeout:
                         logger.error(
                             "RDMA read TIMED OUT for req %s after %.1fs "
-                            "(VLLM_MORIIO_TRANSFER_TIMEOUT_S=%d)",
+                            "(VLLM_MORIIO_TRANSFER_TIMEOUT_S=%d). "
+                            "Notifying prefill so producer blocks can be "
+                            "freed after this consumer has abandoned the "
+                            "read.",
                             req_id,
                             _age,
                             _xfer_timeout,
                         )
+                        host, port, xfer_id = self._recving_transfers_callback_addr[
+                            req_id
+                        ]
+                        try:
+                            self.moriio_wrapper.send_notify(
+                                xfer_id,
+                                host,
+                                port,
+                                message_type="release",
+                                message_fields={"consumer_tp_size": self.world_size},
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to send timeout notification for request %s",
+                                req_id,
+                            )
                         to_remove.append(req_id)
             for req_id in to_remove:
                 del self._recving_transfers[req_id]
