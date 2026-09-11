@@ -8,7 +8,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator, Sequence
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import ExitStack, contextmanager
 from enum import IntEnum
 from functools import partial
@@ -202,6 +202,17 @@ class EngineCore:
                     if worker_dict is not None:
                         content.update(worker_dict)
                 kv_connector.set_xfer_handshake_metadata_pp_aware(content)
+
+        self._model_wait_callback = (
+            kv_connector.get_model_wait_callback() if kv_connector else None
+        )
+        self._model_output_pool = (
+            ThreadPoolExecutor(
+                max_workers=1, initializer=self.model_executor.init_output_thread
+            )
+            if self._model_wait_callback is not None
+            else None
+        )
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -586,6 +597,20 @@ class EngineCore:
         Overridden by the DP engine core; never throttles otherwise."""
         return False
 
+    def _wait_for_model_output(self, future: Future[_R]) -> _R:
+        if self._model_output_pool is None or future.done():
+            return future.result()
+
+        assert self._model_wait_callback is not None
+        output = self._model_output_pool.submit(future.result)
+        try:
+            while not wait((output,), timeout=0.01).done:
+                self._model_wait_callback()
+        except BaseException:
+            wait((output,))
+            raise
+        return output.result()
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -604,9 +629,16 @@ class EngineCore:
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
-            model_output = future.result()
+            model_output = self._wait_for_model_output(future)
             if model_output is None:
-                model_output = self.model_executor.sample_tokens(grammar_output)
+                if self._model_output_pool is None:
+                    model_output = self.model_executor.sample_tokens(grammar_output)
+                else:
+                    model_output = self._wait_for_model_output(
+                        self.model_executor.sample_tokens(
+                            grammar_output, non_block=True
+                        )
+                    )
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -703,11 +735,11 @@ class EngineCore:
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
-            model_output = future.result()
+            model_output = self._wait_for_model_output(future)
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
-                exec_model_fut.result()
+                self._wait_for_model_output(exec_model_fut)
                 raise RuntimeError("unexpected error")
 
         # Before processing the model output, process any aborts that happened
@@ -758,6 +790,8 @@ class EngineCore:
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
+        if pool := getattr(self, "_model_output_pool", None):
+            pool.shutdown()
         if self.scheduler:
             self.scheduler.shutdown()
 

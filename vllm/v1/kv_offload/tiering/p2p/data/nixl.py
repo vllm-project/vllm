@@ -7,13 +7,16 @@ NixlTransport: Data-plane transport for RDMA-based KV block transfers via NIXL.
 from __future__ import annotations
 
 import itertools
+import threading
 from collections.abc import Iterable
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, NamedTuple
 
 import numpy as np
 
 from vllm.distributed.nixl_utils import NixlWrapper as _NixlAgent
 from vllm.distributed.nixl_utils import nixl_agent_config as _NixlAgentConfig
+from vllm.distributed.nixl_utils import nixl_thread_sync_t as _NixlThreadSync
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.tiering.p2p.data.base import (
     CancelMode,
@@ -65,6 +68,9 @@ class NixlTransport(DataTransport):
         self._local_dlist: Any = None
         self._remote_dlists: dict[str, object] = {}
         self._peer_nixl_names: dict[str, str] = {}
+        self._peer_generations: dict[str, object] = {}
+        self._peer_lock = threading.Lock()
+        self._registration_executor = ThreadPoolExecutor(max_workers=1)
         # transfer_id → _Inflight(peer_id, handle).
         self._inflight: dict[int, _Inflight] = {}
         self._next_id = itertools.count()
@@ -81,7 +87,11 @@ class NixlTransport(DataTransport):
 
         non_ucx_backends = [b for b in self._backends if b != "UCX"]
         if non_ucx_backends:
-            cfg = _NixlAgentConfig(backends=self._backends, capture_telemetry=True)
+            cfg = _NixlAgentConfig(
+                backends=self._backends,
+                capture_telemetry=True,
+                sync_mode=_NixlThreadSync.NIXL_THREAD_SYNC_RW,
+            )
             logger.info(
                 "NixlTransport %s: NIXL backends=%s",
                 self._agent_name,
@@ -89,7 +99,9 @@ class NixlTransport(DataTransport):
             )
         else:
             cfg = _NixlAgentConfig(
-                num_threads=self._num_threads, capture_telemetry=True
+                num_threads=self._num_threads,
+                capture_telemetry=True,
+                sync_mode=_NixlThreadSync.NIXL_THREAD_SYNC_RW,
             )
             logger.info(
                 "NixlTransport %s: NIXL backends=[UCX] num_threads=%d",
@@ -128,21 +140,74 @@ class NixlTransport(DataTransport):
         num_blocks: int,
         block_len: int,
     ) -> None:
+        self.add_remote_peer_async(
+            peer_id, agent_metadata, base_addr, num_blocks, block_len
+        ).result()
+
+    def add_remote_peer_async(
+        self,
+        peer_id: str,
+        agent_metadata: bytes,
+        base_addr: int,
+        num_blocks: int,
+        block_len: int,
+    ) -> Future[None]:
+        generation = object()
+        with self._peer_lock:
+            self._peer_generations[peer_id] = generation
+        return self._registration_executor.submit(
+            self._register_peer,
+            peer_id,
+            generation,
+            agent_metadata,
+            base_addr,
+            num_blocks,
+            block_len,
+        )
+
+    def _register_peer(
+        self,
+        peer_id: str,
+        generation: object,
+        agent_metadata: bytes,
+        base_addr: int,
+        num_blocks: int,
+        block_len: int,
+    ) -> None:
+        with self._peer_lock:
+            if self._peer_generations.get(peer_id) is not generation:
+                return
         nixl_name = self._agent.add_remote_agent(agent_metadata)
-        block_descs = [
-            (base_addr + i * block_len, block_len, 0) for i in range(num_blocks)
-        ]
-        xfer_dlist = self._agent.get_xfer_descs(block_descs, mem_type="DRAM")
-        remote_dlist = self._agent.prep_xfer_dlist(nixl_name, xfer_dlist)
-        self._peer_nixl_names[peer_id] = nixl_name
-        self._remote_dlists[peer_id] = remote_dlist
+        remote_dlist = None
+        try:
+            block_descs = [
+                (base_addr + i * block_len, block_len, 0) for i in range(num_blocks)
+            ]
+            xfer_dlist = self._agent.get_xfer_descs(block_descs, mem_type="DRAM")
+            remote_dlist = self._agent.prep_xfer_dlist(nixl_name, xfer_dlist)
+            with self._peer_lock:
+                if self._peer_generations.get(peer_id) is generation:
+                    self._peer_nixl_names[peer_id] = nixl_name
+                    self._remote_dlists[peer_id] = remote_dlist
+                    return
+        except Exception:
+            self._release_peer(nixl_name, remote_dlist)
+            raise
+        self._release_peer(nixl_name, remote_dlist)
 
     def remove_remote_peer(self, peer_id: str) -> None:
-        nixl_name = self._peer_nixl_names.pop(peer_id, None)
-        dlist = self._remote_dlists.pop(peer_id, None)
+        with self._peer_lock:
+            self._peer_generations.pop(peer_id, None)
+            nixl_name = self._peer_nixl_names.pop(peer_id, None)
+            dlist = self._remote_dlists.pop(peer_id, None)
         if self._agent is not None:
+            self._release_peer(nixl_name, dlist)
+
+    def _release_peer(self, nixl_name: str | None, dlist: object) -> None:
+        try:
             if dlist is not None:
                 self._agent.release_dlist_handle(dlist)
+        finally:
             if nixl_name:
                 self._agent.remove_remote_agent(nixl_name)
 
@@ -288,6 +353,9 @@ class NixlTransport(DataTransport):
     # ------------------------------------------------------------------
 
     def close(self) -> None:
+        with self._peer_lock:
+            self._peer_generations.clear()
+        self._registration_executor.shutdown(wait=True)
         if self._agent is None:
             return
         self._release_handles([entry.handle for entry in self._inflight.values()])

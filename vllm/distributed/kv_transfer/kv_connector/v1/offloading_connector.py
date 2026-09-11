@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import torch
@@ -158,6 +158,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def has_pending_push_work(self) -> bool:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.has_pending_push_work()
+
+    def get_model_wait_callback(self) -> Callable[[], None] | None:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.manager.get_model_wait_callback()
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         assert self.connector_scheduler is not None

@@ -287,6 +287,10 @@ class Executor(ABC):
         """Shutdown the executor."""
         self.collective_rpc("shutdown")
 
+    def init_output_thread(self) -> None:
+        """Initialize a thread that resolves model output futures."""
+        return
+
     def init_kv_output_aggregator(self, connector: "KVConnectorBase") -> None:
         """Init KVOutputAggregator"""
         self.kv_output_aggregator = KVOutputAggregator.from_connector(

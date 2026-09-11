@@ -442,7 +442,10 @@ class TestTieringOffloadingManager:
             self.secondary_tier2.lookup(c, _CTX) is LookupResult.HIT for c in chunks
         )
 
-    def test_ref_cnt_protection_during_cascade(self, manager_setup):
+    @pytest.mark.parametrize("during_model_execution", [False, True])
+    def test_ref_cnt_protection_during_cascade(
+        self, manager_setup, during_model_execution
+    ):
         """Test that ref_cnt protects chunks during cascade."""
         chunks = to_keys(range(3))
 
@@ -477,7 +480,12 @@ class TestTieringOffloadingManager:
 
         # End of step 2: flag was reset, so _maybe_process_finished_jobs()
         # runs and processes the cascade completions (complete_read → ref_cnt--)
-        self._simulate_on_schedule_end()
+        if during_model_execution:
+            callback = self.manager.get_model_wait_callback()
+            assert callback is not None
+            callback()
+        else:
+            self._simulate_on_schedule_end()
 
         # After cascade completes, ref_cnt should be 0
         for key in chunks:
@@ -821,6 +829,24 @@ class TestTieringOffloadingManager:
         assert jm_a.req_context is ctx_a
         assert set(jm_b.keys) == {chunks[2], chunks[3]}
         assert jm_b.req_context is ctx_b
+
+    def test_model_wait_promotes_external_lookup(self, manager_setup):
+        """A peer lookup can need another tier's data while the model runs."""
+        key = to_keys([0])[0]
+        self.secondary_tier2.chunks[key] = True
+        results = []
+
+        def serve(parent):
+            results.append(parent.lookup(key, _CTX))
+
+        self.secondary_tier1.serve_external_requests = serve
+        callback = self.manager.get_model_wait_callback()
+        assert callback is not None
+
+        callback()
+        callback()
+
+        assert results == [LookupResult.HIT_PENDING, LookupResult.HIT]
 
     def test_lookup_shared_chunk_no_duplicate_promotion(self, manager_setup):
         """A chunk looked up by two requests in the same step is promoted once.

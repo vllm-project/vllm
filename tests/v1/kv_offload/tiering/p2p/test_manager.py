@@ -25,6 +25,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
+from vllm.v1.kv_offload.tiering.p2p.data.base import DataTransport
 from vllm.v1.kv_offload.tiering.p2p.manager import (
     _UNBOUND_STORE_TIMEOUT_S,
     P2PSecondaryTierManager,
@@ -1047,6 +1048,8 @@ class _LoopbackConnection:
 
 class _FakeData:
     """Minimal NIXL fake that lets matched transfers complete on the next poll."""
+
+    add_remote_peer_async = DataTransport.add_remote_peer_async
 
     def __init__(self, local_id: str) -> None:
         self._local_id = local_id

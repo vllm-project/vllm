@@ -5,7 +5,7 @@ Core abstractions for KV cache offloading in vLLM v1.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
@@ -383,6 +383,10 @@ class OffloadingManager(ABC):
         to be called even when no requests are scheduled.
         """
         return False
+
+    def get_model_wait_callback(self) -> Callable[[], None] | None:
+        """Return nonblocking scheduler-thread work to run while awaiting output."""
+        return None
 
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""

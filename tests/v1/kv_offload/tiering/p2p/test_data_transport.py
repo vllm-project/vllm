@@ -5,9 +5,12 @@
 from __future__ import annotations
 
 import ctypes
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 from vllm.v1.kv_offload.tiering.p2p.data.base import PollResult
 from vllm.v1.kv_offload.tiering.p2p.data.nixl import NixlTransport
@@ -71,6 +74,13 @@ class TestDataTransportBase:
 class TestNixlTransportWithMockedAgent:
     """Tests for NixlTransport logic with a mocked NIXL agent."""
 
+    @pytest.fixture(autouse=True)
+    def cleanup_transports(self):
+        self.transports: list[NixlTransport] = []
+        yield
+        for transport in self.transports:
+            transport.close()
+
     def _make_transport(self) -> NixlTransport:
         """Create a NixlTransport with mocked NIXL internals."""
         view = memoryview(np.zeros((8, 1024), dtype=np.uint8))
@@ -90,6 +100,7 @@ class TestNixlTransportWithMockedAgent:
 
         transport._agent = agent
         transport._local_dlist = MagicMock()
+        self.transports.append(transport)
         return transport
 
     def test_available_false_without_nixl(self):
@@ -285,6 +296,101 @@ class TestNixlTransportWithMockedAgent:
         transport._agent.release_dlist_handle.assert_called()
         transport._agent.remove_remote_agent.assert_called()
 
+    @pytest.mark.parametrize("reconnect", [False, True])
+    def test_pending_registration_cannot_revive_removed_peer(self, reconnect):
+        transport = self._make_transport()
+        agent = transport._agent
+        started, release = threading.Event(), threading.Event()
+        old_dlist, new_dlist = object(), object()
+        agent.add_remote_agent.side_effect = ["old", "new"]
+
+        def prep(nixl_name, descs):
+            if nixl_name == "old":
+                started.set()
+                assert release.wait(5)
+                return old_dlist
+            return new_dlist
+
+        agent.prep_xfer_dlist.side_effect = prep
+        registration = transport.add_remote_peer_async(
+            "peer:1", b"old", 0x1000, 8, 1024
+        )
+        try:
+            assert started.wait(5)
+            assert not registration.done()
+            transport.remove_remote_peer("peer:1")
+            assert "peer:1" not in transport._remote_dlists
+            if reconnect:
+                replacement = transport.add_remote_peer_async(
+                    "peer:1", b"new", 0x2000, 8, 1024
+                )
+        finally:
+            release.set()
+        registration.result(timeout=5)
+        if reconnect:
+            replacement.result(timeout=5)
+            assert transport._remote_dlists["peer:1"] is new_dlist
+            assert transport._peer_nixl_names["peer:1"] == "new"
+        else:
+            assert "peer:1" not in transport._remote_dlists
+        agent.release_dlist_handle.assert_called_once_with(old_dlist)
+        agent.remove_remote_agent.assert_called_once_with("old")
+
+    def test_failed_registration_releases_remote_agent(self):
+        transport = self._make_transport()
+        agent = transport._agent
+        agent.prep_xfer_dlist.side_effect = RuntimeError("registration failed")
+        registration = transport.add_remote_peer_async(
+            "peer:1", b"meta", 0x1000, 8, 1024
+        )
+        with pytest.raises(RuntimeError, match="registration failed"):
+            registration.result(timeout=5)
+        assert not transport._remote_dlists
+        agent.remove_remote_agent.assert_called_once_with("nixl-peer-name")
+
+    def test_close_drains_pending_registration(self):
+        transport = self._make_transport()
+        agent = transport._agent
+        started, release, closing = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
+        shutdown = transport._registration_executor.shutdown
+
+        def prep(*args):
+            started.set()
+            assert release.wait(5)
+            return "remote-dlist"
+
+        def shutdown_registration(*args, **kwargs):
+            closing.set()
+            shutdown(*args, **kwargs)
+
+        agent.prep_xfer_dlist.side_effect = prep
+        registration = transport.add_remote_peer_async(
+            "peer:1", b"meta", 0x1000, 8, 1024
+        )
+        with (
+            ThreadPoolExecutor(max_workers=1) as executor,
+            patch.object(
+                transport._registration_executor, "shutdown", shutdown_registration
+            ),
+        ):
+            try:
+                assert started.wait(5)
+                closed = executor.submit(transport.close)
+                assert closing.wait(5)
+                assert not closed.done()
+                agent.release_dlist_handle.assert_not_called()
+            finally:
+                release.set()
+            closed.result(timeout=5)
+        registration.result(timeout=5)
+        assert transport._agent is None
+        assert not transport._remote_dlists
+        agent.remove_remote_agent.assert_called_once_with("nixl-peer-name")
+
     def test_close_releases_everything(self):
         """close releases all handles and clears state."""
         transport = self._make_transport()
@@ -309,6 +415,12 @@ class TestNixlAgentConfigSelection:
     vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py:325-329.
     """
 
+    @pytest.fixture(autouse=True)
+    def mock_thread_sync(self):
+        with patch("vllm.v1.kv_offload.tiering.p2p.data.nixl._NixlThreadSync") as sync:
+            self.thread_sync = sync.NIXL_THREAD_SYNC_RW
+            yield
+
     def _make_view(self) -> memoryview:
         return memoryview(np.zeros((4, 512), dtype=np.uint8))
 
@@ -324,7 +436,9 @@ class TestNixlAgentConfigSelection:
         ):
             NixlTransport("test:1", self._make_view(), backends=["MOONCAKE"])
 
-        config_fn.assert_called_once_with(backends=["MOONCAKE"], capture_telemetry=True)
+        config_fn.assert_called_once_with(
+            backends=["MOONCAKE"], capture_telemetry=True, sync_mode=self.thread_sync
+        )
         # num_threads must NOT be passed on the non-UCX branch.
         assert "num_threads" not in config_fn.call_args.kwargs
 
@@ -340,7 +454,9 @@ class TestNixlAgentConfigSelection:
         ):
             NixlTransport("test:1", self._make_view(), num_threads=8)
 
-        config_fn.assert_called_once_with(num_threads=8, capture_telemetry=True)
+        config_fn.assert_called_once_with(
+            num_threads=8, capture_telemetry=True, sync_mode=self.thread_sync
+        )
         assert "backends" not in config_fn.call_args.kwargs
 
     def test_default_backends_is_ucx_only(self):
@@ -356,4 +472,6 @@ class TestNixlAgentConfigSelection:
             NixlTransport("test:1", self._make_view())
 
         # Default num_threads=4, no backends kwarg.
-        config_fn.assert_called_once_with(num_threads=4, capture_telemetry=True)
+        config_fn.assert_called_once_with(
+            num_threads=4, capture_telemetry=True, sync_mode=self.thread_sync
+        )

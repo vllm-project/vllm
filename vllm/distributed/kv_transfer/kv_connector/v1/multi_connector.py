@@ -389,6 +389,21 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     # ==============================
     # Scheduler-side methods
     # ==============================
+    def get_model_wait_callback(self) -> Callable[[], None] | None:
+        callbacks = [
+            callback
+            for connector in self._connectors
+            if (callback := connector.get_model_wait_callback()) is not None
+        ]
+        if not callbacks:
+            return None
+
+        def progress() -> None:
+            for callback in callbacks:
+                callback()
+
+        return progress
+
     def get_num_new_matched_tokens(
         self,
         request: "Request",
