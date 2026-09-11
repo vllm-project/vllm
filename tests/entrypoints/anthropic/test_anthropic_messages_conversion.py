@@ -26,7 +26,10 @@ from pydantic import BaseModel, Field, ValidationError
 
 from vllm.entrypoints.anthropic.api_router import attach_router
 from vllm.entrypoints.anthropic.protocol import (
+    AnthropicContentBlock,
     AnthropicMessagesRequest,
+    AnthropicMessagesResponse,
+    AnthropicUsage,
 )
 from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
@@ -1635,6 +1638,89 @@ class TestStopSequenceReason:
         assert msg_deltas[0]["delta"]["stop_reason"] == "end_turn"
         assert "stop_sequence" in msg_deltas[0]["delta"]
         assert msg_deltas[0]["delta"]["stop_sequence"] is None
+
+
+# ======================================================================
+# Non-streaming /v1/messages keeps null stop fields on the wire
+# ======================================================================
+
+
+class TestNonStreamingNullableStopFields:
+    """The Anthropic Message schema lists ``stop_reason`` and
+    ``stop_sequence`` as required, nullable fields. The non-streaming
+    ``/v1/messages`` route serializes with ``exclude_none=True``, which drops
+    them when null; the route must add them back as explicit nulls, matching
+    the streaming ``message_delta`` contract from #55324.
+    """
+
+    @staticmethod
+    def _make_api_app(response: AnthropicMessagesResponse) -> FastAPI:
+        app = FastAPI()
+        attach_router(app)
+        app.state.args = Namespace(log_error_stack=False)
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.create_messages.return_value = response
+        app.state.anthropic_serving_messages = handler
+        return app
+
+    @classmethod
+    def _post_messages(cls, response: AnthropicMessagesResponse) -> dict:
+        with TestClient(cls._make_api_app(response)) as client:
+            http_response = client.post(
+                "/v1/messages",
+                json={
+                    "model": "test-model",
+                    "max_tokens": 8,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+        assert http_response.status_code == HTTPStatus.OK
+        return http_response.json()
+
+    @staticmethod
+    def _make_response(**stop_fields) -> AnthropicMessagesResponse:
+        # Extension fields are set explicitly, as messages_full_converter does,
+        # so the omission test would catch a switch to exclude_unset.
+        return AnthropicMessagesResponse(
+            id="msg_test",
+            content=[AnthropicContentBlock(type="text", text="hi")],
+            model="test-model",
+            usage=AnthropicUsage(input_tokens=5, output_tokens=3),
+            kv_transfer_params=None,
+            ec_transfer_params=None,
+            **stop_fields,
+        )
+
+    def test_end_turn_emits_explicit_null_stop_sequence(self):
+        body = self._post_messages(self._make_response(stop_reason="end_turn"))
+
+        assert body["stop_reason"] == "end_turn"
+        assert "stop_sequence" in body
+        assert body["stop_sequence"] is None
+
+    def test_null_stop_reason_is_kept(self):
+        body = self._post_messages(self._make_response())
+
+        assert body["stop_reason"] is None
+        assert body["stop_sequence"] is None
+
+    def test_populated_stop_sequence_is_not_overwritten(self):
+        body = self._post_messages(
+            self._make_response(stop_reason="stop_sequence", stop_sequence="</tool>")
+        )
+
+        assert body["stop_reason"] == "stop_sequence"
+        assert body["stop_sequence"] == "</tool>"
+
+    def test_other_null_fields_are_still_omitted(self):
+        """exclude_none keeps pruning optional fields outside the contract."""
+        body = self._post_messages(self._make_response(stop_reason="end_turn"))
+
+        assert body["type"] == "message"
+        assert body["role"] == "assistant"
+        assert "kv_transfer_params" not in body
+        assert "ec_transfer_params" not in body
+        assert body["content"] == [{"type": "text", "text": "hi"}]
 
 
 # ======================================================================
