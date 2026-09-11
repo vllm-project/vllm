@@ -251,50 +251,6 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
 
 @dataclass(frozen=True)
-class PCPRegionPacking:
-    """This rank's prefill rows collapsed to one entry per global request."""
-
-    # [num_regions] scheduled (compressed) context of each region, rounded up
-    # to a whole number of DCP shards.
-    seq_lens: np.ndarray
-    # [num_regions] total query length the region's rows contribute.
-    query_lens: np.ndarray
-    # [num_regions+1] region r covers local rows [row_bounds[r], row_bounds[r+1]).
-    row_bounds: np.ndarray
-
-
-def plan_pcp_region_packing(
-    row_req_idx: np.ndarray,
-    row_seq_lens: np.ndarray,
-    row_query_lens: np.ndarray,
-    dcp_world_size: int,
-) -> PCPRegionPacking:
-    """Group prefill rows by the request whose context they share.
-
-    PCP hands each rank two chunks of every split prefill, so one global request
-    shows up as two consecutive local rows over ONE context. Chunking has to see
-    that context once: charging it per row halves the usable logits budget.
-
-    ``row_seq_lens`` holds the whole request's extent on every row.
-    """
-    assert row_req_idx.size > 0, "no prefill rows to pack"
-    row_bounds = request_row_bounds(row_req_idx)
-    region_first_row = row_bounds[:-1]
-    region_seq_lens = row_seq_lens[region_first_row].astype(np.int64)
-    gathered_seq_lens = (
-        (region_seq_lens + dcp_world_size - 1) // dcp_world_size
-    ) * dcp_world_size
-    # Rank 0 holds the short tail chunk as a region's LAST row; a region's first
-    # row is always a full chunk, so this query length matches on every rank.
-    query_lens = np.diff(row_bounds) * row_query_lens[region_first_row]
-    return PCPRegionPacking(
-        seq_lens=gathered_seq_lens.astype(np.int32),
-        query_lens=query_lens.astype(np.int32),
-        row_bounds=row_bounds,
-    )
-
-
-@dataclass(frozen=True)
 class PCPGlobalChunkPlan:
     """PCP packing for one indexer prefill chunk under PCP + DCP."""
 
@@ -1101,28 +1057,34 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         max_logits_bytes: int,
         request_offset: int,
     ) -> list[tuple[slice, slice]]:
-        """Chunk by request rather than by row, then widen each chunk's request
-        slice back to the rows it covers."""
-        packing = plan_pcp_region_packing(
-            row_req_idx,
-            row_seq_lens_cpu.numpy(),
-            row_query_lens_cpu.numpy(),
-            self.dcp_world_size,
+        """Chunk by request rather than by row, so a split prefill's two rows
+        charge their shared context once, then widen each chunk back to rows.
+
+        ``row_seq_lens_cpu`` holds the whole request's extent on every row.
+        """
+        row_bounds = request_row_bounds(row_req_idx)
+        first_rows = row_bounds[:-1]
+        world = self.dcp_world_size
+        # Each request's context, rounded up to whole DCP shards.
+        seq_lens = -(-row_seq_lens_cpu.numpy()[first_rows] // world) * world
+        # Rank 0 holds the short tail chunk as a request's LAST row; the first
+        # row is always a full chunk, so this query length matches on every rank.
+        query_lens = np.diff(row_bounds) * row_query_lens_cpu.numpy()[first_rows]
+        chunk_specs = self._split_indexer_prefill_chunks(
+            torch.from_numpy(seq_lens.astype(np.int32)),
+            torch.from_numpy(query_lens.astype(np.int32)),
+            self.max_prefill_buffer_size,
+            max_logits_bytes,
         )
         return [
             (
                 slice(
-                    request_offset + int(packing.row_bounds[region_slice.start]),
-                    request_offset + int(packing.row_bounds[region_slice.stop]),
+                    request_offset + int(row_bounds[request_slice.start]),
+                    request_offset + int(row_bounds[request_slice.stop]),
                 ),
                 query_slice,
             )
-            for region_slice, query_slice in self._split_indexer_prefill_chunks(
-                torch.from_numpy(packing.seq_lens),
-                torch.from_numpy(packing.query_lens),
-                self.max_prefill_buffer_size,
-                max_logits_bytes,
-            )
+            for request_slice, query_slice in chunk_specs
         ]
 
     @staticmethod

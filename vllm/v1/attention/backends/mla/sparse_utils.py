@@ -33,12 +33,11 @@ def request_row_bounds(req_idx: np.ndarray) -> np.ndarray:
     sparse backends give such a run one KV region.
     """
     assert req_idx.size > 0
-    is_first_row = np.ones(req_idx.shape, dtype=bool)
-    is_first_row[1:] = req_idx[1:] != req_idx[:-1]
-    assert is_first_row.sum() == len(np.unique(req_idx)), (
+    bounds = np.flatnonzero(np.r_[True, req_idx[1:] != req_idx[:-1], True])
+    assert bounds.size - 1 == np.unique(req_idx).size, (
         "rows of one request must be adjacent"
     )
-    return np.append(np.flatnonzero(is_first_row), req_idx.size)
+    return bounds
 
 
 def flat_kv_row_view(
