@@ -152,6 +152,9 @@ Primary candidates use all effective NUMA nodes:
 tensor-parallel-size * data-parallel-size = effective NUMA nodes
 ```
 
+The effective NUMA-node count comes from hardware detection; it is not fixed by
+the sweep generator. The table below shows representative detected topologies.
+
 TP is restricted to the supported values `1`, `2`, `4`, and `8`. The sweep also
 includes the largest supported TP size that does not exceed the effective
 NUMA-node count, even if that layout leaves some NUMA nodes idle.
@@ -162,6 +165,24 @@ NUMA-node count, even if that layout leaves some NUMA nodes idle.
 | 4 | `TP=4, DP=1`; `TP=2, DP=2`; `TP=1, DP=4` |
 | 6 | `TP=4, DP=1` (4 of 6 nodes); `TP=2, DP=3`; `TP=1, DP=6` |
 | 8 | `TP=8, DP=1`; `TP=4, DP=2`; `TP=2, DP=4`; `TP=1, DP=8` |
+
+The generator then applies model- and runtime-aware safety policy before any
+server is started:
+
+1. For an MoE model, if the CPU communicator does not override the variable-size
+   `all_gatherv` and `reduce_scatterv` collectives used by MoE data parallelism,
+   all generated candidates use `DP=1`. Every supported TP value is retained,
+   so a 6-NUMA-node host tests `TP=4`, `TP=2`, and `TP=1` rather than only `TP=4`.
+2. When MoE dimensions are known and expert parallelism is disabled, the fused
+   MoE path flattens TP, DP, and PCP. A candidate is valid only when
+   `moe_intermediate_size % (TP * DP * PCP) == 0`.
+3. Failures not covered by a preflight rule remain isolated by
+   `--continue-on-error` when the installed CLI supports it, with bounded
+   `--resume` retries as the compatibility fallback.
+
+Skipped candidates and reasons are saved in
+`sweep/parallel_layout_skips.json`. If model metadata cannot be loaded, the
+generator keeps the generic layouts and relies on the third policy.
 
 Each candidate starts with a per-replica scheduler baseline:
 
