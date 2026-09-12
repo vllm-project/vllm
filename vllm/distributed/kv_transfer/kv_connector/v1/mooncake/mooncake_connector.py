@@ -67,6 +67,12 @@ from vllm.v1.worker.utils import select_common_block_size
 
 logger = init_logger(__name__)
 
+# Bootstrap registration runs while every prefiller worker is initializing, so
+# the server (a thread of the global rank 0 worker) may be slow to respond.
+# The overall deadline is VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT.
+_BOOTSTRAP_REGISTER_HTTP_TIMEOUT = 30.0
+_BOOTSTRAP_REGISTER_RETRY_INTERVAL = 1.0
+
 try:
     from mooncake.engine import TransferEngine
 except ImportError:
@@ -1012,6 +1018,9 @@ class MooncakeConnectorWorker:
             # An asyncio queue to buffer incoming requests for the sender
             self.sender_worker_queue = asyncio.Queue[tuple[bytes, bytes]]()
             self.sender_loop = asyncio.new_event_loop()
+            # Set by the listener when it fails before signalling readiness,
+            # then re-raised by register_kv_caches().
+            self._sender_listener_startup_exc: Exception | None = None
             # Background thread for processing new sending requests.
             self._sender_listener_t = threading.Thread(
                 target=_async_loop, args=(self.sender_loop,), daemon=True
@@ -1126,22 +1135,57 @@ class MooncakeConnectorWorker:
             pp_rank=self.pp_rank,
             addr=worker_addr,
         )
+        start = time.perf_counter()
+        deadline = start + envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT
         while True:
+            # Never let a single attempt outlive the deadline, so a server
+            # that silently drops packets is not waited on for a further
+            # _BOOTSTRAP_REGISTER_HTTP_TIMEOUT past it.
+            attempt_timeout = min(
+                _BOOTSTRAP_REGISTER_HTTP_TIMEOUT, deadline - time.perf_counter()
+            )
             try:
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(timeout=attempt_timeout) as client:
                     response = await client.post(url, json=payload.model_dump())
                     response.raise_for_status()
                 logger.debug("Successfully registered with bootstrap server at %s", url)
                 break
-            except httpx.ConnectError:
-                # Bootstrap server not ready, wait for a while and retry.
-                await asyncio.sleep(1)
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                # The bootstrap server runs in a thread of the global rank 0
+                # prefiller worker, so it can be slow to start or slow to
+                # answer while that worker is busy initializing. Both cases
+                # are transient: retry until the deadline. Registration is
+                # idempotent for an unchanged address, so a request that
+                # timed out after being committed server-side is safe to
+                # repeat.
+                if time.perf_counter() >= deadline:
+                    logger.error(
+                        "Gave up after %.1fs registering %s with bootstrap "
+                        "server at %s: %r. Raise "
+                        "VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT (currently "
+                        "%ds) if startup is legitimately slower than this.",
+                        time.perf_counter() - start,
+                        payload,
+                        url,
+                        e,
+                        envs.VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT,
+                    )
+                    raise
+                await asyncio.sleep(
+                    min(
+                        _BOOTSTRAP_REGISTER_RETRY_INTERVAL,
+                        max(0.0, deadline - time.perf_counter()),
+                    )
+                )
             except Exception as e:
                 err_msg = (
-                    e.response.text if isinstance(e, httpx.HTTPStatusError) else str(e)
+                    e.response.text if isinstance(e, httpx.HTTPStatusError) else repr(e)
                 )
                 logger.error(
-                    "Error registering %s with bootstrap server: %s", payload, err_msg
+                    "Error registering %s with bootstrap server at %s: %s",
+                    payload,
+                    url,
+                    err_msg,
                 )
                 raise e
 
@@ -1159,15 +1203,23 @@ class MooncakeConnectorWorker:
             self.side_channel_port,
         )
 
-        await self.register_worker_with_bootstrap()
+        try:
+            await self.register_worker_with_bootstrap()
 
-        # Create async worker tasks that process items from the queue
-        sender_tasks = [
-            asyncio.create_task(self._sender_worker(sock))
-            for _ in range(self.num_sender_tasks)
-        ]
-
-        ready_event.set()
+            # Create async worker tasks that process items from the queue
+            sender_tasks = [
+                asyncio.create_task(self._sender_worker(sock))
+                for _ in range(self.num_sender_tasks)
+            ]
+        except Exception as e:
+            # Hand the failure to the thread blocked in register_kv_caches()
+            # before unblocking it, so startup fails loudly instead of
+            # waiting on a ready event that would never be set.
+            self._sender_listener_startup_exc = e
+            sock.close()
+            return
+        finally:
+            ready_event.set()
 
         try:
             while True:
@@ -1787,6 +1839,8 @@ class MooncakeConnectorWorker:
             self._mooncake_sender_listener(ready_event), self.sender_loop
         )
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
+        if self._sender_listener_startup_exc is not None:
+            raise self._sender_listener_startup_exc
 
     async def fetch_finished_recving_reqs(self) -> set[ReqId]:
         finished_recving_reqs = self.finished_recving_reqs

@@ -256,6 +256,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
+    VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT: int = 300
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
@@ -1812,6 +1813,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")
+    ),
+    # Deadline (in seconds) for a Mooncake prefiller worker to register with
+    # the bootstrap server at startup. The server runs in a thread of the
+    # global rank 0 worker, so it can be slow to answer while that worker is
+    # still initializing; registration is retried until this deadline before
+    # failing startup.
+    "VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT": lambda: int(
+        os.getenv("VLLM_MOONCAKE_BOOTSTRAP_REGISTER_TIMEOUT", "300")
     ),
     # If set, it means we pre-downloaded cubin files and flashinfer will
     # read the cubin files directly.
