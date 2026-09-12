@@ -204,6 +204,11 @@ class SchedulerStats:
     kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
 
     spec_decoding_stats: SpecDecodingStats | None = None
+    # K the dynamic-SD schedule selected for this step, or None when dynamic SD
+    # is not in use. Recorded separately from spec_decoding_stats because that
+    # is only built for steps that produced draft tokens, so steps the schedule
+    # sends to K=0 leave no trace in it.
+    spec_decode_scheduled_k: int | None = None
     kv_connector_stats: dict[str, Any] | None = None
 
     waiting_lora_adapters: dict[str, int] = field(default_factory=dict)

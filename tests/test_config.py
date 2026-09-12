@@ -2839,6 +2839,39 @@ def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
     assert speculative_config.use_eagle_block_drop() is not disable_eagle_block_drop
 
 
+def test_repr_omits_absent_dynamic_sd_schedule():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=3,
+    )
+    assert speculative_config.num_speculative_tokens_per_batch_size is None
+    assert repr(speculative_config) == (
+        f"SpeculativeConfig(method={speculative_config.method!r}, model=None, "
+        f"num_spec_tokens={speculative_config.num_speculative_tokens})"
+    )
+
+
+def test_repr_reports_resolved_dynamic_sd_schedule():
+    """The startup banner is the only place a served config surfaces this.
+
+    Without it there is no way to tell from the logs whether a schedule was
+    passed at all, or whether it survived config resolution -- it can still be
+    dropped after parsing, e.g. under data parallelism.
+    """
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=6,
+        num_speculative_tokens_per_batch_size=[(1, 8, 6), (9, 32, 4), (33, 128, 3)],
+    )
+    resolved = speculative_config.num_speculative_tokens_per_batch_size
+    assert resolved == [(1, 8, 6), (9, 32, 4), (33, 128, 3)]
+    assert repr(speculative_config) == (
+        f"SpeculativeConfig(method={speculative_config.method!r}, model=None, "
+        f"num_spec_tokens={speculative_config.num_speculative_tokens}, "
+        f"num_speculative_tokens_per_batch_size={resolved})"
+    )
+
+
 def test_draft_sample_method_gumbel_is_rejected():
     with pytest.raises(ValidationError):
         SpeculativeConfig(
