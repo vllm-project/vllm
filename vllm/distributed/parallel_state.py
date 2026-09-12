@@ -1892,7 +1892,7 @@ def init_distributed_environment(
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
         if config is not None and config.parallel_config.nnodes > 1:
-            _NODE_COUNT = config.parallel_config.nnodes
+            _NODE_COUNT = config.parallel_config.nnodes_within_dp
         else:
             _NODE_COUNT = _node_count(_WORLD.cpu_group)
         logger.debug("Detected %d nodes in the distributed environment", _NODE_COUNT)
