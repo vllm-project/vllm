@@ -24,6 +24,7 @@ from vllm.lora.layers import (
 )
 from vllm.lora.layers.column_parallel_linear import (
     MergedColumnParallelLinearVariableSliceWithLoRA,
+    MergedQKVParallelLinearWithLoRA,
 )
 from vllm.lora.local_adapter import (
     LocalLoRAModulePlan,
@@ -389,6 +390,7 @@ class LoRAModelManager:
             ReplicatedLinearWithLoRA,
             MergedColumnParallelLinearWithLoRA,
             MergedColumnParallelLinearVariableSliceWithLoRA,
+            MergedQKVParallelLinearWithLoRA,
         ):
             raise NotImplementedError(
                 f"Unsupported local adapter wrapper {type(module).__name__}"
@@ -431,6 +433,7 @@ class LoRAModelManager:
                 ReplicatedLinearWithLoRA,
                 MergedColumnParallelLinearWithLoRA,
                 MergedColumnParallelLinearVariableSliceWithLoRA,
+                MergedQKVParallelLinearWithLoRA,
             ),
         ):
             if len(names) != len(shapes):
