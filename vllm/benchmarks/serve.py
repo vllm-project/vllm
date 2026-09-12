@@ -1466,6 +1466,7 @@ async def benchmark(
             prompt_len=test_prompt_len,
             output_len=test_output_len,
             logprobs=logprobs,
+            extra_headers=extra_headers,
         )
         profile_output = await request_func(
             request_func_input=profile_input, session=session
