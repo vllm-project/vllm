@@ -876,12 +876,18 @@ def _topk_topp_kernel(
                 tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
 
 
+def _max_sampler_batch_size(vllm_config: Any) -> int:
+    return vllm_config.scheduler_config.max_num_seqs * max(
+        1, vllm_config.num_speculative_tokens
+    )
+
+
 def _topk_topp_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     vocab_size = vllm_config.model_config.get_vocab_size()
     split_enabled = current_platform.is_cuda_alike()
     mode: Any = WarmupChoices((True, False), (True, True), (False, True))
     logits_stride: Any = WarmupChoices(16, 2)
-    batch_size: Any = WarmupIntRange(1, vllm_config.scheduler_config.max_num_seqs + 1)
+    batch_size: Any = WarmupIntRange(1, _max_sampler_batch_size(vllm_config) + 1)
     topk_enabled = mode[0]
     topp_enabled = mode[1]
     _when(topk_enabled or not (split_enabled and batch_size <= _SPLIT_MAX_BATCH))
@@ -1042,7 +1048,7 @@ def _topp_split_stats_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     num_sm = num_compute_units()
     logits_stride: Any = WarmupChoices(16, 2)
     batch_size: Any = WarmupIntRange(
-        1, min(vllm_config.scheduler_config.max_num_seqs, _SPLIT_MAX_BATCH) + 1
+        1, min(_max_sampler_batch_size(vllm_config), _SPLIT_MAX_BATCH) + 1
     )
     has_k: Any = WarmupChoices(False, True)
     logits = TritonWarmupTensor(
@@ -1331,7 +1337,7 @@ def _topp_split_step_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     num_sm = num_compute_units()
     logits_stride: Any = WarmupChoices(16, 2)
     batch_size: Any = WarmupIntRange(
-        1, min(vllm_config.scheduler_config.max_num_seqs, _SPLIT_MAX_BATCH) + 1
+        1, min(_max_sampler_batch_size(vllm_config), _SPLIT_MAX_BATCH) + 1
     )
     round: Any = WarmupIntRange(0, _SPLIT_ROUNDS)
     has_k: Any = WarmupChoices(False, True)
@@ -1513,7 +1519,7 @@ def _topp_split_mask_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     num_sm = num_compute_units()
     logits_stride: Any = WarmupChoices(16, 2)
     batch_size: Any = WarmupIntRange(
-        1, min(vllm_config.scheduler_config.max_num_seqs, _SPLIT_MAX_BATCH) + 1
+        1, min(_max_sampler_batch_size(vllm_config), _SPLIT_MAX_BATCH) + 1
     )
     has_k: Any = WarmupChoices(False, True)
     logits = TritonWarmupTensor(

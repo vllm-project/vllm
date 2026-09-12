@@ -106,6 +106,7 @@ def can_run_without_jit(spec: JitModel):
         # cuda graphs cover captured decode shapes, run eager.
         enforce_eager=False,
         jit_monitor_mode="error",
+        jit_monitor_verbose=True,
         speculative_config={
             "model": spec.draft,
             "num_speculative_tokens": 2,

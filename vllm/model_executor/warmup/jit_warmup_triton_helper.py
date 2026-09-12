@@ -6,7 +6,7 @@ from abc import abstractmethod
 from collections.abc import Callable, Hashable, Iterable, Mapping
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field
-from functools import cache, cached_property, update_wrapper, wraps
+from functools import cache, cached_property, update_wrapper
 from typing import Any, Generic, ParamSpec, Protocol, TypeVar, cast, overload
 
 from vllm.model_executor.warmup.jit_warmup import (
@@ -14,6 +14,8 @@ from vllm.model_executor.warmup.jit_warmup import (
     get_ast_full_name,
     get_function_source_node,
 )
+from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 
 CompileKeyT = TypeVar("CompileKeyT")
 P = ParamSpec("P")
@@ -197,7 +199,7 @@ class TritonWarmupTensor:
     def device(self) -> Any:
         import torch
 
-        return torch.device("cuda")
+        return torch.device(current_platform.device_type)
 
     def stride(self, dim: int | None = None) -> int | tuple[int, ...]:
         if self.strides is None:
@@ -330,29 +332,6 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         return outputs
 
 
-def kernel_launcher(
-    call_fn: Callable[..., LaunchSpec],
-) -> Callable[..., Any]:
-    """Launch a Triton kernel from a declarative ``__call__`` specification."""
-    signature = inspect.signature(call_fn)
-
-    @wraps(call_fn)
-    def wrapper(
-        self: VllmTritonJitKernel[Any],
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        launch_spec = call_fn(self, *args, **kwargs)
-        bound = signature.bind(self, *args, **kwargs)
-        bound.apply_defaults()
-        inputs = {
-            name: value for name, value in bound.arguments.items() if name != "self"
-        }
-        return self.launch(launch_spec, inputs)
-
-    return wrapper
-
-
 @dataclass(frozen=True)
 class TritonJitKey:
     """Process-local identity of one Triton JIT specialization."""
@@ -375,10 +354,12 @@ def _triton_key_deriver(
     kernel: Any,
 ) -> Callable[[Mapping[str, Any]], set[TritonJitKey]]:
     """Prepare Triton's key derivation once for one kernel and device."""
-    from triton import knobs
-    from triton.runtime.autotuner import Autotuner, Heuristics
-    from triton.runtime.driver import driver
-    from triton.runtime.jit import JITFunction, compute_cache_key
+    knobs = triton.knobs
+    Autotuner = triton.runtime.autotuner.Autotuner
+    Heuristics = triton.runtime.autotuner.Heuristics
+    driver = triton.runtime.driver
+    JITFunction = triton.runtime.jit.JITFunction
+    compute_cache_key = triton.runtime.jit.compute_cache_key
 
     if isinstance(kernel, Heuristics):
         derive_inner = _triton_key_deriver(kernel.fn)
@@ -478,7 +459,7 @@ class _AutomaticTritonJitKernel(VllmTritonJitKernel[TritonCompileKey]):
 
 
 def _is_autotuned(kernel: Any) -> bool:
-    from triton.runtime.autotuner import Autotuner
+    Autotuner = triton.runtime.autotuner.Autotuner
 
     while kernel is not None:
         if isinstance(kernel, Autotuner):
@@ -527,7 +508,7 @@ def _materialize_warmup_case(
                 value.shape,
                 strides,
                 dtype=value.dtype,
-                device="cuda",
+                device=value.device,
             )
         if real:
             if callable(value.init):

@@ -23,8 +23,9 @@ def test_topk_topp_warmups_expand_for_cuda_alike_platform(
             return True
 
     class Config:
-        scheduler_config = SimpleNamespace(max_num_seqs=64)
+        scheduler_config = SimpleNamespace(max_num_seqs=32)
         model_config = SimpleNamespace(get_vocab_size=lambda: 8192)
+        num_speculative_tokens = 3
 
     monkeypatch.setattr(topk_topp, "current_platform", RocmPlatform())
     config = Config()
@@ -34,6 +35,9 @@ def test_topk_topp_warmups_expand_for_cuda_alike_platform(
         )
     )
     assert monolithic_cases
+    assert max(case["logits"].shape[0] for case in monolithic_cases) == (
+        config.scheduler_config.max_num_seqs * config.num_speculative_tokens
+    )
     assert not any(
         case["k"] is None
         and case["p"] is not None
@@ -46,7 +50,11 @@ def test_topk_topp_warmups_expand_for_cuda_alike_platform(
         topk_topp._topp_split_step,
         topk_topp._topp_split_mask,
     ):
-        assert list(launcher._provider_cases(launcher._warmup_inputs_fn, config))
+        cases = list(launcher._provider_cases(launcher._warmup_inputs_fn, config))
+        assert max(case["logits"].shape[0] for case in cases) == min(
+            config.scheduler_config.max_num_seqs * config.num_speculative_tokens,
+            topk_topp._SPLIT_MAX_BATCH,
+        )
 
     logits = SimpleNamespace(shape=(1, 8192), device=SimpleNamespace(type="cuda"))
     _, launch_kwargs = topk_topp._topk_topp._dispatch_fn(

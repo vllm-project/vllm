@@ -203,6 +203,7 @@ def _gumbel_sample_warmup_inputs(vllm_config):
         torch.float32, vllm_config.model_config.head_dtype
     )
     use_fp64: Any = WarmupChoices(False, True)
+    mapping_dtype: Any = WarmupChoices(torch.int32, torch.int64)
     # (has cache, drafting, apply temperature, per-token column, col aligned)
     mode: Any = WarmupChoices(
         (False, False, False, False, True),
@@ -243,7 +244,7 @@ def _gumbel_sample_warmup_inputs(vllm_config):
         logits_cache_col_ptr=logits_cache_col,
         logits_ptr=TritonWarmupTensor(logits_dtype, shape=(1, vocab_size)),
         logits_stride=vocab_size,
-        expanded_idx_mapping_ptr=TritonWarmupTensor(torch.int32),
+        expanded_idx_mapping_ptr=TritonWarmupTensor(mapping_dtype),
         seeds_ptr=TritonWarmupTensor(torch.int64),
         pos_ptr=TritonWarmupTensor(torch.int64),
         temp_ptr=TritonWarmupTensor(torch.float32),
