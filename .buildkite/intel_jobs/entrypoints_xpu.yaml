@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Unit'
+  key: entrypoints-unit-tests
   device: intel_gpu
   timeout_in_minutes: 40
   working_dir: .
@@ -32,6 +33,7 @@ steps:
     pytest -v -s entrypoints/weight_transfer || true &&
     pytest -v -s entrypoints/launchers || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (LLM)'
+  key: entrypoints-integration-llm
   device: intel_gpu
   timeout_in_minutes: 60
   working_dir: .
@@ -62,6 +64,7 @@ steps:
     pytest -v -s entrypoints/llm/test_generate.py || true &&
     pytest -v -s entrypoints/llm/offline_mode || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server) %N'
+  key: entrypoints-integration-api-server
   device: intel_gpu
   timeout_in_minutes: 75
   parallelism: 4
@@ -94,6 +97,7 @@ steps:
     if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then PYTHONPATH=/workspace/vllm pytest -v -s entrypoints/serve/dev/rpc; fi || true &&
     pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server OpenAI - Part 1)'
+  key: entrypoints-integration-api-server-openai-part-1
   device: intel_gpu
   timeout_in_minutes: 68
   working_dir: .
@@ -120,6 +124,7 @@ steps:
     cd tests &&
     pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server OpenAI - Part 2)'
+  key: entrypoints-integration-api-server-openai-part-2
   device: intel_gpu
   timeout_in_minutes: 83
   working_dir: .
@@ -148,6 +153,7 @@ steps:
     pytest -v -s entrypoints/openai/chat_completion || true &&
     pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server Generate)'
+  key: entrypoints-integration-api-server-generate
   device: intel_gpu
   timeout_in_minutes: 50
   working_dir: .
@@ -184,6 +190,7 @@ steps:
     pytest -v -s entrypoints/anthropic || true &&
     pytest -v -s entrypoints/cohere || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (Responses API)'
+  key: entrypoints-integration-responses-api
   device: intel_gpu
   timeout_in_minutes: 50
   working_dir: .
@@ -208,6 +215,7 @@ steps:
     'cd tests &&
     pytest -v -s entrypoints/openai/responses || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (Speech to Text)'
+  key: entrypoints-integration-speech_to_text
   device: intel_gpu
   timeout_in_minutes: 45
   working_dir: .
@@ -235,6 +243,7 @@ steps:
     cd tests &&
     pytest -v -s entrypoints/speech_to_text || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (Multimodal)'
+  key: entrypoints-integration-multimodal
   device: intel_gpu
   timeout_in_minutes: 45
   working_dir: .
@@ -262,6 +271,7 @@ steps:
     cd tests &&
     pytest -v -s entrypoints/multimodal || true'
 - label: ':nvidia: (H200 MIG 35GB) Entrypoints Integration (Pooling)'
+  key: entrypoints-integration-pooling
   device: intel_gpu
   timeout_in_minutes: 75
   working_dir: .
@@ -288,6 +298,7 @@ steps:
     cd tests &&
     pytest -v -s entrypoints/pooling || true'
 - label: ':nvidia: (H200 MIG 18GB) OpenAI API Correctness'
+  key: openai-api-correctness
   device: intel_gpu
   timeout_in_minutes: 20
   working_dir: .
