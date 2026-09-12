@@ -281,7 +281,7 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config, metric_types, labelnames, per_engine_labelvalues
         )
 
-    def prepare_forward(self, **kwargs: Any) -> None:
+    def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, HiSparseConnectorMetadata)
@@ -300,9 +300,6 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
             num_tokens=int(kwargs.get("num_tokens") or 0),
         )
         self.connector_worker.prepare_forward(attn_metadata)
-
-    def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
-        return
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         return
