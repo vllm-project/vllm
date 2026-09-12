@@ -28,7 +28,8 @@ class MTPSpeculator(AutoRegressiveSpeculator):
         # toggles skip_topk so step 0 computes MTP's own indices and
         # steps 1+ reuse them.
         self.share_mtp_topk_indices = (
-            getattr(draft_hf_config, "index_share_for_mtp_iteration", False)
+            self.vllm_config.parallel_config.prefill_context_parallel_size == 1
+            and getattr(draft_hf_config, "index_share_for_mtp_iteration", False)
             and hasattr(draft_model.model, "set_skip_topk")
             and hasattr(draft_model.model, "compact_topk_indices")
         )
