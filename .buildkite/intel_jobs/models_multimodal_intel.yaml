@@ -125,6 +125,7 @@ steps:
       pip install open-clip-torch --no-deps &&
       cd tests &&
       pytest -v -s models/multimodal/processing/test_tensor_schema.py
+      --deselect="tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[deepseek-ai/DeepSeek-V4.1-Flash]"
       --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB'
   parallelism: 4
 

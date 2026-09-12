@@ -2,14 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base classes for the Transformers backend fusers."""
 
+import ast
 import types
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar
 
 from torch import fx, nn
 
+from vllm.model_executor.models.transformers.fx_utils import (
+    aliasing_names,
+    bypass_existence_guard,
+    replace_expr,
+    self_call_and_refs,
+    written_names,
+)
 from vllm.model_executor.models.utils import ShardId, maybe_prefix
 
 if TYPE_CHECKING:
@@ -124,14 +132,14 @@ class StackedFuser(RewriteFuser):
 
     merged_name: ClassVar[str]
     """Attribute name of the merged module created by `update_attrs`."""
-    merged_cls: ClassVar[str]
+    merged_cls_name: ClassVar[str]
     """Name of the vLLM class the merged projection becomes (for logging)."""
 
     def info(self, name: str) -> str:
         sources = " + ".join(shard for shard, _ in self.shards)
         return (
             f"Fused: {sources} ({name}: {self.source_cls}) -> "
-            f"{self.merged_name} ({self.merged_cls})"
+            f"{self.merged_name} ({self.merged_cls_name})"
         )
 
     @property
@@ -157,3 +165,83 @@ class StackedFuser(RewriteFuser):
         """`{merged_name: [projection names]}` so quantization can unpack the
         fused layer into its per-shard configs."""
         return {self.merged_name: [name for name, _ in self.shards]}
+
+    def _unguarded_calls(
+        self, funcdef: ast.FunctionDef, names: Iterable[str]
+    ) -> list[ast.Call]:
+        """One `self.<name>(arg)` call per projection, existence guards folded.
+
+        `update_attrs` deletes the projections it merges, so any reference to one beyond
+        its call site must be a guard on its existence; folding those to their constant
+        value keeps the rewritten forward off a name that no longer exists. A reference
+        that is not such a guard raises, so fusion is skipped."""
+        calls = []
+        for name in names:
+            call, refs = self_call_and_refs(funcdef, name)
+            for ref in refs:
+                bypass_existence_guard(funcdef, ref, name)
+            calls.append(call)
+        return calls
+
+    def _check_input_stable(
+        self,
+        funcdef: ast.FunctionDef,
+        module: nn.Module,
+        calls: list[ast.Call],
+        block: list[ast.stmt],
+        indices: list[int],
+    ) -> None:
+        """Raise unless hoisting the merged GEMM preserves what it reads.
+
+        Fusing moves every projection to one call at `min(indices)`, so the
+        merged GEMM reads the input once, up front, where the last of `calls`
+        would have read it later. That holds only if nothing in between changes
+        the input, and a change need not name it: writing any view that shares
+        its storage changes it too. Both halves of the check over-approximate,
+        since a false hit costs a fusion while a miss returns wrong numbers.
+        """
+        arg_names = {
+            node.id
+            for node in ast.walk(calls[0].args[0])
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+        }
+        # Protect the names the input reads and anything that may alias them.
+        tracked = aliasing_names(funcdef, arg_names, module)
+        # Any of them rebound, written through, or passed to a call that writes
+        # its argument would leave the hoisted GEMM reading a different value.
+        region = block[min(indices) : max(indices) + 1]
+        if tracked & written_names(region):
+            raise ValueError("projection input is rebound or mutated before all calls")
+
+    def _splice_merged_split(
+        self,
+        funcdef: ast.FunctionDef,
+        calls: list[ast.Call],
+        block: list[ast.stmt],
+        index: int,
+    ) -> None:
+        """Insert `temps = self.<merged_name>(arg).split(sizes, -1)` at
+        `block[index]` and replace each of `calls` with its temp name.
+
+        `calls` must share one input argument; `block[index]` must be where
+        they are (or would be) evaluated. Raises if a generated temporary
+        would shadow an existing name in `funcdef`.
+        """
+        temps = [f"_vllm_merged_{i}" for i in range(len(calls))]
+        names = {node.id for node in ast.walk(funcdef) if isinstance(node, ast.Name)}
+        if names & set(temps):
+            raise ValueError("fused temporaries would shadow existing names")
+        targets = ", ".join(temps)
+        sections = local_output_sizes(self.merged_name)
+        source = f"{targets} = self.{self.merged_name}(__arg__).split({sections}, -1)"
+        assign = ast.parse(source).body[0]
+        arg = next(
+            node
+            for node in ast.walk(assign)
+            if isinstance(node, ast.Name) and node.id == "__arg__"
+        )
+        replace_expr(assign, arg, calls[0].args[0])
+        ast.copy_location(assign, block[index])
+        block.insert(index, assign)
+        for call, temp in zip(calls, temps):
+            replace_expr(funcdef, call, ast.Name(id=temp, ctx=ast.Load()))

@@ -142,6 +142,8 @@ class ParallelConfig:
     """IP of the data parallel master."""
     data_parallel_rpc_port: int = Field(default=29550, ge=1, le=65535)
     """Fixed port for data parallel messaging, shared by all nodes."""
+    dp_sync_interval: int = Field(default=16, ge=1)
+    """Steps between DP finish-sync all-reduces; must match across DP ranks."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
     data_parallel_backend: DataParallelBackend = "mp"
@@ -391,7 +393,14 @@ class ParallelConfig:
         in (rank i+1, block j) only after (rank i, block j) is fully occupied.
     Block_size should be greater than or equal to cp_kv_cache_interleave_size.
     Block_size should be divisible by cp_kv_cache_interleave_size.
+
+    When --cp-kv-cache-interleave-size is omitted (None), the interleave size
+    is resolved automatically based on NIXL transfer requirements.
+    Explicit settings take priority.
     """
+
+    _allow_auto_resolve_cp_interleave_size: bool = True
+    """Whether NIXL may select the interleave size automatically."""
 
     data_parallel_index: int = Field(init=False)
     """Equal to the data parallel rank but not used for torch process groups
@@ -545,8 +554,6 @@ class ParallelConfig:
         tp = self.tensor_parallel_size
         pcp = self.prefill_context_parallel_size
         dcp = self.decode_context_parallel_size
-        if pcp > 1 and self.data_parallel_size > 1:
-            raise ValueError("PCP does not support data parallelism yet.")
         if pcp == 1:
             # DCP reuses the TP ranks when PCP is disabled.
             if tp % dcp != 0:
