@@ -210,7 +210,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.fuse_mla_dual_rms_norm and rocm_aiter_ops.is_enabled():
                 self.passes += [MLADualRMSNormFusionPass(config)]
 
-            if self.pass_config.fuse_rope_kvcache:
+            # CUDA uses model-visible manual fusion. Keep the pattern pass for
+            # the ROCm backends that still implement the graph-pass hook.
+            if self.pass_config.fuse_rope_kvcache and current_platform.is_rocm():
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [ScatterSplitReplacementPass(config)]
                 self.passes += [RopeKVCacheFusionPass(config)]
