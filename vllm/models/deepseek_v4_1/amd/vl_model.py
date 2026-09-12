@@ -47,9 +47,7 @@ from ..common.mm_preprocess import (
     IMAGE,
     IMAGE_END,
     IMAGE_NEW_LINE,
-    IMAGE_PAD_ID,
     IMAGE_PLACEHOLDER,
-    IMAGE_SENTINEL_BASE_ID,
     IMAGE_START,
     DeepseekV4VLDummyInputsBuilder,
     DeepseekV4VLMultiModalProcessor,
@@ -277,12 +275,6 @@ class DeepseekV41ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
     ) -> torch.Tensor:
         from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 
-        # Compressor-alignment pads borrow a reserved id; embed them as the
-        # plain image token (the checkpoint has no image_pad vector).
-        # Branch-free: safe inside compiled/captured regions.
-        input_ids = input_ids.masked_fill(
-            input_ids == IMAGE_PAD_ID, IMAGE_SENTINEL_BASE_ID
-        )
         inputs_embeds = self.language_model.embed_input_ids(input_ids)
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:

@@ -5,10 +5,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from vllm.model_executor.warmup import jit_warmup_cutedsl_helper
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     CuTeDSLLaunchSpec,
     VllmCuTeDSLJitKernel,
-    cutedsl_kernel_launcher,
 )
 
 
@@ -30,7 +30,7 @@ class _TestCuTeDSLKernel(VllmCuTeDSLJitKernel["_TestCuTeDSLKernel.CompileKey"]):
     def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         return (f"fake-{compile_key.variant}",)
 
-    @cutedsl_kernel_launcher
+    @kernel_launcher
     def __call__(
         self,
         payload: str,
@@ -38,7 +38,7 @@ class _TestCuTeDSLKernel(VllmCuTeDSLJitKernel["_TestCuTeDSLKernel.CompileKey"]):
         variant: int,
     ) -> CuTeDSLLaunchSpec[CompileKey]:
         compile_key = self.dispatch(variant=variant)
-        return compile_key, (payload,), {"variant": variant}
+        return compile_key, (payload,)
 
 
 def test_cutedsl_launcher_reuses_compiled_executor(monkeypatch) -> None:
@@ -74,3 +74,38 @@ def test_cutedsl_launcher_reuses_compiled_executor(monkeypatch) -> None:
         (("entry", 2), ("fake-2",)),
     ]
     assert launch_calls == [(1, ("runtime",)), (2, ("other",))]
+
+
+def test_cutedsl_launcher_runs_post_launch_finalizer(monkeypatch) -> None:
+    events: list[str] = []
+
+    def compile_cutedsl(entry: tuple[str, int], *args: Any) -> Any:
+        def executor(*runtime_args: Any) -> None:
+            events.append("launch")
+
+        return executor
+
+    class FinalizedKernel(_TestCuTeDSLKernel):
+        @kernel_launcher
+        def __call__(
+            self,
+            payload: str,
+            *,
+            variant: int,
+        ) -> CuTeDSLLaunchSpec[_TestCuTeDSLKernel.CompileKey]:
+            compile_key = self.dispatch(variant=variant)
+
+            def finalize() -> str:
+                events.append("finalize")
+                return "output"
+
+            return compile_key, (payload,), "unused", finalize
+
+    monkeypatch.setattr(
+        jit_warmup_cutedsl_helper,
+        "compile_cutedsl",
+        compile_cutedsl,
+    )
+
+    assert FinalizedKernel()("runtime", variant=1) == "output"
+    assert events == ["launch", "finalize"]
