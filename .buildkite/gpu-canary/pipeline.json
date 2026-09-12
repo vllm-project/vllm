@@ -4,23 +4,63 @@
       "label": "GPU telemetry idle/load and overhead canary",
       "key": "gpu-telemetry-canary",
       "agents": {
-        "queue": "gpu_4_queue"
+        "queue": "l4-k8s"
       },
       "timeout_in_minutes": 20,
-      "command": "bash /workdir/.buildkite/gpu-canary/run.sh",
+      "command": "bash .buildkite/gpu-canary/run.sh",
       "plugins": [
         {
-          "docker#v5.2.0": {
-            "image": "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:988d9b6777d077f843cd2164a222ac8535d36ed2",
-            "always-pull": true,
-            "propagate-environment": true,
-            "mount-buildkite-agent": true,
-            "mount-checkout": true,
-            "workdir": "/workdir",
-            "gpus": "all",
-            "volumes": [
-              "/dev/shm:/dev/shm"
-            ]
+          "kubernetes": {
+            "metadata": {
+              "annotations": {
+                "cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
+                "karpenter.sh/do-not-disrupt": "true"
+              }
+            },
+            "podSpec": {
+              "priorityClassName": "ci",
+              "serviceAccountName": "buildkite-gpu-jobs",
+              "tolerations": [
+                {
+                  "key": "nvidia.com/gpu",
+                  "operator": "Exists",
+                  "effect": "NoSchedule"
+                }
+              ],
+              "nodeSelector": {
+                "vllm.ci/gpu-pool": "l4x4"
+              },
+              "containers": [
+                {
+                  "image": "public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:01557d74b2185346cd227f584b5bc915287fc42b",
+                  "resources": {
+                    "limits": {
+                      "nvidia.com/gpu": 1
+                    },
+                    "requests": {
+                      "nvidia.com/gpu": 1,
+                      "cpu": "10",
+                      "memory": "40Gi"
+                    }
+                  },
+                  "volumeMounts": [
+                    {
+                      "name": "devshm",
+                      "mountPath": "/dev/shm"
+                    }
+                  ]
+                }
+              ],
+              "volumes": [
+                {
+                  "name": "devshm",
+                  "emptyDir": {
+                    "medium": "Memory",
+                    "sizeLimit": "24Gi"
+                  }
+                }
+              ]
+            }
           }
         }
       ]

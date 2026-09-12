@@ -1,10 +1,11 @@
 #!/bin/bash
 set -euo pipefail
-export CI_INFRA_OTEL_DIR=/workdir/.buildkite/scripts/ci-otel
+CANARY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export CI_INFRA_OTEL_DIR="${CANARY_ROOT}/.buildkite/scripts/ci-otel"
 export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 unset CI_INFRA_OTEL_RUNTIME_DIR CI_INFRA_OTEL_SPOOL_DIR _CI_INFRA_OTEL_INITIALIZED
-cp /workdir/.buildkite/gpu-canary/test_gpu_activity.py /tmp/test_gpu_activity.py
-cp /workdir/.buildkite/gpu-canary/benchmark.py /tmp/gpu_benchmark.py
+cp "${CANARY_ROOT}/.buildkite/gpu-canary/test_gpu_activity.py" /tmp/test_gpu_activity.py
+cp "${CANARY_ROOT}/.buildkite/gpu-canary/benchmark.py" /tmp/gpu_benchmark.py
 cd /tmp
 uv venv --python "$(command -v python3)" --system-site-packages /tmp/gpu-canary-venv
 export PATH="/tmp/gpu-canary-venv/bin:$PATH"
