@@ -59,6 +59,23 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
 
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
+            # Require peer coordinates before claiming external tokens so
+            # incomplete client params cannot reach the assert below.
+            if not all(
+                p in params
+                for p in (
+                    "remote_engine_id",
+                    "remote_request_id",
+                    "remote_host",
+                    "remote_port",
+                )
+            ):
+                logger.warning(
+                    "Got invalid KVTransferParams: %s. This "
+                    "request will not utilize KVTransfer",
+                    params,
+                )
+                return 0, False
             token_ids = request.prompt_token_ids or []
             actual = self._get_remote_prefill_token_count(len(token_ids))
             count = actual - num_computed_tokens
@@ -181,7 +198,12 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         params,
                     )
             else:
-                assert num_external_tokens == 0
+                if num_external_tokens > 0:
+                    logger.warning(
+                        "Got invalid KVTransferParams: %s. This "
+                        "request will not utilize KVTransfer",
+                        params,
+                    )
             # Only trigger 1 KV transfer per request.
             params["do_remote_prefill"] = False
             params["_remote_blocks_processed"] = True
