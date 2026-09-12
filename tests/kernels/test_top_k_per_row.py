@@ -735,6 +735,35 @@ def test_deepseek_workspace_topk(
     )
 
 
+def _clusters_separating_at_bit_depth(length: int, depth: int) -> torch.Tensor:
+    """Two clusters of positive floats that first differ at key bit ``depth``.
+
+    All values share the coarse bin (raw bits 0x3F000000..0x3F01FFFF); the
+    cluster with bit ``depth`` set holds every true top-k member.
+    """
+    per_side = length // 2
+    noise = torch.randint(0, 1 << depth, (2 * per_side,), device="cuda")
+    keys = (
+        torch.full((2 * per_side,), 0x3F000000, dtype=torch.int64, device="cuda")
+        + noise
+    )
+    keys[:per_side] += 1 << depth
+    keys = keys[torch.randperm(2 * per_side, device="cuda")]
+    if 2 * per_side < length:
+        keys = torch.cat(
+            [
+                keys,
+                torch.full(
+                    (length - 2 * per_side,),
+                    0x3F000000,
+                    dtype=torch.int64,
+                    device="cuda",
+                ),
+            ]
+        )
+    return keys.to(torch.int32).view(torch.float32)
+
+
 def run_large_context_topk_test(
     batch_size: int,
     seq_lens: list[int],
@@ -742,6 +771,7 @@ def run_large_context_topk_test(
     data_type: str = "random",
     seed: int = 42,
     backend: str = "cooperative_topk",
+    tolerance: float = 1e-4,
 ) -> None:
     """
     Helper to run a top-k backend test with given parameters.
@@ -753,6 +783,8 @@ def run_large_context_topk_test(
         data_type: Type of test data to generate
         seed: Random seed for reproducibility
         backend: Top-k backend to test
+        tolerance: Value tolerance for the reference comparison; clustered
+            rows need exact 0.0
     """
     torch.set_default_device("cuda:0")
     set_random_seed(seed)
@@ -801,6 +833,32 @@ def run_large_context_topk_test(
         )
         logits = base + noise
         for i, length in enumerate(seq_lens):
+            if length < max_len:
+                logits[i, length:] = float("-inf")
+    elif data_type == "tight_cluster":
+        # 1.0 + [0, 1e-3): one coarse bin for the whole row; rows longer
+        # than the stash overflow the stage-1 threshold bin.
+        logits = torch.empty(num_rows, max_len, dtype=torch.float32, device="cuda")
+        for i, length in enumerate(seq_lens):
+            logits[i, :length] = 1.0 + torch.rand(length, device="cuda") * 1e-3
+            if length < max_len:
+                logits[i, length:] = float("-inf")
+    elif data_type.startswith("cluster_at_depth_"):
+        depth = int(data_type.rsplit("_", 1)[-1])
+        logits = torch.empty(num_rows, max_len, dtype=torch.float32, device="cuda")
+        for i, length in enumerate(seq_lens):
+            logits[i, :length] = _clusters_separating_at_bit_depth(length, depth)
+            if length < max_len:
+                logits[i, length:] = float("-inf")
+    elif data_type == "tight_cluster_then_random":
+        # Overflow row first, plain rows after: selection state must not leak
+        # across rows of one persistent launch.
+        logits = torch.empty(num_rows, max_len, dtype=torch.float32, device="cuda")
+        for i, length in enumerate(seq_lens):
+            if i == 0:
+                logits[i, :length] = 1.0 + torch.rand(length, device="cuda") * 1e-3
+            else:
+                logits[i, :length] = torch.randn(length, device="cuda")
             if length < max_len:
                 logits[i, length:] = float("-inf")
     else:
@@ -863,7 +921,7 @@ def run_large_context_topk_test(
                 max_non_topk = non_topk_vals.max()
 
                 # Allow small tolerance for floating point errors
-                assert min_cuda_val >= max_non_topk - 1e-4, (
+                assert min_cuda_val >= max_non_topk - tolerance, (
                     f"Row {i}: CUDA top-k contains values smaller than non-top-k. "
                     f"Min CUDA: {min_cuda_val}, Max non-top-k: {max_non_topk}, "
                     f"Length: {length}, k: {k_i}, CUDA indices: {sorted(cuda_set)[:10]}..., "  # noqa: E501
@@ -874,8 +932,8 @@ def run_large_context_topk_test(
         assert torch.allclose(
             cuda_vals.sort(descending=True)[0],
             torch_vals.sort(descending=True)[0],
-            rtol=1e-4,
-            atol=1e-4,
+            rtol=tolerance,
+            atol=tolerance,
         ), f"""Row {i}: Top-k values don't match.
             CUDA: {cuda_vals.sort(descending=True)[0][:10]},
             Torch: {torch_vals.sort(descending=True)[0][:10]}"""
@@ -1315,3 +1373,77 @@ def test_workspace_topk_padded_stride(top_k: int, backend: str) -> None:
                 f"Row {i}: {backend} with padded stride doesn't match. "
                 f"seq_len={sl}, stride={padded_stride}"
             )
+
+
+# Regression guard: stage-1 threshold bins whose population exceeds the
+# kernel's shared-memory stash (tied/tightly clustered scores). Comparison
+# is exact (tolerance=0); one case per kernel path and terminal-clip mode.
+OVERSIZED_BIN_ROW_CASES = [
+    pytest.param("tight_cluster", [5000], id="tight_5000_decode2048"),
+    pytest.param("tight_cluster", [9407], id="tight_9407"),
+    pytest.param("cluster_at_depth_16", [17802], id="depth16_17802"),
+    pytest.param("cluster_at_depth_0", [8193], id="depth0_8193_exact_ties"),
+    pytest.param("all_same", [17802], id="all_same_17802_exact_ties"),
+    pytest.param(
+        "tight_cluster_then_random", [17802, 3000], id="state_reuse_after_overflow"
+    ),
+]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.parametrize("data_type,seq_lens", OVERSIZED_BIN_ROW_CASES)
+@torch.inference_mode()
+def test_persistent_topk_oversized_threshold_bin(
+    top_k: int, data_type: str, seq_lens: list[int]
+) -> None:
+    run_large_context_topk_test(
+        batch_size=len(seq_lens),
+        seq_lens=seq_lens,
+        top_k=top_k,
+        data_type=data_type,
+        seed=1234,
+        backend="persistent_topk",
+        tolerance=0.0,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("top_k", [512, 2048])
+@pytest.mark.parametrize(
+    "seq_len", [9000, 40000], ids=["hist4096_short", "radix_16k_stash"]
+)
+@torch.inference_mode()
+def test_persistent_topk_oversized_threshold_bin_large_batch(
+    top_k: int, seq_len: int
+) -> None:
+    # >32 rows dispatch to FilteredTopK on GPUs with >=128KB smem: 9000
+    # hits histogram_4096_topk, 40000 the 256-bin + 16K-stash path.
+    run_large_context_topk_test(
+        batch_size=40,
+        seq_lens=[seq_len] * 40,
+        top_k=top_k,
+        data_type="tight_cluster",
+        seed=1234,
+        backend="persistent_topk",
+        tolerance=0.0,
+    )
+
+
+@pytest.mark.skipif(
+    not _has_device_capability(90), reason="cooperative_topk requires SM90+"
+)
+@pytest.mark.parametrize("top_k", [512, 2048])
+@torch.inference_mode()
+def test_cooperative_topk_oversized_threshold_bin(top_k: int) -> None:
+    # sl <= kHist4096MaxLen routes to the shared histogram_4096_topk
+    # short-medium path inside the cluster kernel (stride must be %4 for TMA).
+    run_large_context_topk_test(
+        batch_size=8,
+        seq_lens=[9000] * 8,
+        top_k=top_k,
+        data_type="tight_cluster",
+        seed=1234,
+        backend="cooperative_topk",
+        tolerance=0.0,
+    )
