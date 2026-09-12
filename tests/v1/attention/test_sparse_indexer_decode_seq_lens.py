@@ -20,10 +20,10 @@ kernel is documented to replicate.
 
 import torch
 
-# Bootstrap the glm5next package before entering the indexer module: its
-# kpool_compress import runs glm5next/__init__, which pulls model ->
-# attention -> back into sparse_attn_indexer_kpool (attention.py imports the
-# class at module scope). Production always enters via attention.py first.
+# Bootstrap the glm5next package before importing kpool_compress directly: its
+# import runs glm5next/__init__, which pulls model -> attention -> the indexer
+# dispatcher (sparse_indexer) -> back into the nvidia/amd sparse_indexer
+# modules. Production always enters via attention.py first.
 # isort: off
 import vllm.models.glm5next  # noqa: F401
 from vllm.models.glm5next.nvidia.ops.kpool_compress import (  # noqa: E402
@@ -32,12 +32,16 @@ from vllm.models.glm5next.nvidia.ops.kpool_compress import (  # noqa: E402
 )
 # isort: on
 
-import vllm.model_executor.layers.sparse_attn_indexer_kpool as indexer_mod
-from vllm.model_executor.layers.sparse_attn_indexer_kpool import (
+from vllm.models.glm5next.common.sparse_indexer import (
     _decode_topk_seq_lens,
     _fill_short_decode_causal_indices,
 )
 from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    from vllm.models.glm5next.amd import sparse_indexer as indexer_mod
+else:
+    from vllm.models.glm5next.nvidia import sparse_indexer as indexer_mod
 
 KPOOL = 4
 TOPK_TOKENS = 16
