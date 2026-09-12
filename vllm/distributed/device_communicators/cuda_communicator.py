@@ -115,10 +115,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.rdna4_ar_comm: RDNA4AllReduce | None = None
 
         if (
-            "tp" in unique_name
+            use_custom_allreduce
             and self.world_size in (2, 4, 8)
             and current_platform.is_rocm()
-            and envs.VLLM_ROCM_USE_RDNA4_ALL_REDUCE
         ):
             try:
                 self.rdna4_ar_comm = RDNA4AllReduce(

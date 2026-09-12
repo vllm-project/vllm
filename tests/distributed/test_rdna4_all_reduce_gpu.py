@@ -3,6 +3,7 @@
 
 import importlib.util
 import multiprocessing as mp
+import os
 
 import pytest
 import torch
@@ -22,7 +23,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _worker(rank, world_size, port, element_counts):
+def _worker(rank, world_size, port, element_counts, automatic=False):
     device = torch.device(f"cuda:{rank}")
     torch.accelerator.set_device_index(rank)
     dist.init_process_group(
@@ -36,11 +37,24 @@ def _worker(rank, world_size, port, element_counts):
         RDNA4AllReduce,
     )
 
-    communicator = RDNA4AllReduce(
-        group=dist.group.WORLD,
-        device=device,
-        max_size=max(element_counts) * torch.bfloat16.itemsize,
-    )
+    cuda_communicator = None
+    if automatic:
+        from vllm.distributed.device_communicators.cuda_communicator import (
+            CudaCommunicator,
+        )
+
+        os.environ.pop("VLLM_ROCM_USE_RDNA4_ALL_REDUCE", None)
+        cuda_communicator = CudaCommunicator(
+            cpu_group=dist.group.WORLD, device=device, unique_name="tp:0"
+        )
+        communicator = cuda_communicator.rdna4_ar_comm
+        assert communicator is not None
+    else:
+        communicator = RDNA4AllReduce(
+            group=dist.group.WORLD,
+            device=device,
+            max_size=max(element_counts) * torch.bfloat16.itemsize,
+        )
     try:
         assert not communicator.disabled
         expected = world_size * (world_size + 1) / 2
@@ -51,8 +65,12 @@ def _worker(rank, world_size, port, element_counts):
             torch.accelerator.synchronize()
             dist.barrier()
             with communicator.capture(), torch.cuda.graph(graph):
-                result = communicator.custom_all_reduce(inp, out=out)
-                assert result is out
+                if cuda_communicator is not None:
+                    assert communicator.should_use(inp)
+                    out = cuda_communicator.all_reduce(inp)
+                else:
+                    result = communicator.custom_all_reduce(inp, out=out)
+                    assert result is out
             for _ in range(16):
                 graph.replay()
             torch.accelerator.synchronize()
@@ -65,17 +83,20 @@ def _worker(rank, world_size, port, element_counts):
     finally:
         torch.accelerator.synchronize()
         dist.barrier()
-        communicator.close()
+        if cuda_communicator is not None:
+            cuda_communicator.destroy()
+        else:
+            communicator.close()
         dist.destroy_process_group()
 
 
-def _run(world_size, element_counts):
+def _run(world_size, element_counts, automatic=False):
     context = mp.get_context("spawn")
     port = get_open_port()
     processes = [
         context.Process(
             target=_worker,
-            args=(rank, world_size, port, element_counts),
+            args=(rank, world_size, port, element_counts, automatic),
         )
         for rank in range(world_size)
     ]
@@ -90,6 +111,11 @@ def _run(world_size, element_counts):
         assert process.exitcode == 0, (
             f"RDNA4 all-reduce worker exited with code {process.exitcode}"
         )
+
+
+@multi_gpu_test(num_gpus=2)
+def test_rdna4_all_reduce_tp2_without_env():
+    _run(2, (8, 128, 512, 2048, 4096, 8192, 16_384, 24_576, 32_768), automatic=True)
 
 
 @multi_gpu_test(num_gpus=2)
