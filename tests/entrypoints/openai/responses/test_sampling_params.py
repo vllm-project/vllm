@@ -170,3 +170,101 @@ class TestResponsesRequestSamplingParams:
         assert "Cannot specify both structured_outputs and text.format" in str(
             exc_info.value
         )
+
+
+class TestResponsesStopTokenIds:
+    """Test stop_token_ids merging in ResponsesRequest.to_sampling_params()."""
+
+    @pytest.fixture
+    def minimal_responses_request(self):
+        return ResponsesRequest(
+            model="test-model",
+            input="hello",
+        )
+
+    def test_default_stop_token_ids_applied(self, minimal_responses_request):
+        """Server-default stop_token_ids are applied when client sends none."""
+        default_sampling_params = {
+            "stop_token_ids": [200012, 200002],
+        }
+
+        sampling_params = minimal_responses_request.to_sampling_params(
+            default_max_tokens=100,
+            default_sampling_params=default_sampling_params,
+        )
+
+        assert set(sampling_params.stop_token_ids) == {200012, 200002}
+
+    def test_client_stop_token_ids_merged_with_defaults(self):
+        """Client-specified stop_token_ids are merged with server defaults."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="hello",
+            stop_token_ids=[99999],
+        )
+        default_sampling_params = {
+            "stop_token_ids": [200012, 200002],
+        }
+
+        sampling_params = request.to_sampling_params(
+            default_max_tokens=100,
+            default_sampling_params=default_sampling_params,
+        )
+
+        assert set(sampling_params.stop_token_ids) == {200012, 200002, 99999}
+        assert sampling_params.stop_token_ids == [99999, 200012, 200002]
+
+    def test_no_stop_token_ids_anywhere(self, minimal_responses_request):
+        """When neither client nor server specifies stop_token_ids, result is empty."""
+        sampling_params = minimal_responses_request.to_sampling_params(
+            default_max_tokens=100,
+            default_sampling_params={},
+        )
+
+        assert not sampling_params.stop_token_ids
+
+    def test_only_client_stop_token_ids(self):
+        """Client stop_token_ids work when no server defaults exist."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="hello",
+            stop_token_ids=[42, 43],
+        )
+
+        sampling_params = request.to_sampling_params(
+            default_max_tokens=100,
+            default_sampling_params={},
+        )
+
+        assert set(sampling_params.stop_token_ids) == {42, 43}
+
+    def test_duplicate_stop_token_ids_deduplicated(self):
+        """Overlapping stop_token_ids between client and server are deduplicated."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="hello",
+            stop_token_ids=[200012, 55555],
+        )
+        default_sampling_params = {
+            "stop_token_ids": [200012, 200002],
+        }
+
+        sampling_params = request.to_sampling_params(
+            default_max_tokens=100,
+            default_sampling_params=default_sampling_params,
+        )
+
+        assert set(sampling_params.stop_token_ids) == {200012, 200002, 55555}
+        assert sampling_params.stop_token_ids == [200012, 55555, 200002]
+        assert len(sampling_params.stop_token_ids) == 3
+
+    def test_stop_token_ids_field_is_not_ignored(self):
+        """Constructing ResponsesRequest with stop_token_ids binds the field."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="hello",
+            stop_token_ids=[200012],
+        )
+
+        assert request.stop_token_ids == [200012]
+        assert "stop_token_ids" not in (request.model_extra or {})
