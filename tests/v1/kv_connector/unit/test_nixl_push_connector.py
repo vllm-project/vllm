@@ -30,8 +30,13 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import msgspec
+import numpy as np
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.utils import TransferTopology
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+    NixlBaseConnectorWorker,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
@@ -40,10 +45,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import TPMapping
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+    MambaConvSplitInfo,
+)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, MLAAttentionSpec
 from vllm.v1.outputs import KVConnectorOutput
 
 from .utils import create_request, make_nixl_push_scheduler
@@ -348,12 +357,14 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         # Base worker fields touched by start_load_kv / _get_new_notifs.
         w._recving_metadata = {}
         w._recving_transfers = defaultdict(list)
+        w._is_hma_required = False
         w._reqs_to_process = set()
         w._reqs_to_send = {}
         w.consumer_notification_counts_by_req = defaultdict(int)
         w.tp_rank = 0
         w.pcp_rank = 0
         w.world_size = 1
+        w.pp_size = 1
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
         w._physical_blocks_per_logical_kv_block = 1
@@ -720,6 +731,38 @@ def test_stale_engine_evicted_on_push():
 
 
 class TestPushWriterNotifs:
+    @pytest.mark.parametrize(("pp_size", "is_hma"), [(1, False), (2, True)])
+    def test_completed_writes_release_the_producer_lease(self, pp_size, is_hma):
+        """WRITE completion does not depend on receive-side request metadata."""
+        w = _StubWriterWorker.fresh()
+        w.pp_size = pp_size
+        w._is_hma_required = is_hma
+        w.transfer_topo = MagicMock()
+        w.nixl_wrapper = MagicMock()
+        w.xfer_stats = MagicMock()
+        w._failed_recv_reqs = queue.Queue()
+        w._pending_recv_notifs = {}
+        w._reqs_to_process.add("req-send")
+        w._reqs_to_send["req-send"] = time.perf_counter() + 60
+        w._sending_transfers["req-send"] = [1, 2]
+        w.nixl_wrapper.check_xfer_state.side_effect = ["DONE", "PROC", "DONE"]
+
+        # The lease stays active until every destination handle completes.
+        assert w.get_finished() == (set(), set())
+        assert w._sending_transfers["req-send"] == [2]
+        assert "req-send" in w._reqs_to_send
+
+        assert w.get_finished() == ({"req-send"}, set())
+        assert not w._sending_transfers
+        assert not w._reqs_to_send
+        assert not w._reqs_to_process
+        assert not w._recving_metadata
+        assert w._evict_finished_inbox.get_nowait() == "req-send"
+        assert w.get_finished() == (set(), set())
+        assert w._evict_finished_inbox.empty()
+        assert w.nixl_wrapper.release_xfer_handle.call_count == 2
+        w.xfer_stats.record_kv_expired_req.assert_not_called()
+
     def test_get_new_notifs_processes_forwarded_completion_notif(self):
         """Non-PUSH_REG notifs forwarded by the writer thread are drained
         on the engine main thread inside ``_get_new_notifs``."""
@@ -1372,3 +1415,489 @@ class TestPushPrefixCaching:
         local, remote = self._written_block_ids(w)
         assert local == [10, 11, 12]
         assert remote == [500, 501, 502]
+
+
+def _agent_metadata(
+    region_members: list[list[str]],
+    base_addresses: list[int],
+    block_lens: list[int],
+    block_strides: list[int] | None = None,
+) -> NixlAgentMetadata:
+    return NixlAgentMetadata(
+        engine_id="remote-engine",
+        agent_metadata=b"agent",
+        kv_caches_base_addr=base_addresses,
+        device_id=7,
+        num_blocks=2,
+        block_lens=block_lens,
+        block_strides=list(block_lens if block_strides is None else block_strides),
+        kv_cache_layout="LBHNC",
+        block_size=16,
+        ssm_sizes=(0, 0),
+        attn_backend_name="FLASH_ATTN",
+        physical_blocks_per_logical_kv_block=1,
+        region_members=region_members,
+    )
+
+
+def _member_worker(
+    region_members: list[list[str]],
+    group_by_member: dict[str, int],
+    pp_size: int = 2,
+    is_hma: bool = True,
+) -> _StubWriterWorker:
+    worker = _StubWriterWorker.fresh()
+    worker.pp_size = pp_size
+    worker.dcp_size = 1
+    worker.block_size = 16
+    worker._has_mamba = False
+    worker._is_hma_required = is_hma
+    num_groups = max(group_by_member.values(), default=0) + 1
+    worker._group_spec_types = (FullAttentionSpec,) * num_groups
+    worker.kv_cache_config = MagicMock(transfer_group_index_by_layer=group_by_member)
+    worker.transfer_topo = MagicMock()
+    worker._set_region_members(region_members)
+    return worker
+
+
+@pytest.mark.parametrize(
+    ("region_num_blocks", "expected"),
+    [(None, [1, 2, 15, 21, 22]), ([4, 7, 5], [1, 2, 9, 12, 13])],
+)
+def test_member_group_ids_route_descriptor_blocks(region_num_blocks, expected):
+    worker = _member_worker([["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0})
+    desc_ids = worker._compute_desc_ids(
+        block_ids=[[1, 2], [5]],
+        dst_num_blocks=10,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+        region_num_blocks=region_num_blocks,
+    )
+    assert desc_ids.tolist() == expected
+
+
+def test_member_metadata_round_trip():
+    metadata = _agent_metadata([["L0", "L1"]], [0x10000], [256])
+    metadata.region_num_blocks = [4]
+    metadata.region_group_ids = [-1]
+    metadata.region_names = ["L0"]
+    metadata.region_mem_types = ["VRAM"]
+
+    encoded = msgspec.msgpack.encode(metadata)
+    assert msgspec.msgpack.Decoder(NixlAgentMetadata).decode(encoded) == metadata
+
+
+@pytest.mark.parametrize(
+    "layouts, error",
+    [
+        ({"L0": (-1, 64)}, "escapes its block"),
+        ({"L0": (0, 0)}, "escapes its block"),
+        ({"L0": (200, 64)}, "escapes its block"),
+        ({"L1": (0, 64)}, "has no layout"),
+        ({"L0": (0, 32)}, "page sizes must match"),
+    ],
+)
+def test_packed_member_alignment_rejects_invalid_page_layout(layouts, error):
+    worker = _member_worker([["L0"]], {"L0": 0})
+    worker.block_len_per_layer = [64]
+    metadata = _agent_metadata([["L0", "L1"]], [0x10000], [256])
+    metadata.packed_member_layouts = layouts
+    with pytest.raises(AssertionError, match=error):
+        worker._align_remote_regions_by_member(metadata)
+
+
+def test_member_alignment_preserves_nonpacked_regions_alongside_packed_members():
+    worker = _member_worker([["a"], ["b"]], {"a": 0, "b": 1})
+    worker.block_len_per_layer = [64, 128]
+    metadata = _agent_metadata(
+        [["a", "other"], ["b"]], [0x1000, 0x2000], [192, 128], [256, 128]
+    )
+    metadata.packed_member_layouts = {"a": (64, 64), "other": (128, 64)}
+
+    worker._align_remote_regions_by_member(metadata)
+
+    assert metadata.kv_caches_base_addr == [0x1040, 0x2000]
+    assert metadata.block_lens == [64, 128]
+    assert metadata.block_strides == [256, 128]
+
+
+def test_member_identity_gate_preserves_the_non_hma_path():
+    assert _member_worker([["a"]], {"a": 0})._member_local_regions == (0,)
+
+    # A bare base worker (pull) never routes by member identity, and reading
+    # the derived state must not require a fully constructed worker.
+    pull = object.__new__(NixlBaseConnectorWorker)
+    pull._set_region_members([["a"]])
+    assert pull._member_local_regions == ()
+
+    # A non-HMA local layout does not require member routing.
+    assert _member_worker([["a"]], {"a": 0}, is_hma=False)._member_local_regions == ()
+
+    # PP=1 has congruent local/remote regions and keeps the region route even
+    # when its allocator is hybrid.
+    assert _member_worker([["a"]], {"a": 0}, pp_size=1)._member_local_regions == ()
+
+
+def test_member_alignment_fails_loud_when_remote_omits_members():
+    # Falling back to region-index routing here would silently transfer stale
+    # KV, so an unannounced peer must fail the handshake instead.
+    worker = _member_worker([["a"]], {"a": 0})
+    with pytest.raises(AssertionError, match="no region_members"):
+        worker._align_remote_regions_by_member(_agent_metadata([], [0xA000], [128]))
+
+
+def test_member_alignment_expands_pooled_regions():
+    worker = _member_worker([["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0})
+    assert worker._member_names == ("a", "a.swa", "b")
+    assert worker._member_local_regions == (0, 0, 1)
+    assert worker._member_group_ids == (0, 1, 0)
+
+    metadata = _agent_metadata([["a", "a.swa"], ["b"]], [0xA000, 0xB000], [128, 128])
+    metadata.region_num_blocks = [4, 6]
+    metadata.region_group_ids = [-1, 0]
+    metadata.region_names = ["a", "b"]
+    metadata.region_mem_types = ["VRAM", "VRAM"]
+    worker._align_remote_regions_by_member(metadata)
+
+    assert metadata.kv_caches_base_addr == [0xA000, 0xA000, 0xB000]
+    assert metadata.block_lens == [128, 128, 128]
+    assert metadata.block_strides == [128, 128, 128]
+    assert metadata.region_members == [["a"], ["a.swa"], ["b"]]
+    assert metadata.region_num_blocks == [4, 4, 6]
+    assert metadata.region_group_ids == [-1, -1, 0]
+    assert metadata.region_names == ["a", "a.swa", "b"]
+    assert metadata.region_mem_types == ["VRAM", "VRAM", "VRAM"]
+
+
+def test_member_alignment_filters_and_reorders_a_pp_stage():
+    worker = _member_worker([["l2"], ["l3"]], {"l2": 0, "l3": 1})
+    metadata = _agent_metadata(
+        [["l2"], ["l0"], ["l3"], ["l1"]],
+        [0xC000, 0xA000, 0xD000, 0xB000],
+        [65536, 65536, 32768, 32768],
+        [131072, 131072, 65536, 65536],
+    )
+    metadata.region_num_blocks = [4, 6, 8, 10]
+    metadata.region_group_ids = [0, 0, 1, 1]
+    metadata.region_names = ["l2", "l0", "l3", "l1"]
+    metadata.region_mem_types = ["VRAM"] * 4
+
+    worker._align_remote_regions_by_member(metadata)
+
+    assert worker._member_local_regions == (0, 1)
+    assert worker._member_group_ids == (0, 1)
+    assert metadata.kv_caches_base_addr == [0xC000, 0xD000]
+    assert metadata.block_lens == [65536, 32768]
+    assert metadata.block_strides == [131072, 65536]
+    assert metadata.region_num_blocks == [4, 8]
+    assert metadata.region_group_ids == [0, 1]
+    assert metadata.region_names == ["l2", "l3"]
+    assert metadata.region_mem_types == ["VRAM", "VRAM"]
+
+
+@pytest.mark.parametrize(
+    ("local_num_blocks", "remote_num_blocks"),
+    [([4, 4], [4, 4, 4]), ([4, 6], [3, 5, 7])],
+)
+def test_member_descriptors_pair_layers_across_asymmetric_pp_split(
+    local_num_blocks, remote_num_blocks
+):
+    """A PP split can leave each stage a different mix of attention types.
+
+    Stage 1 owns L3 (full) pooled with L4 (sliding) in region 0, and L5 (full)
+    alone in region 1. The consumer holds every layer and pools them
+    differently, so region indices cannot be paired positionally.
+    """
+    worker = _member_worker([["L3", "L4"], ["L5"]], {"L3": 0, "L4": 1, "L5": 0})
+    worker.block_len_per_layer = [128, 128]
+    worker.block_stride_per_layer = [256, 512]
+    worker._region_is_mla = [False, False]
+    worker.num_blocks = 4
+    worker.region_num_blocks = local_num_blocks
+    worker.device_id = 0
+
+    consumer = _agent_metadata(
+        [["L0", "L1"], ["L3", "L2"], ["L5", "L4"]],
+        [0xA000, 0xB000, 0xC000],
+        [128, 128, 128],
+        [256, 512, 1024],
+    )
+    consumer.num_blocks = 4
+    consumer.region_num_blocks = remote_num_blocks
+    worker._align_remote_regions_by_member(consumer)
+
+    # L3 -> remote region 1, L4 -> 2, L5 -> 2. Pairing by index would have sent
+    # L5 to region 1 and L4 to region 2's sibling.
+    assert consumer.kv_caches_base_addr == [0xB000, 0xC000, 0xC000]
+
+    plan = TPMapping(((0,), (0,)), (0,), {0: 0}, 0)
+    local_descs = worker._build_fa_local([0x1000, 0x2000], block_size_ratio=1)
+    remote_descs = worker._build_fa_remote(plan, consumer, block_size_ratio=1)
+    local_counts = [local_num_blocks[i] for i in worker._member_local_regions]
+    local_ids = worker._compute_desc_ids(
+        [[1, 2], [3]], 4, None, 1, region_num_blocks=local_counts
+    )
+    remote_ids = worker._compute_desc_ids(
+        [[0, 1], [2]], 4, None, 1, region_num_blocks=consumer.region_num_blocks
+    )
+    assert len(local_descs) == sum(local_counts)
+    assert len(remote_descs) == sum(consumer.region_num_blocks)
+
+    # Each pair addresses the same layer's blocks despite different pooling
+    # and strides. L3 and L5 use group 0; L4 uses group 1.
+    assert local_descs[local_ids].tolist() == [
+        [0x1100, 128, 0],
+        [0x1200, 128, 0],
+        [0x1300, 128, 0],
+        [0x2200, 128, 0],
+        [0x2400, 128, 0],
+    ]
+    assert remote_descs[remote_ids].tolist() == [
+        [0xB000, 128, 7],
+        [0xB200, 128, 7],
+        [0xC800, 128, 7],
+        [0xC000, 128, 7],
+        [0xC400, 128, 7],
+    ]
+
+
+def test_member_alignment_is_canonical_across_remote_orderings():
+    local, groups = [["x"], ["y"]], {"x": 0, "y": 1}
+    rank0 = _agent_metadata([["x"], ["y"]], [0x1000, 0x2000], [64, 128], [256, 512])
+    rank1 = _agent_metadata([["y"], ["x"]], [0x2000, 0x1000], [128, 64], [512, 256])
+
+    _member_worker(local, groups)._align_remote_regions_by_member(rank0)
+    _member_worker(local, groups)._align_remote_regions_by_member(rank1)
+
+    assert rank0.kv_caches_base_addr == rank1.kv_caches_base_addr == [0x1000, 0x2000]
+    assert rank0.block_lens == rank1.block_lens == [64, 128]
+    assert rank0.block_strides == rank1.block_strides == [256, 512]
+
+
+def test_member_alignment_is_idempotent():
+    worker = _member_worker([["a", "a.swa"], ["b"]], {"a": 0, "a.swa": 1, "b": 0})
+    metadata = _agent_metadata([["a", "a.swa"], ["b"]], [0xA000, 0xB000], [128, 128])
+    metadata.region_num_blocks = [4, 6]
+    metadata.region_group_ids = [-1, 0]
+    metadata.region_names = ["a", "b"]
+    metadata.region_mem_types = ["VRAM", "VRAM"]
+
+    worker._align_remote_regions_by_member(metadata)
+    aligned = msgspec.msgpack.encode(metadata)
+    worker._align_remote_regions_by_member(metadata)
+
+    assert msgspec.msgpack.encode(metadata) == aligned
+
+
+def test_member_alignment_rejects_missing_local_member():
+    worker = _member_worker([["l0"], ["l1"]], {"l0": 0, "l1": 1})
+    metadata = _agent_metadata([["l0"]], [0xA000], [128])
+
+    with pytest.raises(AssertionError, match="missing locally owned layers"):
+        worker._align_remote_regions_by_member(metadata)
+
+
+def test_member_alignment_rejects_duplicate_remote_member():
+    worker = _member_worker([["a"]], {"a": 0})
+    metadata = _agent_metadata([["a"], ["a"]], [0xA000, 0xB000], [128, 128])
+
+    with pytest.raises(AssertionError, match="in multiple regions"):
+        worker._align_remote_regions_by_member(metadata)
+
+
+def test_member_alignment_rejects_inconsistent_remote_metadata():
+    worker = _member_worker([["a"]], {"a": 0})
+    metadata = _agent_metadata([["a"], ["b"]], [0xA000], [128])
+
+    with pytest.raises(AssertionError, match="lengths disagree"):
+        worker._align_remote_regions_by_member(metadata)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["region_num_blocks", "region_group_ids", "region_names", "region_mem_types"],
+)
+def test_member_alignment_rejects_inconsistent_region_geometry(field):
+    worker = _member_worker([["a"]], {"a": 0})
+    metadata = _agent_metadata([["a"], ["b"]], [0xA000, 0xB000], [128, 128])
+    setattr(metadata, field, [])
+    original = msgspec.msgpack.encode(metadata)
+
+    with pytest.raises(AssertionError, match="lengths disagree"):
+        worker._align_remote_regions_by_member(metadata)
+    assert msgspec.msgpack.encode(metadata) == original
+
+
+def test_set_region_members_rejects_duplicate_local_member():
+    with pytest.raises(AssertionError, match="spans multiple NIXL regions"):
+        _member_worker([["a"], ["a"]], {"a": 0})
+
+
+def test_set_region_members_rejects_layer_outside_any_kv_group():
+    with pytest.raises(AssertionError, match="outside any local group"):
+        _member_worker([["a"], ["b"]], {"a": 0})
+
+
+@pytest.mark.parametrize(
+    ("local_block_size", "remote_block_size", "remote_tp_size", "error"),
+    [
+        (32, 16, 1, "identical P/D block sizes"),
+        (16, 32, 1, "identical P/D block sizes"),
+        (16, 16, 2, "decode TP greater"),
+    ],
+)
+def test_member_handshake_rejects_unsupported_geometry(
+    local_block_size: int, remote_block_size: int, remote_tp_size: int, error: str
+):
+    """Reject unsupported peers without registering agents or transfer state."""
+    metadata = _agent_metadata([["a"]], [0xA000], [128])
+    metadata.block_size = remote_block_size
+    worker = _member_worker([["a"]], {"a": 0})
+    worker.block_size = local_block_size
+    worker.block_len_per_layer = [128]
+    worker.use_mla = False
+    worker.nixl_wrapper = MagicMock()
+    worker.kv_caches_base_addr = defaultdict(dict)
+    worker.dst_num_blocks = {}
+    worker.tp_mappings = {}
+    worker.transfer_topo = TransferTopology(
+        tp_rank=0,
+        tp_size=1,
+        block_size=local_block_size,
+        engine_id=worker.engine_id,
+        is_mla=False,
+        is_mamba=False,
+        total_num_kv_heads=8,
+        attn_backends=[],
+    )
+
+    with pytest.raises(NotImplementedError, match=error):
+        worker.add_remote_agent(metadata, remote_tp_size=remote_tp_size)
+    worker.nixl_wrapper.add_remote_agent.assert_not_called()
+    worker.nixl_wrapper.prep_xfer_dlist.assert_not_called()
+    assert not worker.tp_mappings
+    assert not worker.dst_num_blocks
+    assert not worker.kv_caches_base_addr
+    with pytest.raises(KeyError):
+        worker.transfer_topo.get_engine_info(metadata.engine_id)
+
+
+# KimiLinear-shaped stage: one MLA layer pooled with two KDA layers per region.
+_HYBRID_MEMBERS = [["mla.0", "kda_a.0", "kda_b.0"], ["mla.1", "kda_a.1", "kda_b.1"]]
+_HYBRID_GROUPS = {
+    "mla.0": 0,
+    "kda_a.0": 1,
+    "kda_b.0": 2,
+    "mla.1": 0,
+    "kda_a.1": 1,
+    "kda_b.1": 2,
+}
+# GDN-style conv Q|K|V = 2|2|4 columns x 3 rows of fp16, then 64 bytes of state.
+_HYBRID_CONV = MambaConvSplitInfo(
+    conv_rows=3, local_proj_dims=(2, 2, 4), conv_dtype_size=2, ssm_sizes=(48, 64)
+)
+_HYBRID_SSM_OFFSETS = [(0, 12), (12, 12), (24, 24), (48, 64)]
+_PAGE = 256
+
+
+def _hybrid_member_worker(num_blocks: int = 4) -> _StubWriterWorker:
+    worker = _StubWriterWorker.fresh()
+    worker.pp_size = 2
+    worker.dcp_size = 1
+    worker.block_size = 16
+    worker.use_mla = True
+    worker._has_mamba = True
+    worker._is_hma_required = True
+    worker._group_spec_types = (MLAAttentionSpec, MambaSpec, MambaSpec)
+    worker._conv_decomp = _HYBRID_CONV
+    worker._mamba_ssm_size = _HYBRID_CONV.ssm_sizes
+    worker._ssm_region_indices = [0, 1]
+    worker._ple_region_index = None
+    worker._ple_group_index = None
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.num_blocks = num_blocks
+    worker._logical_num_blocks = num_blocks
+    worker.block_len_per_layer = [_PAGE, _PAGE]
+    worker.block_stride_per_layer = [_PAGE, _PAGE]
+    worker.region_num_blocks = [num_blocks, num_blocks]
+    worker._region_is_mla = [True, True]
+    worker.device_id = 0
+    worker.kv_cache_config = MagicMock(transfer_group_index_by_layer=_HYBRID_GROUPS)
+    worker.transfer_topo = MagicMock()
+    worker._set_region_members(_HYBRID_MEMBERS)
+    return worker
+
+
+def _ssm_rows(block_addr: int, device_id: int) -> list[list[int]]:
+    return [[block_addr + off, size, device_id] for off, size in _HYBRID_SSM_OFFSETS]
+
+
+def test_hybrid_members_split_by_cache_kind():
+    worker = _hybrid_member_worker()
+    assert worker._requires_member_identity()
+    assert worker._member_attention_positions == (0, 3)
+    assert worker._member_ssm_positions == (1, 2, 4, 5)
+
+
+def test_hybrid_member_descriptors_address_each_kind_once_per_layer():
+    """A pooled region backs one MLA and two KDA layers. Each member's blocks
+    must resolve to that layer's own descriptors: the FA page for the MLA
+    member, the conv sub-projections and temporal state for the KDA members."""
+    worker = _hybrid_member_worker()
+    bases = [0x10000, 0x20000]
+    descs = np.concatenate(
+        [
+            worker._build_fa_local(bases, block_size_ratio=1),
+            worker._build_mamba_local(bases),
+        ]
+    )
+    # 2 attention members x 4 blocks, then 4 SSM members x 4 sub-regions x 4 blocks.
+    assert descs.shape == (8 + 64, 3)
+
+    rows = descs[worker._compute_desc_ids([[1], [2], [3]], 4, None, 1)].tolist()
+    assert rows[0] == [0x10000 + _PAGE, _PAGE, 0]
+    assert rows[1:5] == _ssm_rows(0x10000 + 2 * _PAGE, 0)
+    assert rows[5:9] == _ssm_rows(0x10000 + 3 * _PAGE, 0)
+    assert rows[9] == [0x20000 + _PAGE, _PAGE, 0]
+    assert rows[10:14] == _ssm_rows(0x20000 + 2 * _PAGE, 0)
+    assert rows[14:18] == _ssm_rows(0x20000 + 3 * _PAGE, 0)
+
+
+def test_hybrid_member_alignment_pairs_layers_with_an_unsharded_consumer():
+    """A PP stage writing to a PP=1 consumer that pools the same layer kinds per
+    region but advertises them in another order and holds layers we do not."""
+    worker = _hybrid_member_worker()
+    consumer = _agent_metadata(
+        [
+            ["mla.9", "kda_a.9", "kda_b.9"],
+            ["mla.1", "kda_a.1", "kda_b.1"],
+            ["mla.0", "kda_a.0", "kda_b.0"],
+        ],
+        [0xC000, 0xB000, 0xA000],
+        [_PAGE, _PAGE, _PAGE],
+    )
+    consumer.num_blocks = 4
+    consumer.ssm_sizes = _HYBRID_CONV.ssm_sizes
+    worker._align_remote_regions_by_member(consumer)
+    assert consumer.kv_caches_base_addr == [0xA000] * 3 + [0xB000] * 3
+
+    plan = TPMapping(((0,), (0,), (0,)), (0,), {0: 0}, 0)
+    transfer_info = MagicMock(remote_physical_blocks_per_logical=1)
+    descs = np.concatenate(
+        [
+            worker._build_fa_remote(plan, consumer, block_size_ratio=1),
+            worker._build_mamba_remote(
+                consumer, tp_ratio=1, transfer_info=transfer_info
+            ),
+        ]
+    )
+    assert descs.shape == (8 + 64, 3)
+
+    dev = consumer.device_id
+    rows = descs[worker._compute_desc_ids([[0], [1], [2]], 4, None, 1)].tolist()
+    assert rows[0] == [0xA000, _PAGE, dev]
+    assert rows[1:5] == _ssm_rows(0xA000 + _PAGE, dev)
+    assert rows[5:9] == _ssm_rows(0xA000 + 2 * _PAGE, dev)
+    assert rows[9] == [0xB000, _PAGE, dev]
+    assert rows[10:14] == _ssm_rows(0xB000 + _PAGE, dev)
+    assert rows[14:18] == _ssm_rows(0xB000 + 2 * _PAGE, dev)

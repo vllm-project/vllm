@@ -862,6 +862,7 @@ def _make_mock_worker_for_desc_ids(
     worker = MagicMock(spec=NixlConnectorWorker)
     worker.num_regions = num_regions
     worker._uses_region_group_mapping = False
+    worker._member_group_ids = ()
     worker._has_mamba = has_mamba
     worker._group_spec_types = group_spec_types
     worker.block_len_per_layer = block_len_per_layer or [100]
@@ -1863,6 +1864,78 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     fa_descs = worker.src_blocks_data[:24]
     assert fa_descs[1][0] - fa_descs[0][0] == unified_page // 3
     assert all(size == unified_page // 3 for size in fa_descs[:, 1])
+
+
+@pytest.mark.cpu_test
+def test_register_kv_caches_hybrid_mla_pp_stage_routes_by_member():
+    """A PP producer stage of the same hybrid registers by member identity:
+    each pooled region carries its MLA and KDA layer names, FA descriptors are
+    emitted per attention member and conv + temporal descriptors per KDA
+    member, and the FA/mamba boundary counts attention members, not regions."""
+    from unittest.mock import MagicMock
+
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
+        NixlPushConnectorWorker,
+    )
+
+    kv_cache_config = _make_hybrid_mla_kv_cache_config()
+    unified_page = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
+    vllm_config = create_vllm_config(block_size=12, kv_role="kv_producer")
+    vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
+    vllm_config.parallel_config.pipeline_parallel_size = 2
+
+    fake_backend = MagicMock()
+    fake_backend.get_supported_kernel_block_sizes.return_value = [4]
+    fake_backend.get_name.return_value = "FLASHMLA"
+    fake_backend.full_cls_name.return_value = "fake.FLASHMLA"
+    fake_platform = MagicMock()
+    fake_platform.device_type = "cuda"
+    fake_platform.get_nixl_memory_type.return_value = "VRAM"
+
+    with (
+        patch.object(bw, "NixlWrapper"),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(bw, "get_current_attn_backends", return_value=[fake_backend]),
+        patch.object(bw, "current_platform", fake_platform),
+        patch(
+            "vllm.model_executor.layers.mamba.mamba_utils.get_conv_state_layout",
+            return_value="DS",
+        ),
+        set_current_vllm_config(vllm_config),
+    ):
+        worker = NixlPushConnectorWorker(vllm_config, "test-engine", kv_cache_config)
+        worker.use_mla = True
+        worker.nixl_wrapper.get_agent_metadata.return_value = b"fake-agent-metadata"
+        tensors = [torch.zeros(4 * unified_page, dtype=torch.uint8) for _ in range(2)]
+        worker.register_kv_caches(
+            {
+                "kda_a.0": tensors[0],
+                "mla.0": tensors[0],
+                "kda_b.0": tensors[0],
+                "kda_a.1": tensors[1],
+                "mla.1": tensors[1],
+                "kda_b.1": tensors[1],
+            }
+        )
+        # register_kv_caches starts the push writer thread.
+        worker.shutdown()
+
+    assert worker._requires_member_identity()
+    assert worker.region_members == [
+        ["kda_a.0", "mla.0", "kda_b.0"],
+        ["kda_a.1", "mla.1", "kda_b.1"],
+    ]
+    assert worker._member_local_regions == (0, 0, 0, 1, 1, 1)
+    assert worker._member_attention_positions == (1, 4)
+    assert worker._member_ssm_positions == (0, 2, 3, 5)
+    # FA/mamba boundary: 2 attention members x 12 kernel blocks.
+    assert worker.num_regions == 2 and worker.num_descs == 24
+    assert worker._fa_desc_replicated(worker.num_descs) == [True] * 24
+    # 4 KDA members x (3 conv sub-projections + 1 ssm) x 4 logical blocks.
+    assert worker.src_blocks_data.shape == (24 + 64, 3)
 
 
 @pytest.mark.cpu_test

@@ -104,6 +104,25 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - `LBNHC` (token-major, formerly `NHD`) layout is supported but does **not** allow heterogeneous TP head splitting.
 - Experimental `LBHNC` ↔ `LBNHC` permute: enable via `--kv-transfer-config '{"enable_permute_local_kv": true}'`. Not supported with HMA.
 
+### Pipeline parallelism
+
+The default (pull) NixlConnector does **not** support
+`pipeline-parallel-size > 1` together with a hybrid KV cache (HMA)
+layout: region indices are not a stable identity across the
+prefill/decode layer split, so the connector raises at startup. Use the
+push connector (`NixlPushConnector`) for pipeline parallelism with
+hybrid KV caches — it routes transfers by layer-name (member) identity,
+so a PP-sharded prefiller can write into a `PP=1` decoder. See
+[NIXL push-mode KV transfer](../design/nixl_kv_push_connector.md).
+
+Current push PP + HMA limitations:
+
+- Only the prefiller (producer) may be PP-sharded; decode-side PP is not supported.
+- Hybrid SSM/Mamba layouts are not supported under PP.
+- HMA requires the same block size on P and D.
+- Non-MLA attention-HMA member routing requires decode TP to be no greater than prefill TP.
+- Packed layouts under PP require MLA caches. Local and remote packed block strides may differ; member pages must have equal sizes. MLA supports decode TP greater than prefill TP because its KV is replicated.
+
 ### Quantized KV cache
 
 [Quantized KV cache](quantization/quantized_kvcache.md) (e.g., FP8) requires both P and D instances to use the **same** `cache_dtype`. Mismatched cache dtypes will fail the compatibility hash check during handshake.
