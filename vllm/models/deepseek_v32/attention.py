@@ -490,7 +490,7 @@ class DeepseekV32Attention(MLAAttention):
                 ),
                 skip_topk_buffer_clear=True,
             )
-        self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
+        self.impl.record_logical_topk_ready()
 
         attn_metadata, _, kv_cache, layer_slot_mapping = get_attention_context(
             self.layer_name

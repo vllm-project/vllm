@@ -232,7 +232,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
         if self.is_sparse:
-            self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
+            self.mla_attn.impl.record_logical_topk_ready()
 
         if llama_4_scaling is not None:
             q *= llama_4_scaling

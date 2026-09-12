@@ -963,6 +963,13 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     hisparse_cache: "HiSparseCacheHandle | None" = None
     supports_pcp: bool = True
 
+    def record_logical_topk_ready(self) -> None:
+        """Signal that the sparse indexer's logical top-k is written.
+
+        Used by HiSparse host-resident prefetching via ``SparseMLAIndexGroup``.
+        Implementations without an index group have nothing to record.
+        """
+
     @abstractmethod
     def __init__(
         self,
