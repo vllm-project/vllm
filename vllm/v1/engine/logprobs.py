@@ -5,6 +5,9 @@ import itertools
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+import numpy as np
+import torch
+
 from vllm.logger import init_logger
 from vllm.logprobs import (
     FlatLogprobs,
@@ -38,6 +41,9 @@ class LogprobsProcessor:
     cumulative_logprob: float | None
     num_logprobs: int | None
     num_prompt_logprobs: int | None
+    # Scores for caller-selected prompt token IDs. Emitted whole on the final
+    # prefill chunk rather than accumulated here, so it starts as None.
+    prompt_token_id_logprobs: np.ndarray | None = None
 
     @classmethod
     def from_new_request(
@@ -186,6 +192,19 @@ class LogprobsProcessor:
                 self.num_prompt_logprobs,
             )
 
+    def _update_prompt_token_id_logprobs(self, scores: torch.Tensor) -> None:
+        """Store fixed-ID prompt scores from EngineCore.
+
+        Unlike prompt logprobs, these arrive whole: the worker accumulates the
+        prefill chunks and emits the result once, on the final chunk. The IDs
+        are request-wise and caller-supplied, so nothing is detokenized here.
+
+        Args:
+          scores: `[num_scored_rows, num_token_ids]` logprobs, column j holding
+                  the j-th requested token ID.
+        """
+        self.prompt_token_id_logprobs = scores.numpy()
+
     def pop_prompt_logprobs(self) -> PromptLogprobs | None:
         """Pop and return all request prompt logprobs
 
@@ -204,6 +223,17 @@ class LogprobsProcessor:
         if plp:
             self.prompt_logprobs = []
         return plp
+
+    def pop_prompt_token_id_logprobs(self) -> np.ndarray | None:
+        """Pop and return the fixed-ID prompt scores, as pop_prompt_logprobs.
+
+        Returns:
+          None if no IDs were requested or they were already returned.
+          The scores for the whole prompt, otherwise.
+        """
+        scores = self.prompt_token_id_logprobs
+        self.prompt_token_id_logprobs = None
+        return scores
 
     @staticmethod
     def _get_sampled_context_ids(
@@ -350,3 +380,5 @@ class LogprobsProcessor:
             self._update_sample_logprobs(output.new_logprobs)
         if output.new_prompt_logprobs_tensors is not None:
             self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)
+        if output.prompt_token_id_logprobs is not None:
+            self._update_prompt_token_id_logprobs(output.prompt_token_id_logprobs)

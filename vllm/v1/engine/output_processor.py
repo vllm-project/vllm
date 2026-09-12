@@ -374,8 +374,12 @@ class RequestState:
         if self.output_kind == RequestOutputKind.DELTA:
             # Side effect: logprobs processor forgets prompt logprobs
             prompt_logprobs = self.logprobs_processor.pop_prompt_logprobs()
+            prompt_token_id_logprobs = (
+                self.logprobs_processor.pop_prompt_token_id_logprobs()
+            )
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
+            prompt_token_id_logprobs = self.logprobs_processor.prompt_token_id_logprobs
 
         return RequestOutput(
             request_id=external_req_id,  # request_id is what was provided externally
@@ -383,6 +387,7 @@ class RequestState:
             prompt=self.prompt,
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
+            prompt_token_id_logprobs=prompt_token_id_logprobs,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
             kv_transfer_params=kv_transfer_params,
