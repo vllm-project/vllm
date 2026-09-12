@@ -636,20 +636,7 @@ class VllmConfig:
         speculative_config = self.speculative_config
         if speculative_config is None:
             return 0
-        dspark_fill_in = speculative_config.use_dspark() and not getattr(
-            speculative_config.draft_model_config.hf_config, "sample_from_anchor", True
-        )
-        if speculative_config.use_dflash() or dspark_fill_in:
-            # Fill-in drafting uses a bonus query plus one query per draft token.
-            # DSpark's anchor-sampling layout does not need the extra slot.
-            return self.num_speculative_tokens + 1
-        if speculative_config.use_eagle() or speculative_config.uses_draft_model():
-            # Anchor-sampling DSpark drafts a block of num_speculative_tokens
-            # query tokens in which the anchor itself is the first prediction
-            # position (no separate bonus query), so it needs exactly
-            # num_speculative_tokens lookahead slots.
-            return self.num_speculative_tokens
-        return 0
+        return speculative_config.speculator_config.num_lookahead_tokens
 
     @property
     def num_prefill_lookahead_tokens(self) -> int:
@@ -664,15 +651,9 @@ class VllmConfig:
         their own per-method lookahead, so those components cannot drift apart.
         """
         speculative_config = self.speculative_config
-        if speculative_config is None or not speculative_config.use_eagle():
+        if speculative_config is None:
             return 0
-        if speculative_config.use_multi_module_mtp():
-            # Each MTP module reads one token further ahead than the one before
-            # it, so the chain needs num_speculative_tokens of runway at a
-            # chunked-prefill boundary.
-            return self.num_speculative_tokens
-        # Eagle-family drafters read only the immediate next token.
-        return 1
+        return speculative_config.speculator_config.num_prefill_lookahead_tokens
 
     @property
     def uniform_decode_query_len(self) -> int:
@@ -717,6 +698,25 @@ class VllmConfig:
                 raise ValueError(
                     "HiSparse requires Model Runner V2; remove "
                     "VLLM_USE_V2_MODEL_RUNNER=0."
+                )
+            return True
+
+        speculative_config = getattr(self, "speculative_config", None)
+        if speculative_config and speculative_config.speculator_config_class:
+            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
+                raise ValueError(
+                    "speculator_config_class requires Model Runner V2; remove "
+                    "VLLM_USE_V2_MODEL_RUNNER=0."
+                )
+            if not HAS_TRITON:
+                raise ValueError(
+                    "speculator_config_class requires Model Runner V2, which "
+                    "requires Triton."
+                )
+            if unsupported := self._get_v2_model_runner_unsupported_features():
+                raise ValueError(
+                    "speculator_config_class requires Model Runner V2, which does not "
+                    f"yet support {', '.join(unsupported)}."
                 )
             return True
 
@@ -1352,25 +1352,15 @@ class VllmConfig:
                 )
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.method not in ("dflash", "dspark")
+                and not speculative_config.supports_parallel_drafting
             ):
                 raise ValueError(
                     "Parallel speculative drafting is not supported with watermarking."
                 )
-            if speculative_config.method not in (
-                "dflash",
-                "dspark",
-                "eagle",
-                "eagle3",
-                "mtp",
-            ):
+            if not speculative_config.speculator_config.supports_watermarking:
                 raise ValueError(
                     "Watermarking supports only dflash, dspark, eagle, eagle3 and "
-                    "mtp speculative decoding."
-                )
-            if self._is_dflash_candidate_draft():
-                raise ValueError(
-                    "Watermarking does not support DFlash2 and LiLiCorr "
+                    "mtp speculative decoding, and not DFlash2 and LiLiCorr "
                     "candidate-head drafters yet."
                 )
             if (
@@ -2000,7 +1990,7 @@ class VllmConfig:
         if self.cache_config.kv_sharing_fast_prefill:
             if (
                 self.speculative_config is not None
-                and self.speculative_config.use_eagle()
+                and self.speculative_config.uses_target_hidden_states
             ):
                 raise ValueError(
                     "Fast prefill optimization for KV sharing is not "
@@ -2220,7 +2210,7 @@ class VllmConfig:
         ):
             if (
                 self.speculative_config is not None
-                and self.speculative_config.use_eagle()
+                and self.speculative_config.uses_target_hidden_states
             ):
                 # Hybrid KV cache manager is not yet supported with chunked
                 # local attention + eagle.
@@ -2358,7 +2348,7 @@ class VllmConfig:
                     f" num_lookahead_tokens={self.num_lookahead_tokens}."
                 )
             spec = self.speculative_config
-            if spec.use_dflash() or spec.use_dspark():
+            if spec.speculator_config.uses_separate_draft_pass:
                 max_num_active_seqs = (
                     self.scheduler_config.max_num_active_seqs
                     or self.scheduler_config.max_num_seqs
@@ -3046,7 +3036,7 @@ class VllmConfig:
             unsupported.append("pipeline parallelism with external_launcher")
 
         if speculative_config is not None:
-            if speculative_config.method in ("suffix", "custom_class"):
+            if speculative_config.speculator_config.speculator_class is None:
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
@@ -3054,7 +3044,7 @@ class VllmConfig:
             # own speculators.
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.method not in ("dflash", "dspark")
+                and not speculative_config.supports_parallel_drafting
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 

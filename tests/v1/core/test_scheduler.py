@@ -2295,7 +2295,7 @@ def test_block_drafters_cap_requests_instead_of_draft_slots(
     object.__setattr__(
         vllm_config.speculative_config,
         "draft_model_config",
-        SimpleNamespace(hf_config=SimpleNamespace()),
+        SimpleNamespace(hf_config=SimpleNamespace(), architectures=[]),
     )
     vllm_config._set_max_num_scheduled_tokens()
     scheduler = Scheduler(

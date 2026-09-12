@@ -19,6 +19,7 @@ from tests.v1.core.utils import (
     new_mla_spec,
     new_sliding_window_spec,
 )
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -1947,12 +1948,13 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
 def _spec_decode_kv_cache_groups(worker_specs, use_eagle_block_drop=True):
     config = VllmConfig(model_config=ModelConfig(max_model_len=64))
     config.cache_config.kv_cache_layout = "BLHNC"
-    config.speculative_config = SimpleNamespace(
+    config.speculative_config = fake_speculative_config(
         method="dflash",
         use_eagle=lambda: True,
         use_eagle_block_drop=lambda: use_eagle_block_drop,
         use_multi_module_mtp=lambda: False,
         parallel_drafting=False,
+        draft_model_config=SimpleNamespace(architectures=[]),
     )
     configs = get_kv_cache_configs(config, worker_specs, [2**30] * len(worker_specs))
     return generate_scheduler_kv_cache_config(configs).kv_cache_groups

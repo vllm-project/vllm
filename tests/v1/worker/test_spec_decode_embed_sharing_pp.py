@@ -7,6 +7,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.model_executor.model_loader.mtp_validation import (
     disable_mtp_completeness_check,
 )
@@ -110,7 +111,9 @@ def test_target_embedding_provisioning(
         _fake_pp(pp_size, is_last_rank),
         raising=True,
     )
-    speculative_config = None if method is None else SimpleNamespace(method=method)
+    speculative_config = (
+        None if method is None else fake_speculative_config(method=method)
+    )
     config = SimpleNamespace(speculative_config=speculative_config)
     assert spec_decode_needs_target_embed(config) is expected
 
@@ -126,7 +129,7 @@ def test_mtp_target_embedding_requires_model_opt_in(
         "vllm.distributed.parallel_state.get_pp_group",
         _fake_pp(pp_size, is_last_rank),
     )
-    config = SimpleNamespace(speculative_config=SimpleNamespace(method="mtp"))
+    config = SimpleNamespace(speculative_config=fake_speculative_config(method="mtp"))
     assert spec_decode_needs_target_embed(config, include_mtp=True) is expected
     assert not spec_decode_needs_target_embed(config)
 
@@ -155,7 +158,7 @@ def m3_config():
         use_v2_model_runner=True,
         load_config=SimpleNamespace(load_format="auto"),
         model_config=SimpleNamespace(hf_text_config=hf_config),
-        speculative_config=SimpleNamespace(
+        speculative_config=fake_speculative_config(
             method="mtp", draft_model_config=SimpleNamespace(hf_config=hf_config)
         ),
         quant_config=None,

@@ -872,12 +872,8 @@ def spec_decode_needs_target_embed(
     speculative_config = vllm_config.speculative_config
     if speculative_config is None:
         return False
-    if speculative_config.method not in (
-        "eagle",
-        "eagle3",
-        "dflash",
-        "dspark",
-    ) and not (include_mtp and speculative_config.method == "mtp"):
+    sharing = speculative_config.speculator_config.target_embed_sharing
+    if sharing == "never" or (sharing == "target_opt_in" and not include_mtp):
         return False
     pp = get_pp_group()
     return pp.world_size > 1 and pp.is_last_rank

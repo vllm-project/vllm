@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
     import vllm.model_executor.layers.quantization as me_quant
     from vllm.config.vllm import VllmConfig
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
 else:
     PreTrainedConfig = Any
     VllmConfig = Any
@@ -94,7 +95,7 @@ _MUSE_SPARK_DSPARK_ARCHITECTURE = "MuseSparkDSparkModel"
 
 # Draft architectures that carry an XPress refiner. EAGLEConfig rewrites a dflash
 # draft's architecture to DFlash{arch}, so a checkpoint is seen under either name;
-# the dispatch in v1/worker/gpu/spec_decode reads this same set.
+# get_speculator_config_class() reads this same set.
 XPRESS_ARCHITECTURES = frozenset({"Qwen3XPressModel", "DFlashQwen3XPressModel"})
 
 # RoPE types for which get_rope uses max_position_embeddings only to size the
@@ -424,6 +425,21 @@ class SpeculativeConfig:
 
     If using `ngram` method, the related configuration `prompt_lookup_max` and
     `prompt_lookup_min` should be considered."""
+    speculator_config_class: str | None = None
+    """Fully-qualified name of the config class of a user-provided speculator
+    for the V2 model runner (e.g. `"my_module.MySpeculatorConfig"`), used with
+    `method="custom_class"`. The class must subclass
+    `vllm.v1.worker.gpu.spec_decode.speculator_config.SpeculatorConfig`,
+    describe how the speculator behaves, and name the speculator class itself
+    (a `BaseSpeculator` subclass) in its `speculator_class`. It is imported in
+    every vLLM process, so its module should not import the speculator. This
+    is an experimental interface that may change between releases."""
+    base_method: SpeculativeMethod | None = None
+    """Optional built-in speculative method whose interpretation of `model` a
+    custom speculator uses, i.e. how the draft model config is created. If not
+    set, `model` is passed through uninterpreted and the draft model config is
+    the target's. The speculator's behavior is described by its
+    `speculator_config_class`, regardless of `base_method`."""
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
@@ -667,12 +683,7 @@ class SpeculativeConfig:
         factors: list[Any] = []
         # Eagle3 and extract_hidden_states affect the computation graph because
         # they return intermediate hidden states in addition to the final hidden state.
-        uses_aux_hidden_states = self.method in (
-            "eagle3",
-            "extract_hidden_states",
-            "dflash",
-            "dspark",
-        )
+        uses_aux_hidden_states = self.uses_aux_hidden_states
         factors.append(uses_aux_hidden_states)
         if self.method == "dspark":
             factors.append(self.enable_adaptive_verification)
@@ -688,6 +699,9 @@ class SpeculativeConfig:
             if layer_ids is not None and uses_aux_hidden_states:
                 # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
+
+        # A custom speculator may compile a different draft model graph.
+        factors.append(self.speculator_config_class)
 
         if self.method == "mtp" and self.draft_model_config is not None:
             factors.append(
@@ -1200,6 +1214,33 @@ class SpeculativeConfig:
         parts = model.split(".")
         return len(parts) >= 2 and all(part.isidentifier() for part in parts)
 
+    def _resolve_speculator_class_method(self) -> None:
+        """Replace `method="custom_class"` with `base_method` when a custom
+        `speculator_config_class` is given, so that the draft model config is
+        created as for the built-in method. Without `base_method`, `method`
+        stays "custom_class"."""
+        if self.speculator_config_class is None:
+            if self.base_method is not None:
+                raise ValueError(
+                    "base_method requires speculator_config_class to be set."
+                )
+            return
+        if self.base_method == "custom_class":
+            raise ValueError("base_method cannot be 'custom_class'.")
+        if self.method in (None, "custom_class"):
+            logger.warning_once(
+                "Using custom speculator config class '%s'. This is an "
+                "experimental feature and the speculator interface is subject "
+                "to breaking changes in future vLLM releases.",
+                self.speculator_config_class,
+            )
+            self.method = self.base_method or "custom_class"
+        elif self.method != (self.base_method or "custom_class"):
+            raise ValueError(
+                "speculator_config_class requires method='custom_class', "
+                f"got method={self.method!r}."
+            )
+
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
@@ -1208,6 +1249,8 @@ class SpeculativeConfig:
         # will be detected automatically if possible. If the speculative method
         # can not be detected, it will be considered as the "draft_model" by
         # default.
+
+        self._resolve_speculator_class_method()
 
         # infer method from user args
         if self.method is None and SpeculativeConfig._is_custom_proposer_path(
@@ -1259,9 +1302,9 @@ class SpeculativeConfig:
             elif self.method == "extract_hidden_states":
                 self.model = "extract_hidden_states"
             elif self.method == "custom_class":
-                # method was set explicitly, but model should already contain the
-                # custom module path. If not, this is a configuration error.
-                if self.model is None:
+                # A V1 custom proposer is loaded from the module path in model; a
+                # custom speculator_config_class doesn't need a model.
+                if self.speculator_config_class is None:
                     raise ValueError(
                         "method='custom_class' requires 'model' to contain the "
                         "custom proposer module path (e.g., 'my_module.MyProposer')."
@@ -1312,11 +1355,12 @@ class SpeculativeConfig:
         elif self.method == "custom_class":
             # Custom class proposer does not need a draft model.
             # It will dynamically load the user-provided class at runtime.
-            logger.warning_once(
-                "Using a custom class-based proposer backend. This is an "
-                "experimental feature and the proposer interface is subject to "
-                "breaking changes in future vLLM releases."
-            )
+            if self.speculator_config_class is None:
+                logger.warning_once(
+                    "Using a custom class-based proposer backend. This is an "
+                    "experimental feature and the proposer interface is subject "
+                    "to breaking changes in future vLLM releases."
+                )
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
             self.draft_model_config = self.target_model_config
@@ -1677,7 +1721,45 @@ class SpeculativeConfig:
                 "materializes. Disable one of them."
             )
 
+        # Validate a custom speculator config class early.
+        _ = self.speculator_config
+
         return self
+
+    @property
+    def speculator_config(self) -> "SpeculatorConfig":
+        """Describes the configured speculator's behavior; see
+        `vllm.v1.worker.gpu.spec_decode.speculator_config`.
+
+        This is derived from the other fields on each access, which is cheap.
+        """
+        from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+            get_speculator_config_class,
+        )
+
+        return get_speculator_config_class(self)(self)
+
+    # Shortcuts for commonly used speculator config properties.
+
+    @property
+    def uses_target_hidden_states(self) -> bool:
+        """See `SpeculatorConfig.uses_target_hidden_states`."""
+        return self.speculator_config.uses_target_hidden_states
+
+    @property
+    def uses_aux_hidden_states(self) -> bool:
+        """See `SpeculatorConfig.uses_aux_hidden_states`."""
+        return self.speculator_config.uses_aux_hidden_states
+
+    @property
+    def uses_separate_workspace_lane(self) -> bool:
+        """See `SpeculatorConfig.uses_separate_workspace_lane`."""
+        return self.speculator_config.uses_separate_workspace_lane
+
+    @property
+    def supports_parallel_drafting(self) -> bool:
+        """See `SpeculatorConfig.supports_parallel_drafting`."""
+        return self.speculator_config.supports_parallel_drafting
 
     def _validate_suffix_decoding(self):
         if not has_arctic_inference():
@@ -1908,7 +1990,7 @@ class SpeculativeConfig:
 
         if self.draft_lm_head_quantization is not None:
             # Gemma-4 MTP scores tied embedding rows directly; no lm_head to share.
-            if self.method not in ("eagle", "eagle3", "mtp") or self.use_gemma4_mtp():
+            if not self.speculator_config.supports_draft_lm_head_quantization:
                 raise ValueError(
                     "draft_lm_head_quantization is not supported for method "
                     f"{self.method!r}."
@@ -2033,25 +2115,7 @@ class SpeculativeConfig:
         DFlash and DSpark draft in a separate query pass rather than adding
         rows to the target batch.
         """
-        num_draft_tokens = self.num_speculative_tokens
-
-        if self.use_dflash() or self.use_dspark():
-            return 0
-
-        if self.parallel_drafting:
-            if self.uses_draft_model():
-                # PARD does not shift the existing input, so all K query
-                # positions require additional slots.
-                return num_draft_tokens
-
-            # The existing query is reused; only masked queries need new slots.
-            return num_draft_tokens - 1
-
-        if self.uses_draft_model():
-            # The autoregressive draft-model input retains one unsliced token.
-            return 1
-
-        return 0
+        return self.speculator_config.max_num_new_slots_for_drafting
 
     def use_gemma4_mtp(self) -> bool:
         return (
@@ -2163,4 +2227,9 @@ class SpeculativeConfig:
             else self.draft_model_config.model
         )
         num_spec_tokens = self.num_speculative_tokens
+        if (speculator_config_class := self.speculator_config_class) is not None:
+            return (
+                f"SpeculativeConfig({method=}, {speculator_config_class=}, "
+                f"{model=}, {num_spec_tokens=})"
+            )
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
