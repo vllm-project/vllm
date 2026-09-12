@@ -34,9 +34,9 @@
 
 # Entrypoints
 /vllm/entrypoints/anthropic @mgoin @DarkLight1337
-/vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337 @russellb
+/vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337
 /vllm/entrypoints/mcp @heheda12345
-/vllm/entrypoints/openai @aarnphm @chaunceyjiang @DarkLight1337 @russellb
+/vllm/entrypoints/openai @aarnphm @chaunceyjiang @DarkLight1337
 /vllm/entrypoints/speech_to_text/realtime @njhill
 /vllm/entrypoints/speech_to_text @NickLucche
 /vllm/entrypoints/pooling @noooop
@@ -73,7 +73,7 @@
 /vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
 /vllm/v1/sample @22quinn @houseroad @njhill
 /vllm/v1/spec_decode @benchislett @luccafong @MatthewBonanni
-/vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
+/vllm/v1/structured_output @mgoin @aarnphm @benchislett
 /vllm/v1/kv_cache_interface.py @heheda12345 @ivanium
 /vllm/v1/kv_offload @ApostaC @orozery
 /vllm/v1/simple_kv_offload @ivanium
@@ -107,8 +107,8 @@
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche @shen-shanshan
 /tests/multimodal/media @Isotr0py
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety @zyongye @AndreasKaratzas
-/tests/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
-/tests/v1/structured_output @mgoin @russellb @aarnphm
+/tests/entrypoints/llm/test_struct_output_generate.py @mgoin @aarnphm
+/tests/v1/structured_output @mgoin @aarnphm
 /tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
 /tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
@@ -232,6 +232,6 @@ mkdocs.yaml @hmellor
 /docs/training/weight_transfer @aoshen02
 
 # Security guide and policies
-/docs/usage/security.md @russellb @jperezdealgaba
-/SECURITY.md @russellb @jperezdealgaba
-/docs/contributing/vulnerability_management.md @russellb @jperezdealgaba
+/docs/usage/security.md @jperezdealgaba
+/SECURITY.md @jperezdealgaba
+/docs/contributing/vulnerability_management.md @jperezdealgaba
