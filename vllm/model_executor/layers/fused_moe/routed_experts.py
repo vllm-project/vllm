@@ -615,15 +615,16 @@ class RoutedExperts(PluggableLayer):
         # compressed-tensors checkpoints with packed weights are stored flipped
         # TODO (mgoin): check self.quant_method.quant_config.quant_format
         # against known CompressionFormat enum values that have this quality
-        if quant_method_name in (
-            "CompressedTensorsWNA16MoEMethod",
-            "CompressedTensorsWNA16RDNA3MoEMethod",
-            "CompressedTensorsW4A16FlydslMoEMethod",
+        if (
+            quant_method_name
+            in (
+                "CompressedTensorsWNA16MoEMethod",
+                "CompressedTensorsWNA16RDNA3MoEMethod",
+                "CompressedTensorsW4A16FlydslMoEMethod",
+            )
+            and is_transposed
         ):
-            if is_transposed:
-                loaded_weight = loaded_weight.t().contiguous()
-            else:
-                loaded_weight = loaded_weight
+            loaded_weight = loaded_weight.t().contiguous()
 
         if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"shard_id must be ['w1','w2','w3'] but got {shard_id}.")
