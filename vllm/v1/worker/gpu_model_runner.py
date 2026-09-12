@@ -7239,20 +7239,37 @@ class GPUModelRunner(
         Choose the minimum reorder batch threshold from all attention groups.
         Backends should be able to support lower threshold then what they request
         just may have a performance penalty due to that backend treating decodes
-        as prefills.
+        as prefills. Stateful backends can require a higher threshold to keep
+        multi-token decodes ahead of prefills.
         """
         min_none_high = lambda a, b: a if b is None else b if a is None else min(a, b)
 
-        reorder_batch_thresholds: list[int | None] = [
-            group.get_metadata_builder().reorder_batch_threshold
-            for group in self._attn_group_iterator()
+        builders = [
+            group.get_metadata_builder() for group in self._attn_group_iterator()
+        ]
+        reorder_batch_thresholds = [
+            builder.reorder_batch_threshold for builder in builders
         ]
         # If there are no attention groups (attention-free model) or no backend
         # reports a threshold, leave reordering disabled.
         if len(reorder_batch_thresholds) == 0:
             self.reorder_batch_threshold = None
             return
-        self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)  # type: ignore[assignment]
+
+        self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)
+        required_thresholds = [
+            builder.reorder_batch_threshold
+            for builder in builders
+            if builder.requires_decode_ordering
+            and builder.reorder_batch_threshold is not None
+        ]
+        if required_thresholds:
+            required_threshold = max(required_thresholds)
+            if (
+                self.reorder_batch_threshold is None
+                or required_threshold > self.reorder_batch_threshold
+            ):
+                self.reorder_batch_threshold = required_threshold
 
     def may_reinitialize_input_batch(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]

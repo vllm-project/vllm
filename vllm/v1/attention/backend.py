@@ -574,6 +574,9 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
     reorder_batch_threshold: int | None = None
+    # Whether lowering the threshold can misclassify multi-token decodes as
+    # prefills and corrupt stateful attention backends.
+    requires_decode_ordering: bool = False
     # Does this backend/builder support updating the block table in existing
     # metadata
     supports_update_block_table: bool = False
