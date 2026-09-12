@@ -4,10 +4,12 @@
 //! Video-modality preparation: per-clip preprocessing, config resolution,
 //! and per-item feature build.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use itertools::izip;
 use llm_multimodal::{FieldLayout, Modality, PreprocessedEncoderInputs, VideoClip};
+use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
@@ -37,15 +39,19 @@ impl MultimodalModelInfo {
         clips: Vec<Arc<VideoClip>>,
         uuids: Vec<Option<String>>,
         model_dtype: ModelDtype,
+        mm_processor_kwargs: Option<&HashMap<String, Value>>,
     ) -> Result<PreparedMedia> {
         let support = self.video.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: Modality::Video.to_string(),
         })?;
+        let tag = super::mm_processor_kwargs_tag(mm_processor_kwargs);
         let mut replacements = Vec::with_capacity(clips.len());
         let mut items = Vec::with_capacity(clips.len());
 
         for (clip, uuid) in izip!(&clips, uuids) {
-            let preprocessed = self.preprocess_video_clip(support, Arc::clone(clip)).await?;
+            let preprocessed = self
+                .preprocess_video_clip(support, Arc::clone(clip), mm_processor_kwargs)
+                .await?;
             let mut clip_replacements =
                 support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
             if clip_replacements.len() != 1 {
@@ -58,7 +64,9 @@ impl MultimodalModelInfo {
             items.push(build_video_item(
                 support,
                 preprocessed,
-                clip.hash.clone(),
+                // Overrides change the tensors, so they must change the cache
+                // key too.
+                super::tag_media_hash(&clip.hash, tag.as_ref()),
                 uuid,
                 model_dtype,
             )?);
@@ -78,8 +86,9 @@ impl MultimodalModelInfo {
         &self,
         support: &ModalitySupport,
         clip: Arc<VideoClip>,
+        mm_processor_kwargs: Option<&HashMap<String, Value>>,
     ) -> Result<PreprocessedEncoderInputs> {
-        let config = support.config.clone();
+        let config = super::merge_mm_processor_kwargs(support.config.clone(), mm_processor_kwargs)?;
         let processor = support.processor;
 
         tokio::task::spawn_blocking(move || {
