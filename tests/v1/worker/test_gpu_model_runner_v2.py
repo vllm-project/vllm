@@ -119,7 +119,8 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
 
 
 @pytest.mark.skip_global_cleanup
-def test_update_requests_rewinds_all_explicit_device_state():
+@pytest.mark.parametrize("replace_block_table", [False, True])
+def test_update_requests_rewinds_all_explicit_device_state(replace_block_table: bool):
     class StagedOffsets:
         def __init__(self):
             self.gpu = np.asarray([19, 18, 7], dtype=np.int32)
@@ -142,6 +143,14 @@ def test_update_requests_rewinds_all_explicit_device_state():
     sampler_rewinds: list[list[int]] = []
     model_state_rewinds: list[tuple[list[int], list[int]]] = []
     output_bin_counts = object()
+    block_rows = {0: [10], 1: [20], 2: [30]}
+
+    def append_block_ids(req_index, block_ids, overwrite):
+        if overwrite:
+            block_rows[req_index] = list(block_ids[0])
+        else:
+            block_rows[req_index].extend(block_ids[0])
+
     runner = SimpleNamespace(
         req_states=SimpleNamespace(
             req_id_to_index={"rewound": 0, "spec_rejected": 1, "forward": 2},
@@ -169,24 +178,27 @@ def test_update_requests_rewinds_all_explicit_device_state():
                 )
             )
         ),
-        block_tables=SimpleNamespace(
-            append_block_ids=lambda *_args, **_kwargs: pytest.fail(
-                "no block append expected"
-            )
-        ),
+        block_tables=SimpleNamespace(append_block_ids=append_block_ids),
     )
     cached = CachedRequestData(
         req_ids=["rewound", "spec_rejected", "forward"],
         resumed_req_ids=set(),
         new_token_ids=[],
         all_token_ids={},
-        new_block_ids=[None, None, None],
+        new_block_ids=(
+            [([11],), None, ([31],)] if replace_block_table else [None, None, None]
+        ),
         num_computed_tokens=[0, 18, 7],
         num_output_tokens=[4, 5, 6],
         rewound_req_ids={"rewound"},
     )
     scheduler_output = SimpleNamespace(
         scheduled_cached_reqs=cached,
+        block_table_updates=(
+            {"rewound": ([11],), "not_resident": ([99],)}
+            if replace_block_table
+            else None
+        ),
         new_block_ids_to_zero=None,
         kv_cache_block_copies=None,
     )
@@ -201,6 +213,12 @@ def test_update_requests_rewinds_all_explicit_device_state():
     assert sampled_state_rewinds == [([0], [4], output_bin_counts)]
     assert sampler_rewinds == [[0]]
     assert model_state_rewinds == [([0], [0])]
+    # An authoritative replacement must not be appended again during rewind.
+    assert block_rows == (
+        {0: [11], 1: [20], 2: [30, 31]}
+        if replace_block_table
+        else {0: [10], 1: [20], 2: [30]}
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -277,6 +295,7 @@ def test_rewind_converges_emulated_worker_ranks() -> None:
     )
     scheduler_output = SimpleNamespace(
         scheduled_cached_reqs=cached,
+        block_table_updates=None,
         new_block_ids_to_zero=None,
         kv_cache_block_copies=None,
     )
@@ -474,6 +493,7 @@ def test_emulated_pp_delayed_sample_is_rewound_before_recompute() -> None:
     scheduler_output = SimpleNamespace(
         scheduled_new_reqs=[],
         scheduled_cached_reqs=cached,
+        block_table_updates=None,
         finished_req_ids=set(),
         preempted_req_ids=set(),
         free_encoder_mm_hashes=[],
