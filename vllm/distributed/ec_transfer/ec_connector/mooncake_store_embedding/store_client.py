@@ -40,14 +40,29 @@ class _MooncakeErrorCode(IntEnum):
     REPLICA_IS_NOT_READY = -703
     OBJECT_NOT_FOUND = -704
     OBJECT_ALREADY_EXISTS = -705
+    LEASE_EXPIRED = -707
     RPC_FAIL = -900
     RPC_TIMEOUT = -901
+    TENANT_QUOTA_EXCEEDED = -1700
 
 
 # For partial RAM reads and single-replica writes, these rejections occur
 # before submission or after completed I/O. Transfer timeouts can leave I/O
 # in flight; all other failures retain registered buffers and poison the client.
-_SAFE_IO_REJECTIONS = frozenset(_MooncakeErrorCode)
+_SAFE_IO_REJECTIONS = frozenset(
+    {
+        _MooncakeErrorCode.NO_AVAILABLE_HANDLE,
+        _MooncakeErrorCode.REPLICA_IS_NOT_READY,
+        _MooncakeErrorCode.OBJECT_NOT_FOUND,
+        _MooncakeErrorCode.OBJECT_ALREADY_EXISTS,
+        _MooncakeErrorCode.RPC_FAIL,
+        _MooncakeErrorCode.RPC_TIMEOUT,
+    }
+)
+# Ranged GET checks the lease after transfer completion; PUT rejects tenant
+# quotas before allocating replicas or submitting transfers.
+_SAFE_GET_REJECTIONS = _SAFE_IO_REJECTIONS | {_MooncakeErrorCode.LEASE_EXPIRED}
+_SAFE_PUT_REJECTIONS = _SAFE_IO_REJECTIONS | {_MooncakeErrorCode.TENANT_QUOTA_EXCEEDED}
 
 
 _MOONCAKE_TENSOR_OBJECT_MAGIC = 0x4D4F4F4E
@@ -133,7 +148,10 @@ class MooncakeEmbeddingStoreClient:
 
     @contextmanager
     def _registered_io(
-        self, buffers: list[tuple[Any, int, int]]
+        self,
+        buffers: list[tuple[Any, int, int]],
+        *,
+        safe_rejections: frozenset[_MooncakeErrorCode],
     ) -> Iterator[Callable[[Any], None]]:
         self._check_healthy()
         registered = []
@@ -146,9 +164,7 @@ class MooncakeEmbeddingStoreClient:
             def terminal(value: Any) -> bool:
                 if isinstance(value, (list, tuple)):
                     return bool(value) and all(terminal(x) for x in value)
-                return type(value) is int and (
-                    value >= 0 or value in _SAFE_IO_REJECTIONS
-                )
+                return type(value) is int and (value >= 0 or value in safe_rejections)
 
             if not terminal(results):
                 raise EmbeddingStoreError(
@@ -241,7 +257,9 @@ class MooncakeEmbeddingStoreClient:
             (tensor, tensor.data_ptr(), data_size),
             (header, header_ptr, len(metadata)),
         ]
-        with self._registered_io(buffers) as confirm:
+        with self._registered_io(
+            buffers, safe_rejections=_SAFE_PUT_REJECTIONS
+        ) as confirm:
             results = self.store.batch_put_from_multi_buffers(
                 [pool_key.to_string()],
                 [[header_ptr, tensor.data_ptr()]],
@@ -279,7 +297,9 @@ class MooncakeEmbeddingStoreClient:
         *,
         owner: Any,
     ) -> int:
-        with self._registered_io([(owner, addr, size)]) as confirm:
+        with self._registered_io(
+            [(owner, addr, size)], safe_rejections=_SAFE_GET_REJECTIONS
+        ) as confirm:
             key = pool_key.to_string()
             results = self.store.get_into_ranges(
                 [addr],

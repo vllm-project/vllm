@@ -30,6 +30,11 @@ other modalities retain the normal encoder path. Supported embedding dtypes are
 FP16, BF16 and FP32. Only contiguous outputs are published; non-contiguous
 outputs are skipped without allocating a staging copy.
 
+Keep `--mm-processor-cache-gb` greater than zero when shared reuse is enabled.
+Encoder-only serving disables prefix caching; also disabling processor caching
+replaces content identifiers with process-local request counters that can collide
+across Encoders or restarts. This combination is rejected at startup.
+
 On each Encoder, enable `cross_encoder_cache` in the normal Mooncake P2P
 configuration. For example:
 
@@ -92,10 +97,16 @@ multimodal identifier. They exclude the request and Encoder instance IDs.
 The current key namespace uses `protocol:v2`.
 
 All Encoders sharing a namespace must use the same immutable model weights and
-compatible preprocessing. `embedding_model_identity` overrides the model path
-in the key, allowing identical snapshots mounted at different paths to share
-outputs; it must not identify different weights as equivalent. Change the
-namespace when replacing weights in place or changing an output-affecting
+compatible preprocessing. `embedding_model_identity` overrides only the key's
+model field; reuse also requires identical vLLM multimodal identifiers.
+Automatically generated identifiers include the configured model path.
+Caller-provided UUIDs are also hashed with that path when processor or media
+kwargs are present. Use the same configured model path across Encoders when
+relying on automatic identifiers: an equal `embedding_model_identity` alone
+does not enable reuse across different mount paths.
+
+The model identity must not identify different weights as equivalent. Change
+the namespace when replacing weights in place or changing an output-affecting
 setting. Caller-supplied multimodal identifiers must identify the same input
 consistently. Shape validation alone cannot detect semantically different
 outputs with the same dimensions.

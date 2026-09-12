@@ -14,7 +14,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from tests.v1.ec_connector.unit.utils import create_ec_vllm_config
+from vllm.config import MultiModalConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
+from vllm.distributed.ec_transfer.ec_connector.mooncake.config import MooncakeECConfig
 from vllm.distributed.ec_transfer.ec_connector.mooncake.metadata import (
     ECMooncakeConnectorMetadata,
     ECMooncakePushSpec,
@@ -39,6 +42,18 @@ KEY = EmbeddingKeyMetadata(
     "test", "model", "revision", "encoder", "torch.float32", "v2"
 )
 SPEC = TensorSpec((2, 2), "torch.float32", 16)
+
+
+def test_shared_reuse_requires_content_stable_identifiers():
+    """Encoder-only cache-off rendering uses process-local counter identifiers."""
+    config = create_ec_vllm_config(ec_role="ec_producer")
+    config.ec_transfer_config.ec_connector = "ECMooncakeConnector"
+    config.ec_transfer_config.ec_connector_extra_config["cross_encoder_cache"] = True
+    config.model_config.multimodal_config = MultiModalConfig(mm_processor_cache_gb=0)
+    config.use_v2_model_runner = True
+    config.lora_config = None
+    with pytest.raises(ValueError, match="mm_processor_cache_gb"):
+        MooncakeECConfig.from_vllm_config(config)
 
 
 class MemoryStore:
@@ -137,6 +152,7 @@ def make_worker(backend):
         "hit",
         "partial",
         "get-failure",
+        "lease-expired",
         "registration-failure",
     ],
 )
@@ -154,24 +170,25 @@ def test_reuse_pipeline(backend, mode):
     native = backend.store_client.store
     if mode == "partial":
         hits = {"a", "c"}
-    elif mode in ("hit", "get-failure", "registration-failure"):
+    elif mode in ("hit", "get-failure", "lease-expired", "registration-failure"):
         hits = set("abc")
     else:
         hits = set()
     for key in hits:
         backend.store_client.put_tensor(EmbeddingPoolKey(KEY, key), torch.ones(2, 2))
-    if mode == "get-failure":
+    if mode in ("get-failure", "lease-expired"):
         read = native.get_into_ranges
 
-        def evicted(pointers, keys, dst, src, sizes):
-            return (
-                [[[-704]]]
-                if keys == [[EmbeddingPoolKey(KEY, "b").to_string()]]
-                and src == [[[304]]]
-                else read(pointers, keys, dst, src, sizes)
-            )
+        def failed_read(pointers, keys, dst, src, sizes):
+            if keys == [[EmbeddingPoolKey(KEY, "b").to_string()]] and src == [[[304]]]:
+                if mode == "lease-expired":
+                    # Native ranged GET checks the lease after the transfer.
+                    read(pointers, keys, dst, src, sizes)
+                    return [[[-707]]]
+                return [[[-704]]]
+            return read(pointers, keys, dst, src, sizes)
 
-        native.get_into_ranges = evicted
+        native.get_into_ranges = failed_read
         hits.remove("b")
     if mode == "registration-failure":
         native.register_buffer = MagicMock(return_value=-500)
@@ -308,7 +325,7 @@ def test_native_io_owners(backend, operation):
             native.unregister_buffer = MagicMock(return_value=-500)
         else:
             native.batch_put_from_multi_buffers = MagicMock(
-                return_value=[-200 if rejected else -800]
+                return_value=[-1700 if rejected else -800]
             )
         assert backend._enqueue_save("a", tensor)
         future = backend._pending["a"][0]

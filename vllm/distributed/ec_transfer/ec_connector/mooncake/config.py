@@ -107,6 +107,12 @@ class MooncakeECConfig:
                 raise ValueError("cross_encoder_cache requires Model Runner V2")
             if vllm_config.lora_config is not None:
                 raise ValueError("cross_encoder_cache does not support dynamic LoRA")
+            mm_config = vllm_config.model_config.multimodal_config
+            if mm_config is not None and mm_config.mm_processor_cache_gb == 0:
+                raise ValueError(
+                    "cross_encoder_cache requires mm_processor_cache_gb > 0 "
+                    "to preserve content identifiers across Encoders and restarts"
+                )
         control_port = int(ec_config.ec_port) + (
             parallel_config.data_parallel_index * parallel_config.tensor_parallel_size
         )
