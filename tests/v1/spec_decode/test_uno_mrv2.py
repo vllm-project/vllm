@@ -610,8 +610,8 @@ def test_survivor_preemption_arithmetic_fits_then_overflows_the_budget():
     preemption geometry is provable on CPU. The finish-peer cap is read from
     ``uno_kv_budget.SURVIVOR_FINISH_MAX_TOKENS`` so the CPU pin and the e2e
     cannot drift. Prefix caching is disabled in this phase, so every request's
-    complete prompt-plus-generation footprint is counted. The inverted run
-    swaps max_tokens back to [96, 4, 4, 2] and must fail the growth assertion.
+    complete prompt-plus-generation footprint is counted, including the K
+    lookahead slots the allocator reserves.
 
     The compared request is one of the two long peers, so the crossing point
     must sit below the cap: above it a peer could finish naturally before
@@ -625,7 +625,10 @@ def test_survivor_preemption_arithmetic_fits_then_overflows_the_budget():
     from tests.v1.e2e.spec_decode import uno_kv_budget as budget
 
     shared_prefix_tokens = 161
-    prompt_tokens = [171, 265, 265, 249]  # seed, finish-0, finish-1, abort
+    # seed, finish-0, finish-1, abort. The e2e asserts its runtime tokenisation
+    # against this same constant, so a drift fails on the GPU with a message
+    # that names the literal instead of moving the geometry underneath it.
+    prompt_tokens = list(budget.SURVIVOR_PROMPT_TOKENS)
     max_tokens = [
         96,
         budget.SURVIVOR_FINISH_MAX_TOKENS,
@@ -689,16 +692,93 @@ def test_survivor_preemption_arithmetic_fits_then_overflows_the_budget():
         for tokens, cap in zip(prompt_tokens, max_tokens)
     ), (prompt_tokens, max_tokens)
 
-    # The old peer cap finished before growth could empty the budget; the same
-    # arithmetic must not clear the gate, which is why the gate was vacuous.
-    old_growth = budget.mixed_growth_blocks(
-        prompt_tokens,
-        [96, 4, 4, 2],
-        shared_prefix_tokens,
-        prefix_cache_enabled=False,
+    # The gate must be falsifiable at THIS geometry, and the configuration it
+    # replaced is the negative control: an 81-block pool (80 allocatable) with a
+    # 512-token cap cannot force a crossing once the peers drift apart, because
+    # a leader at its cap plus a stalled twin is 67 of 80 blocks. The worst-case
+    # helper must refuse it, and the two GPU receipts that skipped on it are the
+    # field evidence.
+    round8_pool = budget.allocatable_blocks(81)
+    round8_worst_case = budget.worst_case_crossing_tokens(
+        prompt_tokens[1], [prompt_tokens[2]], round8_pool
     )
-    assert old_growth <= pool_blocks, (
-        f"the old max_tokens=4 peers ({old_growth} blocks) unexpectedly clear "
-        f"the growth gate ({pool_blocks} blocks); the inverted run would not "
-        "fire"
+    assert round8_worst_case > 512, (
+        "the replaced 81-block/512-token configuration would now pass the "
+        f"worst-case pre-gate ({round8_worst_case} tokens vs a 512 cap), so "
+        "this gate no longer rejects the geometry that skipped on two cards"
     )
+
+
+def test_survivor_resident_blocks_track_the_speculative_width():
+    """The resident-block arithmetic must move when K moves.
+
+    Uno's ``num_lookahead_tokens`` is K, so a running request holds its
+    committed tokens plus the sampled token plus K. Re-deriving that as a bare
+    ``+1`` made the worst-case pre-gate optimistic and left it silently stale
+    for any other K, which the same test matrix uses (K=1 in the greedy rows).
+    One hand computation, and one pair that must differ.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    # cdiv(257 + 0 + 1 + 8, 16) = cdiv(266, 16) = 17 blocks held by a peer that
+    # has been admitted and has generated nothing.
+    assert budget.min_resident_blocks(257) == 17
+    # cdiv(257 + 0 + 1 + 16, 16) = cdiv(274, 16) = 18: K is really read.
+    assert budget.min_resident_blocks(257, 16) == 18
+    # cdiv(257 + 640 + 1 + 8, 16) = cdiv(906, 16) = 57 blocks at the cap, which
+    # is what a solo peer occupied on both GPU receipts (83.8% of 68).
+    assert budget.resident_blocks(257, budget.SURVIVOR_FINISH_MAX_TOKENS) == 57
+
+    budget_blocks = budget.survivor_kv_budget() // budget.kv_bytes_per_block()
+    pool_blocks = budget.allocatable_blocks(budget_blocks)
+    # Worst case by hand: the laggard holds 17, so the leader must reach
+    # 68 - 17 + 1 = 52 blocks, i.e. more than 51 * 16 = 816 slots, i.e.
+    # 257 + t + 9 > 816 -> t >= 551.
+    assert budget.worst_case_crossing_tokens(257, [257], pool_blocks) == 551
+    at_k1 = budget.worst_case_crossing_tokens(257, [257], pool_blocks, 1)
+    assert at_k1 != 551, (
+        "the worst-case crossing did not move with K, so the pre-gate is not "
+        f"reading the speculative width: K=1 gives {at_k1}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(None, None), ("0.35", 0.35), (" 1 ", 1.0)],
+)
+def test_survivor_memory_override_accepts_a_fraction_or_nothing(raw, expected):
+    """Unset means the engine default; a fraction in (0, 1] is honoured."""
+    from tests.v1.e2e.spec_decode.test_uno import _gpu_memory_utilization_from_env
+
+    assert _gpu_memory_utilization_from_env(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "high", "0", "1.5", "-0.2"])
+def test_survivor_memory_override_refuses_what_the_engine_would(raw):
+    """A blank or out-of-range value must name the variable, not float('').
+
+    The lane's own runbook exports this variable, and a shell that expands it to
+    nothing used to reach ``float('')`` and abort the run with a ValueError
+    mentioning neither the variable nor how to fix it.
+    """
+    from tests.v1.e2e.spec_decode.test_uno import _gpu_memory_utilization_from_env
+
+    with pytest.raises(ValueError, match="VLLM_UNO_SURVIVOR_GPU_MEMORY_UTILIZATION"):
+        _gpu_memory_utilization_from_env(raw)
+
+
+def test_survivor_usage_percentages_are_read_against_the_pinned_pool():
+    """A percentage from another geometry must not be quoted as this one's.
+
+    The 81-block pool read one free block as 98.750% (79 of 80). The pinned
+    69-block pool reads the same state as 98.529% (67 of 68), and a full pool
+    as 100.000%. Receipts quote the pool they were measured on.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    budget_blocks = budget.survivor_kv_budget() // budget.kv_bytes_per_block()
+    assert budget.usage_with_free_blocks(budget_blocks, 0) == 1.0
+    assert round(budget.usage_with_free_blocks(budget_blocks, 1), 5) == round(
+        1 - 1 / 68, 5
+    )
+    assert round(budget.usage_with_free_blocks(81, 1), 5) == round(1 - 1 / 80, 5)

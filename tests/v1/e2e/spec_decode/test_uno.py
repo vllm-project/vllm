@@ -3,6 +3,7 @@
 """Greedy Uno parity with the original Qwen3-8B adapter on one NVIDIA GPU."""
 
 import os
+from collections import deque
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
@@ -26,15 +27,19 @@ from .uno_kv_budget import (
     MODEL_REVISION,
     SURVIVOR_FINISH_MAX_TOKENS,
     SURVIVOR_MAX_MODEL_LEN,
+    SURVIVOR_NUM_SPECULATIVE_TOKENS,
+    SURVIVOR_PROMPT_TOKENS,
     allocatable_blocks,
     engine_minimum_kv_bytes,
     kv_bytes_per_block,
+    mid_generation_preemption_counts,
     mixed_admission_blocks,
     mixed_crossing_tokens,
     mixed_growth_blocks,
     prompt_token_ids_are_pairwise_content_distinct,
     qwen3_geometry,
     survivor_kv_budget,
+    usage_with_free_blocks,
     worst_case_crossing_tokens,
 )
 from .utils import (
@@ -47,6 +52,92 @@ from .utils import (
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Uno requires an NVIDIA CUDA device"
 )
+
+
+# Bounds on the per-step trace a failing survivor run carries in its assertion
+# message: the first steps where the pool is nearly full (where the crossing has
+# to happen) plus the last steps of the run. A forked child cannot print, so this
+# trace is the only way a non-firing run explains itself.
+_TRACE_TAIL_STEPS = 12
+_TRACE_NOTABLE_STEPS = 24
+# "Nearly full" for the notable-step trace: within two block-groups of empty.
+_TRACE_FREE_BLOCK_THRESHOLD = 2
+
+# The environment variable a co-tenanted box uses to fit the survivor engine
+# beside another model, and the one that asks for the receipt as a file.
+_GPU_MEMORY_ENV = "VLLM_UNO_SURVIVOR_GPU_MEMORY_UTILIZATION"
+_RECEIPT_ENV = "VLLM_UNO_SURVIVOR_RECEIPT"
+
+
+def _gpu_memory_utilization_from_env(
+    raw: str | None,
+) -> float | None:
+    """Parse the co-tenancy override, refusing anything the engine would not.
+
+    Unset means "leave the engine default". Anything else must be a fraction in
+    (0, 1]; a blank or unparsable value used to reach ``float('')`` and abort
+    the run with a ValueError that named neither the variable nor the fix.
+    """
+    if raw is None:
+        return None
+    text = raw.strip()
+    problem: str | None = None
+    value: float | None = None
+    if not text:
+        problem = "is set but empty"
+    else:
+        try:
+            value = float(text)
+        except ValueError:
+            problem = f"is not a number: {raw!r}"
+        else:
+            if not 0.0 < value <= 1.0:
+                problem = f"must be a fraction in (0, 1]; got {value}"
+    if problem is not None:
+        raise ValueError(
+            f"{_GPU_MEMORY_ENV} {problem}. Unset it to use the engine default, "
+            "or set it to the fraction of the device this run may request "
+            "(the survivor KV pool stays pinned by num_gpu_blocks_override "
+            "either way; see the contract16 command block, step 0)."
+        )
+    return value
+
+
+def _peer_trace(request) -> str:
+    """One peer's state for the per-step trace: tokens, status, preemptions."""
+    if request is None:
+        return "absent"
+    return (
+        f"{len(request.output_token_ids)}/{request.status.name}"
+        f"/p{request.num_preemptions}"
+    )
+
+
+def _render_receipt(mixed: "_MixedPhase", geometry: str, metrics: str) -> str:
+    """The whole survivor receipt as one string, for an assertion message.
+
+    ``pytest.mark.forked`` discards the child's stdout, so anything not in the
+    assertion message (or in the file `VLLM_UNO_SURVIVOR_RECEIPT` names) is lost
+    to whoever reads the run.
+    """
+    lines = [
+        geometry,
+        metrics,
+        f"steps={mixed.steps}, peer_visible_steps={mixed.peer_visible_steps}",
+        f"peak_kv_cache_usage={mixed.peak_kv_cache_usage:.3%}, "
+        f"min_free_blocks={mixed.min_free_blocks}",
+        f"max_generation_lag={mixed.max_generation_lag}, "
+        f"final_lengths={mixed.final_lengths}",
+        f"preempted_while_active={mixed.preempted_while_active}, "
+        f"preemption_events={mixed.preemption_events}",
+        f"peer_preemptions_final={mixed.peer_preemptions_final}, "
+        f"peer_statuses_seen={mixed.peer_statuses_seen}",
+        f"scheduler_request_ids_last={list(mixed.scheduler_request_ids_last)}",
+        "receipts=" + (str(mixed.receipts) if mixed.receipts else "[]"),
+        "trace:",
+        *(f"  {line}" for line in mixed.trace),
+    ]
+    return "\n".join(lines)
 
 
 # Eight repeats give each peer ~104 body tokens beyond the shared prefix: enough
@@ -189,17 +280,31 @@ def _scheduler(engine):
 
 @dataclass
 class _MixedPhase:
-    """What the mixed phase produced, including the preemption receipt."""
+    """What the mixed phase produced, including the preemption receipt.
+
+    Everything a failing run needs to explain itself lives in this object and is
+    rendered into the assertion message by ``_render_receipt``. It must not be
+    left in ``print`` output: the survivor case is ``pytest.mark.forked``, and a
+    forked child's stdout reaches neither the log nor the JUnit attachment even
+    under ``-s`` -- which is why the first two GPU runs of this gate could only
+    report that nothing was observed, never why.
+    """
 
     # Final greedy token IDs per finish peer, keyed by request id.
     finished: dict[str, tuple[int, ...]]
     # How many times each finish peer was preempted while still generating.
     preempted_while_active: dict[str, int]
     # One line per observed preemption: which request, at which token, while
-    # which requests were running/waiting. Printed so a GPU run can be read.
+    # which requests were running/waiting.
     receipts: list[str]
+    # (request_id, generated tokens at preemption) per observed preemption. A
+    # preemption at zero generated tokens is a prefill recompute and does not
+    # satisfy the gate.
+    preemption_events: list[tuple[str, int]]
     # Highest scheduler-reported KV occupancy observed during the mixed phase.
     peak_kv_cache_usage: float
+    # Free blocks at the fullest step, so the peak can be read in blocks.
+    min_free_blocks: int | None
     # Generated-token count per finish peer at every step, reduced to the
     # largest gap ever seen between the fastest and the slowest peer. This is
     # the receipt for the failure class the round-9 redesign closed: peers that
@@ -208,6 +313,22 @@ class _MixedPhase:
     max_generation_lag: int
     # Generated-token count per finish peer when it finished.
     final_lengths: dict[str, int]
+    # Steps driven, and steps at which BOTH finish peers were resolvable in
+    # `scheduler.requests`. The second number is what makes the per-request
+    # receipt falsifiable: a zero here means the gate was reading an empty
+    # channel, not that the engine never preempted.
+    steps: int
+    peer_visible_steps: int
+    # Request ids the scheduler held at the last step, and every status each
+    # finish peer was ever seen in. A PREEMPTED status is a preemption even if
+    # the counter poll missed the step it happened on.
+    scheduler_request_ids_last: tuple[str, ...]
+    peer_statuses_seen: dict[str, tuple[str, ...]]
+    # Final `num_preemptions` per finish peer, read once at the end.
+    peer_preemptions_final: dict[str, int]
+    # Bounded per-step trace: the steps around the fullest pool and the last
+    # steps of the run, which is where a non-firing crossing has to be read.
+    trace: list[str]
 
 
 def _run_survivor_with_peers(
@@ -246,20 +367,57 @@ def _run_survivor_with_peers(
     preempted_while_active: dict[str, int] = {}
     receipts: list[str] = []
     peak_kv_cache_usage = 0.0
+    min_free_blocks: int | None = None
     max_generation_lag = 0
     seen_preemptions: dict[str, int] = {}
+    preemption_events: list[tuple[str, int]] = []
+    steps = 0
+    peer_visible_steps = 0
+    statuses_seen: dict[str, list[str]] = {rid: [] for rid in finish_ids}
+    scheduler_request_ids_last: tuple[str, ...] = ()
+    recent_trace: deque[str] = deque(maxlen=_TRACE_TAIL_STEPS)
+    notable_trace: list[str] = []
+    block_pool = scheduler.kv_cache_manager.block_pool
     while engine.has_unfinished_requests():
         outputs = engine.step()
-        peak_kv_cache_usage = max(peak_kv_cache_usage, scheduler.get_kv_cache_usage())
-        live_lengths = [
-            len(request.output_token_ids)
-            for request in (scheduler.requests.get(rid) for rid in finish_ids)
-            if request is not None
-        ]
-        if len(live_lengths) == len(finish_ids):
+        steps += 1
+        usage = scheduler.get_kv_cache_usage()
+        free_blocks = block_pool.get_num_free_blocks()
+        peak_kv_cache_usage = max(peak_kv_cache_usage, usage)
+        min_free_blocks = (
+            free_blocks
+            if min_free_blocks is None
+            else min(min_free_blocks, free_blocks)
+        )
+        scheduler_request_ids_last = tuple(sorted(scheduler.requests))
+        peers = {rid: scheduler.requests.get(rid) for rid in finish_ids}
+        for request_id, request in peers.items():
+            if request is None:
+                continue
+            status = request.status.name
+            if status not in statuses_seen[request_id]:
+                statuses_seen[request_id].append(status)
+        if all(request is not None for request in peers.values()):
+            peer_visible_steps += 1
+            live_lengths = [
+                len(request.output_token_ids)
+                for request in peers.values()
+                if request is not None
+            ]
             max_generation_lag = max(
                 max_generation_lag, max(live_lengths) - min(live_lengths)
             )
+        record = (
+            f"step {steps}: usage={usage:.3%} free={free_blocks} "
+            f"running={sorted(r.request_id for r in scheduler.running)} "
+            f"waiting={sorted(r.request_id for r in scheduler.waiting)} "
+            + " ".join(f"{rid}=" + _peer_trace(req) for rid, req in peers.items())
+        )
+        recent_trace.append(record)
+        if free_blocks <= _TRACE_FREE_BLOCK_THRESHOLD and len(notable_trace) < (
+            _TRACE_NOTABLE_STEPS
+        ):
+            notable_trace.append(record)
         for output in outputs:
             if output.request_id == seed_id:
                 if output.outputs:
@@ -289,25 +447,33 @@ def _run_survivor_with_peers(
             aborted = True
 
         for request_id in finish_ids:
-            request = scheduler.requests.get(request_id)
+            request = peers[request_id]
             if request is None:
                 continue
             if request.num_preemptions <= seen_preemptions.get(request_id, 0):
                 continue
             seen_preemptions[request_id] = request.num_preemptions
+            generated = len(request.output_token_ids)
+            preemption_events.append((request_id, generated))
             # A request can only be preempted while it is running, so an
             # increment before its finished output was delivered is exactly the
-            # "preempted while active" receipt this gate needs.
+            # "preempted while active" receipt this gate needs. Whether it was
+            # mid-generation is a separate question the gate asks with
+            # `mid_generation_preemption_counts`.
             if request_id not in finished:
                 preempted_while_active[request_id] = (
                     preempted_while_active.get(request_id, 0) + 1
                 )
-            receipts.append(
-                f"{request_id} preempted at {len(request.output_token_ids)} "
+            receipt = (
+                f"step {steps}: {request_id} preempted at {generated} "
                 f"generated tokens of {finish_sampling.max_tokens}; "
+                f"usage={usage:.3%} free={free_blocks}; "
                 f"running={sorted(r.request_id for r in scheduler.running)}, "
                 f"waiting={sorted(r.request_id for r in scheduler.waiting)}"
             )
+            receipts.append(receipt)
+            if len(notable_trace) < _TRACE_NOTABLE_STEPS:
+                notable_trace.append(receipt)
 
     assert injected, "peers never joined the seed mid-stream"
     assert aborted, "the aborting peer was never retired mid-stream"
@@ -318,11 +484,28 @@ def _run_survivor_with_peers(
         finished=finished,
         preempted_while_active=preempted_while_active,
         receipts=receipts,
+        preemption_events=preemption_events,
         peak_kv_cache_usage=peak_kv_cache_usage,
+        min_free_blocks=min_free_blocks,
         max_generation_lag=max_generation_lag,
         final_lengths={
             request_id: len(tokens) for request_id, tokens in finished.items()
         },
+        steps=steps,
+        peer_visible_steps=peer_visible_steps,
+        scheduler_request_ids_last=scheduler_request_ids_last,
+        peer_statuses_seen={
+            request_id: tuple(seen) for request_id, seen in statuses_seen.items()
+        },
+        peer_preemptions_final={
+            request_id: (
+                scheduler.requests[request_id].num_preemptions
+                if request_id in scheduler.requests
+                else seen_preemptions.get(request_id, 0)
+            )
+            for request_id in finish_ids
+        },
+        trace=notable_trace + ["...", *recent_trace],
     )
 
 
@@ -376,7 +559,7 @@ def test_uno_continuous_batching_survivor_matches_solo(
         # Long enough that the peers' generation growth, not their prompt size,
         # is what exhausts the KV budget and forces preemption. With prefix
         # caching disabled, the two long peers cross the 68 allocatable blocks
-        # at 280 generated tokens growing together, and at 536 when one of them
+        # at 279 generated tokens growing together, and at 551 when one of them
         # stalls at its admission footprint -- both below the 640 cap, so a peer
         # cannot finish naturally before the scheduler preempts one whatever
         # their relative acceptance rates are.
@@ -453,6 +636,18 @@ def test_uno_continuous_batching_survivor_matches_solo(
     assert all(prompt_distinctness.values()), (
         "mixed-phase prompts must differ in token content, not only length: "
         f"{prompt_distinctness}"
+    )
+    # The CPU suite checks this geometry from literals because it has no hub;
+    # those literals are only worth anything if they are what the tokenizer
+    # actually produces. An earlier copied value (265 for the finish peers) was
+    # eight tokens off and put the CPU-side crossings 15 tokens below the ones
+    # two GPU receipts printed.
+    assert tuple(prompt_tokens) == SURVIVOR_PROMPT_TOKENS, (
+        "the survivor prompts no longer tokenise to the lengths the CPU suite "
+        f"pins: runtime {tuple(prompt_tokens)} vs SURVIVOR_PROMPT_TOKENS "
+        f"{SURVIVOR_PROMPT_TOKENS} at revision {MODEL_REVISION}. Update the "
+        "literal in uno_kv_budget.py and re-derive the crossings; do not widen "
+        "the pool to accommodate it"
     )
     admission_blocks = mixed_admission_blocks(
         prompt_tokens, shared_prefix_tokens, prefix_cache_enabled=False
@@ -531,27 +726,32 @@ def test_uno_continuous_batching_survivor_matches_solo(
             "_validate_prompt_len raises rather than clamping"
         )
 
-    print(f"survivor prompt token-id distinctness: {prompt_distinctness}")
-    print(
+    geometry_receipt = (
         "survivor KV arithmetic: prefix_cache=False, "
+        f"K={SURVIVOR_NUM_SPECULATIVE_TOKENS}, "
         f"floor_blocks={kv_floor_blocks}, budget_blocks={budget_blocks}, "
         f"pool_blocks={pool_blocks}, admission_blocks={admission_blocks}, "
         f"growth_blocks={growth_blocks}, crossing_tokens={crossing_tokens}, "
         f"worst_case_crossing_tokens={worst_case_crossing}, "
-        f"prompt_tokens={prompt_tokens}, max_tokens={max_tokens}"
+        f"prompt_tokens={prompt_tokens}, max_tokens={max_tokens}, "
+        f"one_free_block_reads={usage_with_free_blocks(budget_blocks, 1):.3%}, "
+        f"distinctness={prompt_distinctness}"
     )
+    print(geometry_receipt)
 
     # The pool is pinned by `num_gpu_blocks_override`, so the memory fraction
     # the engine requests cannot change this test's geometry -- only whether it
     # can start beside another tenant. A box sharing its GPU exports
     # VLLM_UNO_SURVIVOR_GPU_MEMORY_UTILIZATION rather than patching this file.
-    memory_override = os.environ.get("VLLM_UNO_SURVIVOR_GPU_MEMORY_UTILIZATION")
+    memory_utilization = _gpu_memory_utilization_from_env(
+        os.environ.get(_GPU_MEMORY_ENV)
+    )
     memory_options = (
         {}
-        if memory_override is None
-        else {"gpu_memory_utilization": float(memory_override)}
+        if memory_utilization is None
+        else {"gpu_memory_utilization": memory_utilization}
     )
-    print(f"survivor gpu_memory_utilization override: {memory_override}")
+    print(f"survivor gpu_memory_utilization override: {memory_utilization}")
 
     common = dict(
         revision=MODEL_REVISION,
@@ -583,10 +783,32 @@ def test_uno_continuous_batching_survivor_matches_solo(
             "method": "uno",
             "uno_lora_path": uno_adapter_path,
             "uno_mask_token_id": 151669,
-            "num_speculative_tokens": 8,
+            "num_speculative_tokens": SURVIVOR_NUM_SPECULATIVE_TOKENS,
         },
     ) as runner:
         engine = runner.llm.llm_engine
+        # Read the two settings the arithmetic assumes from the engine that was
+        # actually built, rather than trusting the literals passed above: a
+        # platform default or a config validator that flipped either of them
+        # would silently change what the pre-gate means.
+        engine_cache_config = engine.vllm_config.cache_config
+        engine_lookahead = engine.vllm_config.num_lookahead_tokens
+        assert not engine_cache_config.enable_prefix_caching, (
+            "the survivor engine enabled prefix caching, so the peers can share "
+            "decode blocks and the arithmetic above does not describe this run: "
+            f"cache_config.enable_prefix_caching="
+            f"{engine_cache_config.enable_prefix_caching}"
+        )
+        assert engine_lookahead == SURVIVOR_NUM_SPECULATIVE_TOKENS, (
+            "the engine reserves a different lookahead than the resident-block "
+            f"arithmetic assumes: num_lookahead_tokens={engine_lookahead} vs "
+            f"K={SURVIVOR_NUM_SPECULATIVE_TOKENS}"
+        )
+        assert engine_cache_config.num_gpu_blocks_override == budget_blocks, (
+            "the engine did not take the pinned KV pool: "
+            f"num_gpu_blocks_override="
+            f"{engine_cache_config.num_gpu_blocks_override} vs {budget_blocks}"
+        )
         # One uninterrupted baseline per long peer, so whichever peer the
         # scheduler preempts has its own solo result to be compared against.
         solo_ids = {
@@ -613,81 +835,98 @@ def test_uno_continuous_batching_survivor_matches_solo(
         )
         after_metrics = runner.llm.get_metrics()
 
-    for request_id, tokens in mixed.finished.items():
-        print(f"survivor mixed tokens {request_id}={list(tokens)}")
-    for receipt in mixed.receipts:
-        print(f"survivor engagement receipt: {receipt}")
-    print(f"survivor peak KV cache usage: {mixed.peak_kv_cache_usage:.3%}")
-    print(f"survivor prompt token-id distinctness: {prompt_distinctness}")
-    print(
-        f"survivor generation lag: max_generation_lag={mixed.max_generation_lag} "
-        f"tokens, final_lengths={mixed.final_lengths}"
-    )
-    print(
-        f"survivor preempted-while-active counts: {mixed.preempted_while_active} "
-        f"(solo lengths: {[len(ids) for ids in solo_ids.values()]})"
-    )
-
-    # The token-equality gate is only load-bearing for a request that was still
-    # generating when it was preempted. The geometry above makes that event
-    # unavoidable for every interleaving, so a run without it is a FAILURE, not
-    # a skip: either the pre-gate arithmetic no longer matches the engine's
-    # allocator, or the resume path is not being reached (checklist rows 2, 29).
-    #
-    # Note that a peak below 100% is not evidence the pool never filled: the
-    # step that takes the last block is the same step whose next allocation
-    # fails and frees the victim's blocks, so the per-step sample can top out
-    # one block short (98.750% of a 69-block pool is 79 of 80). Read
-    # `receipts` and `max_generation_lag`, not the peak.
-    assert mixed.preempted_while_active, (
-        "no finish peer was preempted while still generating, so the resume "
-        "path was not exercised. The geometry asserts this cannot happen: "
-        f"pool_blocks={pool_blocks}, growth_blocks={growth_blocks}, "
-        f"worst_case_crossing_tokens={worst_case_crossing} < "
-        f"cap {finish_sampling.max_tokens}. Receipt: "
-        f"peak_kv_cache_usage={mixed.peak_kv_cache_usage:.3%}; "
-        f"max_generation_lag={mixed.max_generation_lag}; "
-        f"final_lengths={mixed.final_lengths}; "
-        f"prompt_token_id_distinctness={prompt_distinctness}; "
-        f"receipts={mixed.receipts}"
-    )
-
-    for request_id, count in mixed.preempted_while_active.items():
-        assert count >= 1, (request_id, count)
-        assert mixed.finished[request_id] == solo_ids[request_id], (
-            f"preemption/resume changed {request_id}'s tokens: "
-            f"solo={list(solo_ids[request_id])}, "
-            f"mixed={list(mixed.finished[request_id])}"
-        )
-
+    # The engine's own counters are a channel that does not depend on this
+    # test's scheduler navigation, so they are read BEFORE the gate and carried
+    # in the receipt. `vllm:num_preemptions` counts scheduler iterations;
+    # `vllm:request_num_preemptions` is observed in
+    # `IterationStats.update_from_finished_request` ->
+    # `FinishedRequestStats.num_preemptions` (`vllm/v1/metrics/loggers.py`), so
+    # its sum is only positive when a preempted request was recomputed to a
+    # natural finish rather than merely aborted.
     drafts = _counter_total(
         after_metrics, "vllm:spec_decode_num_drafts"
     ) - _counter_total(before_metrics, "vllm:spec_decode_num_drafts")
     preemptions = _counter_total(
         after_metrics, "vllm:num_preemptions"
     ) - _counter_total(before_metrics, "vllm:num_preemptions")
-    # Second, independent signal that the gate cannot pass vacuously:
-    # `vllm:num_preemptions` counts scheduler iterations, while this histogram is
-    # observed in `IterationStats.update_from_finished_request` ->
-    # `FinishedRequestStats.num_preemptions` (`vllm/v1/metrics/loggers.py`), so
-    # `sum > 0` only when a request was preempted and then recomputed to a
-    # natural finish rather than merely aborted.
     finished_preemptions = _histogram_total(
         after_metrics, "vllm:request_num_preemptions"
     ) - _histogram_total(before_metrics, "vllm:request_num_preemptions")
-    print(
-        f"survivor mixed-phase deltas: drafts={drafts}, preemptions={preemptions}, "
-        f"finished_preemptions={finished_preemptions}"
+    metrics_receipt = (
+        f"engine: prefix_caching={engine_cache_config.enable_prefix_caching}, "
+        f"lookahead={engine_lookahead}, "
+        f"num_gpu_blocks_override={engine_cache_config.num_gpu_blocks_override}; "
+        f"engine deltas: drafts={drafts}, preemptions={preemptions}, "
+        f"finished_preemptions={finished_preemptions}; "
+        f"solo_lengths={[len(ids) for ids in solo_ids.values()]}"
     )
-    assert drafts > 0, "Uno did not draft during the mixed phase"
-    assert preemptions > 0, (
-        "the mixed phase did not preempt/recompute despite the derived KV "
-        f"budget (preemptions={preemptions})"
+    mid_generation = mid_generation_preemption_counts(mixed.preemption_events)
+    receipt = _render_receipt(mixed, geometry_receipt, metrics_receipt)
+    print(receipt)
+    receipt_path = os.environ.get(_RECEIPT_ENV)
+    if receipt_path:
+        # A forked child cannot print into the run log, so a box that wants the
+        # receipt as evidence asks for it as a file.
+        Path(receipt_path).write_text(receipt, encoding="utf-8")
+
+    # 1. The per-request channel must have seen something. A zero here means
+    #    the gate was polling an empty channel and every other count below is
+    #    meaningless, which is a test defect, not an engine verdict.
+    assert mixed.peer_visible_steps > 0, (
+        "the scheduler receipt channel never resolved either finish peer, so "
+        "no preemption could have been observed whatever the engine did: "
+        f"steps={mixed.steps}, peer_visible_steps=0, ids at the last step "
+        f"{list(mixed.scheduler_request_ids_last)} do not contain "
+        f"{sorted(mixed.final_lengths)}.\n{receipt}"
     )
+    # 2. The pool must actually have been exhausted. If it never filled, the
+    #    geometry (not the resume path) is what failed, and the receipt's free
+    #    block count says by how much.
+    assert mixed.min_free_blocks == 0, (
+        "the KV pool never ran out during the mixed phase, so the scheduler "
+        "was never asked to preempt: the fullest step still had "
+        f"{mixed.min_free_blocks} of {pool_blocks} blocks free "
+        f"(peak {mixed.peak_kv_cache_usage:.3%}). Re-derive the geometry; do "
+        f"not relax the gate.\n{receipt}"
+    )
+    # 3. The engine's counter and this test's per-request receipt must agree.
+    #    Disagreement is the failure that produced two unreadable GPU runs: the
+    #    pool filled, the engine preempted, and the receipt stayed empty.
+    assert (preemptions > 0) == bool(mixed.preemption_events), (
+        "the engine's preemption counter and the per-request receipt disagree, "
+        f"so the receipt channel is unreliable: vllm:num_preemptions delta "
+        f"{preemptions} vs observed events {mixed.preemption_events}.\n{receipt}"
+    )
+    # 4. Some long peer must have been preempted, and preempted while it was
+    #    generating: a preemption during a peer's chunked prefill recomputes a
+    #    prefill, which is not the resume path this gate protects.
+    assert mixed.preempted_while_active, (
+        "no finish peer was preempted while still unfinished, so the resume "
+        "path was not exercised. The geometry asserts this cannot happen: "
+        f"pool_blocks={pool_blocks}, growth_blocks={growth_blocks}, "
+        f"worst_case_crossing_tokens={worst_case_crossing} < "
+        f"cap {finish_sampling.max_tokens}.\n{receipt}"
+    )
+    assert mid_generation, (
+        "every observed long-peer preemption happened at zero generated "
+        "tokens, i.e. during its chunked prefill, so the gate below would "
+        "compare tokens that no resume-from-generation produced: "
+        f"events={mixed.preemption_events}.\n{receipt}"
+    )
+    # 5. The correctness claim itself.
+    for request_id, count in mid_generation.items():
+        assert count >= 1, (request_id, count)
+        assert mixed.finished[request_id] == solo_ids[request_id], (
+            f"preemption/resume changed {request_id}'s tokens: "
+            f"solo={list(solo_ids[request_id])}, "
+            f"mixed={list(mixed.finished[request_id])}"
+        )
+    # 6. Uno drafted, and a preempted request reached a natural finish.
+    assert drafts > 0, f"Uno did not draft during the mixed phase\n{receipt}"
     assert finished_preemptions > 0, (
         "no preempted request was recomputed to a finished state "
         f"(vllm:request_num_preemptions delta={finished_preemptions}); the "
-        "mixed phase produced no surviving recompute"
+        f"mixed phase produced no surviving recompute\n{receipt}"
     )
 
 

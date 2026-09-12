@@ -31,10 +31,11 @@ from vllm.v1.request import Request, RequestStatus
 
 pytestmark = pytest.mark.cpu_test
 
-# K for every scheduler in this module. Uno reserves K lookahead slots per
-# running request, which is what makes its block accounting differ from plain
-# autoregressive decoding.
-NUM_SPECULATIVE_TOKENS = 8
+# K for every scheduler in this module, read from the same constant the e2e
+# passes to `speculative_config` and the resident-block arithmetic reserves, so
+# a K change cannot leave the twin and the pre-gate describing different
+# engines.
+NUM_SPECULATIVE_TOKENS = budget.SURVIVOR_NUM_SPECULATIVE_TOKENS
 
 
 @pytest.fixture
@@ -139,6 +140,33 @@ def _held_blocks(scheduler, request_id: str) -> int:
     return len(scheduler.kv_cache_manager.get_block_ids(request_id)[0])
 
 
+def _apply_output(scheduler, scheduler_output, accepted_per_request: dict[str, int]):
+    """Feed one already-scheduled batch back, sampling per request."""
+    request_ids = list(scheduler_output.num_scheduled_tokens)
+    sampled: list[list[int]] = []
+    for request_id in request_ids:
+        request = scheduler.requests.get(request_id)
+        if request is None or request.is_prefill_chunk:
+            sampled.append([])
+            continue
+        drafts = scheduler_output.scheduled_spec_decode_tokens.get(request_id, ())
+        accepted = min(accepted_per_request.get(request_id, 0), len(drafts))
+        sampled.append(_sample_tokens(request, accepted + 1))
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=request_ids,
+            req_id_to_index={
+                request_id: index for index, request_id in enumerate(request_ids)
+            },
+            sampled_token_ids=sampled,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+
 def test_uno_running_request_is_preempted_when_slots_run_out(uno_scheduler):
     """The production allocate_slots failure preempts, and Uno state survives.
 
@@ -210,6 +238,99 @@ def test_uno_running_request_is_preempted_when_slots_run_out(uno_scheduler):
         expected_resume_tokens, 64
     ), resumed.num_scheduled_tokens
     assert list(victim.output_token_ids)[: len(kept_tokens)] == kept_tokens
+
+
+@pytest.mark.parametrize("in_flight", [False, True])
+def test_uno_preemption_drains_in_flight_output(uno_scheduler, in_flight):
+    """A preemption with a batch still in flight drains its stale share.
+
+    The engine schedules the next step before the previous step's output comes
+    back, so a request can be preempted while it still has tokens in flight.
+    ``_preempt_request`` then parks that share in ``num_stale_output_tokens``
+    and ``update_from_output`` drains it in lockstep, guarding the async
+    placeholder accounting. A synchronous schedule/apply loop never reaches
+    that path: with ``in_flight=False`` the stale share at preemption is zero,
+    which is exactly what this case asserts, so the parameterisation is its own
+    inverted control.
+    """
+    scheduler = uno_scheduler(num_blocks=9, max_num_seqs=2, max_num_batched_tokens=64)
+    requests = create_requests(
+        num_requests=2,
+        num_tokens=16,
+        max_tokens=512,
+        ignore_eos=True,
+        block_size=budget.BLOCK_SIZE,
+        req_ids=["uno-lead", "uno-victim"],
+    )
+    for request in requests:
+        scheduler.add_request(request)
+    victim = scheduler.requests["uno-victim"]
+
+    pending: list = []
+    stale_at_preemption: int | None = None
+    in_flight_at_preemption: int | None = None
+    for _ in range(64):
+        scheduler_output = scheduler.schedule()
+        pending.append(scheduler_output)
+        if victim.num_preemptions and stale_at_preemption is None:
+            stale_at_preemption = victim.num_stale_output_tokens
+            in_flight_at_preemption = victim.num_in_flight_tokens
+        # With in_flight, keep one batch outstanding while the next is
+        # scheduled, which is what makes a preemption land on a request that
+        # still has tokens in flight.
+        if in_flight and len(pending) < 2 and not victim.num_preemptions:
+            continue
+        _apply_output(scheduler, pending.pop(0), {})
+        if victim.num_preemptions:
+            break
+    assert victim.num_preemptions == 1, (
+        f"the victim was never preempted: free="
+        f"{scheduler.kv_cache_manager.block_pool.get_num_free_blocks()}"
+    )
+    assert stale_at_preemption is not None
+
+    if in_flight:
+        assert in_flight_at_preemption and in_flight_at_preemption > 0, (
+            "no batch was in flight at the preemption, so the drain was not "
+            f"exercised: num_in_flight_tokens={in_flight_at_preemption}"
+        )
+        assert stale_at_preemption == in_flight_at_preemption, (
+            "the preemption did not park the in-flight share: "
+            f"stale={stale_at_preemption} vs in_flight={in_flight_at_preemption}"
+        )
+        # Drain every outstanding batch; the stale share must go to zero
+        # without the placeholder accounting underflowing.
+        while pending:
+            _apply_output(scheduler, pending.pop(0), {})
+        assert victim.num_stale_output_tokens == 0, (
+            "the stale output share was not drained: "
+            f"{victim.num_stale_output_tokens} left"
+        )
+        assert victim.num_output_placeholders == 0
+    else:
+        assert stale_at_preemption == 0, (
+            "a synchronous driver should leave nothing in flight at the "
+            f"preemption, but parked {stale_at_preemption} tokens"
+        )
+
+
+def test_mid_generation_predicate_rejects_prefill_preemptions():
+    """A preemption at zero generated tokens must not satisfy the gate.
+
+    A request preempted while its prompt is still being chunked recomputes a
+    prefill; the survivor claim is about a request that had already generated.
+    The e2e counts its observed preemptions through this predicate, so the two
+    cases are distinguished by one function both sides read.
+    """
+    counts = budget.mid_generation_preemption_counts(
+        [("uno-finish-peer-0", 0), ("uno-finish-peer-1", 0)]
+    )
+    assert counts == {}, counts
+
+    counts = budget.mid_generation_preemption_counts(
+        [("uno-finish-peer-0", 0), ("uno-finish-peer-0", 37), ("x", 1)]
+    )
+    assert counts == {"uno-finish-peer-0": 1, "x": 1}, counts
 
 
 def _victim_pair(cap: int) -> list[Request]:
@@ -292,9 +413,9 @@ def test_uno_survivor_geometry_forces_preemption_for_any_acceptance(
 ):
     """The e2e survivor geometry must preempt a long peer at any rate ratio.
 
-    Prompt lengths are the pinned Qwen3-8B tokenisations the e2e prints
-    (seed 171, finish peers 265, abort peer 249); the pool, caps and
-    ``max_model_len`` come from ``uno_kv_budget``. The abort peer is retired
+    Prompt lengths, pool, caps and ``max_model_len`` all come from
+    ``uno_kv_budget``, so this replay and the e2e pre-gate cannot describe
+    different engines. The abort peer is retired
     after two tokens and the seed finishes early, exactly as in the e2e, so the
     only requests left to preempt are the two long peers.
     """
@@ -306,11 +427,12 @@ def test_uno_survivor_geometry_forces_preemption_for_any_acceptance(
         max_num_batched_tokens=256,
     )
     cap = budget.SURVIVOR_FINISH_MAX_TOKENS
+    seed_prompt, peer_prompt, _, abort_prompt = budget.SURVIVOR_PROMPT_TOKENS
     specs = (
-        ("uno-seed", 171, 96),
-        ("uno-finish-peer-0", 265, cap),
-        ("uno-finish-peer-1", 265, cap),
-        ("uno-abort-peer", 249, 64),
+        ("uno-seed", seed_prompt, 96),
+        ("uno-finish-peer-0", peer_prompt, cap),
+        ("uno-finish-peer-1", peer_prompt, cap),
+        ("uno-abort-peer", abort_prompt, 64),
     )
     requests = {}
     for request_id, prompt_tokens, max_tokens in specs:

@@ -44,19 +44,31 @@ SURVIVOR_MAX_MODEL_LEN = 1024
 # and the gate never fired.
 SURVIVOR_KV_HEADROOM_BLOCKS = 4
 
-# Uno reserves `num_speculative_tokens` KV slots past the scheduled query rows
-# (`VllmConfig.num_lookahead_tokens`), so a running request holds one block more
-# than its committed tokens imply. The survivor engine pins K=8.
-SURVIVOR_LOOKAHEAD_TOKENS = 8
+# K for the survivor engine. This is the ONE source: the e2e passes it to
+# `speculative_config`, the CPU twin builds its scheduler with it, and the
+# resident-block arithmetic below reserves it. Uno's `num_lookahead_tokens` is
+# exactly K (`VllmConfig.num_lookahead_tokens`), so a running request holds
+# slots for its committed tokens plus one sampled token plus K.
+SURVIVOR_NUM_SPECULATIVE_TOKENS = 8
 
 # Prefix caching is disabled in the survivor test. The finish peers therefore
 # keep generating until their resident sets grow past the 68 allocatable
-# blocks. Growing together they cross at 280 generated tokens; with one peer
-# stalled at its admission footprint the leader crosses at 536. A 640-token cap
-# leaves at least six block-groups of margin in the worst case, so no peer can
-# finish before the scheduler has to preempt one. The abort peer is retired
-# after two tokens and holds only its own prompt blocks while it runs.
+# blocks. Growing together they cross at 288 generated tokens; with one peer
+# stalled at its admission footprint the leader crosses at 560. A 640-token cap
+# leaves five block-groups of margin in the worst case, so no peer can finish
+# before the scheduler has to preempt one. The abort peer is retired after two
+# tokens and holds only its own prompt blocks while it runs.
 SURVIVOR_FINISH_MAX_TOKENS = 640
+
+# Prompt lengths the survivor e2e tokenises at MODEL_REVISION. The e2e measures
+# them at runtime and prints them; these literals exist so the CPU suite can
+# check the geometry without the hub, and they are only allowed to be what a
+# GPU receipt shows. The finish peers are 257 -- eight tokens more than the
+# abort peer, which is the per-repeat cost of the two-word peer tag against the
+# one-word abort tag, proved by the contract16 (GB10) and r3 (Ampere) receipts,
+# which both print `worst_case_crossing_tokens=544` and `growth_blocks=151`.
+# The earlier 265 was a copied literal that no receipt ever supported.
+SURVIVOR_PROMPT_TOKENS = (171, 257, 257, 249)
 
 # The K-matrix engine keeps upstream's 4096 context on a 2 GiB budget, far above
 # its 257-block floor.
@@ -110,12 +122,24 @@ def allocatable_blocks(budget_blocks: int) -> int:
 
     ``BlockPool`` pops one block off the free queue as the null block, and
     ``get_usage`` divides by ``num_gpu_blocks - 1``. A pool pinned with
-    ``num_gpu_blocks_override=69`` therefore hands out 68 blocks, and a reported
-    usage of 98.750% is 79 of 80 blocks, not 80 of 81. Every survivor
-    inequality is stated against this number so the printed receipt and the
-    arithmetic share one denominator.
+    ``num_gpu_blocks_override=69`` therefore hands out 68 blocks, so one free
+    block reads as ``1 - 1/68`` = 98.529% and a full pool reads 100.000%. (On
+    the historical 81-block geometry the same one-free-block state read
+    98.750%, which is 79 of 80; that number belongs to that geometry only.)
+    Every survivor inequality is stated against this count so the receipt and
+    the arithmetic share one denominator.
     """
     return budget_blocks - 1
+
+
+def usage_with_free_blocks(budget_blocks: int, free_blocks: int) -> float:
+    """The occupancy ``get_kv_cache_usage`` reports for ``free_blocks`` free.
+
+    Lets a receipt say what a printed percentage means in blocks for the pool
+    actually pinned, instead of quoting a percentage from another geometry.
+    """
+    pool = allocatable_blocks(budget_blocks)
+    return 1.0 - (free_blocks / pool)
 
 
 def blocks_for_tokens(tokens: int) -> int:
@@ -123,15 +147,36 @@ def blocks_for_tokens(tokens: int) -> int:
     return cdiv(tokens, BLOCK_SIZE)
 
 
-def min_resident_blocks(prompt_tokens: int) -> int:
+def resident_blocks(
+    prompt_tokens: int,
+    generated_tokens: int,
+    num_speculative_tokens: int = SURVIVOR_NUM_SPECULATIVE_TOKENS,
+) -> int:
+    """Blocks a running request holds after ``generated_tokens`` tokens.
+
+    ``allocate_slots`` reserves ``num_computed + num_new + num_lookahead``
+    slots, and for Uno ``num_lookahead_tokens`` is K exactly, so the request
+    holds its committed tokens plus the sampled token plus K, rounded up to
+    blocks. Deriving it from K rather than a bare ``+1`` is what keeps the
+    pre-gate honest when K changes: at K=1 a 257-token prompt holds 17 blocks,
+    at K=8 it holds 17, and at K=16 it holds 18.
+    """
+    return blocks_for_tokens(
+        prompt_tokens + generated_tokens + 1 + num_speculative_tokens
+    )
+
+
+def min_resident_blocks(
+    prompt_tokens: int,
+    num_speculative_tokens: int = SURVIVOR_NUM_SPECULATIVE_TOKENS,
+) -> int:
     """Blocks an admitted request holds before it has generated anything.
 
-    Its rounded prompt plus one block for the first decode step (which is also
-    what the Uno lookahead reservation rounds into for these prompt lengths).
     A request that is merely lagging, rather than preempted or finished, never
-    holds less than this while it is running.
+    holds less than this while it is running, which is what the worst-case
+    crossing charges the slower peer.
     """
-    return blocks_for_tokens(prompt_tokens) + 1
+    return resident_blocks(prompt_tokens, 0, num_speculative_tokens)
 
 
 def prompt_token_ids_are_pairwise_content_distinct(
@@ -164,7 +209,7 @@ def mixed_admission_blocks(
     in the queue instead of triggering preemption.
     """
     if not prefix_cache_enabled:
-        return sum(blocks_for_tokens(tokens) + 1 for tokens in prompt_tokens)
+        return sum(min_resident_blocks(tokens) for tokens in prompt_tokens)
 
     prefix_blocks = blocks_for_tokens(shared_prefix_tokens)
     unique = sum(
@@ -191,7 +236,7 @@ def mixed_growth_blocks(
     """
     if not prefix_cache_enabled:
         return sum(
-            blocks_for_tokens(prompt + cap)
+            resident_blocks(prompt, cap)
             for prompt, cap in zip(prompt_tokens, max_tokens)
         )
 
@@ -202,10 +247,29 @@ def mixed_growth_blocks(
     )
 
 
+def mid_generation_preemption_counts(
+    events: Sequence[tuple[str, int]],
+) -> dict[str, int]:
+    """Count only the preemptions that interrupted a request mid-generation.
+
+    ``events`` are ``(request_id, generated_tokens_at_preemption)`` pairs. A
+    request preempted while its prompt is still being chunked has produced no
+    tokens, and its recompute re-runs a prefill the gate is not about: only a
+    preemption at one or more generated tokens exercises the resume path the
+    survivor claim covers.
+    """
+    counts: dict[str, int] = {}
+    for request_id, generated_tokens in events:
+        if generated_tokens > 0:
+            counts[request_id] = counts.get(request_id, 0) + 1
+    return counts
+
+
 def worst_case_crossing_tokens(
     peer_prompt_tokens: int,
     other_peer_prompt_tokens: Sequence[int],
     allocatable: int,
+    num_speculative_tokens: int = SURVIVOR_NUM_SPECULATIVE_TOKENS,
 ) -> int:
     """Generated tokens at which ONE peer alone must outgrow the pool.
 
@@ -219,10 +283,14 @@ def worst_case_crossing_tokens(
     scheduler must preempt for every interleaving rather than for the lucky
     ones.
     """
-    held = sum(min_resident_blocks(tokens) for tokens in other_peer_prompt_tokens)
+    held = sum(
+        min_resident_blocks(tokens, num_speculative_tokens)
+        for tokens in other_peer_prompt_tokens
+    )
     tokens = 0
     while True:
-        if blocks_for_tokens(peer_prompt_tokens + tokens) + held > allocatable:
+        leader = resident_blocks(peer_prompt_tokens, tokens, num_speculative_tokens)
+        if leader + held > allocatable:
             return tokens
         tokens += 1
 
@@ -252,9 +320,9 @@ def mixed_crossing_tokens(
             unique = max(
                 0, blocks_for_tokens(peer_prompt_tokens + tokens) - prefix_blocks
             )
-            resident_blocks = prefix_blocks + 2 * unique
+            resident = prefix_blocks + 2 * unique
         else:
-            resident_blocks = 2 * blocks_for_tokens(peer_prompt_tokens + tokens)
-        if resident_blocks > capacity_blocks:
+            resident = 2 * resident_blocks(peer_prompt_tokens, tokens)
+        if resident > capacity_blocks:
             return tokens
         tokens += 1
