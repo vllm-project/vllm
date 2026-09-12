@@ -172,7 +172,7 @@ def response_input_to_harmony(
         elif isinstance(content, str):
             msg = Message.from_role_and_content(role, content)
         else:
-            contents = [TextContent(text=c.get("text", "")) for c in content]
+            contents = [TextContent(text=text_from_content_part(c)) for c in content]
             msg = Message.from_role_and_contents(role, contents)
         if role == "assistant":
             msg = msg.with_channel("final")
