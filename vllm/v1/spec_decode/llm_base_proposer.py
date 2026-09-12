@@ -1292,6 +1292,18 @@ class SpecDecodeBaseProposer:
 
         return base
 
+    @property
+    def draft_vllm_config(self) -> VllmConfig:
+        if hasattr(self, "_draft_vllm_config"):
+            return self._draft_vllm_config
+        if (
+            getattr(self, "vllm_config", None) is not None
+            and getattr(self, "speculative_config", None) is not None
+        ):
+            self._draft_vllm_config = self._create_draft_vllm_config()
+            return self._draft_vllm_config
+        return getattr(self, "vllm_config", None)
+
     def _get_model(self) -> nn.Module:
         """
         Default method to call get_model(). Can be overridden by subclasses which
@@ -1299,10 +1311,9 @@ class SpecDecodeBaseProposer:
         """
         from vllm.compilation.backends import set_model_tag
 
-        draft_vllm_config = self._create_draft_vllm_config()
         with set_model_tag("eagle_head"):
             model = get_model(
-                vllm_config=draft_vllm_config,
+                vllm_config=self.draft_vllm_config,
                 model_config=self.speculative_config.draft_model_config,
                 load_config=self.speculative_config.draft_load_config,
             )
@@ -1753,7 +1764,7 @@ class SpecDecodeBaseProposer:
                         kv_cache_group_id=self.kv_cache_gid,
                     )
                     attn_group.create_metadata_builders(
-                        self.vllm_config,
+                        self.draft_vllm_config,
                         self.device,
                         kernel_block_size=kernel_block_size,
                     )
