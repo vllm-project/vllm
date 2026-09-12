@@ -802,7 +802,8 @@ mod tests {
     #[file_serial(hf_qwen3)]
     async fn lower_text_request_uses_real_qwen_generation_defaults() {
         let model_id = "Qwen/Qwen3-0.6B";
-        let files = ResolvedModelFiles::new(model_id).await.expect("resolve qwen model files");
+        let files =
+            ResolvedModelFiles::new(model_id, None).await.expect("resolve qwen model files");
         let backend = HfTextBackend::from_resolved_model_files(
             files,
             model_id.to_string(),
