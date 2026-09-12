@@ -282,6 +282,51 @@ def fold_consecutive_reshapes(gm: fx.GraphModule) -> None:
         gm.graph.erase_node(inp)
 
 
+def normalize_single_dynamic_dim_reshapes(graph: fx.Graph) -> int:
+    """Rewrite reshape shape lists like ``[sym, 4096]`` to ``[-1, 4096]``.
+
+    Inductor registers replacement patterns with Python lists and ints ignored,
+    so a pattern reshape often fingerprints as ``reshape(x, Ignored())`` while
+    the live graph fingerprints as ``reshape(x, [sym, 4096])``.  When the shape
+    list has exactly one symbolic dimension and every other entry is a concrete
+    non-``-1`` integer, replacing that symbolic entry with ``-1`` preserves
+    reshape semantics and produces a more canonical graph for matching.
+    """
+
+    def is_symbolic_dim(dim: object) -> bool:
+        if isinstance(dim, torch.SymInt):
+            return True
+        if not isinstance(dim, fx.Node):
+            return False
+        val = dim.meta.get("val")
+        return isinstance(val, torch.SymInt)
+
+    count = 0
+    aten_reshape = torch.ops.aten.reshape.default
+    for node in graph.nodes:
+        if not is_func(node, aten_reshape):
+            continue
+        if len(node.args) < 2 or not isinstance(node.args[1], list):
+            continue
+
+        shape = node.args[1]
+        if any(dim == -1 for dim in shape if isinstance(dim, int)):
+            continue
+
+        symbolic_indices = [i for i, dim in enumerate(shape) if is_symbolic_dim(dim)]
+        if len(symbolic_indices) != 1:
+            continue
+        if any(not isinstance(dim, int) and not is_symbolic_dim(dim) for dim in shape):
+            continue
+
+        normalized_shape = list(shape)
+        normalized_shape[symbolic_indices[0]] = -1
+        node.update_arg(1, normalized_shape)
+        count += 1
+
+    return count
+
+
 def _remove_noop_permutes(gm: fx.GraphModule) -> None:
     for node in gm.graph.nodes:
         if not is_func(node, torch.ops.aten.permute.default):
