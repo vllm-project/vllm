@@ -256,7 +256,16 @@ class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [64 if current_platform.is_device_capability_family(90) else 128]
+        # Support SM90 (Hopper), SM120/GB10, and SM121 (Blackwell variants).
+        # DeepGEMM requires block_size 64 for ratio-1 layers on these
+        # architectures.
+        if (
+            current_platform.is_device_capability_family(90)
+            or current_platform.is_device_capability_family(120)
+            or current_platform.is_device_capability_family(121)
+        ):
+            return [64]
+        return [128]
 
 
 @dataclass
@@ -779,21 +788,19 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 f"(compress_ratio={self.compress_ratio})."
             )
 
-        # Pre-allocate buffers for CUDA graph compatibility when
-        if self.compress_ratio > 1:
-            # compress_ratio > 1 (DeepseekV4)
-            # Compressed slot mapping output buffer
-            self.compressed_slot_mapping_buffer = torch.zeros(
-                (scheduler_config.max_num_batched_tokens,),
-                dtype=torch.int64,
-                device=self.device,
-            )
-            # Buffer for compressed seq_lens in decode path
-            self.expanded_seq_lens_buffer = torch.zeros(
-                (scheduler_config.max_num_batched_tokens,),
-                dtype=torch.int32,
-                device=self.device,
-            )
+        # Pre-allocate buffers for CUDA graph compatibility. The logical kernel
+        # page size is selected after builder construction, so ratio-1 layers
+        # can also need the remapped slot buffer.
+        self.compressed_slot_mapping_buffer = torch.zeros(
+            (scheduler_config.max_num_batched_tokens,),
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self.expanded_seq_lens_buffer = torch.zeros(
+            (scheduler_config.max_num_batched_tokens,),
+            dtype=torch.int32,
+            device=self.device,
+        )
         self.indexer_decode_block_table_buffer: torch.Tensor | None = None
         self._max_num_batched_tokens = scheduler_config.max_num_batched_tokens
 
@@ -1046,15 +1053,22 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         compressed_slot_mapping = slot_mapping
         compressed_seq_lens = seq_lens
         indexer_block_table = block_table
-        if self.compress_ratio > 1:
-            kernel_block_size = self.kernel_block_size
-            if (
-                kernel_block_size is not None
-                and self.kv_cache_spec.block_size != kernel_block_size
-                and self.kv_cache_spec.block_size % kernel_block_size == 0
-            ):
-                factor = self.kv_cache_spec.block_size // kernel_block_size
-                indexer_block_table = (block_table[:, ::factor] // factor).contiguous()
+        kernel_block_size = self.kernel_block_size or self.kv_cache_spec.block_size
+        if self.kv_cache_spec.block_size % kernel_block_size != 0:
+            raise ValueError(
+                "Indexer kernel block size must divide the storage block size: "
+                f"storage={self.kv_cache_spec.block_size}, "
+                f"kernel={kernel_block_size}."
+            )
+        block_factor = self.kv_cache_spec.block_size // kernel_block_size
+        if block_factor > 1:
+            # Split storage pages into the smaller logical pages required by the
+            # indexer kernel. This is needed for ratio-1 layers on SM12x too.
+            indexer_block_table = (
+                block_table[:, ::block_factor] // block_factor
+            ).contiguous()
+
+        if self.compress_ratio > 1 or block_factor > 1:
             padded_num_tokens = num_tokens
             if self.pcp_world_size > 1:
                 padded_num_tokens = slot_mapping.shape[0] // self.pcp_world_size
@@ -1063,7 +1077,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 query_start_loc,
                 seq_lens,
                 indexer_block_table,
-                self.kv_cache_spec.num_states,
+                kernel_block_size // self.compress_ratio,
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
             )
@@ -1246,26 +1260,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     )
                 )
 
-            if self.compress_ratio > 1:
-                kernel_block_size = self.kernel_block_size
-                if (
-                    kernel_block_size is not None
-                    and self.kv_cache_spec.block_size != kernel_block_size
-                    and self.kv_cache_spec.block_size % kernel_block_size == 0
-                ):
-                    factor = self.kv_cache_spec.block_size // kernel_block_size
-                    compressed = block_table[:, ::factor] // factor
-                    rows, cols = compressed.shape
-                    if self.indexer_decode_block_table_buffer is None:
-                        self.indexer_decode_block_table_buffer = torch.zeros(
-                            (self._max_num_batched_tokens, cols),
-                            dtype=torch.int32,
-                            device=self.device,
-                        )
-                    self.indexer_decode_block_table_buffer[:rows, :cols].copy_(
-                        compressed
+            if block_factor > 1:
+                compressed = block_table[:, ::block_factor] // block_factor
+                rows, cols = compressed.shape
+                if self.indexer_decode_block_table_buffer is None:
+                    self.indexer_decode_block_table_buffer = torch.zeros(
+                        (self._max_num_batched_tokens, cols),
+                        dtype=torch.int32,
+                        device=self.device,
                     )
-                    block_table = self.indexer_decode_block_table_buffer[:rows, :cols]
+                self.indexer_decode_block_table_buffer[:rows, :cols].copy_(compressed)
+                block_table = self.indexer_decode_block_table_buffer[:rows, :cols]
 
             # Flattening always returns a buffer view, including single-token
             # batches. Keep its address stable across varlen graph replays.
@@ -1303,7 +1308,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if current_platform.is_cuda() and has_deep_gemm():
                 metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
-                    self.kv_cache_spec.num_states,
+                    kernel_block_size // self.compress_ratio,
                     self.num_sms,
                     indices=decode_indices,
                 )

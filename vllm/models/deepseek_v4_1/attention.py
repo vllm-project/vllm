@@ -51,6 +51,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v4_1.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v4_1.compressor import DeepseekCompressor
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
@@ -446,6 +447,17 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self._uses_fp8_ds_mla_layout(), cache_config.cache_dtype, cache_config
         )
 
+        # Determine block_size based on GPU architecture for SM120/121 support.
+        # Defaults to 32 if platform info is unavailable (e.g., non-GPU CI).
+        try:
+            is_sm120_or_sm121 = current_platform.is_device_capability_family(
+                120
+            ) or current_platform.is_device_capability_family(121)
+            swa_block_size = 64 if is_sm120_or_sm121 else 32
+        except (AttributeError, RuntimeError):
+            # Fallback for non-GPU environments or when platform is unavailable
+            swa_block_size = 32
+
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -453,7 +465,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
             backend_cls=self.swa_backend_cls,
-            block_size=32,
+            block_size=swa_block_size,
         )
 
         # The attention layer itself was already registered with the
