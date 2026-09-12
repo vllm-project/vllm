@@ -119,7 +119,10 @@ class Base(
     embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
-        nn.Module.__init__(self)
+        if TYPE_CHECKING:
+            nn.Module.__init__(self)
+        else:
+            super().__init__()
         logger.info("Using Transformers modeling backend.")
 
         self.vllm_config = vllm_config
