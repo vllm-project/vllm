@@ -393,6 +393,8 @@ void fused_kda_decode(
 #endif
 
 #ifdef VLLM_ENABLE_FUSED_GDN_DECODE
+bool fused_gdn_decode_kernel_available();
+
 void fused_gdn_decode_post_conv_mtp(
     torch::stable::Tensor const& mixed_qkv, torch::stable::Tensor const& a,
     torch::stable::Tensor const& b, torch::stable::Tensor const& a_log,
