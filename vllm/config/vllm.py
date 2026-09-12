@@ -2583,6 +2583,14 @@ class VllmConfig:
         path = self.compilation_config.debug_dump_path / append_path
         return path
 
+    def kv_cache_dtype_str(self) -> str:
+        """Resolves `auto` to the actual dtype used.
+        """
+        cache_dtype = self.cache_config.cache_dtype
+        if cache_dtype != "auto":
+            return cache_dtype
+        return f"auto ({self.model_config.dtype})"
+
     def __str__(self):
         return (
             f"model={self.model_config.model!r}, "
@@ -2607,7 +2615,7 @@ class VllmConfig:
             f"quantization_config={self.model_config.quantization_config}, "  # noqa
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"enable_return_routed_experts={self.model_config.enable_return_routed_experts}, "  # noqa
-            f"kv_cache_dtype={self.cache_config.cache_dtype}, "
+            f"kv_cache_dtype={self.kv_cache_dtype_str()}, "
             f"device_config={self.device_config.device}, "
             f"structured_outputs_config={self.structured_outputs_config!r}, "
             f"observability_config={self.observability_config!r}, "
