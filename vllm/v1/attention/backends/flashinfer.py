@@ -1275,6 +1275,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         return decode_wrapper
 
+    @staticmethod
+    def _is_uniform_query_batch(common_attn_metadata: CommonAttentionMetadata) -> bool:
+        num_reqs = common_attn_metadata.num_reqs
+        qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
+        q_lens = qo_indptr_cpu[1 : num_reqs + 1] - qo_indptr_cpu[:num_reqs]
+        q_len = int(q_lens[0])
+        return (
+            q_len > 0
+            and bool((q_lens == q_len).all())
+            and q_len * num_reqs == common_attn_metadata.num_actual_tokens
+        )
+
     def _get_cutedsl_decode_wrapper(self) -> "BatchDecodePagedCuteDSLWrapper":
         if self._cutedsl_decode_wrapper is None:
             from flashinfer.cute_dsl.attention import BatchDecodePagedCuteDSLWrapper
@@ -1366,7 +1378,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             not causal
             and self._use_cutedsl_decode
             and num_reqs > 0
-            and num_actual_tokens == num_reqs * common_attn_metadata.max_query_len
+            and self._is_uniform_query_batch(common_attn_metadata)
         )
         route_decode = causal or self.use_xqa
         if route_decode:

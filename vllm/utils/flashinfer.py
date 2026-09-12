@@ -438,7 +438,19 @@ def has_flashinfer_cutedsl_decode() -> bool:
     if not has_flashinfer_cutedsl():
         return False
     mod = _get_submodule("flashinfer.cute_dsl.attention")
-    return mod is not None and hasattr(mod, "BatchDecodePagedCuteDSLWrapper")
+    if mod is None or not hasattr(mod, "BatchDecodePagedCuteDSLWrapper"):
+        return False
+    try:
+        from flashinfer.cute_dsl.availability import is_cute_dsl_arch_supported
+    except ImportError:
+        return False
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        return False
+    try:
+        return bool(is_cute_dsl_arch_supported(capability.major, capability.minor))
+    except (RuntimeError, TypeError, ValueError):
+        return False
 
 
 @functools.cache
