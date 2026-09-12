@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from collections.abc import Callable, Sequence
 from typing import Any, Literal, TypeAlias
 
@@ -9,31 +11,62 @@ from openai.types.responses.response import ToolChoice as ResponsesToolChoice
 from openai.types.responses.tool import Tool as ResponsesTool
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
 from openai.types.responses.tool_choice_function import ToolChoiceFunction
-from xgrammar import StructuralTag, normalize_tool_choice
-from xgrammar import get_model_structural_tag as get_xgrammar_model_structural_tag
-from xgrammar.openai_tool_call_schema import (
-    BuiltinToolParam,
-    FunctionToolParam,
-)
-from xgrammar.structural_tag import (
-    AnyTextFormat,
-    ConstStringFormat,
-    JSONSchemaFormat,
-    OptionalFormat,
-    OrFormat,
-    PlusFormat,
-    RegexFormat,
-    SequenceFormat,
-    StarFormat,
-    TagFormat,
-    TagsWithSeparatorFormat,
-    TriggeredTagsFormat,
-)
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
+from vllm.utils.import_utils import PlaceholderModule
+
+try:
+    from xgrammar import StructuralTag, normalize_tool_choice
+    from xgrammar import get_model_structural_tag as get_xgrammar_model_structural_tag
+    from xgrammar.openai_tool_call_schema import (
+        BuiltinToolParam,
+        FunctionToolParam,
+    )
+    from xgrammar.structural_tag import (
+        AnyTextFormat,
+        ConstStringFormat,
+        JSONSchemaFormat,
+        OptionalFormat,
+        OrFormat,
+        PlusFormat,
+        RegexFormat,
+        SequenceFormat,
+        StarFormat,
+        TagFormat,
+        TagsWithSeparatorFormat,
+        TriggeredTagsFormat,
+    )
+except ImportError:
+    # xgrammar has no wheels for some platforms (e.g. s390x). Only the
+    # structural tag builders below need it, so fail on first use instead
+    # of at import time.
+    _xgrammar = PlaceholderModule("xgrammar")
+    _xgr_tool_schema = _xgrammar.placeholder_attr("openai_tool_call_schema")
+    _xgr_structural_tag = _xgrammar.placeholder_attr("structural_tag")
+    StructuralTag = _xgrammar.placeholder_attr("StructuralTag")
+    normalize_tool_choice = _xgrammar.placeholder_attr("normalize_tool_choice")
+    get_xgrammar_model_structural_tag = _xgrammar.placeholder_attr(
+        "get_model_structural_tag"
+    )
+    BuiltinToolParam = _xgr_tool_schema.placeholder_attr("BuiltinToolParam")
+    FunctionToolParam = _xgr_tool_schema.placeholder_attr("FunctionToolParam")
+    AnyTextFormat = _xgr_structural_tag.placeholder_attr("AnyTextFormat")
+    ConstStringFormat = _xgr_structural_tag.placeholder_attr("ConstStringFormat")
+    JSONSchemaFormat = _xgr_structural_tag.placeholder_attr("JSONSchemaFormat")
+    OptionalFormat = _xgr_structural_tag.placeholder_attr("OptionalFormat")
+    OrFormat = _xgr_structural_tag.placeholder_attr("OrFormat")
+    PlusFormat = _xgr_structural_tag.placeholder_attr("PlusFormat")
+    RegexFormat = _xgr_structural_tag.placeholder_attr("RegexFormat")
+    SequenceFormat = _xgr_structural_tag.placeholder_attr("SequenceFormat")
+    StarFormat = _xgr_structural_tag.placeholder_attr("StarFormat")
+    TagFormat = _xgr_structural_tag.placeholder_attr("TagFormat")
+    TagsWithSeparatorFormat = _xgr_structural_tag.placeholder_attr(
+        "TagsWithSeparatorFormat"
+    )
+    TriggeredTagsFormat = _xgr_structural_tag.placeholder_attr("TriggeredTagsFormat")
 
 ToolChoice: TypeAlias = (
     Literal["none", "auto", "required"]
@@ -43,16 +76,11 @@ ToolChoice: TypeAlias = (
 )
 AllowedToolRef: TypeAlias = dict[str, object]
 SimplifiedToolChoice: TypeAlias = Literal["auto", "required", "forced"]
-StructuralTagBuilder: TypeAlias = Callable[
-    [
-        list[FunctionToolParam],
-        list[BuiltinToolParam],
-        SimplifiedToolChoice,
-        bool,
-        str,
-    ],
-    StructuralTag,
-]
+# Quoted so the placeholders above are never evaluated at import time.
+StructuralTagBuilder: TypeAlias = (
+    "Callable[[list[FunctionToolParam], list[BuiltinToolParam], "
+    "SimplifiedToolChoice, bool, str], StructuralTag]"
+)
 
 # Keep this list in sync with xgrammar.builtin_structural_tag. It is used for
 # vLLM-side validation and for documenting the xgrammar builtin surface that

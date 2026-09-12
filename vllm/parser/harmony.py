@@ -10,21 +10,6 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, NamedTuple
 
 from openai_harmony import HarmonyError, Message, Role
-from xgrammar import StructuralTag
-from xgrammar.openai_tool_call_schema import BuiltinToolParam, FunctionToolParam
-from xgrammar.structural_tag import (
-    AnyTextFormat,
-    ConstStringFormat,
-    Format,
-    GrammarFormat,
-    JSONSchemaFormat,
-    OptionalFormat,
-    OrFormat,
-    RegexFormat,
-    SequenceFormat,
-    TagFormat,
-    TriggeredTagsFormat,
-)
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
@@ -52,9 +37,48 @@ from vllm.tool_parsers.structural_tag_registry import (
     get_function_parameters,
     register_vllm_structural_tag,
 )
+from vllm.utils.import_utils import PlaceholderModule
 
 if TYPE_CHECKING:
     from openai_harmony import Message, StreamableParser
+
+try:
+    from xgrammar import StructuralTag
+    from xgrammar.openai_tool_call_schema import BuiltinToolParam, FunctionToolParam
+    from xgrammar.structural_tag import (
+        AnyTextFormat,
+        ConstStringFormat,
+        Format,
+        GrammarFormat,
+        JSONSchemaFormat,
+        OptionalFormat,
+        OrFormat,
+        RegexFormat,
+        SequenceFormat,
+        TagFormat,
+        TriggeredTagsFormat,
+    )
+except ImportError:
+    # xgrammar has no wheels for some platforms (e.g. s390x). Only the
+    # structural tag builders below need it, so fail on first use instead
+    # of at import time.
+    _xgrammar = PlaceholderModule("xgrammar")
+    _xgr_tool_schema = _xgrammar.placeholder_attr("openai_tool_call_schema")
+    _xgr_structural_tag = _xgrammar.placeholder_attr("structural_tag")
+    StructuralTag = _xgrammar.placeholder_attr("StructuralTag")
+    BuiltinToolParam = _xgr_tool_schema.placeholder_attr("BuiltinToolParam")
+    FunctionToolParam = _xgr_tool_schema.placeholder_attr("FunctionToolParam")
+    AnyTextFormat = _xgr_structural_tag.placeholder_attr("AnyTextFormat")
+    ConstStringFormat = _xgr_structural_tag.placeholder_attr("ConstStringFormat")
+    Format = _xgr_structural_tag.placeholder_attr("Format")
+    GrammarFormat = _xgr_structural_tag.placeholder_attr("GrammarFormat")
+    JSONSchemaFormat = _xgr_structural_tag.placeholder_attr("JSONSchemaFormat")
+    OptionalFormat = _xgr_structural_tag.placeholder_attr("OptionalFormat")
+    OrFormat = _xgr_structural_tag.placeholder_attr("OrFormat")
+    RegexFormat = _xgr_structural_tag.placeholder_attr("RegexFormat")
+    SequenceFormat = _xgr_structural_tag.placeholder_attr("SequenceFormat")
+    TagFormat = _xgr_structural_tag.placeholder_attr("TagFormat")
+    TriggeredTagsFormat = _xgr_structural_tag.placeholder_attr("TriggeredTagsFormat")
 
 
 logger = init_logger(__name__)
@@ -402,8 +426,6 @@ _FUNCTION_CALL_BEGINS = [
     " to=functions.{name}{channel}{constrain}<|message|>",
     "{channel} to=functions.{name}{constrain}<|message|>",
 ]
-_JSON_CONTENT = JSONSchemaFormat(json_schema={"type": "object"})
-_ANY_CONTENT = AnyTextFormat()
 
 
 def _assemble_tag(
@@ -416,7 +438,7 @@ def _assemble_tag(
                 elements=[
                     TagFormat(
                         begin="<|channel|>analysis<|message|>",
-                        content=_ANY_CONTENT,
+                        content=AnyTextFormat(),
                         end="<|end|>",
                     ),
                     ConstStringFormat(value="<|start|>assistant"),
@@ -431,7 +453,7 @@ def _assemble_tag(
                 elements=[
                     TagFormat(
                         begin="<|channel|>commentary<|message|>",
-                        content=_ANY_CONTENT,
+                        content=AnyTextFormat(),
                         end="<|end|>",
                     ),
                     ConstStringFormat(value="<|start|>assistant"),
@@ -494,7 +516,7 @@ def get_harmony_structural_tag(
         tags.extend(
             TagFormat(
                 begin=_FINAL_BEGIN.format(constrain=constrain),
-                content=_ANY_CONTENT,
+                content=AnyTextFormat(),
                 end=_END_TAG,
             )
             for constrain in _JSON_CONSTRAINS + [""]
@@ -508,7 +530,7 @@ def get_harmony_structural_tag(
 def _params_to_final_content(params: StructuredOutputsParams) -> Format | None:
     """Map StructuredOutputsParams in a XGrammar Format."""
     if params.json_object:
-        return _JSON_CONTENT
+        return JSONSchemaFormat(json_schema={"type": "object"})
     if params.json is not None:
         schema = params.json
         if isinstance(schema, str):
