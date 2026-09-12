@@ -26,10 +26,9 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
     """Spin-wait until the file reaches expected_size (creator truncated it)."""
     deadline = time.monotonic() + timeout
     while True:
-        file_stat = os.fstat(fd)
-        if file_stat.st_size >= expected_size:
+        if os.fstat(fd).st_size >= expected_size:
             return
-        if file_stat.st_nlink == 0:
+        if os.fstat(fd).st_nlink == 0:
             raise RuntimeError(
                 "Shared offload region creator failed during initialization."
             )
@@ -111,8 +110,6 @@ class SharedOffloadRegion:
 
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
         self._creator = False  # set True only if this worker creates the file
-        self.fd: int | None = None
-        self.mmap_obj: mmap.mmap | None = None
         self.rank = rank
         if rank is not None:
             # byte offset to this worker's first slot within each chunk row
@@ -121,7 +118,7 @@ class SharedOffloadRegion:
             self._worker_area_end = (rank + 1) * cpu_page_size
         try:
             try:
-                self.fd = os.open(
+                self.fd: int | None = os.open(
                     self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
                 )
             except FileExistsError:
@@ -146,7 +143,7 @@ class SharedOffloadRegion:
                     self.total_size_bytes / 1e9,
                 )
 
-            self.mmap_obj = mmap.mmap(
+            self.mmap_obj: mmap.mmap | None = mmap.mmap(
                 self.fd,
                 self.total_size_bytes,
                 flags=mmap.MAP_SHARED,
@@ -161,10 +158,10 @@ class SharedOffloadRegion:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(self.mmap_path)
                 self._creator = False
-            if self.mmap_obj is not None:
+            if hasattr(self, "mmap_obj") and self.mmap_obj is not None:
                 self.mmap_obj.close()
                 self.mmap_obj = None
-            if self.fd is not None:
+            if hasattr(self, "fd") and self.fd is not None:
                 os.close(self.fd)
                 self.fd = None
             # Peers block inside the barrier until the collective times out if
