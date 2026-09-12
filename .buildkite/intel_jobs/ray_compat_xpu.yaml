@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (H200 MIG 18GB) Ray Dependency Compatibility Check'
+  key: ray-dependency-compatibility-check
   device: intel_gpu
   timeout_in_minutes: 10
   soft_fail: true

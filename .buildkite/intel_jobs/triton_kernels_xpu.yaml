@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: R01
+  key: r01
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -26,6 +27,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/moe/test_batched_moe.py::test_batched_mm -v || true'
 - label: R02
+  key: r02
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -48,6 +50,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/moe/test_moe.py::test_fused_moe_wn16 -v || true'
 - label: fused_moe_kernel
+  key: fused-moe-kernel
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -71,6 +74,7 @@ steps:
     'pytest tests/kernels/moe/test_triton_moe_no_act_mul.py::test_triton_experts_no_mul_activation -v || true &&
     pytest tests/kernels/quantization/test_int8_kernel.py::test_w8a8_fp8_fused_moe -v || true'
 - label: _count_expert_num_tokens
+  key: count-expert-num-tokens
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -92,6 +96,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/moe/test_count_expert_num_tokens.py::test_compute_expert_num_tokens -v || true'
 - label: _causal_conv1d_fwd_kernel
+  key: causal-conv1d-fwd-kernel
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -113,6 +118,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/mamba/test_causal_conv1d.py::test_causal_conv1d_varlen -v || true'
 - label: _causal_conv1d_update_kernel
+  key: causal-conv1d-update-kernel
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -136,6 +142,7 @@ steps:
     'pytest tests/models/kimi_k3/test_kda.py::test_kda_spec_decode_correctness -v || true &&
     pytest tests/kernels/mamba/test_causal_conv1d.py::test_causal_conv1d_update -v || true'
 - label: R03
+  key: r03
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -165,6 +172,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/models/kimi_k3/test_kda.py::test_chunk_kda -v || true'
 - label: fused_recurrent_gated_delta_rule
+  key: fused-recurrent-gated-delta-rule
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -186,6 +194,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/test_fused_recurrent_packed_decode.py::test_fused_recurrent_packed_decode_matches_reference -v || true'
 - label: layer_norm_fwd_kernel
+  key: layer-norm-fwd-kernel
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -207,6 +216,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/test_fla_layernorm_guard.py::test_layer_norm_fwd_basic -v || true'
 - label: _silu_mul_fp8_quant_deep_gemm
+  key: silu-mul-fp8-quant-deep-gemm
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -228,6 +238,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/moe/test_silu_mul_fp8_quant_deep_gemm.py::test_silu_mul_fp8_quant_deep_gemm -v || true'
 - label: merge_attn_states_kernel
+  key: merge-attn-states-kernel
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -249,6 +260,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/attention/test_merge_attn_states.py::test_merge_attn_states -v || true'
 - label: R04
+  key: r04
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -272,6 +284,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/attention/test_triton_decode_attention.py::test_decode_attention -v || true'
 - label: R05
+  key: r05
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -295,6 +308,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/attention/test_triton_unified_attention.py::test_triton_unified_attn -v || true'
 - label: scaled_mm_kernel
+  key: scaled-mm-kernel
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -316,6 +330,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/quantization/test_triton_scaled_mm.py::test_scaled_mm -v || true'
 - label: awq_dequantize_kernel
+  key: awq-dequantize-kernel
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -337,6 +352,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/quantization/test_awq_triton.py::test_dequantize -v || true'
 - label: awq_gemm_kernel
+  key: awq-gemm-kernel
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -358,6 +374,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/quantization/test_awq_triton.py::test_gemm -v || true'
 - label: R06
+  key: r06
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -380,6 +397,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/quantization/test_int8_kernel.py::test_per_token_quant_int8 -v || true'
 - label: _per_token_group_quant_fp8
+  key: per-token-group-quant-fp8
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -401,6 +419,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/quantization/test_per_token_group_quant.py::test_per_token_group_quant_fp8 -v || true'
 - label: _per_token_group_quant_fp8_colmajor
+  key: per-token-group-quant-fp8-colmajor
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -424,6 +443,7 @@ steps:
     'pytest tests/kernels/quantization/test_per_token_group_quant.py::test_per_token_group_quant_fp8 -v || true &&
     pytest tests/kernels/moe/test_silu_mul_per_token_group_quant_fp8_colmajor.py::test_silu_mul_fp8_quant_deep_gemm -v || true'
 - label: R07
+  key: r07
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -448,6 +468,7 @@ steps:
     'pytest tests/kernels/mamba/test_replayssm_prefill_decode_equivalence_mamba2.py::test_replayssm_prefill_decode_equivalence -v || true &&
     pytest tests/kernels/mamba/test_mamba_ssm.py::test_selective_state_update -v || true'
 - label: R08
+  key: r08
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -475,6 +496,7 @@ steps:
     'pytest tests/kernels/mamba/test_replayssm_prefill_decode_equivalence_mamba2.py::test_replayssm_prefill_decode_equivalence -v || true &&
     pytest tests/kernels/mamba/test_mamba_ssm_ssd.py::test_mamba_chunk_scan_single_example -v || true'
 - label: layer_norm_gated_fwd_kernel
+  key: layer-norm-gated-fwd-kernel
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -496,6 +518,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/core/test_fused_rms_norm_gated.py::test_compiled_vs_eager -v || true'
 - label: kda_gate_fwd_kernel
+  key: kda-gate-fwd-kernel
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -517,6 +540,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/models/kimi_k3/test_kda.py::test_chunk_kda_fused_gate_cumsum_matches_unfused -v || true'
 - label: R09
+  key: r09
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .
@@ -541,6 +565,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/attention/test_lightning_attn.py::test_lightning_attention_reference -v || true'
 - label: _linear_attn_decode_kernel
+  key: linear-attn-decode-kernel
   device: intel_gpu
   timeout_in_minutes: 85
   working_dir: .

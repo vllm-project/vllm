@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (L4) Distributed Models Shard %N'
+  key: distributed-model-tests-2-gpus-2
   device: intel_gpu
   timeout_in_minutes: 35
   parallelism: 3
