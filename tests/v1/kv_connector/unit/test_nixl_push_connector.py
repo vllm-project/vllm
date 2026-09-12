@@ -804,7 +804,75 @@ class TestPushSchedulerNegative:
         )
 
         assert sched._push_pending_registrations == {}
+        assert request.request_id not in sched._reqs_need_recv
+
+    def test_incomplete_do_remote_prefill_params_do_not_register(self):
+        """do_remote_prefill without remote peer fields must not KeyError.
+
+        Client-supplied kv_transfer_params may contain only
+        {"do_remote_prefill": true}. Registration must be skipped and the
+        flag cleared so the scheduler does not claim an unfulfillable
+        remote transfer.
+        """
+        sched = make_nixl_push_scheduler()
+        _stub_sw_clipping(sched)
+
+        request = MagicMock()
+        request.request_id = "req-incomplete-prefill"
+        request.prompt_token_ids = [1, 2, 3, 4]
+        request.kv_transfer_params = {"do_remote_prefill": True}
+
+        assert sched.get_num_new_matched_tokens(request, 0) == (0, False)
+        assert request.kv_transfer_params["do_remote_prefill"] is False
+
+        # Even if external tokens were somehow claimed, registration must
+        # still refuse incomplete params instead of indexing missing keys.
+        request.kv_transfer_params = {"do_remote_prefill": True}
+        sched.update_state_after_alloc(
+            request, _BlocksMock(([10, 11],)), num_external_tokens=32
+        )
+
+        assert sched._push_pending_registrations == {}
         assert sched._push_registration_deadlines == {}
+        assert sched._reqs_need_recv == {}
+        assert request.kv_transfer_params["do_remote_prefill"] is False
+
+    def test_partial_remote_prefill_params_do_not_register(self):
+        """Missing any required remote field skips Push registration."""
+        sched = make_nixl_push_scheduler()
+        _stub_sw_clipping(sched)
+
+        request = MagicMock()
+        request.request_id = "req-partial-prefill"
+        request.prompt_token_ids = [1, 2, 3]
+        request.kv_transfer_params = {
+            "do_remote_prefill": True,
+            "remote_engine_id": "prefill-engine",
+            "remote_host": "10.0.0.1",
+            # missing remote_port and tp_size
+        }
+
+        assert sched.get_num_new_matched_tokens(request, 0) == (0, False)
+        sched.update_state_after_alloc(
+            request, _BlocksMock(([1],)), num_external_tokens=16
+        )
+        assert sched._push_pending_registrations == {}
+        assert request.kv_transfer_params["do_remote_prefill"] is False
+
+    def test_non_dict_kv_transfer_params_do_not_register(self):
+        """Non-dict kv_transfer_params must not crash the Push scheduler."""
+        sched = make_nixl_push_scheduler()
+        _stub_sw_clipping(sched)
+
+        request = MagicMock()
+        request.request_id = "req-bad-type"
+        request.kv_transfer_params = "not-a-dict"
+
+        sched.update_state_after_alloc(
+            request, _BlocksMock(([1, 2],)), num_external_tokens=16
+        )
+        assert sched._push_pending_registrations == {}
+        assert sched._reqs_need_recv == {}
 
     def test_request_finished_unfinished_status_does_not_stage(self):
         """If a request is still RUNNING, request_finished must not stash
