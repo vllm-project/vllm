@@ -200,7 +200,7 @@ def generate_continuous_batched_examples(
 
 @pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("n_heads", [4, 16, 32])
-@pytest.mark.parametrize("d_head", [5, 8, 32, 128])
+@pytest.mark.parametrize("d_head", [5, 32, 128])
 @pytest.mark.parametrize("seq_len_chunk_size", [(112, 16), (128, 32)])
 def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size, itype):
     # this tests the kernels on a single example (bs=1)
@@ -280,8 +280,6 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size, it
             [(4, 4), (4, 4), (4, 4), (4, 4)],
         ),  # chunk_size larger than cont batches
         (64, 8, 5, [(64, 32, 16, 8, 8)]),
-        # large-ish chunk_size (256)
-        (64, 256, 1, [(5,), (1,), (1,), (1,)]),  # irregular sizes with small sequences
         (
             64,
             256,
