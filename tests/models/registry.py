@@ -1252,6 +1252,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "NemotronH_Omni_Reasoning_V3": _HfExamplesInfo(
         "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
     ),
+    "OmniAsrForConditionalGeneration": _HfExamplesInfo(
+        "ziywang50/omniASR-LLM-300M",
+    ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",
         trust_remote_code=True,
