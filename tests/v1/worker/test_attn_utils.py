@@ -13,15 +13,18 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
-from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    HiSparseResidentSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
     MLAAttentionSpec,
+    SparseCacheRole,
     compute_layout_strides,
 )
 from vllm.v1.worker.gpu import attn_utils
@@ -34,6 +37,60 @@ from vllm.v1.worker.utils import (
     allocate_kv_cache,
     copy_kv_cache_blocks_inplace,
 )
+
+
+@pytest.mark.parametrize(
+    ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected"),
+    [
+        (True, 256, [64], [64], 64),
+        (True, 64, [32, 64], [16, 32], 32),
+        (True, 64, [MultipleOf(16)], [32], 32),
+        (True, 64, [64], [32], None),
+        (False, 256, [64], [64], 256),
+    ],
+)
+def test_get_kv_cache_spec_resolves_hisparse_block_size(
+    monkeypatch, enabled, block_size, main_sizes, indexer_sizes, expected
+):
+    """Resolve shared MLA geometry before planning; leave other specs alone."""
+    specs = {
+        "main": MLAAttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
+        ),
+        "indexer": MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            cache_role=SparseCacheRole.INDEXER,
+        ),
+        "dense": FullAttentionSpec(
+            block_size=block_size, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+        ),
+    }
+    layers = {}
+    for name, sizes in zip(specs, [main_sizes, indexer_sizes, [block_size]]):
+        backend = SimpleNamespace(
+            customize_spec=AttentionBackend.customize_spec,
+            get_supported_kernel_block_sizes=lambda sizes=sizes: sizes,
+        )
+        layers[name] = SimpleNamespace(
+            get_kv_cache_spec=lambda _, spec=specs[name]: spec,
+            get_attn_backend=lambda backend=backend: backend,
+        )
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=object() if enabled else None)
+    )
+    if expected is None:
+        with pytest.raises(ValueError, match="supported by every sparse"):
+            attn_utils.get_kv_cache_spec(config)
+        return
+
+    resolved = attn_utils.get_kv_cache_spec(config)
+    assert resolved["main"].block_size == resolved["indexer"].block_size == expected
+    assert resolved["dense"] is specs["dense"]
+    assert all(spec.block_size == block_size for spec in specs.values())
 
 
 class _FakeMetadataBuilder:
@@ -390,3 +447,71 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(
             torch.testing.assert_close(
                 cache[dst_start + physical_idx], expected[layer_idx][physical_idx]
             )
+
+
+def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
+    """Host tensors get their own backing; view-less specs keep the raw one."""
+    spec = FullAttentionSpec(
+        block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float32
+    )
+    page = spec.page_size_bytes
+    resident_spec = HiSparseResidentSpec(block_size=2, page_size=page)
+    device_size = 4 * page
+    config = KVCacheConfig(
+        num_blocks=4,
+        hisparse_host_num_blocks=3,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=3 * page,
+                layers=["source"],
+                layer_stride=3 * page,
+                block_stride=page,
+                host_resident=True,
+            ),
+            KVCacheTensor(
+                size=device_size,
+                layers=["indexer"],
+                layer_stride=device_size,
+                block_stride=page,
+            ),
+            KVCacheTensor(
+                size=device_size,
+                layers=["resident"],
+                layer_stride=device_size,
+                block_stride=page,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["source"], spec, host_resident=True),
+            KVCacheGroupSpec(["indexer"], spec),
+            KVCacheGroupSpec(["resident"], resident_spec),
+        ],
+    )
+    host_buffers: list[torch.Tensor] = []
+
+    def host_allocator(size: int) -> torch.Tensor:
+        host_buffers.append(torch.zeros(size, dtype=torch.int8))
+        return host_buffers[-1]
+
+    caches = allocate_hisparse_kv_caches(
+        config,
+        torch.device("cpu"),
+        KVCacheLayout.LBHNC,
+        [2, 2, 2],
+        SimpleNamespace(allocate=host_allocator),
+    )
+    assert len(config.kv_cache_tensors) == 3
+
+    assert [buf.numel() for buf in host_buffers] == [3 * page]
+    assert caches["source"].shape[0] == 3
+    assert (
+        caches["source"].untyped_storage().data_ptr()
+        == host_buffers[0].untyped_storage().data_ptr()
+    )
+    assert caches["indexer"].shape[0] == 4
+    backing = caches["resident"]
+    assert backing.dtype == torch.int8 and backing.numel() >= device_size
+    assert (
+        backing.untyped_storage().data_ptr()
+        == caches["indexer"].untyped_storage().data_ptr()
+    )

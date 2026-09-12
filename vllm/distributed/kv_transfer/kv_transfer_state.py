@@ -78,13 +78,11 @@ def ensure_kv_transfer_initialized(
 
     global _KV_CONNECTOR_AGENT
 
-    if vllm_config.kv_transfer_config is None:
+    if _KV_CONNECTOR_AGENT is not None:
         return
 
-    if (
-        vllm_config.kv_transfer_config.is_kv_transfer_instance
-        and _KV_CONNECTOR_AGENT is None
-    ):
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is not None and kv_transfer_config.is_kv_transfer_instance:
         # NIXL P/D requires an interleave_size equal to block_size.
         vllm_config.adjust_dcp_kv_cache_interleave_size(kv_cache_config)
         _sync_engine_id_across_tp(vllm_config)

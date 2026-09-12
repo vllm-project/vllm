@@ -19,10 +19,12 @@ import vllm.config.vllm as vllm_config_module
 import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
     CompilationConfig,
     DeviceConfig,
     EngramConfig,
+    HiSparseConfig,
     KernelConfig,
     KVTransferConfig,
     ModelConfig,
@@ -279,6 +281,62 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
+def test_hisparse_requires_v2_model_runner():
+    config = object.__new__(VllmConfig)
+    config.attention_config = AttentionConfig(hisparse_config=HiSparseConfig())
+
+    with patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", None):
+        assert config.use_v2_model_runner
+    with (
+        patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", False),
+        pytest.raises(ValueError, match="requires Model Runner V2"),
+    ):
+        _ = config.use_v2_model_runner
+
+
+def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "device_count", lambda: 2)
+    with pytest.raises(ValueError, match="decode context parallelism"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                decode_context_parallel_size=2,
+            ),
+        )
+
+
+def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(current_platform, "device_count", lambda: 2)
+    with pytest.raises(ValueError, match="pipeline parallelism"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            parallel_config=ParallelConfig(pipeline_parallel_size=2),
+        )
+
+
+def test_hisparse_rejects_disabled_hybrid_kv_cache_manager(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    with pytest.raises(ValueError, match="requires the hybrid KV cache manager"):
+        VllmConfig(
+            attention_config=AttentionConfig(hisparse_config=HiSparseConfig()),
+            scheduler_config=SchedulerConfig(
+                max_model_len=2048,
+                is_encoder_decoder=False,
+                disable_hybrid_kv_cache_manager=True,
+            ),
+        )
+
+
+def test_hisparse_rejects_non_cuda(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    with pytest.raises(ValueError, match="requires NVIDIA CUDA"):
+        VllmConfig(attention_config=AttentionConfig(hisparse_config=HiSparseConfig()))
+
+
 def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
     """ROCm keeps the DSA models (DeepSeek V3.2/V4, GLM-5.2) on their compiled
     MRV1 paths and off breakable cudagraphs by default."""
@@ -305,7 +363,8 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
         # (warning_once args must be hashable for its lru_cache).
         monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
         config = SimpleNamespace(
-            model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"])
+            model_config=SimpleNamespace(architectures=["DeepseekV32ForCausalLM"]),
+            attention_config=AttentionConfig(),
         )
         assert VllmConfig.use_v2_model_runner.fget(config) is False
     finally:
@@ -385,6 +444,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     )
     config = SimpleNamespace(
         model_config=model_config,
+        attention_config=AttentionConfig(),
         speculative_config=SimpleNamespace(method="mtp") if with_mtp else None,
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
         compilation_config=CompilationConfig(
@@ -897,7 +957,10 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
-    config = SimpleNamespace(model_config=model_config)
+    config = SimpleNamespace(
+        model_config=model_config,
+        attention_config=AttentionConfig(),
+    )
     config._get_v2_model_runner_unsupported_features = lambda: []
 
     assert VllmConfig.use_v2_model_runner.fget(config) is expected
@@ -2787,6 +2850,7 @@ def test_draft_sample_method_gumbel_is_rejected():
 def _watermarked_vllm_config() -> VllmConfig:
     config = object.__new__(VllmConfig)
     config.watermark_config = WatermarkConfig(key=42)
+    config.attention_config = AttentionConfig()
     config.speculative_config = None
     return config
 
