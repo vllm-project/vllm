@@ -1077,3 +1077,406 @@ def test_aiter_fused_moe_mi3xx_fp8_accuracy():
         pass_rate=1.0,
         max_violation_factor=1.5,
     )
+
+
+# Weight alignment tests --------------------------------------------------
+#
+# AITER's CK 2stages MoE kernel dispatches on ``inter_dim <= 192``: below the
+# threshold both stages use 64-wide tiles, above it at least one stage uses a
+# 128-wide tile at every reachable ``block_m``, and CK's
+# ``IsSupportedArgument`` rejects an intermediate size that is not divisible by
+# that tile width. Some model + TP splits land on an unaligned size (e.g.
+# 1792 / TP=8 = 224), so the AITER path rounds the intermediate dim up in
+# ``maybe_roundup_sizes`` and the weights are allocated at the padded size.
+
+ALIGNMENT_HIDDEN = 64
+ALIGNMENT_NUM_EXPERTS = 2
+
+
+def _make_alignment_moe_config(intermediate: int, has_bias: bool = False):
+    from tests.kernels.moe.utils import make_dummy_moe_config
+
+    config = make_dummy_moe_config(
+        num_experts=ALIGNMENT_NUM_EXPERTS,
+        hidden_dim=ALIGNMENT_HIDDEN,
+        intermediate_size=intermediate,
+    )
+    config.has_bias = has_bias
+    return config
+
+
+def _make_aiter_method(moe_config):
+    """Build the unquantized method with the backend pinned to AITER.
+
+    ``select_unquantized_moe_backend`` needs a real ROCm + AITER runtime, so
+    stub it out and set the backend directly.
+    """
+    from unittest.mock import patch
+
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+    )
+    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+        UnquantizedFusedMoEMethod,
+    )
+
+    with patch(
+        "vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method"
+        ".select_unquantized_moe_backend",
+        return_value=(UnquantizedMoeBackend.AITER, None),
+    ):
+        return UnquantizedFusedMoEMethod(moe_config)
+
+
+def _roundup(method, moe_config, intermediate):
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+
+    return method.maybe_roundup_sizes(
+        hidden_size=ALIGNMENT_HIDDEN,
+        intermediate_size_per_partition=intermediate,
+        act_dtype=moe_config.in_dtype,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("intermediate", "expected_alignment"),
+    [
+        (64, 64),
+        (96, 64),
+        (128, 64),
+        (160, 64),
+        (192, 64),  # threshold: still the 64-wide branch
+        (224, 128),  # first size above the threshold
+        (256, 128),
+        (448, 128),  # K2-Horizon-375B at TP=4
+        (4096, 128),
+    ],
+)
+def test_aiter_moe_alignment_follows_threshold(intermediate, expected_alignment):
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        aiter_moe_intermediate_alignment,
+    )
+
+    assert aiter_moe_intermediate_alignment(intermediate) == expected_alignment
+
+
+@pytest.mark.parametrize(
+    ("intermediate", "expected_padded"),
+    [
+        (64, 64),  # already aligned, untouched
+        (96, 128),
+        (160, 192),
+        (192, 192),  # must stay 192: it is valid and has tuned configs
+        (224, 256),  # K2-Horizon-375B at TP=8
+        (256, 256),
+        (448, 512),  # K2-Horizon-375B at TP=4
+        (512, 512),
+        (4096, 4096),
+    ],
+)
+def test_aiter_moe_padded_size_stays_in_its_dispatch_branch(
+    intermediate, expected_padded
+):
+    """Padding must not move a size across AITER's ``<= 192`` threshold.
+
+    Otherwise the alignment we picked would not be the one the kernel's
+    dispatcher applies to the padded shape.
+    """
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        aiter_moe_intermediate_alignment,
+    )
+
+    alignment = aiter_moe_intermediate_alignment(intermediate)
+    padded = -(-intermediate // alignment) * alignment
+
+    assert padded == expected_padded
+    assert padded % alignment == 0
+    assert (intermediate <= 192) == (padded <= 192)
+    assert aiter_moe_intermediate_alignment(padded) == alignment
+
+
+@pytest.mark.parametrize(
+    ("intermediate", "expected_padded"),
+    [(96, 128), (192, 192), (224, 256), (448, 512), (512, 512)],
+)
+def test_aiter_moe_roundup_pads_intermediate(
+    intermediate,
+    expected_padded,
+    default_vllm_config,
+):
+    moe_config = _make_alignment_moe_config(intermediate)
+    method = _make_aiter_method(moe_config)
+
+    hidden, padded = _roundup(method, moe_config, intermediate)
+
+    assert padded == expected_padded
+    assert hidden == ALIGNMENT_HIDDEN
+
+
+@pytest.mark.parametrize("backend_name", ["TRITON", "FLASHINFER_CUTLASS"])
+def test_aiter_moe_roundup_is_not_applied_to_other_backends(
+    backend_name,
+    default_vllm_config,
+):
+    """The padding is AITER-only; other backends keep the unaligned size."""
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+    )
+
+    intermediate = 224
+    moe_config = _make_alignment_moe_config(intermediate)
+    method = _make_aiter_method(moe_config)
+    method.unquantized_backend = UnquantizedMoeBackend[backend_name]
+
+    _, padded = _roundup(method, moe_config, intermediate)
+
+    assert padded == intermediate
+
+
+@pytest.mark.parametrize("intermediate", [224, 448])
+def test_aiter_moe_padded_weights_are_zero_initialized(
+    intermediate,
+    default_vllm_config,
+):
+    """Pad lanes must be zero, not ``torch.empty`` garbage.
+
+    The weight loader only fills the unpadded rows, so anything left in the
+    tail flows through ``silu`` into the stage-2 accumulation.
+    """
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        aiter_moe_intermediate_alignment,
+    )
+
+    alignment = aiter_moe_intermediate_alignment(intermediate)
+    padded = -(-intermediate // alignment) * alignment
+    assert padded != intermediate
+
+    moe_config = _make_alignment_moe_config(intermediate)
+    method = _make_aiter_method(moe_config)
+    layer = torch.nn.Module()
+
+    method.create_weights(
+        layer=layer,
+        num_experts=ALIGNMENT_NUM_EXPERTS,
+        hidden_size=ALIGNMENT_HIDDEN,
+        intermediate_size_per_partition=padded,
+        params_dtype=torch.float32,
+    )
+
+    assert layer.w13_weight.shape == (
+        ALIGNMENT_NUM_EXPERTS,
+        2 * padded,
+        ALIGNMENT_HIDDEN,
+    )
+    assert layer.w2_weight.shape == (ALIGNMENT_NUM_EXPERTS, ALIGNMENT_HIDDEN, padded)
+    assert torch.all(layer.w13_weight == 0)
+    assert torch.all(layer.w2_weight == 0)
+
+
+def test_aiter_moe_aligned_weights_skip_zero_init(default_vllm_config):
+    """An unpadded intermediate means no reason to pay for zeroing.
+
+    Reading the tensor cannot prove this -- ``torch.empty`` may hand back
+    zeroed pages -- so record which allocator was called.
+    """
+    from unittest.mock import patch
+
+    moe_config = _make_alignment_moe_config(256)
+    method = _make_aiter_method(moe_config)
+    layer = torch.nn.Module()
+
+    with patch("torch.zeros", wraps=torch.zeros) as zeros:
+        method.create_weights(
+            layer=layer,
+            num_experts=ALIGNMENT_NUM_EXPERTS,
+            hidden_size=ALIGNMENT_HIDDEN,
+            intermediate_size_per_partition=256,
+            params_dtype=torch.float32,
+        )
+
+    # has_bias is False here, so any torch.zeros call is a weight allocation.
+    assert not zeros.called
+
+
+@pytest.mark.parametrize("num_fused_shared_experts", [1, 2])
+def test_padded_weights_zero_init_covers_fused_shared_slots(
+    num_fused_shared_experts,
+    default_vllm_config,
+):
+    """Shared-expert fusion appends slots on dim 0; their pad tails must be zero.
+
+    Fusion grows the expert count (``E + n``) while padding grows the
+    intermediate dim, so the two are orthogonal and the appended slots inherit
+    zero-init only because it is per-tensor. Assert against the shared indices
+    ``[E, E + n)`` specifically, so narrowing zero-init to the routed range
+    fails here.
+    """
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        aiter_moe_intermediate_alignment,
+    )
+
+    intermediate = 224
+    alignment = aiter_moe_intermediate_alignment(intermediate)
+    padded = -(-intermediate // alignment) * alignment
+    assert padded != intermediate
+
+    num_slots = ALIGNMENT_NUM_EXPERTS + num_fused_shared_experts
+    moe_config = _make_alignment_moe_config(intermediate)
+    method = _make_aiter_method(moe_config)
+    layer = torch.nn.Module()
+
+    method.create_weights(
+        layer=layer,
+        num_experts=num_slots,
+        hidden_size=ALIGNMENT_HIDDEN,
+        intermediate_size_per_partition=padded,
+        params_dtype=torch.float32,
+    )
+
+    assert layer.w13_weight.shape[0] == num_slots
+    assert layer.w2_weight.shape[0] == num_slots
+
+    shared = slice(ALIGNMENT_NUM_EXPERTS, num_slots)
+    # w13 is [gate | up], each of width `padded`; the tail of each half is pad.
+    assert torch.all(layer.w13_weight[shared, intermediate:padded] == 0)
+    assert torch.all(layer.w13_weight[shared, padded + intermediate :] == 0)
+    assert torch.all(layer.w2_weight[shared, :, intermediate:] == 0)
+
+
+@pytest.mark.parametrize("intermediate", [224, 448])
+def test_aiter_moe_bias_matches_padded_weight(intermediate, default_vllm_config):
+    """``w13_bias`` must be sized off the padded ``w13_up_dim``.
+
+    Sizing it off the unpadded intermediate leaves the bias shorter than the
+    weight it is added to (e.g. GPT-OSS, which sets ``has_bias=True``).
+    """
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        aiter_moe_intermediate_alignment,
+    )
+
+    alignment = aiter_moe_intermediate_alignment(intermediate)
+    padded = -(-intermediate // alignment) * alignment
+
+    moe_config = _make_alignment_moe_config(intermediate, has_bias=True)
+    method = _make_aiter_method(moe_config)
+    layer = torch.nn.Module()
+
+    method.create_weights(
+        layer=layer,
+        num_experts=ALIGNMENT_NUM_EXPERTS,
+        hidden_size=ALIGNMENT_HIDDEN,
+        intermediate_size_per_partition=padded,
+        params_dtype=torch.float32,
+    )
+
+    assert layer.w13_bias.shape[1] == layer.w13_weight.shape[1]
+    assert layer.w2_bias.shape[1] == layer.w2_weight.shape[1]
+
+
+def _aiter_accepts_intermediate(intermediate: int, num_tokens: int) -> bool:
+    """Run the real AITER CK MoE kernel and report whether it dispatched."""
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        ActivationMethod,
+        QuantMethod,
+    )
+
+    case = _make_moe_case(
+        num_tokens=num_tokens,
+        hidden_dim=1024,
+        intermediate_dim=intermediate,
+        num_experts=8,
+        topk=2,
+        seed=0,
+    )
+    try:
+        _run_fused_moe(
+            case["hidden_states"],
+            case["w1"],
+            case["w2"],
+            case["topk_weights"],
+            case["topk_ids"],
+            activation_method=int(ActivationMethod.SILU),
+            quant_method=int(QuantMethod.NO),
+        )
+    except RuntimeError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(
+    not (on_gfx942() or on_gfx950()),
+    reason="gfx942/gfx950 ROCm only",
+)
+@pytest.mark.parametrize("intermediate", [192, 224, 256])
+# AITER picks ``block_m`` from ``estimated_m_per_expert`` (tokens * topk /
+# experts), so with the 8 experts and topk=2 used here these counts are the
+# ones that actually land on distinct 32 / 64 / 128 tiles -- measured, not
+# assumed. Anything below 1536 stays on tile 32 and the sweep is vacuous.
+@pytest.mark.parametrize("num_tokens", [1024, 1536, 2560])
+def test_aiter_moe_alignment_rule_holds_across_block_m(intermediate, num_tokens):
+    """The alignment rule must hold at every reachable ``block_m``.
+
+    Stage 1 checks ``NPerBlock`` and stage 2 ``KPerBlock``; both vary with
+    ``block_m``, so a size validated at one tile size says nothing about the
+    others. Assert that acceptance matches the rule's prediction, and that the
+    padded size is accepted unconditionally.
+    """
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        aiter_moe_intermediate_alignment,
+    )
+
+    _assert_aiter_supported()
+
+    alignment = aiter_moe_intermediate_alignment(intermediate)
+    padded = -(-intermediate // alignment) * alignment
+
+    assert _aiter_accepts_intermediate(intermediate, num_tokens) == (
+        intermediate % alignment == 0
+    )
+    assert _aiter_accepts_intermediate(padded, num_tokens)
+
+
+@pytest.mark.parametrize("intermediate", [96, 224, 448])
+def test_aiter_moe_padding_is_numerically_inert(intermediate):
+    """The padded rows must not change the MoE result.
+
+    The zero gate column gives ``silu(0) * u = 0``, and the matching zero
+    columns in w2 keep the contribution at exactly zero.
+    """
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        aiter_moe_intermediate_alignment,
+    )
+
+    alignment = aiter_moe_intermediate_alignment(intermediate)
+    padded = -(-intermediate // alignment) * alignment
+
+    torch.manual_seed(0)
+    w13 = torch.randn(
+        ALIGNMENT_NUM_EXPERTS, 2 * intermediate, ALIGNMENT_HIDDEN, dtype=torch.float32
+    )
+    w2 = torch.randn(
+        ALIGNMENT_NUM_EXPERTS, ALIGNMENT_HIDDEN, intermediate, dtype=torch.float32
+    )
+
+    # Mirror what the loader does into a zero-initialized padded parameter:
+    # gate and up land at the padded stride, the tail stays zero.
+    padded_w13 = torch.zeros(
+        ALIGNMENT_NUM_EXPERTS, 2 * padded, ALIGNMENT_HIDDEN, dtype=torch.float32
+    )
+    padded_w13[:, :intermediate, :] = w13[:, :intermediate, :]
+    padded_w13[:, padded : padded + intermediate, :] = w13[:, intermediate:, :]
+    padded_w2 = torch.zeros(
+        ALIGNMENT_NUM_EXPERTS, ALIGNMENT_HIDDEN, padded, dtype=torch.float32
+    )
+    padded_w2[:, :, :intermediate] = w2
+
+    def expert_mlp(w13_e, w2_e, inter, x):
+        h = x @ w13_e.transpose(0, 1)
+        return (F.silu(h[:, :inter]) * h[:, inter:]) @ w2_e.transpose(0, 1)
+
+    x = torch.randn(8, ALIGNMENT_HIDDEN, dtype=torch.float32)
+    for e in range(ALIGNMENT_NUM_EXPERTS):
+        ref = expert_mlp(w13[e], w2[e], intermediate, x)
+        got = expert_mlp(padded_w13[e], padded_w2[e], padded, x)
+        torch.testing.assert_close(got, ref)

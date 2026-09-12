@@ -1,0 +1,219 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Tests for the AITER biased_grouped_topk expert-group count.
+
+The AITER kernel is only instantiated for ``NUM_GRP`` in {1, 2, 4, 8}, so the
+group count derived from ``num_experts`` has to be rounded to a supported
+power of two that still divides ``num_experts``. Grouping is a no-op on this
+path (``topk_group == num_expert_group``), so any such value routes
+identically; the constraint is purely about which kernel exists.
+"""
+
+import pytest
+import torch
+
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    AITER_MAX_EXPERTS_PER_GROUP as MAX_EXPERTS_PER_GROUP,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    AITER_SUPPORTED_NUM_GRP as SUPPORTED_NUM_GRP,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
+    _aiter_can_use_biased_grouped_topk,
+    _aiter_get_num_expert_group,
+)
+from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
+    grouped_topk,
+)
+from vllm.platforms import current_platform
+
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-specific tests"
+)
+
+
+@pytest.mark.parametrize(
+    "num_experts",
+    [
+        1,
+        8,
+        16,
+        32,  # exactly one full group
+        33,
+        64,
+        72,
+        96,
+        128,
+        129,
+        160,
+        192,
+        256,
+        257,
+        320,
+        384,
+    ],
+)
+def test_group_count_divides_and_bounds_group_size(num_experts):
+    g = _aiter_get_num_expert_group(num_experts)
+
+    assert num_experts % g == 0, f"{g} does not divide {num_experts}"
+    # The router asserts this unconditionally; rounding must never break it.
+    assert num_experts // g <= MAX_EXPERTS_PER_GROUP
+
+
+@pytest.mark.parametrize(
+    "num_experts",
+    [1, 8, 16, 32, 64, 72, 96, 128, 160, 192, 256, 320, 384],
+)
+def test_group_count_is_kernel_supported_when_one_fits(num_experts):
+    """Whenever some supported NUM_GRP works, the chosen value must be one."""
+    fits = [
+        c
+        for c in SUPPORTED_NUM_GRP
+        if num_experts % c == 0 and num_experts // c <= MAX_EXPERTS_PER_GROUP
+    ]
+    if not fits:
+        pytest.skip(f"no supported NUM_GRP fits {num_experts=}")
+
+    assert _aiter_get_num_expert_group(num_experts) in fits
+
+
+@pytest.mark.parametrize(
+    ("num_experts", "expected"),
+    [
+        (8, 1),  # 8 experts fit in a single group
+        (32, 1),  # exactly at the per-group limit
+        (64, 2),
+        (128, 4),
+        (256, 8),
+        (72, 8),  # naive ceil gives 3 -> unsupported, rounds up to 8
+        (96, 8),  # naive ceil gives 3 -> unsupported, rounds up to 8
+        (160, 8),  # naive ceil gives 5 -> unsupported, rounds up to 8
+        (192, 8),  # naive ceil gives 6 -> unsupported, rounds up to 8
+        # No supported NUM_GRP divides these while keeping the group size
+        # within the limit, so the naive value is kept and the call site's
+        # membership check sends routing to the generic path.
+        (320, 10),
+        (384, 12),
+        (33, 3),
+        (129, 43),
+    ],
+)
+def test_known_expert_counts(num_experts, expected):
+    assert _aiter_get_num_expert_group(num_experts) == expected
+
+
+@pytest.mark.parametrize("num_experts", [33, 129, 257, 320, 384])
+@pytest.mark.parametrize("topk", [1, 2, 4, 6, 8])
+def test_falls_back_when_no_supported_group_count_fits(num_experts, topk):
+    """An unsupported group count must never reach the kernel.
+
+    With no usable NUM_GRP the naive divisor is kept, and it has no
+    instantiated kernel. ``topk >= num_expert_group`` alone does not stop it:
+    for ``num_experts=33`` the count is 3, which passes at ``topk >= 3``. The
+    membership check is what declines, so assert the call site's own predicate
+    rather than restating it here.
+    """
+    assert not any(
+        num_experts % c == 0 and num_experts // c <= MAX_EXPERTS_PER_GROUP
+        for c in SUPPORTED_NUM_GRP
+    )
+
+    g = _aiter_get_num_expert_group(num_experts)
+    assert num_experts % g == 0
+    assert num_experts // g <= MAX_EXPERTS_PER_GROUP
+    assert g not in SUPPORTED_NUM_GRP
+
+    assert not _aiter_can_use_biased_grouped_topk(num_experts, topk)
+
+
+@pytest.mark.parametrize("num_experts", [8, 32, 64, 72, 96, 128, 160, 192, 256])
+def test_supported_group_counts_are_dispatched(num_experts):
+    """The guard must still admit the shapes AITER does have a kernel for.
+
+    Without this the ``not`` assertion above is satisfied by a predicate that
+    is always False.
+    """
+    g = _aiter_get_num_expert_group(num_experts)
+    assert g in SUPPORTED_NUM_GRP
+
+    assert _aiter_can_use_biased_grouped_topk(num_experts, topk=g)
+    assert not _aiter_can_use_biased_grouped_topk(num_experts, topk=g - 1)
+
+
+@pytest.mark.parametrize("num_experts", [72, 96, 160, 192])
+def test_rounding_only_moves_to_supported_values(num_experts):
+    """The naive ceil-divide result is unsupported for these counts."""
+    naive = max(1, -(-num_experts // MAX_EXPERTS_PER_GROUP))
+    while num_experts % naive != 0:
+        naive += 1
+    assert naive not in SUPPORTED_NUM_GRP
+
+    assert _aiter_get_num_expert_group(num_experts) in SUPPORTED_NUM_GRP
+
+
+@pytest.mark.parametrize(
+    "num_experts",
+    [
+        64,  # g == 2, not rounded -- covers the no-op claim itself
+        128,  # g == 4, not rounded
+        256,  # g == 8, not rounded
+        96,  # naive 3 -> rounded to 8
+        192,  # naive 6 -> rounded to 8
+    ],
+)
+@pytest.mark.parametrize("topk", [8])
+def test_rounded_group_count_routes_like_the_reference(num_experts, topk):
+    """The rounded group count must route identically.
+
+    Reference is ``grouped_topk``, which falls back to pure torch here.
+    Gating is continuous random so exact score ties, the one place the
+    two may legitimately differ, have measure zero.
+    """
+    torch.manual_seed(num_experts)
+    device = "cuda"
+    num_tokens = 83  # not a multiple of any warp/tile size
+    g = _aiter_get_num_expert_group(num_experts)
+    assert _aiter_can_use_biased_grouped_topk(num_experts, topk)
+
+    gating = torch.randn(num_tokens, num_experts, dtype=torch.float32, device=device)
+    bias = torch.randn(num_experts, dtype=torch.float32, device=device)
+
+    ref_weights, ref_ids = grouped_topk(
+        hidden_states=torch.empty(num_tokens, 1, device=device),
+        gating_output=gating,
+        topk=topk,
+        renormalize=True,
+        num_expert_group=g,
+        topk_group=g,
+        scoring_func="sigmoid",
+        e_score_correction_bias=bias,
+    )
+
+    weights = torch.empty(num_tokens, topk, dtype=torch.float32, device=device)
+    ids = torch.empty(num_tokens, topk, dtype=torch.int32, device=device)
+    rocm_aiter_ops.biased_grouped_topk(
+        gating,
+        bias,
+        weights,
+        ids,
+        num_expert_group=g,
+        topk_group=g,
+        need_renorm=True,
+    )
+
+    # Neither side promises an order within a token's top-k, so sort by expert
+    # id and carry the weights through the same permutation -- sorting the two
+    # independently would not catch a weight attached to the wrong expert.
+    order = ids.argsort(dim=-1)
+    ref_order = ref_ids.argsort(dim=-1)
+    torch.testing.assert_close(
+        ids.gather(1, order), ref_ids.to(torch.int32).gather(1, ref_order)
+    )
+    torch.testing.assert_close(
+        weights.gather(1, order),
+        ref_weights.gather(1, ref_order),
+        atol=1e-4,
+        rtol=1e-4,
+    )

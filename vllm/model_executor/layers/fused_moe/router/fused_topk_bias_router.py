@@ -19,6 +19,11 @@ from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
     dsv4_topk,
 )
 
+# AITER instantiates biased_grouped_topk only for these NUM_GRP values, with at
+# most this many experts per group.
+AITER_SUPPORTED_NUM_GRP = (1, 2, 4, 8)
+AITER_MAX_EXPERTS_PER_GROUP = 32
+
 
 def _get_padding_mask(num_tokens: int) -> torch.Tensor | None:
     if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
@@ -104,15 +109,40 @@ def vllm_topk_softplus_sqrt(
 
 @functools.lru_cache(maxsize=8)
 def _aiter_get_num_expert_group(num_experts: int) -> int:
-    _AITER_MAX_EXPERTS_PER_GROUP = 32
-    g = max(1, -(-num_experts // _AITER_MAX_EXPERTS_PER_GROUP))
+    g = max(1, -(-num_experts // AITER_MAX_EXPERTS_PER_GROUP))
     while num_experts % g != 0:
         g += 1
     assert num_experts % g == 0, f"{num_experts=} not divisible by {g=}"
-    assert num_experts // g <= _AITER_MAX_EXPERTS_PER_GROUP, (
-        f"group size {num_experts // g} exceeds limit {_AITER_MAX_EXPERTS_PER_GROUP}"
+    # Grouping is a no-op here (topk_group == num_expert_group), so any divisor
+    # within the limit routes identically; only the kernel's existence
+    # constrains us. Prefer the largest supported count to keep groups small.
+    # If none fits, g stays unsupported -- callers must gate on
+    # _aiter_can_use_biased_grouped_topk, not on the return value alone.
+    if g not in AITER_SUPPORTED_NUM_GRP:
+        g = next(
+            (
+                c
+                for c in sorted(AITER_SUPPORTED_NUM_GRP, reverse=True)
+                if num_experts % c == 0
+                and num_experts // c <= AITER_MAX_EXPERTS_PER_GROUP
+            ),
+            g,
+        )
+    assert num_experts // g <= AITER_MAX_EXPERTS_PER_GROUP, (
+        f"group size {num_experts // g} exceeds limit {AITER_MAX_EXPERTS_PER_GROUP}"
     )
     return g
+
+
+def _aiter_can_use_biased_grouped_topk(num_experts: int, topk: int) -> bool:
+    """Whether AITER has an instantiated kernel for this routing shape.
+
+    ``topk >= g`` is required by the kernel's grouping; membership is what
+    guarantees the kernel exists at all. Neither implies the other -- an
+    unsupported count can be small enough to pass the first check (33 -> 3).
+    """
+    g = _aiter_get_num_expert_group(num_experts)
+    return topk >= g and g in AITER_SUPPORTED_NUM_GRP
 
 
 def fused_topk_bias(
@@ -229,7 +259,7 @@ def fused_topk_bias(
         M = hidden_states.size(0)
         num_experts = gating_output.shape[-1]
         num_expert_group = _aiter_get_num_expert_group(num_experts)
-        if topk >= num_expert_group:
+        if _aiter_can_use_biased_grouped_topk(num_experts, topk):
             topk_weights = torch.empty(
                 M, topk, dtype=torch.float32, device=hidden_states.device
             )
