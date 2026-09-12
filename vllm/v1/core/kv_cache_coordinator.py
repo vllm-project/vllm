@@ -155,6 +155,9 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers:
                 if isinstance(manager, MambaManager):
                     manager.drop_eagle_checkpoint_block = True
+        self.group_block_sizes = tuple(
+            manager.block_size for manager in self.single_type_managers
+        )
 
         # A positive retention interval must be a multiple of the base hit granularity
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
@@ -307,27 +310,26 @@ class KVCacheCoordinator(ABC):
             for manager in self.single_type_managers
         )
 
-    def get_replay_boundary(self, request: Request) -> int:
-        """Return the position a later request replaying this prompt resumes at.
+    def get_replay_boundaries(self, request: Request) -> tuple[int, ...]:
+        """Positions a later request replaying this prompt can resume at.
 
-        A cache hit is the shortest hit across all groups, so this is a
-        model-level position: every group has to retain state here, whether or
-        not it is the group that drops. Groups differ only in how much they
-        keep around it -- EAGLE groups also keep the block above, which they
+        A hit is the shortest across all groups, so every group retains state
+        at each position; EAGLE groups also keep the block above, which they
         match and drop back from (see ``reachable_block_mask``).
 
-        Under EAGLE that block must exist, so the boundary sits one alignment
-        unit below the prompt's last aligned position; every group's block size
-        divides the alignment, so the block above always fits in the prompt.
+        Two positions are reachable: a resend of the identical prompt is capped
+        at ``num_tokens - 1`` (its last token is recomputed for logits), a
+        longer sibling matches the final aligned block. They differ only on a
+        block-aligned prompt, where retaining just the higher one collapses the
+        resend's hit to 0. The alignment is the scheduler block size, not the
+        finer hash granularity, which would over-estimate the reach.
         """
         if not self.eagle_group_ids:
-            return request.num_prompt_tokens - 1
-        aligned = (
-            request.num_prompt_tokens
-            // self.scheduler_block_size
-            * self.scheduler_block_size
-        )
-        return max(aligned - self.scheduler_block_size, 0)
+            return (request.num_prompt_tokens - 1,)
+        block = self.scheduler_block_size
+        resend = (request.num_prompt_tokens - 1) // block * block
+        extension = request.num_prompt_tokens // block * block
+        return tuple(sorted({max(resend - block, 0), max(extension - block, 0)}))
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """
@@ -339,7 +341,7 @@ class KVCacheCoordinator(ABC):
                 that need to be cached
                 (including tokens that are already cached).
         """
-        replay_boundary = self.get_replay_boundary(request)
+        boundaries = self.get_replay_boundaries(request)
         for manager in self.single_type_managers:
             # Only cache tokens with finalized KV. The last num_reprefillable_tokens
             # tokens can be re-prefilled during multi-module MTP.
@@ -350,7 +352,7 @@ class KVCacheCoordinator(ABC):
                 request,
                 num_tokens_to_cache,
                 retention_interval=self.retention_interval,
-                replay_boundary=replay_boundary,
+                replay_boundaries=boundaries,
             )
 
     def free(self, request_id: str) -> None:
@@ -606,6 +608,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
         num_prefill_lookahead: int = 0,
+        allow_partial_hash_hits: bool = True,
     ):
         super().__init__(
             kv_cache_config,
@@ -630,7 +633,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # Only groups that participate in prefix caching must satisfy the
         # divisibility constraint; groups that opt out (e.g. GLM-5.3-Flash kpool
         # tail, block_size=kpool) are scratch buffers and excluded.
-        group_block_sizes = [
+        cacheable_block_sizes = [
             manager.block_size
             for manager, group in zip(
                 self.single_type_managers, kv_cache_config.kv_cache_groups
@@ -638,10 +641,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if group.kv_cache_spec.prefix_cacheable
         ]
         assert all(
-            block_size % hash_block_size == 0 for block_size in group_block_sizes
+            block_size % hash_block_size == 0 for block_size in cacheable_block_sizes
         ), (
             "Each KV cache group's real block_size must be divisible by "
-            f"hash_block_size. block_sizes={group_block_sizes}, "
+            f"hash_block_size. block_sizes={cacheable_block_sizes}, "
             f"hash_block_size={hash_block_size}"
         )
         assert pcp_world_size == 1, "PCP not support hybrid attn now."
@@ -670,7 +673,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             )
             for g in kv_cache_config.kv_cache_groups
         )
-        self.enable_partial_hash_hits = has_partial_mamba_group
+        self.enable_partial_hash_hits = (
+            allow_partial_hash_hits and has_partial_mamba_group
+        )
         if self.enable_partial_hash_hits:
             unsupported_partial_hit_managers = {
                 type(manager).__name__
@@ -775,7 +780,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         cached_num_computed_tokens = self._align_cacheable(num_computed_tokens)
-        replay_boundary = self.get_replay_boundary(request)
+        boundaries = self.get_replay_boundaries(request)
         for manager in self.single_type_managers:
             num_tokens_to_cache = cached_num_computed_tokens
             # EAGLE groups match one block past each aligned boundary and drop
@@ -802,7 +807,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 request,
                 num_tokens_to_cache,
                 retention_interval=self.retention_interval,
-                replay_boundary=replay_boundary,
+                replay_boundaries=boundaries,
             )
 
     def find_longest_cache_hit(
@@ -988,6 +993,7 @@ def get_kv_cache_coordinator(
     hash_block_size: int,
     metrics_collector: KVCacheMetricsCollector | None = None,
     num_prefill_lookahead: int = 0,
+    allow_partial_hash_hits: bool = True,
 ) -> KVCacheCoordinator:
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(
@@ -1031,4 +1037,5 @@ def get_kv_cache_coordinator(
         hash_block_size=hash_block_size,
         metrics_collector=metrics_collector,
         num_prefill_lookahead=num_prefill_lookahead,
+        allow_partial_hash_hits=allow_partial_hash_hits,
     )
