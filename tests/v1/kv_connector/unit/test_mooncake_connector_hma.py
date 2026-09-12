@@ -230,6 +230,7 @@ async def test_build_transfer_params_multi_group_trimming(monkeypatch):
             vllm_config, KVConnectorRole.WORKER, kv_cache_config
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         block_len = 4096
         # Call _build_transfer_params directly (avoids send_kv_to_decode
@@ -327,6 +328,7 @@ async def test_build_transfer_params_group_count_mismatch(monkeypatch):
             vllm_config, KVConnectorRole.WORKER, kv_cache_config
         )
         worker = connector.connector_worker
+        assert worker is not None
 
         block_len = 4096
         transfer_id = "xfer-mismatch"
@@ -416,6 +418,7 @@ def test_request_finished_with_hma_groups():
     )
 
     request = create_request(request_id=1, do_remote_decode=True)
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params["transfer_id"] = request.request_id
 
     from vllm.v1.request import RequestStatus

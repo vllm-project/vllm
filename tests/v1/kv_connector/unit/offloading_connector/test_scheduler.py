@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, call
 
 import pytest
@@ -16,7 +17,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
-from vllm.config import KVEventsConfig
+from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -44,6 +45,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.output import (
     KVConnectorBlockState,
+    NewRequestData,
     SchedulerOutput,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -66,6 +68,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadingManager,
+    OffloadingSpec,
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
@@ -75,7 +78,12 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.outputs import KVConnectorOutput
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import Request, RequestStatus
+
+
+def _as_mock(value: object) -> MagicMock:
+    assert isinstance(value, MagicMock)
+    return value
 
 
 @pytest.mark.parametrize("boundary", [3840, 3904])
@@ -123,8 +131,8 @@ def test_swa_offload_window_covers_unaligned_hit(boundary, eagle, left_state):
         parallel_config=SimpleNamespace(world_size=1, decode_context_parallel_size=1),
     )
     sched = OffloadingConnectorScheduler(
-        spec,
-        config,
+        cast(OffloadingSpec, spec),
+        cast(VllmConfig, config),
         KVCacheConfig(num_blocks=256, kv_cache_tensors=[], kv_cache_groups=groups),
     )
     request = MagicMock()
@@ -149,6 +157,7 @@ def test_swa_offload_window_covers_unaligned_hit(boundary, eagle, left_state):
     if left_state == "pending":
         assert manager.prepare_store([left_key], state.req_context) is not None
     if left_state == "loading":
+        assert sched._chunks_being_loaded is not None
         sched._chunks_being_loaded.add(left_key)
 
     external, load_async = sched.get_num_new_matched_tokens(request, 0)
@@ -157,17 +166,30 @@ def test_swa_offload_window_covers_unaligned_hit(boundary, eagle, left_state):
         assert not load_async
         return
     assert external == boundary and load_async
+    assert external is not None
     pool = BlockPool(256, enable_caching=True, hash_block_size=8)
     managers = []
     for i, group in enumerate(groups):
-        cls = FullAttentionManager if i == 0 else SlidingWindowManager
-        m = cls(
-            kv_cache_spec=group.kv_cache_spec,
-            block_pool=pool,
-            enable_caching=True,
-            kv_cache_group_id=i,
-            scheduler_block_size=256,
-        )
+        kv_cache_spec = group.kv_cache_spec
+        m: FullAttentionManager | SlidingWindowManager
+        if i == 0:
+            assert isinstance(kv_cache_spec, FullAttentionSpec)
+            m = FullAttentionManager(
+                kv_cache_spec=kv_cache_spec,
+                block_pool=pool,
+                enable_caching=True,
+                kv_cache_group_id=i,
+                scheduler_block_size=256,
+            )
+        else:
+            assert isinstance(kv_cache_spec, SlidingWindowSpec)
+            m = SlidingWindowManager(
+                kv_cache_spec=kv_cache_spec,
+                block_pool=pool,
+                enable_caching=True,
+                kv_cache_group_id=i,
+                scheduler_block_size=256,
+            )
         m.add_local_computed_blocks(request.request_id, [], 0, external)
         managers.append(m)
     for m in managers:
@@ -228,18 +250,19 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     req_status = scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
 
+    block_ids_by_req: dict[str, tuple[list[int], ...]] = {}
     output = SimpleNamespace(
         kv_connector_block_state=KVConnectorBlockState(
             req_ids=set(),
-            resolve_block_ids={}.__getitem__,
+            resolve_block_ids=block_ids_by_req.__getitem__,
             boundary_state_offloads={"req": [(1, 99, 28)]},
         )
     )
-    jobs = scheduler._build_partial_tail_store_jobs(output)
+    jobs = scheduler._build_partial_tail_store_jobs(cast(SchedulerOutput, output))
 
     assert len(jobs) == 1
     [job_id] = jobs
@@ -288,24 +311,28 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
     req_status = scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
 
+    block_ids_by_req: dict[str, tuple[list[int], ...]] = {}
     output = SimpleNamespace(
         kv_connector_block_state=KVConnectorBlockState(
             req_ids=set(),
-            resolve_block_ids={}.__getitem__,
+            resolve_block_ids=block_ids_by_req.__getitem__,
             boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]},
         )
     )
-    jobs = scheduler._build_partial_tail_store_jobs(output)
+    jobs = scheduler._build_partial_tail_store_jobs(cast(SchedulerOutput, output))
 
     assert len(jobs) == 2
-    src_spec = next(
-        job.src_spec for job in jobs.values() if len(job.src_spec.block_ids) == 1
-    )
-    assert isinstance(src_spec, GPULoadStoreSpec)
+    src_specs = [
+        job.src_spec
+        for job in jobs.values()
+        if isinstance(job.src_spec, GPULoadStoreSpec)
+        and len(job.src_spec.block_ids) == 1
+    ]
+    [src_spec] = src_specs
     assert src_spec.block_ids.tolist() == [98]
     assert src_spec.group_sizes == [0, 1]
     assert src_spec.block_indices == [0, 0]
@@ -316,13 +343,14 @@ def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
     indexer_config = scheduler.config.kv_group_configs[1]
     scheduler.config = scheduler.config._replace(kv_group_configs=(indexer_config,))
     _make_partial_tail_request(scheduler)
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
 
     jobs = scheduler._build_aligned_boundary_store_jobs({"req": [(1, 98, 16)]})
 
     [job] = jobs.values()
+    assert isinstance(job.src_spec, GPULoadStoreSpec)
     assert job.src_spec.group_sizes == [1]
     assert job.src_spec.block_indices == [0]
 
@@ -331,17 +359,19 @@ def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
 def test_aligned_boundary_store_flushes_before_block_reuse(cow_reuse):
     scheduler = _make_partial_tail_scheduler()
     _make_partial_tail_request(scheduler)
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
 
+    block_ids_by_req: dict[str, tuple[list[int], ...]] = {}
     output = SchedulerOutput.make_empty()
     output.kv_connector_block_state = KVConnectorBlockState(
         req_ids=set(),
-        resolve_block_ids={}.__getitem__,
+        resolve_block_ids=block_ids_by_req.__getitem__,
         boundary_state_offloads={"req": [(1, 99, 16)]},
     )
     meta = scheduler.build_connector_meta(output)
+    assert isinstance(meta, OffloadingConnectorMetadata)
     [job_id] = meta.store_jobs
 
     output = SchedulerOutput.make_empty()
@@ -351,6 +381,7 @@ def test_aligned_boundary_store_flushes_before_block_reuse(cow_reuse):
         output.scheduled_cached_reqs.req_ids = ["req"]
         output.scheduled_cached_reqs.new_block_ids = [([], [99])]
     meta = scheduler.build_connector_meta(output)
+    assert isinstance(meta, OffloadingConnectorMetadata)
 
     assert meta.jobs_to_flush == {job_id}
 
@@ -364,7 +395,7 @@ def test_normal_store_excludes_align_mode_mamba_sources():
     req_status.group_states[0].block_ids[:] = [11]
     req_status.group_states[1].block_ids[:] = [99]
     req_status.update_offload_keys()
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
 
@@ -372,7 +403,7 @@ def test_normal_store_excludes_align_mode_mamba_sources():
         num_scheduled_tokens={"req": 16},
         finished_req_ids=set(),
     )
-    jobs = scheduler._build_store_jobs(output)
+    jobs = scheduler._build_store_jobs(cast(SchedulerOutput, output))
 
     assert len(jobs) == 1
     [job] = jobs.values()
@@ -389,7 +420,7 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     req_status.num_locally_computed_tokens = 0
     req_status.update_offload_keys()
 
-    scheduler.manager.lookup.return_value = LookupResult.HIT
+    _as_mock(scheduler.manager.lookup).return_value = LookupResult.HIT
     assert scheduler._lookup(req_status) == 28
 
     assert req_status.partial_tail_boundary == 28
@@ -417,7 +448,7 @@ def test_lookup_cap_stops_at_authoritative_prefix_boundary():
     scheduler = _make_partial_tail_scheduler()
     request = _make_partial_tail_request(scheduler)
     request.skip_reading_prefix_cache = False
-    scheduler.manager.lookup.return_value = LookupResult.HIT
+    _as_mock(scheduler.manager.lookup).return_value = LookupResult.HIT
 
     tokens, load_async = scheduler.get_num_new_matched_tokens(
         request, 0, max_num_new_tokens=20
@@ -478,6 +509,7 @@ def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():
     )
 
     [load_job] = scheduler._current_batch_load_jobs.values()
+    assert isinstance(load_job.dst_spec, GPULoadStoreSpec)
     loaded = list(load_job.dst_spec.block_ids)
     # The fresh region starts at index 1, so the sparse group's block 0 (id 41) is
     # not a load destination. Before the fix the boundary collapsed to 0.
@@ -496,7 +528,7 @@ def test_partial_lookup_requires_every_cache_group():
             return LookupResult.MISS
         return LookupResult.HIT
 
-    scheduler.manager.lookup.side_effect = lookup
+    _as_mock(scheduler.manager.lookup).side_effect = lookup
     assert scheduler._lookup(req_status) == 16
     assert req_status.partial_tail_boundary is None
 
@@ -1563,7 +1595,7 @@ def test_scan_behavior_declared_for_every_lookup_result(result: LookupResult):
     sched = _make_scheduler_with_lookup(dict.fromkeys([1, 2, 3], result))
 
     assert sched._sliding_window_lookup(keys, 1, _EMPTY_REQ_CTX) == expected_end
-    assert len(sched.manager.lookup.call_args_list) == expected_lookups
+    assert len(_as_mock(sched.manager.lookup).call_args_list) == expected_lookups
 
 
 @pytest.mark.parametrize(
@@ -1597,7 +1629,7 @@ class TestMaximalPrefixLookup:
         sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
 
         assert _maximal_lookup(sched, keys, start_chunk_idx=3) == 2
-        assert sched._events_tracker.record_lookup.call_args_list == [
+        assert _as_mock(sched._events_tracker.record_lookup).call_args_list == [
             call(
                 _LOOKUP_REQ,
                 _LOOKUP_GROUP_CONFIG,
@@ -1615,7 +1647,7 @@ class TestMaximalPrefixLookup:
     def test_all_miss(self):
         sched = _make_scheduler_with_lookup({})
         assert _maximal_lookup(sched, to_keys([1, 2])) == 0
-        sched._events_tracker.record_lookup.assert_not_called()
+        _as_mock(sched._events_tracker.record_lookup).assert_not_called()
 
     def test_partial_prefix(self):
         sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
@@ -1644,7 +1676,7 @@ class TestMaximalPrefixLookup:
         sched = _make_scheduler_with_lookup({1: pending_result})
 
         assert _maximal_lookup(sched, to_keys([1])) is None
-        sched._events_tracker.record_lookup.assert_not_called()
+        _as_mock(sched._events_tracker.record_lookup).assert_not_called()
 
     def test_retry_defers(self):
         keys = to_keys([1, 2])
@@ -1652,8 +1684,8 @@ class TestMaximalPrefixLookup:
             {1: LookupResult.RETRY, 2: LookupResult.HIT}
         )
         assert _maximal_lookup(sched, keys) is None
-        assert sched.manager.lookup.call_count == 2
-        sched._events_tracker.record_lookup.assert_called_once_with(
+        assert _as_mock(sched.manager.lookup).call_count == 2
+        _as_mock(sched._events_tracker.record_lookup).assert_called_once_with(
             _LOOKUP_REQ,
             _LOOKUP_GROUP_CONFIG,
             1,
@@ -1666,7 +1698,7 @@ class TestMaximalPrefixLookup:
             {1: LookupResult.HIT, 2: LookupResult.RETRY}
         )
         assert _maximal_lookup(sched, keys) is None
-        sched._events_tracker.record_lookup.assert_called_once_with(
+        _as_mock(sched._events_tracker.record_lookup).assert_called_once_with(
             _LOOKUP_REQ,
             _LOOKUP_GROUP_CONFIG,
             0,
@@ -1679,8 +1711,8 @@ class TestMaximalPrefixLookup:
             {1: LookupResult.HIT_PENDING, 2: LookupResult.HIT}
         )
         assert _maximal_lookup(sched, keys) is None
-        assert sched.manager.lookup.call_count == 2
-        sched._events_tracker.record_lookup.assert_called_once_with(
+        assert _as_mock(sched.manager.lookup).call_count == 2
+        _as_mock(sched._events_tracker.record_lookup).assert_called_once_with(
             _LOOKUP_REQ,
             _LOOKUP_GROUP_CONFIG,
             1,
@@ -1693,8 +1725,8 @@ class TestMaximalPrefixLookup:
             {1: LookupResult.HIT_PENDING, 2: LookupResult.MISS, 3: LookupResult.HIT}
         )
         assert _maximal_lookup(sched, to_keys([1, 2, 3])) is None
-        assert sched.manager.lookup.call_count == 2
-        sched._events_tracker.record_lookup.assert_not_called()
+        assert _as_mock(sched.manager.lookup).call_count == 2
+        _as_mock(sched._events_tracker.record_lookup).assert_not_called()
 
     def test_retry_stops_at_miss(self):
         """RETRY is treated as hit for iteration, but miss stops the scan."""
@@ -1703,8 +1735,8 @@ class TestMaximalPrefixLookup:
         )
         assert _maximal_lookup(sched, to_keys([1, 2, 3])) is None
         # lookup should have been called for blocks 1 and 2 (stops at miss)
-        assert sched.manager.lookup.call_count == 2
-        sched._events_tracker.record_lookup.assert_not_called()
+        assert _as_mock(sched.manager.lookup).call_count == 2
+        _as_mock(sched._events_tracker.record_lookup).assert_not_called()
 
 
 class TestSlidingWindowLookup:
@@ -1857,7 +1889,7 @@ def test_sliding_window_demand_is_store_reachable(
 
     demanded = {
         int(get_offload_block_hash(lookup_call.args[0]).decode())
-        for lookup_call in sched.manager.lookup.call_args_list
+        for lookup_call in _as_mock(sched.manager.lookup).call_args_list
     }
     assert demanded, "the scan must query something"
 
@@ -2423,11 +2455,14 @@ def test_pending_transfer_defers_prefix_lookup():
     scheduler = object.__new__(OffloadingConnectorScheduler)
     scheduler.manager = MagicMock(spec=OffloadingManager)
 
-    request = SimpleNamespace(request_id="req-0")
+    request = cast(Request, SimpleNamespace(request_id="req-0"))
     group_state = SimpleNamespace(block_ids=[1, 2, 3])
-    req_status = SimpleNamespace(
-        group_states=[group_state],
-        transfer_jobs={123},
+    req_status = cast(
+        RequestOffloadState,
+        SimpleNamespace(
+            group_states=[group_state],
+            transfer_jobs={123},
+        ),
     )
     scheduler._req_status = {request.request_id: req_status}
 
@@ -2439,7 +2474,7 @@ def test_pending_transfer_defers_prefix_lookup():
     assert matched_tokens is None
     assert is_async is False
     assert group_state.block_ids == []
-    scheduler.manager.lookup.assert_not_called()
+    _as_mock(scheduler.manager.lookup).assert_not_called()
 
 
 def test_async_preempt_readmit_before_transfer_output_is_deferred(request_runner):
@@ -2668,7 +2703,10 @@ def _demanded_keys(runner, offload_keys_per_group: list[list], num_tokens: int) 
             _maximal_lookup(scan, keys)
         else:
             scan._sliding_window_lookup(keys, window, _EMPTY_REQ_CTX)
-    return {lookup_call.args[0] for lookup_call in scan.manager.lookup.call_args_list}
+    return {
+        lookup_call.args[0]
+        for lookup_call in _as_mock(scan.manager.lookup).call_args_list
+    }
 
 
 @pytest.mark.parametrize("warmth", ["cold", "gpu_warm", "primary_warm"])
@@ -3758,8 +3796,8 @@ class TestEagle:
         )
         spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
         scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
-        scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
-            generate_store_output(keys)
+        _as_mock(scheduler.manager.prepare_store).side_effect = (
+            lambda keys, req_context: (generate_store_output(keys))
         )
 
         request = MagicMock()
@@ -3780,7 +3818,16 @@ class TestEagle:
         swa_block_ids = list(range(1001, 1126))
         first_output = SchedulerOutput.make_empty()
         first_output.scheduled_new_reqs = [
-            SimpleNamespace(req_id="req", block_ids=(full_block_ids, swa_block_ids))
+            NewRequestData(
+                req_id="req",
+                prompt_token_ids=[],
+                mm_features=[],
+                sampling_params=None,
+                pooling_params=None,
+                block_ids=(full_block_ids, swa_block_ids),
+                num_computed_tokens=0,
+                lora_request=None,
+            )
         ]
         first_output.num_scheduled_tokens = {"req": 1000}
         first_output.total_num_scheduled_tokens = 1000
@@ -3792,6 +3839,7 @@ class TestEagle:
         abort_output = SchedulerOutput.make_empty()
         abort_output.finished_req_ids = {"req"}
         abort_meta = scheduler.build_connector_meta(abort_output)
+        assert isinstance(abort_meta, OffloadingConnectorMetadata)
 
         assert len(abort_meta.store_jobs) == 1
         [store_job] = abort_meta.store_jobs.values()
@@ -4537,12 +4585,13 @@ class TestMambaHybridOffloadServing:
         req_status.group_states[0].block_ids[:] = list(range(1, n_full + 1))
         req_status.group_states[1].block_ids[:] = list(range(101, 101 + n_mamba + 1))
 
+        block_ids_by_req: dict[str, tuple[list[int], ...]] = {}
         out = SimpleNamespace(
             num_scheduled_tokens={"A": self.PROMPT_TOKENS},
             finished_req_ids=set(),
             kv_connector_block_state=KVConnectorBlockState(
                 req_ids=set(),
-                resolve_block_ids={}.__getitem__,
+                resolve_block_ids=block_ids_by_req.__getitem__,
                 boundary_state_offloads={"A": [(1, 101, self.MAMBA_BLOCK)]},
             ),
         )
