@@ -283,11 +283,12 @@ def test_deepseek_v41_mhc_fused_post_pre_delayed(num_tokens, hidden_size, carrie
     weight.uniform_(0.5, 1.5)
     mix_args = (fn, scale, base, 1e-20, 1e-6, 1e-6, 2.0, 20)
 
-    residual_cur, post, comb, layer_input, next_pre = (
+    residual_cur, post, comb, layer_input, next_pre, aux = (
         torch.ops.vllm.mhc_fused_post_pre_delayed_tilelang(
             x, residual, post_layer_mix, comb_res_mix, *mix_args, pre_mix, weight, 1e-6
         )
     )
+    assert aux.shape == (0, hidden_size)
     assert [
         residual_cur.shape,
         post.shape,
@@ -331,6 +332,24 @@ def test_deepseek_v41_mhc_fused_post_pre_delayed(num_tokens, hidden_size, carrie
     ):
         torch.testing.assert_close(actual, expected, atol=tol, rtol=tol)
 
+    # Folding the stream mean into the collapse must not change it, or anything
+    # else the op returns.
+    captured = torch.ops.vllm.mhc_fused_post_pre_delayed_tilelang(
+        x,
+        residual,
+        post_layer_mix,
+        comb_res_mix,
+        *mix_args,
+        pre_mix,
+        weight,
+        1e-6,
+        True,
+    )
+    torch.testing.assert_close(captured[5], residual_cur.mean(dim=1), atol=0, rtol=0)
+    unchanged = (residual_cur, post, comb, layer_input, next_pre)
+    for with_aux, without in zip(captured[:5], unchanged, strict=True):
+        torch.testing.assert_close(with_aux, without, atol=0, rtol=0)
+
     # Decode replays this op from a captured graph.
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -338,14 +357,15 @@ def test_deepseek_v41_mhc_fused_post_pre_delayed(num_tokens, hidden_size, carrie
             x, residual, post_layer_mix, comb_res_mix, *mix_args, pre_mix, weight, 1e-6
         )
     graph.replay()
-    eager = (residual_cur, post, comb, layer_input, next_pre)
+    eager = (residual_cur, post, comb, layer_input, next_pre, aux)
     for replayed, expected in zip(captured, eager, strict=True):
         torch.testing.assert_close(replayed, expected, atol=0, rtol=0)
 
 
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
 @pytest.mark.parametrize("carried", [False, True])
-def test_mhc_fused_post_pre_delayed_custom_op_supports_compile(carried):
+@pytest.mark.parametrize("capture_aux", [False, True])
+def test_mhc_fused_post_pre_delayed_custom_op_supports_compile(carried, capture_aux):
     set_random_seed(0)
     x = torch.randn(2, 5120, dtype=torch.bfloat16, device=DEVICE)
     residual = torch.randn(2, 4, 5120, dtype=torch.bfloat16, device=DEVICE)
@@ -371,6 +391,9 @@ def test_mhc_fused_post_pre_delayed_custom_op_supports_compile(carried):
             2.0,
             20,
             pre_mix,
+            None,
+            1e-6,
+            capture_aux,
         ),
     )
 
@@ -435,9 +458,10 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         post, res, collapsed, pre = mhc_pre_delayed_torch(*args, **kwargs)
         return post, res, decoder.attn_norm(collapsed), pre
 
-    def fused_reference(x, residual, post_mix, res_mix, *args, **kwargs):
+    def fused_reference(x, residual, post_mix, res_mix, *args, capture_aux=False, **kw):
         residual = mhc_post_torch(x, residual, post_mix, res_mix)
-        return residual, *reference(residual, *args, **kwargs)
+        aux = residual.mean(dim=1) if capture_aux else residual.new_empty(0)
+        return residual, *reference(residual, *args, **kw), aux
 
     monkeypatch.setattr(
         "vllm.models.deepseek_v4_1.nvidia.model.mhc_pre_delayed_tilelang",

@@ -245,6 +245,12 @@ class DeepseekV4DecoderLayer(nn.Module):
                 {**hc_stream, "use_pre_mix_in": False},
                 {**hc_stream, "use_pre_mix_in": True},
             ]
+            if vllm_config.speculative_config is not None:
+                # Draft setups read aux hidden states out of the same collapse,
+                # which is its own specialization of the kernel.
+                variants.append(
+                    {**hc_stream, "use_pre_mix_in": True, "write_aux": True}
+                )
             for variant in variants:
                 MHC_PRE_NORM_KERNEL.register_warmup(
                     max_tokens=max_tokens,
@@ -393,7 +399,9 @@ class DeepseekV4DecoderLayer(nn.Module):
                 norm_eps=self.attn_norm.variance_epsilon,
             )
         else:
-            residual, post_mix, res_mix, x, attn_pre = (
+            # The collapse already reads the post-mapped streams, so the mean
+            # aux consumers want comes out of the same kernel.
+            residual, post_mix, res_mix, x, attn_pre, aux = (
                 mhc_fused_post_pre_delayed_tilelang(
                     x,
                     residual,
@@ -410,12 +418,11 @@ class DeepseekV4DecoderLayer(nn.Module):
                     pre_mix=pre_mix,
                     norm_weight=self.attn_norm.weight,
                     norm_eps=self.attn_norm.variance_epsilon,
+                    capture_aux=capture_previous_aux,
                 )
             )
             if capture_previous_aux:
-                # The fused call already applied the previous sublayer's post;
-                # aux consumers only need its mean over the hc streams.
-                previous_aux = residual.mean(dim=1)
+                previous_aux = aux
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
@@ -424,22 +431,24 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
 
-        residual, post_mix, res_mix, x, ffn_pre = mhc_fused_post_pre_delayed_tilelang(
-            x,
-            residual,
-            post_mix,
-            res_mix,
-            self.hc_ffn_fn,
-            self.hc_ffn_scale,
-            self.hc_ffn_base,
-            self.rms_norm_eps,
-            self.hc_eps,
-            self.hc_eps,
-            self.hc_post_alpha,
-            self.hc_sinkhorn_iters,
-            pre_mix=attn_pre,
-            norm_weight=self.ffn_norm.weight,
-            norm_eps=self.ffn_norm.variance_epsilon,
+        residual, post_mix, res_mix, x, ffn_pre, _ = (
+            mhc_fused_post_pre_delayed_tilelang(
+                x,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_ffn_fn,
+                self.hc_ffn_scale,
+                self.hc_ffn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                pre_mix=attn_pre,
+                norm_weight=self.ffn_norm.weight,
+                norm_eps=self.ffn_norm.variance_epsilon,
+            )
         )
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix, ffn_pre, previous_aux
