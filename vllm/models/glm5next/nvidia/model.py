@@ -755,7 +755,17 @@ class Glm5NextModel(nn.Module):
         if self.config.mla_nope and self.config.qk_rope_head_dim > 0:
             kv_a_pad_size = self.config.qk_rope_head_dim
 
-        _pending_wk_fp8: dict = {}
+        # FP8 (weight, weight_scale_inv) pairs are dequantized once both halves
+        # have been seen. A streaming loader may send the 2 halves in different
+        # load_weights() calls. AutoWeightsLoader invokes this method once per
+        # contiguous run of a top-level prefix, so any ``visual.*`` tensor between
+        # a weight and its scale ends the call, thereby discarding the pending half
+        # that actually should have been successfully loaded. To avoid this, keep
+        # the pending halves alive such that completed pairs are popped by the
+        # helpers, so the dict is empty again after a full load.
+        _pending_wk_fp8 = getattr(self, "_pending_fp8_pairs", None)
+        if _pending_wk_fp8 is None:
+            self._pending_fp8_pairs = _pending_wk_fp8 = {}
 
         for args in weights:
             name, loaded_weight = args[:2]
