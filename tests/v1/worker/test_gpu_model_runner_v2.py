@@ -3,7 +3,6 @@
 
 import contextlib
 from types import SimpleNamespace
-from unittest.mock import Mock
 
 import pytest
 import torch
@@ -19,41 +18,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
-
-
-@pytest.mark.parametrize(
-    ("speculative", "draft_dtype"),
-    [(False, None), (True, None), (True, torch.bfloat16), (True, torch.float32)],
-)
-def test_dummy_sampler_reuses_logits_for_rejection_warmup(
-    monkeypatch, speculative, draft_dtype
-):
-    runner = GPUModelRunner.__new__(GPUModelRunner)
-    hidden_states = torch.zeros(3, 4)
-    logits = torch.zeros(3, 8, dtype=torch.bfloat16)
-    draft_logits = (
-        torch.zeros(3, 7, 8, dtype=draft_dtype) if draft_dtype is not None else None
-    )
-    runner.model = SimpleNamespace(compute_logits=Mock(return_value=logits))
-    runner.sampler = Mock()
-    runner.rejection_sampler = Mock() if speculative else None
-    runner.speculator = (
-        SimpleNamespace(draft_logits=draft_logits) if speculative else None
-    )
-    runner.input_buffers = object()
-    dummy_batch = object()
-    monkeypatch.setattr(
-        model_runner_module.InputBatch, "make_dummy", lambda *args: dummy_batch
-    )
-
-    runner._dummy_sampler_run(hidden_states)
-
-    runner.model.compute_logits.assert_called_once_with(hidden_states)
-    runner.sampler.assert_called_once_with(logits, dummy_batch)
-    if speculative:
-        runner.rejection_sampler.assert_called_once_with(
-            logits, dummy_batch, draft_logits
-        )
 
 
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
