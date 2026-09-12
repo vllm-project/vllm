@@ -285,37 +285,12 @@ def mhc_pre_tilelang(
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Forward pass for mHC pre block.
-
-    Args:
-        residual: shape (..., hc_mult, hidden_size), dtype torch.bfloat16
-        fn: shape (hc_mult3, hc_mult * hidden_size), dtype torch.float32
-        hc_scale: shape (3,), dtype torch.float32
-        hc_base: shape (hc_mult3,), dtype torch.float32
-        rms_eps: RMS normalization epsilon
-        hc_pre_eps: pre-mix epsilon
-        hc_sinkhorn_eps: sinkhorn epsilon
-        hc_post_mult_value: post-mix multiplier value
-        sinkhorn_repeat: number of sinkhorn iterations
-        n_splits: split-k factor;
-        norm_weight: optional RMSNorm weight, shape (hidden_size,), dtype
-            torch.bfloat16. When provided, RMSNorm is fused into the
-            layer_input write path of the big_fuse kernel.
-        norm_eps: epsilon for the fused RMSNorm; only consulted when
-            norm_weight is given.
-
-    Returns:
-        post_mix: shape (..., hc_mult), dtype torch.float32
-        comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
-        layer_input: shape (..., hidden_size), dtype torch.bfloat16
-    """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,
         mhc_pre_big_fuse_tilelang,
         mhc_pre_big_fuse_with_norm_tilelang,
     )
-    from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
+    from vllm.utils.deep_gemm import is_deep_gemm_supported, tf32_hc_prenorm_gemm
     from vllm.utils.math_utils import cdiv
 
     assert residual.dtype == torch.bfloat16
@@ -346,11 +321,8 @@ def mhc_pre_tilelang(
     residual_flat = residual.view(-1, hc_mult, hidden_size)
     num_tokens = residual_flat.shape[0]
 
-    from vllm.utils.deep_gemm import is_deep_gemm_supported
-
     use_deep_gemm = is_deep_gemm_supported()
     if use_deep_gemm:
-        # these numbers are from deepgemm kernel impl
         block_k = 64
         block_m = 64
         n_splits = compute_num_split(block_k, hc_hidden_size, cdiv(num_tokens, block_m))
@@ -464,7 +436,6 @@ def _mhc_pre_tilelang_fake(
     hidden_size = residual.shape[-1]
     outer_shape = residual.shape[:-2]
 
-    # Create empty tensors with correct shapes for meta device / shape inference
     post_mix = torch.empty(
         *outer_shape,
         hc_mult,
@@ -509,6 +480,7 @@ def mhc_pre_broadcast_tilelang(
         compute_num_split,
         mhc_pre_big_fuse_broadcast_with_norm_tilelang,
     )
+    from vllm.utils.deep_gemm import is_deep_gemm_supported, tf32_hc_prenorm_gemm
     from vllm.utils.math_utils import cdiv
 
     assert norm_weight is not None, "broadcast mHC pre currently requires fused RMSNorm"
@@ -537,7 +509,11 @@ def mhc_pre_broadcast_tilelang(
     residual_flat = residual
     num_tokens = residual.shape[0]
 
-    n_splits = compute_num_split(64, hidden_size, cdiv(num_tokens, 64))
+    use_deep_gemm = is_deep_gemm_supported()
+    if use_deep_gemm:
+        n_splits = compute_num_split(64, hidden_size, cdiv(num_tokens, 64))
+    else:
+        n_splits = 1
 
     residual_out = torch.empty(
         num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=residual.device
@@ -558,15 +534,23 @@ def mhc_pre_broadcast_tilelang(
         n_splits, num_tokens, dtype=torch.float32, device=residual.device
     )
 
-    from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
+    if use_deep_gemm:
+        tf32_hc_prenorm_gemm(
+            residual_flat,
+            fn_broadcast,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+            n_splits,
+        )
+    else:
+        # Correctness fallback when DeepGEMM is unavailable (forces n_splits=1)
+        _torch_hc_prenorm_gemm(
+            residual_flat,
+            fn_broadcast,
+            gemm_out_mul,
+            gemm_out_sqrsum,
+        )
 
-    tf32_hc_prenorm_gemm(
-        residual_flat,
-        fn_broadcast,
-        gemm_out_mul,
-        gemm_out_sqrsum,
-        n_splits,
-    )
     mhc_pre_big_fuse_broadcast_with_norm_tilelang(
         gemm_out_mul,
         gemm_out_sqrsum,
@@ -637,20 +621,6 @@ def mhc_fused_post_pre_tilelang(
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Run one MHC post block followed by the next MHC pre block.
-
-    When ``norm_weight`` is provided, the layer_input_cur output is the
-    RMSNorm'd activation (fused into the kernel); otherwise it is the
-    raw pre-norm activation as before.
-
-    Returns:
-        residual_cur: post-mapped residual, shape (..., hc_mult, hidden_size)
-        post_mix_cur: shape (..., hc_mult, 1)
-        comb_mix_cur: shape (..., hc_mult, hc_mult)
-        layer_input_cur: shape (..., hidden_size)
-    """
-
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,
         mhc_fused_tilelang,
@@ -658,6 +628,7 @@ def mhc_fused_post_pre_tilelang(
         mhc_pre_big_fuse_tilelang,
         mhc_pre_big_fuse_with_norm_tilelang,
     )
+    from vllm.utils.deep_gemm import is_deep_gemm_supported
     from vllm.utils.math_utils import cdiv
 
     assert residual.dtype == torch.bfloat16
@@ -701,17 +672,13 @@ def mhc_fused_post_pre_tilelang(
     post_layer_mix_flat = post_layer_mix.view(num_tokens, hc_mult)
     comb_res_mix_flat = comb_res_mix.view(num_tokens, hc_mult, hc_mult)
 
-    from vllm.utils.deep_gemm import is_deep_gemm_supported
-
     use_deep_gemm = is_deep_gemm_supported()
     use_small_fma = num_tokens <= 16
     if use_small_fma:
-        # TODO(gnovack): investigate autotuning these heuristics
         tile_n = 2 if num_tokens < 8 else 3
         n_splits = 8 if (num_tokens < 8 and hidden_size <= 4096) else 4
     else:
         if use_deep_gemm:
-            # these number are from deepgemm kernel impl
             block_k = 64
             block_m = 64
             n_splits = compute_num_split(
@@ -919,7 +886,6 @@ def hc_head_fused_kernel_tilelang(
     rms_eps: float,
     hc_eps: float,
 ) -> torch.Tensor:
-    """Apply the fused hc_head kernel and return the (T, H) bf16 result."""
     num_tokens, hc_mult, hidden_size = hs_flat.shape
     out = torch.empty(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=hs_flat.device
