@@ -140,7 +140,8 @@ class ClientRole:
         self._completed_loads: list[LoadResult] = []
         # Next round_seq after idle prune so a reused kv_request_id does
         # not restart at 0 while a delayed completion for the old round
-        # can still arrive.
+        # can still arrive. Entries stay until session close; dropping
+        # one would restart that id at round 0.
         self._next_round: dict[str, int] = {}
 
     # ------------------------------------------------------------------
@@ -159,6 +160,11 @@ class ClientRole:
     def _maybe_prune(self, kv_request_id: str) -> None:
         """Drop live load/lookup state once idle; keep the next round_seq.
 
+        ``_next_round`` is not TTL-expired: forgetting an id would let a
+        later reuse start at round 0 and accept a delayed completion for
+        the retired round. Long-lived sessions grow one int per unique
+        id until ``close()``.
+
         ``peer_lookup_open`` is only read by ``finish``, and every path
         that clears the last probe (fetch / finish / close) also settles
         it, so dropping on emptiness never loses a flag still in use.
@@ -169,6 +175,12 @@ class ClientRole:
             prev = self._next_round.get(kv_request_id, 0)
             self._next_round[kv_request_id] = max(prev, next_round)
             del self._requests[kv_request_id]
+            n = len(self._next_round)
+            if n > 0 and n & (n - 1) == 0:
+                logger.debug(
+                    "Retaining %d kv_request_id round_seq entries until session close",
+                    n,
+                )
 
     def _on_load_terminal(self, kv_request_id: str, st: _ClientRequestState) -> None:
         """Wind down id-level state once no load remains in flight."""
