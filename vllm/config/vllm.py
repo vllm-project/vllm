@@ -81,6 +81,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "DeepseekV4ForCausalLM",
         "DeepseekV4ForConditionalGeneration",
         "DeepSeekV4MTPModel",
+        "DeepseekV41ForCausalLM",
         "Dots3NoteForCausalLM",
         "Dots3NoteMTPModel",
         "Glm5NextForCausalLM",
@@ -665,6 +666,14 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
+        if self.attention_config.hisparse_config is not None:
+            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
+                raise ValueError(
+                    "HiSparse requires Model Runner V2; remove "
+                    "VLLM_USE_V2_MODEL_RUNNER=0."
+                )
+            return True
+
         if getattr(self, "watermark_config", None) is not None:
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
                 logger.info_once(
@@ -990,6 +999,28 @@ class VllmConfig:
             speculative_config.num_speculative_tokens,
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
+
+    def _normalize_piecewise_cudagraph_mode(
+        self, *, breakable_cudagraph_enabled: bool
+    ) -> None:
+        compilation_config = self.compilation_config
+        if (
+            compilation_config.cudagraph_mode.requires_piecewise_compilation()
+            and compilation_config.mode != CompilationMode.VLLM_COMPILE
+            and not breakable_cudagraph_enabled
+        ):
+            fallback_mode = compilation_config.cudagraph_mode.without_piecewise()
+            logger.info_once(
+                "Cudagraph mode %s is not compatible with compilation mode %s. "
+                "Overriding to %s.",
+                compilation_config.cudagraph_mode,
+                compilation_config.mode,
+                fallback_mode,
+            )
+            compilation_config.cudagraph_mode = fallback_mode
+            if fallback_mode == CUDAGraphMode.NONE:
+                compilation_config.max_cudagraph_capture_size = 0
+                compilation_config.cudagraph_capture_sizes = []
 
     def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.
@@ -1536,18 +1567,42 @@ class VllmConfig:
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
-        if (
-            self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
-            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
-            and not envs.VLLM_USE_BREAKABLE_CUDAGRAPH
-        ):
-            logger.info_once(
-                "Cudagraph mode %s is not compatible with compilation mode %s."
-                "Overriding to NONE.",
-                self.compilation_config.cudagraph_mode,
-                self.compilation_config.mode,
-            )
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        if self.attention_config.hisparse_config is not None:
+            if not current_platform.is_cuda():
+                raise ValueError("HiSparse currently requires NVIDIA CUDA.")
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError("HiSparse does not support pipeline parallelism.")
+            if self.parallel_config.decode_context_parallel_size > 1:
+                raise ValueError(
+                    "HiSparse does not support decode context parallelism."
+                )
+            if self.model_config is not None and not hasattr(
+                self.model_config.hf_config, "index_topk"
+            ):
+                raise ValueError(
+                    "HiSparse is only supported for DSA models with index_topk."
+                )
+            if self.kv_transfer_config is not None and (
+                self.kv_transfer_config.kv_connector
+                not in (
+                    None,
+                    "NixlConnector",
+                    "MooncakeStoreConnector",
+                    "MultiConnector",
+                )
+            ):
+                logger.warning(
+                    "HiSparse host-resident KV is configured with connector "
+                    "%s. NixlConnector (GPU-staged host imports) and "
+                    "MooncakeStoreConnector (shared-store offload) are the "
+                    "validated paths; other connectors are treated as "
+                    "debug/fallback paths.",
+                    self.kv_transfer_config.kv_connector,
+                )
+
+        self._normalize_piecewise_cudagraph_mode(
+            breakable_cudagraph_enabled=breakable_cudagraph_enabled
+        )
 
         # async tp is built on top of sequence parallelism and requires it.
         pass_config = self.compilation_config.pass_config
@@ -1716,8 +1771,13 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
+        self._normalize_piecewise_cudagraph_mode(
+            breakable_cudagraph_enabled=breakable_cudagraph_enabled
+        )
+
         self._resolve_mm_embedding_inputs()
         self._resolve_mm_processor_device()
+        self._resolve_mm_video_decode_device()
         self._validate_mm_processor_device()
 
         if self.use_v2_model_runner:
@@ -1917,6 +1977,16 @@ class VllmConfig:
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
+
+        if (
+            self.attention_config.hisparse_config is not None
+            and self.scheduler_config.disable_hybrid_kv_cache_manager
+        ):
+            raise ValueError(
+                "HiSparse requires the hybrid KV cache manager; remove "
+                "--disable-hybrid-kv-cache-manager or use connectors that "
+                "support HMA."
+            )
 
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (
@@ -2605,6 +2675,61 @@ class VllmConfig:
             device_type,
         )
 
+    def _resolve_mm_video_decode_device(self) -> None:
+        """Default video decoding to torchcodec GPU backend for EPD encoder-only
+        instance if the mm processor runs on CUDA.
+
+        The processor consumes the decoded frames on-device in that case, so
+        keeping the frames on the GPU skips the host round-trip through the
+        CPU media path. An explicit codec/backend choice in
+        `--media-io-kwargs` is left alone, and the default is skipped where
+        torchcodec (or its FFmpeg runtime) is unavailable.
+        """
+        if self.model_config is None or self.model_config.multimodal_config is None:
+            return
+        mm_config = self.model_config.multimodal_config
+
+        ec_config = self.ec_transfer_config
+        # An EC producer that is not also a consumer runs no forward pass and
+        # allocates no KV cache, so frontend accelerator work has the device to
+        # itself.
+        if ec_config is None or not ec_config.is_encode_only:
+            return
+
+        from vllm.platforms import current_platform
+
+        device_type = current_platform.device_type
+        if (
+            device_type != "cuda"
+            or mm_config.get_mm_processor_device_type() != device_type
+        ):
+            return
+
+        # User set video backend or device explicitly
+        video_kwargs = mm_config.media_io_kwargs.setdefault("video", {})
+        if "backend" in video_kwargs or "device" in video_kwargs:
+            return
+
+        from vllm.utils.import_utils import check_torchcodec_available
+
+        try:
+            check_torchcodec_available()
+        except (ImportError, RuntimeError):
+            # torchcodec is not installed, or is installed without a usable
+            # FFmpeg runtime (it raises rather than returning False).
+            logger.info_once(
+                "EPD encoder instance: keeping CPU video decoding because "
+                "torchcodec is not available (needs a CUDA build with FFmpeg)."
+            )
+            return
+
+        video_kwargs["backend"] = "torchcodec"
+        video_kwargs["device"] = device_type
+        logger.info_once(
+            "EPD encoder instance: decoding video with NVDEC (torchcodec device=%s).",
+            device_type,
+        )
+
     def _validate_mm_processor_device(self) -> None:
         """Hand the EC config to `MultiModalConfig`, which owns the rule."""
         model_config = self.model_config
@@ -2728,12 +2853,11 @@ class VllmConfig:
                 "Adaptive verification is not currently compatible with LoRA"
             )
 
-        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-            # The draft budget divides by step costs profiled from captured
-            # cudagraphs; eager execution captures none.
+        if not self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             raise ValueError(
-                "Adaptive verification is not currently compatible with "
-                "enforce_eager/cudagraph_mode=none"
+                "Adaptive verification requires full CUDA graphs. Use cudagraph "
+                "mode FULL, FULL_DECODE_ONLY, or FULL_AND_PIECEWISE, or disable "
+                "adaptive verification."
             )
 
         if self.parallel_config.pipeline_parallel_size > 1:
