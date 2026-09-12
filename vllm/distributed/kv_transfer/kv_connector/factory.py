@@ -198,6 +198,12 @@ KVConnectorFactory.register_connector(
 )
 
 KVConnectorFactory.register_connector(
+    "HiSparseConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector",
+    "HiSparseConnector",
+)
+
+KVConnectorFactory.register_connector(
     "MoRIIOConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector",
     "MoRIIOConnector",
