@@ -186,7 +186,9 @@ class DeepseekV32IndexerBackend(AttentionBackend):
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         # Only the varlen paged MQA logits kernel takes per-request query
         # lengths from device tensors natively. Hopper can instead flatten each
-        # query into a single-token row using device-built metadata.
+        # query into a single-token row using device-built metadata. ROCm
+        # flattening reuses that same Triton metadata kernel, so adaptive
+        # verification can write query_start_loc on device here too.
         return _supports_varlen_paged_mqa_logits() or (
             _supports_flattened_device_query_lens()
         )
@@ -623,6 +625,11 @@ def _supports_varlen_paged_mqa_logits() -> bool:
 
 
 def _supports_flattened_device_query_lens() -> bool:
+    # Hopper DeepGEMM flatten path. ROCm DSpark already flattens (native
+    # decode is only next_n in {1, 2}), and the Triton metadata kernel
+    # from #56562 can build per-token rows from device query_start_loc.
+    if current_platform.is_rocm():
+        return True
     return (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(90)
@@ -702,11 +709,23 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.reorder_batch_threshold = None
         self.use_flattening = _use_flattening(self.vllm_config)
         self.supports_varlen = _supports_varlen_paged_mqa_logits()
+        spec_config = self.vllm_config.speculative_config
+        # SM100 varlen already builds decode metadata from device
+        # query_start_loc. ROCm flattening does not, unless we take the
+        # same Triton kernel. Adaptive verification writes those lengths
+        # on device, so ROCm must use that kernel when the flag is on.
+        self.use_device_decode_metadata = self.supports_varlen or (
+            current_platform.is_rocm()
+            and self.use_flattening
+            and spec_config is not None
+            and spec_config.enable_adaptive_verification
+        )
         logger.info_once(
             "DSA indexer decode path: use_flattening=%s supports_varlen=%s "
-            "(next_n=%d, use_fp4_cache=%s)",
+            "use_device_decode_metadata=%s (next_n=%d, use_fp4_cache=%s)",
             self.use_flattening,
             self.supports_varlen,
+            self.use_device_decode_metadata,
             next_n,
             self.indexer_uses_fp4,
         )
@@ -1134,7 +1153,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         decode_metadata = None
         if num_decodes > 0:
-            if not self.supports_varlen:
+            if not self.use_device_decode_metadata:
                 torch.diff(
                     common_attn_metadata.query_start_loc[: num_decodes + 1],
                     out=self.decode_lens_buffer[:num_decodes],
@@ -1177,7 +1196,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 and step_next_n_ok
             )
 
-            if not self.supports_varlen:
+            if not self.use_device_decode_metadata:
                 global_seq_lens_for_decode = self._prepare_global_decode_seq_lens(
                     global_seq_lens=global_seq_lens_for_decode,
                     decode_lens=decode_lens,
@@ -1189,7 +1208,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
 
             decode_indices = None
-            if self.supports_varlen:
+            if self.use_device_decode_metadata:
                 from vllm.v1.attention.ops.metadata import (
                     _indexer_decode_metadata_kernel,
                 )
