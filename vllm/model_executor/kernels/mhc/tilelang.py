@@ -222,6 +222,7 @@ def mhc_pre_delayed_tilelang(
         layer_input,
         pre_mix if pre_mix is not None else post,
         next_pre_mix,
+        layer_input,
         hidden_size,
         rms_eps,
         hc_pre_eps,
@@ -479,6 +480,7 @@ def mhc_fused_post_pre_delayed_tilelang(
         layer_input,
         pre_mix if pre_mix is not None else post,
         next_pre_mix,
+        aux if capture_aux else layer_input,
         hidden_size,
         rms_eps,
         hc_pre_eps,
@@ -490,10 +492,8 @@ def mhc_fused_post_pre_delayed_tilelang(
         use_pre_mix_in=pre_mix is not None,
         save_pre_mix=True,
         rms_numel=input_size,
+        write_aux=capture_aux,
     )
-    if capture_aux:
-        # The unnormalized epilogue has no fused aux path.
-        aux.copy_(residual_cur.mean(dim=1))
     return outputs
 
 
