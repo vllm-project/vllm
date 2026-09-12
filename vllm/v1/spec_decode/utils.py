@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 import torch
 
 from vllm.model_executor.warmup.jit_warmup import (
@@ -322,21 +324,22 @@ def _eagle_prepare_next_token_warmup_inputs(
     *, vocab_size: int, num_sampled_tokens_per_req: int, max_batch_size: int
 ):
     int32 = TritonWarmupTensor(torch.int32)
+    sampled_width: Any = WarmupIntRange(1, num_sampled_tokens_per_req + 1)
     return dict(
         sampled_token_ids=TritonWarmupTensor(
             torch.int32,
-            shape=(1, num_sampled_tokens_per_req),
-            strides=(num_sampled_tokens_per_req, 1),
+            shape=(1, sampled_width),
+            strides=(sampled_width, 1),
         ),
         discard_request_mask=TritonWarmupTensor(torch.bool),
         backup_next_token_ids=int32,
         next_token_ids=int32,
         valid_sampled_tokens_count=int32,
         vocab_size=vocab_size,
-        num_sampled_tokens_per_req=num_sampled_tokens_per_req,
+        num_sampled_tokens_per_req=sampled_width,
         num_reqs=WarmupIntRange(1, max_batch_size + 1),
-        stride_sampled_token_ids=num_sampled_tokens_per_req,
-        BLOCK_SIZE_TOKENS=next_power_of_2(num_sampled_tokens_per_req),
+        stride_sampled_token_ids=sampled_width,
+        BLOCK_SIZE_TOKENS=next_power_of_2(sampled_width),
     )
 
 
