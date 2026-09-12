@@ -35,10 +35,15 @@ def test_mixed_warmup_skipped_for_single_seq(max_num_reqs):
 def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_warmup):
     """Startup must warm fixed drafts before calibration and retain its manager."""
     manager = SimpleNamespace(cost_tables=None)
-    runner = SimpleNamespace(adaptive_verification=manager)
+    rejection_sampler = SimpleNamespace(enable_adaptive_verification=True)
+    runner = SimpleNamespace(
+        adaptive_verification=manager,
+        rejection_sampler=rejection_sampler,
+    )
 
     def run_steps(model_runner, execute, sample):
         assert model_runner.adaptive_verification is None
+        assert not model_runner.rejection_sampler.enable_adaptive_verification
         if fail_warmup:
             raise RuntimeError("warmup failed")
 
@@ -50,3 +55,4 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
         warmup.warmup_kernels(runner, _fail, _fail)
     assert runner.adaptive_verification is manager
     assert manager.cost_tables is None
+    assert rejection_sampler.enable_adaptive_verification
