@@ -73,19 +73,23 @@ steps:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
     - pytest -v -s kernels/test_top_k_per_row.py
 
-- label: ":nvidia: (B200) DeepSeek V4 Kernels"
+- label: ":nvidia: (B200) DeepSeek V4 / DeepGEMM MegaMoE"
   key: deepseek-v4-kernel-test-b200
   timeout_in_minutes: 20
   device: b200-k8s
   source_file_dependencies:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
+  - vllm/model_executor/models/deepseek_v2.py
+  - vllm/models/deepseek_v32/nvidia/
   - vllm/models/deepseek_v4/common/ops/
   - vllm/models/deepseek_v4/nvidia/
+  - vllm/models/glm5next/nvidia/
+  - vllm/models/kimi_k3/nvidia/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
-  - tests/models/test_deepseek_v4_mega_moe.py
+  - tests/models/test_deep_gemm_mega_moe.py
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
-    - pytest -v -s models/test_deepseek_v4_mega_moe.py
+    - pytest -v -s models/test_deep_gemm_mega_moe.py
 
 # Catch-all for test files at the tests/kernels root. This job collects
 # the whole root so new files are wired by default.
