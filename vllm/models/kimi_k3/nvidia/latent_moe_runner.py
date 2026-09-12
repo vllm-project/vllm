@@ -332,11 +332,9 @@ class LatentMoERunner(MoERunner):
             hidden_states, shared_experts_input = self.apply_routed_input_transform(
                 hidden_states
             )
-        hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = (
-            self._maybe_pad_hidden_states(
-                shared_experts_input,
-                hidden_states,
-            )
+        og_hidden_dim_pre_xform, og_hidden_dim_post_xform = self._forward_padding_plan(
+            shared_experts_input,
+            hidden_states,
         )
 
         if (
@@ -361,9 +359,7 @@ class LatentMoERunner(MoERunner):
             shared_experts_input,
             input_ids,
             self._encode_layer_name(),
-            self.moe_config.hidden_dim_unpadded
-            if self._quant_method.has_unpadded_output
-            else 0,
+            self._moe_out_hidden_dim(hidden_states),
         )
 
         shared_output, fused_output = cast(tuple[torch.Tensor, torch.Tensor], result)
