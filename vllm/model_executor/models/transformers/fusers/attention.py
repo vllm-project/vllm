@@ -8,7 +8,7 @@ import textwrap
 from collections.abc import Hashable
 from dataclasses import dataclass
 from functools import cache
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 from torch import fx, nn
@@ -98,7 +98,9 @@ class AttentionFuser(BaseFuser):
     def match(
         cls, graph: fx.Graph | None, module: nn.Module
     ) -> "AttentionFuser | None":
-        if (call := interface_call(cast(Hashable, type(module)))) is None:
+        module_cls = type(module)
+        assert isinstance(module_cls, Hashable)
+        if (call := interface_call(module_cls)) is None:
             return None
         scaling = [kw.value for kw in call.keywords if kw.arg == "scaling"]
         scale_expr = scaling[0] if len(scaling) == 1 else None
@@ -126,7 +128,8 @@ class AttentionFuser(BaseFuser):
             data = torch.empty(size, dtype=sinks.dtype, device=device)
             sinks_param = nn.Parameter(data, requires_grad=False)
             set_weight_attrs(sinks_param, {"weight_loader": sharded_weight_loader(0)})
-            s_aux_expr = cast(ast.Attribute, self.s_aux_expr)
+            s_aux_expr = self.s_aux_expr
+            assert isinstance(s_aux_expr, ast.Attribute)
             setattr(module, s_aux_expr.attr, sinks_param)
         return module
 

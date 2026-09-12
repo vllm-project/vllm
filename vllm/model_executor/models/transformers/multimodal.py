@@ -396,14 +396,10 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
         itself is to process it by itself.
         """
         audios = mm_data.get("audio")
-        if not isinstance(audios, Sequence) or not audios:
-            return
-        audio_lengths = []
-        for audio in audios:
-            if not isinstance(audio, Sized):
-                return
-            audio_lengths.append(len(audio))
-        if len(set(audio_lengths)) == 1:
+        if TYPE_CHECKING:
+            assert isinstance(audios, Sequence)
+            assert all(isinstance(audio, Sized) for audio in audios)
+        if not audios or len({len(audio) for audio in audios}) == 1:
             return
 
         alone = [
@@ -488,8 +484,9 @@ class LegacyMultiModalProcessor(_MultiModalProcessorBase):
         token_id = getattr(processor, names[0], getattr_iter(config, names))
         if token_id is None:
             token = getattr(processor, f"{modality}_token", None)
-            if isinstance(token, str):
-                token_id = info.get_tokenizer().get_vocab().get(token)
+            if TYPE_CHECKING:
+                assert isinstance(token, str)
+            token_id = info.get_tokenizer().get_vocab().get(token)
         if token_id is None:
             raise ValueError(
                 f"Cannot find {modality}_token_id on processor or model config"
@@ -814,13 +811,15 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
     ) -> list[int] | None:
         """Ask the HF processor how many rows of image data each image produces."""
         images = mm_data.get("images")
-        if not isinstance(images, Iterable) or not images:
+        if TYPE_CHECKING:
+            assert isinstance(images, Iterable)
+        if not images:
             return None
         try:
             sizes = []
             for image in images:
-                if not isinstance(image, _ImageWithSize):
-                    return None
+                if TYPE_CHECKING:
+                    assert isinstance(image, _ImageWithSize)
                 sizes.append((image.height, image.width))
             mm_tokens = self.info.get_hf_processor()._get_num_multimodal_tokens(
                 image_sizes=sizes, **self.info.ctx.get_merged_mm_kwargs({})

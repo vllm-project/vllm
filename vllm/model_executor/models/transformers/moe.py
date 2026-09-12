@@ -109,8 +109,9 @@ class TransformersMoERunner(_TransformersMoERunnerBase):
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
     ) -> torch.Tensor:
-        assert isinstance(self, MoERunner)
-        return MoERunner.forward(self, hidden_states, topk_weights)
+        if TYPE_CHECKING:
+            return MoERunner.forward(self, hidden_states, topk_weights)
+        return super().forward(hidden_states, topk_weights)
 
 
 def _transformers_moe_forward(
@@ -148,14 +149,17 @@ class TransformersRoutedExperts(_TransformersRoutedExpertsBase):
     def get_expert_mapping(
         self, include_fused: bool = False
     ) -> list[tuple[str, str, int, str]]:
-        assert isinstance(self, RoutedExperts)
         common_names = ("gate_proj", "down_proj", "up_proj")
-        common_map = RoutedExperts.get_expert_mapping(
-            self, *common_names, include_fused
-        )
-        mixtral_map = RoutedExperts.get_expert_mapping(
-            self, "w1", "w2", "w3", include_fused
-        )
+        if TYPE_CHECKING:
+            common_map = RoutedExperts.get_expert_mapping(
+                self, *common_names, include_fused
+            )
+            mixtral_map = RoutedExperts.get_expert_mapping(
+                self, "w1", "w2", "w3", include_fused
+            )
+        else:
+            common_map = super().get_expert_mapping(*common_names, include_fused)
+            mixtral_map = super().get_expert_mapping("w1", "w2", "w3", include_fused)
         if not include_fused:
             return common_map + mixtral_map
         common_fused, common_unfused = common_map[:3], common_map[3:]
@@ -230,10 +234,12 @@ class MoEMixin(_MoEMixinBase):
         )
 
         # Dtype the router computes in, if it is not the activation dtype.
-        config_router_dtype = getattr(text_config, "moe_router_dtype", None)
+        config_router_dtype_name: str | None = getattr(
+            text_config, "moe_router_dtype", None
+        )
         config_router_dtype = (
-            STR_DTYPE_TO_TORCH_DTYPE.get(config_router_dtype)
-            if isinstance(config_router_dtype, str)
+            STR_DTYPE_TO_TORCH_DTYPE.get(config_router_dtype_name)
+            if config_router_dtype_name is not None
             else None
         )
 

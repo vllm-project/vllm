@@ -130,9 +130,15 @@ class StackedFuser(RewriteFuser):
     """A fuser that merges sibling projections into one stacked linear and
     rewrites the forward to call it."""
 
-    @property
-    @abstractmethod
-    def merged_name(self) -> str:
+    if TYPE_CHECKING:
+
+        @property
+        @abstractmethod
+        def merged_name(self) -> str:
+            """Attribute name of the merged module created by `update_attrs`."""
+
+    else:
+        merged_name: ClassVar[str]
         """Attribute name of the merged module created by `update_attrs`."""
 
     merged_cls_name: ClassVar[str]
