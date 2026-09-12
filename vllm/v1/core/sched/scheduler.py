@@ -55,6 +55,7 @@ from vllm.v1.core.sched.request_queue import (
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
     MambaSpec,
     get_mamba_prefill_checkpoint_position,
@@ -75,6 +76,20 @@ from vllm.v1.structured_output.utils import strip_speculative_padding
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+
+def _kv_group_prefix_cacheable(spec) -> bool:
+    """Whether a KV-cache group participates in prefix caching.
+
+    Newer trees expose ``participates_in_prefix_caching`` (nightly line) or
+    ``prefix_cacheable``; older trees expose neither, in which case every
+    group participates.
+    """
+    for name in ("participates_in_prefix_caching", "prefix_cacheable"):
+        value = getattr(spec, name, None)
+        if value is not None:
+            return bool(value)
+    return True
 
 
 class Scheduler(SchedulerInterface):
@@ -3053,10 +3068,10 @@ class Scheduler(SchedulerInterface):
         """
         Identify and update requests affected by invalid KV cache blocks.
 
-        This method scans the given requests, detects those with invalid blocks
-        and adjusts their `num_computed_tokens` to the longest valid prefix.
-        For observability, it also accumulates the total number of tokens that
-        will need to be recomputed across all affected requests.
+        Detects affected requests and repairs invalid blocks. Single-group
+        requests keep their longest valid prefix; hybrid (multi-group)
+        requests replay from zero because cross-group state dependencies
+        make partial resume unsound. Also totals the tokens to recompute.
 
         Args:
             requests: The set of requests to scan for invalid blocks.
@@ -3081,17 +3096,74 @@ class Scheduler(SchedulerInterface):
         # these requests must be rescheduled, but only the first will recompute
         # it. This set tracks blocks already marked for recomputation.
         marked_invalid_block_ids: set[int] = set()
-        for request in requests:
+        # Hybrid recovery may preempt running requests (removing them from
+        # self.running), so iterate over a snapshot.
+        for request in tuple(requests):
             is_affected = False
             marked_invalid_block = False
             req_id = request.request_id
-            # TODO (davidb): add support for hybrid memory allocator
-            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+            group_block_ids = self.kv_cache_manager.get_block_ids(req_id)
             # We iterate only over blocks that may contain externally computed
             # tokens
             req_num_computed_tokens = (
                 request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0)
             )
+
+            if len(group_block_ids) > 1:
+                # Hybrid (multi-group) requests cannot resume at a partial
+                # prefix: state groups depend on the full-attention group's
+                # boundary state, so replay from zero with every participating
+                # group's hash invalidated.
+                req_num_computed_tokens = max(0, req_num_computed_tokens)
+                dependent_groups = []
+                for block_ids, group in zip(
+                    group_block_ids,
+                    self.kv_cache_config.kv_cache_groups,
+                    strict=True,
+                ):
+                    spec = group.kv_cache_spec
+                    if not _kv_group_prefix_cacheable(spec):
+                        continue
+                    # Match the engine's outer-spec DCP coverage rule.
+                    block_size = spec.block_size
+                    if isinstance(spec, AttentionSpec):
+                        block_size *= self.dcp_world_size
+                    dependent_groups.append(block_ids)
+                    num_computed_blocks = -(-req_num_computed_tokens // block_size)
+                    if any(
+                        block_id in invalid_block_ids
+                        for _, block_id in zip(range(num_computed_blocks), block_ids)
+                    ):
+                        is_affected = True
+
+                if not is_affected:
+                    continue
+                affected_req_ids.add(req_id)
+                total_affected_tokens += req_num_computed_tokens
+                # A failed group invalidates all dependent group states, not
+                # just the failed group's suffix. evict_blocks removes hashes
+                # only: it must not return DMA-owned buffers to the pool.
+                dependent_block_ids = {
+                    block_id for block_ids in dependent_groups for block_id in block_ids
+                }
+                if evict_blocks:
+                    blocks_to_evict.update(dependent_block_ids)
+                if self.recompute_kv_load_failures:
+                    self.kv_cache_manager.evict_blocks(dependent_block_ids)
+                    request.skip_reading_prefix_cache = True
+                    if request.status == RequestStatus.RUNNING:
+                        self.running.remove(request)
+                        self._preempt_request(
+                            request, time.monotonic(), drop_stale_output=True
+                        )
+                    else:
+                        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+                        # Keep async receive buffers until finished_recving;
+                        # _update_waiting_for_remote_kv then frees all groups.
+                        request.num_computed_tokens = 0
+                continue
+
+            (req_block_ids,) = group_block_ids
 
             req_num_computed_blocks = (
                 req_num_computed_tokens + self.block_size - 1
