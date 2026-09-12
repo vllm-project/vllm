@@ -5,6 +5,13 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
+# Programs per row for the kernels that walk a row's own [start, end) range.
+# The grid is static (rows x this), so the kernels replay unchanged inside CUDA
+# graphs while the work stays proportional to each row's context length. The
+# logits buffer can be as wide as max_model_len (1M for DeepSeek-V4), so a grid
+# over the buffer width would sweep a million columns per row every step.
+_ROW_PROGRAMS = 8
+
 
 @triton.jit
 def _max_with_nan(a, b):
@@ -27,28 +34,37 @@ def _block_scores_kernel(
     HAS_STARTS: tl.constexpr,
     ROW_REPEAT: tl.constexpr,
     TILE: tl.constexpr,
+    ROW_PROGRAMS: tl.constexpr,
 ):
+    # Per-block max of the row's logits over [start, end); blocks past the
+    # row's range are not written here: `scores` is pre-filled with -inf.
     row = tl.program_id(0).to(tl.int64)
-    blocks = tl.program_id(1) * TILE + tl.arange(0, TILE)
     start = tl.load(starts + row // ROW_REPEAT * stride_start) if HAS_STARTS else 0
-    end = tl.load(ends + row // ROW_REPEAT * stride_end)
+    end_raw = tl.load(ends + row // ROW_REPEAT * stride_end)
+    end = tl.minimum(end_raw, width)
+    row_blocks = tl.cdiv(tl.maximum(end - start, 0), BLOCK_SIZE)
+    row_blocks = tl.minimum(row_blocks, nblocks)
+    # The row's newest block is pinned to +inf. It is computed from the raw
+    # end, as before, so a row whose end lies past the buffer width still pins
+    # the block the packed-column clamp later maps to the last column.
+    pin = (end_raw - start - 1) // BLOCK_SIZE
     offsets = tl.arange(0, triton.next_power_of_2(BLOCK_SIZE))
-    cols = start + blocks[:, None] * BLOCK_SIZE + offsets[None, :]
-    values = tl.load(
-        logits + row * stride_row + cols * stride_col,
-        (blocks[:, None] < nblocks)
-        & (offsets[None, :] < BLOCK_SIZE)
-        & (cols < end)
-        & (cols < width),
-        other=-float("inf"),
-    )
-    reduced = tl.reduce(values, 1, _max_with_nan)
-    reduced = tl.where(
-        (end > start) & (blocks == (end - start - 1) // BLOCK_SIZE),
-        float("inf"),
-        reduced,
-    )
-    tl.store(scores + row * nblocks + blocks, reduced, blocks < nblocks)
+    for tile in range(tl.program_id(1), tl.cdiv(row_blocks, TILE), ROW_PROGRAMS):
+        blocks = tile * TILE + tl.arange(0, TILE)
+        cols = start + blocks[:, None] * BLOCK_SIZE + offsets[None, :]
+        values = tl.load(
+            logits + row * stride_row + cols * stride_col,
+            (blocks[:, None] < row_blocks)
+            & (offsets[None, :] < BLOCK_SIZE)
+            & (cols < end),
+            other=-float("inf"),
+        )
+        reduced = tl.reduce(values, 1, _max_with_nan)
+        reduced = tl.where((end_raw > start) & (blocks == pin), float("inf"), reduced)
+        tl.store(scores + row * nblocks + blocks, reduced, blocks < row_blocks)
+    if tl.program_id(1) == 0:
+        if (end_raw > start) & (pin >= row_blocks) & (pin < nblocks):
+            tl.store(scores + row * nblocks + pin, float("inf"))
 
 
 @triton.jit(do_not_specialize=["k"])
@@ -77,10 +93,12 @@ def _store_candidates_kernel(
 def _candidate_flags_kernel(
     candidates,
     starts,
+    ends,
     flags,
     stride_row,
     stride_col,
     stride_start,
+    stride_end,
     width,
     nblocks,
     BLOCK_SIZE: tl.constexpr,
@@ -88,12 +106,19 @@ def _candidate_flags_kernel(
     HAS_STARTS: tl.constexpr,
     ROW_REPEAT: tl.constexpr,
 ):
+    # Only the flags of the row's own blocks (plus the sentinel slot at
+    # `nblocks`) are ever read by the mask kernel, so only those are cleared.
     row = tl.program_id(0).to(tl.int64)
-    offsets = tl.arange(0, 1024)
-    for tile in range(tl.cdiv(nblocks + 1, 1024)):
-        slots = tile * 1024 + offsets
-        tl.store(flags + row * (nblocks + 1) + slots, 0, slots <= nblocks)
     start = tl.load(starts + row // ROW_REPEAT * stride_start) if HAS_STARTS else 0
+    end = tl.load(ends + row // ROW_REPEAT * stride_end)
+    end = tl.minimum(end, width)
+    row_blocks = tl.cdiv(tl.maximum(end - start, 0), BLOCK_SIZE)
+    row_blocks = tl.minimum(row_blocks, nblocks)
+    offsets = tl.arange(0, 1024)
+    for tile in range(tl.cdiv(row_blocks, 1024)):
+        slots = tile * 1024 + offsets
+        tl.store(flags + row * (nblocks + 1) + slots, 0, slots < row_blocks)
+    tl.store(flags + row * (nblocks + 1) + nblocks, 0)
     cols = tl.arange(0, triton.next_power_of_2(K))
     block = tl.load(
         candidates + row * stride_row + cols * stride_col, cols < K, other=-1
@@ -120,21 +145,28 @@ def _mask_candidates_kernel(
     HAS_STARTS: tl.constexpr,
     ROW_REPEAT: tl.constexpr,
     TILE: tl.constexpr,
+    ROW_PROGRAMS: tl.constexpr,
 ):
+    # Walk only the row's own [start, end) columns. Columns outside it are
+    # never read by the row top-k (it takes the same bounds), so they are left
+    # alone instead of being filled with -inf across the whole buffer width.
     row = tl.program_id(0).to(tl.int64)
-    cols = tl.program_id(1) * TILE + tl.arange(0, TILE)
     start = tl.load(starts + row // ROW_REPEAT * stride_start) if HAS_STARTS else 0
     end = tl.load(ends + row // ROW_REPEAT * stride_end)
-    valid = (cols >= start) & (cols < end) & (cols < width)
-    block = (cols - start) // BLOCK_SIZE
-    keep = tl.load(flags + row * (nblocks + 1) + block, valid, other=0)
+    end = tl.minimum(end, width)
     edge = tl.load(flags + row * (nblocks + 1) + nblocks)
-    keep = (keep != 0) | ((cols == width - 1) & (edge != 0))
-    tl.store(
-        logits + row * stride_row + cols * stride_col,
-        -float("inf"),
-        (cols < width) & ~(valid & keep),
-    )
+    offsets = tl.arange(0, TILE)
+    for tile in range(tl.program_id(1), tl.cdiv(tl.maximum(end - start, 0), TILE), ROW_PROGRAMS):
+        cols = start + tile * TILE + offsets
+        valid = cols < end
+        block = (cols - start) // BLOCK_SIZE
+        keep = tl.load(flags + row * (nblocks + 1) + block, valid, other=0)
+        keep = (keep != 0) | ((cols == width - 1) & (edge != 0))
+        tl.store(
+            logits + row * stride_row + cols * stride_col,
+            -float("inf"),
+            valid & ~keep,
+        )
 
 
 def select_candidate_blocks(
@@ -159,8 +191,8 @@ def select_candidate_blocks(
         out.fill_(-1)
         return
     nblocks = triton.cdiv(width, block_size)
-    scores = logits.new_empty((rows, nblocks))
-    _block_scores_kernel[(rows, triton.cdiv(nblocks, 128))](
+    scores = logits.new_full((rows, nblocks), -float("inf"))
+    _block_scores_kernel[(rows, _ROW_PROGRAMS)](
         logits,
         row_ks,
         row_ke,
@@ -174,6 +206,7 @@ def select_candidate_blocks(
         row_ks is not None,
         row_repeat,
         128,
+        _ROW_PROGRAMS,
     )
     # Keep the existing top-k tie behavior.
     top = scores.topk(min(topk_blocks, nblocks), dim=-1)
@@ -196,7 +229,7 @@ def apply_candidate_mask(
     block_size: int,
     row_repeat: int = 1,
 ) -> None:
-    """Mask packed logits outside causal bounds and request-local candidates."""
+    """Mask each row's in-range logits down to its request-local candidates."""
     assert logits.is_cuda
     rows, width = logits.shape
     if not rows or not width:
@@ -207,9 +240,11 @@ def apply_candidate_mask(
     _candidate_flags_kernel[(rows,)](
         candidate_blocks,
         row_ks,
+        row_ke,
         flags,
         *candidate_blocks.stride(),
         start_stride,
+        row_ke.stride(0),
         width,
         nblocks,
         block_size,
@@ -217,7 +252,7 @@ def apply_candidate_mask(
         row_ks is not None,
         row_repeat,
     )
-    _mask_candidates_kernel[(rows, triton.cdiv(width, 1024))](
+    _mask_candidates_kernel[(rows, _ROW_PROGRAMS)](
         logits,
         row_ks,
         row_ke,
@@ -231,4 +266,5 @@ def apply_candidate_mask(
         row_ks is not None,
         row_repeat,
         1024,
+        _ROW_PROGRAMS,
     )
