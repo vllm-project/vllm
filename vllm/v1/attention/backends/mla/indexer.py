@@ -9,12 +9,12 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonPointerInputVariant,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
@@ -396,7 +396,7 @@ class BuildPrefillChunkMetadataKernel(
 
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
         max_tokens = max(1, min(vllm_config.scheduler_config.max_num_batched_tokens, 8))
-        hf_config = vllm_config.model_config.hf_config
+        hf_text_config = vllm_config.model_config.hf_text_config
         parallel_config = vllm_config.parallel_config
         dcp_world = parallel_config.decode_context_parallel_size
         dcp_interleave = parallel_config.cp_kv_cache_interleave_size
@@ -405,12 +405,12 @@ class BuildPrefillChunkMetadataKernel(
             dict.fromkeys(
                 max(1, int(ratio))
                 for ratio in (
-                    *(getattr(hf_config, "compress_ratios", None) or (1,)),
-                    getattr(hf_config, "index_kpool", 1) or 1,
+                    *(getattr(hf_text_config, "compress_ratios", None) or (1,)),
+                    getattr(hf_text_config, "index_kpool", 1) or 1,
                 )
             )
         )
-        index_kpool = getattr(hf_config, "index_kpool", None)
+        index_kpool = getattr(hf_text_config, "index_kpool", None)
         if index_kpool and index_kpool > 1 and index_kpool not in compress_ratios:
             compress_ratios = compress_ratios + (index_kpool,)
         return self._trace_dispatch(self.dispatch)(
