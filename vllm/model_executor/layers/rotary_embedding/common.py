@@ -141,11 +141,15 @@ class ApplyRotaryEmb(CustomOp):
         """
         Args:
             x: [batch_size (optional), seq_len, num_heads, head_size]
-            cos: [seq_len, head_size // 2]
-            sin: [seq_len, head_size // 2]
+            cos: [seq_len, rotary_dim // 2]
+            sin: [seq_len, rotary_dim // 2]
             is_neox_style: Whether to use the Neox-style or GPT-J-style.
             enable_fp32_compute: Temporarily convert x, cos, sin to FP32 dtype
                                  for higher accuracy.
+
+        As in ``forward_cuda``, ``rotary_dim = 2 * cos.shape[-1]`` may be smaller
+        than ``head_size`` (partial rotary), in which case only the leading
+        ``rotary_dim`` channels are rotated.
         """
         origin_dtype = x.dtype
         if enable_fp32_compute:
@@ -153,6 +157,16 @@ class ApplyRotaryEmb(CustomOp):
 
         cos = cos.unsqueeze(-2).to(x.dtype)
         sin = sin.unsqueeze(-2).to(x.dtype)
+
+        # Split off the pass-through tail before rotating.
+        head_size = x.shape[-1]
+        rotary_dim = 2 * cos.shape[-1]
+        assert rotary_dim <= head_size, (
+            f"rotary_dim ({rotary_dim}) must not exceed head_size ({head_size})"
+        )
+        x_pass = None
+        if rotary_dim < head_size:
+            x, x_pass = x[..., :rotary_dim], x[..., rotary_dim:]
 
         if is_neox_style:
             x1, x2 = torch.chunk(x, 2, dim=-1)
@@ -167,6 +181,9 @@ class ApplyRotaryEmb(CustomOp):
             output = torch.cat((o1, o2), dim=-1)
         else:
             output = torch.stack((o1, o2), dim=-1).flatten(-2)
+
+        if x_pass is not None:
+            output = torch.cat((output, x_pass), dim=-1)
 
         if enable_fp32_compute:
             output = output.to(origin_dtype)
