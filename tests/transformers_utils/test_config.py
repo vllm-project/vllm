@@ -6,6 +6,7 @@ only get the `eos_token_id` from the tokenizer as defined by
 `BaseRenderer.get_eos_token_id`.
 """
 
+import math
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
@@ -18,8 +19,10 @@ from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils import config as config_module
 from vllm.transformers_utils.config import (
     get_safetensors_params_metadata,
+    mrope_num_dims,
     patch_legacy_rope_type,
     try_get_generation_config,
+    uses_mrope,
 )
 from vllm.transformers_utils.configs.glm5_next import (
     Glm5NextConfig,
@@ -47,6 +50,31 @@ def test_patch_legacy_rope_type_preserves_nope_layers():
             "rope_type": "default",
             "mrope_section": [24, 20, 20],
         },
+    }
+
+
+def test_patch_legacy_rope_type_normalizes_telechat3_yarn():
+    """TeleChat3's RoPE is YaRN with 0.07 in place of the usual 0.1.
+
+    Encoding that as a precomputed attention_factor keeps the config
+    plain YaRN, which Transformers and every "yarn" guard understand.
+    `mscale` cannot express it: Transformers only applies mscale when
+    mscale_all_dim is also truthy.
+    """
+    rope_parameters = {
+        "type": "telechat3-yarn",
+        "rope_type": "telechat3-yarn",
+        "factor": 4.0,
+        "original_max_position_embeddings": 8192,
+    }
+
+    patch_legacy_rope_type(rope_parameters)
+
+    assert rope_parameters == {
+        "rope_type": "yarn",
+        "factor": 4.0,
+        "original_max_position_embeddings": 8192,
+        "attention_factor": pytest.approx(0.07 * math.log(4.0) + 1.0),
     }
 
 
@@ -176,3 +204,49 @@ def test_safetensors_metadata_of_repo_without_safetensors():
         assert get_safetensors_params_metadata("some/pytorch-only-model") == {}
 
     get_safetensors_metadata.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("section_key", "mrope_section", "expected_num_dims"),
+    [
+        ("mrope_section", [16, 24, 24], 3),
+        ("mrope_section", [16, 16, 16, 16], 4),
+        # Interleaved M-RoPE takes 2 sections but still consumes 3D positions
+        ("mrope_section", [32, 32], 3),
+        # HunYuan-VL checkpoints ship the section under its legacy name
+        ("xdrope_section", [16, 16, 16, 16], 4),
+    ],
+)
+def test_mrope_num_dims(section_key, mrope_section, expected_num_dims):
+    config = PretrainedConfig()
+    config.rope_parameters = {"rope_type": "default", section_key: mrope_section}
+
+    assert uses_mrope(config)
+    assert mrope_num_dims(config) == expected_num_dims
+
+
+@pytest.mark.parametrize("section_name", ["mrope_section", "xdrope_section"])
+def test_mrope_num_dims_from_config_attribute(section_name):
+    """Some configs expose the section as an attribute rather than under
+    `rope_parameters`."""
+    config = PretrainedConfig()
+    setattr(config, section_name, [16, 16, 16, 16])
+
+    assert uses_mrope(config)
+    assert mrope_num_dims(config) == 4
+
+
+def test_mrope_num_dims_from_nested_rope_parameters():
+    """Sections nested by layer type must be found, not silently defaulted."""
+    config = PretrainedConfig()
+    config.rope_parameters = {
+        "full_attention": {"mrope_section": [16, 16, 16, 16]},
+        "linear_attention": {"rope_type": "default"},
+    }
+
+    assert uses_mrope(config)
+    assert mrope_num_dims(config) == 4
+
+
+def test_mrope_num_dims_without_mrope():
+    assert mrope_num_dims(PretrainedConfig()) == 0
