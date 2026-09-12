@@ -151,6 +151,52 @@ class LlamaDecoderLayer(_Eagle3LlamaDecoderLayerBase):
         return hidden_states, residual
 
 
+def _resolve_num_aux_hidden_states(config: LlamaConfig) -> int:
+    """How many target hidden states the draft head concatenates.
+
+    Resolution order follows how configs actually carry it: an explicit
+    ``num_aux_hidden_states`` count, then nested ``eagle_config`` (the legacy
+    layout), then a top-level ``eagle_aux_hidden_state_layer_ids`` list, which
+    is what Speculators writes and what the speculators config loader carries
+    through. Falls back to the historical default of 3.
+
+    Declarations that disagree (a count that does not match the layer list's
+    length, or two lists of different lengths) raise instead of silently
+    picking one; the bare fallback warns, since a config that says nothing is
+    usually a legacy checkpoint that genuinely has 3 aux layers.
+    """
+    num_aux = getattr(config, "num_aux_hidden_states", None)
+    eagle_config = getattr(config, "eagle_config", None) or {}
+    nested_ids = eagle_config.get("eagle_aux_hidden_state_layer_ids")
+    top_ids = getattr(config, "eagle_aux_hidden_state_layer_ids", None)
+    if nested_ids is not None and top_ids is not None and len(nested_ids) != len(top_ids):
+        raise ValueError(
+            "Conflicting Eagle3 aux layer declarations: "
+            f"eagle_config.eagle_aux_hidden_state_layer_ids has "
+            f"{len(nested_ids)} entries but the top-level "
+            f"eagle_aux_hidden_state_layer_ids has {len(top_ids)}."
+        )
+    layer_ids = nested_ids if nested_ids is not None else top_ids
+    if num_aux is not None:
+        if layer_ids is not None and len(layer_ids) != num_aux:
+            raise ValueError(
+                f"num_aux_hidden_states={num_aux} disagrees with the "
+                f"eagle_aux_hidden_state_layer_ids list of length "
+                f"{len(layer_ids)}."
+            )
+        return num_aux
+    if layer_ids:
+        return len(layer_ids)
+    logger.warning(
+        "Eagle3 draft config declares no aux hidden state count or layer "
+        "ids; assuming the historical default of 3. Legacy checkpoints "
+        "(e.g. yuhuili/EAGLE3-LLaMA3.1-Instruct-8B) carry 3, so this is "
+        "usually right, but a draft trained with a different count will "
+        "mis-size the head."
+    )
+    return 3
+
+
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -207,13 +253,7 @@ class LlamaModel(nn.Module):
             ]
         )
         if self.use_aux_hidden_state:
-            self.num_aux_hidden_states = getattr(
-                self.config, "num_aux_hidden_states", None
-            )
-            if self.num_aux_hidden_states is None:
-                eagle_config = getattr(self.config, "eagle_config", None) or {}
-                layer_ids = eagle_config.get("eagle_aux_hidden_state_layer_ids")
-                self.num_aux_hidden_states = len(layer_ids) if layer_ids else 3
+            self.num_aux_hidden_states = _resolve_num_aux_hidden_states(self.config)
 
             target_hidden_size = getattr(
                 self.config, "target_hidden_size", self.config.hidden_size
