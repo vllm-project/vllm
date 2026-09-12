@@ -2,7 +2,8 @@ group: Rust Frontend E2E
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H200) Rust Frontend OpenAI Coverage"
+- label: ":nvidia: (H200 MIG 18GB) Rust Frontend OpenAI Coverage"
+  key: rust-frontend-openai-coverage
   timeout_in_minutes: 30
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -15,7 +16,9 @@ steps:
   - tests/utils.py
   - tests/benchmarks/test_serve_cli.py
   - tests/entrypoints/openai/chat_completion/test_chat_completion.py
+  - tests/entrypoints/openai/chat_completion/test_include_reasoning.py
   - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
+  - tests/entrypoints/openai/chat_completion/test_serving_chat.py
 
   # - tests/entrypoints/openai/completion/test_prompt_validation.py
   - tests/entrypoints/launchers/test_shutdown.py
@@ -27,7 +30,9 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s benchmarks/test_serve_cli.py -k "not insecure and not (test_bench_serve and not test_bench_serve_chat)"
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_invalid_json_schema and not test_invalid_regex and not test_kv_transfer_prompt_token_ids_round_trip and not test_kv_transfer_prompt_token_ids_streaming"
+  - pytest -v -s entrypoints/openai/chat_completion/test_include_reasoning.py
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
+  - pytest -v -s entrypoints/openai/chat_completion/test_serving_chat.py -k "test_chat_per_request_metrics_follow_server_flag or test_streaming_reasoning_usage_counts_across_deltas or test_completion_tokens_details"
 
   # - pytest -v -s entrypoints/openai/completion/test_prompt_validation.py -k "not prompt_embeds"
   - pytest -v -s entrypoints/launchers/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
@@ -53,14 +58,17 @@ steps:
       - tests/utils.py
       - tests/benchmarks/test_serve_cli.py
       - tests/entrypoints/openai/chat_completion/test_chat_completion.py
+      - tests/entrypoints/openai/chat_completion/test_include_reasoning.py
       - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
+      - tests/entrypoints/openai/chat_completion/test_serving_chat.py
       - tests/entrypoints/openai/completion/test_shutdown.py
       - tests/entrypoints/openai/test_return_token_ids.py
       - tests/entrypoints/openai/test_uds.py
       - tests/v1/sample/test_logprobs_e2e.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200) Rust Frontend Serve/Admin Coverage"
+- label: ":nvidia: (H200 MIG 18GB) Rust Frontend Serve/Admin Coverage"
+  key: rust-frontend-serve-admin-coverage
   timeout_in_minutes: 25
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -109,7 +117,8 @@ steps:
       - tests/entrypoints/serve/tokenize/test_tokenization.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200) Rust Frontend Core Correctness"
+- label: ":nvidia: (H200 MIG 18GB) Rust Frontend Core Correctness"
+  key: rust-frontend-core-correctness
   timeout_in_minutes: 20
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -122,8 +131,23 @@ steps:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+  mirror:
+    amd:
+      label: ":amd: (MI355) Rust Frontend Core Correctness"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - rust/
+      - vllm/entrypoints/openai/
+      - tests/utils.py
+      - tests/entrypoints/openai/correctness/test_lmeval.py
+      - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200) Rust Frontend Tool Use"
+- label: ":nvidia: (H200 MIG 35GB) Rust Frontend Tool Use"
+  key: rust-frontend-tool-use
   device: h200_35gb
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
@@ -137,9 +161,26 @@ steps:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
+  mirror:
+    amd:
+      label: ":amd: (MI355) Rust Frontend Tool Use"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 25
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - rust/
+      - vllm/entrypoints/openai/
+      - vllm/tool_parsers/
+      - tests/utils.py
+      - tests/tool_use/
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (L4) Rust Frontend Distributed"
+  key: rust-frontend-distributed
   timeout_in_minutes: 25
+  device: l4
   num_devices: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -168,7 +209,9 @@ steps:
       label: ":amd: (MI355) Rust Frontend Distributed"
       dind: false
       device: mi355_4
-      timeout_in_minutes: 30
+      timeout_in_minutes: 45
+      env:
+        VLLM_ENGINE_READY_TIMEOUT_S: "1800"
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -176,7 +219,7 @@ steps:
       - vllm/distributed/
       - "!vllm/distributed/kv_transfer/"
       - vllm/engine/
-      - vllm/executor/
+      - vllm/v1/executor/
       - vllm/v1/engine/
       - vllm/v1/worker/
       - tests/utils.py

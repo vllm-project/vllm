@@ -94,6 +94,7 @@ def _make_speculator(
 
     speculator = object.__new__(_TestSpeculator)
     speculator.supports_mm_inputs = False
+    speculator.pcp_manager = None
     speculator.vllm_config = None
     speculator.input_buffers = SimpleNamespace(
         input_ids=torch.arange(4),
@@ -102,6 +103,47 @@ def _make_speculator(
     speculator.hidden_states = torch.zeros(4, 3)
     speculator.model = _DraftModel(output)
     return speculator
+
+
+@pytest.mark.parametrize(("hc_mult", "expected"), [(None, 64), (4, 256)])
+def test_speculator_uses_draft_model_hidden_size(monkeypatch, hc_mult, expected):
+    # Qwen4Exp targets expose multi-stream HC residuals to the drafter.
+    monkeypatch.setattr(base_spec_module, "_target_feeds_hc_residual", lambda _: True)
+    hf_config = SimpleNamespace()
+    if hc_mult is not None:
+        hf_config.hc_mult = hc_mult
+    draft_model_config = SimpleNamespace(
+        hf_config=hf_config,
+        get_hidden_size=lambda: 64,
+        get_vocab_size=lambda: 32,
+    )
+    speculative_config = SimpleNamespace(
+        method="mtp",
+        num_speculative_tokens=3,
+        draft_model_config=draft_model_config,
+        use_local_argmax_reduction=False,
+        draft_sample_method="greedy",
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=speculative_config,
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=2,
+            max_num_batched_tokens=8,
+        ),
+        model_config=SimpleNamespace(
+            max_model_len=32,
+            dtype=torch.float32,
+            use_fp64_gumbel=False,
+        ),
+        parallel_config=SimpleNamespace(
+            data_parallel_size=1,
+            data_parallel_rank=0,
+        ),
+    )
+
+    speculator = _TestSpeculator(vllm_config, torch.device("cpu"))
+
+    assert speculator.hidden_size == expected
 
 
 def test_mm_support_configured_after_model_load(monkeypatch):
@@ -197,9 +239,11 @@ def test_load_model_disables_mm_support_for_text_only_drafter(monkeypatch):
 
     assert not speculator.supports_mm_inputs
     assert warning_messages == [
-        "Draft model _TextOnlyDraftModel does not support external multimodal "
-        "embeddings. Embeddings from the target model will not be passed to the "
-        "drafter; using text-only draft inputs instead."
+        (
+            "Draft model _TextOnlyDraftModel does not support external multimodal "
+            "embeddings. Embeddings from the target model will not be passed to the "
+            "drafter; using text-only draft inputs instead."
+        )
     ]
 
 
@@ -307,6 +351,8 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     speculator = object.__new__(_TestSpeculator)
     speculator.num_speculative_steps = 4
     speculator.current_draft_step = torch.tensor(0)
+    speculator.slot_mapping_observer = None
+    speculator.host_mirror_forward_observer = None
     speculator.input_buffers = SimpleNamespace(
         positions=torch.arange(2),
         query_start_loc=torch.arange(3),

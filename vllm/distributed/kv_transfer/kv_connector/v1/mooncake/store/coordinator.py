@@ -3,17 +3,19 @@
 """External-store cache-hit coordinator for MooncakeStoreConnector."""
 
 from collections.abc import Sequence
-from typing import cast
+from typing import NamedTuple, cast
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     chunk_hashes_for_block_size,
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_coordinator import SpecGroup
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
+)
+from vllm.v1.core.single_type_kv_cache_manager import (
+    SingleTypeKVCacheManager,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -23,6 +25,13 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+
+
+class StoreSpecGroup(NamedTuple):
+    spec: KVCacheSpec
+    group_ids: list[int]
+    manager_cls: type[SingleTypeKVCacheManager]
+    use_eagle: bool
 
 
 class ExternalCachedBlockPool:
@@ -75,8 +84,14 @@ class MooncakeStoreCoordinator:
         retention_interval: int | None = None,
         dcp_world_size: int = 1,
     ) -> None:
+        # Mirrors core's resolve_kv_cache_block_sizes: the hash unit only has
+        # to divide groups that participate in prefix caching. Non-shareable
+        # scratch groups (e.g. GLM-5.3-Flash's kpool tail) are skipped by
+        # _verify_and_split_kv_cache_groups and never probed for hits.
         assert all(
-            g.kv_cache_spec.block_size % hash_block_size == 0 for g in kv_cache_groups
+            g.kv_cache_spec.block_size % hash_block_size == 0
+            for g in kv_cache_groups
+            if g.kv_cache_spec.prefix_cacheable
         ), "block_size must be divisible by hash_block_size"
         assert scheduler_block_size % hash_block_size == 0, (
             f"scheduler_block_size ({scheduler_block_size}) must be a multiple of "
@@ -85,6 +100,7 @@ class MooncakeStoreCoordinator:
         assert all(
             scheduler_block_size % g.kv_cache_spec.block_size == 0
             for g in kv_cache_groups
+            if g.kv_cache_spec.prefix_cacheable
         ), "scheduler_block_size must be a multiple of each group's block_size"
         self.kv_cache_groups = kv_cache_groups
         self.mamba_group_ids = {
@@ -114,8 +130,14 @@ class MooncakeStoreCoordinator:
         """Mirrors KVCacheCoordinator.verify_and_split_kv_cache_groups but
         dispatches via spec_manager_map (we don't allocate managers).
         """
-        attention_groups: list[SpecGroup] = []
+        attention_groups: list[StoreSpecGroup] = []
         for i, g in enumerate(self.kv_cache_groups):
+            # Skip groups that opt out of prefix caching (e.g. GLM-5.3-Flash
+            # kpool tail): per-request scratch, never shareable, so they must
+            # not participate in hit lookup. Mirrors core's
+            # KVCacheCoordinator.verify_and_split_kv_cache_groups.
+            if not g.kv_cache_spec.prefix_cacheable:
+                continue
             spec = _unwrap_spec(g.kv_cache_spec)
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None, (
@@ -130,7 +152,7 @@ class MooncakeStoreCoordinator:
                     break
             else:
                 attention_groups.append(
-                    SpecGroup(spec, [i], manager_cls, g.is_eagle_group)
+                    StoreSpecGroup(spec, [i], manager_cls, g.is_eagle_group)
                 )
         # Full attention first (matches upstream convergence ordering).
         attention_groups.sort(key=lambda g: not isinstance(g.spec, FullAttentionSpec))
@@ -286,6 +308,10 @@ class MooncakeStoreCoordinator:
                 use_eagle=use_eagle,
                 retention_interval=retention_interval,
                 reachable_boundaries=reachable_boundaries,
+                # ``spec`` is already DCP-resolved (worker.py applies
+                # resolve_dcp_kv_cache_spec) and ``end_chunk`` is indexed in
+                # that scaled block size, so the mask must not scale again.
+                dcp_world_size=1,
             )
             if mask is not None:
                 assert len(mask) == end_chunk - start_chunk

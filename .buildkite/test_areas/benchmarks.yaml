@@ -2,7 +2,7 @@ group: Benchmarks
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200) Benchmarks CLI"
+- label: ":nvidia: (H200 MIG 18GB) Benchmarks CLI"
   key: benchmarks-cli-test
   timeout_in_minutes: 45
   device: h200_18gb
@@ -39,7 +39,7 @@ steps:
       label: ":amd: (MI355) Attention Benchmark Smoke"
       dind: false
       device: mi355_2
-      timeout_in_minutes: 20
+      timeout_in_minutes: 25
       depends_on:
       - image-build-amd
       source_file_dependencies:

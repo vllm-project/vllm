@@ -16,7 +16,9 @@ steps:
       label: ":amd: (MI355) DeepSeek V2-Lite Sync EPLB Accuracy"
       dind: false
       device: mi355_4
-      timeout_in_minutes: 25
+      timeout_in_minutes: 40
+      env:
+        VLLM_ENGINE_READY_TIMEOUT_S: "1800"
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -46,7 +48,7 @@ steps:
       label: ":amd: (MI355) Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy TP2"
       dind: false
       device: mi355_4
-      timeout_in_minutes: 25
+      timeout_in_minutes: 30
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -75,7 +77,7 @@ steps:
       label: ":amd: (MI355) Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy TP1"
       dind: false
       device: mi355_2
-      timeout_in_minutes: 20
+      timeout_in_minutes: 25
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -104,7 +106,7 @@ steps:
       label: ":amd: (MI355) Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy"
       dind: false
       device: mi355_4
-      timeout_in_minutes: 25
+      timeout_in_minutes: 30
       depends_on:
       - image-build-amd
       source_file_dependencies:

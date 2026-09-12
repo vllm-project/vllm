@@ -15,6 +15,8 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheGroupSpec,
+    KVCacheLayout,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
@@ -99,12 +101,12 @@ def test_get_block_size_falls_back_to_cache_config_when_no_kv_cache_config():
     assert block_size == 16
 
 
-# ---- MLA-verifier absorption ------------------------------------------------
+# ---- Packed MLA grouping ----------------------------------------------------
 
 
-def test_find_group_id_errors_clearly_when_absorbed_by_mla_swa_verifier():
-    # HiddenStateCacheSpec subclasses MLAAttentionSpec, so an MLA + sliding-
-    # window MLA verifier absorbs it into the MLA group instead of isolating it.
+def test_hidden_state_group_isolated_from_packed_mla_groups():
+    # HiddenStateCacheSpec subclasses MLAAttentionSpec, but grouping must pull
+    # it out before packing compatible MLA cache specs.
     dt = torch.bfloat16
     spec = {
         "layers.0.mla": MLAAttentionSpec(
@@ -116,11 +118,54 @@ def test_find_group_id_errors_clearly_when_absorbed_by_mla_swa_verifier():
         "cache_only_layers.61": _hidden(64),
     }
     vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
+        ),
         scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         speculative_config=None,
     )
     groups = get_kv_cache_groups(vllm_config, spec)
-    assert not any(isinstance(g.kv_cache_spec, HiddenStateCacheSpec) for g in groups)
+    hidden_group_ids = [
+        i
+        for i, group in enumerate(groups)
+        if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
+    ]
+    assert len(hidden_group_ids) == 1
     cfg = SimpleNamespace(kv_cache_groups=groups)
-    with pytest.raises(ValueError, match="MLA verifiers are unsupported"):
-        ExampleHiddenStatesConnector._find_cache_kv_group_id(cfg)
+    assert (
+        ExampleHiddenStatesConnector._find_cache_kv_group_id(cfg) == hidden_group_ids[0]
+    )
+
+
+def test_hidden_state_group_isolated_from_packed_mixed_page_groups():
+    # Packed grouping keeps groups with unequal page sizes (blocks are strided
+    # by the widest group), so the hidden group is appended without padding.
+    hidden = _hidden(16)
+    spec = {
+        "layers.0.attn": _full(16),
+        "layers.1.mamba": MambaSpec(
+            block_size=16, shapes=((1024,),), dtypes=(torch.float32,)
+        ),
+        "cache_only_layers.61": hidden,
+    }
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
+    )
+    groups = get_kv_cache_groups(vllm_config, spec)
+    page_sizes = {g.kv_cache_spec.page_size_bytes for g in groups}
+    assert len(page_sizes) > 1, "spec must exercise the packed grouping path"
+    hidden_group_ids = [
+        i
+        for i, group in enumerate(groups)
+        if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
+    ]
+    assert len(hidden_group_ids) == 1
+    assert groups[hidden_group_ids[0]].kv_cache_spec == hidden
+    cfg = SimpleNamespace(kv_cache_groups=groups)
+    assert (
+        ExampleHiddenStatesConnector._find_cache_kv_group_id(cfg) == hidden_group_ids[0]
+    )
