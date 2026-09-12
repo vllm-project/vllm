@@ -241,6 +241,9 @@ def _gqa_sparse_decode_kernel(
     lse_ptr,  # partial lse (log2): [NUM_TOPK_CHUNKS, total_q, num_heads]
     block_table_ptr,  # [num_reqs, max_blocks]
     seq_lens,  # [num_reqs]
+    query_start_loc_ptr,  # [num_reqs + 1] int32; read only when VARLEN
+    token_to_req_ptr,  # [total_q] int32; read only when VARLEN
+    num_reqs,
     total_q,
     gqa_group_size,
     head_dim,
@@ -276,14 +279,24 @@ def _gqa_sparse_decode_kernel(
     USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
     KV_SCALE_MODE: tl.constexpr,  # 0: none, 1: scalar, 2: [kv_head, token]
     USE_PDL: tl.constexpr,
+    VARLEN: tl.constexpr,
 ):
     sm_scale_log2e = sm_scale * 1.4426950409
     # split-K over the topk dimension: pid(0) folds (query-token, chunk).
     pid_bc, pid_kh = tl.program_id(0), tl.program_id(1)
     pid_b = pid_bc % total_q
     pid_c = pid_bc // total_q
-    req_id = pid_b // decode_query_len
-    q_offset = pid_b - req_id * decode_query_len
+    if VARLEN:
+        req_id = tl.load(token_to_req_ptr + pid_b)
+        q_start = tl.load(query_start_loc_ptr + req_id)
+        q_len = tl.load(query_start_loc_ptr + req_id + 1) - q_start
+        valid_token = pid_b < tl.load(query_start_loc_ptr + num_reqs)
+    else:
+        req_id = pid_b // decode_query_len
+        q_start = req_id * decode_query_len
+        q_len = decode_query_len
+        valid_token = True
+    q_offset = pid_b - q_start
     pid_h = pid_kh * gqa_group_size
     chunk_size_topk = (max_topk + NUM_TOPK_CHUNKS - 1) // NUM_TOPK_CHUNKS
     chunk_start_topk = pid_c * chunk_size_topk
@@ -293,10 +306,10 @@ def _gqa_sparse_decode_kernel(
         tl.extra.cuda.gdc_wait()
 
     seq_len = tl.load(seq_lens + req_id)
-    query_pos = seq_len - decode_query_len + q_offset
+    query_pos = seq_len - q_len + q_offset
     # Full-CG padding uses zero-length request rows. Clamp to an empty
     # attention range instead of letting padded rows produce negative lengths.
-    kv_len = tl.maximum(query_pos + 1, 0)
+    kv_len = tl.where(valid_token, tl.maximum(query_pos + 1, 0), 0)
 
     # Valid block count from seq_len (no sentinel): min(topk, cdiv(kv_len, blk)).
     idx_base = t_ptr + pid_kh * stride_th + pid_b * stride_tn
@@ -610,10 +623,22 @@ def minimax_m3_sparse_attn_decode(
     decode_query_len: int,
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+    token_to_req_indices: torch.Tensor | None = None,
 ) -> None:
-    """GQA block-sparse attention for decode (split-K over the top-k blocks)."""
+    """GQA block-sparse attention for uniform or ragged decode batches."""
     total_q, num_heads, head_dim = q.shape
-    assert total_q == seq_lens.shape[0] * decode_query_len
+    varlen = query_start_loc is not None
+    if query_start_loc is not None:
+        assert token_to_req_indices is not None
+        assert query_start_loc.shape[0] == seq_lens.shape[0] + 1
+        assert token_to_req_indices.shape[0] >= total_q
+    else:
+        assert total_q == seq_lens.shape[0] * decode_query_len
+    # Triton requires pointer arguments even when the constexpr branch
+    # does not read them.
+    qsl_arg = query_start_loc if query_start_loc is not None else seq_lens
+    t2r_arg = token_to_req_indices if token_to_req_indices is not None else seq_lens
     max_topk = topk_idx.shape[-1]
     gqa_group_size = num_heads // num_kv_heads
     use_fp8 = kv_cache.dtype in _FP8_DTYPES
@@ -665,6 +690,9 @@ def minimax_m3_sparse_attn_decode(
         lse_partial,
         block_table,
         seq_lens,
+        qsl_arg,
+        t2r_arg,
+        seq_lens.shape[0],
         total_q,
         gqa_group_size,
         head_dim,
@@ -698,6 +726,7 @@ def minimax_m3_sparse_attn_decode(
         USE_FP8=use_fp8,
         KV_SCALE_MODE=kv_scale_mode,
         USE_PDL=use_pdl,
+        VARLEN=varlen,
         **pdl_launch,
     )
     merge_grid = (total_q, num_heads)

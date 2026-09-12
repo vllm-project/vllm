@@ -396,6 +396,7 @@ def _decode_index_score_kernel(
     score_ptr,  # [num_idx_heads, total_q, max_block]
     block_table_ptr,  # [num_reqs, max_blocks]
     seq_lens,  # [num_reqs]
+    query_start_loc_ptr,  # [num_reqs + 1] int32; read only when VARLEN
     num_idx_heads: tl.constexpr,
     head_dim: tl.constexpr,
     init_blocks,
@@ -415,6 +416,7 @@ def _decode_index_score_kernel(
     BLOCK_SIZE_Q: tl.constexpr,
     num_kv_chunks,
     USE_PDL: tl.constexpr,
+    VARLEN: tl.constexpr,
 ):
     BLOCK_SIZE_HQ: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
     pid_r = tl.program_id(0)
@@ -422,15 +424,21 @@ def _decode_index_score_kernel(
     hq_offsets = tl.arange(0, BLOCK_SIZE_HQ)
     h_offsets = hq_offsets // BLOCK_SIZE_Q
     q_offsets = hq_offsets % BLOCK_SIZE_Q
-    q_mask = q_offsets < decode_query_len
-    q_ids = pid_r * decode_query_len + q_offsets
+    if VARLEN:
+        q_start = tl.load(query_start_loc_ptr + pid_r)
+        q_len = tl.load(query_start_loc_ptr + pid_r + 1) - q_start
+    else:
+        q_start = pid_r * decode_query_len
+        q_len = decode_query_len
+    q_mask = q_offsets < q_len
+    q_ids = q_start + q_offsets
 
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
 
     seq_len = tl.load(seq_lens + pid_r)
-    query_pos = seq_len - decode_query_len + q_offsets
+    query_pos = seq_len - q_len + q_offsets
     # Full-CG padding uses zero-length request rows. Clamp to an empty
     # attention range instead of letting padded rows produce negative lengths.
     kv_len = tl.maximum(query_pos + 1, 0)
@@ -506,6 +514,7 @@ def _decode_index_score_mapped_range(
     ik_cache_ptr,
     score_ptr,
     block_table_ptr,
+    query_start_loc_ptr,
     pid_r,
     seq_len,
     chunk_start_block,
@@ -527,15 +536,22 @@ def _decode_index_score_mapped_range(
     stride_bt_b,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
+    VARLEN: tl.constexpr,
 ):
     BLOCK_SIZE_HQ: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
     hq_offsets = tl.arange(0, BLOCK_SIZE_HQ)
     h_offsets = hq_offsets // BLOCK_SIZE_Q
     q_offsets = hq_offsets % BLOCK_SIZE_Q
-    q_mask = q_offsets < decode_query_len
-    q_ids = pid_r * decode_query_len + q_offsets
+    if VARLEN:
+        q_start = tl.load(query_start_loc_ptr + pid_r)
+        q_len = tl.load(query_start_loc_ptr + pid_r + 1) - q_start
+    else:
+        q_start = pid_r * decode_query_len
+        q_len = decode_query_len
+    q_mask = q_offsets < q_len
+    q_ids = q_start + q_offsets
 
-    query_pos = seq_len - decode_query_len + q_offsets
+    query_pos = seq_len - q_len + q_offsets
     kv_len = tl.maximum(query_pos + 1, 0)
     num_blocks_q = (kv_len + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K
     kv_len_max = tl.max(tl.where(q_mask, kv_len, 0), axis=0)
@@ -607,6 +623,7 @@ def _decode_index_score_balanced_kernel(
     score_ptr,
     block_table_ptr,
     seq_lens,
+    query_start_loc_ptr,
     num_idx_heads: tl.constexpr,
     head_dim: tl.constexpr,
     init_blocks,
@@ -626,6 +643,7 @@ def _decode_index_score_balanced_kernel(
     stride_bt_b,
     BLOCK_SIZE_K: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
+    VARLEN: tl.constexpr,
 ):
     pid = tl.program_id(0)
     total_blocks = tl.zeros((), dtype=tl.int32)
@@ -685,6 +703,7 @@ def _decode_index_score_balanced_kernel(
         ik_cache_ptr,
         score_ptr,
         block_table_ptr,
+        query_start_loc_ptr,
         pid_r,
         selected_seq_len,
         chunk_start_block,
@@ -706,6 +725,7 @@ def _decode_index_score_balanced_kernel(
         stride_bt_b,
         BLOCK_SIZE_K,
         BLOCK_SIZE_Q,
+        VARLEN,
     )
 
 
@@ -857,6 +877,9 @@ def _decode_topk_fused_kernel(
     attention_block_table_ptr,  # [num_reqs, max_blocks]
     sparse_bt_ptr,  # [total_q, topk * PAGES_PER_SPARSE_BLOCK]
     sparse_ctx_ptr,  # [total_q]
+    query_start_loc_ptr,  # [num_reqs + 1] int32; read only when VARLEN
+    token_to_req_ptr,  # [total_q] int32; read only when VARLEN
+    num_reqs,
     decode_query_len,
     stride_s_h,
     stride_s_b,
@@ -882,17 +905,28 @@ def _decode_topk_fused_kernel(
     EMIT_SPARSE_TABLE: tl.constexpr,
     SINGLE_TILE_GUARANTEED: tl.constexpr,
     ADAPTIVE_FINAL_MERGE: tl.constexpr,
+    VARLEN: tl.constexpr,
 ):
     tl.static_assert(topk <= BLOCK_SIZE_T)
     tl.static_assert(BLOCK_SIZE_T <= BLOCK_SIZE_K)
     pid_b = tl.program_id(0)
     pid_h = tl.program_id(1)
     pid_chunk = tl.program_id(2)
-    req_id = pid_b // decode_query_len
-    q_offset = pid_b - req_id * decode_query_len
+    if VARLEN:
+        req_id = tl.load(token_to_req_ptr + pid_b)
+        q_start = tl.load(query_start_loc_ptr + req_id)
+        q_len = tl.load(query_start_loc_ptr + req_id + 1) - q_start
+        valid_token = pid_b < tl.load(query_start_loc_ptr + num_reqs)
+    else:
+        req_id = pid_b // decode_query_len
+        q_start = req_id * decode_query_len
+        q_len = decode_query_len
+        valid_token = True
+    q_offset = pid_b - q_start
 
     seq_len = tl.load(seq_lens_ptr + req_id)
-    query_pos = seq_len - decode_query_len + q_offset
+    query_pos = seq_len - q_len + q_offset
+    query_pos = tl.where(valid_token, query_pos, -1)
     kv_len = tl.maximum(query_pos + 1, 0)
     num_blocks = (kv_len + block_size - 1) // block_size
 
@@ -1296,6 +1330,8 @@ def minimax_m3_index_decode(
     sparse_context_lens_out: torch.Tensor | None = None,
     block_page_stride: int | None = None,
     completion_counter: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+    token_to_req_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Decode index block-score followed by fused adaptive top-k selection.
 
@@ -1312,8 +1348,18 @@ def minimax_m3_index_decode(
     assert num_idx_heads == num_kv_heads, (
         "M3 expects num_idx_heads == num_kv_heads (no topk index reduce)"
     )
-    assert 0 < decode_query_len <= max_decode_query_len
-    assert total_q == seq_lens.shape[0] * decode_query_len
+    varlen = query_start_loc is not None
+    if query_start_loc is not None:
+        assert token_to_req_indices is not None
+        assert query_start_loc.shape[0] == seq_lens.shape[0] + 1
+        assert token_to_req_indices.shape[0] >= total_q
+    else:
+        assert 0 < decode_query_len <= max_decode_query_len
+        assert total_q == seq_lens.shape[0] * decode_query_len
+    # Triton requires pointer arguments even when the constexpr branch
+    # does not read them.
+    qsl_arg = query_start_loc if query_start_loc is not None else seq_lens
+    t2r_arg = token_to_req_indices if token_to_req_indices is not None else seq_lens
     batch = total_q
     emit_sparse_table = attention_block_table is not None
     if emit_sparse_table and (
@@ -1448,6 +1494,7 @@ def minimax_m3_index_decode(
             score,
             block_table,
             seq_lens,
+            qsl_arg,
             num_idx_heads,
             head_dim,
             init_blocks,
@@ -1467,6 +1514,7 @@ def minimax_m3_index_decode(
             block_table.stride(0),
             BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
             BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+            VARLEN=varlen,
             num_warps=2,
             num_stages=1,
         )
@@ -1491,6 +1539,7 @@ def minimax_m3_index_decode(
             score,
             block_table,
             seq_lens,
+            qsl_arg,
             num_idx_heads,
             head_dim,
             init_blocks,
@@ -1510,6 +1559,7 @@ def minimax_m3_index_decode(
             BLOCK_SIZE_Q=BLOCK_SIZE_Q,
             num_kv_chunks=num_kv_chunks,
             USE_PDL=use_pdl,
+            VARLEN=varlen,
             **score_kwargs,
         )
 
@@ -1588,6 +1638,9 @@ def minimax_m3_index_decode(
         selector_attention_block_table,
         selector_sparse_block_table,
         selector_sparse_context_lens,
+        qsl_arg,
+        t2r_arg,
+        seq_lens.shape[0],
         decode_query_len,
         score.stride(0),
         score.stride(1),
@@ -1613,6 +1666,7 @@ def minimax_m3_index_decode(
         EMIT_SPARSE_TABLE=emit_sparse_table,
         SINGLE_TILE_GUARANTEED=single_tile_guaranteed,
         ADAPTIVE_FINAL_MERGE=adaptive_final_merge,
+        VARLEN=varlen,
         num_warps=4 if adaptive_final_merge else 8,
         num_stages=2,
     )
