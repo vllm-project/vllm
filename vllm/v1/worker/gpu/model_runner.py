@@ -1169,15 +1169,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if (idx := self.req_states.req_id_to_index.get(req_id)) is not None:
                 self.block_tables.append_block_ids(idx, block_ids, overwrite=True)
         num_computed_tokens_np = self.req_states.num_computed_tokens_np
+        gpu_num_computed_reset = False
         for req_id, num_computed_tokens, req_new_block_ids in zip(
             reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
         ):
             req_index = self.req_states.req_id_to_index[req_id]
+            # num_computed_tokens_np is an optimistic CPU mirror; the GPU tensor
+            # is advanced forward-only by post_update_num_computed_tokens. On a
+            # KV-load-failure recompute the scheduler moves num_computed_tokens
+            # BACKWARD, and writing it only to the CPU mirror leaves the GPU
+            # tensor stale, so prepare_prefill_inputs / prepare_pos_seq_lens gather
+            # the recompute's tokens and positions from the wrong offset. Push the
+            # backward correction to the GPU tensor explicitly.
+            if num_computed_tokens < num_computed_tokens_np[req_index]:
+                self.req_states.num_computed_tokens.stage_write_elem(
+                    req_index, num_computed_tokens
+                )
+                gpu_num_computed_reset = True
             num_computed_tokens_np[req_index] = num_computed_tokens
             if req_new_block_ids is not None and req_id not in table_updates:
                 self.block_tables.append_block_ids(
                     req_index, req_new_block_ids, overwrite=False
                 )
+        if gpu_num_computed_reset:
+            self.req_states.num_computed_tokens.apply_write()
 
         # Update CPU num_computed_prefill_tokens.
         np.minimum(
