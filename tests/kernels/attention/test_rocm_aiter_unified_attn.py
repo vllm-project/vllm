@@ -49,13 +49,19 @@ PREFILL_SEQ_LENS = [
     [(256, 1024), (128, 2048)],
 ]
 
+Fp8Variant = Literal["fp8_kv", "fp8_query", "fp8_query_kv"]
+
 DEFAULT_ATOL, DEFAULT_RTOL = 1.5e-2, 1e-2
-FP8_ATOL, FP8_RTOL = 1.5e-1, 1.5e-1
+# fp8_kv: reference dequantizes the same KV, so error is bf16-scale (~2e-3).
+# fp8_query / fp8_query_kv: query and/or KV e4m3 rounding dominates (~0.1-0.4).
+FP8_TOL_BY_VARIANT: dict[Fp8Variant, tuple[float, float]] = {
+    "fp8_kv": (2.5e-3, 1e-2),
+    "fp8_query": (1.5e-1, 1.5e-1),
+    "fp8_query_kv": (1.5e-1, 1.5e-1),
+}
 # Non-unity scale so q_descale handling is exercised explicitly.
 Q_SCALE = 0.75
 K_SCALE, V_SCALE = 0.5, 0.25
-
-Fp8Variant = Literal["fp8_kv", "fp8_query", "fp8_query_kv"]
 
 FP8_VARIANTS = [
     pytest.param("fp8_kv", id="fp8_kv"),
@@ -336,4 +342,5 @@ def test_aiter_unified_attn_fp8(
         block_size=block_size,
         variant=variant,
     )
-    _assert_matches_reference(case, atol=FP8_ATOL, rtol=FP8_RTOL)
+    atol, rtol = FP8_TOL_BY_VARIANT[variant]
+    _assert_matches_reference(case, atol=atol, rtol=rtol)

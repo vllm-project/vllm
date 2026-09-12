@@ -4,10 +4,10 @@
 from dataclasses import dataclass
 from typing import Any
 
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     VllmTritonJitKernel,
-    kernel_launcher,
 )
 
 
@@ -107,13 +107,13 @@ def test_compute_slot_mapping_uses_named_launcher_inputs(monkeypatch) -> None:
     )
     launches: list[tuple[Any, ...]] = []
 
-    def launch(grid: Any, inputs: Any, **kwargs: Any) -> None:
-        launches.append((grid, inputs, kwargs))
+    def launch(launch_spec: Any, inputs: Any) -> None:
+        launches.append((launch_spec, inputs))
 
     monkeypatch.setattr(owner, "launch", launch)
     owner.compile(compile_key)
 
-    grid, inputs, kwargs = launches[0]
+    (grid, kwargs), inputs = launches[0]
     assert grid == (2,)
     assert inputs["num_tokens"] == 2
     assert inputs["block_table_stride"] == 128

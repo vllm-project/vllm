@@ -6,6 +6,7 @@ import torch.nn as nn
 from vllm.config import ModelConfig, VllmConfig, replace
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 logger = init_logger(__name__)
 
@@ -17,9 +18,9 @@ def _resolve_dspark_attention_backend(
 ) -> AttentionBackendEnum | None:
     if draft_backend is not None:
         return draft_backend
-    # DeepSeek-V4 draft layers share the target's KV-cache layout. Other
+    # DeepSeek-V4(.1) draft layers share the target's KV-cache layout. Other
     # DSpark architectures may use a different attention kind.
-    if draft_model_config.hf_config.model_type == "deepseek_v4":
+    if draft_model_config.hf_config.model_type in ("deepseek_v4", "deepseek_v41"):
         if target_backend is not None:
             logger.info_once(
                 "Using the target model's %s attention backend for the "
@@ -73,6 +74,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             if speculative_config.kv_cache_dtype is not None
             else vllm_config.cache_config
         ),
+        load_config=get_pp_safe_draft_load_config(vllm_config.load_config),
     )
     # VllmConfig post-init restores the target's quant config because the target
     # config is retained for DSpark's target-layer metadata, so we must override it.

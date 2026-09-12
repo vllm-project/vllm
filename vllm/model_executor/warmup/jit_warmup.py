@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, fields
+from functools import wraps
 from typing import Any, Generic, TypeVar, cast
 
 __all__ = [
@@ -23,11 +24,32 @@ __all__ = [
     "WarmupIntRange",
     "get_ast_full_name",
     "get_function_source_node",
+    "kernel_launcher",
     "zip_inputs",
 ]
 
 
 CompileKeyT = TypeVar("CompileKeyT")
+
+
+def kernel_launcher(call_fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Delegate a declarative launch specification to its backend owner."""
+    signature = inspect.signature(call_fn)
+
+    @wraps(call_fn)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        launch_spec = call_fn(self, *args, **kwargs)
+        if not self.bind_launch_inputs:
+            return self.launch(launch_spec, {})
+
+        bound = signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        inputs = {
+            name: value for name, value in bound.arguments.items() if name != "self"
+        }
+        return self.launch(launch_spec, inputs)
+
+    return wrapper
 
 
 @dataclass(frozen=True)
@@ -549,6 +571,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
     """Kernel wrapper that owns dispatch, warmup keys, and compilation."""
 
     CompileKey: type[CompileKeyT]
+    bind_launch_inputs = True
 
     def __init__(self) -> None:
         self._dispatch_trace = _trace_compile_key_dispatch(self.dispatch)

@@ -11,8 +11,9 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CUDAGraphMode
+from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
@@ -25,6 +26,8 @@ if current_platform.is_rocm():
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False
+
+logger = init_logger(__name__)
 
 
 @functools.cache
@@ -39,8 +42,25 @@ def _get_aiter_topk_ops() -> tuple[Callable[..., None], Callable[..., None]] | N
     return top_k_per_row_prefill, top_k_per_row_decode
 
 
+@functools.cache
+def _get_aiter_sparse_prefill_opus() -> Callable[..., torch.Tensor] | None:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_mla_enabled():
+        return None
+    try:
+        from aiter.ops.pa_sparse_prefill_opus import pa_sparse_prefill_opus
+    except ImportError:
+        return None
+    logger.info_once("Using AITER OPUS for large sparse MLA prefill on gfx950")
+    return pa_sparse_prefill_opus
+
+
 _GFX950_C4A_AITER_MAX_COMPRESSED_SEQ_LEN = 64 * 1024
 _GFX950_C4A_NATIVE_MAX_ROWS = 256
+# Conservative perf gate, not a correctness bound: OPUS is correct for any query
+# count, but Triton stays faster below this measured crossover.
+_GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES = 1024
 
 
 def _get_aiter_top_k_kernel(
@@ -272,16 +292,16 @@ def _cp_gather_indexer_quant_cache_kernel(
     HEAD_DIM: tl.constexpr,
     BLOCK_TILE_SIZE: tl.constexpr,
     HEAD_TILE_SIZE: tl.constexpr,
-    NUM_TOKENS: tl.constexpr,
-    NUM_BATCHES: tl.constexpr,
-    BLOCK_TABLE_WIDTH: tl.constexpr,
-    NUM_BLOCKS: tl.constexpr,
+    num_tokens,
+    num_batches,
+    block_table_width,
+    num_blocks,
 ):
     tid = tl.program_id(0)
     offset = tl.arange(0, HEAD_DIM)
-    valid_tid = tid < NUM_TOKENS
+    valid_tid = tid < num_tokens
     batch_id = tl.load(token_to_seq_ptr + tid, mask=valid_tid, other=-1)
-    valid_batch = (batch_id >= 0) & (batch_id < NUM_BATCHES)
+    valid_batch = (batch_id >= 0) & (batch_id < num_batches)
     safe_batch_id = tl.where(valid_batch, batch_id, 0)
     batch_start = tl.load(cu_seqlen_ptr + safe_batch_id, mask=valid_batch, other=0)
     batch_end = tl.load(cu_seqlen_ptr + safe_batch_id + 1, mask=valid_batch, other=0)
@@ -294,7 +314,7 @@ def _cp_gather_indexer_quant_cache_kernel(
     valid_block_table = (
         valid_token
         & (block_table_id >= 0)
-        & (block_table_id < BLOCK_TABLE_WIDTH)
+        & (block_table_id < block_table_width)
         & (block_offset >= 0)
         & (block_offset < block_size)
     )
@@ -303,7 +323,7 @@ def _cp_gather_indexer_quant_cache_kernel(
     block_id = tl.load(
         block_table_ptr + block_table_offset, mask=valid_block_table, other=-1
     )
-    valid_block = valid_block_table & (block_id >= 0) & (block_id < NUM_BLOCKS)
+    valid_block = valid_block_table & (block_id >= 0) & (block_id < num_blocks)
     # The packed KV layout makes per-block strides large
     # enough that block_id * stride can exceed 32-bit range.
     safe_block_id = tl.where(valid_block, block_id, 0).to(tl.int64)
@@ -799,6 +819,32 @@ def rocm_fp8_mqa_logits(
         return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
 
+def _max_decode_logits_rows(num_batched_tokens: int) -> int:
+    """Upper bound on decode rows the paged-MQA logits buffer can ever hold.
+
+    ``rocm_fp8_paged_mqa_logits`` sizes its workspace as
+    ``(batch_size * next_n, max_model_len)``. ``batch_size`` is bounded by
+    ``max_num_seqs`` and ``next_n`` by ``1 + num_speculative_tokens``, which is
+    far tighter than ``max_num_batched_tokens`` -- 192 vs 16384 for a typical
+    32-seq DSpark-5 deployment. The loose bound is harmless at short contexts
+    but scales with ``max_model_len``, so at the model's full context it asks
+    for tens of TiB and the engine cannot start. Take whichever valid bound is
+    smaller; the workspace is locked after profiling, so it must not be under-
+    estimated.
+    """
+    try:
+        vllm_config = get_current_vllm_config()
+    except Exception:
+        return num_batched_tokens
+    scheduler_config = getattr(vllm_config, "scheduler_config", None)
+    max_num_seqs = getattr(scheduler_config, "max_num_seqs", None)
+    if not max_num_seqs:
+        return num_batched_tokens
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    num_spec = getattr(speculative_config, "num_speculative_tokens", 0) or 0
+    return min(num_batched_tokens, max_num_seqs * (1 + num_spec))
+
+
 def rocm_aiter_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
@@ -815,6 +861,9 @@ def rocm_aiter_sparse_attn_indexer_fake(
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
     compress_ratio: int = 1,
+    candidate_blocks: torch.Tensor | None = None,
+    candidate_block_size: int = 0,
+    candidate_write: bool = False,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -836,6 +885,9 @@ def rocm_aiter_sparse_attn_indexer(
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
     compress_ratio: int = 1,
+    candidate_blocks: torch.Tensor | None = None,
+    candidate_block_size: int = 0,
+    candidate_write: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -861,15 +913,15 @@ def rocm_aiter_sparse_attn_indexer(
         )
 
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
-        # batch_size * next_n <= hidden_states.shape[0] == max_num_batched_tokens
+        decode_rows = _max_decode_logits_rows(hidden_states.shape[0])
         if _ON_GFX942 or _ON_GFX950:
             workspace_manager.get_simultaneous(
-                ((hidden_states.shape[0], max_model_len), torch.float32),
+                ((decode_rows, max_model_len), torch.float32),
             )
         else:
             workspace_manager.get_simultaneous(
                 (
-                    (q_fp8.shape[1], hidden_states.shape[0], max_model_len),
+                    (q_fp8.shape[1], decode_rows, max_model_len),
                     torch.float32,
                 ),
             )
@@ -899,6 +951,9 @@ def rocm_aiter_sparse_attn_indexer(
             topk_indices_buffer,
             skip_k_cache_insert,
             compress_ratio,
+            candidate_blocks,
+            candidate_block_size,
+            candidate_write,
         )
     layer_attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
@@ -954,6 +1009,30 @@ def rocm_aiter_sparse_attn_indexer(
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
             )
+            if candidate_blocks is not None:
+                from vllm.model_executor.layers.sparse_attn_indexer import (
+                    _apply_candidate_mask,
+                    _select_candidate_blocks,
+                )
+
+                chunk_candidates = candidate_blocks[chunk.token_start : chunk.token_end]
+                if candidate_write:
+                    _select_candidate_blocks(
+                        logits,
+                        chunk.cu_seqlen_ks,
+                        chunk.cu_seqlen_ke,
+                        chunk_candidates.shape[1],
+                        candidate_block_size,
+                        chunk_candidates,
+                    )
+                else:
+                    _apply_candidate_mask(
+                        logits,
+                        chunk.cu_seqlen_ks,
+                        chunk.cu_seqlen_ke,
+                        chunk_candidates,
+                        candidate_block_size,
+                    )
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
@@ -1021,6 +1100,37 @@ def rocm_aiter_sparse_attn_indexer(
             max_model_len=max_model_len,
         )
 
+        if candidate_blocks is not None:
+            from vllm.model_executor.layers.sparse_attn_indexer import (
+                _apply_candidate_mask,
+                _select_candidate_blocks,
+            )
+
+            num_rows = logits.shape[0]
+            visible = decode_metadata.seq_lens.reshape(-1)
+            if visible.numel() != num_rows:
+                visible = visible.repeat_interleave(next_n)
+            visible = visible[:num_rows].to(torch.int64)
+            row_starts = torch.zeros_like(visible)
+            decode_candidates = candidate_blocks[:num_rows]
+            if candidate_write:
+                _select_candidate_blocks(
+                    logits,
+                    row_starts,
+                    visible,
+                    decode_candidates.shape[1],
+                    candidate_block_size,
+                    decode_candidates,
+                )
+            else:
+                _apply_candidate_mask(
+                    logits,
+                    row_starts,
+                    visible,
+                    decode_candidates,
+                    candidate_block_size,
+                )
+
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
         num_rows = logits.shape[0]
 
@@ -1077,6 +1187,10 @@ def _decode_e8m0_scales(scale: torch.Tensor) -> torch.Tensor:
         )
 
         return _upcast_e8m0_to_fp32(scale).contiguous()
+    if scale.dtype == torch.uint8:
+        # MXFP8 parameters preserve E8M0 scales as their raw exponent bytes.
+        # They are biased exponents, not numeric uint8 scale values.
+        return torch.exp2(scale.to(torch.int16).to(torch.float32) - 127.0)
     return scale.to(torch.float32)
 
 
@@ -1206,7 +1320,15 @@ def _get_cached_wo_a_bf16(
     )
 
     wo_a_scale_param = get_fp8_block_weight_scale(wo_a)
-    if wo_a_scale_param is not None:
+    if wo_a_scale_param is None:
+        # ModelOpt MXFP8 stores the multiplicative E8M0 scale without the
+        # historical ``_inv`` suffix.
+        wo_a_scale_param = getattr(wo_a, "weight_scale", None)
+    # Emulated MXFP8 kernels can replace the original one-byte weight with an
+    # already-dequantized BF16 tensor while retaining the scale attribute for
+    # metadata. Applying that retained scale again would double-dequantize the
+    # weight. Block scaling is only valid while the one-byte FP8 storage remains.
+    if wo_a_scale_param is not None and wo_a.weight.element_size() == 1:
         wo_a_weight = wo_a.weight.view(n_local_groups, o_lora_rank, hidden_dim).to(
             torch.float32
         )
@@ -2667,6 +2789,66 @@ def _rocm_sparse_attn_prefill_triton(
     )
 
 
+def _can_use_aiter_sparse_prefill_opus(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    attn_sink: torch.Tensor | None,
+    output: torch.Tensor,
+    on_gfx950: bool = _ON_GFX950,
+) -> bool:
+    return (
+        on_gfx950
+        and q.shape[0] >= _GFX950_AITER_SPARSE_PREFILL_OPUS_MIN_QUERIES
+        and q.is_cuda
+        and output.shape == q.shape
+        and kv.shape[-1] == q.shape[-1]
+        and q.dtype in (torch.bfloat16, torch.float16)
+        and kv.dtype == q.dtype
+        and output.dtype == q.dtype
+        and kv.device == q.device
+        and output.device == q.device
+        and q.stride(-1) == 1
+        and kv.stride(-1) == 1
+        and output.stride() == q.stride()
+        and attn_sink is not None
+        and attn_sink.shape == (q.shape[1],)
+        and attn_sink.dtype == torch.float32
+        and attn_sink.device == q.device
+    )
+
+
+def _rocm_sparse_attn_prefill_ragged_aiter_opus(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    indptr: torch.Tensor,
+    scale: float,
+    attn_sink: torch.Tensor,
+    output: torch.Tensor,
+) -> bool:
+    pa_sparse_prefill_opus = _get_aiter_sparse_prefill_opus()
+    if pa_sparse_prefill_opus is None:
+        return False
+
+    indices = _as_int32_contiguous_1d(indices)
+    indptr = _as_int32_contiguous_1d(indptr)
+    empty_indices = indices[:0]
+    empty_indptr = torch.zeros_like(indptr)
+    pa_sparse_prefill_opus(
+        q,
+        kv,
+        indices,
+        indptr,
+        kv[:1],
+        empty_indices,
+        empty_indptr,
+        attn_sink.contiguous(),
+        float(scale),
+        out=output,
+    )
+    return True
+
+
 @functools.lru_cache
 def _decode_cu_count() -> int:
     try:
@@ -3170,6 +3352,33 @@ def rocm_sparse_attn_prefill(
         rope_head_dim,
         "rocm_sparse_attn_prefill",
     )
+    opus_attn_sink = None if attn_sink is None else attn_sink[: q.shape[1]]
+    if (
+        _can_use_aiter_sparse_prefill_opus(q, kv.squeeze(1), opus_attn_sink, output)
+        and _get_aiter_sparse_prefill_opus() is not None
+    ):
+        if ragged_indices is None or ragged_indptr is None:
+            assert indices is not None
+            indices_2d = indices.reshape(indices.shape[0], -1)
+            ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
+                indices_2d,
+                topk_length
+                if topk_length is not None
+                else (indices_2d >= 0).sum(dim=-1, dtype=torch.int32),
+                num_rows=kv.shape[0],
+            )
+        assert opus_attn_sink is not None
+        if _rocm_sparse_attn_prefill_ragged_aiter_opus(
+            q=q,
+            kv=kv.squeeze(1),
+            indices=ragged_indices,
+            indptr=ragged_indptr,
+            scale=scale,
+            attn_sink=opus_attn_sink,
+            output=output,
+        ):
+            return
+
     if ragged_indices is not None and ragged_indptr is not None:
         output_chunk = _rocm_sparse_attn_prefill_ragged_triton(
             q=q,
