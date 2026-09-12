@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: V1 Core + KV + Metrics
+  key: v1-core-kv-metrics-intel
   timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
@@ -32,9 +33,10 @@ steps:
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
       pytest -v -s v1/executor &&
-      VLLM_BATCH_INVARIANT=1 pytest -v -s -m 'not cpu_test' v1/ec_connector/unit'
+      VLLM_BATCH_INVARIANT=1 pytest -v -s -m "not cpu_test" v1/ec_connector/unit'
 
 - label: V1 Sample + Logits
+  key: v1-sample-logits-intel
   timeout_in_minutes: 90
   device: intel_gpu
   agent_tags:
@@ -80,6 +82,7 @@ steps:
   parallelism: 4
 
 - label: Basic Models Tests (Initialization)
+  key: basic-models-tests-initialization
   timeout_in_minutes: 60
   device: intel_gpu
   agent_tags:
@@ -104,6 +107,7 @@ steps:
       pytest -v -s models/test_initialization.py::test_can_initialize_large_subset[Eagle3MiniMaxM2ForCausalLM]'
 
 - label: XPU CPU Offload
+  key: xpu-cpu-offload
   timeout_in_minutes: 60
   device: intel_gpu
   agent_tags:
@@ -131,6 +135,7 @@ steps:
       pytest -v -s v1/kv_connector/unit/test_offloading_connector.py'
 
 - label: NixlConnector PD accuracy (4 GPUs)
+  key: nixlconnector-pd-accuracy-4-gpus
   timeout_in_minutes: 60
   num_devices: 4
   device: intel_gpu
@@ -269,6 +274,7 @@ steps:
     pytest -v -s utils_ --ignore=utils_/test_mem_utils.py'
 
 - label: Fusion Unit Tests
+  key: fusion-unit-tests
   timeout_in_minutes: 30
   device: intel_gpu
   agent_tags:
