@@ -387,6 +387,7 @@ def move_to_buffer(
         recv_dst_rows=recv_dst_rows,
     )
 
+    # Batching is opt-in; by default, submit all transfers in one step.
     if enable_migration_batching:
         _execute_migration_batches(
             num_local_experts=num_local_experts,
@@ -401,7 +402,6 @@ def move_to_buffer(
         )
         return transfer_metadata
 
-    # By default, submit all expert transfers in one communication step.
     communicator.set_transfer_context(old_indices, layer_idx)
 
     # 2. Post sends
