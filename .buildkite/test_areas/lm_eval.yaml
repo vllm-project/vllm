@@ -122,6 +122,28 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt
 
+- label: ":nvidia: (H100) LM Eval Watermark Feature Combination"
+  key: lm-eval-dspark-watermark-2xh100
+  device: h100
+  num_devices: 2
+  # Local TP2 runs took 84–379 seconds, including startup.
+  timeout_in_minutes: 15
+  source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/
+  - vllm/config/speculative.py
+  - vllm/config/vllm.py
+  - vllm/config/watermarking.py
+  - vllm/sampling_params.py
+  - vllm/model_executor/models/qwen3_dspark.py
+  - vllm/model_executor/models/qwen3_dflash.py
+  - vllm/model_executor/warmup/
+  - vllm/v1/watermarking/
+  - vllm/v1/worker/gpu/
+  autorun_on_main: true
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark-dspark-tp2.txt
+
 - label: ":nvidia: (B200) LM Eval Spec Decode"
   key: lm-eval-spec-decode-4xb200
   timeout_in_minutes: 120
@@ -512,6 +534,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"
 
 - label: ":nvidia: (H200 MIG 35GB) MRCR Eval Small Models"
+  key: mrcr-eval-small-models
   device: h200_35gb
   timeout_in_minutes: 25
   source_file_dependencies:

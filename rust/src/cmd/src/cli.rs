@@ -23,8 +23,8 @@ use serde_json::Value;
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
+use vllm_chat::GenerationConfigMode;
 use vllm_chat::multimodal::MmLimitPerPrompt;
-use vllm_chat::{GenerationConfigMode, ReasoningParserFactory};
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
@@ -110,6 +110,9 @@ pub enum BenchCommand {
 pub struct RenderArgs {
     /// Model identifier or local model directory containing tokenizer files.
     model: String,
+    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
+    #[arg(long)]
+    revision: Option<String>,
     /// HTTP bind host.
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -157,6 +160,7 @@ impl RenderArgs {
 
         RenderConfig {
             model: self.model,
+            revision: self.revision,
             served_model_name: self.served_model_name,
             host: self.host,
             port: self.port,
@@ -194,6 +198,11 @@ pub struct SharedRuntimeArgs {
     /// Model identifier or local model directory used for backend loading and
     /// public model ID.
     pub model: String,
+
+    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
+    #[arg(long)]
+    #[serde(default)]
+    pub revision: Option<String>,
 
     /// The source of generation-config sampling defaults. `"auto"` loads the
     /// model's defaults, while `"vllm"` uses vLLM's neutral defaults.
@@ -481,6 +490,7 @@ impl SharedRuntimeArgs {
                 None => CoordinatorMode::None,
             },
             model: self.model,
+            revision: self.revision,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
@@ -536,6 +546,7 @@ impl SharedRuntimeArgs {
             },
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
+            revision: self.revision,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
             listener_mode,
@@ -743,6 +754,7 @@ impl ServeArgs {
 
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
+            self.runtime.revision.clone(),
             self.runtime.max_logprobs,
             profiler_config,
             reasoning_parser.as_deref(),
@@ -756,13 +768,7 @@ impl ServeArgs {
 }
 
 fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -> Option<String> {
-    match selection {
-        ParserSelection::Auto => ReasoningParserFactory::global()
-            .resolve_name_for_model(model)
-            .map(str::to_string),
-        ParserSelection::None => None,
-        ParserSelection::Explicit(name) => Some(name.clone()),
-    }
+    selection.resolve_reasoning_name(model).map(str::to_owned)
 }
 
 /// Allocate fresh IPC endpoints for one managed frontend instance.

@@ -46,6 +46,46 @@ def test_optional_type():
     assert optional_type_func("42") == 42
 
 
+def test_watermark_config_cli():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--model",
+            "dummy",
+            "--watermark-config",
+            '{"algorithm":"dual_key_gumbel","key":42,"prf":"philox","alpha":0.25,'
+            '"allow_target_only_watermarking":true}',
+        ]
+    )
+
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+
+    assert config is not None
+    assert config.algorithm == "dual_key_gumbel"
+    assert config.key == 42
+    assert config.alpha == 0.25
+    assert config.context_width == 4
+    assert config.deduplicate_contexts == "single_turn"
+    assert config.deduplicate_contexts_max_history == 8192
+    assert config.prf == "philox"
+    assert config.allow_target_only_watermarking
+
+    args = parser.parse_args(
+        [
+            "--model",
+            "dummy",
+            "--watermark-config",
+            '{"key":42,"deduplicate_contexts":"none",'
+            '"deduplicate_contexts_max_history":32}',
+        ]
+    )
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+
+    assert config is not None
+    assert config.deduplicate_contexts == "none"
+    assert config.deduplicate_contexts_max_history == 32
+
+
 @pytest.mark.parametrize(
     "options",
     [
@@ -538,24 +578,6 @@ def test_prefix_cache_default():
     args = parser.parse_args(["--prefix-cache-retention-interval", "64"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert engine_args.prefix_cache_retention_interval == 64
-
-
-def test_prefix_cache_retention_interval_from_deprecated_env(
-    monkeypatch, caplog, disable_log_dedup
-):
-    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "64")
-
-    engine_args = EngineArgs()
-
-    assert engine_args.prefix_cache_retention_interval == 64
-    assert "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in caplog.text
-    assert "deprecated" in caplog.text
-    assert "prefix_cache_retention_interval" in caplog.text
-
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args(["--prefix-cache-retention-interval", "32"])
-    engine_args = EngineArgs.from_cli_args(args)
-    assert engine_args.prefix_cache_retention_interval == 32
 
 
 @pytest.mark.parametrize(

@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend OpenAI Coverage"
+  key: rust-frontend-openai-coverage
   timeout_in_minutes: 30
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -67,6 +68,7 @@ steps:
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Serve/Admin Coverage"
+  key: rust-frontend-serve-admin-coverage
   timeout_in_minutes: 25
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -116,6 +118,7 @@ steps:
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend Core Correctness"
+  key: rust-frontend-core-correctness
   timeout_in_minutes: 20
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -144,6 +147,7 @@ steps:
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 35GB) Rust Frontend Tool Use"
+  key: rust-frontend-tool-use
   device: h200_35gb
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
@@ -174,6 +178,7 @@ steps:
       - vllm/platforms/rocm.py
 
 - label: ":nvidia: (L4) Rust Frontend Distributed"
+  key: rust-frontend-distributed
   timeout_in_minutes: 25
   device: l4
   num_devices: 4
