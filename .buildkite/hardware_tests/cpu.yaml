@@ -52,6 +52,42 @@ steps:
       tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp"
   parallelism: 2
 
+# Speculative decoding under a CPU platform. The unit tests already pass on
+# CPU but no CPU job runs them; the e2e tests gate the engine path itself,
+# which unit tests cannot reach. Files not listed here are CUDA-gated.
+- label: CPU-Spec Decode Tests
+  key: cpu-spec-decode-tests
+  depends_on: []
+  device: intel_cpu
+  no_plugin: true
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/cpu/
+  - vllm/v1/worker/cpu_model_runner.py
+  - vllm/v1/worker/gpu/spec_decode/
+  - tests/v1/e2e/test_cpu_spec_decode.py
+  - tests/v1/spec_decode/
+  - tests/v1/worker/
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 40m "
+      pytest -x -v -s \
+      tests/v1/worker/test_gpu_autoregressive_speculator.py \
+      tests/v1/worker/test_gpu_extract_hidden_states_speculator.py \
+      tests/v1/worker/test_gpu_batch_ordering.py \
+      tests/v1/worker/test_gpu_rejection_sampler_chunking.py \
+      tests/v1/worker/test_eagle3_aux_hidden_states_pp.py \
+      tests/v1/worker/test_spec_decode_embed_sharing_pp.py \
+      tests/v1/spec_decode/test_adaptive_verification.py \
+      tests/v1/spec_decode/test_dflash2.py \
+      tests/v1/spec_decode/test_dflash_causality.py \
+      tests/v1/spec_decode/test_eagle_draft_attn_metadata.py \
+      tests/v1/spec_decode/test_draft_attention_backend_override.py \
+      tests/v1/spec_decode/test_draft_moe_backend_override.py \
+      tests/v1/spec_decode/test_ngram.py \
+      tests/v1/spec_decode/test_llm_base_proposer_sampling.py
+      pytest -x -v -s tests/v1/e2e/test_cpu_spec_decode.py"
+
 # Note: SDE can't be downloaded from CI host because of AWS WAF
 # - label: CPU-Compatibility Tests
 #   depends_on: []
