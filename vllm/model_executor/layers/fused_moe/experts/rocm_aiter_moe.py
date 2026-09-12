@@ -55,6 +55,7 @@ class ActivationMethod(IntEnum):
     # without importing the ActivationType enum from AITER globally.
     SILU = 0
     GELU = 1
+    GELU_TANH = 4
 
 
 aiter_topK_meta_data: tuple[torch.Tensor, torch.Tensor] | None = None
@@ -267,6 +268,8 @@ def rocm_aiter_fused_experts(
         activation_method = ActivationMethod.SILU
     elif activation == MoEActivation.GELU:
         activation_method = ActivationMethod.GELU
+    elif activation == MoEActivation.GELU_TANH:
+        activation_method = ActivationMethod.GELU_TANH
     elif activation == MoEActivation.SWIGLUOAI:
         activation_method = rocm_aiter_ops.get_aiter_activation_type("swiglu")
     elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
@@ -506,6 +509,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
             MoEActivation.SITU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
