@@ -109,6 +109,9 @@ class Scheduler(SchedulerInterface):
             )
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
+        # num_common_prefix_blocks feeds cascade attention and nothing else,
+        # so when cascade attention is off there is no reason to compute it.
+        self.disable_cascade_attn = vllm_config.model_config.disable_cascade_attn
         self.is_mm_encoder_only = vllm_config.is_mm_encoder_only
 
         # include_finished_set controls whether a separate set of finished
@@ -1313,9 +1316,16 @@ class Scheduler(SchedulerInterface):
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
+        # FullAttentionManager walks the first request's block list until it
+        # finds one that is not shared, which for a single long-context request
+        # means walking every block it owns -- O(context / block_size) python
+        # iterations per step. Only cascade attention consumes the result
+        # (_compute_cascade_attn_prefix_lens), so skip the walk when it is off.
         num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
+        if self.running and not self.disable_cascade_attn:
+            with record_function_or_nullcontext(
+                "schedule: get_num_common_prefix_blocks"
+            ):
                 any_request_id = self.running[0].request_id
                 num_common_prefix_blocks = (
                     self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
