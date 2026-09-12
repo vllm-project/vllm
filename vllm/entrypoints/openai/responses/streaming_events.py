@@ -128,10 +128,10 @@ def is_mcp_tool_by_namespace(
     """
     Determine if a tool call is an MCP tool based on recipient prefix.
 
-    Inverse of :func:`is_function_recipient` — everything that is not
-    a function call is an MCP tool.
+    Inverse of :func:`is_function_recipient` for external tools. Built-in
+    browser recipients have their own web-search event lifecycle.
     """
-    if recipient is None:
+    if recipient is None or recipient.startswith("browser."):
         return False
     return not is_function_recipient(recipient, allowed_function_tool_names)
 
