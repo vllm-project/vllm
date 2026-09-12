@@ -43,6 +43,9 @@ For example:
 VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B
 ```
 
+For a controlled eager-versus-decode-Graph comparison, see
+[the CUDA Graph validation guide](docs/decode_graph_validation.md).
+
 ### External Engine
 
 `vllm-rs serve` can be run standalone with `--data-parallel-size-local 0` when the Python engines
