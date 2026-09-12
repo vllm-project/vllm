@@ -19,8 +19,7 @@ import requests
 from tests.utils import RemoteOpenAIServer, multi_gpu_test
 from vllm.utils.import_utils import has_nixl_ep
 
-MODEL_NAME = os.getenv("MODEL_NAME", "ibm-research/PowerMoE-3b")
-DP_SIZE = 2
+MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-V2-Lite-Chat")
 
 # Fault-detection timeout budget:
 # - CPU: Gloo DP allreduce timeout (30s) detects the dead peer.
@@ -30,8 +29,16 @@ CPU_DISTRIBUTED_TIMEOUT_S = 30
 FAULT_DETECTION_DEADLINE_S = 45
 
 
-# Patches ``gpu.dp_utils.sync_cudagraph_and_dp_padding`` to raise on ``rank`` at
-# a chosen step. Gated on VLLM_FT_TEST_INJECT_FAULT.
+NUM_REDUNDANT_EXPERTS = 32
+
+# Recovery after scale_down (mask + expert redistribution + weight reload)
+# is expected to finish well within this deadline; the busy-loop wrapper
+# itself waits engine_recovery_timeout_sec (120s) before giving up.
+SCALE_DOWN_DEADLINE_S = 20
+
+
+# Patches ``gpu.dp_utils.sync_cudagraph_and_dp_padding`` to raise on ``rank``
+# once armed (via /collective_rpc). Gated on VLLM_FT_TEST_INJECT_FAULT.
 _FAULT_INJECT_SITECUSTOMIZE = """\
 import builtins
 import os
@@ -40,11 +47,15 @@ import sys
 _SPEC = os.environ.get("VLLM_FT_TEST_INJECT_FAULT")
 _MODULE = "vllm.v1.worker.gpu.dp_utils"
 _ATTR = "sync_cudagraph_and_dp_padding"
+_WORKER_MODULE = "vllm.v1.worker.gpu_worker"
 
 if _SPEC:
     _f = dict(kv.split("=", 1) for kv in _SPEC.split(","))
-    _RANK, _STEP = int(_f["rank"]), int(_f["step"])
-    _steps = [0]
+    _RANK = int(_f["rank"])
+    _ARMED = [False]
+
+    def _arm():
+        _ARMED[0] = True
 
     def _patch(m):
         import inspect
@@ -56,11 +67,11 @@ if _SPEC:
             bound.apply_defaults()
             dp_rank = bound.arguments.get("dp_rank")
             if dp_rank == _RANK:
-                _steps[0] += 1
-                if _steps[0] == _STEP:
-                    raise RuntimeError(
-                        "FT test fault injection (rank=%d step=%d)" % (_RANK, _STEP)
-                    )
+                # One-shot: disarm before raising so post-retry steps pass.
+                if not _ARMED[0]:
+                    return result
+                _ARMED[0] = False
+                raise RuntimeError("FT test fault injection (rank=%d)" % _RANK)
             return result
 
         setattr(m, _ATTR, _wrapped)
@@ -79,17 +90,26 @@ if _SPEC:
         ):
             m._ft_patched = True
             _patch(m)
+        # Expose arming to /collective_rpc via a Worker method.
+        w = sys.modules.get(_WORKER_MODULE)
+        if (
+            w is not None
+            and hasattr(w, "Worker")
+            and not getattr(w, "_ft_arm_patched", False)
+        ):
+            w._ft_arm_patched = True
+            w.Worker.arm_ft_fault_injection = lambda self, *a, **k: _arm()
         return module
 
     builtins.__import__ = _hook
 """
 
 
-def _install_fault_injection(monkeypatch, tmp_path, rank: int, step: int) -> None:
-    """Arrange for the DP-sync fn to raise on ``rank`` at serving ``step``.
+def _install_fault_injection(monkeypatch, tmp_path, rank: int) -> None:
+    """Install a sitecustomize that raises on ``rank`` once armed.
 
-    Writes a ``sitecustomize.py`` and prepends its dir to PYTHONPATH so every
-    vLLM subprocess picks it up; the fault spec is read from the environment.
+    Disarmed until the test calls /collective_rpc (needs VLLM_SERVER_DEV_MODE,
+    set here).
     """
     site_dir = tmp_path / "ft_inject"
     site_dir.mkdir()
@@ -99,10 +119,11 @@ def _install_fault_injection(monkeypatch, tmp_path, rank: int, step: int) -> Non
         "PYTHONPATH",
         str(site_dir) + (os.pathsep + existing if existing else ""),
     )
-    monkeypatch.setenv("VLLM_FT_TEST_INJECT_FAULT", f"rank={rank},step={step}")
+    monkeypatch.setenv("VLLM_FT_TEST_INJECT_FAULT", f"rank={rank}")
+    monkeypatch.setenv("VLLM_SERVER_DEV_MODE", "1")
 
 
-def _ft_server_args() -> list[str]:
+def _ft_server_args(extra_args: list[str] | None = None) -> list[str]:
     return [
         "--enforce-eager",
         "--dtype",
@@ -119,18 +140,19 @@ def _ft_server_args() -> list[str]:
         str(CPU_DISTRIBUTED_TIMEOUT_S),
         "--fault-tolerance-config",
         '{"engine_recovery_timeout_sec": 120}',
+        *(extra_args or []),
     ]
 
 
-def _ft_manager():
+def _ft_manager(extra_args: list[str] | None = None, dp_size: int = 2):
     """Build the shared DP+EP fault-tolerant server topology (one engine/server)."""
     from tests.v1.distributed.test_external_lb_dp import ExternalLBServerManager
 
     return ExternalLBServerManager(
         MODEL_NAME,
-        DP_SIZE,
+        dp_size,
         api_server_count=1,  # FT requires a single API server per engine
-        base_server_args=_ft_server_args(),
+        base_server_args=_ft_server_args(extra_args),
         tp_size=1,
     )
 
@@ -156,6 +178,39 @@ def _complete(client):
     )
 
 
+# Accuracy probe constants mirror test_elastic_ep.py; invalid responses
+# count as wrong answers. Env overrides exist for tuning.
+NUM_GSM8K_QUESTIONS = int(os.getenv("NUM_GSM8K_QUESTIONS", "256"))
+EXPECTED_ACCURACY = float(os.getenv("EXPECTED_ACCURACY", "0.58"))
+ACCURACY_TOL = float(os.getenv("ACCURACY_TOL", "0.08"))
+
+
+def _run_gsm8k_eval(server, stage: str) -> float:
+    """Run the gsm8k probe; assert the absolute bar, return the accuracy."""
+    from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
+
+    host_port = server.url_for("v1").split("//")[1].split("/")[0]
+    host, port_str = host_port.rsplit(":", 1)
+    results = evaluate_gsm8k(
+        num_questions=NUM_GSM8K_QUESTIONS,
+        num_shots=5,
+        host=f"http://{host}",
+        port=int(port_str),
+        temperature=0.0,
+        seed=42,
+    )
+    accuracy = results["accuracy"]
+    print(
+        f"[{stage}] GSM8K accuracy: {accuracy:.3f} "
+        f"invalid_rate={results['invalid_rate']:.3f} "
+        f"({results['num_questions']} questions)"
+    )
+    assert accuracy >= EXPECTED_ACCURACY, (
+        f"[{stage}] gsm8k accuracy {accuracy:.3f} < {EXPECTED_ACCURACY}"
+    )
+    return accuracy
+
+
 def _in_parallel(fn, servers) -> list:
     """Run ``fn(server)`` for all servers concurrently; return results in order."""
     with ThreadPoolExecutor(max_workers=len(servers)) as ex:
@@ -163,7 +218,7 @@ def _in_parallel(fn, servers) -> list:
 
 
 def _get_ft_status(server) -> dict:
-    resp = requests.get(server.url_for("fault_tolerance/status"), timeout=10)
+    resp = requests.get(server.url_for("v1/fault_tolerance/status"), timeout=10)
     resp.raise_for_status()
     return resp.json()
 
@@ -180,12 +235,23 @@ def _assert_serving_and_healthy(servers) -> None:
 def _apply_ft(server, instruction: str, params: dict | None = None) -> dict:
     """POST an FT instruction; assert it is accepted (202) and return the body."""
     resp = requests.post(
-        server.url_for("fault_tolerance/apply"),
+        server.url_for("v1/fault_tolerance/apply"),
         json={"instruction": instruction, "params": params or {}},
         timeout=10,
     )
     assert resp.status_code == 202, resp.text
     return resp.json()
+
+
+def _arm_ft_injection(servers) -> None:
+    """Arm the fault injection in every engine's workers via /collective_rpc."""
+    for server in servers:
+        resp = requests.post(
+            server.url_for("collective_rpc"),
+            json={"method": "arm_ft_fault_injection"},
+            timeout=10,
+        )
+        assert resp.status_code == 200, resp.text
 
 
 def _kill_worker_process(server) -> None:
@@ -205,7 +271,7 @@ def _wait_for_engines(
     match_values: set[str],
     deadline_s: int = FAULT_DETECTION_DEADLINE_S,
 ) -> list[dict[str, Any] | None]:
-    """Poll ``/fault_tolerance/status`` until each server's engine status matches.
+    """Poll ``/v1/fault_tolerance/status`` until each server's engine status matches.
 
     A server matches when its engine-status dict has ``match_key`` equal to
     one of ``match_values``. Returns one engine-status dict per server. Servers still
@@ -254,15 +320,45 @@ def _driving(*servers):
             t.join(timeout=2)
 
 
-def _wait_for_ft_apply_outcome(server, request_id: str, deadline_s: int) -> str | None:
-    """Wait until ``/fault_tolerance/status`` records the FT apply outcome."""
+def _wait_for_ft_failure(server, deadline_s: int) -> str | None:
+    """Wait until ``/v1/fault_tolerance/status`` records the FT failure outcome."""
     engine_status = _wait_for_engines(
         [server],
-        match_key="last_ft_request_id",
-        match_values={request_id},
+        match_key="ft_state",
+        match_values={"failed"},
         deadline_s=deadline_s,
     )[0]
     return engine_status.get("ft_error") if engine_status else None
+
+
+def _servers_by_rank(servers, dp_size: int) -> dict[int, RemoteOpenAIServer]:
+    """Map each DP rank to its server, so tests can index by rank not position."""
+    return {r: _server_for_rank(servers, r) for r in range(dp_size)}
+
+
+def _drive_to_faulted(
+    servers_by_rank: dict[int, RemoteOpenAIServer],
+    match_values: set[str],
+) -> dict[int, dict[str, Any]]:
+    """Drive every engine until each reports a matching fault status.
+
+    Returns a ``{rank: engine_status}`` map. Asserts no rank hung (all matched
+    within the deadline) so callers can assume every value is present.
+    """
+    ranks = sorted(servers_by_rank)
+    all_servers = [servers_by_rank[r] for r in ranks]
+    with _driving(*all_servers):
+        statuses = _wait_for_engines(
+            all_servers, match_key="status", match_values=match_values
+        )
+    faulted: dict[int, dict[str, Any]] = {}
+    for rank, engine_status in zip(ranks, statuses):
+        assert engine_status is not None, (
+            f"rank {rank} did not report fault within "
+            f"{FAULT_DETECTION_DEADLINE_S}s -- it likely hung"
+        )
+        faulted[rank] = engine_status
+    return faulted
 
 
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
@@ -270,109 +366,138 @@ def _wait_for_ft_apply_outcome(server, request_id: str, deadline_s: int) -> str 
 def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
     """An exception injected into the inference path drives full retry recovery.
 
-    Injecting an exception into ``sync_cudagraph_and_dp_padding`` at a chosen
-    step on rank 1.
+    The fault is patched into ``sync_cudagraph_and_dp_padding`` on rank 1 via
+    a generated ``sitecustomize``; it raises on the engine's first DP-sync
+    step after arming, so rank 1 goes UNHEALTHY and rank 0 times out on the
+    DP allreduce. Both UNHEALTHY is the precondition for ``retry``.
 
-    - Rank 1 raises inside the busy loop and goes UNHEALTHY.
-    - Rank 0 detects the now-absent peer via the communication timeout and also
-      goes UNHEALTHY.
-
-    Both being UNHEALTHY is the precondition for ``retry``. The fault is patched
-    into the DP-sync fn from the test (via a generated ``sitecustomize``).
+    The injection is armed (via /collective_rpc) only after the baseline
+    accuracy eval; accuracy is compared before and after recovery, mirroring
+    test_elastic_ep.py.
     """
-    fault_step = int(os.getenv("FT_FAULT_STEP", "50"))
-    _install_fault_injection(monkeypatch, tmp_path, rank=1, step=fault_step)
+    _install_fault_injection(monkeypatch, tmp_path, rank=1)
+    dp_size = 2
+    faulted_rank = 1
+    with _ft_manager(dp_size=dp_size) as servers:
+        assert len(servers) == dp_size
+        servers_by_rank = _servers_by_rank(servers, dp_size)
 
-    with _ft_manager() as servers:
-        assert len(servers) == DP_SIZE
-        rank0 = _server_for_rank(servers, 0)
-        rank1 = _server_for_rank(servers, 1)
+        # 1. All engines healthy and serving.
+        _assert_serving_and_healthy(list(servers_by_rank.values()))
 
-        # 1. Both engines healthy and serving.
-        _assert_serving_and_healthy((rank0, rank1))
+        # 2. Baseline accuracy (the injection is still disarmed).
+        initial_accuracy = _run_gsm8k_eval(servers_by_rank[0], "Initial")
 
-        # 2. Drive both ranks so rank 1 accumulates execute_model steps and trips
-        #    the injected fault; rank 0 then times out on the DP allreduce.
-        with _driving(rank0, rank1):
-            faulted = _wait_for_engines(
-                [rank0, rank1], match_key="status", match_values={"unhealthy"}
-            )
+        # 3. Arm, then drive: the injected rank faults on its next engine step.
+        _arm_ft_injection(list(servers_by_rank.values()))
+        faulted = _drive_to_faulted(servers_by_rank, match_values={"unhealthy"})
 
-        for rank, engine_status in enumerate(faulted):
-            assert engine_status is not None, (
-                f"rank {rank} did not report UNHEALTHY within "
-                f"{FAULT_DETECTION_DEADLINE_S}s -- it likely hung"
-            )
         # The rank that raised carries the fault info from its own exception.
-        assert faulted[1] is not None
-        assert faulted[1].get("fault_info"), faulted[1]
+        assert faulted[faulted_rank].get("fault_info"), faulted[faulted_rank]
 
-        # 3. retry both engines.
-        for server in (rank0, rank1):
+        # 4. retry every engine.
+        for server in servers_by_rank.values():
             _apply_ft(server, "retry")
 
-        # 4. Recovery completes: both engines return to healthy and serve again.
-        _assert_serving_and_healthy((rank0, rank1))
+        # 5. Recovery completes: every engine returns to healthy and serves again.
+        _assert_serving_and_healthy(list(servers_by_rank.values()))
+
+        # 6. Post-recovery accuracy vs the pre-fault baseline.
+        recovered_accuracy = _run_gsm8k_eval(servers_by_rank[0], "After retry")
+        assert recovered_accuracy >= initial_accuracy - ACCURACY_TOL, (
+            f"Accuracy dropped after retry: {recovered_accuracy:.3f} < "
+            f"{initial_accuracy:.3f} - {ACCURACY_TOL}"
+        )
+        print(
+            "\nAccuracy Summary:\n"
+            f"  Initial:     {initial_accuracy:.3f}\n"
+            f"  After retry: {recovered_accuracy:.3f} "
+            f"(diff: {recovered_accuracy - initial_accuracy:+.3f})\n"
+            f"  Tolerance:   {ACCURACY_TOL:.3f}"
+        )
 
 
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
-@multi_gpu_test(num_gpus=2)
-def test_worker_kill_survivor_unhealthy_and_dead_rejects_retry():
-    """One worker kill surfaces two status transitions at once.
+@multi_gpu_test(num_gpus=4)
+def test_scale_down_removes_dead_rank_and_recovers():
+    """scale_down removes a dead DP rank; survivors keep serving with a smaller
+    DP group.
 
-    SIGKILLing only rank 1's worker leaves both EngineCores alive, so the same
-    fault is seen two ways:
+    SIGKILLing rank 1's worker leaves its EngineCore DEAD while the other ranks
+    detect the peer fault and go UNHEALTHY. The orchestrator then sends
+    ``scale_down`` with ``removed_dp_ranks=[1]`` to every survivor.
 
-    - Survivor (rank 0): detects the dead peer via Gloo allreduce / nixl_ep
-      kernel timeout. Its own executor is fine, so ``on_fault`` marks it
-      UNHEALTHY with a ``fault_info``.
-    - Victim (rank 1): detects its own executor failure and marks itself DEAD.
 
-    Recovery is gated on UNHEALTHY: the DEAD engine accepts ``retry`` at the
-    HTTP layer (202 = background dispatch) but rejects it in the engine,
-    recording the reason as ``ft_error``.
+    Also verifies that a DEAD engine rejects ``retry``: recovery is gated on
+    UNHEALTHY, so trying ``retry`` on the victim records a rejection reason.
+
+    Accuracy is measured before the fault and after scale_down; the survivor
+    must stay within ACCURACY_TOL of the pre-fault baseline.
     """
-    with _ft_manager() as servers:
-        assert len(servers) == DP_SIZE
-        survivor = _server_for_rank(servers, 0)
-        victim = _server_for_rank(servers, 1)
+    eplb_args = [
+        "--enable-eplb",
+        "--eplb-config.num_redundant_experts",
+        str(NUM_REDUNDANT_EXPERTS),
+    ]
+    dp_size = 4
+    victim_rank = 1
+    with _ft_manager(eplb_args, dp_size=dp_size) as servers:
+        assert len(servers) == dp_size
+        servers_by_rank = _servers_by_rank(servers, dp_size)
+        victim = servers_by_rank[victim_rank]
+        survivor_ranks = [r for r in servers_by_rank if r != victim_rank]
+        survivors = [servers_by_rank[r] for r in survivor_ranks]
 
-        # 1. Confirm both engines are healthy and serving.
-        _assert_serving_and_healthy((survivor, victim))
+        # 1. All engines healthy and serving.
+        _assert_serving_and_healthy(list(servers_by_rank.values()))
 
-        # 2. Kill only the victim's worker; both EngineCores stay alive.
+        # 2. Baseline accuracy while the full DP group is healthy.
+        initial_accuracy = _run_gsm8k_eval(servers_by_rank[0], "Initial")
+
+        # 3. Kill the victim's worker; drive all engines into the fault.
         _kill_worker_process(victim)
+        faulted = _drive_to_faulted(servers_by_rank, match_values={"dead", "unhealthy"})
 
-        # 3. Drive both engines so each keeps stepping into the failed component.
-        with _driving(survivor, victim):
-            survivor_faulted, victim_faulted = _wait_for_engines(
-                [survivor, victim],
-                match_key="status",
-                match_values={"dead", "unhealthy"},
-            )
-
-        assert survivor_faulted is not None, (
-            "survivor did not report the peer fault within "
-            f"{FAULT_DETECTION_DEADLINE_S}s -- it likely hung"
-        )
-        # The survivor's own executor is fine, so it must be UNHEALTHY, not DEAD.
-        assert survivor_faulted["status"] == "unhealthy", survivor_faulted
-        assert survivor_faulted.get("fault_info"), survivor_faulted
-
-        assert victim_faulted is not None, (
-            "victim did not report its worker's death within "
-            f"{FAULT_DETECTION_DEADLINE_S}s"
-        )
-        assert victim_faulted["status"] == "dead", victim_faulted
-
-        # 4. retry is accepted at the HTTP layer (202 = background dispatch)...
-        request_id = _apply_ft(victim, "retry")["request_id"]
-
-        # 5. ...but the DEAD engine must reject it: recovery requires UNHEALTHY.
-        ft_error = _wait_for_ft_apply_outcome(
-            victim, request_id, FAULT_DETECTION_DEADLINE_S
-        )
+        # 4. DEAD engine rejects retry: recovery requires UNHEALTHY.
+        assert faulted[victim_rank]["status"] == "dead", faulted[victim_rank]
+        _apply_ft(victim, "retry")
+        ft_error = _wait_for_ft_failure(victim, FAULT_DETECTION_DEADLINE_S)
         assert ft_error is not None, (
-            "rejection was never recorded in /fault_tolerance/status"
+            "rejection was never recorded in /v1/fault_tolerance/status"
         )
         assert "status is DEAD" in ft_error, ft_error
+
+        # 5. scale_down sent to every survivor: remove the dead rank.
+        for server in survivors:
+            _apply_ft(server, "scale_down", {"removed_dp_ranks": [victim_rank]})
+
+        # 6. Recovery completes: all survivors are healthy and serving.
+        recovered = _wait_for_engines(
+            survivors,
+            match_key="status",
+            match_values={"healthy"},
+            deadline_s=SCALE_DOWN_DEADLINE_S,
+        )
+        for rank, engine_status in zip(survivor_ranks, recovered):
+            assert engine_status is not None, (
+                f"survivor {rank} did not recover within {SCALE_DOWN_DEADLINE_S}s "
+                "-- expert reload or DP-group reinit likely failed"
+            )
+        # Verify all survivors actually serve.
+        for server in survivors:
+            completion = _complete(server.get_client())
+            assert completion.choices[0].text
+
+        # 7. Post-recovery accuracy vs the pre-fault baseline.
+        recovered_accuracy = _run_gsm8k_eval(survivors[0], "After scale down")
+        assert recovered_accuracy >= initial_accuracy - ACCURACY_TOL, (
+            f"Accuracy dropped after scale_down: {recovered_accuracy:.3f} < "
+            f"{initial_accuracy:.3f} - {ACCURACY_TOL}"
+        )
+        print(
+            "\nAccuracy Summary:\n"
+            f"  Initial:          {initial_accuracy:.3f}\n"
+            f"  After scale down: {recovered_accuracy:.3f} "
+            f"(diff: {recovered_accuracy - initial_accuracy:+.3f})\n"
+            f"  Tolerance:        {ACCURACY_TOL:.3f}"
+        )

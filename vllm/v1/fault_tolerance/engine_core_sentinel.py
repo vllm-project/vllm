@@ -2,34 +2,50 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """EngineCoreSentinel and fault_tolerant_wrapper for the engine core."""
 
-import json
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from datetime import timedelta
+from typing import TYPE_CHECKING, cast
 
 import msgspec
+import torch
+import torch.distributed as dist
+from torch.distributed import PrefixStore, TCPStore
+from torch.distributed.distributed_c10d import Backend, _get_default_timeout
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
-from vllm.distributed.utils import stateless_init_torch_distributed_process_group
+from vllm.distributed.utils import (
+    create_tcp_store,
+    enter_steady_state,
+    init_gloo_process_group,
+    set_gloo_backend_timeout,
+)
 from vllm.logger import init_logger
-from vllm.utils.network_utils import get_open_port
 from vllm.v1.engine import (
     FT_STATUS_CALL_ID,
     EngineCoreOutputs,
     EngineStatusType,
     UtilityOutput,
 )
-from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
+from vllm.v1.fault_tolerance.utils import (
+    ALLOWED_FT_INSTRUCTIONS,
+    FaultToleranceRequest,
+    FaultToleranceResult,
+)
 from vllm.v1.request import RequestStatus
 from vllm.v1.serial_utils import UtilityResult, run_method
 
 if TYPE_CHECKING:
-    from vllm.v1.engine.core import EngineCoreProc
+    from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
 
 logger = init_logger(__name__)
 
 FT_UTILITY_METHOD = "handle_fault_tolerance"
+
+# Fixed rendezvous step for steady-state cpu timeout activation: by then,
+# sustained traffic is assumed to have reached every rank.
+STEADY_STATE_ACTIVATION_STEP = 32
 
 
 class EngineCoreSentinel:
@@ -47,11 +63,65 @@ class EngineCoreSentinel:
         self.status_type = EngineStatusType.HEALTHY
         self.fault_info: str | None = None
         self._dp_reinit_epoch = 0
+        self._initial_dp_size = parallel_config.data_parallel_size
+        self._dead_dp_ranks: set[int] = set()
+        self._steady_state_activated = False
+        self._recovery_store: TCPStore | None = None
+
+    @property
+    def coordinator_disabled(self) -> bool:
+        """True once any scale_down has committed dead ranks. The DP wave
+        wake-up path depends on the DP coordinator, which has no failover;
+        after a scale_down the engine never idle-pauses and keeps stepping
+        dummy batches instead."""
+        return bool(self._dead_dp_ranks)
+
+    def maybe_activate_steady_state_cpu_timeout(self, step_counter: int) -> None:
+        """Activate the steady-state cpu timeout once: at a fixed rendezvous step for
+        dp>1 so all engines activate together after first-request cold costs."""
+        if self._steady_state_activated:
+            return
+        if self._initial_dp_size > 1 and step_counter < STEADY_STATE_ACTIVATION_STEP:
+            return
+        self._steady_state_activated = True
+        enter_steady_state()
+        timeout_seconds = self.parallel_config.cpu_distributed_timeout_seconds
+        if timeout_seconds is None:
+            return
+        timeout = timedelta(seconds=timeout_seconds)
+        if self._initial_dp_size > 1:
+            set_gloo_backend_timeout(
+                cast("DPEngineCoreProc", self.engine).dp_group, timeout
+            )
+        self.engine.model_executor.collective_rpc(
+            "handle_ft_command",
+            args=(
+                FaultToleranceRequest(
+                    instruction="activate_steady_state_cpu_timeout", params={}
+                ),
+            ),
+        )
+        logger.info(
+            "[FT] Steady-state cpu timeout activated on engine %d at step %s",
+            self.engine_index,
+            step_counter,
+        )
 
     def handle_command(self, client_idx: int, call_id: int, ft_args: dict):
         """Dispatch an FT command by instruction name."""
         ft_request = FaultToleranceRequest(**ft_args)
-        if self.status_type != EngineStatusType.UNHEALTHY:
+        if ft_request.instruction not in ALLOWED_FT_INSTRUCTIONS:
+            reason = (
+                f"[FT] Rejecting unknown instruction "
+                f"'{ft_request.instruction}' on engine {self.engine_index}"
+            )
+            logger.warning(reason)
+            result = FaultToleranceResult(
+                request_id=ft_request.request_id,
+                success=False,
+                reason=reason,
+            )
+        elif self.status_type != EngineStatusType.UNHEALTHY:
             reason = (
                 f"[FT] Rejecting {ft_request.instruction} on engine "
                 f"{self.engine_index}: status is {self.status_type.name}"
@@ -94,8 +164,19 @@ class EngineCoreSentinel:
             and engine.model_executor.is_failed
         ):
             self.status_type = EngineStatusType.DEAD
+            mask = None
         else:
-            self.status_type = EngineStatusType.UNHEALTHY
+            # Push DIAGNOSING first. Commands are rejected until UNHEALTHY.
+            self.status_type = EngineStatusType.DIAGNOSING
+            self._push_status()
+            try:
+                mask = self._query_mask()
+            except Exception:
+                logger.warning("[FT] Failed to query mask for status push")
+                mask = None
+            # on_executor_failed may have set DEAD concurrently.
+            if self.status_type == EngineStatusType.DIAGNOSING:
+                self.status_type = EngineStatusType.UNHEALTHY
         self.fault_info = f"{type(exc).__name__}"
         logger.info(
             "[FT] Engine %d status -> %s:",
@@ -103,13 +184,21 @@ class EngineCoreSentinel:
             self.status_type.name,
             exc_info=exc,
         )
-        self._push_status()
+        self._push_status(mask)
 
-    def _push_status(self):
+    def on_executor_failed(self):
+        """Notify the client about the executor failure"""
+        if self.status_type != EngineStatusType.HEALTHY:
+            self.status_type = EngineStatusType.DEAD
+            self._push_status()
+
+    def _push_status(self, mask: list[int] | None = None):
         """Push current health to the client so it can refresh its cache."""
         payload = {"id": self.engine_index, "status": self.status_type.name.lower()}
         if self.status_type == EngineStatusType.UNHEALTHY:
             payload["fault_info"] = self.fault_info
+            if mask is not None:
+                payload["mask"] = mask
         outputs = EngineCoreOutputs(
             utility_output=UtilityOutput(
                 call_id=FT_STATUS_CALL_ID,
@@ -119,61 +208,250 @@ class EngineCoreSentinel:
         outputs.engine_index = self.engine_index
         self.engine.output_queue.put_nowait((0, outputs))
 
-    def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
-        engine = self.engine
-        executor = engine.model_executor
+    def _query_mask(self) -> list[int]:
+        """Union of all workers' all2all masks.
 
+        A rank is excluded if any worker suspects it.
+        """
+        ft_request = FaultToleranceRequest(instruction="query_mask", params={})
+        results = self.engine.model_executor.collective_rpc(
+            "handle_ft_command",
+            args=(ft_request,),
+            timeout=self.engine_recovery_timeout_sec,
+        )
+        return [max(bits) for bits in zip(*(r["mask"] for r in results))]
+
+    def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
+        # Workers replay masks for the cumulative dead set.
+        ft_request.params["dead_dp_ranks"] = sorted(self._dead_dp_ranks)
+        self._recover_and_vote(ft_request, terminal=False)
+        return self._mark_healthy(ft_request)
+
+    def scale_down(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
+        if self._initial_dp_size == 1:
+            raise ValueError(
+                "scale_down requires data_parallel_size > 1; a dp=1 "
+                "engine has no ranks to remove"
+            )
+        removed_set = set(ft_request.params["removed_dp_ranks"])
+        my_rank = self.parallel_config.data_parallel_rank
+        newly_dead = removed_set - self._dead_dp_ranks
+        if (
+            not removed_set
+            or not removed_set <= set(range(self._initial_dp_size))
+            or my_rank in removed_set
+            or set(range(self._initial_dp_size)) <= self._dead_dp_ranks | newly_dead
+            or not newly_dead
+        ):
+            raise ValueError(
+                f"Invalid removed_dp_ranks {sorted(removed_set)} for engine "
+                f"{self.engine_index} (dp_rank={my_rank}, "
+                f"dead_dp_ranks={sorted(self._dead_dp_ranks)})"
+            )
+
+        # Removing the store master (the lowest alive rank) requires the new
+        # store location in the request.
+        alive_before = sorted(set(range(self._initial_dp_size)) - self._dead_dp_ranks)
+        if alive_before[0] in newly_dead and (
+            ft_request.params.get("dp_store_port") is None
+            or ft_request.params.get("dp_master_ip") is None
+        ):
+            raise ValueError(
+                "dp_store_port and dp_master_ip required when the store "
+                f"master (rank {alive_before[0]}) is removed"
+            )
+
+        new_dead = self._dead_dp_ranks | newly_dead
+        ft_request.params["dead_dp_ranks"] = sorted(new_dead)
+        self._recover_and_vote(ft_request, terminal=True, dead_ranks=new_dead)
+        # Commit the dead set only after the full recovery succeeded.
+        self._dead_dp_ranks = new_dead
+        logger.info(
+            "[FT] Engine %d scale_down complete: removed %s, "
+            "cumulative dead_dp_ranks=%s",
+            self.engine_index,
+            sorted(newly_dead),
+            sorted(new_dead),
+        )
+        return self._mark_healthy(ft_request)
+
+    def _rebuild_dp_store(
+        self,
+        host: str,
+        port: int,
+        is_master: bool,
+        num_clients: int,
+    ) -> None:
+        """Rebuild dp_store when the old store master was removed."""
+        timeout_seconds = self.parallel_config.cpu_distributed_timeout_seconds
+        if timeout_seconds is not None:
+            timeout = timedelta(seconds=timeout_seconds)
+        else:
+            timeout = _get_default_timeout(Backend.GLOO)
+        engine = cast("DPEngineCoreProc", self.engine)
+        engine.dp_store = TCPStore(
+            host,
+            port,
+            num_clients,
+            is_master=is_master,
+            timeout=timeout,
+        )
+
+    def _reinit_groups(
+        self, ft_request: FaultToleranceRequest, dead_ranks: set[int] | None = None
+    ) -> None:
+        """Fill worker params and reinit the engine DP group (dp>1 only).
+
+        For scale_down (dead_ranks given), the TCPStore is rebuilt first if
+        the store master was just removed.
+        """
+        engine = self.engine
+        params = ft_request.params
+        dead = self._dead_dp_ranks if dead_ranks is None else dead_ranks
+        # The rebuilt gloo group contains only alive members; its internal
+        # rank/size are dense over sorted(alive), while parallel_config keeps
+        # the frozen original values.
+        alive = sorted(set(range(self._initial_dp_size)) - dead)
+        master_ip = self.parallel_config.data_parallel_master_ip
+        if dead_ranks is not None:
+            # The lowest alive rank hosts the TCPStore master; rebuild the
+            # store if that rank was just removed.
+            alive_before = sorted(
+                set(range(self._initial_dp_size)) - self._dead_dp_ranks
+            )
+            if alive_before[0] in dead_ranks - self._dead_dp_ranks:
+                master_ip = params["dp_master_ip"]
+                self._rebuild_dp_store(
+                    master_ip,
+                    params["dp_store_port"],
+                    is_master=(self.parallel_config.data_parallel_rank == alive[0]),
+                    num_clients=len(alive),
+                )
+        params["dp_master_ip"] = master_ip
+        params["dp_group_rank"] = alive.index(self.parallel_config.data_parallel_rank)
+        params["dp_group_size"] = len(alive)
+        recovery_round = ft_request.request_id or str(self._dp_reinit_epoch)
+        params["recovery_round"] = recovery_round
+
+        if self._initial_dp_size == 1:
+            # dp=1 has no dp_store/dp_group; the engine still hosts the
+            # recovery store for its own workers' TP group reinit.
+            params["recovery_store_port"] = self._coordinate_recovery_store_port(
+                master_ip, recovery_round, is_master=True
+            )
+            return
+
+        params["recovery_store_port"] = self._coordinate_recovery_store_port(
+            master_ip, recovery_round, is_master=(params["dp_group_rank"] == 0)
+        )
         with set_current_vllm_config(engine.vllm_config):
-            ft_request.params.update(self._reinit_dp_group())
+            self._reinit_engine_groups(
+                params["dp_group_rank"], len(alive), recovery_round
+            )
+        # Commit the master IP only after the group reinit succeeded, so a
+        # failed recovery leaves a consistent state that can be retried.
+        self.parallel_config.data_parallel_master_ip = master_ip
+
+    def _recover_and_vote(
+        self,
+        ft_request: FaultToleranceRequest,
+        terminal: bool,
+        dead_ranks: set[int] | None = None,
+    ) -> None:
+        """Reinit the engine groups, dispatch the command to workers, then
+        all surviving engines vote one success bit over the rebuilt DP group
+        so they commit or fail together. Any failure is terminal when
+        `terminal` is set; otherwise the engine stays UNHEALTHY, retryable."""
+        engine = self.engine
         if hasattr(engine, "step_counter"):
             engine.step_counter = 0
 
-        executor.collective_rpc("handle_ft_command", args=(ft_request,))
+        local_error: Exception | None = None
+        try:
+            self._reinit_groups(ft_request, dead_ranks=dead_ranks)
+            engine.model_executor.collective_rpc(
+                "handle_ft_command", args=(ft_request,)
+            )
+        except Exception as exc:
+            local_error = exc
 
+        success = torch.tensor([local_error is None], dtype=torch.int32)
+        if self._initial_dp_size > 1:
+            try:
+                dist.all_reduce(
+                    success,
+                    op=dist.ReduceOp.MIN,
+                    group=cast("DPEngineCoreProc", engine).dp_group,
+                )
+            except Exception:
+                success.zero_()
+        if success.item():
+            return
+
+        if terminal:
+            self.status_type = EngineStatusType.DEAD
+            self.fault_info = "Recovery failed; full restart required"
+            self._push_status()
+        if local_error is not None:
+            raise local_error
+        raise RuntimeError("[FT] Recovery vote failed")
+
+    def _mark_healthy(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         self.status_type = EngineStatusType.HEALTHY
         logger.info("[FT] Engine %d status -> HEALTHY", self.engine_index)
         self.resumed.set()
         self._push_status()
         return FaultToleranceResult(request_id=ft_request.request_id, success=True)
 
-    def _reinit_dp_group(self) -> dict:
-        """Reinit DP process group if in DP mode. Returns worker params."""
-        engine = self.engine
-        if not hasattr(engine, "dp_group") or not hasattr(engine, "dp_store"):
-            return {}
-
-        parallel_config = engine.vllm_config.parallel_config
-        worker_key = f"ft_worker_dp_ports_{self._dp_reinit_epoch}"
-        engine_key = f"ft_engine_dp_port_{self._dp_reinit_epoch}"
+    def _reinit_engine_groups(
+        self, dense_rank: int, dense_size: int, recovery_round: str
+    ) -> None:
+        """Reinit the engine DP group (dp>1). Worker group ports are
+        coordinated by the workers themselves via the recovery store."""
+        engine = cast("DPEngineCoreProc", self.engine)
         self._dp_reinit_epoch += 1
 
-        if parallel_config.data_parallel_rank == 0:
-            worker_ports = [get_open_port() for _ in range(parallel_config.world_size)]
-            engine_port = get_open_port()
-            engine.dp_store.set(worker_key, json.dumps(worker_ports).encode())
-            engine.dp_store.set(engine_key, str(engine_port).encode())
+        prefix_store = PrefixStore(f"ft_engine_dp_{recovery_round}", engine.dp_store)
+        timeout_seconds = self.parallel_config.cpu_distributed_timeout_seconds
+        if timeout_seconds is not None:
+            timeout = timedelta(seconds=timeout_seconds)
         else:
-            worker_ports = json.loads(engine.dp_store.get(worker_key).decode())
-            engine_port = int(engine.dp_store.get(engine_key).decode())
-
-        stateless_destroy_torch_distributed_process_group(engine.dp_group)
-        engine.dp_group, engine.dp_store = (
-            stateless_init_torch_distributed_process_group(
-                parallel_config.data_parallel_master_ip,
-                engine_port,
-                parallel_config.data_parallel_rank,
-                parallel_config.data_parallel_size,
-                backend="gloo",
-                return_store=True,
-            )
+            timeout = _get_default_timeout(Backend.GLOO)
+        new_group = init_gloo_process_group(
+            prefix_store=prefix_store,
+            group_rank=dense_rank,
+            group_size=dense_size,
+            timeout=timeout,
         )
-        return {"new_stateless_dp_group_ports": worker_ports}
+        stateless_destroy_torch_distributed_process_group(engine.dp_group)
+        engine.dp_group = new_group
+
+    def _coordinate_recovery_store_port(
+        self, master_ip: str, recovery_round: str, is_master: bool
+    ) -> int:
+        """Create (is_master) or look up (others) the per-round TCPStore
+        that workers use to coordinate reinit ports; return its port."""
+        if is_master:
+            store = create_tcp_store(
+                master_ip, 0, is_master=True, world_size=-1, wait_for_workers=False
+            )
+            self._recovery_store = store
+            if self._initial_dp_size > 1:
+                key = f"ft_recovery_store_port_{recovery_round}"
+                cast("DPEngineCoreProc", self.engine).dp_store.set(
+                    key, str(store.port).encode()
+                )
+            return store.port
+        key = f"ft_recovery_store_port_{recovery_round}"
+        return int(cast("DPEngineCoreProc", self.engine).dp_store.get(key).decode())
 
 
 def fault_tolerant_wrapper(busy_loop_func: Callable):
     """Wrap the busy loop to catch faults and delegate recovery."""
 
     def run_with_fault_tolerance(self: "EngineCoreProc"):
+        if self.enable_fault_tolerance:
+            self.ft_sentinel.maybe_activate_steady_state_cpu_timeout(step_counter=1)
         while True:
             try:
                 busy_loop_func(self)

@@ -10,6 +10,7 @@ import functools
 import os
 import pickle
 import socket
+import struct
 import sys
 import time
 import uuid
@@ -523,14 +524,57 @@ def get_cached_tcp_store_client(host: str, port: int) -> TCPStore:
     return TCPStore(host, port, is_master=False, wait_for_workers=False)
 
 
+def allocate_group_ports(
+    store: Store, key: str, host: str, count: int
+) -> tuple[list[int], list[socket.socket]]:
+    """Bind sockets and publish the ports to *store*.
+
+    Returns ``(ports, sockets)`` with the sockets still open.
+    """
+    socks: list[socket.socket] = []
+    ports: list[int] = []
+    for _ in range(count):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind((host, 0))
+        s.listen()
+        socks.append(s)
+        ports.append(s.getsockname()[1])
+    store.set(key, struct.pack(f"!{count}I", *ports))
+    return ports, socks
+
+
+def fetch_group_ports(store: Store, key: str, count: int) -> list[int]:
+    """Read ports published under *key* by func:`allocate_group_ports`. Blocks until
+    the key is available.
+    """
+    return list(struct.unpack(f"!{count}I", store.get(key)))
+
+
+# Whether this process has entered steady state — init (weight load, KV setup,
+# graph capture) is done and ranks step in lockstep.
+_steady_state_entered = False
+
+
+def enter_steady_state() -> None:
+    global _steady_state_entered
+    _steady_state_entered = True
+
+
 def get_cpu_distributed_timeout_or_none() -> timedelta | None:
     from vllm.config import get_current_vllm_config_or_none
 
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:
         return None
-    timeout_seconds = vllm_config.parallel_config.cpu_distributed_timeout_seconds
+    parallel_config = vllm_config.parallel_config
+    if parallel_config.enable_fault_tolerance and not _steady_state_entered:
+        return None
+    timeout_seconds = parallel_config.cpu_distributed_timeout_seconds
     return timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
+
+
+def set_gloo_backend_timeout(group: ProcessGroup, timeout: timedelta) -> None:
+    group._get_backend(torch.device("cpu"))._set_default_timeout(timeout)
 
 
 def get_distributed_timeout_or_none() -> timedelta | None:

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-import uuid
 from http import HTTPStatus
 
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException, Request
@@ -11,50 +10,67 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import validate_json_request
 from vllm.logger import init_logger
-from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
+from vllm.v1.fault_tolerance.utils import ALLOWED_FT_INSTRUCTIONS, FaultToleranceRequest
 
 logger = init_logger(__name__)
 
 router = APIRouter()
 
-_ALLOWED_INSTRUCTIONS = {"retry"}
 
-
-def _validate_payload(body: dict) -> tuple[str, dict]:
+def _validate_payload(body: dict) -> tuple[str, dict, str]:
     if not isinstance(body, dict):
         raise HTTPException(400, "Request body must be a JSON object.")
     instruction = body.get("instruction")
     if not instruction:
         raise HTTPException(400, "'instruction' is required.")
-    if instruction not in _ALLOWED_INSTRUCTIONS:
+    if instruction not in ALLOWED_FT_INSTRUCTIONS:
         raise HTTPException(400, f"Invalid instruction: '{instruction}'.")
     params = body.get("params", {})
     if not isinstance(params, dict):
         raise HTTPException(400, "'params' must be an object.")
-    return instruction, params
+
+    request_id = body.get("request_id", "")
+    if not isinstance(request_id, str):
+        raise HTTPException(400, "'request_id' must be a string.")
+    return instruction, params, request_id
 
 
 @router.post(
-    "/fault_tolerance/apply",
+    "/v1/fault_tolerance/apply",
     dependencies=[Depends(validate_json_request)],
     responses={
         HTTPStatus.ACCEPTED.value: {"model": dict},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
     },
 )
+@router.post(
+    "/fault_tolerance/apply",
+    dependencies=[Depends(validate_json_request)],
+    deprecated=True,
+    include_in_schema=False,
+)
 async def process_fault_tolerance_instruction(
     raw_request: Request, background_tasks: BackgroundTasks
 ):
+    if not raw_request.url.path.startswith("/v1/"):
+        logger.warning_once(
+            "POST /fault_tolerance/apply is deprecated; use /v1/fault_tolerance/apply."
+        )
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
         raise HTTPException(400, "Invalid JSON format") from e
 
-    instruction, params = _validate_payload(body)
+    instruction, params, request_id = _validate_payload(body)
+    # One recovery round shares one request_id, which namespaces that round's
+    # coordination keys. The orchestrator must send the same non-empty
+    # request_id to every engine in a round; empty falls back to the engine's
+    # local epoch, which can diverge across engines after a partially failed
+    # round.
     ft_request = FaultToleranceRequest(
         instruction=instruction,
         params=params,
-        request_id=str(uuid.uuid4()),
+        request_id=request_id,
     )
 
     client: EngineClient = raw_request.app.state.engine_client
@@ -90,8 +106,13 @@ async def _run_fault_recovery(
         )
 
 
-@router.get("/fault_tolerance/status")
+@router.get("/v1/fault_tolerance/status")
+@router.get("/fault_tolerance/status", deprecated=True, include_in_schema=False)
 async def get_status(raw_request: Request):
+    if not raw_request.url.path.startswith("/v1/"):
+        logger.warning_once(
+            "GET /fault_tolerance/status is deprecated; use /v1/fault_tolerance/status."
+        )
     client: EngineClient = raw_request.app.state.engine_client
     return JSONResponse(content=await client.get_status())
 
