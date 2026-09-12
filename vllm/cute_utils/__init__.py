@@ -22,6 +22,14 @@ _TORCH_TO_CUTE_DTYPE = {
     torch.float32: Float32,
 }
 
+
+def torch_to_cute_dtype(dtype: torch.dtype):
+    try:
+        return _TORCH_TO_CUTE_DTYPE[dtype]
+    except KeyError as exc:
+        raise TypeError(f"Unsupported CuTe dtype {dtype}") from exc
+
+
 _CUTE_TO_PTX_DTYPE = {
     BFloat16: "bf16",
     Float16: "f16",

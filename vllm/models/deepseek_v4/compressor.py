@@ -203,8 +203,8 @@ class DeepseekCompressor(nn.Module):
     prologue (kv/score split, save_partial_states launch). The
     compress → norm → RoPE → store step is dispatched to a triton kernel
     (``compress_norm_rope_store_triton``) by default, except for the NVIDIA
-    head_dim=128 indexer path which uses the cutedsl kernel
-    (``compress_norm_rope_store_cutedsl``) for better performance.
+    head_dim=512 path which uses the CuTeDSL compressor kernels for better
+    performance.
     """
 
     def __init__(
@@ -317,7 +317,33 @@ class DeepseekCompressor(nn.Module):
                 head_dim=self.head_dim,
                 compress_ratio=self.compress_ratio,
             )
-            if self.head_dim != 512:
+            if current_platform.is_cuda() and self.head_dim == 512:
+                from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (  # noqa: E501
+                    _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL,
+                    _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL,
+                    _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL,
+                    _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL,
+                    _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL,
+                )
+
+                store_full_kv = vllm_config.cache_config.cache_dtype != "fp8_ds_mla"
+                if self.compress_ratio == 4:
+                    (
+                        _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_FULL_C4_KERNEL
+                        if store_full_kv
+                        else _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL
+                    ).register_warmup()
+                else:
+                    _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL.register_warmup()
+                    if store_full_kv:
+                        _SPARSE_ATTN_NORM_ROPE_STORE_FULL_KERNEL.register_warmup()
+                    else:
+                        _SPARSE_ATTN_NORM_ROPE_STORE_KERNEL.register_warmup(
+                            vllm_config,
+                            k_cache_prefix=self.k_cache_prefix,
+                            compress_ratio=self.compress_ratio,
+                        )
+            else:
                 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (  # noqa: E501
                     _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL,
                 )
@@ -419,13 +445,13 @@ class DeepseekCompressor(nn.Module):
         compress_norm_rope_store_fn: Any
         if current_platform.is_cuda() and self.head_dim == 512:
             from .nvidia.ops.sparse_attn_compress_cutedsl import (
-                compress_norm_rope_store_cutedsl,
+                _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL,
             )
 
             # head=512 on CUDA always uses cutedsl, for both the fp8_ds_mla
             # layout and the plain full-cache layout. The full-cache flags
             # are consumed only here.
-            compress_norm_rope_store_fn = compress_norm_rope_store_cutedsl
+            compress_norm_rope_store_fn = _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL
             extra_kwargs: dict[str, Any] = dict(
                 store_full_kv=store_full_kv,
                 store_full_fp8=store_full_fp8,
