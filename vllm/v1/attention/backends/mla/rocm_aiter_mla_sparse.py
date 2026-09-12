@@ -19,6 +19,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SharedTopkIndicesBuffer,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import get_cdna_version
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import np_to_pinned_tensor
@@ -45,6 +46,31 @@ from vllm.v1.worker.workspace import current_workspace_manager
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 logger = init_logger(__name__)
+
+
+def _select_remap_block_n(num_tokens: int, num_topk_tokens: int) -> int:
+    """Pick the column-tile width of the sparse index remap.
+
+    Widen the tile size for prefill.
+
+    Args:
+        num_tokens: Number of rows (query tokens) in this remap.
+        num_topk_tokens: Columns per row. The tile must divide it evenly.
+
+    Returns:
+        Tile width in columns.
+    """
+    _REMAP_BLOCK_N_NARROW = 128
+    _REMAP_BLOCK_N_WIDE = 1024
+    _REMAP_MIN_PROGRAMS = 1024
+    if not get_cdna_version() >= 3:
+        return _REMAP_BLOCK_N_NARROW
+    if num_topk_tokens % _REMAP_BLOCK_N_WIDE != 0:
+        return _REMAP_BLOCK_N_NARROW
+    tiles_per_row = num_topk_tokens // _REMAP_BLOCK_N_WIDE
+    if num_tokens * tiles_per_row < _REMAP_MIN_PROGRAMS:
+        return _REMAP_BLOCK_N_NARROW
+    return _REMAP_BLOCK_N_WIDE
 
 
 def _use_rocm_sparse_triton(
@@ -165,7 +191,7 @@ def triton_convert_req_index_to_global_index(
     paged_kv_indices: torch.Tensor,  # int32 [num_tokens * topk] out_buffer
     BLOCK_SIZE: int = 64,
     NUM_TOPK_TOKENS: int = 2048,
-    BLOCK_N: int = 128,  # tile width along columns
+    BLOCK_N: int | None = None,  # tile width; None selects from the shape
 ):
     """
     out[token_id, indice_id] =
@@ -181,8 +207,10 @@ def triton_convert_req_index_to_global_index(
     assert block_table.dtype == torch.int32
     assert token_indices.dtype == torch.int32
     assert token_indices.shape[1] == NUM_TOPK_TOKENS
+    if BLOCK_N is None:
+        BLOCK_N = _select_remap_block_n(req_id.shape[0], NUM_TOPK_TOKENS)
     assert NUM_TOPK_TOKENS % BLOCK_N == 0, (
-        f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible byBLOCK_N ({BLOCK_N})"
+        f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible by BLOCK_N ({BLOCK_N})"
     )
     # print("req_id: ", req_id, flush=True)
     num_tokens = req_id.shape[0]
