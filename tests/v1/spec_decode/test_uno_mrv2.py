@@ -7,6 +7,7 @@ reordering without advancing request state. Unit tests directly exercise its
 preparation and adapter scope; model/sampler/graph numerics require GPU tests.
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
@@ -765,6 +766,35 @@ def test_survivor_memory_override_refuses_what_the_engine_would(raw):
 
     with pytest.raises(ValueError, match="VLLM_UNO_SURVIVOR_GPU_MEMORY_UTILIZATION"):
         _gpu_memory_utilization_from_env(raw)
+
+
+def test_survivor_receipt_is_written_where_the_evidence_lives(tmp_path, monkeypatch):
+    """The receipt must not depend on a forked child's stdout.
+
+    Two GPU runs lost every printed receipt line because the survivor case is
+    ``pytest.mark.forked``. The receipt now goes to the path the environment
+    names, else beside the JUnit file the run was invoked with, which is what a
+    lease lane commits.
+    """
+    from tests.v1.e2e.spec_decode.test_uno import _write_receipt
+
+    named = tmp_path / "named" / "receipt.txt"
+    monkeypatch.setenv("VLLM_UNO_SURVIVOR_RECEIPT", str(named))
+    request = SimpleNamespace(config=SimpleNamespace(option=SimpleNamespace()))
+    assert _write_receipt("hello", request) == str(named)
+    assert named.read_text(encoding="utf-8") == "hello"
+
+    monkeypatch.delenv("VLLM_UNO_SURVIVOR_RECEIPT")
+    xml = tmp_path / "survivor.xml"
+    request = SimpleNamespace(
+        config=SimpleNamespace(option=SimpleNamespace(xmlpath=str(xml)))
+    )
+    written = _write_receipt("beside the junit", request)
+    assert written == str(tmp_path / "survivor-survivor-receipt.txt")
+    assert Path(written).read_text(encoding="utf-8") == "beside the junit"
+
+    request = SimpleNamespace(config=SimpleNamespace(option=SimpleNamespace()))
+    assert _write_receipt("nowhere", request) is None
 
 
 def test_survivor_usage_percentages_are_read_against_the_pinned_pool():

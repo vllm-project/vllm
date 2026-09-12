@@ -103,6 +103,30 @@ def _gpu_memory_utilization_from_env(
     return value
 
 
+def _write_receipt(receipt: str, request) -> str | None:
+    """Put the receipt where the evidence lives; return the path, if any.
+
+    `VLLM_UNO_SURVIVOR_RECEIPT` wins; otherwise the receipt lands next to the
+    JUnit file the run was invoked with, which is the artifact a GPU lease lane
+    commits. A failure to write must not mask the verdict the receipt explains.
+    """
+    target = os.environ.get(_RECEIPT_ENV)
+    if not target:
+        xmlpath = getattr(request.config.option, "xmlpath", None)
+        if xmlpath:
+            junit = Path(xmlpath)
+            target = str(junit.with_name(junit.stem + "-survivor-receipt.txt"))
+    if not target:
+        return None
+    try:
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_text(receipt, encoding="utf-8")
+    except OSError as error:  # pragma: no cover - evidence is best effort
+        print(f"survivor receipt could not be written to {target}: {error}")
+        return None
+    return target
+
+
 def _peer_trace(request) -> str:
     """One peer's state for the per-step trace: tokens, status, preemptions."""
     if request is None:
@@ -435,6 +459,18 @@ def _run_survivor_with_peers(
                 engine.add_request(f"uno-finish-peer-{index}", prompt, finish_sampling)
             engine.add_request(abort_id, abort_prompt, abort_sampling)
             injected = True
+            # Fail here, seconds into the run, rather than three minutes later
+            # with an empty receipt: `add_request` puts the request into
+            # `Scheduler.requests` synchronously, so if this handle cannot see
+            # them now it will never see anything, and every count this driver
+            # collects afterwards would be meaningless.
+            missing = [rid for rid in finish_ids if rid not in scheduler.requests]
+            assert not missing, (
+                "the scheduler handle cannot see the peers this driver just "
+                f"added, so its per-request receipt is blind: missing {missing}; "
+                f"scheduler holds {sorted(scheduler.requests)}. The receipt "
+                "channel, not the engine, is what needs fixing"
+            )
 
         # Always retire the aborting peer so the loop terminates even if it was
         # never scheduled long enough to reach the threshold.
@@ -518,6 +554,8 @@ def test_uno_continuous_batching_survivor_matches_solo(
     vllm_runner,
     monkeypatch: pytest.MonkeyPatch,
     uno_adapter_path: str,
+    request: pytest.FixtureRequest,
+    record_property,
 ):
     """A peer preempted while active keeps its tokens when it resumes.
 
@@ -863,11 +901,16 @@ def test_uno_continuous_batching_survivor_matches_solo(
     mid_generation = mid_generation_preemption_counts(mixed.preemption_events)
     receipt = _render_receipt(mixed, geometry_receipt, metrics_receipt)
     print(receipt)
-    receipt_path = os.environ.get(_RECEIPT_ENV)
-    if receipt_path:
-        # A forked child cannot print into the run log, so a box that wants the
-        # receipt as evidence asks for it as a file.
-        Path(receipt_path).write_text(receipt, encoding="utf-8")
+    # A forked child's stdout reaches neither the run log nor the JUnit
+    # attachment, so the receipt is written where a lease lane can commit it:
+    # the path VLLM_UNO_SURVIVOR_RECEIPT names, else beside --junitxml when one
+    # was given. `record_property` is a third channel for harnesses whose
+    # forked reports carry user properties.
+    written = _write_receipt(receipt, request)
+    record_property("uno_survivor_receipt", receipt)
+    print(receipt)
+    if written:
+        print(f"survivor receipt written to {written}")
 
     # 1. The per-request channel must have seen something. A zero here means
     #    the gate was polling an empty channel and every other count below is
