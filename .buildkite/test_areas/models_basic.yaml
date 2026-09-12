@@ -113,9 +113,9 @@ steps:
   - vllm/models/deepseek_v4/nvidia/
   - vllm/models/glm5next/nvidia/
   - vllm/models/kimi_k3/nvidia/
-  - tests/models/test_deep_gemm_bf16_mega_moe.py
+  - tests/models/test_deep_gemm_mega_moe.py
   commands:
-    - pytest -v -s models/test_deep_gemm_bf16_mega_moe.py
+    - pytest -v -s models/test_deep_gemm_mega_moe.py
 
 - label: ":nvidia: (H200) Qwen4 Exp"
   key: qwen4-exp-unit-tests
