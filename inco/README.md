@@ -62,6 +62,14 @@ On an H200 (141GB) or with TP=2 there is ~60GB of KV cache, enough for a
    the sweep (`--allow-degraded-server` to override). A curve from a
    silently-eager server is not a baseline.
 
+## Experiment log
+
+Every run we made, with verbatim commands and what each showed, is in
+[`EXPERIMENTS.md`](EXPERIMENTS.md) — including which runs are superseded or
+invalid and why. Commands there pass all workload parameters explicitly rather
+than relying on the defaults in `scripts/workload.env`, so each is reproducible
+on its own.
+
 ## Quick start
 
 ### On a GPU host (Lambda / RunPod / EC2 / Vast)
