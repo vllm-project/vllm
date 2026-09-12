@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from types import NoneType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import regex as re
@@ -19,6 +19,13 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
+from vllm.config.profiler import (
+    ProfilerConfig,
+    ProfilerKind,
+    TorchProfilerActivity,
+    validate_profile_prefix,
+)
+from vllm.config.utils import replace
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
     ensure_model_parallel_initialized,
@@ -63,6 +70,7 @@ from vllm.profiler.wrapper import (
     CudaProfilerWrapper,
     ProtonProfilerWrapper,
     TorchProfilerWrapper,
+    WorkerProfiler,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -177,6 +185,17 @@ class AsyncIntermediateTensors(IntermediateTensors):
 
 
 class Worker(WorkerBase):
+    DEFAULT_TORCH_PROFILER_ACTIVITIES: ClassVar[tuple[TorchProfilerActivity, ...]] = (
+        "CPU",
+        "CUDA",
+    )
+    SUPPORTED_TORCH_PROFILER_ACTIVITIES: ClassVar[frozenset[TorchProfilerActivity]] = (
+        frozenset(DEFAULT_TORCH_PROFILER_ACTIVITIES)
+    )
+    SUPPORTED_PROFILER_KINDS: ClassVar[frozenset[ProfilerKind]] = frozenset(
+        ("torch", "cuda", "proton")
+    )
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -1216,6 +1235,56 @@ class Worker(WorkerBase):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
+    def _resolve_torch_profiler_activities(
+        self, profiler_config: ProfilerConfig
+    ) -> tuple[TorchProfilerActivity, ...]:
+        configured = profiler_config.torch_profiler_activities
+        activities = (
+            self.DEFAULT_TORCH_PROFILER_ACTIVITIES
+            if configured is None
+            else tuple(configured)
+        )
+        unsupported = set(activities) - self.SUPPORTED_TORCH_PROFILER_ACTIVITIES
+        if unsupported:
+            unsupported_names = ", ".join(sorted(unsupported))
+            supported_names = ", ".join(
+                sorted(self.SUPPORTED_TORCH_PROFILER_ACTIVITIES)
+            )
+            raise ValueError(
+                f"Unsupported torch profiler activities for "
+                f"{type(self).__name__}: {unsupported_names}. "
+                f"Supported activities: {supported_names}."
+            )
+        return activities
+
+    def _create_profiler(
+        self, profiler_config: ProfilerConfig, trace_name: str
+    ) -> WorkerProfiler:
+        profiler_type = profiler_config.profiler
+        if profiler_type not in self.SUPPORTED_PROFILER_KINDS:
+            supported_names = ", ".join(sorted(self.SUPPORTED_PROFILER_KINDS))
+            raise ValueError(
+                f"Unsupported profiler type for {type(self).__name__}: "
+                f"{profiler_type}. Supported profiler types: {supported_names}."
+            )
+
+        if profiler_type == "torch":
+            profiler = TorchProfilerWrapper(
+                profiler_config,
+                worker_name=trace_name,
+                local_rank=self.local_rank,
+                activities=self._resolve_torch_profiler_activities(profiler_config),
+            )
+            logger.debug("Starting torch profiler with trace name: %s", trace_name)
+            return profiler
+        if profiler_type == "cuda":
+            logger.debug("Starting CUDA profiler")
+            return CudaProfilerWrapper(profiler_config)
+
+        assert profiler_type == "proton"
+        logger.debug("Starting Proton profiler with trace name: %s", trace_name)
+        return ProtonProfilerWrapper(profiler_config, worker_name=trace_name)
+
     def profile(
         self,
         is_start: bool = True,
@@ -1233,9 +1302,6 @@ class Worker(WorkerBase):
             )
 
         if is_start:
-            from vllm.config.profiler import validate_profile_prefix
-            from vllm.config.utils import replace
-
             if profile_prefix is not None:
                 validate_profile_prefix(profile_prefix)
 
@@ -1254,7 +1320,6 @@ class Worker(WorkerBase):
                 else self.profiler_config
             )
 
-            profiler_type = self.profiler_config.profiler
             # Generate the trace name by combining prefix with comprehensive rank suffix
             from vllm.distributed.utils import get_worker_rank_suffix
 
@@ -1266,26 +1331,7 @@ class Worker(WorkerBase):
             else:
                 trace_name = rank_suffix
 
-            if profiler_type == "torch":
-                self.profiler = TorchProfilerWrapper(
-                    session_config,
-                    worker_name=trace_name,
-                    local_rank=self.local_rank,
-                    activities=session_config.torch_profiler_activities,
-                )
-                logger.debug("Starting torch profiler with trace name: %s", trace_name)
-            elif profiler_type == "cuda":
-                self.profiler = CudaProfilerWrapper(session_config)
-                logger.debug("Starting CUDA profiler")
-            elif profiler_type == "proton":
-                self.profiler = ProtonProfilerWrapper(
-                    session_config, worker_name=trace_name
-                )
-                logger.debug("Starting Proton profiler with trace name: %s", trace_name)
-            else:
-                # Config validation should prevent this code being reached
-                raise ValueError(f"Invalid profiler value of {session_config.profiler}")
-
+            self.profiler = self._create_profiler(session_config, trace_name)
             self.profiler.start()
         else:
             if self.profiler is None:

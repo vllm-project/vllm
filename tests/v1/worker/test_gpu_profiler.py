@@ -23,8 +23,10 @@ from vllm.profiler.wrapper import (
     WorkerProfiler,
 )
 from vllm.v1.core.sched.output import CachedRequestData
+from vllm.v1.worker.cpu_worker import CPUWorker
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
+from vllm.v1.worker.xpu_worker import XPUWorker
 
 
 class ConcreteWorkerProfiler(WorkerProfiler):
@@ -253,10 +255,38 @@ def test_mixed_delay_and_stop(default_profiler_config):
     assert profiler.start_call_count == 0
 
 
-def test_torch_profiler_activities_default_to_cpu_and_cuda():
+def test_torch_profiler_activities_default_to_platform_default():
     config = ProfilerConfig(profiler="torch", torch_profiler_dir="/tmp/mock")
 
-    assert config.torch_profiler_activities == ["CPU", "CUDA"]
+    assert config.torch_profiler_activities is None
+
+
+@pytest.mark.parametrize(
+    ("worker_cls", "expected"),
+    [
+        (Worker, ("CPU", "CUDA")),
+        (CPUWorker, ("CPU",)),
+        (XPUWorker, ("CPU", "XPU")),
+    ],
+)
+def test_worker_resolves_platform_default_torch_activities(worker_cls, expected):
+    config = ProfilerConfig(profiler="torch", torch_profiler_dir="/tmp/mock")
+    worker = object.__new__(worker_cls)
+
+    assert worker._resolve_torch_profiler_activities(config) == expected
+
+
+@pytest.mark.parametrize("worker_cls", [CPUWorker, XPUWorker])
+def test_worker_rejects_unsupported_torch_activities(worker_cls):
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir="/tmp/mock",
+        torch_profiler_activities=["CUDA"],
+    )
+    worker = object.__new__(worker_cls)
+
+    with pytest.raises(ValueError, match="Unsupported torch profiler activities"):
+        worker._resolve_torch_profiler_activities(config)
 
 
 def test_cuda_only_torch_profiler_skips_cpu_annotations(
@@ -637,9 +667,11 @@ class TestProtonProfilerWrapper:
 
 @_requires_cuda_for_proton
 def test_gpu_worker_creates_proton_profiler():
-    worker = MagicMock()
+    worker = object.__new__(Worker)
     worker.rank = 1
+    worker.local_rank = 0
     worker.profiler = None
+    worker.profiler_config = MagicMock()
     worker.profiler_config.profiler = "proton"
 
     with (
@@ -657,9 +689,11 @@ def test_gpu_worker_creates_proton_profiler():
 
 @_requires_cuda_for_proton
 def test_gpu_worker_recreates_proton_profiler_for_each_run():
-    worker = MagicMock()
+    worker = object.__new__(Worker)
     worker.rank = 1
+    worker.local_rank = 0
     worker.profiler = None
+    worker.profiler_config = MagicMock()
     worker.profiler_config.profiler = "proton"
 
     with (
@@ -681,7 +715,7 @@ def test_gpu_worker_recreates_proton_profiler_for_each_run():
 
 
 def test_gpu_worker_applies_per_session_torch_overrides():
-    worker = MagicMock()
+    worker = object.__new__(Worker)
     worker.rank = 1
     worker.local_rank = 0
     worker.profiler = None
@@ -716,6 +750,52 @@ def test_gpu_worker_applies_per_session_torch_overrides():
         session_config,
         worker_name="benchmark_rank1",
         local_rank=0,
-        activities=["CUDA"],
+        activities=("CUDA",),
     )
+    wrapper.return_value.start.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("worker_cls", "expected_activities"),
+    [
+        (CPUWorker, ("CPU",)),
+        (XPUWorker, ("CPU", "XPU")),
+    ],
+)
+def test_non_gpu_worker_creates_one_platform_profiler_per_session(
+    worker_cls, expected_activities
+):
+    worker = object.__new__(worker_cls)
+    worker.rank = 1
+    worker.local_rank = 0
+    worker.profiler = None
+    worker.profiler_config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir="/tmp/mock",
+        delay_iterations=1,
+        max_iterations=2,
+    )
+
+    with (
+        patch(
+            "vllm.distributed.utils.get_worker_rank_suffix",
+            return_value="rank1",
+        ),
+        patch("vllm.v1.worker.gpu_worker.TorchProfilerWrapper") as wrapper,
+    ):
+        worker.profile(
+            profile_prefix="first",
+            delay_iterations=10,
+            max_iterations=20,
+        )
+
+    session_config = wrapper.call_args.args[0]
+    wrapper.assert_called_once_with(
+        session_config,
+        worker_name="first_rank1",
+        local_rank=0,
+        activities=expected_activities,
+    )
+    assert session_config.delay_iterations == 10
+    assert session_config.max_iterations == 20
     wrapper.return_value.start.assert_called_once_with()

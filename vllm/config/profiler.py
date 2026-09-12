@@ -15,7 +15,7 @@ from vllm.utils.hashing import safe_hash
 logger = init_logger(__name__)
 
 ProfilerKind = Literal["torch", "cuda", "proton"]
-TorchProfilerActivity = Literal["CPU", "CUDA"]
+TorchProfilerActivity = Literal["CPU", "CUDA", "PrivateUse1", "XPU"]
 ProtonBackend = Literal["cupti"]
 ProtonContext = Literal["shadow", "python"]
 ProtonData = Literal["tree", "trace"]
@@ -23,10 +23,6 @@ ProtonHook = Literal["triton"]
 ProtonOutputFormat = Literal["hatchet", "hatchet_msgpack", "chrome_trace"]
 
 _PROFILE_PREFIX_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-
-
-def _default_torch_profiler_activities() -> list[TorchProfilerActivity]:
-    return ["CPU", "CUDA"]
 
 
 def validate_profile_prefix(profile_prefix: str) -> str:
@@ -69,12 +65,11 @@ class ProfilerConfig:
     worker's traces (CPU & GPU) will be saved under this directory. Note that
     it must be an absolute path."""
 
-    torch_profiler_activities: list[TorchProfilerActivity] = Field(
-        default_factory=_default_torch_profiler_activities,
-        min_length=1,
+    torch_profiler_activities: list[TorchProfilerActivity] | None = Field(
+        default=None, min_length=1
     )
-    """Activities recorded by GPU workers using the torch profiler. Defaults
-    to CPU and CUDA for backwards compatibility."""
+    """Activities recorded by workers using the torch profiler. When unset,
+    each worker uses its platform default: CPU; CPU and CUDA; or CPU and XPU."""
 
     proton_profiler_dir: str = ""
     """Directory to save Triton Proton profiles. Each worker writes a
@@ -192,11 +187,15 @@ class ProfilerConfig:
     @model_validator(mode="after")
     def _validate_profiler_config(self) -> Self:
         has_delay_or_limit = self.delay_iterations > 0 or self.max_iterations > 0
+        records_cpu_activity = (
+            self.torch_profiler_activities is None
+            or "CPU" in self.torch_profiler_activities
+        )
         if (
             self.profiler == "torch"
             and has_delay_or_limit
             and not self.ignore_frontend
-            and "CPU" in self.torch_profiler_activities
+            and records_cpu_activity
         ):
             logger.warning_once(
                 "Using 'torch' profiler with delay_iterations or max_iterations "

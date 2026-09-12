@@ -8,7 +8,6 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from contextlib import nullcontext
-from typing import Literal
 from uuid import uuid4
 
 import torch
@@ -17,7 +16,7 @@ from typing_extensions import override
 
 import vllm.version
 from vllm.config import ProfilerConfig
-from vllm.config.profiler import _is_uri_path
+from vllm.config.profiler import TorchProfilerActivity, _is_uri_path
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -169,7 +168,6 @@ class WorkerProfiler(ABC):
         return nullcontext()
 
 
-TorchProfilerActivity = Literal["CPU", "CUDA", "PrivateUse1", "XPU"]
 TorchProfilerActivityMap = {
     "CPU": torch.profiler.ProfilerActivity.CPU,
     "CUDA": torch.profiler.ProfilerActivity.CUDA,

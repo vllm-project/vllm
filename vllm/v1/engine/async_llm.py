@@ -192,10 +192,14 @@ class AsyncLLM(EngineClient):
 
         self.profiler = profiler
         self._frontend_profiler_injected = profiler is not None
+        configured_activities = vllm_config.profiler_config.torch_profiler_activities
+        records_cpu_activity = (
+            configured_activities is None or "CPU" in configured_activities
+        )
         self._frontend_profiler_enabled = self._frontend_profiler_injected or (
             vllm_config.profiler_config.profiler == "torch"
             and not vllm_config.profiler_config.ignore_frontend
-            and "CPU" in vllm_config.profiler_config.torch_profiler_activities
+            and records_cpu_activity
         )
         self._frontend_profiler_running = False
         if self._frontend_profiler_enabled and not self._frontend_profiler_injected:

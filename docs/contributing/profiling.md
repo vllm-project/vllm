@@ -22,9 +22,10 @@ To use the `torch.profiler` module, set the `profiler` entry to `'torch'` and `t
 - `torch_profiler_with_flops` to enable recording FLOPs, off by default
 - `torch_profiler_use_gzip` to control gzip-compressing profiling files, on by default
 - `torch_profiler_dump_cuda_time_total` to control dumping and printing the aggregated CUDA self time table, on by default
-- `torch_profiler_activities` to select worker activities (`["CPU", "CUDA"]` by
-  default). Use `["CUDA"]` for lower-overhead GPU-only traces; omitting `CPU`
-  also disables the frontend CPU profiler.
+- `torch_profiler_activities` to override the platform default activities:
+  `["CPU"]` on CPU, `["CPU", "CUDA"]` on CUDA/ROCm, and `["CPU", "XPU"]` on
+  XPU. Use `["CUDA"]` for lower-overhead GPU-only traces; omitting `CPU` also
+  disables the frontend CPU profiler.
 
 When using `vllm bench serve`, you can enable profiling by passing the `--profile` flag.
 
@@ -102,8 +103,7 @@ curl -X POST http://localhost:8000/start_profile \
     }'
 ```
 
-The Python and Rust API frontends accept the same request body. Per-session
-iteration bounds are currently supported by GPU workers.
+The Python and Rust API frontends accept the same request body.
 
 ## Profile with Triton Proton
 
