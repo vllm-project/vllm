@@ -312,6 +312,7 @@ def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
         default_breakable_cudagraph_architectures.cache_clear()
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
 @pytest.mark.parametrize(
     ("architecture", "use_v2", "mode", "expected"),
     [
