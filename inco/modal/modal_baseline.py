@@ -279,17 +279,21 @@ def sweep(
     model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507",
     isl: int = 1024,
     osl: int = 256,
-    concurrencies: str = "1,2,4,8,16,32,48",
-    max_num_seqs: int = 48,
+    concurrencies: str = "1,2,4,8,16,32,64",
+    max_num_seqs: int = 64,
     max_num_batched_tokens: int = 8192,
     max_model_len: int = 4096,
     gpu_memory_utilization: float = 0.90,
     kv_cache_gib: float = 12.0,
     extra_serve_args: str = "",
     extra_sweep_args: str = "",
+    moe_shape_log: bool = False,
 ) -> str:
     """Launch the server, run the sweep, return the markdown summary."""
     import shlex
+
+    if moe_shape_log:
+        os.environ["INCO_MOE_SHAPE_LOG"] = "1"
 
     serve_cmd = [
         "vllm",
@@ -394,9 +398,12 @@ def main(
     model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507",
     isl: int = 1024,
     osl: int = 256,
-    concurrencies: str = "1,2,4,8,16,32,48",
+    concurrencies: str = "1,2,4,8,16,32,64",
+    max_num_seqs: int = 64,
+    kv_cache_gib: float = 12.0,
     extra_serve_args: str = "",
     extra_sweep_args: str = "",
+    moe_shape_log: bool = False,
 ) -> None:
     print(
         sweep.remote(
@@ -405,8 +412,11 @@ def main(
             isl=isl,
             osl=osl,
             concurrencies=concurrencies,
+            max_num_seqs=max_num_seqs,
+            kv_cache_gib=kv_cache_gib,
             extra_serve_args=extra_serve_args,
             extra_sweep_args=extra_sweep_args,
+            moe_shape_log=moe_shape_log,
         )
     )
     print(

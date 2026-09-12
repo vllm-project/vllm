@@ -119,10 +119,7 @@ class PerfFeatureAudit:
         found = []
         if self.enforce_eager:
             found.append("enforce_eager=True: CUDA graphs are disabled")
-        if self.cudagraph_mode is not None and str(self.cudagraph_mode).upper() in (
-            "NONE",
-            "0",
-        ):
+        if _cudagraphs_disabled(self.cudagraph_mode):
             found.append(f"cudagraph_mode={self.cudagraph_mode}: no CUDA graphs")
         if self.async_scheduling is False:
             found.append(
@@ -149,6 +146,23 @@ class PerfFeatureAudit:
         if not self.kv_cache_size_tokens or seq_len < 1:
             return None
         return self.kv_cache_size_tokens / seq_len
+
+
+def _cudagraphs_disabled(mode: Any) -> bool:
+    """Whether ``cudagraph_mode`` means "no graphs at all".
+
+    The JSON form of vLLM's CUDAGraphMode is its enum *value*: an int for
+    NONE/PIECEWISE/FULL (0/1/2), or a pair for the composite modes --
+    FULL_AND_PIECEWISE serialises as ``[2, 1]``. A string comparison would
+    therefore never match a disabled server and the gate would pass it.
+    """
+    if mode is None:
+        return False
+    if isinstance(mode, str):
+        return mode.strip().upper() in ("NONE", "0")
+    if isinstance(mode, (list, tuple)):
+        return bool(mode) and all(_cudagraphs_disabled(part) for part in mode)
+    return mode == 0
 
 
 def _first_gpu_model(system_env: Any) -> str | None:

@@ -176,12 +176,50 @@ def plot_pareto(
     return path
 
 
+def integrity_warnings(
+    points: Sequence[SweepPoint], min_waves: float = 4.0
+) -> list[str]:
+    """Measurement defects that invalidate a curve rather than merely add noise.
+
+    Two checks, both learned the hard way:
+
+    * tokens/s/user rising with concurrency is physically impossible -- a
+      wider batch cannot decode faster per sequence. It means the points are
+      dominated by something other than the engine.
+    * Too few waves through the batch leaves the fill/drain transient a large
+      fraction of the sample, which is what produced the impossible ordering.
+    """
+    found = []
+    ordered = sorted(points, key=lambda p: p.concurrency)
+    for earlier, later in zip(ordered, ordered[1:]):
+        if later.tokens_per_s_per_user > earlier.tokens_per_s_per_user:
+            found.append(
+                f"tokens/s/user rose from {earlier.tokens_per_s_per_user:.1f} at "
+                f"concurrency {earlier.concurrency} to "
+                f"{later.tokens_per_s_per_user:.1f} at {later.concurrency}: "
+                "impossible, so these points do not measure the engine"
+            )
+    for point in ordered:
+        if point.request_count and point.concurrency:
+            waves = point.request_count / point.concurrency
+            if waves < min_waves:
+                found.append(
+                    f"concurrency {point.concurrency} saw only {waves:.1f} waves "
+                    f"({point.request_count:.0f} requests): raise max_requests"
+                )
+    return found
+
+
 def summarize(
     points: Sequence[SweepPoint],
     slo_tokens_per_s_per_user: Iterable[float] = (10, 20, 30, 50),
 ) -> str:
     """Markdown block with the table plus throughput-at-SLO headlines."""
     chunks = [markdown_table(points), ""]
+    if problems := integrity_warnings(points):
+        chunks.append("**Measurement integrity warnings**\n")
+        chunks += [f"- {problem}" for problem in problems]
+        chunks.append("")
     chunks.append("| interactivity SLO | best tok/s/gpu | at concurrency |")
     chunks.append("|---|---|---|")
     for slo in slo_tokens_per_s_per_user:

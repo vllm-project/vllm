@@ -241,6 +241,8 @@ def render_report(workload: Workload, sweep: SweepConfig) -> None:
         return
     out_dir = sweep.run_dir
     csv_path = report.write_csv(points, out_dir / "pareto.csv")
+    for problem in report.integrity_warnings(points):
+        log(f"[warn] {problem}", stream=sys.stderr)
     md = report.summarize(points)
     md_path = out_dir / "summary.md"
     md_path.write_text(

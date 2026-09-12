@@ -174,16 +174,39 @@ $M run $R/inco/modal/modal_baseline.py \
   --extra-serve-args "--jit-monitor-verbose"
 ```
 
-**`moe-shapes`** — log which MoE tile configs get selected, and by which token
-count. Requires the diagnostic patch:
+**`moe-shapes`** — logs which MoE tile config gets selected, and by which token
+count. Needs a one-off instrumentation hook in
+`try_get_optimal_moe_config()` (`vllm/model_executor/layers/fused_moe/fused_moe.py`)
+that logs `(M, top_k) -> BLOCK_M/N/K, stages, warps` once per distinct config,
+gated on `INCO_MOE_SHAPE_LOG`. Not committed — `inco/patches/` is gitignored,
+since it is diagnostic scaffolding rather than part of the harness.
 
 ```bash
-git apply inco/patches/moe-shape-log.diff
 $M run $R/inco/modal/modal_baseline.py \
   --label moe-shapes --isl 128 --osl 128 --concurrencies "1,32" \
   --moe-shape-log --extra-serve-args "--jit-monitor-verbose"
-git checkout vllm/model_executor/layers/fused_moe/fused_moe.py   # revert before measuring
 ```
+
+What it found — the MoE tile config is selected by *nearest token count*, so
+each distinct M bucket compiles a separate Triton kernel:
+
+| M (tokens) | BLOCK_M | BLOCK_N | BLOCK_K | warps |
+|---|---|---|---|---|
+| 2 | 16 | 64 | 128 | 4 |
+| 64 | 32 | 64 | 128 | 4 |
+| 96 | 32 | 128 | 64 | 4 |
+| 128 | 64 | 128 | 64 | 4 |
+| 8192 | 128 | 128 | 64 | 8 |
+
+Startup warms the `warps=4` variants; every in-inference compile was `warps=8`,
+i.e. a config startup never touched. Each compile costs ~350ms and they come in
+pairs (the MoE's two GEMMs), so ~700ms lands in TTFT. `enable_jit_warmup`
+defaults on but is only wired into attention paths, never MoE. One config
+compiled twice with identical visible parameters, which is still unexplained.
+
+Only reproduces at short ISL: at ISL=1024 the prefill lands in an
+already-warmed bucket and TTFT p99/mean is 1.2x instead of 11x. So it does not
+affect the baseline workload.
 
 Both perturb the measurement: together they cost ~13% throughput
 (2305 -> 2012 tok/s/gpu at c=32). Never leave them on for a measured run.

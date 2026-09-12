@@ -15,10 +15,12 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
-# Tops out at 48: on one 80GB H100 the bf16 MoE weights leave only ~7GB of KV
-# cache, which holds roughly 60 resident requests at ISL+OSL=1280. Going
-# wider would measure the scheduler queue instead of the engine.
-DEFAULT_CONCURRENCIES: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 48)
+# Powers of two to 64. Measured KV capacity at ISL+OSL=1280 with the cache
+# pinned to 12GiB is ~102 resident requests, so 64 leaves headroom; every value
+# is also a captured CUDA graph size, so no point pays padding. Extend to 96 if
+# tokens/s/gpu is still climbing at 64 -- a later run merges into the same
+# curve, since results are collected from disk by label.
+DEFAULT_CONCURRENCIES: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64)
 
 INCO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ARTIFACT_ROOT = str(INCO_ROOT / "results")
@@ -133,7 +135,7 @@ class SweepConfig:
     concurrencies: tuple[int, ...] = DEFAULT_CONCURRENCIES
     requests_per_concurrency: int = 8
     min_requests: int = 24
-    max_requests: int = 1024
+    max_requests: int = 100_000
     warmup_requests: int = 16
     benchmark_duration: float | None = None
     reset_prefix_cache: bool = True
@@ -155,14 +157,16 @@ class SweepConfig:
     def warmup_count(self, concurrency: int) -> int:
         """Warmup requests to discard before measuring at ``concurrency``.
 
-        A flat count, independent of concurrency. Note the tradeoff: warmup
-        runs at the concurrency it is warming, so a count below the
-        concurrency only fills part of the batch and never touches the target
-        CUDA graph size -- its first-touch cost then lands in the measurement.
-        Scale this with concurrency if the first measured requests at wide
-        batches look anomalously slow.
+        At least one full wave at the target batch width. Warmup runs *at* the
+        concurrency it is warming, so a fixed count below that concurrency
+        warms a narrower CUDA graph and leaves the target width's first-touch
+        cost inside the measurement -- a bias that reached 40% of the sample
+        at concurrency 400. The configured value is a floor for low
+        concurrency, where one wave is too few requests.
         """
-        return max(0, self.warmup_requests)
+        if self.warmup_requests <= 0:
+            return 0
+        return max(self.warmup_requests, concurrency)
 
     def request_count(self, concurrency: int) -> int:
         """Requests to send at ``concurrency``.
