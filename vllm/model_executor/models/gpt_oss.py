@@ -76,6 +76,8 @@ _GPT_OSS_STREAMED_EXPERT_SUFFIX_TO_SHARD = {
     "w2_bias": "gpt_oss_w2",
     "w13_weight_scale": "gpt_oss_w13",
     "w2_weight_scale": "gpt_oss_w2",
+    "w13_weight_packed": "gpt_oss_w13",
+    "w2_weight_packed": "gpt_oss_w2",
 }
 
 
