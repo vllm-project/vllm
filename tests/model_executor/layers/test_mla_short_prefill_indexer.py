@@ -320,6 +320,9 @@ def test_select_candidate_blocks_tolerates_empty_rows():
     "width,block_size,k,decode",
     [
         (73, 8, 16, False),
+        (73, 8, 16, True),
+        (80, 8, 10, False),
+        (81, 8, 10, False),
         (97, 3, 7, False),
         (32768, 8, 2048, False),
         (32768, 8, 2048, True),
@@ -339,6 +342,7 @@ def test_candidate_kernels_preserve_packed_bounds_and_padding(
     logits = torch.randn(rows, width * 2, device="cuda")[:, ::2]
     logits[0, :16] = 0
     logits[2, 5] = float("nan")
+    logits[3, :] = -torch.inf
     starts = torch.tensor([0, 5, 3, 0, 7, 1], device="cuda", dtype=torch.int32)
     ends = torch.tensor([0, width, width - 1, 1, 11, width], device="cuda")
     repeat = 1
@@ -365,9 +369,17 @@ def test_candidate_kernels_preserve_packed_bounds_and_padding(
     expected[:, : top.indices.shape[1]] = torch.where(
         top.values > -torch.inf, top.indices, -1
     ).int()
-    actual = torch.empty(rows, k * 2, device="cuda", dtype=torch.int32)[:, ::2]
+    storage = torch.full((rows, k * 2), -99, device="cuda", dtype=torch.int32)
+    actual = storage[:, ::2]
     select_candidate_blocks(logits, starts, ends, k, block_size, actual, repeat)
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    if k >= nblocks:
+        # All blocks fit: their membership matters, not their score order.
+        torch.testing.assert_close(
+            actual.sort().values, expected.sort().values, rtol=0, atol=0
+        )
+    else:
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert torch.all(storage[:, 1::2] == -99)
 
     candidates = actual.clone()
     candidates[:, 0] = nblocks + 10
@@ -400,3 +412,34 @@ def test_candidate_kernels_preserve_packed_bounds_and_padding(
         keep = valid & (block >= 0) & ((cols - ks[:, None]) // block_size == block)
         reference = torch.where(keep, 3.0, -torch.inf)
         torch.testing.assert_close(logits, reference, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_candidate_selection_all_blocks_graph_replay():
+    """Replay must refresh block validity and newest-block inclusion."""
+    from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
+        select_candidate_blocks,
+    )
+
+    logits = torch.ones(2, 32, device="cuda")
+    ends = torch.tensor([32, 32], device="cuda", dtype=torch.int32)
+    out = torch.empty(2, 6, device="cuda", dtype=torch.int32)
+    select_candidate_blocks(logits, None, ends, 6, 8, out)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        select_candidate_blocks(logits, None, ends, 6, 8, out)
+    for length in (17, 0, 32):
+        ends.fill_(length)
+        logits.fill_(-torch.inf)
+        logits[:, :8] = torch.nan
+        logits[:, 8:16] = 1
+        graph.replay()
+        # NaN and all-minus-inf blocks are excluded, except the newest block.
+        blocks = {1} if length > 8 else set()
+        if length:
+            blocks.add((length - 1) // 8)
+        expected = sorted(list(blocks) + [-1] * (6 - len(blocks)))
+        torch.testing.assert_close(
+            out.sort().values,
+            torch.tensor([expected] * 2, device="cuda", dtype=torch.int32),
+        )
