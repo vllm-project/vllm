@@ -209,8 +209,12 @@ def _triton_w4a16_gemm_impl(
     # Provide a dummy pointer when HAS_ZP=False (Triton requires a valid ptr)
     zeros_ptr = qzeros if has_zp else b_q
 
+    # Set by the gfx90a branch below; left None elsewhere so every other
+    # platform launches exactly as before, with Triton's default warp count.
+    num_warps = None
+
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx1x
+        from vllm.platforms.rocm import on_gfx1x, on_gfx90a
 
         if on_gfx1x():
             # Tuned for RDNA 3.5 (gfx1151, 40 CUs, 32-wide wavefronts).
@@ -220,6 +224,85 @@ def _triton_w4a16_gemm_impl(
                 BLOCK_M, BLOCK_N, BLOCK_K = 64, 64, 32
             else:
                 BLOCK_M, BLOCK_N, BLOCK_K = 128, 32, 64
+        elif on_gfx90a():
+            # Tuned for MI210 (gfx90a, 104 CUs, 64-wide wavefronts).
+            #
+            # Without this branch gfx90a inherits the MI300 tiles below, which
+            # assume 304 CUs. At decode widths that starves the card: with
+            # BLOCK_N=64 a narrow-N layer launches only 80-96 workgroups onto
+            # 104 CUs -- fewer than one per CU -- so most of the card idles.
+            # Shrinking BLOCK_N raises the count to 320-384.
+            #
+            # Measured on 2x MI210, rocprofv3 kernel time, median of 50, M=1,
+            # searched over 69 configurations:
+            #   q_proj   6144x5120    160.0us ->  93.4us   1.71x
+            #   o_proj   5120x6144    191.1us -> 109.3us   1.75x
+            #   gate_up 34816x5120    541.8us -> 379.5us   1.43x
+            #   down_proj 5120x17408  560.4us -> 307.2us   1.82x
+            #   per decoder layer    1453us   -> 889us     1.63x
+            #
+            # gate_up gains least because at BLOCK_N=64 it already had 544
+            # workgroups -- it is the one shape that was not starved -- so it
+            # gets a wider tile than the narrow-N shapes.
+            #
+            # This is an occupancy fix, not a bandwidth one. The kernel is
+            # not memory-bound here: MemUnitStalled is 0.0% and FETCH_SIZE is
+            # 1.03x the compressed weight bytes, i.e. already minimal traffic.
+            # It is bound by dequant instruction count (~19 VALU lane-ops per
+            # int4 weight), which no tile choice changes; these tiles recover
+            # the idle-CU loss and cap out near 17% of HBM ceiling.
+            #
+            # The narrow tiles are bounded above deliberately. They were
+            # searched at M=1 and hold at M=8, but at M=32 they REGRESS the
+            # wide shape: gate_up measured 125 -> 99 GB/s, a 21% loss, because
+            # once M is large enough to fill the machine the small BLOCK_N
+            # stops buying occupancy and only costs reuse.
+            #
+            # Above the rung this ladder still differs from the MI300 one
+            # below -- it uses 64x64x32 rather than MI300's 32x64x32 up to
+            # M=32 -- and that is also a win here, measured at M=32:
+            #   q_proj 60 -> 68, o_proj 53 -> 61, gate_up 125 -> 165 GB/s.
+            #
+            # The rung runs to M<=16, measured, not assumed: M=9/12/16 gain
+            # 1.44/1.45/1.37x on gate_up, 1.40/1.38/1.39x on q_proj and
+            # 1.43/1.40/1.41x on o_proj (GB/s of int4 bytes, median of 31,
+            # interleaved). It stops at 16 because M=24 measures 0.79x on
+            # gate_up -- past that the narrow tile stops buying occupancy and
+            # only costs reuse.
+            #
+            # Widening the rung also widens where the magic-bias path applies:
+            # _use_magic_bias is keyed on BLOCK_M <= 16, so M=9..16 picks it up
+            # automatically, and the gate's own argument survives that -- it
+            # bounds the correction cost by BLOCK_M, which stays 16 here
+            # however large M gets. The two effects were measured apart,
+            # because the headline number hides opposite mechanisms:
+            #
+            #              new/old   tile alone   magic-bias alone
+            #   gate_up     1.44x       0.97x          1.49x
+            #   q_proj      1.40x       1.30x          1.08x
+            #   o_proj      1.43x       1.33x          1.07x
+            #
+            # On gate_up the tile change alone is slightly negative and the
+            # whole win is the dequant arriving with it; on the narrower
+            # shapes it is mostly the tile.
+            #
+            # DELIBERATELY NOT the (M, N)-keyed ladder that the fp8 W8A16
+            # kernel carries, nor its BLOCK_M=32 rung. Those were measured
+            # against fp8 decode, which costs ~4.5 VALU ops per weight against
+            # int4's ~19, and decode cost is what sets the occupancy-versus-
+            # reuse balance a crossover expresses. The M=24 numbers above are
+            # the direct evidence: fp8 wants a wider rung there, this kernel
+            # regresses. This kernel keeps its own searched N >= 16384 split.
+            if M <= 16:
+                if N >= 16384:
+                    BLOCK_M, BLOCK_N, BLOCK_K = 16, 32, 64
+                else:
+                    BLOCK_M, BLOCK_N, BLOCK_K = 16, 16, 128
+                num_warps = 2
+            elif M <= 64:
+                BLOCK_M, BLOCK_N, BLOCK_K = 64, 64, 32
+            else:
+                BLOCK_M, BLOCK_N, BLOCK_K = 128, 128, 32
         else:
             # Tuned for MI300 (gfx942, 304 CUs, 64-wide wavefronts).
             if M <= 32:
@@ -246,6 +329,10 @@ def _triton_w4a16_gemm_impl(
 
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
 
+    # Omitted entirely when unset, so Triton picks its own default exactly as
+    # it did before this branch existed.
+    launch_opts = {} if num_warps is None else {"num_warps": num_warps}
+
     triton_w4a16_gemm_kernel[grid](
         a,
         b_q,
@@ -267,6 +354,7 @@ def _triton_w4a16_gemm_impl(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
+        **launch_opts,
     )
     return c
 
