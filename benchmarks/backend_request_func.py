@@ -586,7 +586,7 @@ async def async_request_openai_audio(
 
 
 def get_model(pretrained_model_name_or_path: str) -> str:
-    if os.getenv("VLLM_USE_MODELSCOPE", "False").lower() == "true":
+    if os.getenv("VLLM_USE_MODELSCOPE", "False").strip().lower() == "true":
         from modelscope import snapshot_download
 
         from vllm.model_executor.model_loader.weight_utils import get_lock
