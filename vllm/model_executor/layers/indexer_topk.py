@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Top-k kernels for the DSA sparse attention indexer."""
 
-import contextlib
 import functools
 
 import torch
@@ -49,8 +48,14 @@ _FI_WIDE_TOPK_MAX_ROWS = 256
 # Matches the -1 fill convention used for topk_indices_buffer elsewhere.
 IDX_OOB_FILL_VALUE = -1
 
-with contextlib.suppress(ImportError):
+try:
     import vllm._deepselect_C  # noqa: F401  (registers torch.ops.deep_select)
+except ImportError as e:
+    from vllm.logger import init_logger
+
+    init_logger(__name__).warning(
+        "Failed to import the DeepSelect extension (vllm._deepselect_C): %s", e
+    )
 
 
 @functools.lru_cache(maxsize=1)
