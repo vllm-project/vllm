@@ -24,11 +24,9 @@ def _import_compute(version: str):
 
 
 def _run(compute, topk_indices, token_to_req, block_table, is_valid):
-    out, lens = compute(
-        topk_indices, token_to_req, block_table, BLOCK_SIZE, is_valid
-    )
+    out, lens = compute(topk_indices, token_to_req, block_table, BLOCK_SIZE, is_valid)
     if topk_indices.is_cuda:
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
     return out, lens
 
 
@@ -37,7 +35,7 @@ def compute(request):
     return _import_compute(request.param)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not torch.accelerator.is_available(), reason="CUDA required")
 class TestComputeGlobalTopkBounds:
     def test_exact_valid_metadata_unchanged(self, compute):
         """Valid entries produce expected slots; unchanged."""

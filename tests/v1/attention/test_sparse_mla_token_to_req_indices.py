@@ -32,8 +32,7 @@ def _make_cm(
     qsl = torch.tensor(starts, dtype=torch.int32, device=device)
     num_tokens = int(starts[-1])
     seq_lens = torch.tensor(
-        [max(q, 0) for q in query_lens]
-        + [0] * max(0, num_reqs - len(query_lens)),
+        [max(q, 0) for q in query_lens] + [0] * max(0, num_reqs - len(query_lens)),
         dtype=torch.int32,
         device=device,
     )[:num_reqs]
