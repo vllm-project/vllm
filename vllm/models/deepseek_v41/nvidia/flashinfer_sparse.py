@@ -338,6 +338,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         assert swa_metadata.token_to_req_indices is not None
         assert swa_metadata.decode_swa_indices is not None
         assert swa_metadata.block_table is not None
+        assert swa_metadata.replay_start is not None
 
         decode_swa_indices = swa_metadata.decode_swa_indices.reshape(
             num_decode_tokens, swa_metadata.decode_swa_width
@@ -417,6 +418,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 decode_is_valid_token=decode_is_valid_token,
                 swa_block_span=swa_block_span,
                 compressed_block_span=compressed_block_span,
+                replay_start=swa_metadata.replay_start[:num_reqs],
             )
             if swa_only:
                 swa_metadata.flashinfer_sparse_index_cache["swa_only"] = (

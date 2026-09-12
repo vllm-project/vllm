@@ -273,3 +273,49 @@ def test_get_dummy_block_tables_returns_zeroed_rows():
     assert (dummy[0] == 0).all()
     # CUDA graph invariant: same persistent tensor, not a fresh allocation.
     assert dummy[0].data_ptr() == block_tables.input_block_tables[0].data_ptr()
+
+
+def test_replayed_tokens_write_only_the_window_group():
+    """SWA bounded replay: a replaying request's slots below
+    replay_start + replay_tokens are padded in prefix-cacheable groups while
+    the replayed window group keeps writing."""
+    device = torch.device("cuda")
+    block_tables = BlockTables(
+        block_sizes=[8, 32],
+        max_num_reqs=4,
+        max_num_batched_tokens=8,
+        max_num_blocks_per_group=[4, 1],
+        device=device,
+        kernel_block_sizes=[8, 32],
+        prefix_cacheable=[True, False],
+        replay_tokens=2,
+    )
+    block_tables.append_block_ids(
+        req_index=0, new_block_ids=([5, 6, 7], [9]), overwrite=True
+    )
+    block_tables.append_block_ids(req_index=1, new_block_ids=([3], [2]), overwrite=True)
+    block_tables.apply_staged_writes()
+
+    idx_mapping = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, 4, 6], dtype=torch.int32, device=device)
+    positions = torch.tensor([16, 17, 18, 19, 0, 1], dtype=torch.int64, device=device)
+    slot_mappings = block_tables.compute_slot_mappings(
+        idx_mapping,
+        query_start_loc,
+        positions,
+        num_tokens_padded=6,
+        replay_start=torch.tensor([16, 0], dtype=torch.int32, device=device),
+    )
+    torch.accelerator.synchronize()
+
+    # Request 0 replays positions 16 and 17; 18 and 19 are new.
+    assert slot_mappings[0].tolist() == [-1, -1, 7 * 8 + 2, 7 * 8 + 3, 3 * 8, 3 * 8 + 1]
+    # The replayed window group is written in full.
+    assert slot_mappings[1].tolist() == [
+        9 * 32 + 16,
+        9 * 32 + 17,
+        9 * 32 + 18,
+        9 * 32 + 19,
+        2 * 32,
+        2 * 32 + 1,
+    ]

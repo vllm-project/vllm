@@ -161,3 +161,32 @@ def test_maybe_prepare_dcp_local_seq_lens_matches_reference(
         )
         assert batch.dcp_local_seq_lens is not None
         assert torch.equal(batch.dcp_local_seq_lens.cpu(), expected.to(torch.int32))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_prepare_pos_seq_lens_gathers_replay_start():
+    """replay_start follows the batch order and pads to 0 like seq_lens."""
+    from vllm.v1.worker.gpu.input_batch import prepare_pos_seq_lens
+
+    device = torch.device("cuda")
+    max_num_reqs = 4
+    idx_mapping = torch.tensor([2, 0], dtype=torch.int64, device=device)
+    query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
+    num_computed_tokens = torch.tensor([7, 0, 40, 0], dtype=torch.int32, device=device)
+    replay_start = torch.tensor([0, 0, 32, 5], dtype=torch.int32, device=device)
+    pos = torch.zeros(8, dtype=torch.int64, device=device)
+    seq_lens = torch.full((max_num_reqs,), -1, dtype=torch.int32, device=device)
+    batch_replay_start = torch.full(
+        (max_num_reqs,), -1, dtype=torch.int32, device=device
+    )
+    prepare_pos_seq_lens(
+        idx_mapping,
+        query_start_loc,
+        num_computed_tokens,
+        replay_start,
+        pos,
+        seq_lens,
+        batch_replay_start,
+    )
+    assert seq_lens.tolist() == [43, 9, 0, 0]
+    assert batch_replay_start.tolist() == [32, 0, 0, 0]

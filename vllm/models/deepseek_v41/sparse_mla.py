@@ -201,6 +201,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
                 int(self.kv_cache_spec.num_states),
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
+                token_slot_mapping=cm.slot_mapping,
             )
 
         return DeepseekV4FlashMLAMetadata(

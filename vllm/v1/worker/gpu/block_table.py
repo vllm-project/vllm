@@ -27,6 +27,8 @@ class BlockTables:
         cp_rank: int = 0,
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
+        prefix_cacheable: list[bool] | None = None,
+        replay_tokens: int = 0,
     ):
         self.block_sizes = block_sizes
         self.kernel_block_sizes = kernel_block_sizes
@@ -44,6 +46,14 @@ class BlockTables:
             slot_mapping_enabled = [True] * self.num_kv_cache_groups
         assert len(slot_mapping_enabled) == self.num_kv_cache_groups
         self._slot_mapping_enabled = slot_mapping_enabled
+        # DeepSeek-V4.1 only: SWA bounded replay recomputes the `replay_tokens`
+        # tokens from a request's replay_start on; their slots in the
+        # prefix-cacheable groups are padded so the cached KV stays as is.
+        if prefix_cacheable is None:
+            prefix_cacheable = [True] * self.num_kv_cache_groups
+        assert len(prefix_cacheable) == self.num_kv_cache_groups
+        self._prefix_cacheable = prefix_cacheable
+        self.replay_tokens = replay_tokens
 
         self.blocks_per_kv_block = [
             bs // kbs for bs, kbs in zip(block_sizes, kernel_block_sizes)
@@ -107,6 +117,9 @@ class BlockTables:
         )
         self.slot_mapping_enabled = torch.tensor(
             self._slot_mapping_enabled, dtype=torch.bool, device=self.device
+        )
+        self.prefix_cacheable = torch.tensor(
+            self._prefix_cacheable, dtype=torch.bool, device=self.device
         )
         self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
@@ -194,6 +207,7 @@ class BlockTables:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
         num_tokens_padded: int,
+        replay_start: torch.Tensor | None = None,
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.num_kv_cache_groups == 0:
@@ -201,6 +215,9 @@ class BlockTables:
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
         slot_mappings = self.slot_mappings if out is None else out
+        # Only the target model's prefill passes replay_start; drafters write
+        # positions above the hit, where nothing is replayed.
+        has_replay = self.replay_tokens > 0 and replay_start is not None
         _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
             slot_mappings.shape[1],
             idx_mapping,
@@ -211,9 +228,13 @@ class BlockTables:
             self.block_sizes_tensor,
             self.kernel_block_sizes_tensor,
             self.slot_mapping_enabled,
+            replay_start if has_replay else query_start_loc,  # unread w/o replay
+            self.replay_tokens,
+            self.prefix_cacheable,
             slot_mappings,
             slot_mappings.stride(0),
             self.cp_rank,
+            HAS_REPLAY=has_replay,
             CP_SIZE=self.cp_size,
             CP_INTERLEAVE=self.cp_interleave,
             PAD_ID=PAD_SLOT_ID,
@@ -284,9 +305,13 @@ def _compute_slot_mappings_kernel(
     block_sizes,  # [num_kv_cache_groups]
     kernel_block_sizes,  # [num_kv_cache_groups]
     slot_mapping_enabled,  # [num_kv_cache_groups]
+    replay_start,  # [num_reqs]
+    replay_tokens,
+    prefix_cacheable,  # [num_kv_cache_groups]
     slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
     slot_mappings_stride,
     cp_rank,
+    HAS_REPLAY: tl.constexpr,
     CP_SIZE: tl.constexpr,
     CP_INTERLEAVE: tl.constexpr,
     PAD_ID: tl.constexpr,
@@ -315,6 +340,17 @@ def _compute_slot_mappings_kernel(
     mapping_enabled = tl.load(slot_mapping_enabled + group_id)
 
     req_state_idx = tl.load(idx_mapping + batch_idx)
+    write_start = 0
+    if HAS_REPLAY:
+        # A replaying request recomputes [replay_start, replay_start +
+        # replay_tokens) without rewriting its cached KV in the
+        # prefix-cacheable groups.
+        req_replay_start = tl.load(replay_start + batch_idx)
+        write_start = tl.where(
+            tl.load(prefix_cacheable + group_id) & (req_replay_start > 0),
+            req_replay_start + replay_tokens,
+            0,
+        )
     start_idx = tl.load(query_start_loc + batch_idx)
     end_idx = tl.load(query_start_loc + batch_idx + 1)
     for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
@@ -349,5 +385,7 @@ def _compute_slot_mappings_kernel(
         if CP_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 
-        slot_ids = tl.where(mapping_enabled, slot_ids, PAD_ID)
+        slot_ids = tl.where(
+            mapping_enabled & (positions >= write_start), slot_ids, PAD_ID
+        )
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)

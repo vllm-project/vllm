@@ -48,6 +48,8 @@ class RequestState:
         # must treat prompt and output tokens separately.
         self.prompt_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
         self.prefill_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
+        # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
+        self.replay_start = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
         # total_len = prompt_len + output_len. It grows as the request progresses.
         self.total_len = StagedWriteTensor(
             self.max_num_reqs, dtype=torch.int32, device=device
@@ -95,6 +97,7 @@ class RequestState:
         all_token_ids: list[int],
         num_computed_tokens: int,
         max_tokens: int,
+        replay_start: int = 0,
     ) -> None:
         assert len(self.free_indices) > 0, "No free indices"
         req_idx = self.free_indices.pop()
@@ -113,12 +116,14 @@ class RequestState:
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens_np[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
+        self.replay_start.np[req_idx] = replay_start
 
         self.draft_tokens[req_idx].zero_()
 
     def apply_staged_writes(self) -> None:
         self.prompt_len.copy_to_uva()
         self.prefill_len.copy_to_uva()
+        self.replay_start.copy_to_uva()
         self.total_len.apply_write()
         self.all_token_ids.apply_write()
         self.num_computed_tokens.apply_write()

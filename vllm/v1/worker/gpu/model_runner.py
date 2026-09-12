@@ -588,9 +588,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         block_sizes = []
         max_num_blocks_per_group = []
         slot_mapping_enabled = []
+        prefix_cacheable = []
+        replay_tokens = 0
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
+            prefix_cacheable.append(spec.prefix_cacheable)
+            replay_tokens = max(replay_tokens, spec.prefix_replay_tokens)
             layer_spec = (
                 spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
             )
@@ -659,6 +663,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             kernel_block_sizes=self.kernel_block_sizes,
             slot_mapping_enabled=slot_mapping_enabled,
+            prefix_cacheable=prefix_cacheable,
+            replay_tokens=replay_tokens,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
@@ -1126,6 +1132,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 all_token_ids=new_req_data.prefill_token_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
+                replay_start=new_req_data.replay_start,
             )
             req_index = self.req_states.req_id_to_index[req_id]
             if self.adaptive_verification is not None:
@@ -1370,8 +1377,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             idx_mapping,
             query_start_loc,
             self.req_states.num_computed_tokens.gpu,
+            self.req_states.replay_start.gpu,
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
+            self.input_buffers.replay_start,
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
@@ -1433,6 +1442,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,
+            replay_start=self.input_buffers.replay_start[:num_reqs_padded],
             num_computed_tokens_np=num_computed_tokens_np,
             prefill_len_np=batch_req_state.prefill_len_np,
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
@@ -1478,6 +1488,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
             input_batch.positions,
             num_tokens_padded=input_batch.num_tokens_after_padding,
+            replay_start=input_batch.replay_start,
         )
         return block_tables, slot_mappings
 

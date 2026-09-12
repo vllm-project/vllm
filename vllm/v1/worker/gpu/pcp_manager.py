@@ -704,6 +704,7 @@ class PCPManager:
             global_batch.query_start_loc,
             global_batch.positions,
             global_batch.num_tokens,
+            global_batch.replay_start,
             out=self._global_batch_slot_mappings,
         )
         return self._convert_to_gathered_slot_mappings(global_batch_slot_mappings)
