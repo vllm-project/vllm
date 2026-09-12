@@ -594,6 +594,13 @@ class QSAForwardMetadata(AttentionMetadata):
     max_seq_len: int
     storage_block_size: int
     compress_ratio: int
+    # Tile-union prefill kernel (nvidia/ops/qsa_tile_union.py): the row -> tile
+    # layout of this forward, computed by the first QSA layer that needs it and
+    # shared by the rest: ((num_rows, rows_per_tile), (tile_row0, tile_request,
+    # num_tiles)).
+    tile_union_layout: (
+        tuple[tuple[int, int], tuple[torch.Tensor, torch.Tensor, int]] | None
+    ) = None
 
 
 class QSAMetadataBuilder(AttentionMetadataBuilder[QSAForwardMetadata]):
