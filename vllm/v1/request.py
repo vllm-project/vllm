@@ -78,10 +78,14 @@ class Request:
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         abort_immediately: bool = False,
+        mamba_checkpoint_position: int | None = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
         self.priority = priority
+        self.mamba_checkpoint_position = mamba_checkpoint_position
+        self.mamba_checkpoint_source_block_ids: tuple[int, ...] | None = None
+        self.mamba_prefix_producer_id: str | None = None
         self.sampling_params = sampling_params
         self.pooling_params = pooling_params
         self.lora_request = lora_request
@@ -173,6 +177,7 @@ class Request:
         # V2+PP+async: Enforces `pp_size` cadence between same-request decode steps
         # so the worker's broadcast slot ring stays consistent.
         self.next_decode_eligible_step = 0
+        self.waiting_for_mamba_checkpoint = False
 
         # Seq of the most recent step this request was scheduled in; fences
         # deferred block freeing (see Scheduler._free_request_blocks).
@@ -260,6 +265,7 @@ class Request:
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
+            mamba_checkpoint_position=request.mamba_checkpoint_position,
         )
 
     def append_output_token_ids(
