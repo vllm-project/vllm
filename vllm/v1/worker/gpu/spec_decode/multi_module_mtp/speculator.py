@@ -75,7 +75,6 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
 
         self.cudagraph_manager: SpeculatorCudaGraphManager | None = None
 
-        _prepare_input_buffers.register_warmup(speculator=self)
         _prepare_input_hidden_states.register_warmup(speculator=self)
         _pad_trailing_draft_slots.register_warmup(
             slot_mappings_stride0=self.max_num_tokens
@@ -607,66 +606,6 @@ def _prepare_input_buffers_kernel(
             tl.store(last_token_indices_ptr + block, 0, mask=mask)
 
 
-def _prepare_input_buffers_warmup_inputs(
-    *, speculator: MultiModuleMTPSpeculator
-) -> dict[str, Any]:
-    steps = speculator.num_speculative_steps
-    max_reqs = speculator.max_num_reqs
-    return dict(
-        last_token_indices=TritonWarmupTensor(torch.int64),
-        draft_input_ids=TritonWarmupTensor(torch.int32),
-        draft_positions=TritonWarmupTensor(torch.int64),
-        draft_seq_lens=TritonWarmupTensor(torch.int32),
-        target_input_ids=TritonWarmupTensor(torch.int32),
-        target_positions=TritonWarmupTensor(torch.int64),
-        cached_draft_input_ids=TritonWarmupTensor(
-            torch.int64, shape=(1, steps - 1), strides=(steps - 1, 1)
-        ),
-        draft_input_id_overrides=TritonWarmupTensor(
-            torch.int64, shape=(1, steps - 1), strides=(steps - 1, 1)
-        ),
-        idx_mapping=TritonWarmupTensor(torch.int32),
-        last_sampled=TritonWarmupTensor(torch.int64),
-        next_prefill_tokens=TritonWarmupTensor(
-            torch.int32, shape=(steps, 1), strides=(max_reqs, 1)
-        ),
-        num_sampled=TritonWarmupTensor(torch.int32),
-        num_rejected=TritonWarmupTensor(torch.int32),
-        target_seq_lens=TritonWarmupTensor(torch.int32),
-        query_start_loc=TritonWarmupTensor(torch.int32),
-        max_num_reqs=max_reqs,
-        num_speculative_steps=steps,
-        num_reqs=1,
-    )
-
-
-@triton_kernel_dispatcher_with_warmup(
-    kernel=_prepare_input_buffers_kernel,
-    warmup_inputs=_prepare_input_buffers_warmup_inputs,
-)
-def _prepare_input_buffers(
-    last_token_indices: torch.Tensor,
-    draft_input_ids: torch.Tensor,
-    draft_positions: torch.Tensor,
-    draft_seq_lens: torch.Tensor,
-    target_input_ids: torch.Tensor,
-    target_positions: torch.Tensor,
-    cached_draft_input_ids: torch.Tensor,
-    draft_input_id_overrides: torch.Tensor,
-    idx_mapping: torch.Tensor,
-    last_sampled: torch.Tensor,
-    next_prefill_tokens: torch.Tensor,
-    num_sampled: torch.Tensor,
-    num_rejected: torch.Tensor,
-    target_seq_lens: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    max_num_reqs: int,
-    num_speculative_steps: int,
-    num_reqs: int,
-) -> DispatchSpec:
-    return (num_reqs,), dict(BLOCK_SIZE=1024)
-
-
 def prepare_input_buffers(
     num_reqs: int,
     input_batch: InputBatch,
@@ -688,7 +627,7 @@ def prepare_input_buffers(
     max_num_reqs: int,
     num_speculative_steps: int,
 ) -> None:
-    _prepare_input_buffers(
+    _prepare_input_buffers_kernel[(num_reqs,)](
         last_token_indices,
         input_buffers.input_ids,
         input_buffers.positions,
@@ -696,17 +635,20 @@ def prepare_input_buffers(
         input_batch.input_ids,
         input_batch.positions,
         cached_draft_input_ids,
+        cached_draft_input_ids.stride(0) if cached_draft_input_ids is not None else 0,
         draft_input_id_overrides,
+        draft_input_id_overrides.stride(0),
         input_batch.idx_mapping,
         last_sampled,
         next_prefill_tokens,
+        next_prefill_tokens.stride(0),
         num_sampled,
         num_rejected,
         input_batch.seq_lens,
         input_buffers.query_start_loc,
         max_num_reqs,
         num_speculative_steps,
-        num_reqs=num_reqs,
+        BLOCK_SIZE=1024,
     )
 
 
