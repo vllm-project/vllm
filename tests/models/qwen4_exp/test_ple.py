@@ -14,6 +14,7 @@ from torch.nn import functional as F
 import vllm.model_executor.layers.vocab_parallel_embedding as embedding_module
 import vllm.model_executor.parameter as parameter_module
 import vllm.models.qwen4_exp.nvidia.ngram_embedding as ngram_embedding_module
+from vllm.config import EngramConfig
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
@@ -504,9 +505,12 @@ def test_pinned_fp8_embedding_uses_int8_for_parallel_reduce() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_ple_device_embedding_allocates_on_active_device(
+@pytest.mark.parametrize("cpu_offload", [None, False])
+def test_ngram_embedding_storage_follows_engram_config(
     monkeypatch: pytest.MonkeyPatch,
+    cpu_offload: bool | None,
 ) -> None:
+    """The model defaults to pinned host storage and can explicitly opt into HBM."""
     _mock_etp_group(monkeypatch)
     monkeypatch.setattr(embedding_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
@@ -516,19 +520,38 @@ def test_ple_device_embedding_allocates_on_active_device(
     monkeypatch.setattr(
         parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
     )
-    embedding_method = Qwen4ExpPLEUnquantizedEmbeddingMethod()
-
+    engram_config = (
+        EngramConfig() if cpu_offload is None else EngramConfig(cpu_offload=cpu_offload)
+    )
+    monkeypatch.setattr(
+        ngram_embedding_module,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(engram_config=engram_config),
+    )
+    config = SimpleNamespace(
+        ngram_size=2,
+        heads_per_ngram=1,
+        eos_token_id=0,
+        vocab_size=16,
+        ngram_vocab_size_base=4,
+        make_ngram_vocab_size_divisible_by=1,
+    )
     with torch.device("cuda:0"):
-        embedding = Qwen4ExpPLEDeviceEmbedding(
+        module = Qwen4ExpNGramEmbedding(
+            config,
+            32,
+            0,
             4,
-            3,
-            params_dtype=torch.bfloat16,
-            padding_size=1,
+            data_parallel_rank=0,
             prefix="test.ple_embedding",
-            embedding_method=embedding_method,
+            params_dtype=torch.bfloat16,
         )
-
-    assert embedding.weight.device == torch.device("cuda:0")
+    weight = module.ngram_embedding.weight
+    if engram_config.cpu_offload:
+        assert weight.device.type == "cpu"
+        assert weight.is_pinned()
+    else:
+        assert weight.device == torch.device("cuda:0")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

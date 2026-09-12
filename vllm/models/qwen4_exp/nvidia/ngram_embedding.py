@@ -700,9 +700,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         engram_config = get_current_vllm_config().engram_config
+        assert engram_config is not None
         embedding_cls = (
             Qwen4ExpPLEPinnedHostEmbedding
-            if engram_config is not None and engram_config.cpu_offload
+            if engram_config.cpu_offload
             else Qwen4ExpPLEDeviceEmbedding
         )
         self.ngram_embedding = embedding_cls(

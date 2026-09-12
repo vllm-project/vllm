@@ -186,6 +186,9 @@ steps:
   - tests/v1/distributed
   - tests/v1/engine/test_engine_core_client.py
   - tests/distributed/test_utils
+  - tests/distributed/test_engram_dp_shard.py
+  - vllm/config/engram.py
+  - vllm/models/deepseek_v4_1/
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
   - export NCCL_CUMEM_HOST_ENABLE=0
@@ -197,6 +200,7 @@ steps:
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py
   - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
   - pytest -v -s distributed/test_utils.py
+  - pytest -v -s distributed/test_engram_dp_shard.py --timeout=180
 
 - label: ":nvidia: (L4) Distributed Compile + Comm"
   key: distributed-compile-comm-4-gpus

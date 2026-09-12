@@ -75,13 +75,9 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
-from ..common.engram import (
-    Engram,
-    EngramLayout,
-    NgramHashState,
-    gather_engram_hashes,
-)
+from ..common.engram import EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
+from .engram import Engram, gather_engram_hashes
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -472,9 +468,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # layer's sliding-window KV cache. Only PP ranks owning an engram
         # layer need it.
         self.engram_hash: NgramHashState | None = None
-        self.engram_shared_memory = bool(
+        self.engram_dp_shared_memory = bool(
             vllm_config.engram_config
-            and vllm_config.engram_config.enable_engram_shared_memory
+            and vllm_config.engram_config.enable_engram_dp_shared_memory
         )
         self.engram_swa_prefix: str | None = None
         if self.engram_layout is not None:
@@ -612,7 +608,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 # Gather all Engram rows before entering the decoder layers.
                 # One gather feeds every layer sharing the DP-split table.
                 gathered_hashes = gather_engram_hashes(
-                    engram_hashes, shared_memory=self.engram_shared_memory
+                    engram_hashes, dp_shared_memory=self.engram_dp_shared_memory
                 )
                 for layer in islice(self.layers, self.start_layer, self.end_layer):
                     engram = getattr(layer, "engram", None)
