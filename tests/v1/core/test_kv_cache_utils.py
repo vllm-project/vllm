@@ -4136,3 +4136,50 @@ def test_deepseek_v4_annotation_requires_model_type():
     )
 
     assert not any(g.is_eagle_group for g in groups)
+
+
+def test_annotate_eagle_groups_flags_separately_prefixed_drafter_layers():
+    """A drafter registered under its own module prefix after the target
+    (Qwen4ExpMTP under "mtp.") marks every group holding one of its layers as
+    a draft group; groups holding only target layers, such as the Mamba
+    groups, stay unflagged so they keep serving prefix hits."""
+    from unittest.mock import Mock
+
+    from vllm.v1.core.kv_cache_utils import _annotate_eagle_groups
+
+    attn = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    mamba = MambaSpec(shapes=((1, 1),), dtypes=(torch.float32,), block_size=16)
+    kv_cache_spec = {
+        "model.layers.0.attn": attn,
+        "model.layers.1.mamba": mamba,
+        "model.layers.2.attn": attn,
+        "mtp.mtp.layers.3.self_attn.attn": attn,
+    }
+    groups = [
+        KVCacheGroupSpec(["model.layers.1.mamba"], mamba),
+        KVCacheGroupSpec(["model.layers.0.attn", "model.layers.2.attn", "mtp.mtp.layers.3.self_attn.attn"], attn),
+    ]
+    vllm_config = Mock()
+    vllm_config.speculative_config.use_eagle_block_drop.return_value = True
+    _annotate_eagle_groups(vllm_config, kv_cache_spec, groups)
+    assert [g.is_eagle_group for g in groups] == [False, True]
+
+    # Same top-level prefix for every layer (an EAGLE head registered under
+    # "model."): nothing can be told apart, so nothing is flagged and the
+    # coordinator keeps its conservative all-groups fallback.
+    same_prefix_spec = {
+        "model.layers.0.attn": attn,
+        "model.layers.1.mamba": mamba,
+        "model.layers.2.attn": attn,
+    }
+    groups2 = [
+        KVCacheGroupSpec(["model.layers.1.mamba"], mamba),
+        KVCacheGroupSpec(["model.layers.0.attn", "model.layers.2.attn"], attn),
+    ]
+    _annotate_eagle_groups(vllm_config, same_prefix_spec, groups2)
+    assert [g.is_eagle_group for g in groups2] == [False, False]
+
+    # No block drop configured: untouched.
+    vllm_config.speculative_config.use_eagle_block_drop.return_value = False
+    _annotate_eagle_groups(vllm_config, kv_cache_spec, groups2)
+    assert [g.is_eagle_group for g in groups2] == [False, False]
