@@ -36,7 +36,7 @@ SURVIVOR_MAX_MODEL_LEN = 1024
 
 # Blocks granted above the engine's single-request admission floor. Four blocks
 # put the budget at 69 (68 allocatable, see `allocatable_blocks`), which admits
-# the four mixed-phase prompts (65 blocks) and still forces preemption for every
+# the four mixed-phase prompts (63 blocks) and still forces preemption for every
 # interleaving of the two long peers (see `worst_case_crossing_tokens`). A wider
 # margin re-opens the desynchronisation hole this replaced: with the former
 # 25% headroom (81 blocks) a peer that lagged its twin by ~285 generated tokens

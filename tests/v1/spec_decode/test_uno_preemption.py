@@ -351,6 +351,59 @@ def test_scheduler_is_keyed_by_the_internal_request_id(uno_scheduler):
         assert request is not None and request.request_id == internal, external
 
 
+def test_preemption_must_be_recorded_where_it_happens(uno_scheduler):
+    """Polling the scheduler after the fact loses preemptions; a hook does not.
+
+    A preempted request is freed from ``Scheduler.requests`` as soon as it
+    finishes, and under async scheduling that can be the same step: the victim's
+    stale output is still delivered and can reach its stop. Anything that reads
+    the request afterwards then sees nothing at all, which is why the e2e
+    records at ``_preempt_request`` instead of polling.
+    """
+    scheduler = uno_scheduler(num_blocks=9, max_num_seqs=2, max_num_batched_tokens=64)
+    requests = create_requests(
+        num_requests=2,
+        num_tokens=16,
+        max_tokens=96,
+        ignore_eos=True,
+        block_size=budget.BLOCK_SIZE,
+        req_ids=["uno-lead", "uno-victim"],
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    recorded: list[tuple[str, int, str]] = []
+    original = scheduler._preempt_request
+
+    def _record(request, timestamp, drop_stale_output=False):
+        recorded.append(
+            (request.request_id, len(request.output_token_ids), request.status.name)
+        )
+        return original(request, timestamp, drop_stale_output=drop_stale_output)
+
+    scheduler._preempt_request = _record
+    try:
+        for _ in range(16 * 96):
+            if not scheduler.has_unfinished_requests():
+                break
+            _drive_step(scheduler, {"uno-lead": 3, "uno-victim": 3})
+    finally:
+        scheduler._preempt_request = original
+
+    assert recorded, "this pool must preempt the victim at least once"
+    victim_events = [event for event in recorded if event[0] == "uno-victim"]
+    assert victim_events, recorded
+    # Every hook event catches the request RUNNING with its committed tokens,
+    # which is the state the receipt needs and the state a later poll cannot
+    # reconstruct.
+    for _request_id, generated, status in victim_events:
+        assert status == "RUNNING", status
+        assert generated >= 0
+    # And by the end the requests are gone, so a poll would have nothing left
+    # to read.
+    assert not scheduler.requests, sorted(scheduler.requests)
+
+
 def test_internal_id_resolution_refuses_what_it_cannot_pin():
     """Ambiguity and absence must be reported, never silently resolved."""
     external = "uno-finish-peer-0"

@@ -191,7 +191,11 @@ def _render_receipt(mixed: "_MixedPhase", geometry: str, metrics: str) -> str:
         f"preempted_while_active={mixed.preempted_while_active}, "
         f"preemption_events={mixed.preemption_events}",
         f"peer_preemptions_final={mixed.peer_preemptions_final}, "
+        f"polled_preemptions={mixed.polled_preemptions}, "
         f"peer_statuses_seen={mixed.peer_statuses_seen}",
+        f"internal_request_ids={mixed.internal_request_ids}",
+        "all_preemptions (recorded where they happen)="
+        + (str(mixed.all_preemptions) if mixed.all_preemptions else "[]"),
         f"scheduler_request_ids_last={list(mixed.scheduler_request_ids_last)}",
         "receipts=" + (str(mixed.receipts) if mixed.receipts else "[]"),
         "trace:",
@@ -392,6 +396,14 @@ class _MixedPhase:
     # External request id -> the id `Scheduler.requests` is keyed by. Empty
     # until the peers are injected and resolved.
     internal_request_ids: dict[str, str] = field(default_factory=dict)
+    # Every preemption the scheduler performed, recorded at the moment it
+    # happened rather than by polling afterwards: under async scheduling the
+    # victim's stale output is still delivered and can reach its stop, freeing
+    # the request from `Scheduler.requests` before the next poll could see it.
+    all_preemptions: list[str] = field(default_factory=list)
+    # `num_preemptions` as the per-step poll last saw it, kept only to
+    # cross-check the hook above.
+    polled_preemptions: dict[str, int] = field(default_factory=dict)
 
 
 def _run_survivor_with_peers(
@@ -422,18 +434,113 @@ def _run_survivor_with_peers(
     finish_id_set = set(finish_ids)
     engine.add_request(seed_id, seed_prompt, seed_sampling)
     scheduler = _scheduler(engine)
-    injected = False
-    aborted = False
-    seed_len = 0
-    seed_final = False
-    abort_len = 0
-    # External id -> the id the scheduler is keyed by, filled at injection.
+    # External id -> the id the scheduler is keyed by, and back, filled at
+    # injection and shared with the preemption hook below.
     internal: dict[str, str] = {}
+    external_of: dict[str, str] = {}
     seen_preemptions: dict[str, int] = {}
     statuses_seen: dict[str, list[str]] = {rid: [] for rid in finish_ids}
     recent_trace: deque[str] = deque(maxlen=_TRACE_TAIL_STEPS)
     notable_trace: list[str] = []
     block_pool = scheduler.kv_cache_manager.block_pool
+
+    # Record preemptions where they happen. Polling `Scheduler.requests` after
+    # `engine.step()` is not enough under async scheduling: the newer batch is
+    # scheduled before the prior output is consumed, so a victim can be
+    # preempted, have its stale output delivered, reach its stop and be freed
+    # from `Scheduler.requests` inside one step -- and the poll would see
+    # nothing at all. `_preempt_request` runs with the victim still RUNNING and
+    # its committed tokens intact, which is exactly the state the receipt wants.
+    original_preempt = getattr(scheduler, "_preempt_request", None)
+    assert callable(original_preempt), (
+        "the scheduler no longer exposes _preempt_request, so this driver "
+        "cannot observe preemptions where they happen; find the new hook "
+        "rather than falling back to polling"
+    )
+
+    def _record_preemption(request, timestamp, drop_stale_output=False):
+        generated = len(request.output_token_ids)
+        external = external_of.get(request.request_id)
+        phase.all_preemptions.append(
+            f"step {phase.steps}: {request.request_id} "
+            f"(external={external}) preempted at {generated} generated tokens, "
+            f"status={request.status.name}, "
+            f"free={block_pool.get_num_free_blocks()}, "
+            f"in_flight={request.num_in_flight_tokens}"
+        )
+        if external is not None:
+            phase.preemption_events.append((external, generated))
+            # `_preempt_request` asserts the request is RUNNING, so a long peer
+            # recorded here was preempted while it was still unfinished by
+            # construction; whether it had generated anything is the separate
+            # mid-generation question.
+            phase.preempted_while_active[external] = (
+                phase.preempted_while_active.get(external, 0) + 1
+            )
+            phase.peer_preemptions_final[external] = (
+                phase.peer_preemptions_final.get(external, 0) + 1
+            )
+            if len(notable_trace) < _TRACE_NOTABLE_STEPS:
+                notable_trace.append(phase.all_preemptions[-1])
+            phase.receipts.append(phase.all_preemptions[-1])
+        return original_preempt(request, timestamp, drop_stale_output=drop_stale_output)
+
+    scheduler._preempt_request = _record_preemption
+    try:
+        _drive_mixed_phase(
+            engine=engine,
+            scheduler=scheduler,
+            phase=phase,
+            block_pool=block_pool,
+            seed_id=seed_id,
+            abort_id=abort_id,
+            finish_ids=finish_ids,
+            finish_id_set=finish_id_set,
+            finish_prompts=finish_prompts,
+            abort_prompt=abort_prompt,
+            finish_sampling=finish_sampling,
+            abort_sampling=abort_sampling,
+            inject_after=inject_after,
+            internal=internal,
+            external_of=external_of,
+            seen_preemptions=seen_preemptions,
+            statuses_seen=statuses_seen,
+            recent_trace=recent_trace,
+            notable_trace=notable_trace,
+        )
+    finally:
+        scheduler._preempt_request = original_preempt
+    return phase
+
+
+def _drive_mixed_phase(
+    *,
+    engine,
+    scheduler,
+    phase: _MixedPhase,
+    block_pool,
+    seed_id: str,
+    abort_id: str,
+    finish_ids: list[str],
+    finish_id_set: set[str],
+    finish_prompts: list[str],
+    abort_prompt: str,
+    finish_sampling: SamplingParams,
+    abort_sampling: SamplingParams,
+    inject_after: int,
+    internal: dict[str, str],
+    external_of: dict[str, str],
+    seen_preemptions: dict[str, int],
+    statuses_seen: dict[str, list[str]],
+    recent_trace: deque[str],
+    notable_trace: list[str],
+) -> None:
+    """Step the engine until every mixed-phase request has finished."""
+    injected = False
+    aborted = False
+    seed_len = 0
+    seed_final = False
+    abort_len = 0
     while engine.has_unfinished_requests():
         outputs = engine.step()
         phase.steps += 1
@@ -509,7 +616,9 @@ def _run_survivor_with_peers(
             # is disabled. Resolve it here, fail here if it cannot be resolved,
             # and use the resolved key for every read below: polling by the
             # external id is what left two GPU runs with an empty receipt.
-            internal, problems = _internal_request_ids(engine, scheduler, finish_ids)
+            resolved, problems = _internal_request_ids(engine, scheduler, finish_ids)
+            internal.update(resolved)
+            external_of.update({key: value for value, key in resolved.items()})
             phase.internal_request_ids = dict(internal)
             assert not problems, (
                 "the survivor driver cannot map its peers onto the ids the "
@@ -538,36 +647,16 @@ def _run_survivor_with_peers(
             engine.abort_request([abort_id])
             aborted = True
 
+        # The hook records the events; this poll only cross-checks that the
+        # counter it can still see agrees with what the hook captured, so a
+        # future engine that stops calling `_preempt_request` is visible.
         for request_id in finish_ids:
             request = peers[request_id]
             if request is None:
                 continue
-            if request.num_preemptions <= seen_preemptions.get(request_id, 0):
-                continue
-            seen_preemptions[request_id] = request.num_preemptions
-            phase.peer_preemptions_final = dict(seen_preemptions)
-            generated = len(request.output_token_ids)
-            phase.preemption_events.append((request_id, generated))
-            # A request can only be preempted while it is running, so an
-            # increment before its finished output was delivered is exactly the
-            # "preempted while active" receipt this gate needs. Whether it was
-            # mid-generation is a separate question the gate asks with
-            # `mid_generation_preemption_counts`.
-            if request_id not in phase.finished:
-                phase.preempted_while_active[request_id] = (
-                    phase.preempted_while_active.get(request_id, 0) + 1
-                )
-            receipt = (
-                f"step {phase.steps}: {request_id} ({internal[request_id]}) "
-                f"preempted at {generated} generated tokens of "
-                f"{finish_sampling.max_tokens}; "
-                f"usage={usage:.3%} free={free_blocks}; "
-                f"running={sorted(r.request_id for r in scheduler.running)}, "
-                f"waiting={sorted(r.request_id for r in scheduler.waiting)}"
-            )
-            phase.receipts.append(receipt)
-            if len(notable_trace) < _TRACE_NOTABLE_STEPS:
-                notable_trace.append(receipt)
+            if request.num_preemptions > seen_preemptions.get(request_id, 0):
+                seen_preemptions[request_id] = request.num_preemptions
+                phase.polled_preemptions = dict(seen_preemptions)
 
     assert injected, "peers never joined the seed mid-stream"
     assert aborted, "the aborting peer was never retired mid-stream"
@@ -575,7 +664,6 @@ def _run_survivor_with_peers(
         "not every finish peer produced a finished output; "
         f"finished={sorted(phase.finished)}"
     )
-    return phase
 
 
 @pytest.mark.forked
@@ -979,16 +1067,23 @@ def test_uno_continuous_batching_survivor_matches_solo(
             f"(peak {mixed.peak_kv_cache_usage:.3%}). Re-derive the geometry; "
             f"do not relax the gate.\n{receipt}"
         )
-    # 3. The per-request receipt may not claim what the engine's own counter
-    #    denies. The reverse is not a defect: the engine counts preemptions of
-    #    the seed and the abort peer too, which this receipt deliberately does
-    #    not track, so a positive counter with no finish-peer event is reported
-    #    by the assertion below rather than being an error here.
-    assert not (mixed.preemption_events and preemptions == 0), (
-        "the per-request receipt recorded preemptions the engine's counter "
-        f"does not: events={mixed.preemption_events} but vllm:num_preemptions "
-        f"delta is {preemptions}, so one of the two channels is wrong.\n"
+    # 3. The scheduler hook and the engine's counter must agree in both
+    #    directions. The hook records every preemption where it happens,
+    #    whichever request it hits, so a positive counter with nothing recorded
+    #    is a receipt-channel failure. It is never evidence that "the victims
+    #    must have been the short peers": once the seed has finished and the
+    #    abort peer is retired, a long peer at its cap plus its twin's
+    #    admission footprint is 57 + 17 of 68 blocks, so a long-peer preemption
+    #    is not optional.
+    assert not (preemptions > 0 and not mixed.all_preemptions), (
+        f"the engine counted {preemptions} preemptions and the scheduler hook "
+        "recorded none, so the channel missed the event it exists to catch.\n"
         f"{receipt}"
+    )
+    assert not (mixed.all_preemptions and preemptions == 0), (
+        "the scheduler hook recorded preemptions the engine's counter does "
+        f"not: {mixed.all_preemptions} against a vllm:num_preemptions delta of "
+        f"{preemptions}, so one of the two channels is wrong.\n{receipt}"
     )
     # 4. Some long peer must have been preempted, and preempted while it was
     #    generating: a preemption during a peer's chunked prefill recomputes a
@@ -999,9 +1094,10 @@ def test_uno_continuous_batching_survivor_matches_solo(
         f"pool_blocks={pool_blocks}, growth_blocks={growth_blocks}, "
         f"worst_case_crossing_tokens={worst_case_crossing} < "
         f"cap {finish_sampling.max_tokens}. The engine counted {preemptions} "
-        "preemptions in this phase: a positive count here means the victims "
-        "were the seed or the abort peer, a zero count means the scheduler "
-        f"never had to preempt at all.\n{receipt}"
+        f"preemptions in this phase and the hook recorded "
+        f"{len(mixed.all_preemptions)}, each listed in the receipt with the "
+        "request it hit, so read those rather than inferring a victim.\n"
+        f"{receipt}"
     )
     assert mid_generation, (
         "every observed long-peer preemption happened at zero generated "
