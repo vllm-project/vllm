@@ -4,7 +4,6 @@
 import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
-
 from typing import Any
 
 from vllm.distributed.kv_events import (
