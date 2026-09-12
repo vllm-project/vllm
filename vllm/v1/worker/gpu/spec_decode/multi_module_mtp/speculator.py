@@ -75,7 +75,6 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
 
         self.cudagraph_manager: SpeculatorCudaGraphManager | None = None
 
-        _prepare_input_hidden_states.register_warmup(speculator=self)
         _pad_trailing_draft_slots.register_warmup(
             slot_mappings_stride0=self.max_num_tokens
         )
@@ -756,83 +755,6 @@ def _prepare_input_hidden_states_and_embeddings_kernel(
                 )
 
 
-def _prepare_input_hidden_states_warmup_inputs(
-    *, speculator: MultiModuleMTPSpeculator
-) -> dict[str, Any]:
-    hidden = TritonWarmupTensor(
-        speculator.dtype,
-        shape=(1, speculator.hidden_size),
-        strides=(speculator.hidden_size, 1),
-    )
-    cached = TritonWarmupTensor(
-        speculator.dtype,
-        shape=(1, speculator.num_speculative_steps - 1, speculator.hidden_size),
-        strides=(
-            (speculator.num_speculative_steps - 1) * speculator.hidden_size,
-            speculator.hidden_size,
-            1,
-        ),
-    )
-    use_embeds = WarmupChoices(False, True)
-    return dict(
-        hidden_states=hidden,
-        target_hidden_states=hidden,
-        cached_target_hidden_states=cached,
-        input_embeds=hidden if use_embeds else None,
-        cached_draft_input_embeds=cached if use_embeds else None,
-        idx_mapping=TritonWarmupTensor(torch.int32),
-        num_rejected=TritonWarmupTensor(torch.int32),
-        query_start_loc=TritonWarmupTensor(torch.int32),
-        num_speculative_steps=speculator.num_speculative_steps,
-        num_reqs=1,
-        max_query_len=1,
-    )
-
-
-@triton_kernel_dispatcher_with_warmup(
-    kernel=_prepare_input_hidden_states_and_embeddings_kernel,
-    warmup_inputs=_prepare_input_hidden_states_warmup_inputs,
-)
-def _prepare_input_hidden_states(
-    hidden_states: torch.Tensor,
-    target_hidden_states: torch.Tensor,
-    cached_target_hidden_states: torch.Tensor | None,
-    input_embeds: torch.Tensor | None,
-    cached_draft_input_embeds: torch.Tensor | None,
-    idx_mapping: torch.Tensor,
-    num_rejected: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    num_speculative_steps: int,
-    num_reqs: int,
-    max_query_len: int,
-) -> DispatchSpec:
-    hidden_size = target_hidden_states.shape[-1]
-    cached_target_hidden_states = (
-        cached_target_hidden_states
-        if cached_target_hidden_states is not None
-        else hidden_states
-    )
-    input_embeds_ptr = input_embeds if input_embeds is not None else hidden_states
-    cached_embeds_ptr = (
-        cached_draft_input_embeds
-        if cached_draft_input_embeds is not None
-        else cached_target_hidden_states
-    )
-    return (
-        (num_reqs, triton.cdiv(max_query_len, 16), triton.cdiv(hidden_size, 256)),
-        dict(
-            draft_input_hidden_states_ptr=hidden_states,
-            cached_target_hidden_states_ptr=cached_target_hidden_states,
-            input_embeds_ptr=input_embeds_ptr,
-            cached_draft_input_embeds_ptr=cached_embeds_ptr,
-            hidden_size=hidden_size,
-            BLOCK_SIZE_Q=16,
-            BLOCK_SIZE_H=256,
-            USE_INPUT_EMBEDS=input_embeds is not None,
-        ),
-    )
-
-
 def prepare_input_hidden_states_and_embeddings(
     num_reqs: int,
     # Upper bound on the draft query length of any request in the batch.
@@ -853,18 +775,44 @@ def prepare_input_hidden_states_and_embeddings(
     num_rejected: torch.Tensor,
     num_speculative_steps: int,
 ) -> None:
-    _prepare_input_hidden_states(
+    use_input_embeds = input_embeds is not None
+    hidden_size = target_hidden_states.shape[-1]
+    query_block_size = 16
+    hidden_block_size = 256
+    grid = (
+        num_reqs,
+        triton.cdiv(max_query_len, query_block_size),
+        triton.cdiv(hidden_size, hidden_block_size),
+    )
+    _prepare_input_hidden_states_and_embeddings_kernel[grid](
         hidden_states,
+        hidden_states.stride(0),
         target_hidden_states,
+        target_hidden_states.stride(0),
         cached_target_hidden_states,
+        cached_target_hidden_states.stride(0)
+        if cached_target_hidden_states is not None
+        else 0,
+        cached_target_hidden_states.stride(1)
+        if cached_target_hidden_states is not None
+        else 0,
         input_embeds,
+        input_embeds.stride(0) if input_embeds is not None else 0,
         cached_draft_input_embeds,
+        cached_draft_input_embeds.stride(0)
+        if cached_draft_input_embeds is not None
+        else 0,
+        cached_draft_input_embeds.stride(1)
+        if cached_draft_input_embeds is not None
+        else 0,
         input_batch.idx_mapping,
         num_rejected,
         input_buffers.query_start_loc,
-        num_reqs=num_reqs,
-        max_query_len=max_query_len,
-        num_speculative_steps=num_speculative_steps,
+        num_speculative_steps,
+        hidden_size,
+        BLOCK_SIZE_Q=query_block_size,
+        BLOCK_SIZE_H=hidden_block_size,
+        USE_INPUT_EMBEDS=use_input_embeds,
     )
 
 

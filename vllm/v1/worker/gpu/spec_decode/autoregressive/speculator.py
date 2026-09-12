@@ -53,7 +53,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self.use_fused_multi_step_decode = False
 
         if self.num_speculative_steps > 1:
-            _prepare_decode_inputs.register_warmup(speculator=self)
             _update_draft_inputs.register_warmup(speculator=self)
 
     def load_model(self, target_model: nn.Module) -> None:
@@ -880,51 +879,6 @@ def _prepare_decode_inputs_kernel(
     tl.store(seq_lens_ptr + req_idx, seq_len)
 
 
-def _prepare_decode_inputs_warmup_inputs(
-    *, speculator: AutoRegressiveSpeculator
-) -> dict[str, Any]:
-    return dict(
-        draft_tokens=TritonWarmupTensor(
-            speculator.draft_tokens.dtype,
-            strides=(speculator.draft_tokens.stride(0),),
-        ),
-        target_seq_lens=TritonWarmupTensor(torch.int32),
-        num_rejected=TritonWarmupTensor(torch.int32),
-        input_ids=TritonWarmupTensor(torch.int32),
-        positions=TritonWarmupTensor(torch.int64),
-        sample_src_positions=TritonWarmupTensor(torch.int64),
-        query_start_loc=TritonWarmupTensor(torch.int32),
-        seq_lens=TritonWarmupTensor(torch.int32),
-        max_model_len=speculator.max_model_len,
-        max_num_reqs=speculator.max_num_reqs,
-        num_reqs=1,
-        advance_draft_positions=speculator.advance_draft_positions,
-    )
-
-
-@triton_kernel_dispatcher_with_warmup(
-    kernel=_prepare_decode_inputs_kernel,
-    warmup_inputs=_prepare_decode_inputs_warmup_inputs,
-)
-def _prepare_decode_inputs(
-    draft_tokens: torch.Tensor,
-    target_seq_lens: torch.Tensor,
-    num_rejected: torch.Tensor,
-    input_ids: torch.Tensor,
-    positions: torch.Tensor,
-    sample_src_positions: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    seq_lens: torch.Tensor,
-    max_model_len: int,
-    max_num_reqs: int,
-    num_reqs: int,
-    advance_draft_positions: bool,
-) -> DispatchSpec:
-    return (num_reqs + 1,), dict(
-        BLOCK_SIZE=1024,
-    )
-
-
 def prepare_decode_inputs(
     draft_tokens: torch.Tensor,
     target_seq_lens: torch.Tensor,
@@ -936,8 +890,9 @@ def prepare_decode_inputs(
     advance_draft_positions: bool = True,
 ):
     num_reqs = draft_tokens.shape[0]
-    _prepare_decode_inputs(
+    _prepare_decode_inputs_kernel[(num_reqs + 1,)](
         draft_tokens,
+        draft_tokens.stride(0),
         target_seq_lens,
         num_rejected,
         input_buffers.input_ids,
@@ -947,8 +902,8 @@ def prepare_decode_inputs(
         input_buffers.seq_lens,
         max_model_len,
         max_num_reqs,
-        num_reqs=num_reqs,
-        advance_draft_positions=advance_draft_positions,
+        BLOCK_SIZE=1024,
+        ADVANCE_DRAFT_POSITIONS=advance_draft_positions,
     )
 
 
