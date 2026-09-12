@@ -257,6 +257,9 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         if not isinstance(obj, dict):
             return False
 
+        if "allOf" in obj and isinstance(obj["allOf"], list) and len(obj["allOf"]) != 1:
+            return True
+
         # Check for numeric ranges
         if obj.get("type") in ("integer", "number") and ("multipleOf" in obj):
             return True
