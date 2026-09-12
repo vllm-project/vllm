@@ -337,6 +337,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         assert swa_metadata.token_to_req_indices is not None
         assert swa_metadata.decode_swa_indices is not None
         assert swa_metadata.block_table is not None
+        assert swa_metadata.replay_start is not None
 
         decode_swa_indices = swa_metadata.decode_swa_indices.reshape(
             num_decode_tokens, swa_metadata.decode_swa_width
@@ -420,6 +421,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 prefill_right_visible=swa_metadata.prefill_right_visible,
                 # getattr for tests that bypass __init__ via object.__new__.
                 max_image_tokens=getattr(self, "max_image_tokens", 0),
+                replay_start=swa_metadata.replay_start[:num_reqs],
             )
             if swa_only:
                 swa_metadata.flashinfer_sparse_index_cache["swa_only"] = (

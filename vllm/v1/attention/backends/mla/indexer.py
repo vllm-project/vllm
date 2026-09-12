@@ -1191,6 +1191,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.kv_cache_spec.num_states,
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
+                # Under PCP the token slot mapping is in the gathered layout.
+                token_slot_mapping=None if self.use_pcp else slot_mapping,
             )
             if self.pcp_world_size > 1:
                 compressed_slot_mapping = get_pcp_group().all_gather(

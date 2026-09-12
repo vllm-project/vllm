@@ -457,6 +457,11 @@ class CommonAttentionMetadata:
     where bidirectional attention should apply. None for text-only
     batches or non-PrefixLM models. A request's ranges must not overlap."""
 
+    replay_start: torch.Tensor | None = None
+    """[num_reqs] int32. DeepSeek-V4.1 SWA bounded replay: a request holds no
+    sliding-window KV below this position, so its window attention must not
+    read there. None when the runner does not track it."""
+
     rswa_prefix_lens: torch.Tensor | None = None
     """(batch_size,) per-request prefix length (prompt/image token count) for
     Reference Sliding Window Attention (R-SWA). Tokens with logical index below

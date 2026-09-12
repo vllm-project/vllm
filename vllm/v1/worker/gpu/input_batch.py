@@ -33,6 +33,7 @@ class InputBuffers:
             max_num_reqs + 1, dtype=torch.int32, device=device
         )
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+        self.replay_start = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
         # DCP: per-request local seq_lens buffer
         self.dcp_local_seq_lens = torch.zeros(
             max_num_reqs, dtype=torch.int32, device=device
@@ -109,6 +110,8 @@ class InputBatch:
     # a query length this batch's own split does not reach, so attention metadata
     # stays valid for every replay the graph serves.
     max_query_len: int | None = None
+    # DeepSeek-V4.1 only: RequestState.replay_start in batch order.
+    replay_start: torch.Tensor | None = None
 
     # Arms the KV-sharing fast prefill path for this step. Absent for dummy
     # (cudagraph capture) batches, which run the KV-sharing layers in full.
@@ -152,6 +155,7 @@ class InputBatch:
         # Pad for full CUDA graph mode.
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
+        replay_start = input_buffers.replay_start[:num_reqs].zero_()
 
         query_start_loc_np = np.empty(num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
@@ -194,6 +198,7 @@ class InputBatch:
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,
+            replay_start=replay_start,
             num_computed_tokens_np=np.zeros(num_reqs, dtype=np.int32),
             prefill_len_np=np.zeros(num_reqs, dtype=np.int32),
             num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
@@ -335,24 +340,28 @@ def prepare_prefill_inputs(
 def _prepare_pos_seq_lens_kernel(
     pos_ptr,
     seq_lens_ptr,
+    batch_replay_start_ptr,
     idx_mapping_ptr,
     query_start_loc_ptr,
     num_computed_tokens_ptr,
+    replay_start_ptr,
     max_num_reqs,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_id = tl.program_id(0)
     num_reqs = tl.num_programs(0) - 1
     if req_id == num_reqs:
-        # Pad unused seq_lens as 0 for full CUDA graphs.
+        # Pad unused seq_lens and replay_start as 0 for full CUDA graphs.
         for i in tl.range(num_reqs, max_num_reqs, BLOCK_SIZE):
             block = i + tl.arange(0, BLOCK_SIZE)
             mask = block < max_num_reqs
             tl.store(seq_lens_ptr + block, 0, mask=mask)
+            tl.store(batch_replay_start_ptr + block, 0, mask=mask)
         return
 
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
     num_computed_tokens = tl.load(num_computed_tokens_ptr + req_state_idx)
+    tl.store(batch_replay_start_ptr + req_id, tl.load(replay_start_ptr + req_state_idx))
 
     start = tl.load(query_start_loc_ptr + req_id)
     end = tl.load(query_start_loc_ptr + req_id + 1)
@@ -372,8 +381,10 @@ def prepare_pos_seq_lens(
     idx_mapping: torch.Tensor,
     query_start_loc: torch.Tensor,
     num_computed_tokens: torch.Tensor,
+    replay_start: torch.Tensor,
     pos: torch.Tensor,
     seq_lens: torch.Tensor,
+    batch_replay_start: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
     # NOTE(woosuk): We do +1 because the last thread block is used
@@ -381,9 +392,11 @@ def prepare_pos_seq_lens(
     _prepare_pos_seq_lens_kernel[(num_reqs + 1,)](
         pos,
         seq_lens,
+        batch_replay_start,
         idx_mapping,
         query_start_loc,
         num_computed_tokens,
+        replay_start,
         seq_lens.shape[0],
         BLOCK_SIZE=1024,
     )

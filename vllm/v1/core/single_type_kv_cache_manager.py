@@ -489,6 +489,8 @@ class SingleTypeKVCacheManager(ABC):
             replay_boundaries: Positions a later request replaying this prompt
                 can resume at, from ``get_replay_boundaries``.
         """
+        if not self.kv_cache_spec.prefix_cacheable:
+            return
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
 
