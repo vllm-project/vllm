@@ -8,5 +8,7 @@
   "repositories": {
     "main": "vllm-ci-postmerge-repo",
     "premerge": "vllm-ci-test-repo"
-  }
+  },
+  "run_all_patterns": [],
+  "run_all_exclude_patterns": []
 }
