@@ -388,6 +388,7 @@ class ServerRole:
             return
         if result.local_idxs:
             self._submit_transfer(kv_request_id, result, req, round_seq)
+            return
         # Prefiller-first mode: finish_request may have run before
         # fetch arrived. If so, finalize once we know what was
         # demanded — fully satisfied → success, else early-fail.

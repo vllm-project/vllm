@@ -8,6 +8,7 @@ import ctypes
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 
 from vllm.v1.kv_offload.tiering.p2p.data.base import PollResult
 from vllm.v1.kv_offload.tiering.p2p.data.nixl import NixlTransport
@@ -121,6 +122,36 @@ class TestNixlTransportWithMockedAgent:
         tid = transport.write_blocks("peer:1", [0, 1], [2, 3])
         assert tid is not None
         assert isinstance(tid, int)
+
+    @pytest.mark.parametrize(
+        "failure_method,release_fails",
+        [
+            ("make_prepped_xfer", False),
+            ("transfer", False),
+            ("transfer", True),
+        ],
+    )
+    def test_write_blocks_submission_exception_returns_failure(
+        self, failure_method, release_fails
+    ):
+        """Setup failures surface even if releasing a created handle also fails."""
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+        agent = transport._agent
+        getattr(agent, failure_method).side_effect = RuntimeError("submission failed")
+        if release_fails:
+            agent.release_xfer_handle.side_effect = RuntimeError("release failed")
+
+        assert transport.write_blocks("peer:1", [0], [1]) is None
+        assert not transport._inflight
+        assert transport.poll() == PollResult(done=(), failed=())
+        if failure_method == "make_prepped_xfer":
+            agent.transfer.assert_not_called()
+            agent.release_xfer_handle.assert_not_called()
+        else:
+            agent.release_xfer_handle.assert_called_once_with(
+                agent.make_prepped_xfer.return_value
+            )
 
     def test_write_blocks_increments_transfer_id(self):
         """Each write_blocks call gets a unique transfer_id."""
