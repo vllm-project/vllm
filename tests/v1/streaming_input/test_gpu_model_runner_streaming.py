@@ -6,6 +6,7 @@
 from unittest.mock import Mock
 
 import pytest
+import torch
 
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -18,6 +19,17 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 # Not cpu_test: InputBatch allocates pinned (UVA) memory, which requires a
 # CUDA device even though the batch tensors live on the CPU.
+
+
+def test_streaming_prompt_prefill_only_request_discarded_before_finalize():
+    mask = GPUModelRunner._compute_discard_request_mask(
+        req_ids=["normal_req", "streaming_prompt_req", "partial_prefill_req"],
+        num_tokens=[5, 5, 8],
+        optimistic_seq_lens_cpu=torch.tensor([5, 5, 7], dtype=torch.int32),
+        prefill_only_req_ids={"streaming_prompt_req"},
+    )
+
+    assert mask.tolist() == [False, True, True]
 
 
 @pytest.fixture

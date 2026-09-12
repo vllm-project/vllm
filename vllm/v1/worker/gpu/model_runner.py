@@ -1169,15 +1169,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if (idx := self.req_states.req_id_to_index.get(req_id)) is not None:
                 self.block_tables.append_block_ids(idx, block_ids, overwrite=True)
         num_computed_tokens_np = self.req_states.num_computed_tokens_np
-        for req_id, num_computed_tokens, req_new_block_ids in zip(
-            reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
+        prompt_tokens_appended = False
+        for req_id, num_computed_tokens, req_new_block_ids, new_prompt_token_ids in zip(
+            reqs.req_ids,
+            reqs.num_computed_tokens,
+            reqs.new_block_ids,
+            reqs.new_prompt_token_ids,
         ):
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens_np[req_index] = num_computed_tokens
+            if new_prompt_token_ids:
+                self.req_states.append_prompt_token_ids(req_id, new_prompt_token_ids)
+                prompt_tokens_appended = True
             if req_new_block_ids is not None and req_id not in table_updates:
                 self.block_tables.append_block_ids(
                     req_index, req_new_block_ids, overwrite=False
                 )
+
+        if prompt_tokens_appended:
+            self.req_states.apply_staged_writes()
 
         # Update CPU num_computed_prefill_tokens.
         np.minimum(
