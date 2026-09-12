@@ -10,6 +10,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.workspace import current_workspace_manager
 
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
 _DECODE_BLOCK_N = 64
@@ -385,18 +386,15 @@ def _prefill_logits(
     query_start_loc: torch.Tensor,
     visible_blocks: torch.Tensor,
     max_query_len: int,
-    logits_width: int,
+    logits: torch.Tensor,
     query_offset: int,
-    num_queries: int,
-) -> torch.Tensor:
+) -> None:
+    num_queries, logits_width = logits.shape
     assert query_start_loc.shape == (page_table.shape[0] + 1,)
     assert visible_blocks.shape == (q.shape[0],)
     assert 0 <= query_offset <= query_offset + num_queries <= q.shape[0]
     assert 0 < logits_width <= page_table.shape[1] * k_cache.shape[1]
 
-    logits = torch.empty(
-        (num_queries, logits_width), dtype=torch.float32, device=q.device
-    )
     # tuned on GB300
     if k_cache.dtype == torch.float8_e4m3fn:
         TILE_R, STAGES, num_warps = 32, 2, 8
@@ -432,7 +430,6 @@ def _prefill_logits(
         STAGES=STAGES,
         num_warps=num_warps,
     )
-    return logits
 
 
 def expand_qsa_block_indices(
@@ -572,6 +569,18 @@ def qsa_select_paged_decode(
     )
 
 
+def get_qsa_prefill_workspace(logits_width: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reserve the logits budget and disjoint top-k scratch, also during profiling."""
+    max_logits_elems = max(
+        envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024 // 4, logits_width
+    )
+    logits, topk = current_workspace_manager().get_simultaneous(
+        ((max_logits_elems,), torch.float32),
+        ((_TOPK_WORKSPACE_BYTES,), torch.uint8),
+    )
+    return logits, topk
+
+
 def qsa_select_paged_prefill(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -612,25 +621,24 @@ def qsa_select_paged_prefill(
     logits_width = min(max(64, logits_width), page_table.shape[1] * k_cache.shape[1])
 
     # chunk the inputs to keep temp logits below VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
-    max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-    rows_per_chunk = max(1, max_logits_bytes // (logits_width * 4))
-    topk_workspace = torch.empty(
-        (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
-    )
+    logits_workspace, topk_workspace = get_qsa_prefill_workspace(logits_width)
+    rows_per_chunk = logits_workspace.numel() // logits_width
 
     for query_start in range(0, rows, rows_per_chunk):
         query_end = min(query_start + rows_per_chunk, rows)
         query_slice = slice(query_start, query_end)
-        logits = _prefill_logits(
+        logits = logits_workspace[: (query_end - query_start) * logits_width].view(
+            -1, logits_width
+        )
+        _prefill_logits(
             q,
             k_cache,
             page_table,
             query_start_loc,
             visible_blocks,
             max_query_len,
-            logits_width,
+            logits,
             query_offset=query_start,
-            num_queries=query_end - query_start,
         )
         _topk(
             logits,
