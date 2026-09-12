@@ -40,6 +40,11 @@ class Transition:
     next_state: ParserState
     events: tuple[EventType, ...] = field(default_factory=tuple)
     skip_in_token_id_mode: bool = False
+    # Hold every event back until a TOOL_CALL_END commits the call.
+    # If the stream ends before that, the consumed text is replayed as
+    # plain content instead. Used for recovery paths that start a tool
+    # call from CONTENT, where the opening marker alone is weak evidence.
+    provisional: bool = False
 
 
 @dataclass(frozen=True)

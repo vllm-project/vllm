@@ -445,6 +445,97 @@ class TestMissingToolCallsWrapper:
         assert result.content is None
 
 
+class TestTruncatedOrphanInvoke:
+    """An orphan invoke (no ``tool_calls`` wrapper) is only weak evidence of
+    a tool call, so it stays provisional until ``</｜DSML｜invoke>`` closes
+    it. If the stream ends first — truncation at the length limit, or prose
+    that quotes the syntax — the consumed text is replayed as content and no
+    tool call is emitted (#56482).
+    """
+
+    def _parser(self, mock_tokenizer) -> DeepSeekV4Parser:
+        return DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+
+    def test_truncated_at_name_non_streaming(self, mock_tokenizer, mock_request):
+        text = "I will run a command now: " + DSML_INVOKE_PREFIX + "bash"
+        result = self._parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert not result.tool_calls
+        assert result.content == text
+
+    def test_truncated_mid_args_non_streaming(self, mock_tokenizer, mock_request):
+        text = (
+            "note "
+            + DSML_INVOKE_PREFIX
+            + "bash"
+            + DSML_INVOKE_NAME_END
+            + "\n"
+            + _param("command", "true", "rm -rf /tmp/x")
+        )
+        result = self._parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert not result.tool_calls
+        assert result.content == text
+
+    @pytest.mark.parametrize("chunk_size", [1, 3, None], ids=lambda c: f"chunk={c}")
+    def test_truncated_streaming_replays_text(
+        self, mock_tokenizer, mock_request, chunk_size
+    ):
+        text = "I will run a command now: " + DSML_INVOKE_PREFIX + "bash"
+        chunks = list(text) if chunk_size == 1 else [text]
+        if chunk_size == 3:
+            chunks = [text[i : i + 3] for i in range(0, len(text), 3)]
+
+        parser = self._parser(mock_tokenizer)
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+        # The stream ends here without a closing tag; the server signals
+        # that through finish_streaming(), which replays the held text.
+        results.append((parser.finish_streaming(), text))
+
+        assert collect_function_name(results) is None
+        assert collect_content(results) == text
+
+    def test_closed_orphan_still_recovers(self, mock_tokenizer, mock_request):
+        text = (
+            "pre\n"
+            + DSML_INVOKE_PREFIX
+            + "terminal"
+            + DSML_INVOKE_NAME_END
+            + "\n"
+            + _param("command", "true", "echo hi")
+            + "\n"
+            + DSML_INVOKE_END
+        )
+        result = self._parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert [tc.function.name for tc in result.tool_calls] == ["terminal"]
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"command": "echo hi"}
+        assert result.content == "pre\n"
+
+    def test_wrapped_truncation_keeps_old_semantics(self, mock_tokenizer, mock_request):
+        """Inside an explicit ``tool_calls`` wrapper the intent is clear, so
+        a truncated invoke is still surfaced as a call, as before."""
+        text = (
+            DSML_TOOL_START
+            + "\n"
+            + DSML_INVOKE_PREFIX
+            + "get_weather"
+            + DSML_INVOKE_NAME_END
+            + "\n"
+            + _param("location", "true", "NYC")
+        )
+        result = self._parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert result.tool_calls[0].function.name == "get_weather"
+
+
 # ── Thinking mode initial state ──────────────────────────────────────
 
 
