@@ -1,0 +1,105 @@
+<svg viewBox="0 0 780 320" xmlns="http://www.w3.org/2000/svg" font-family="monospace, sans-serif" font-size="13">
+
+  <!-- Background -->
+  <rect width="780" height="320" fill="#0d1117" rx="10"/>
+
+  <!-- Title -->
+  <text x="390" y="30" fill="#e6edf3" font-size="15" font-weight="bold" text-anchor="middle">Dual Batch Overlap (DBO) — Overlap Schedule</text>
+
+  <!-- Row labels -->
+  <text x="60" y="90" fill="#8b949e" text-anchor="middle">Compute</text>
+  <text x="60" y="170" fill="#8b949e" text-anchor="middle">Comm</text>
+  <text x="60" y="250" fill="#8b949e" text-anchor="middle">Compute</text>
+  <text x="60" y="310" fill="#8b949e" text-anchor="middle">Comm</text>
+
+  <!-- µBatch labels -->
+  <text x="60" y="70" fill="#58a6ff" font-weight="bold" text-anchor="middle">µBatch₀</text>
+  <text x="60" y="230" fill="#f78166" font-weight="bold" text-anchor="middle">µBatch₁</text>
+
+  <!-- Divider line -->
+  <line x1="100" y1="200" x2="760" y2="200" stroke="#30363d" stroke-width="1" stroke-dasharray="4,4"/>
+
+  <!-- ===== µBatch₀ Compute blocks ===== -->
+  <!-- A0₀ -->
+  <rect x="110" y="72" width="80" height="36" rx="4" fill="#1f6feb"/>
+  <text x="150" y="95" fill="#e6edf3" text-anchor="middle">A0₀</text>
+
+  <!-- A1₀ -->
+  <rect x="195" y="72" width="80" height="36" rx="4" fill="#1f6feb"/>
+  <text x="235" y="95" fill="#e6edf3" text-anchor="middle">A1₀</text>
+
+  <!-- MLP₀ (delayed, overlaps with MLP₁ comm) -->
+  <rect x="450" y="72" width="100" height="36" rx="4" fill="#1f6feb"/>
+  <text x="500" y="95" fill="#e6edf3" text-anchor="middle">MLP₀</text>
+
+  <!-- S₀ -->
+  <rect x="555" y="72" width="80" height="36" rx="4" fill="#1f6feb"/>
+  <text x="595" y="95" fill="#e6edf3" text-anchor="middle">S₀</text>
+
+  <!-- A0₁ reuse in µBatch₀ row — actually belongs to batch1, skip for clarity -->
+
+  <!-- ===== µBatch₀ Comm blocks ===== -->
+  <!-- D₀ -->
+  <rect x="280" y="152" width="100" height="36" rx="4" fill="#388bfd" opacity="0.7"/>
+  <text x="330" y="175" fill="#e6edf3" text-anchor="middle">D₀</text>
+
+  <!-- C₀ -->
+  <rect x="555" y="152" width="185" height="36" rx="4" fill="#388bfd" opacity="0.7"/>
+  <text x="647" y="175" fill="#e6edf3" text-anchor="middle">C₀</text>
+
+  <!-- ===== µBatch₁ Compute blocks ===== -->
+  <!-- MLP₁ -->
+  <rect x="280" y="232" width="100" height="36" rx="4" fill="#b45309"/>
+  <text x="330" y="255" fill="#e6edf3" text-anchor="middle">MLP₁</text>
+
+  <!-- S₁ -->
+  <rect x="385" y="232" width="60" height="36" rx="4" fill="#b45309"/>
+  <text x="415" y="255" fill="#e6edf3" text-anchor="middle">S₁</text>
+
+  <!-- A0₁ -->
+  <rect x="600" y="232" width="75" height="36" rx="4" fill="#b45309"/>
+  <text x="637" y="255" fill="#e6edf3" text-anchor="middle">A0₁</text>
+
+  <!-- A1₁ -->
+  <rect x="680" y="232" width="75" height="36" rx="4" fill="#b45309"/>
+  <text x="717" y="255" fill="#e6edf3" text-anchor="middle">A1₁</text>
+
+  <!-- ===== µBatch₁ Comm blocks ===== -->
+  <!-- D₁ -->
+  <rect x="110" y="292" width="165" height="28" rx="4" fill="#c9650a" opacity="0.7"/>
+  <text x="192" y="311" fill="#e6edf3" text-anchor="middle">D₁</text>
+
+  <!-- C₁ -->
+  <rect x="385" y="292" width="145" height="28" rx="4" fill="#c9650a" opacity="0.7"/>
+  <text x="457" y="311" fill="#e6edf3" text-anchor="middle">C₁</text>
+
+  <!-- Yield arrows between threads -->
+  <line x1="280" y1="108" x2="280" y2="152" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="450" y1="188" x2="450" y2="232" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="555" y1="108" x2="555" y2="152" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="555" y1="268" x2="555" y2="292" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Arrow marker -->
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#3fb950"/>
+    </marker>
+  </defs>
+
+  <!-- Legend -->
+  <rect x="110" y="130" width="12" height="12" fill="#1f6feb" rx="2"/>
+  <text x="127" y="141" fill="#8b949e" font-size="11">Compute (µBatch₀)</text>
+
+  <rect x="260" y="130" width="12" height="12" fill="#b45309" rx="2"/>
+  <text x="277" y="141" fill="#8b949e" font-size="11">Compute (µBatch₁)</text>
+
+  <rect x="420" y="130" width="12" height="12" fill="#388bfd" opacity="0.7" rx="2"/>
+  <text x="437" y="141" fill="#8b949e" font-size="11">Comm (µBatch₀)</text>
+
+  <rect x="560" y="130" width="12" height="12" fill="#c9650a" opacity="0.7" rx="2"/>
+  <text x="577" y="141" fill="#8b949e" font-size="11">Comm (µBatch₁)</text>
+
+  <line x1="670" y1="130" x2="682" y2="130" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="688" y="136" fill="#8b949e" font-size="11">yield</text>
+
+</svg>
