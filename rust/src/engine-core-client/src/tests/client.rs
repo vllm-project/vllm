@@ -22,8 +22,8 @@ use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, Zmq
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::multimodal::{
-    MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmSlice, PlaceholderRange,
-    SliceSpec,
+    MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmModality, MmSlice,
+    PlaceholderRange, SliceSpec,
 };
 use crate::protocol::output::{
     DpControlMessage, DpControlOutput, EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs,
@@ -191,7 +191,7 @@ fn sample_multimodal_request() -> EngineCoreRequest {
                     }),
                 },
             )])),
-            modality: "image".to_string(),
+            modality: MmModality::Image,
             identifier: "mm-cache-key".to_string(),
             mm_position: PlaceholderRange {
                 offset: 1,

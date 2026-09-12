@@ -280,23 +280,11 @@ def _make_metadata_with_slice(
         query_start_loc[1:] -= tokens_skipped
         query_start_loc_cpu[1:] -= tokens_skipped
     seq_lens = attn_metadata.seq_lens[request_slice]
-    # Read raw fields to avoid triggering the deprecated D2H-syncing properties.
-    seq_lens_cpu = (
-        attn_metadata._seq_lens_cpu[request_slice]
-        if attn_metadata._seq_lens_cpu is not None
-        else None
-    )
     seq_lens_cpu_upper_bound = (
         attn_metadata.seq_lens_cpu_upper_bound[request_slice]
         if attn_metadata.seq_lens_cpu_upper_bound is not None
         else None
     )
-    num_computed_tokens_cpu = (
-        attn_metadata._num_computed_tokens_cpu[request_slice]
-        if attn_metadata._num_computed_tokens_cpu is not None
-        else None
-    )
-
     if splits_last_request:
         # NOTE: We use start_locs (the original query_start_loc_cpu) to calculate
         # the tokens skipped because query_start_loc_cpu might have been modified
@@ -309,9 +297,6 @@ def _make_metadata_with_slice(
         #  (not cudagraph compatible)
         seq_lens = seq_lens.clone()
         seq_lens[-1] -= tokens_skipped
-        if seq_lens_cpu is not None:
-            seq_lens_cpu = seq_lens_cpu.clone()
-            seq_lens_cpu[-1] -= tokens_skipped
         if seq_lens_cpu_upper_bound is not None:
             seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound.clone()
             seq_lens_cpu_upper_bound[-1] -= tokens_skipped
@@ -346,8 +331,6 @@ def _make_metadata_with_slice(
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-        _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=num_computed_tokens_cpu,
     )
 
 
