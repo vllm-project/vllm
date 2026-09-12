@@ -485,11 +485,27 @@ class CommonAttentionMetadata:
         # per-request draft split on device, so the CPU copy carries the right total
         # but not the right per-request boundaries. Padding requests have a query
         # length of zero and drop out of the repeat.
+        #
+        # Contract: query slots, num_reqs, and block_table rows must agree.
+        # Request indices are built from num_reqs (not an independently sized
+        # tensor). Do NOT clamp an OOB req_idx onto another request's KV row —
+        # fail closed here instead. CUDA-graph capture that keeps padded request
+        # slots must pad block_table_tensor to num_reqs before this runs.
         num_mapped_tokens = int(self.query_start_loc_cpu[-1])
         query_lens = self.query_start_loc[1:] - self.query_start_loc[:-1]
+        if query_lens.shape[0] != self.num_reqs:
+            raise RuntimeError(
+                "token_to_req_indices: query_start_loc slots "
+                f"({query_lens.shape[0]}) != num_reqs ({self.num_reqs})"
+            )
+        if self.block_table_tensor.shape[0] != self.num_reqs:
+            raise RuntimeError(
+                "token_to_req_indices: block_table rows "
+                f"({self.block_table_tensor.shape[0]}) != num_reqs ({self.num_reqs})"
+            )
         assert buffer.shape[0] >= max(num_mapped_tokens, num_tokens)
         token_to_req_indices = torch.repeat_interleave(
-            torch.arange(query_lens.shape[0], dtype=torch.int32, device=buffer.device),
+            torch.arange(self.num_reqs, dtype=torch.int32, device=buffer.device),
             query_lens,
             output_size=num_mapped_tokens,
         )

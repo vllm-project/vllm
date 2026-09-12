@@ -837,11 +837,15 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                 num_decode_tokens, num_decode_tokens + num_prefill_tokens
             )
             block_size = attn_metadata.block_size // self.compress_ratio
+            # Prefill must slice to num_reqs (decode already uses [:num_decodes]).
+            # Keeps block_table rows aligned with token_to_req_indices domain.
+            num_reqs = attn_metadata.num_reqs
+            assert attn_metadata.block_table.shape[0] >= num_reqs
             extra_sparse_indices, extra_sparse_lengths = (
                 compute_global_topk_indices_and_lens(
                     local_topk_indices,
                     swa_metadata.token_to_req_indices[prefill_token_slice],
-                    attn_metadata.block_table,
+                    attn_metadata.block_table[:num_reqs],
                     block_size,
                     swa_metadata.is_valid_token[prefill_token_slice],
                 )

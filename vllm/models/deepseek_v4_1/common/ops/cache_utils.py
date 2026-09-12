@@ -468,6 +468,8 @@ def compute_global_topk_indices_and_lens(
         topk_indices.shape[-1],
         token_to_req_indices,
         block_table,
+        block_table.shape[0],
+        block_table.shape[1],
         block_table.stride(0),
         block_size,
         is_valid_token,
@@ -476,7 +478,7 @@ def compute_global_topk_indices_and_lens(
     return global_topk_indices, topk_lens
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["block_table_rows", "block_table_cols"])
 def _compute_global_topk_indices_and_lens_kernel(
     global_topk_indices_ptr,
     global_topk_indices_stride: tl.constexpr,
@@ -486,6 +488,8 @@ def _compute_global_topk_indices_and_lens_kernel(
     topk: tl.constexpr,
     token_to_req_indices_ptr,
     block_table_ptr,
+    block_table_rows,
+    block_table_cols,
     block_table_stride: tl.constexpr,
     block_size: tl.constexpr,
     is_valid_token_ptr,
@@ -494,6 +498,7 @@ def _compute_global_topk_indices_and_lens_kernel(
     token_idx = tl.program_id(0)
     is_valid_token = tl.load(is_valid_token_ptr + token_idx)
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+    req_idx_valid = (req_idx >= 0) & (req_idx < block_table_rows)
 
     count = tl.zeros((), dtype=tl.int32)
     for i in range(0, topk, TRITON_BLOCK_SIZE):
@@ -505,26 +510,39 @@ def _compute_global_topk_indices_and_lens_kernel(
             mask=mask,
             other=-1,
         )
-        is_valid = local_idx >= 0
-
         block_indices = local_idx // block_size
+        is_valid = (
+            (local_idx >= 0)
+            & is_valid_token
+            & req_idx_valid
+            & (block_indices < block_table_cols)
+        )
         block_numbers = tl.load(
             block_table_ptr + req_idx * block_table_stride + block_indices,
             mask=mask & is_valid,
+            other=0,
         )
         block_offsets = local_idx % block_size
 
         slot_ids = block_numbers * block_size + block_offsets
-        slot_ids = tl.where(is_valid, slot_ids, -1)
+        valid_i32 = is_valid.to(tl.int32)
+        packed_offset = count + tl.cumsum(valid_i32, axis=0) - valid_i32
+
         tl.store(
             global_topk_indices_ptr + token_idx * global_topk_indices_stride + offset,
-            slot_ids,
+            -1,
             mask=mask,
         )
-        count += tl.sum(is_valid.to(tl.int32), axis=0)
+        tl.store(
+            global_topk_indices_ptr
+            + token_idx * global_topk_indices_stride
+            + packed_offset,
+            slot_ids,
+            mask=mask & is_valid,
+        )
+        count += tl.sum(valid_i32, axis=0)
 
-    # Zero out length for padding tokens.
-    tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
+    tl.store(topk_lens_ptr + token_idx, count)
 
 
 # FlashMLA sparse prefill asserts `params.topk % B_TOPK == 0` (see
