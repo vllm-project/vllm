@@ -384,10 +384,12 @@ def test_human_readable_int_rejects_invalid(invalid: str):
         human_readable_int(invalid)
 
 
-def _make_scaling_llm() -> AsyncLLM:
+def _make_scaling_llm(all2all_backend: str = "allgather_reducescatter") -> AsyncLLM:
     llm = AsyncLLM.__new__(AsyncLLM)
     llm.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(data_parallel_size=2),
+        parallel_config=SimpleNamespace(
+            data_parallel_size=2, all2all_backend=all2all_backend
+        ),
         use_v2_model_runner=True,
     )
     llm.engine_core = SimpleNamespace(
@@ -472,6 +474,23 @@ async def test_mrv2_scaling_closes_admission_drains_then_commits():
         assert llm.engine_core.commit_elastic_ep.await_count == 1
         assert not get_scaling_elastic_ep()
         assert llm.vllm_config.parallel_config.data_parallel_size == 4
+    finally:
+        set_scaling_elastic_ep(False)
+
+
+@pytest.mark.asyncio
+async def test_mrv2_scaling_skips_drain_when_graphs_are_reused():
+    """Existing NIXL EP ranks keep their graphs and do not re-warm at commit."""
+    llm = _make_scaling_llm(all2all_backend="nixl_ep")
+    llm._drain_requests_for_elastic_ep = AsyncMock()
+
+    from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
+
+    set_scaling_elastic_ep(False)
+    try:
+        await llm._scale_elastic_ep(4, 30)
+        llm._drain_requests_for_elastic_ep.assert_not_awaited()
+        assert llm.engine_core.commit_elastic_ep.await_count == 1
     finally:
         set_scaling_elastic_ep(False)
 

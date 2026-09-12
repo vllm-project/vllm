@@ -1202,8 +1202,17 @@ class AsyncLLM(EngineClient):
                 self._logger_ref[0] = self.logger_manager
             self.logger_manager.log_engine_initialized()
 
+        from vllm.distributed.elastic_ep.elastic_execute import (
+            can_reuse_fused_moe_kernel,
+        )
+
+        # MRV2 ranks that re-warm at commit need an empty request pool.
+        drain = envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS or (
+            self.vllm_config.use_v2_model_runner
+            and not can_reuse_fused_moe_kernel(self.vllm_config.parallel_config)
+        )
         set_scaling_elastic_ep(True)
-        if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS or self.vllm_config.use_v2_model_runner:
+        if drain:
             await self._drain_requests_for_elastic_ep(drain_timeout)
 
         await self.engine_core.commit_elastic_ep()
