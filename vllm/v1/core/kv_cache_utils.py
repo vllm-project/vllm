@@ -1044,7 +1044,7 @@ def is_kv_cache_spec_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     try:
         kv_cache_spec_values = list(kv_cache_spec.values())
         _ = kv_cache_spec_values[0].merge(kv_cache_spec_values)
-    except AssertionError:
+    except (AssertionError, ValueError):
         return False
     return True
 
@@ -1099,7 +1099,11 @@ def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
     Get the page size of the KV cache.
     """
     page_sizes = {layer.page_size_bytes for layer in kv_cache_specs}
-    assert len(page_sizes) == 1
+    if len(page_sizes) != 1:
+        raise ValueError(
+            f"Expected exactly one unique page size, got {len(page_sizes)}: "
+            f"{page_sizes}"
+        )
     return page_sizes.pop()
 
 
