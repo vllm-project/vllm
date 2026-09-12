@@ -14,10 +14,36 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import get_tokenizer
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.structured_output.backend_guidance import GuidanceBackend
+from vllm.v1.structured_output.backend_guidance import (
+    GuidanceBackend,
+    _cached_serialize_guidance_grammar,
+)
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
 TOKENIZER = "openai-community/gpt2"
+
+
+def test_guidance_grammar_serialization_cache():
+    _cached_serialize_guidance_grammar.cache_clear()
+    grammar_spec = '{"type":"object","properties":{"value":{"type":"string"}}}'
+
+    first = _cached_serialize_guidance_grammar(
+        StructuredOutputOptions.JSON,
+        grammar_spec,
+        False,
+        True,
+    )
+    second = _cached_serialize_guidance_grammar(
+        StructuredOutputOptions.JSON,
+        grammar_spec,
+        False,
+        True,
+    )
+
+    assert first is second
+    assert _cached_serialize_guidance_grammar.cache_info().hits == 1
+    assert _cached_serialize_guidance_grammar.cache_info().misses == 1
+    _cached_serialize_guidance_grammar.cache_clear()
 
 
 @pytest.fixture(scope="module")
