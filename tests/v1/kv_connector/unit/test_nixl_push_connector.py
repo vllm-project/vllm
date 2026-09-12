@@ -26,6 +26,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -33,6 +34,7 @@ import msgspec
 import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    PUSH_FAIL_NOTIF_PREFIX,
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
     NixlConnectorMetadata,
@@ -343,6 +345,15 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._deferred_push_inbox = queue.Queue()
         w._abandoned_push_lock = threading.Lock()
         w._abandoned_push_ids = {}
+        w._pending_handshake_callbacks = {}
+        w._abandoned_push_notified = set()
+        w._failed_write_reqs = set()
+        w._failed_recv_reqs = queue.Queue()
+        w._invalid_block_ids = queue.Queue()
+        w._is_hma_required = False
+        w.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
+        w.xfer_stats = MagicMock()
+        w._handshake_lock = threading.RLock()
         w._push_writer_wake = threading.Event()
         w._push_writer_stop = threading.Event()
         w._push_writer_thread = None
@@ -605,12 +616,29 @@ def test_do_start_push_kv_defers_then_writes_when_handshake_ready():
     assert meta.remote.request_id == "req-hs"
 
 
+def _abandoned_worker() -> _StubWriterWorker:
+    """Stub with a decode agent so abandoned-push notifs can be observed."""
+    w = _StubWriterWorker.fresh()
+    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    w.nixl_wrapper = MagicMock()
+    w._remote_agents["decode-engine"] = {(0, 0): "agent-decode"}
+    return w
+
+
+def _assert_abandoned_push_notified(w: _StubWriterWorker, request_id: str) -> None:
+    w.nixl_wrapper.send_notif.assert_called()
+    call = w.nixl_wrapper.send_notif.call_args
+    assert call.args[0] == "agent-decode"
+    notif = call.kwargs["notif_msg"]
+    assert notif.startswith(PUSH_FAIL_NOTIF_PREFIX)
+    assert notif == PUSH_FAIL_NOTIF_PREFIX + f"{request_id}:{w.world_size}".encode()
+
+
 def test_do_start_push_kv_drops_deferred_write_after_request_ends():
     """If the producer lease ends while the P→D handshake is still
     in flight, the completion callback must not queue a WRITE: those
     source blocks may already have been reused by another request."""
-    w = _StubWriterWorker.fresh()
-    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    w = _abandoned_worker()
     xfer_calls: list[dict[str, Any]] = []
     w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
 
@@ -625,13 +653,13 @@ def test_do_start_push_kv_drops_deferred_write_after_request_ends():
     assert w._deferred_push_inbox.qsize() == 0
     assert xfer_calls == []
     assert not w._push_writer_wake.is_set()
+    _assert_abandoned_push_notified(w, "req-stale")
 
 
 def test_do_start_push_kv_skips_ready_write_after_request_ends():
     """Handshake already ready: an expired/finished request must not
     submit a WRITE from leftover logical block ids."""
-    w = _StubWriterWorker.fresh()
-    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    w = _abandoned_worker()
     xfer_calls: list[dict[str, Any]] = []
     w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
     w._ensure_handshake = lambda *a, **k: None
@@ -640,59 +668,148 @@ def test_do_start_push_kv_skips_ready_write_after_request_ends():
     _real_do_start_push_kv(w, "req-done", ([4, 5],), _registration_data("req-done"))
 
     assert xfer_calls == []
+    _assert_abandoned_push_notified(w, "req-done")
 
 
 def test_push_reg_match_skips_write_after_request_ends():
     """A PUSH_REG that matches leftover finished blocks must not WRITE
     once the producer request has been abandoned."""
-    w = _StubWriterWorker.fresh()
-    w._logical_to_kernel_block_ids = lambda x, ratio: x
+    w = _abandoned_worker()
     xfer_calls: list[dict[str, Any]] = []
     w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
     w._ensure_handshake = lambda *a, **k: None
     w._push_finished_blocks["req-A"] = ([200, 201],)
     w._abandon_push("req-A")
-    w._do_start_push_kv = (
-        lambda rid, blocks, rd: NixlPushConnectorWorker._do_start_push_kv(
-            w, rid, blocks, rd
-        )
-    )
+
+    def _start(rid, blocks, rd):
+        NixlPushConnectorWorker._do_start_push_kv(w, rid, blocks, rd)
+
+    object.__setattr__(w, "_do_start_push_kv", _start)
 
     notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(_registration_data("req-A"))
     w._handle_push_reg_notif(notif)
 
     assert xfer_calls == []
     assert w.start_push_calls == []
+    _assert_abandoned_push_notified(w, "req-A")
 
 
-def test_writer_loop_skips_abandoned_deferred_push():
-    """A deferred inbox entry for an abandoned request is dropped and
-    does not re-enter ``_do_start_push_kv``."""
-    w = _StubWriterWorker.fresh()
-    w.nixl_wrapper = MagicMock()
+def test_writer_loop_notifies_decode_for_abandoned_deferred_push():
+    """A deferred inbox entry for an abandoned request does not WRITE;
+    D is told so the decode request can fail instead of waiting."""
+    w = _abandoned_worker()
     w.nixl_wrapper.get_new_notifs.return_value = {}
     w._abandon_push("req-dead")
+    xfer_calls: list[dict[str, Any]] = []
+    w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
 
-    processed = threading.Event()
+    notified = threading.Event()
+    orig = w._notify_abandoned_push
 
-    def _tracked(rid, blocks, rd):
-        w.start_push_calls.append((rid, blocks, rd))
-        processed.set()
+    def _tracked(rid, rd):
+        orig(rid, rd)
+        notified.set()
 
-    w._do_start_push_kv = _tracked  # type: ignore[method-assign]
+    w._notify_abandoned_push = _tracked  # type: ignore[method-assign]
     w._deferred_push_inbox.put(("req-dead", ([1, 2],), _registration_data("req-dead")))
     w._push_writer_wake.set()
 
     t = threading.Thread(target=w._push_writer_loop, daemon=True)
     t.start()
     try:
-        assert not processed.wait(timeout=1.0)
+        assert notified.wait(timeout=2.0), "writer did not notify abandoned push"
     finally:
         w._push_writer_stop.set()
         w._push_writer_wake.set()
         t.join(timeout=2)
 
-    assert w.start_push_calls == []
+    assert xfer_calls == []
+    _assert_abandoned_push_notified(w, "req-dead")
+
+
+def test_abandoned_id_kept_while_handshake_callback_pending(monkeypatch):
+    """A handshake callback still pending after the tombstone TTL must
+    not queue a WRITE: GC of abandoned ids skips in-flight callbacks."""
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker."
+        "_ABANDONED_PUSH_TTL_S",
+        0.01,
+    )
+    w = _abandoned_worker()
+    xfer_calls: list[dict[str, Any]] = []
+    w._xfer_blocks_for_req = lambda **kw: xfer_calls.append(kw)
+    fut: Future = Future()
+    w._ensure_handshake = lambda *a, **k: fut
+
+    rd = _registration_data("req-stale")
+    _real_do_start_push_kv(w, "req-stale", ([1, 2, 3],), rd)
+    w._abandon_push("req-stale")
+    time.sleep(0.02)
+    # A later abandon would have GC'd req-stale if the pending callback
+    # did not pin the tombstone.
+    w._abandon_push("req-other")
+    assert w._is_push_abandoned("req-stale")
+
+    fut.set_result(({(0, 0): "agent"}, 0.0))
+
+    assert w._deferred_push_inbox.qsize() == 0
+    assert xfer_calls == []
+    _assert_abandoned_push_notified(w, "req-stale")
+
+
+def test_abandoned_id_expires_after_ttl_without_pending_callback(monkeypatch):
+    """Ids with no in-flight handshake are still reclaimed after the TTL."""
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker."
+        "_ABANDONED_PUSH_TTL_S",
+        0.01,
+    )
+    w = _StubWriterWorker.fresh()
+    w._abandon_push("req-old")
+    time.sleep(0.02)
+    w._abandon_push("req-new")
+    assert not w._is_push_abandoned("req-old")
+    assert w._is_push_abandoned("req-new")
+
+
+def test_decode_fails_recv_on_abandoned_push_notif():
+    """D treats the stand-in notif as a failed WRITE and fails the recv
+    instead of waiting for a completion that will never arrive."""
+    w = _StubWriterWorker.fresh()
+    w.transfer_topo = MagicMock()
+    w._recving_metadata["req-stale"] = SimpleNamespace(
+        pp_size=1, local_block_ids=([100, 101],)
+    )
+    body = f"req-stale:{w.world_size}"
+    w._pending_completion_notifs.put(PUSH_FAIL_NOTIF_PREFIX + body.encode())
+
+    notified = w._get_new_notifs()
+
+    assert notified == set()
+    assert w._failed_recv_reqs.get_nowait() == "req-stale"
+    assert "req-stale" not in w._recving_transfers
+    assert w._invalid_block_ids.get_nowait() == {100, 101}
+    w.xfer_stats.record_failed_transfer.assert_called_once()
+
+
+def test_abandoned_push_notif_waits_for_sibling_producer_ranks():
+    """Do not fail D on the first PUSH_FAIL when another producer rank
+    may still have a WRITE in flight."""
+    w = _StubWriterWorker.fresh()
+    w.transfer_topo = MagicMock()
+    w._recving_metadata["d-req"] = SimpleNamespace(
+        pp_size=1, local_block_ids=([100, 101],)
+    )
+    body = "d-req:2"
+    w._pending_completion_notifs.put(PUSH_FAIL_NOTIF_PREFIX + body.encode())
+    w._get_new_notifs()
+    assert w._failed_recv_reqs.empty()
+    assert w.consumer_notification_counts_by_req["d-req"] == 1
+
+    w._pending_completion_notifs.put(body.encode())
+    w._get_new_notifs()
+    assert w._failed_recv_reqs.get_nowait() == "d-req"
+    assert "d-req" not in w._recving_transfers
 
 
 def test_do_start_push_kv_drops_request_on_handshake_failure():

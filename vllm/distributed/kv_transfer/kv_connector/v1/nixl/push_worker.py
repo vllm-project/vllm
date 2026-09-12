@@ -47,6 +47,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    PUSH_FAIL_NOTIF_PREFIX,
     PUSH_REG_NOTIF_PREFIX,
     NixlConnectorMetadata,
     RemoteMeta,
@@ -77,7 +78,13 @@ _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
 
 # How long a finished/expired request id stays abandoned so a late
 # handshake callback cannot WRITE after the producer lease ended.
+# IDs with an in-flight handshake callback are never expired: the
+# callback itself is the bound, and the NIXL handshake receive timeout
+# is 5s. The TTL only reclaims ids that have no pending callback.
 _ABANDONED_PUSH_TTL_S = 300.0
+
+# Notifs are decoded to str before dispatch; keep a str twin of the prefix.
+_PUSH_FAIL_PREFIX_STR = PUSH_FAIL_NOTIF_PREFIX.decode()
 
 
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
@@ -128,8 +135,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # Request ids whose producer lease ended or whose WRITE finished.
         # Checked on the handshake callback and again at WRITE submit so
         # a late callback cannot transfer from reused source blocks.
+        # IDs with a pending handshake callback are not TTL-expired.
         self._abandoned_push_lock = threading.Lock()
         self._abandoned_push_ids: dict[str, float] = {}
+        self._pending_handshake_callbacks: dict[str, int] = {}
+        self._abandoned_push_notified: set[str] = set()
+        # D-side: requests where P reported a WRITE it could not post.
+        # Failed only once the expected notif count completes.
+        self._failed_write_reqs: set[ReqId] = set()
 
         # Wake signal from engine main thread (start_load_kv / get_finished).
         # Writer self-polls at _PUSH_WRITER_POLL_INTERVAL_MS while it has
@@ -172,18 +185,95 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         Called from the engine main thread when the producer lease expires
         or the WRITE has already completed. A late handshake callback on
         another thread consults this before queueing a deferred WRITE.
+        Ids with an in-flight handshake callback are kept past the TTL so
+        the callback cannot WRITE after the tombstone is forgotten.
         """
         now = time.perf_counter()
         cutoff = now - _ABANDONED_PUSH_TTL_S
         with self._abandoned_push_lock:
             self._abandoned_push_ids[req_id] = now
-            stale = [rid for rid, ts in self._abandoned_push_ids.items() if ts < cutoff]
+            stale = [
+                rid
+                for rid, ts in self._abandoned_push_ids.items()
+                if ts < cutoff and self._pending_handshake_callbacks.get(rid, 0) == 0
+            ]
             for rid in stale:
                 del self._abandoned_push_ids[rid]
+                self._abandoned_push_notified.discard(rid)
 
     def _is_push_abandoned(self, req_id: str) -> bool:
         with self._abandoned_push_lock:
-            return req_id in self._abandoned_push_ids
+            ts = self._abandoned_push_ids.get(req_id)
+            if ts is None:
+                return False
+            if self._pending_handshake_callbacks.get(req_id, 0) > 0:
+                return True
+            if time.perf_counter() - ts >= _ABANDONED_PUSH_TTL_S:
+                del self._abandoned_push_ids[req_id]
+                self._abandoned_push_notified.discard(req_id)
+                return False
+            return True
+
+    def _note_pending_handshake_callback(self, req_id: str) -> None:
+        with self._abandoned_push_lock:
+            self._pending_handshake_callbacks[req_id] = (
+                self._pending_handshake_callbacks.get(req_id, 0) + 1
+            )
+
+    def _handshake_callback_finished(self, req_id: str) -> None:
+        with self._abandoned_push_lock:
+            n = self._pending_handshake_callbacks.get(req_id, 0) - 1
+            if n <= 0:
+                self._pending_handshake_callbacks.pop(req_id, None)
+            else:
+                self._pending_handshake_callbacks[req_id] = n
+
+    def _notify_abandoned_push(
+        self, request_id: str, registration_data: dict[str, Any]
+    ) -> None:
+        """Tell D the WRITE will not run so it can fail instead of waiting.
+
+        Best-effort: if the P→D handshake never completed there are no
+        remote agents and D falls back to its registration watchdog.
+        """
+        with self._abandoned_push_lock:
+            if request_id in self._abandoned_push_notified:
+                return
+            self._abandoned_push_notified.add(request_id)
+
+        self._log_failure(
+            failure_type="push_write_abandoned",
+            req_id=request_id,
+            msg="Producer request ended before WRITE; notifying decode",
+        )
+        decode_engine_id = registration_data.get("decode_engine_id")
+        decode_request_id = registration_data.get("request_id")
+        if not isinstance(decode_engine_id, str) or not isinstance(
+            decode_request_id, str
+        ):
+            return
+        notif_msg = (
+            PUSH_FAIL_NOTIF_PREFIX + f"{decode_request_id}:{self.world_size}".encode()
+        )
+        handshake_lock = getattr(self, "_handshake_lock", None)
+        if handshake_lock is not None:
+            with handshake_lock:
+                agents = dict(self._remote_agents.get(decode_engine_id) or {})
+        else:
+            agents = dict(self._remote_agents.get(decode_engine_id) or {})
+        nixl = getattr(self, "nixl_wrapper", None)
+        if nixl is None or not agents:
+            return
+        for rank, agent_name in agents.items():
+            try:
+                nixl.send_notif(agent_name, notif_msg=notif_msg)
+            except Exception as e:
+                self._log_failure(
+                    failure_type="push_fail_notif_failed",
+                    req_id=request_id,
+                    error=e,
+                    remote_rank=rank,
+                )
 
     # --- Engine-main-thread entry point -------------------------------- #
 
@@ -262,7 +352,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         rid, blocks, rd = self._deferred_push_inbox.get_nowait()
                     except queue.Empty:
                         break
-                    if not self._is_push_abandoned(rid):
+                    if self._is_push_abandoned(rid):
+                        self._notify_abandoned_push(rid, rd)
+                    else:
                         self._do_start_push_kv(rid, blocks, rd)
 
                 # 3. P-side finished blocks; match against pending regs.
@@ -454,9 +546,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if not local_block_ids:
             logger.warning("No local blocks to push for request %s", request_id)
             return
-        if self._is_push_abandoned(request_id):
-            logger.debug("Skipping push WRITE for abandoned request %s", request_id)
-            return
 
         # ``local_block_ids`` are P's logical block IDs; ``remote_block_ids``
         # (D's, from the PUSH_REG notif) are also logical.
@@ -465,6 +554,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         decode_request_id = registration_data["request_id"]
 
         # Runs on the background executor; defer the WRITE until it's ready.
+        # Even an already-abandoned request still handshakes so we can tell
+        # D the WRITE will not run instead of leaving it on the watchdog.
         fut = self._ensure_handshake(
             decode_engine_id,
             registration_data["decode_host"],
@@ -472,6 +563,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             registration_data["decode_tp_size"],
         )
         if fut is not None:
+            self._note_pending_handshake_callback(request_id)
 
             def _on_handshake(
                 f: Future[tuple[dict[tuple[int, int], str], float]],
@@ -479,17 +571,20 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 blocks: BlockIds = local_block_ids,
                 rd: dict[str, Any] = registration_data,
             ) -> None:
-                if (e := f.exception()) is not None:
-                    # The engine reclaims the blocks via the TTL so we dont free here
-                    self._log_failure(
-                        failure_type="push_handshake_failed", req_id=rid, error=e
-                    )
-                    return
-                if self._is_push_abandoned(rid):
-                    logger.debug("Dropping deferred push for abandoned request %s", rid)
-                    return
-                self._deferred_push_inbox.put((rid, blocks, rd))
-                self._push_writer_wake.set()
+                try:
+                    if (e := f.exception()) is not None:
+                        # Blocks are reclaimed via the lease TTL.
+                        self._log_failure(
+                            failure_type="push_handshake_failed", req_id=rid, error=e
+                        )
+                        return
+                    if self._is_push_abandoned(rid):
+                        self._notify_abandoned_push(rid, rd)
+                        return
+                    self._deferred_push_inbox.put((rid, blocks, rd))
+                    self._push_writer_wake.set()
+                finally:
+                    self._handshake_callback_finished(rid)
 
             fut.add_done_callback(_on_handshake)
             return
@@ -497,7 +592,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # expired while we waited, and those source blocks may already
         # belong to another request.
         if self._is_push_abandoned(request_id):
-            logger.debug("Skipping push WRITE for abandoned request %s", request_id)
+            self._notify_abandoned_push(request_id, registration_data)
             return
 
         # Keep the engine alive while it is actively receiving pushes, mirroring
@@ -524,6 +619,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         )
 
         t0 = time.perf_counter()
+        if self._is_push_abandoned(request_id):
+            self._notify_abandoned_push(request_id, registration_data)
+            return
         self._xfer_blocks_for_req(req_id=request_id, meta=push_meta)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         if elapsed_ms > 200.0:
@@ -769,32 +867,24 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._handle_heartbeat(msg[3:])
                 continue
 
+            failed_write = msg.startswith(_PUSH_FAIL_PREFIX_STR)
+            if failed_write:
+                msg = msg[len(_PUSH_FAIL_PREFIX_STR) :]
+
             req_id, tp_size = msg.rsplit(":", 1)
 
             # Not tracked as a P-side send/process for this notif.
             if req_id not in self._reqs_to_send and req_id not in self._reqs_to_process:
-                if (meta := self._recving_metadata.get(req_id)) is not None:
-                    # Consumer waits for one notif per producer rank writing
-                    # here: pp_size stages * producers-per-consumer (>1 when
-                    # producer TP > consumer TP; tp_size is the producer TP).
-                    producers_per_consumer = max(1, int(tp_size) // self.world_size)
-                    expected_notifs = meta.pp_size * producers_per_consumer
-                    self.consumer_notification_counts_by_req[req_id] += 1
-                    notifs = self.consumer_notification_counts_by_req[req_id]
-                    if notifs < expected_notifs:
-                        continue
-                    del self.consumer_notification_counts_by_req[req_id]
-                    # P drove the transfer (we own no NIXL handle), so
-                    # materialise an empty ``_recving_transfers`` entry for
-                    # ``_pop_done_transfers`` to report done.
-                    self._recving_transfers.setdefault(req_id, [])
-                else:
-                    # Not tracked on either side (lease may have expired
-                    # before the notif arrived). Log and skip.
-                    logger.error(
-                        "Unrecognized request %s notif (may have expired).",
-                        req_id,
-                    )
+                self._count_consumer_notif(req_id, int(tp_size), failed_write)
+                continue
+
+            if failed_write:
+                # Counting it here would retire our own lease.
+                logger.error(
+                    "Ignoring failed-WRITE report for %s, which this worker is "
+                    "itself producing",
+                    req_id,
+                )
                 continue
 
             n_consumers = int(tp_size)
@@ -811,6 +901,66 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._reqs_to_send.pop(req_id, None)
         return notified_req_ids
 
+    def _count_consumer_notif(
+        self, req_id: str, producer_tp_size: int, failed_write: bool
+    ) -> None:
+        """Count one notif for a request this node is receiving.
+
+        A failed WRITE reports in place of its completion, so a failure
+        never short-circuits the count: every posted WRITE has landed by
+        the time the request is failed.
+        """
+        meta = self._recving_metadata.get(req_id)
+        if meta is None:
+            logger.error("Unrecognized request %s notif (may have expired).", req_id)
+            return
+
+        if failed_write:
+            self._failed_write_reqs.add(req_id)
+
+        producers_per_consumer = max(1, producer_tp_size // self.world_size)
+        expected_notifs = meta.pp_size * producers_per_consumer
+        self.consumer_notification_counts_by_req[req_id] += 1
+        if self.consumer_notification_counts_by_req[req_id] < expected_notifs:
+            return
+
+        del self.consumer_notification_counts_by_req[req_id]
+        if req_id not in self._failed_write_reqs:
+            # P drove the transfer (we own no NIXL handle), so materialise an
+            # empty ``_recving_transfers`` entry for ``_pop_done_transfers``
+            # to report done.
+            self._recving_transfers.setdefault(req_id, [])
+            return
+
+        self._failed_write_reqs.discard(req_id)
+        self._fail_incomplete_push(req_id, meta)
+
+    def _fail_incomplete_push(self, req_id: str, meta: ReqMeta) -> None:
+        """Fail a request whose producer could not post every WRITE."""
+        # ``_handle_failed_transfer`` invalidates one group only. With no
+        # blocks recorded the scheduler promotes the request as a successful
+        # load over a cache that was never written, so leave it to its lease.
+        if self._is_hma_required or len(self.kv_cache_config.kv_cache_groups) > 1:
+            reason = "recovery is unsupported for hybrid or multi-group models"
+        elif not any(meta.local_block_ids):
+            reason = "it has no local blocks to invalidate"
+        else:
+            reason = None
+
+        if reason is not None:
+            logger.error(
+                "Producer could not write all KV for request %s and %s; it will "
+                "hold its blocks until it is aborted",
+                req_id,
+                reason,
+            )
+            return
+
+        logger.warning(
+            "Producer could not write all KV for request %s; failing it.", req_id
+        )
+        self._handle_failed_transfer(req_id, None)
+
     def get_finished(self) -> tuple[set[str], set[str]]:
         # Engine main thread asking for completions: also wake the writer
         # so it gets a chance to drain NIXL notifs (heartbeats, completion
@@ -818,6 +968,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._push_writer_wake.set()
 
         done_sending, done_recving = super().get_finished()
+
+        # A request retired before its count completed would leak its flag.
+        self._failed_write_reqs.difference_update(done_recving)
 
         # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
         # writer thread also appends to it, so guard the pop.
