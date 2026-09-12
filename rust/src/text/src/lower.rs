@@ -98,6 +98,7 @@ pub fn lower_sampling_params(
         max_tokens,
         min_tokens,
         thinking_token_budget,
+        reasoning_eos_policy,
         logprobs,
         prompt_logprobs,
         min_p,
@@ -170,6 +171,7 @@ pub fn lower_sampling_params(
         max_tokens,
         min_tokens,
         thinking_token_budget,
+        reasoning_eos_policy,
         logprobs,
         prompt_logprobs,
         min_p,
@@ -416,6 +418,21 @@ mod tests {
     }
 
     #[test]
+    fn lower_sampling_params_forwards_reasoning_eos_policy() {
+        use vllm_engine_core_client::protocol::sampling::ReasoningEosPolicy;
+
+        let params = lower_sampling_params_with_limits(
+            SamplingParams {
+                reasoning_eos_policy: ReasoningEosPolicy::ForceEnd,
+                ..SamplingParams::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap();
+        assert_eq!(params.reasoning_eos_policy, ReasoningEosPolicy::ForceEnd);
+    }
+
+    #[test]
     fn lower_sampling_params_rejects_min_tokens_above_resolved_max_tokens() {
         let error = lower_sampling_params_with_limits(
             SamplingParams {
@@ -638,6 +655,7 @@ mod tests {
                 max_tokens: 999997,
                 min_tokens: 0,
                 thinking_token_budget: None,
+                reasoning_eos_policy: Stop,
                 logprobs: None,
                 prompt_logprobs: None,
                 min_p: 0.0,
@@ -692,6 +710,7 @@ mod tests {
                 max_tokens: 999997,
                 min_tokens: 0,
                 thinking_token_budget: None,
+                reasoning_eos_policy: Stop,
                 logprobs: None,
                 prompt_logprobs: None,
                 min_p: 0.0,
@@ -860,6 +879,7 @@ mod tests {
                 max_tokens: 40957,
                 min_tokens: 0,
                 thinking_token_budget: None,
+                reasoning_eos_policy: Stop,
                 logprobs: None,
                 prompt_logprobs: None,
                 min_p: 0.0,
@@ -924,6 +944,7 @@ mod tests {
                 max_tokens: 999997,
                 min_tokens: 0,
                 thinking_token_budget: None,
+                reasoning_eos_policy: Stop,
                 logprobs: None,
                 prompt_logprobs: None,
                 min_p: 0.0,
@@ -996,6 +1017,7 @@ mod tests {
                 max_tokens: 32,
                 min_tokens: 2,
                 thinking_token_budget: None,
+                reasoning_eos_policy: Stop,
                 logprobs: None,
                 prompt_logprobs: None,
                 min_p: 0.1,
@@ -1246,6 +1268,7 @@ mod tests {
                 max_tokens: 128,
                 min_tokens: 0,
                 thinking_token_budget: None,
+                reasoning_eos_policy: Stop,
                 logprobs: None,
                 prompt_logprobs: None,
                 min_p: 0.1,

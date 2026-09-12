@@ -156,6 +156,7 @@ pub(super) fn prepare_chat_request(
             max_tokens: request.max_completion_tokens,
             min_tokens: request.min_tokens,
             thinking_token_budget: request.thinking_token_budget,
+            reasoning_eos_policy: request.reasoning_eos_policy,
             logprobs: request.logprobs.then_some(top_logprobs),
             prompt_logprobs,
             min_p: request.min_p,
@@ -954,6 +955,26 @@ mod tests {
         assert_eq!(prepare(Some(64)), Some(64));
         assert_eq!(prepare(Some(-1)), Some(-1));
         assert_eq!(prepare(None), None);
+    }
+
+    #[test]
+    fn prepare_chat_request_passes_through_reasoning_eos_policy() {
+        use vllm_text::ReasoningEosPolicy;
+
+        let prepared = prepare_chat_request(
+            ChatCompletionRequest {
+                reasoning_eos_policy: ReasoningEosPolicy::ForceEnd,
+                ..base_request()
+            },
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.sampling_params.reasoning_eos_policy,
+            ReasoningEosPolicy::ForceEnd
+        );
     }
 
     #[test]

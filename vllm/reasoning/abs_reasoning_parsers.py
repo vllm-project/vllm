@@ -58,6 +58,16 @@ class ReasoningParser:
         """
         return None
 
+    @property
+    def implicit_reasoning_end_strs(self) -> list[str]:
+        """Strings that implicitly end reasoning (e.g. Qwen3 ``<tool_call>``).
+
+        The sampler uses these so thinking-budget forcing and
+        ``reasoning_eos_policy`` treat a tool call started inside ``<think>``
+        as having left the think block. Extraction/streaming is unchanged.
+        """
+        return []
+
     def has_engine_confirmed_reasoning_end(self) -> bool:
         """Whether the engine has confirmed the reasoning end transition.
 

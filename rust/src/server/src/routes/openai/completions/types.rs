@@ -164,6 +164,10 @@ pub struct CompletionRequest {
     /// to "no budget").
     pub thinking_token_budget: Option<i64>,
 
+    /// What to do when EOS/stop would end generation inside a reasoning block.
+    #[serde(default)]
+    pub reasoning_eos_policy: vllm_text::ReasoningEosPolicy,
+
     /// Request scheduling priority (lower means earlier; default 0)
     pub priority: Option<i32>,
 

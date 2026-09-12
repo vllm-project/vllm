@@ -220,6 +220,10 @@ class Qwen3Parser(ParserEngine):
     TOOL_END = TOOL_CALL_END
     TURN_BOUNDARIES: frozenset[str] = CHATML_TURN_BOUNDARIES
 
+    @property
+    def implicit_reasoning_end_strs(self) -> list[str]:
+        return [self.TOOL_START]
+
     def __init__(
         self,
         tokenizer: TokenizerLike,

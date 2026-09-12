@@ -24,6 +24,20 @@ fn default_max_tokens() -> u32 {
     16
 }
 
+/// What to do when an EOS/stop token would end generation inside a reasoning
+/// block.
+///
+/// Mirrors Python's `SamplingParams.reasoning_eos_policy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEosPolicy {
+    /// Current behavior: EOS ends the request while still in `<think>`.
+    #[default]
+    Stop,
+    /// Mask EOS and force `reasoning_end_str`, then continue into the answer.
+    ForceEnd,
+}
+
 ///
 /// Parameters for detecting repetitive N-gram patterns in output tokens.
 ///
@@ -86,6 +100,9 @@ pub struct EngineCoreSamplingParams {
     /// reaching this DTO, so only non-negative values are sent. Enforced
     /// engine-side (and only when a reasoning parser is configured).
     pub thinking_token_budget: Option<u64>,
+    /// What to do when EOS/stop would end generation inside a reasoning block.
+    /// Omitted Python `omit_defaults` maps to [`ReasoningEosPolicy::Stop`].
+    pub reasoning_eos_policy: ReasoningEosPolicy,
     /// Number of log probabilities to return per generated token.
     ///
     /// `None` disables sample logprobs. `-1` requests the full vocabulary.
@@ -161,6 +178,7 @@ impl EngineCoreSamplingParams {
             max_tokens: 65536,
             min_tokens: 0,
             thinking_token_budget: None,
+            reasoning_eos_policy: ReasoningEosPolicy::Stop,
             logprobs: None,
             prompt_logprobs: None,
             min_p: 0.0,

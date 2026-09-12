@@ -39,6 +39,10 @@ class ReasoningConfig:
         default=None, init=False, repr=False
     )
     """Token IDs that naturally terminate reasoning, as defined by the parser."""
+    _implicit_reasoning_end_token_ids: list[int] | None = field(
+        default=None, init=False, repr=False
+    )
+    """Token IDs that implicitly end reasoning (e.g. Qwen3 ``<tool_call>``)."""
 
     _enabled: bool = field(default=False, init=False, repr=False)
     """Private field indicating whether reasoning token IDs have been initialized.
@@ -66,6 +70,16 @@ class ReasoningConfig:
         """Token IDs that indicate the model naturally ended reasoning."""
         return self._natural_reasoning_end_token_ids
 
+    @property
+    def implicit_reasoning_end_token_ids(self) -> list[int] | None:
+        """Token IDs that implicitly end reasoning, such as a tool-call start.
+
+        Used by the sampler so a ``<tool_call>`` started inside ``<think>`` is
+        not treated as still-in-think (thinking budget and
+        ``reasoning_eos_policy``). The reasoning parser itself is unchanged.
+        """
+        return self._implicit_reasoning_end_token_ids
+
     def initialize_token_ids(self, model_config: ModelConfig) -> None:
         """Initialize reasoning token IDs from strings using the tokenizer."""
         if (
@@ -80,6 +94,7 @@ class ReasoningConfig:
         reasoning_start_str = self.reasoning_start_str
         reasoning_end_str = self.reasoning_end_str
         natural_reasoning_end_str = ""
+        implicit_reasoning_end_strs: list[str] = []
         if self.reasoning_parser:
             parser_cls = ReasoningParserManager.get_reasoning_parser(
                 self.reasoning_parser
@@ -93,6 +108,9 @@ class ReasoningConfig:
             if end_token and not reasoning_end_str:
                 reasoning_end_str = end_token
             natural_reasoning_end_str = end_token or ""
+            implicit_reasoning_end_strs = list(
+                getattr(reasoning_parser, "implicit_reasoning_end_strs", None) or []
+            )
 
         if not natural_reasoning_end_str:
             natural_reasoning_end_str = reasoning_end_str
@@ -110,6 +128,15 @@ class ReasoningConfig:
         self._natural_reasoning_end_token_ids = tokenizer.encode(
             natural_reasoning_end_str, add_special_tokens=False
         )
+        implicit_ids: list[int] = []
+        for implicit_str in implicit_reasoning_end_strs:
+            if not implicit_str:
+                continue
+            encoded = tokenizer.encode(implicit_str, add_special_tokens=False)
+            if encoded:
+                implicit_ids = encoded
+                break
+        self._implicit_reasoning_end_token_ids = implicit_ids
 
         if (
             not self._reasoning_start_token_ids

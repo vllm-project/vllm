@@ -27,6 +27,7 @@ from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import (
     BeamSearchParams,
+    ReasoningEosPolicy,
     RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
@@ -249,6 +250,14 @@ class CompletionRequest(OpenAIBaseModel):
             "-1 means unlimited (treated as unset)."
         ),
     )
+    reasoning_eos_policy: ReasoningEosPolicy = Field(
+        default="stop",
+        description=(
+            "What to do when EOS/stop would end generation inside a "
+            "reasoning block. 'stop' keeps current behavior; 'force_end' "
+            "emits reasoning_end_str and continues into the answer."
+        ),
+    )
 
     stream_interval: Annotated[int, Field(ge=1)] | None = Field(
         default=None,
@@ -402,6 +411,7 @@ class CompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
             thinking_token_budget=self.thinking_token_budget,
+            reasoning_eos_policy=self.reasoning_eos_policy,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
 

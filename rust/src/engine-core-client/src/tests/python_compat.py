@@ -40,6 +40,7 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     max_tokens: int = 16
     min_tokens: int = 0
     thinking_token_budget: int | None = None
+    reasoning_eos_policy: str = "stop"
     min_p: float = 0.0
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0

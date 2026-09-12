@@ -44,6 +44,7 @@ from vllm.logprobs import Logprob
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import (
     BeamSearchParams,
+    ReasoningEosPolicy,
     RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
@@ -256,6 +257,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     thinking_token_budget: ThinkingTokenBudget = None
+    reasoning_eos_policy: ReasoningEosPolicy = "stop"
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -753,6 +755,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
             thinking_token_budget=self.thinking_token_budget,
+            reasoning_eos_policy=self.reasoning_eos_policy,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
