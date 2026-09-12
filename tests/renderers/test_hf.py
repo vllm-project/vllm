@@ -599,6 +599,47 @@ def test_resolve_content_format_examples(template_path, expected_format):
 
 
 @pytest.mark.parametrize(
+    ("template_path", "given_format", "expected_resolved"),
+    [
+        # Forcing openai on a string-only template must fall back to string
+        ("template_chatml.jinja", "openai", "string"),
+        ("template_alpaca.jinja", "openai", "string"),
+        # Forcing string on an openai template is fine (string is always safe)
+        ("tool_chat_template_llama3.1_json.jinja", "string", "string"),
+        # Matching force is a no-op
+        ("template_chatml.jinja", "string", "string"),
+        ("tool_chat_template_llama3.1_json.jinja", "openai", "openai"),
+    ],
+)
+def test_resolve_content_format_forced_fallback(
+    template_path, given_format, expected_resolved
+):
+    model = "Qwen/Qwen2-VL-2B-Instruct"  # Dummy
+    model_config = ModelConfig(
+        model,
+        tokenizer=model,
+        trust_remote_code=True,
+    )
+    dummy_tokenizer = get_tokenizer(
+        model,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    dummy_tokenizer.chat_template = None
+
+    chat_template = load_chat_template(EXAMPLES_DIR / template_path)
+
+    resolved_format = resolve_chat_template_content_format(
+        chat_template,
+        None,
+        given_format,
+        dummy_tokenizer,
+        model_config=model_config,
+    )
+
+    assert resolved_format == expected_resolved
+
+
+@pytest.mark.parametrize(
     "model,template,add_generation_prompt,continue_final_message,expected_output",
     MODEL_TEMPLATE_GENERATION_OUTPUT,
 )
