@@ -160,12 +160,28 @@ def _run_request_to_finish(
 
 
 def _scheduler(engine):
-    """The offline engine's scheduler (LLMEngine -> InprocClient -> EngineCore).
+    """Return the scheduler used by the in-process offline engine.
 
-    The e2e runner builds the engine in process, so the scheduler object that
-    counts per-request preemptions is reachable without a metrics round trip.
+    The per-request preemption receipt is not exposed by ``RequestOutput`` or
+    the output processor, so this e2e test intentionally uses V1 in-process
+    mode. Multiprocess mode has no scheduler object in the client process.
     """
-    return engine.engine_core.engine_core.scheduler
+    client = getattr(engine, "engine_core", None)
+    core = getattr(client, "engine_core", None)
+    scheduler = getattr(core, "scheduler", None)
+    if scheduler is None:
+        client_name = type(client).__name__ if client is not None else "<missing>"
+        mode = (
+            "multiprocess"
+            if client_name in {"SyncMPClient", "AsyncMPClient"}
+            else "unknown"
+        )
+        raise AssertionError(
+            "survivor scheduler receipt requires V1 in-process mode "
+            "(VLLM_ENABLE_V1_MULTIPROCESSING=0); got "
+            f"{client_name} in {mode} mode"
+        )
+    return scheduler
 
 
 @dataclass
@@ -311,6 +327,8 @@ def test_uno_continuous_batching_survivor_matches_solo(
     monkeypatch.setattr(envs, "VLLM_USE_V2_MODEL_RUNNER", True)
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setattr(envs, "VLLM_ENABLE_V1_MULTIPROCESSING", False)
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     shared_prefix = "The quick brown fox jumps over the lazy dog. " * 16

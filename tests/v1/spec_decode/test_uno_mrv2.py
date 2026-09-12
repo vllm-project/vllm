@@ -586,6 +586,22 @@ def test_survivor_prompts_require_content_difference_at_shared_positions():
     assert not prompt_token_ids_are_pairwise_content_distinct([[1, 2], [1, 2, 3]])
 
 
+def test_survivor_scheduler_requires_v1_inprocess_mode():
+    """Scheduler receipts fail clearly when V1 multiprocessing hides the core."""
+    from tests.v1.e2e.spec_decode.test_uno import _scheduler
+
+    scheduler = object()
+    inprocess_engine = SimpleNamespace(
+        engine_core=SimpleNamespace(engine_core=SimpleNamespace(scheduler=scheduler))
+    )
+    assert _scheduler(inprocess_engine) is scheduler
+
+    multiprocess_client = type("SyncMPClient", (), {})()
+    multiprocess_engine = SimpleNamespace(engine_core=multiprocess_client)
+    with pytest.raises(AssertionError, match="VLLM_ENABLE_V1_MULTIPROCESSING=0"):
+        _scheduler(multiprocess_engine)
+
+
 def test_survivor_preemption_arithmetic_fits_then_overflows_the_budget():
     """The survivor window admits four prompts but their growth exceeds it.
 
