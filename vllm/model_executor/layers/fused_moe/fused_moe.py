@@ -715,6 +715,7 @@ def _fused_moe_triton_kernel_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
         USE_TD=resolve_moe_use_td() and not use_fp8 and k % config["BLOCK_SIZE_K"] == 0,
         num_warps=config["num_warps"],
         num_stages=config["num_stages"],
+        waves_per_eu=config.get("waves_per_eu"),
     )
 
 
@@ -774,12 +775,13 @@ def _FUSED_MOE_TRITON_KERNEL(
     USE_TD: bool = False,
     num_warps: int,
     num_stages: int,
+    waves_per_eu: int | None = None,
 ) -> DispatchSpec:
     grid: Any = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"])
         * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
     )
-    return grid, dict(
+    launch_kwargs = dict(
         a_ptr=A,
         b_ptr=B,
         c_ptr=C,
@@ -789,6 +791,9 @@ def _FUSED_MOE_TRITON_KERNEL(
         num_warps=num_warps,
         num_stages=num_stages,
     )
+    if waves_per_eu is not None:
+        launch_kwargs["waves_per_eu"] = waves_per_eu
+    return grid, launch_kwargs
 
 
 def invoke_fused_moe_wna16_cuda_kernel(
