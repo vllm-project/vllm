@@ -352,6 +352,7 @@ class DeltaMessage(OpenAIBaseModel):
     role: str | None = None
     content: str | None = None
     reasoning: str | None = None
+    reasoning_effort: str | None = None
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
 
     @model_serializer(mode="wrap")
