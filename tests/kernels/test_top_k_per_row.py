@@ -1427,14 +1427,20 @@ def test_persistent_topk_all_equal(num_rows: int, seq_len: int) -> None:
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 @pytest.mark.parametrize("num_rows", [1, 8, 64])
-@pytest.mark.parametrize("seq_len", [16383, 16384, 16385])
+@pytest.mark.parametrize("seq_len", [22015, 22016, 22017])
 @pytest.mark.parametrize("top_k", [512, 2048])
 def test_persistent_topk_path_transition(
     num_rows: int, seq_len: int, top_k: int
 ) -> None:
     """Either side of RADIX_THRESHOLD, where the row switches between the
     single-CTA select and the cooperative multi-CTA path. Both must produce
-    the same exact answer."""
+    the same exact answer.
+
+    The dispatch is ``max_seq_len <= RADIX_THRESHOLD`` (22016), so 22016 stays
+    single-CTA, 22017 goes cooperative, and 22015 is a below-boundary control.
+    num_rows 1 and 8 exercise that routing; num_rows 64 can instead select
+    FilteredTopK on devices offering at least 128 KiB of opt-in shared memory,
+    where it is correctness coverage rather than transition coverage."""
     torch.set_default_device("cuda:0")
     gen = torch.Generator(device="cuda").manual_seed(seq_len + top_k + num_rows)
     logits = torch.randn(num_rows, seq_len, generator=gen, device="cuda")
