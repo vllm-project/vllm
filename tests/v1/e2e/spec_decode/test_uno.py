@@ -4,7 +4,7 @@
 
 import os
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import combinations
 from pathlib import Path
 
@@ -38,6 +38,7 @@ from .uno_kv_budget import (
     mixed_growth_blocks,
     prompt_token_ids_are_pairwise_content_distinct,
     qwen3_geometry,
+    resolve_internal_request_ids,
     survivor_kv_budget,
     usage_with_free_blocks,
     worst_case_crossing_tokens,
@@ -125,6 +126,41 @@ def _write_receipt(receipt: str, request) -> str | None:
         print(f"survivor receipt could not be written to {target}: {error}")
         return None
     return target
+
+
+def _internal_request_ids(
+    engine, scheduler, external_ids: list[str]
+) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """Map external request ids to the ids the scheduler is keyed by.
+
+    The engine's own map is authoritative: the output processor records
+    ``external_req_ids[external] -> [internal, ...]`` when it registers a
+    request (`vllm/v1/engine/output_processor.py`). If a future engine stops
+    exposing it, fall back to matching the scheduler's own keys, which is the
+    dictionary this driver actually reads. Equality with the external id is
+    never enough: `InputProcessor.assign_request_id` appends eight random
+    characters unless VLLM_DISABLE_REQUEST_ID_RANDOMIZATION is set.
+    """
+    scheduler_keys = list(scheduler.requests)
+    engine_map = getattr(
+        getattr(engine, "output_processor", None), "external_req_ids", None
+    )
+    if engine_map is not None:
+        resolved: dict[str, str] = {}
+        problems: dict[str, list[str]] = {}
+        for external in external_ids:
+            candidates = [
+                key for key in engine_map.get(external, []) if key in scheduler_keys
+            ]
+            if len(candidates) == 1:
+                resolved[external] = candidates[0]
+            else:
+                problems[external] = candidates
+        if not problems:
+            return resolved, problems
+    # Either the engine no longer publishes the map, or it disagrees with the
+    # scheduler; fall back to the scheduler's keys and report what is there.
+    return resolve_internal_request_ids(scheduler_keys, external_ids)
 
 
 def _peer_trace(request) -> str:
@@ -314,45 +350,48 @@ class _MixedPhase:
     report that nothing was observed, never why.
     """
 
-    # Final greedy token IDs per finish peer, keyed by request id.
-    finished: dict[str, tuple[int, ...]]
+    # Final greedy token IDs per finish peer, keyed by EXTERNAL request id.
+    finished: dict[str, tuple[int, ...]] = field(default_factory=dict)
     # How many times each finish peer was preempted while still generating.
-    preempted_while_active: dict[str, int]
+    preempted_while_active: dict[str, int] = field(default_factory=dict)
     # One line per observed preemption: which request, at which token, while
     # which requests were running/waiting.
-    receipts: list[str]
+    receipts: list[str] = field(default_factory=list)
     # (request_id, generated tokens at preemption) per observed preemption. A
     # preemption at zero generated tokens is a prefill recompute and does not
     # satisfy the gate.
-    preemption_events: list[tuple[str, int]]
+    preemption_events: list[tuple[str, int]] = field(default_factory=list)
     # Highest scheduler-reported KV occupancy observed during the mixed phase.
-    peak_kv_cache_usage: float
+    peak_kv_cache_usage: float = 0.0
     # Free blocks at the fullest step, so the peak can be read in blocks.
-    min_free_blocks: int | None
+    min_free_blocks: int | None = None
     # Generated-token count per finish peer at every step, reduced to the
     # largest gap ever seen between the fastest and the slowest peer. This is
     # the receipt for the failure class the round-9 redesign closed: peers that
     # drift apart never hold their footprints at the same time, so a
     # grow-together budget is never crossed (see `worst_case_crossing_tokens`).
-    max_generation_lag: int
+    max_generation_lag: int = 0
     # Generated-token count per finish peer when it finished.
-    final_lengths: dict[str, int]
+    final_lengths: dict[str, int] = field(default_factory=dict)
     # Steps driven, and steps at which BOTH finish peers were resolvable in
     # `scheduler.requests`. The second number is what makes the per-request
     # receipt falsifiable: a zero here means the gate was reading an empty
     # channel, not that the engine never preempted.
-    steps: int
-    peer_visible_steps: int
+    steps: int = 0
+    peer_visible_steps: int = 0
     # Request ids the scheduler held at the last step, and every status each
     # finish peer was ever seen in. A PREEMPTED status is a preemption even if
     # the counter poll missed the step it happened on.
-    scheduler_request_ids_last: tuple[str, ...]
-    peer_statuses_seen: dict[str, tuple[str, ...]]
+    scheduler_request_ids_last: tuple[str, ...] = ()
+    peer_statuses_seen: dict[str, tuple[str, ...]] = field(default_factory=dict)
     # Final `num_preemptions` per finish peer, read once at the end.
-    peer_preemptions_final: dict[str, int]
+    peer_preemptions_final: dict[str, int] = field(default_factory=dict)
     # Bounded per-step trace: the steps around the fullest pool and the last
     # steps of the run, which is where a non-firing crossing has to be read.
-    trace: list[str]
+    trace: list[str] = field(default_factory=list)
+    # External request id -> the id `Scheduler.requests` is keyed by. Empty
+    # until the peers are injected and resolved.
+    internal_request_ids: dict[str, str] = field(default_factory=dict)
 
 
 def _run_survivor_with_peers(
@@ -364,6 +403,7 @@ def _run_survivor_with_peers(
     seed_sampling: SamplingParams,
     finish_sampling: SamplingParams,
     abort_sampling: SamplingParams,
+    phase: _MixedPhase,
     inject_after: int = 4,
 ) -> _MixedPhase:
     """Drive a seed while long peers join, finish and abort mid-stream.
@@ -387,52 +427,50 @@ def _run_survivor_with_peers(
     seed_len = 0
     seed_final = False
     abort_len = 0
-    finished: dict[str, tuple[int, ...]] = {}
-    preempted_while_active: dict[str, int] = {}
-    receipts: list[str] = []
-    peak_kv_cache_usage = 0.0
-    min_free_blocks: int | None = None
-    max_generation_lag = 0
+    # External id -> the id the scheduler is keyed by, filled at injection.
+    internal: dict[str, str] = {}
     seen_preemptions: dict[str, int] = {}
-    preemption_events: list[tuple[str, int]] = []
-    steps = 0
-    peer_visible_steps = 0
     statuses_seen: dict[str, list[str]] = {rid: [] for rid in finish_ids}
-    scheduler_request_ids_last: tuple[str, ...] = ()
     recent_trace: deque[str] = deque(maxlen=_TRACE_TAIL_STEPS)
     notable_trace: list[str] = []
     block_pool = scheduler.kv_cache_manager.block_pool
     while engine.has_unfinished_requests():
         outputs = engine.step()
-        steps += 1
+        phase.steps += 1
         usage = scheduler.get_kv_cache_usage()
         free_blocks = block_pool.get_num_free_blocks()
-        peak_kv_cache_usage = max(peak_kv_cache_usage, usage)
-        min_free_blocks = (
+        phase.peak_kv_cache_usage = max(phase.peak_kv_cache_usage, usage)
+        phase.min_free_blocks = (
             free_blocks
-            if min_free_blocks is None
-            else min(min_free_blocks, free_blocks)
+            if phase.min_free_blocks is None
+            else min(phase.min_free_blocks, free_blocks)
         )
-        scheduler_request_ids_last = tuple(sorted(scheduler.requests))
-        peers = {rid: scheduler.requests.get(rid) for rid in finish_ids}
+        phase.scheduler_request_ids_last = tuple(sorted(scheduler.requests))
+        peers = {
+            rid: scheduler.requests.get(internal[rid]) if rid in internal else None
+            for rid in finish_ids
+        }
         for request_id, request in peers.items():
             if request is None:
                 continue
             status = request.status.name
             if status not in statuses_seen[request_id]:
                 statuses_seen[request_id].append(status)
+        phase.peer_statuses_seen = {
+            request_id: tuple(seen) for request_id, seen in statuses_seen.items()
+        }
         if all(request is not None for request in peers.values()):
-            peer_visible_steps += 1
+            phase.peer_visible_steps += 1
             live_lengths = [
                 len(request.output_token_ids)
                 for request in peers.values()
                 if request is not None
             ]
-            max_generation_lag = max(
-                max_generation_lag, max(live_lengths) - min(live_lengths)
+            phase.max_generation_lag = max(
+                phase.max_generation_lag, max(live_lengths) - min(live_lengths)
             )
         record = (
-            f"step {steps}: usage={usage:.3%} free={free_blocks} "
+            f"step {phase.steps}: usage={usage:.3%} free={free_blocks} "
             f"running={sorted(r.request_id for r in scheduler.running)} "
             f"waiting={sorted(r.request_id for r in scheduler.waiting)} "
             + " ".join(f"{rid}=" + _peer_trace(req) for rid, req in peers.items())
@@ -442,6 +480,7 @@ def _run_survivor_with_peers(
             _TRACE_NOTABLE_STEPS
         ):
             notable_trace.append(record)
+        phase.trace = notable_trace + ["..."] + list(recent_trace)
         for output in outputs:
             if output.request_id == seed_id:
                 if output.outputs:
@@ -450,7 +489,12 @@ def _run_survivor_with_peers(
                     seed_final = True
             elif output.request_id in finish_id_set:
                 if output.finished and output.outputs:
-                    finished[output.request_id] = tuple(output.outputs[0].token_ids)
+                    phase.finished[output.request_id] = tuple(
+                        output.outputs[0].token_ids
+                    )
+                    phase.final_lengths[output.request_id] = len(
+                        output.outputs[0].token_ids
+                    )
             elif output.request_id == abort_id and output.outputs:
                 abort_len = max(abort_len, len(output.outputs[0].token_ids))
 
@@ -459,17 +503,29 @@ def _run_survivor_with_peers(
                 engine.add_request(f"uno-finish-peer-{index}", prompt, finish_sampling)
             engine.add_request(abort_id, abort_prompt, abort_sampling)
             injected = True
-            # Fail here, seconds into the run, rather than three minutes later
-            # with an empty receipt: `add_request` puts the request into
-            # `Scheduler.requests` synchronously, so if this handle cannot see
-            # them now it will never see anything, and every count this driver
-            # collects afterwards would be meaningless.
-            missing = [rid for rid in finish_ids if rid not in scheduler.requests]
-            assert not missing, (
-                "the scheduler handle cannot see the peers this driver just "
-                f"added, so its per-request receipt is blind: missing {missing}; "
-                f"scheduler holds {sorted(scheduler.requests)}. The receipt "
-                "channel, not the engine, is what needs fixing"
+            # `add_request` puts the request into `Scheduler.requests`
+            # synchronously, under the id the input processor assigned it --
+            # which is NOT the id passed above unless request-id randomization
+            # is disabled. Resolve it here, fail here if it cannot be resolved,
+            # and use the resolved key for every read below: polling by the
+            # external id is what left two GPU runs with an empty receipt.
+            internal, problems = _internal_request_ids(engine, scheduler, finish_ids)
+            phase.internal_request_ids = dict(internal)
+            assert not problems, (
+                "the survivor driver cannot map its peers onto the ids the "
+                f"scheduler is keyed by: {problems}; scheduler holds "
+                f"{sorted(scheduler.requests)}. Every per-request reading below "
+                "would be empty, so this is a receipt-channel failure, not an "
+                "engine verdict"
+            )
+            unknown = [
+                external
+                for external, key in internal.items()
+                if key not in scheduler.requests
+            ]
+            assert not unknown, (
+                f"resolved ids the scheduler does not hold: {unknown} -> "
+                f"{[internal[external] for external in unknown]}"
             )
 
         # Always retire the aborting peer so the loop terminates even if it was
@@ -489,60 +545,37 @@ def _run_survivor_with_peers(
             if request.num_preemptions <= seen_preemptions.get(request_id, 0):
                 continue
             seen_preemptions[request_id] = request.num_preemptions
+            phase.peer_preemptions_final = dict(seen_preemptions)
             generated = len(request.output_token_ids)
-            preemption_events.append((request_id, generated))
+            phase.preemption_events.append((request_id, generated))
             # A request can only be preempted while it is running, so an
             # increment before its finished output was delivered is exactly the
             # "preempted while active" receipt this gate needs. Whether it was
             # mid-generation is a separate question the gate asks with
             # `mid_generation_preemption_counts`.
-            if request_id not in finished:
-                preempted_while_active[request_id] = (
-                    preempted_while_active.get(request_id, 0) + 1
+            if request_id not in phase.finished:
+                phase.preempted_while_active[request_id] = (
+                    phase.preempted_while_active.get(request_id, 0) + 1
                 )
             receipt = (
-                f"step {steps}: {request_id} preempted at {generated} "
-                f"generated tokens of {finish_sampling.max_tokens}; "
+                f"step {phase.steps}: {request_id} ({internal[request_id]}) "
+                f"preempted at {generated} generated tokens of "
+                f"{finish_sampling.max_tokens}; "
                 f"usage={usage:.3%} free={free_blocks}; "
                 f"running={sorted(r.request_id for r in scheduler.running)}, "
                 f"waiting={sorted(r.request_id for r in scheduler.waiting)}"
             )
-            receipts.append(receipt)
+            phase.receipts.append(receipt)
             if len(notable_trace) < _TRACE_NOTABLE_STEPS:
                 notable_trace.append(receipt)
 
     assert injected, "peers never joined the seed mid-stream"
     assert aborted, "the aborting peer was never retired mid-stream"
-    assert all(request_id in finished for request_id in finish_ids), (
-        f"not every finish peer produced a finished output; finished={sorted(finished)}"
+    assert all(request_id in phase.finished for request_id in finish_ids), (
+        "not every finish peer produced a finished output; "
+        f"finished={sorted(phase.finished)}"
     )
-    return _MixedPhase(
-        finished=finished,
-        preempted_while_active=preempted_while_active,
-        receipts=receipts,
-        preemption_events=preemption_events,
-        peak_kv_cache_usage=peak_kv_cache_usage,
-        min_free_blocks=min_free_blocks,
-        max_generation_lag=max_generation_lag,
-        final_lengths={
-            request_id: len(tokens) for request_id, tokens in finished.items()
-        },
-        steps=steps,
-        peer_visible_steps=peer_visible_steps,
-        scheduler_request_ids_last=scheduler_request_ids_last,
-        peer_statuses_seen={
-            request_id: tuple(seen) for request_id, seen in statuses_seen.items()
-        },
-        peer_preemptions_final={
-            request_id: (
-                scheduler.requests[request_id].num_preemptions
-                if request_id in scheduler.requests
-                else seen_preemptions.get(request_id, 0)
-            )
-            for request_id in finish_ids
-        },
-        trace=notable_trace + ["...", *recent_trace],
-    )
+    return phase
 
 
 @pytest.mark.forked
@@ -814,103 +847,115 @@ def test_uno_continuous_batching_survivor_matches_solo(
         disable_log_stats=False,
     )
 
-    with vllm_runner(
-        "Qwen/Qwen3-8B",
-        **common,
-        speculative_config={
-            "method": "uno",
-            "uno_lora_path": uno_adapter_path,
-            "uno_mask_token_id": 151669,
-            "num_speculative_tokens": SURVIVOR_NUM_SPECULATIVE_TOKENS,
-        },
-    ) as runner:
-        engine = runner.llm.llm_engine
-        # Read the two settings the arithmetic assumes from the engine that was
-        # actually built, rather than trusting the literals passed above: a
-        # platform default or a config validator that flipped either of them
-        # would silently change what the pre-gate means.
-        engine_cache_config = engine.vllm_config.cache_config
-        engine_lookahead = engine.vllm_config.num_lookahead_tokens
-        assert not engine_cache_config.enable_prefix_caching, (
-            "the survivor engine enabled prefix caching, so the peers can share "
-            "decode blocks and the arithmetic above does not describe this run: "
-            f"cache_config.enable_prefix_caching="
-            f"{engine_cache_config.enable_prefix_caching}"
-        )
-        assert engine_lookahead == SURVIVOR_NUM_SPECULATIVE_TOKENS, (
-            "the engine reserves a different lookahead than the resident-block "
-            f"arithmetic assumes: num_lookahead_tokens={engine_lookahead} vs "
-            f"K={SURVIVOR_NUM_SPECULATIVE_TOKENS}"
-        )
-        assert engine_cache_config.num_gpu_blocks_override == budget_blocks, (
-            "the engine did not take the pinned KV pool: "
-            f"num_gpu_blocks_override="
-            f"{engine_cache_config.num_gpu_blocks_override} vs {budget_blocks}"
-        )
-        # One uninterrupted baseline per long peer, so whichever peer the
-        # scheduler preempts has its own solo result to be compared against.
-        solo_ids = {
-            f"uno-finish-peer-{index}": _run_request_to_finish(
-                engine, f"uno-solo-peer-{index}", prompt, finish_sampling
+    # Everything below is wrapped so the receipt is written even when the
+    # engine fails to build or the driver raises: a run that dies before the
+    # gate is exactly the run whose state nobody can otherwise see, because a
+    # forked child's stdout does not reach the log or the JUnit attachment.
+    mixed = _MixedPhase()
+    engine_receipt = "engine: not built"
+    metrics_receipt = "engine deltas: not reached"
+    solo_ids: dict[str, tuple[int, ...]] = {}
+    drafts = preemptions = finished_preemptions = 0.0
+    try:
+        with vllm_runner(
+            "Qwen/Qwen3-8B",
+            **common,
+            speculative_config={
+                "method": "uno",
+                "uno_lora_path": uno_adapter_path,
+                "uno_mask_token_id": 151669,
+                "num_speculative_tokens": SURVIVOR_NUM_SPECULATIVE_TOKENS,
+            },
+        ) as runner:
+            engine = runner.llm.llm_engine
+            # Read the two settings the arithmetic assumes from the engine that was
+            # actually built, rather than trusting the literals passed above: a
+            # platform default or a config validator that flipped either of them
+            # would silently change what the pre-gate means.
+            engine_cache_config = engine.vllm_config.cache_config
+            engine_lookahead = engine.vllm_config.num_lookahead_tokens
+            assert not engine_cache_config.enable_prefix_caching, (
+                "the survivor engine enabled prefix caching, so the peers can share "
+                "decode blocks and the arithmetic above does not describe this run: "
+                f"cache_config.enable_prefix_caching="
+                f"{engine_cache_config.enable_prefix_caching}"
             )
-            for index, prompt in enumerate(finish_prompts)
-        }
-        assert all(
-            len(ids) == finish_sampling.max_tokens for ids in solo_ids.values()
-        ), f"solo finish peers did not reach their cap: {solo_ids}"
+            assert engine_lookahead == SURVIVOR_NUM_SPECULATIVE_TOKENS, (
+                "the engine reserves a different lookahead than the resident-block "
+                f"arithmetic assumes: num_lookahead_tokens={engine_lookahead} vs "
+                f"K={SURVIVOR_NUM_SPECULATIVE_TOKENS}"
+            )
+            assert engine_cache_config.num_gpu_blocks_override == budget_blocks, (
+                "the engine did not take the pinned KV pool: "
+                f"num_gpu_blocks_override="
+                f"{engine_cache_config.num_gpu_blocks_override} vs {budget_blocks}"
+            )
+            # One uninterrupted baseline per long peer, so whichever peer the
+            # scheduler preempts has its own solo result to be compared against.
+            solo_ids = {
+                f"uno-finish-peer-{index}": _run_request_to_finish(
+                    engine, f"uno-solo-peer-{index}", prompt, finish_sampling
+                )
+                for index, prompt in enumerate(finish_prompts)
+            }
+            assert all(
+                len(ids) == finish_sampling.max_tokens for ids in solo_ids.values()
+            ), f"solo finish peers did not reach their cap: {solo_ids}"
 
-        # The cumulative counters also cover the solo runs, so snapshot
-        # at the start of the mixed phase and assert only the phase deltas.
-        before_metrics = runner.llm.get_metrics()
-        mixed = _run_survivor_with_peers(
-            engine,
-            seed_prompt=seed_prompt,
-            finish_prompts=finish_prompts,
-            abort_prompt=abort_prompt,
-            seed_sampling=seed_sampling,
-            finish_sampling=finish_sampling,
-            abort_sampling=abort_sampling,
+            engine_receipt = (
+                f"engine: prefix_caching={engine_cache_config.enable_prefix_caching}, "
+                f"lookahead={engine_lookahead}, "
+                f"num_gpu_blocks_override="
+                f"{engine_cache_config.num_gpu_blocks_override}"
+            )
+
+            # The cumulative counters also cover the solo runs, so snapshot
+            # at the start of the mixed phase and assert only the phase deltas.
+            before_metrics = runner.llm.get_metrics()
+            _run_survivor_with_peers(
+                engine,
+                seed_prompt=seed_prompt,
+                finish_prompts=finish_prompts,
+                abort_prompt=abort_prompt,
+                seed_sampling=seed_sampling,
+                finish_sampling=finish_sampling,
+                abort_sampling=abort_sampling,
+                phase=mixed,
+            )
+            after_metrics = runner.llm.get_metrics()
+            # The engine's own counters are a channel that does not depend on this
+            # test's scheduler navigation, so they are read BEFORE the gate and
+            # carried in the receipt. `vllm:num_preemptions` counts scheduler
+            # iterations; `vllm:request_num_preemptions` is observed in
+            # `IterationStats.update_from_finished_request` ->
+            # `FinishedRequestStats.num_preemptions` (`vllm/v1/metrics/loggers.py`),
+            # so its sum is only positive when a preempted request was recomputed to
+            # a natural finish rather than merely aborted.
+            drafts = _counter_total(
+                after_metrics, "vllm:spec_decode_num_drafts"
+            ) - _counter_total(before_metrics, "vllm:spec_decode_num_drafts")
+            preemptions = _counter_total(
+                after_metrics, "vllm:num_preemptions"
+            ) - _counter_total(before_metrics, "vllm:num_preemptions")
+            finished_preemptions = _histogram_total(
+                after_metrics, "vllm:request_num_preemptions"
+            ) - _histogram_total(before_metrics, "vllm:request_num_preemptions")
+            metrics_receipt = (
+                f"engine deltas: drafts={drafts}, preemptions={preemptions}, "
+                f"finished_preemptions={finished_preemptions}; "
+                f"solo_lengths={[len(ids) for ids in solo_ids.values()]}"
+            )
+    finally:
+        receipt = _render_receipt(
+            mixed, geometry_receipt, f"{engine_receipt}; {metrics_receipt}"
         )
-        after_metrics = runner.llm.get_metrics()
+        written = _write_receipt(receipt, request)
+        record_property("uno_survivor_receipt", receipt)
+        print(receipt)
+        if written:
+            print(f"survivor receipt written to {written}")
 
-    # The engine's own counters are a channel that does not depend on this
-    # test's scheduler navigation, so they are read BEFORE the gate and carried
-    # in the receipt. `vllm:num_preemptions` counts scheduler iterations;
-    # `vllm:request_num_preemptions` is observed in
-    # `IterationStats.update_from_finished_request` ->
-    # `FinishedRequestStats.num_preemptions` (`vllm/v1/metrics/loggers.py`), so
-    # its sum is only positive when a preempted request was recomputed to a
-    # natural finish rather than merely aborted.
-    drafts = _counter_total(
-        after_metrics, "vllm:spec_decode_num_drafts"
-    ) - _counter_total(before_metrics, "vllm:spec_decode_num_drafts")
-    preemptions = _counter_total(
-        after_metrics, "vllm:num_preemptions"
-    ) - _counter_total(before_metrics, "vllm:num_preemptions")
-    finished_preemptions = _histogram_total(
-        after_metrics, "vllm:request_num_preemptions"
-    ) - _histogram_total(before_metrics, "vllm:request_num_preemptions")
-    metrics_receipt = (
-        f"engine: prefix_caching={engine_cache_config.enable_prefix_caching}, "
-        f"lookahead={engine_lookahead}, "
-        f"num_gpu_blocks_override={engine_cache_config.num_gpu_blocks_override}; "
-        f"engine deltas: drafts={drafts}, preemptions={preemptions}, "
-        f"finished_preemptions={finished_preemptions}; "
-        f"solo_lengths={[len(ids) for ids in solo_ids.values()]}"
-    )
     mid_generation = mid_generation_preemption_counts(mixed.preemption_events)
-    receipt = _render_receipt(mixed, geometry_receipt, metrics_receipt)
-    print(receipt)
-    # A forked child's stdout reaches neither the run log nor the JUnit
-    # attachment, so the receipt is written where a lease lane can commit it:
-    # the path VLLM_UNO_SURVIVOR_RECEIPT names, else beside --junitxml when one
-    # was given. `record_property` is a third channel for harnesses whose
-    # forked reports carry user properties.
-    written = _write_receipt(receipt, request)
-    record_property("uno_survivor_receipt", receipt)
-    print(receipt)
-    if written:
-        print(f"survivor receipt written to {written}")
 
     # 1. The per-request channel must have seen something. A zero here means
     #    the gate was polling an empty channel and every other count below is

@@ -797,6 +797,32 @@ def test_survivor_receipt_is_written_where_the_evidence_lives(tmp_path, monkeypa
     assert _write_receipt("nowhere", request) is None
 
 
+def test_survivor_receipt_renders_before_the_engine_exists(tmp_path, monkeypatch):
+    """The receipt must render from an empty phase, which is the failure path.
+
+    A run that dies while the engine is being built, or inside the driver, is
+    the run whose state nobody can otherwise see. The e2e writes the receipt in
+    a `finally`, so rendering must not depend on any field the driver fills.
+    """
+    from tests.v1.e2e.spec_decode.test_uno import (
+        _MixedPhase,
+        _render_receipt,
+        _write_receipt,
+    )
+
+    receipt = _render_receipt(_MixedPhase(), "geometry line", "engine: not built")
+    assert "geometry line" in receipt
+    assert "engine: not built" in receipt
+    assert "steps=0, peer_visible_steps=0" in receipt
+    assert "receipts=[]" in receipt
+
+    target = tmp_path / "receipt.txt"
+    monkeypatch.setenv("VLLM_UNO_SURVIVOR_RECEIPT", str(target))
+    request = SimpleNamespace(config=SimpleNamespace(option=SimpleNamespace()))
+    assert _write_receipt(receipt, request) == str(target)
+    assert target.read_text(encoding="utf-8") == receipt
+
+
 def test_survivor_usage_percentages_are_read_against_the_pinned_pool():
     """A percentage from another geometry must not be quoted as this one's.
 

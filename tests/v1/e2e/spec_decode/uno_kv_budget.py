@@ -14,7 +14,7 @@ module, which already requires the model, cross-checks the literals against
 ``AutoConfig`` for ``MODEL_REVISION``.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from itertools import combinations
 
 from vllm.utils.math_utils import cdiv
@@ -53,11 +53,12 @@ SURVIVOR_NUM_SPECULATIVE_TOKENS = 8
 
 # Prefix caching is disabled in the survivor test. The finish peers therefore
 # keep generating until their resident sets grow past the 68 allocatable
-# blocks. Growing together they cross at 288 generated tokens; with one peer
-# stalled at its admission footprint the leader crosses at 560. A 640-token cap
+# blocks. Growing together they cross at 279 generated tokens; with one peer
+# stalled at its admission footprint the leader crosses at 551. A 640-token cap
 # leaves five block-groups of margin in the worst case, so no peer can finish
-# before the scheduler has to preempt one. The abort peer is retired after two
-# tokens and holds only its own prompt blocks while it runs.
+# before the scheduler has to preempt one; both crossings are pinned by
+# test_uno_mrv2 and printed by each round's geometry probe. The abort peer is
+# retired after two tokens and holds only its own prompt blocks while it runs.
 SURVIVOR_FINISH_MAX_TOKENS = 640
 
 # Prompt lengths the survivor e2e tokenises at MODEL_REVISION. The e2e measures
@@ -245,6 +246,48 @@ def mixed_growth_blocks(
         max(0, blocks_for_tokens(prompt + cap) - prefix_blocks)
         for prompt, cap in zip(prompt_tokens, max_tokens)
     )
+
+
+def resolve_internal_request_ids(
+    scheduler_keys: Iterable[str],
+    external_ids: Sequence[str],
+) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """Map external request ids to the ids the scheduler is keyed by.
+
+    ``InputProcessor.assign_request_id`` replaces the id a caller passes to
+    ``add_request`` with ``f"{external}-{random_uuid():.8}"`` unless
+    ``VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`` is set, and ``Request`` keeps only
+    that internal id. Looking a request up by the id the test supplied
+    therefore returns ``None`` on every step -- which is why two GPU runs
+    reported an empty per-request receipt while the scheduler's own pool
+    reported 100% occupancy.
+
+    Returns ``(resolved, problems)``: ``resolved`` maps each external id whose
+    internal id was unambiguous, ``problems`` maps the rest to the candidates
+    found, so a caller can fail with the ids the scheduler actually holds.
+    """
+    keys = list(scheduler_keys)
+    resolved: dict[str, str] = {}
+    problems: dict[str, list[str]] = {}
+    for external in external_ids:
+        candidates = [key for key in keys if _is_internal_id(key, external)]
+        if len(candidates) == 1:
+            resolved[external] = candidates[0]
+        else:
+            problems[external] = candidates
+    return resolved, problems
+
+
+def _is_internal_id(key: str, external: str) -> bool:
+    """Whether ``key`` is the scheduler's id for the request ``external``."""
+    if key == external:
+        # VLLM_DISABLE_REQUEST_ID_RANDOMIZATION=1.
+        return True
+    if not key.startswith(f"{external}-"):
+        return False
+    suffix = key[len(external) + 1 :]
+    # `random_uuid():.8` is eight characters of a uuid4 string.
+    return len(suffix) == 8 and suffix.isalnum()
 
 
 def mid_generation_preemption_counts(

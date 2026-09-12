@@ -314,6 +314,66 @@ def test_uno_preemption_drains_in_flight_output(uno_scheduler, in_flight):
         )
 
 
+def test_scheduler_is_keyed_by_the_internal_request_id(uno_scheduler):
+    """A request is not in `Scheduler.requests` under the id the caller passed.
+
+    `InputProcessor.assign_request_id` rewrites `request_id` to
+    ``f"{external}-{random_uuid():.8}"`` unless
+    VLLM_DISABLE_REQUEST_ID_RANDOMIZATION is set, and `Request` keeps only that
+    internal id. The e2e driver adds its peers through the engine, so every
+    scheduler lookup it makes has to go through the resolver; this case builds
+    the same shape directly (the twin adds to the scheduler itself, which is why
+    it could not reproduce the two GPU no-fires) and pins both halves: equality
+    with the external id finds nothing, and the resolver finds exactly one.
+    """
+    scheduler = uno_scheduler(num_blocks=32, max_num_seqs=4)
+    external_ids = ["uno-finish-peer-0", "uno-finish-peer-1"]
+    internal_ids = [
+        f"{external}-{index:08x}" for index, external in enumerate(external_ids)
+    ]
+    for request, request_id in zip(_victim_pair(64), internal_ids):
+        request.request_id = request_id
+        scheduler.add_request(request)
+
+    for external in external_ids:
+        assert scheduler.requests.get(external) is None, (
+            "the scheduler answered to the external id, so this case no longer "
+            "reproduces the id path the engine takes"
+        )
+
+    resolved, problems = budget.resolve_internal_request_ids(
+        scheduler.requests, external_ids
+    )
+    assert not problems, problems
+    assert resolved == dict(zip(external_ids, internal_ids))
+    for external, internal in resolved.items():
+        request = scheduler.requests[internal]
+        assert request is not None and request.request_id == internal, external
+
+
+def test_internal_id_resolution_refuses_what_it_cannot_pin():
+    """Ambiguity and absence must be reported, never silently resolved."""
+    external = "uno-finish-peer-0"
+    # Randomization disabled: the key is the external id itself.
+    resolved, problems = budget.resolve_internal_request_ids([external], [external])
+    assert resolved == {external: external} and not problems
+
+    # Nothing there at all.
+    resolved, problems = budget.resolve_internal_request_ids(["other"], [external])
+    assert resolved == {} and problems == {external: []}
+
+    # Two candidates: refuse rather than pick one.
+    twins = [f"{external}-aaaaaaaa", f"{external}-bbbbbbbb"]
+    resolved, problems = budget.resolve_internal_request_ids(twins, [external])
+    assert resolved == {} and problems == {external: twins}
+
+    # A longer id that merely starts with the external one is not a match.
+    resolved, problems = budget.resolve_internal_request_ids(
+        [f"{external}-0", f"{external}-toolongsuffix"], [external]
+    )
+    assert resolved == {} and problems == {external: []}
+
+
 def test_mid_generation_predicate_rejects_prefill_preemptions():
     """A preemption at zero generated tokens must not satisfy the gate.
 
