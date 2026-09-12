@@ -3254,7 +3254,10 @@ class NixlBaseConnectorWorker:
         # Notif-only engines (push-mode D side) have no descriptor state.
         for handle in self.dst_xfer_side_handles.pop(engine_id, {}).values():
             self.nixl_wrapper.release_dlist_handle(handle)
-        for agent_name in self._remote_agents.pop(engine_id).values():
+        # Pop under the handshake lock; NIXL teardown stays outside it.
+        with self._handshake_lock:
+            agents = self._remote_agents.pop(engine_id)
+        for agent_name in agents.values():
             self.nixl_wrapper.remove_remote_agent(agent_name)
 
         self.kv_caches_base_addr.pop(engine_id, None)
