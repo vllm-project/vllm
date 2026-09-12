@@ -48,6 +48,11 @@ class MinPLogitsProcessor(LogitsProcessor):
         """Min-p never impacts greedy sampling"""
         return True
 
+    @classmethod
+    def needs_output_token_ids(cls) -> bool:
+        """Min-p does not read output token ids."""
+        return False
+
     def get_min_p_by_index(self, index: int) -> float:
         return float(self.min_p_cpu[index])
 
@@ -132,6 +137,11 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         outcome of argmax in greedy sampling."""
         return False
 
+    @classmethod
+    def needs_output_token_ids(cls) -> bool:
+        """Logit bias does not read output token ids."""
+        return False
+
     def update_state(self, batch_update: BatchUpdate | None):
         needs_update = process_dict_updates(
             self.biases, batch_update, lambda params, _, __: params.logit_bias or None
@@ -189,6 +199,12 @@ class MinTokensLogitsProcessor(LogitsProcessor):
     def is_argmax_invariant(self) -> bool:
         """By censoring stop tokens, min-tokens can change the outcome
         of the argmax operation in greedy sampling."""
+        return False
+
+    @classmethod
+    def needs_output_token_ids(cls) -> bool:
+        """Min-tokens only reads the number of output tokens, not their
+        values, so `-1` placeholders under async scheduling are fine."""
         return False
 
     @staticmethod
