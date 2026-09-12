@@ -12,9 +12,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
-    patch_gating_output,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
@@ -24,17 +21,6 @@ __all__ = [
     "AiterW4A16ExpertsMonolithic",
     "aiter_triton_kernel_w4a16_moe_forward",
 ]
-
-
-def _aiter_raw(t):
-    """Unwrap the `triton_kernels.tensor.Tensor` that `_swizzle_mxfp4` returns."""
-    if t is None or isinstance(t, torch.Tensor):
-        return t
-    assert hasattr(t, "storage"), (
-        f"expected a triton_kernels wrapped tensor with a .storage attribute, "
-        f"got {type(t)}"
-    )
-    return t.storage.data
 
 
 def _aiter_w4a16_silu_via_a8w4(
@@ -170,11 +156,6 @@ def aiter_triton_kernel_w4a16_moe_forward(
         _routing_mod.is_tdm_avail = lambda: False
     aiter_routing = _routing_mod.routing
 
-    # See context in #50859.
-    # TODO: Remove once https://github.com/ROCm/aiter/pull/4530 is merged,
-    # AITER released, and AITER pin in vLLM increased from 0.1.19.
-    gating_output = patch_gating_output(gating_output, global_num_experts)
-
     if score_mode is not None:
         use_grouped_topk = num_expert_group is not None and num_expert_group > 1
         routing_data, gather_idx, scatter_idx = aiter_routing(
@@ -203,10 +184,14 @@ def aiter_triton_kernel_w4a16_moe_forward(
     assert quant_config.w1_precision is not None
     assert quant_config.w2_precision is not None
 
-    w1_data = _aiter_raw(w1)
-    w2_data = _aiter_raw(w2)
-    w1_wscale = _aiter_raw(quant_config.w1_precision.weight_scale)
-    w2_wscale = _aiter_raw(quant_config.w2_precision.weight_scale)
+    w1_data = w1.storage.data
+    w2_data = w2.storage.data
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        weight_mx_scale,
+    )
+
+    w1_wscale = weight_mx_scale(quant_config.w1_precision).storage.data
+    w2_wscale = weight_mx_scale(quant_config.w2_precision).storage.data
 
     gammas = routing_data.gate_scal if routing_data else None
 
