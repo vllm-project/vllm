@@ -73,6 +73,9 @@ def _ring_slot_mapping_kernel(
     valid = offsets < num_actual_tokens
     req = tl.load(token_to_req_ptr + offsets, mask=valid, other=0).to(tl.int64)
     block = tl.load(block_table_ptr + req * block_table_stride, mask=valid, other=0)
+    # Block 0 is the null page shared by every cache group; dummy batches
+    # (profiling, CUDA graph capture) point their ring there, so pad instead.
+    valid = valid & (block > 0)
     pos = tl.load(positions_ptr + offsets, mask=valid, other=0)
     slot = block.to(tl.int64) * CAPACITY + pos % CAPACITY
     tl.store(

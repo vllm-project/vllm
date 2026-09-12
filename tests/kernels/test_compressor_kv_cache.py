@@ -342,6 +342,12 @@ def test_v41_compressor_metadata_maps_tokens_to_their_ring():
     assert metadata.query_start_loc is query_start_loc
     assert metadata.token_to_req_indices.tolist() == [0, 0, 0, 1, 1]
 
+    # Dummy batches (profiling, CUDA graph capture) carry all-zero block
+    # tables. Block 0 is the shared null page every group overlays, so the ring
+    # must not write it: those tokens stay at PAD like every other cache's.
+    common.block_table_tensor.zero_()
+    assert builder.build(0, common).slot_mapping.tolist() == [-1] * 8
+
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA stream coverage")
 @pytest.mark.parametrize(
