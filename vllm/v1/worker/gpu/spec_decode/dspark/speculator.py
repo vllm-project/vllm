@@ -25,14 +25,21 @@ backbone forward AND the sequential Markov sampling.
 
 from typing import Any
 
+import numpy as np
 import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
+from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
 
@@ -112,6 +119,59 @@ class DSparkSpeculator(DFlashSpeculator):
             # is available.
             self.use_acceptance_estimator = False
         return model
+
+    def set_attn(
+        self,
+        model_state: ModelState,
+        kv_cache_config: KVCacheConfig,
+        block_tables: BlockTables,
+        target_input_buffers: InputBuffers,
+        target_attn_groups: list[list[AttentionGroup]],
+    ) -> None:
+        super().set_attn(
+            model_state,
+            kv_cache_config,
+            block_tables,
+            target_input_buffers,
+            target_attn_groups,
+        )
+        # DSV4.1 decoder-side SWA bounded replay, where draft context is never
+        # attended beyond the fixed window at the end. Adaptive verification
+        # splits the leading verification requests on the GPU only; they are
+        # never trimmed, so the CPU row selection holds.
+        windows = [
+            getattr(self.attn_groups[gid][0].kv_cache_spec, "sliding_window", None)
+            for gid in self.draft_kv_cache_group_ids
+        ]
+        self.context_window: int | None = None
+        if None not in windows and self.vllm_config.cache_config.swa_bounded_replay:
+            assert len(set(windows)) == 1, (
+                "All draft KV caches must have the same sliding_window."
+            )
+            self.context_window = windows[0]
+        # Rows of each request's trailing window (see _context_rows).
+        self._context_row_pool = UvaBufferPool(self.max_num_tokens, torch.int64)
+
+    def _context_rows(self, input_batch: InputBatch) -> torch.Tensor | None:
+        """Target rows whose draft context KV can still be read, or None for all.
+
+        With a sliding-window drafter, a request's context beyond its last
+        ``context_window`` scheduled tokens is never attended (and under the
+        target's decoder-side replay was never computed), so it is skipped.
+        """
+        window = self.context_window
+        if window is None:
+            return None
+        query_start_loc = input_batch.query_start_loc_np[: input_batch.num_reqs + 1]
+        lens = np.diff(query_start_loc)
+        if lens.max() <= window:
+            return None
+        keep = np.minimum(lens, window)
+        # Kept row r of request i is window_start[i] + (r - kept_start[i]).
+        window_start = query_start_loc[1:] - keep
+        kept_start = np.cumsum(keep) - keep
+        rows = np.repeat(window_start - kept_start, keep) + np.arange(int(keep.sum()))
+        return self._context_row_pool.copy_to_uva(rows)
 
     def _sample_logits(
         self,
