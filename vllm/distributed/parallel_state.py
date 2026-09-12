@@ -673,11 +673,11 @@ class GroupCoordinator:
         else:
             stream = graph_capture_context.stream
 
-        # only cuda uses this function,
+        # only cuda/rocm uses this function,
         # so we don't abstract it into the base class
         maybe_ca_context = nullcontext()
         maybe_fi_pcie_ipc_context: AbstractContextManager[Any] = nullcontext()
-        maybe_aiter_context = nullcontext()
+        maybe_aiter_ar_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
         )
@@ -698,12 +698,10 @@ class GroupCoordinator:
                 if fi_pcie_ipc_ar_comm is not None:
                     maybe_fi_pcie_ipc_context = fi_pcie_ipc_ar_comm.capture()
 
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            if rocm_aiter_ops.is_enabled():
-                aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
-                if aiter_ar is not None:
-                    maybe_aiter_context = aiter_ar.capture()  # type: ignore
+            # Capture each group's own comm. A global lookup would double-capture
+            aiter_ar_comm = getattr(self.device_communicator, "aiter_ar_comm", None)
+            if aiter_ar_comm is not None:
+                maybe_aiter_ar_context = aiter_ar_comm.capture()  # type: ignore
 
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
@@ -715,7 +713,7 @@ class GroupCoordinator:
             torch.cuda.stream(stream),
             maybe_ca_context,
             maybe_fi_pcie_ipc_context,
-            maybe_aiter_context,
+            maybe_aiter_ar_context,
         ):
             yield graph_capture_context
 
@@ -1640,7 +1638,11 @@ def graph_capture(
     context = graph_capture_context or GraphCaptureContext(
         torch.cuda.Stream(device=device)
     )
-    with get_tp_group().graph_capture(context), get_pp_group().graph_capture(context):
+    with (
+        get_tp_group().graph_capture(context),
+        get_pp_group().graph_capture(context),
+        get_dp_group().graph_capture(context),
+    ):
         yield context
 
 
@@ -2357,6 +2359,12 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     from vllm.platforms import current_platform
 
     if not current_platform.is_cpu():
+        from vllm.triton_utils import HAS_TRITON
+
+        if HAS_TRITON:
+            from vllm.v1.sample.ops.topk_topp_triton import reset_buffer_cache
+
+            reset_buffer_cache()
         torch.accelerator.empty_cache()
         try:
             torch.accelerator.empty_host_cache()
