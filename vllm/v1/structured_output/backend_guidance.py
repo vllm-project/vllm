@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
-from transformers import MistralCommonBackend
 
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -21,6 +20,7 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputOptions,
 )
 from vllm.v1.structured_output.request import get_structured_output_key
+from vllm.v1.structured_output.utils import strip_speculative_padding
 
 if TYPE_CHECKING:
     import llguidance
@@ -97,10 +97,6 @@ class GuidanceBackend(StructuredOutputBackend):
 
         if is_mistral_tokenizer(self.tokenizer):
             self.ll_tokenizer = self.tokenizer.llg_tokenizer
-        elif isinstance(self.tokenizer, MistralCommonBackend):
-            from mistral_common.guidance.tokenizer import from_mistral_tokenizer
-
-            self.ll_tokenizer = from_mistral_tokenizer(self.tokenizer.tokenizer)
         else:
             self.ll_tokenizer = llguidance_hf.from_tokenizer(
                 self.tokenizer, max(self.vocab_size, len(self.tokenizer))
@@ -196,6 +192,10 @@ class GuidanceGrammar(StructuredOutputGrammar):
         if len(tokens) == 0:
             return []
         if self.ll_matcher.is_stopped():
+            return []
+
+        tokens = strip_speculative_padding(tokens)
+        if len(tokens) == 0:
             return []
 
         num_tokens = self.ll_matcher.validate_tokens(tokens)
