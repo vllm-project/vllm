@@ -209,6 +209,9 @@ class EngineCoreClient(ABC):
     def get_weight_version(self) -> str:
         raise NotImplementedError
 
+    def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
     async def execute_dummy_batch_async(self) -> None:
         raise NotImplementedError
 
@@ -216,6 +219,11 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def get_weight_version_async(self) -> str:
+        raise NotImplementedError
+
+    async def get_inflight_queue_diagnostics_async(
+        self, limit: int
+    ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     def abort_requests(self, request_ids: list[str]) -> None:
@@ -413,6 +421,9 @@ class InprocClient(EngineCoreClient):
 
     def get_weight_version(self) -> str:
         return self.engine_core.get_weight_version()
+
+    def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
+        return [self.engine_core.get_inflight_queue_diagnostics(limit)]
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.engine_core.add_lora(lora_request)
@@ -1028,6 +1039,9 @@ class SyncMPClient(MPClient):
     def get_weight_version(self) -> str:
         return self.call_utility("get_weight_version")
 
+    def get_inflight_queue_diagnostics(self, limit: int) -> list[dict[str, Any]]:
+        return [self.call_utility("get_inflight_queue_diagnostics", limit)]
+
     def collective_rpc(
         self,
         method: str | Callable[..., _R],
@@ -1271,6 +1285,12 @@ class AsyncMPClient(MPClient):
 
     async def get_weight_version_async(self) -> str:
         return await self.call_utility_async("get_weight_version")
+
+    async def get_inflight_queue_diagnostics_async(
+        self, limit: int
+    ) -> list[dict[str, Any]]:
+        result = await self.call_utility_async("get_inflight_queue_diagnostics", limit)
+        return [result]
 
     async def add_lora_async(self, lora_request: LoRARequest) -> bool:
         return await self.call_utility_async("add_lora", lora_request)
@@ -1606,6 +1626,18 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 ]
             )
         )[0]
+
+    async def get_inflight_queue_diagnostics_async(
+        self, limit: int
+    ) -> list[dict[str, Any]]:
+        return await asyncio.gather(
+            *[
+                self._call_utility_async(
+                    "get_inflight_queue_diagnostics", limit, engine=engine
+                )
+                for engine in self.core_engines
+            ]
+        )
 
     @staticmethod
     async def process_engine_outputs(
