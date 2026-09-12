@@ -15,7 +15,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
-    RowvLLMParameter,
 )
 from vllm.scalar_type import scalar_types
 
@@ -28,7 +27,7 @@ if TYPE_CHECKING:
 class INCWNA16LinearScheme(INCLinearScheme):
     def __init__(self, layer_config: "INCLayerConfig") -> None:
         self.layer_config = layer_config
-        self.inner_method = self._build_inner_method()
+        self.linear_method = self._build_inner_method()
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -44,6 +43,10 @@ class INCWNA16LinearScheme(INCLinearScheme):
         )
 
     def _build_gptq_method(self):
+        assert isinstance(self.layer_config.group_size, int), (
+            "WNA16 only supports integer group_size."
+        )
+
         gptq_type_map = {
             (4, True): scalar_types.uint4b8,
             (8, True): scalar_types.uint8b128,
@@ -85,6 +88,10 @@ class INCWNA16LinearScheme(INCLinearScheme):
         )
 
     def _build_awq_method(self):
+        assert isinstance(self.layer_config.group_size, int), (
+            "WNA16 only supports integer group_size."
+        )
+
         awq_type_map = {
             4: scalar_types.uint4,
             8: scalar_types.uint8,
@@ -138,7 +145,7 @@ class INCWNA16LinearScheme(INCLinearScheme):
         params_dtype: "torch.dtype",
         **extra_weight_attrs,
     ) -> None:
-        return self.inner_method.create_weights(
+        return self.linear_method.create_weights(
             layer=layer,
             input_size_per_partition=input_size_per_partition,
             output_partition_sizes=output_partition_sizes,
@@ -149,7 +156,7 @@ class INCWNA16LinearScheme(INCLinearScheme):
         )
 
     def process_weights_after_loading(self, layer: "torch.nn.Module") -> None:
-        return self.inner_method.process_weights_after_loading(layer)
+        return self.linear_method.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
@@ -157,7 +164,7 @@ class INCWNA16LinearScheme(INCLinearScheme):
         x: "torch.Tensor",
         bias: "torch.Tensor | None" = None,
     ) -> "torch.Tensor":
-        return self.inner_method.apply(layer, x, bias)
+        return self.linear_method.apply(layer, x, bias)
 
 
 class INCXPULinearBase(INCLinearScheme):
@@ -168,6 +175,9 @@ class INCXPULinearBase(INCLinearScheme):
 
     def __init__(self, layer_config: "INCLayerConfig") -> None:
         self.weight_bits = layer_config.bits
+        assert isinstance(layer_config.group_size, int), (
+            "INCXPULinearBase requires integer group_size."
+        )
         self.group_size = layer_config.group_size
 
         self.sym = layer_config.sym
@@ -245,16 +255,6 @@ class INCXPULinearBase(INCLinearScheme):
         layer.register_parameter("qweight", qweight)
         layer.register_parameter("scales", scales)
         layer.register_parameter("qzeros", qzeros)
-
-        g_idx = RowvLLMParameter(
-            data=torch.tensor(
-                [i // self.group_size for i in range(input_size_per_partition)],
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("g_idx", g_idx)
 
     def _convert_awq_qweight_to_gptq(self, qw: torch.Tensor) -> torch.Tensor:
         """Convert AWQ qweight [K, N // pf] to GPTQ qweight [K // pf, N].
@@ -348,7 +348,7 @@ class INCXPULinearMethod(INCXPULinearBase):
             layer.scales,
             layer.qzeros,
             self.group_size,
-            None,
+            None,  # Retained by the external XPU op ABI.
         )
         return out.reshape(out_shape)
 
@@ -461,7 +461,3 @@ class INCARKLinearMethod(INCXPULinearBase):
             layer.ark_scale_type,
             not self.sym,
         )
-
-
-class INCXPUW4A16LinearScheme(INCXPULinearMethod):
-    pass

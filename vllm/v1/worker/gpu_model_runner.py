@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from functools import reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
@@ -42,7 +42,9 @@ from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    copy_kv_blocks,
+)
 from vllm.distributed.parallel_state import (
     GraphCaptureContext,
     get_dcp_group,
@@ -57,20 +59,18 @@ from vllm.forward_context import (
 )
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA, LoRAMapping, LoRAMappingType
-from vllm.model_executor.layers.attention import Attention, MLAAttention
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
-from vllm.model_executor.layers.rotary_embedding import (
-    MRotaryEmbedding,
-    XDRotaryEmbedding,
-)
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
@@ -81,14 +81,12 @@ from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMRoPE,
     SupportsMultiModal,
-    SupportsXDRoPE,
     get_mixture_of_experts_model,
     supports_eagle3,
     supports_mrope,
     supports_multimodal_pruning,
     supports_realtime,
     supports_transcription,
-    supports_xdrope,
 )
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling,
@@ -100,6 +98,7 @@ from vllm.model_executor.offloader import (
     get_offloader,
     set_offloader,
 )
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import (
@@ -120,6 +119,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
@@ -128,7 +129,6 @@ from vllm.utils.torch_utils import (
     PIN_MEMORY,
     async_tensor_h2d,
     current_stream,
-    is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
@@ -144,6 +144,7 @@ from vllm.v1.attention.backends.linear_attn import (
     BailingLinearAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
+from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     create_fast_prefill_custom_backend,
@@ -162,8 +163,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheSpecKind,
-    KVQuantMode,
-    MambaSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
@@ -219,7 +218,6 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
-from vllm.v1.worker.gpu.attn_utils import _reshape_attention_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -230,13 +228,18 @@ from vllm.v1.worker.ubatch_utils import (
     maybe_create_ubatch_slices,
     split_attn_metadata,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp, raise_if_nan_logits
+from vllm.v1.worker.utils import (
+    EncoderTimingStats,
+    is_residual_scattered_for_sp,
+    raise_if_nan_logits,
+)
 from vllm.v1.worker.workspace import lock_workspace
 
 from .utils import (
     AttentionGroup,
     KVBlockZeroer,
     add_kv_sharing_layers_to_kv_cache_groups,
+    allocate_kv_cache,
     bind_kv_cache,
     copy_kv_cache_blocks_inplace,
     prepare_kernel_block_sizes,
@@ -511,6 +514,7 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -567,7 +571,7 @@ class GPUModelRunner(
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-        self.uses_xdrope_dim = model_config.uses_xdrope_dim
+        self.mrope_num_dims = model_config.mrope_num_dims
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
@@ -581,6 +585,9 @@ class GPUModelRunner(
 
         # Async scheduling
         self.use_async_scheduling = self.scheduler_config.async_scheduling
+
+        # Async PP broadcast of sampled token ids, waited on in _prepare_input_ids.
+        self._pp_recv_work: torch.distributed.Work | None = None
 
         # Sampler
         self.sampler = Sampler(
@@ -602,9 +609,6 @@ class GPUModelRunner(
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
-        # Initialize in initialize_kv_cache_tensors
-        self.cross_layers_kv_cache: torch.Tensor | None = None
-        self.cross_layers_attn_backend: type[AttentionBackend] | None = None
         # indexes: [kv_cache_group_id][attn_group]
         self.attn_groups: list[list[AttentionGroup]] = []
         # self.kv_cache_config: KVCacheConfig
@@ -742,34 +746,40 @@ class GPUModelRunner(
         self._init_kernel_block_sizes = [placeholder_block_size]
         self._init_max_num_blocks = [placeholder_max_num_blocks]
         self._init_slot_mapping_modes = [SlotMappingMode.TOKEN_TO_KV_SLOT]
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            # We need to use the encoder length for encoder-decoder
-            # because of KV cache for cross-attention.
-            max_model_len=max(self.max_model_len, self.max_encoder_len),
-            max_num_batched_tokens=self.max_num_tokens,
-            device=self.device,
-            vocab_size=self.model_config.get_vocab_size(),
-            block_sizes=[placeholder_block_size],
-            kernel_block_sizes=[placeholder_block_size],
-            max_num_blocks_per_req=[placeholder_max_num_blocks],
-            num_spec_tokens=self.num_spec_tokens,
-            logitsprocs=build_logitsprocs(
-                self.vllm_config,
-                self.device,
-                PIN_MEMORY,
-                self.is_pooling_model,
-                custom_logitsprocs,
-            ),
-            # We currently don't know whether a particular custom logits processor
-            # uses output token ids so we set this conservatively. Thinking-budget
-            # tracking is requested dynamically when a budgeted request is in the batch.
-            logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
-            is_pooling_model=self.is_pooling_model,
-            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
-            reasoning_config=self.vllm_config.reasoning_config,
-            use_replayssm=self.cache_config.use_replayssm,
+        self.cp_kv_cache_interleave_size = (
+            self.parallel_config.cp_kv_cache_interleave_size
         )
+        # Capture warmup providers registered by the initial placeholder InputBatch
+        with self.jit_warmup_registry.activate():
+            self.input_batch = InputBatch(
+                max_num_reqs=self.max_num_reqs,
+                # We need to use the encoder length for encoder-decoder
+                # because of KV cache for cross-attention.
+                max_model_len=max(self.max_model_len, self.max_encoder_len),
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                vocab_size=self.model_config.get_vocab_size(),
+                block_sizes=[placeholder_block_size],
+                kernel_block_sizes=[placeholder_block_size],
+                max_num_blocks_per_req=[placeholder_max_num_blocks],
+                num_spec_tokens=self.num_spec_tokens,
+                logitsprocs=build_logitsprocs(
+                    self.vllm_config,
+                    self.device,
+                    PIN_MEMORY,
+                    self.is_pooling_model,
+                    custom_logitsprocs,
+                ),
+                # We currently don't know whether a particular custom logits processor
+                # uses output token ids so we set this conservatively. Thinking-budget
+                # tracking is requested dynamically when a budgeted request is in the
+                # batch.
+                logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
+                is_pooling_model=self.is_pooling_model,
+                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+                reasoning_config=self.vllm_config.reasoning_config,
+                use_replayssm=self.cache_config.use_replayssm,
+            )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
@@ -803,6 +813,9 @@ class GPUModelRunner(
 
         # Persistent buffers for CUDA graphs.
         self.input_ids = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
+        # [max_num_reqs, depth] prompt token ids preceding each request's chunk
+        # start, for models exposing `token_lookback_depth`. Sized after load.
+        self.lookback_token_ids: CpuGpuBuffer | None = None
         self.positions = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=self.device
         )
@@ -857,20 +870,11 @@ class GPUModelRunner(
             # with torch compile.
             # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
 
-            # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
-            # the modality of inputs. For text-only inputs, each dimension has
-            # identical position IDs, making M-RoPE functionally equivalent to
-            # 1D-RoPE.
+            # NOTE: For text-only inputs, each dimension has identical position
+            # IDs, making M-RoPE functionally equivalent to 1D-RoPE.
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = self._make_buffer(
-                (3, self.max_num_tokens + 1), dtype=torch.int64
-            )
-
-        # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-        if self.uses_xdrope_dim > 0:
-            # Similar to mrope but use assigned dimension number for RoPE, 4 as default.
-            self.xdrope_positions = self._make_buffer(
-                (self.uses_xdrope_dim, self.max_num_tokens + 1), dtype=torch.int64
+                (self.mrope_num_dims, self.max_num_tokens + 1), dtype=torch.int64
             )
 
         # None in the first PP rank. The rest are set after load_model.
@@ -984,6 +988,7 @@ class GPUModelRunner(
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
+        self._mamba_state_copy_funcs: MambaStateCopyFuncsByType | None = None
         self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
         if self.cache_config.mamba_cache_mode == "all" and self.num_spec_tokens > 0:
             self.mamba_prev_last_scheduled_idx = self._make_buffer(
@@ -1016,72 +1021,14 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         self.late_interaction_runner.clear()
 
-    def post_kv_cache_wake_up(self) -> None:
-        self.init_fp8_kv_scales()
-
-    @torch.inference_mode()
-    def init_fp8_kv_scales(self) -> None:
-        """
-        Re-initialize the KV cache and FP8 scales after waking from sleep.
-        1. Zero out the KV cache tensors to remove garbage data from re-allocation.
-        2. Reset Attention layer scaling factors (_k_scale, _v_scale) to 1.0.
-          If these are left at 0.0 (default after wake_up), all KV cache values
-          become effectively zero, causing gibberish output.
-        """
-        if not is_quantized_kv_cache(self.cache_config.cache_dtype):
-            return
-
-        kv_caches = getattr(self, "kv_caches", [])
-        for cache_entry in kv_caches:
-            if cache_entry is None:
-                continue
-            # Hybrid models (Mamba, DeltaNet) store per-layer state as a
-            # list of tensors rather than a single tensor.
-            if isinstance(cache_entry, list):
-                for t in cache_entry:
-                    t.zero_()
-            else:
-                cache_entry.zero_()
-
-        k_attr_names = ("_k_scale", "k_scale")
-        v_attr_names = ("_v_scale", "v_scale")
-
-        attn_layers = self.compilation_config.static_forward_context
-        for name, module in attn_layers.items():
-            if isinstance(module, (Attention, MLAAttention)):
-                # TODO: Generally, scale is 1.0 if user uses on-the-fly fp8
-                # kvcache quant. However, to get better accuracy, compression
-                # frameworks like llm-compressors allow users to tune the
-                # scale. We may need to restore the specific calibrated scales
-                # here in the future.
-                k_scale_val, v_scale_val = 1.0, 1.0
-
-                # Processing K Scale
-                for attr in k_attr_names:
-                    if hasattr(module, attr):
-                        param = getattr(module, attr)
-                        if isinstance(param, torch.Tensor):
-                            param.fill_(k_scale_val)
-
-                # Processing V Scale
-                for attr in v_attr_names:
-                    if hasattr(module, attr):
-                        param = getattr(module, attr)
-                        if isinstance(param, torch.Tensor):
-                            param.fill_(v_scale_val)
-
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
             if self.uses_mrope:
                 return self.mrope_positions.gpu[:, :num_tokens]
-            if self.uses_xdrope_dim > 0:
-                return self.xdrope_positions.gpu[:, :num_tokens]
             return self.positions[:num_tokens]
         else:
             if self.uses_mrope:
                 return self.mrope_positions.gpu[:, num_tokens]
-            if self.uses_xdrope_dim > 0:
-                return self.xdrope_positions.gpu[:, num_tokens]
             return self.positions[num_tokens]
 
     def _make_buffer(
@@ -1094,6 +1041,15 @@ class GPUModelRunner(
             with_numpy=numpy,
         )
 
+    def _get_mamba_state_copy_funcs(self) -> MambaStateCopyFuncsByType:
+        if self._mamba_state_copy_funcs is None:
+            mamba_groups = mamba_utils.get_mamba_groups(self.kv_cache_config)
+            mamba_types = {spec.mamba_type for spec in mamba_groups}
+            copy_funcs = self.model.get_mamba_state_copy_funcs(mamba_types)
+            mamba_utils.validate_mamba_state_copy_funcs(mamba_groups, copy_funcs)
+            self._mamba_state_copy_funcs = copy_funcs
+        return self._mamba_state_copy_funcs
+
     def _get_mamba_bufs(self) -> mamba_utils.MambaBuffers:
         # Only reachable on the ``mamba_cache_mode == "align"`` path.
         # The postprocess sub-object is additionally gated on spec
@@ -1103,7 +1059,7 @@ class GPUModelRunner(
             self._mamba_bufs = mamba_utils.MambaBuffers.create(
                 max_num_reqs=self.max_num_reqs,
                 kv_cache_config=self.kv_cache_config,
-                copy_funcs=self.model.get_mamba_state_copy_func(),
+                copy_funcs=self._get_mamba_state_copy_funcs(),
                 make_buffer=self._make_buffer,
                 device=self.device,
                 with_postprocess_align=(
@@ -1112,8 +1068,35 @@ class GPUModelRunner(
             )
         return self._mamba_bufs
 
-    def _init_model_kwargs(self):
+    def _prepare_lookback_token_ids(self, num_reqs: int) -> torch.Tensor:
+        """Gather, per request, the `depth` prompt token ids preceding its
+        first scheduled token (column j is position start - 1 - j); -1 where
+        the position is before the prompt or already past it. Generated
+        positions are left to the model: under async scheduling the CPU token
+        table holds placeholders for them."""
+        buf = self.lookback_token_ids
+        assert buf is not None
+        buf.np.fill(-1)
+        if num_reqs > 0:
+            depth = buf.np.shape[1]
+            starts = self.input_batch.num_computed_tokens_cpu[:num_reqs, None]
+            pos = starts - np.arange(1, depth + 1)
+            num_prompt = self.input_batch.num_prompt_tokens[:num_reqs, None]
+            valid = (pos >= 0) & (pos < num_prompt)
+            rows = np.arange(num_reqs)[:, None]
+            ids = self.input_batch.token_ids_cpu[rows, np.clip(pos, 0, None)]
+            buf.np[:num_reqs] = np.where(valid, ids, -1)
+        return buf.copy_to_gpu()
+
+    def _init_model_kwargs(self, num_reqs: int | None = None):
         model_kwargs = dict[str, Any]()
+
+        if self.lookback_token_ids is not None:
+            if num_reqs is None:
+                num_reqs = self.input_batch.num_reqs
+            model_kwargs["lookback_token_ids"] = self._prepare_lookback_token_ids(
+                num_reqs
+            )
 
         if not self.is_pooling_model:
             return model_kwargs
@@ -1187,9 +1170,9 @@ class GPUModelRunner(
             self.device,
             attn_groups_iter=self._kv_cache_spec_attn_group_iterator(),
             kernel_block_sizes=self._kernel_block_sizes,
-            cache_dtype=self.cache_config.cache_dtype,
             runner_only_attn_layers=self.runner_only_attn_layers,
             static_forward_context=self.compilation_config.static_forward_context,
+            num_blocks=self.kv_cache_config.num_blocks,
         )
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
@@ -1360,10 +1343,6 @@ class GPUModelRunner(
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
                 self._init_mrope_positions(req_state)
-
-            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-            if self.uses_xdrope_dim > 0:
-                self._init_xdrope_positions(req_state)
 
             reqs_to_add.append(req_state)
             # Track new requests for ngram_gpu full tensor copy
@@ -1641,7 +1620,7 @@ class GPUModelRunner(
                 input_batch=self.input_batch,
                 kv_cache_config=self.kv_cache_config,
                 forward_context=self.compilation_config.static_forward_context,
-                mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+                mamba_state_copy_funcs=self._get_mamba_state_copy_funcs(),
             )
 
             assert self.num_accepted_tokens_event is not None
@@ -1729,19 +1708,6 @@ class GPUModelRunner(
                 input_tokens,
                 mrope_features,
             )
-        )
-
-    def _init_xdrope_positions(self, req_state: CachedRequestState):
-        model = self.get_model()
-        xdrope_model = cast(SupportsXDRoPE, model)
-        assert req_state.prompt_token_ids is not None, (
-            "XD-RoPE requires prompt_token_ids to be available."
-        )
-        assert supports_xdrope(model), "XD-RoPE support is not implemented."
-
-        req_state.xdrope_positions = xdrope_model.get_xdrope_input_positions(
-            req_state.prompt_token_ids,
-            req_state.mm_features,
         )
 
     def _extract_mm_kwargs(
@@ -1838,6 +1804,11 @@ class GPUModelRunner(
         Uses self.prev_positions[:num_reqs] which maps current pos -> prev pos
         (-1 for new requests).
         """
+
+        # Sync the async PP broadcast before reading sampled tokens.
+        if self._pp_recv_work is not None:
+            self._pp_recv_work.wait()
+            self._pp_recv_work = None
 
         if self.input_batch.prev_sampled_token_ids is None:
             # Normal scheduling case
@@ -2005,10 +1976,11 @@ class GPUModelRunner(
     ) -> tuple[
         torch.Tensor,
         SpecDecodeMetadata | None,
+        int,
     ]:
         """
         Returns:
-            tuple[logits_indices, spec_decode_metadata]
+            tuple[logits_indices, spec_decode_metadata, max_num_sampled_tokens]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -2039,11 +2011,6 @@ class GPUModelRunner(
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
             self._calc_mrope_positions(scheduler_output)
-
-        # Calculate XD-RoPE positions.
-        # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-        if self.uses_xdrope_dim > 0:
-            self._calc_xdrope_positions(scheduler_output)
 
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -2251,24 +2218,29 @@ class GPUModelRunner(
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.mrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True,
-            )
-        elif self.uses_xdrope_dim > 0:
-            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True,
-            )
-        if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
+            # Copy one row at a time. mrope_positions is allocated as
+            # [num_dims, max_num_tokens + 1] with a dummy trailing column to keep it
+            # non-contiguous for torch.compile, so cpu[:, :N] is a strided view.
+            # copy_() cannot express a strided source as a single
+            # cudaMemcpyAsync, so it first gathers into a contiguous *pageable*
+            # temporary, and a pageable H2D ignores non_blocking=True and
+            # synchronizes the stream before the transfer starts. Each row is
+            # contiguous within the pinned allocation, so per-row copies stay on
+            # the pinned path and are genuinely asynchronous.
+            for row in range(self.mrope_positions.gpu.shape[0]):
+                self.mrope_positions.gpu[row, :total_num_scheduled_tokens].copy_(
+                    self.mrope_positions.cpu[row, :total_num_scheduled_tokens],
+                    non_blocking=True,
+                )
+        if self.use_async_spec_decode and self.uses_mrope:
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
-            ) - self.input_batch.num_computed_tokens_cpu_tensor[req_indices].to(
-                device=self.device, dtype=torch.int64, non_blocking=True
+            ) - async_tensor_h2d(
+                self.input_batch.num_computed_tokens_cpu_tensor[req_indices],
+                device=self.device,
+                dtype=torch.int64,
             )
-            target = self.mrope_positions if self.uses_mrope else self.xdrope_positions
-            target.gpu[:, :total_num_scheduled_tokens] += drift
+            self.mrope_positions.gpu[:, :total_num_scheduled_tokens] += drift
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -2320,6 +2292,7 @@ class GPUModelRunner(
         return (
             logits_indices,
             spec_decode_metadata,
+            int(num_sampled_tokens.max()),
         )
 
     def _build_attention_metadata(
@@ -2331,6 +2304,7 @@ class GPUModelRunner(
         num_reqs_padded: int | None = None,
         ubatch_slices: UBatchSlices | None = None,
         logits_indices: torch.Tensor | None = None,
+        max_num_sampled_tokens: int | None = None,
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
@@ -2403,8 +2377,7 @@ class GPUModelRunner(
         num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
             :num_reqs_padded
         ]
-        seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
-        seq_lens_cpu_upper_bound = seq_lens_cpu
+        seq_lens_cpu_upper_bound = self.optimistic_seq_lens_cpu[:num_reqs_padded]
 
         # is_prefilling: True if request is still in prefill phase.
         # Used by mamba backends to distinguish actual decodes from
@@ -2413,11 +2386,6 @@ class GPUModelRunner(
         # Zero out padded rows so stale data from condense() doesn't
         # misclassify padding as prefill in CUDA graph mode.
         is_prefilling[num_reqs:] = False
-
-        if self.use_async_spec_decode:
-            # GPU tensors are authoritative in async mode.
-            seq_lens_cpu = None
-            num_computed_tokens_cpu = None
 
         # Compute mm_prefix bidirectional ranges before building
         # attention metadata so builders handle them during build().
@@ -2434,6 +2402,16 @@ class GPUModelRunner(
             _bidi_sw = getattr(hf_text_config, "sliding_window", None)
             _clamps_in_kernel = getattr(
                 self.model, "mm_prefix_clamp_sliding_window", False
+            ) or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False)
+            # Some models (DeepSeek-V4 vision) define the bidirectional span
+            # over the whole sentinel block ([IMAGE_START, IMAGE_END]) rather
+            # than the embed tokens, and prepend a position-dependent
+            # alignment pad before the first sentinel. For those, derive the
+            # span from the full placeholder range and strip the pad.
+            # TODO(Isotr0py): Refactor mm_prefix_lm implementation
+            # for better readability and maintainability.
+            _span_pad_modulus = getattr(
+                hf_text_config, "mm_prefix_span_leading_pad_modulus", 0
             )
             for req_id in self.input_batch.req_ids:
                 image_doc_ranges = []
@@ -2442,7 +2420,18 @@ class GPUModelRunner(
                     if mm_feature.modality == "audio":
                         continue
                     pos_info = mm_feature.mm_position
-                    img_doc_range = pos_info.extract_embeds_range()
+                    if _span_pad_modulus:
+                        pad = (
+                            _span_pad_modulus - 1 - pos_info.offset % _span_pad_modulus
+                        )
+                        img_doc_range = [
+                            (
+                                pos_info.offset + pad,
+                                pos_info.offset + pos_info.length - 1,
+                            )
+                        ]
+                    else:
+                        img_doc_range = pos_info.extract_embeds_range()
                     for r in img_doc_range:
                         if (
                             not _clamps_in_kernel
@@ -2471,8 +2460,6 @@ class GPUModelRunner(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
             seq_lens=self.seq_lens[:num_reqs_padded],
-            _seq_lens_cpu=seq_lens_cpu,
-            _num_computed_tokens_cpu=num_computed_tokens_cpu,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             replayssm_decode_base_cpu=replayssm_decode_base_cpu,
             num_reqs=num_reqs_padded,
@@ -2505,6 +2492,7 @@ class GPUModelRunner(
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
+            cm_base.max_logits_per_req = max_num_sampled_tokens
             cm_base.logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
                 logits_indices
             )
@@ -2544,6 +2532,7 @@ class GPUModelRunner(
                     Mamba2AttentionMetadataBuilder,
                     GDNAttentionMetadataBuilder,
                     BailingLinearAttentionMetadataBuilder,
+                    ShortConvAttentionMetadataBuilder,
                 ),
             ):
                 assert ubid is None, (
@@ -2841,53 +2830,6 @@ class GPUModelRunner(
 
                 mrope_pos_ptr += completion_part_len
 
-    def _calc_xdrope_positions(self, scheduler_output: "SchedulerOutput"):
-        xdrope_pos_ptr = 0
-        for index, req_id in enumerate(self.input_batch.req_ids):
-            req = self.requests[req_id]
-            assert req.xdrope_positions is not None
-
-            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[index]
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-                req.prompt_token_ids, req.prompt_embeds
-            )
-
-            if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
-                prompt_part_len = max(0, num_prompt_tokens - num_computed_tokens)
-                completion_part_len = max(0, num_scheduled_tokens - prompt_part_len)
-            else:
-                prompt_part_len = num_scheduled_tokens
-                completion_part_len = 0
-
-            assert num_scheduled_tokens == prompt_part_len + completion_part_len
-
-            if prompt_part_len > 0:
-                # prompt's xdrope_positions are pre-computed
-                dst_start = xdrope_pos_ptr
-                dst_end = xdrope_pos_ptr + prompt_part_len
-                src_start = num_computed_tokens
-                src_end = num_computed_tokens + prompt_part_len
-
-                self.xdrope_positions.cpu[:, dst_start:dst_end] = req.xdrope_positions[
-                    :, src_start:src_end
-                ]
-                xdrope_pos_ptr += prompt_part_len
-
-            if completion_part_len > 0:
-                # compute completion's xdrope_positions on-the-fly
-                dst_start = xdrope_pos_ptr
-                dst_end = xdrope_pos_ptr + completion_part_len
-
-                XDRotaryEmbedding.get_next_input_positions_tensor(
-                    out=self.xdrope_positions.np,
-                    out_offset=dst_start,
-                    context_len=num_computed_tokens + prompt_part_len,
-                    num_new_tokens=completion_part_len,
-                )
-
-                xdrope_pos_ptr += completion_part_len
-
     def _calc_spec_decode_metadata(
         self,
         num_draft_tokens: np.ndarray,
@@ -3105,18 +3047,24 @@ class GPUModelRunner(
             token_lora_mapping = []
             lora_requests = set()
             encoder_token_counts = []
+            connector_token_counts = []
 
-            for req_id, pos_info in mm_lora_refs:
+            for (req_id, pos_info), (modality, mm_item) in zip(
+                mm_lora_refs,
+                mm_kwargs,
+            ):
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 lora_id = int(self.input_batch.request_lora_mapping[req_idx])
 
-                # Prefer pos_info.get_num_embeds to count precise MM embedding tokens.
-                num_tokens = self.model.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
-                    pos_info.get_num_embeds()
+                tower_tokens, connector_tokens = self.model.get_mm_lora_token_counts(  # type: ignore[attr-defined]
+                    modality=modality,
+                    mm_kwargs=mm_item,
+                    num_mm_embeds=pos_info.get_num_embeds(),
                 )
                 prompt_lora_mapping.append(lora_id)
-                token_lora_mapping.extend([lora_id] * num_tokens)
-                encoder_token_counts.append(num_tokens)
+                token_lora_mapping.extend([lora_id] * tower_tokens)
+                encoder_token_counts.append(tower_tokens)
+                connector_token_counts.append(connector_tokens)
 
                 if lora_id > 0:
                     lora_request = self.input_batch.lora_id_to_lora_request.get(lora_id)
@@ -3144,16 +3092,11 @@ class GPUModelRunner(
             if (
                 mm_mapping is not None
                 and mm_mapping.connector
-                and hasattr(self.model, "get_num_mm_connector_tokens")
+                and all(count is not None for count in connector_token_counts)
             ):
-                post_op_counts = [
-                    self.model.get_num_mm_connector_tokens(num_tokens)  # type: ignore[attr-defined]
-                    for num_tokens in encoder_token_counts
-                ]
-
                 connector_token_mapping = np.repeat(
                     np.array(prompt_lora_mapping, dtype=np.int32),
-                    np.array(post_op_counts, dtype=np.int32),
+                    np.array(connector_token_counts, dtype=np.int32),
                 )
                 connector_mapping = LoRAMapping(
                     index_mapping=tuple(connector_token_mapping.tolist()),
@@ -3281,7 +3224,6 @@ class GPUModelRunner(
 
         req_start_idx = 0
         should_sync_mrope_positions = False
-        should_sync_xdrope_positions = False
 
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
@@ -3373,10 +3315,6 @@ class GPUModelRunner(
         if should_sync_mrope_positions:
             self._calc_mrope_positions(scheduler_output)
             self.mrope_positions.copy_to_gpu(total_num_scheduled_tokens)
-
-        if should_sync_xdrope_positions:
-            self._calc_xdrope_positions(scheduler_output)
-            self.xdrope_positions.copy_to_gpu(total_num_scheduled_tokens)
 
         return mm_embeds, is_mm_embed
 
@@ -3484,17 +3422,11 @@ class GPUModelRunner(
     def setup_eplb_from_mapping(
         self,
         expanded_physical_to_logical: torch.Tensor,
-        old_num_physical_experts: int,
     ) -> None:
-        assert self._moe_model is not None
-
-        self.eplb_state = EplbState.from_mapping(
-            model=self._moe_model,
-            model_config=self.model_config,
-            device=self.device,
-            parallel_config=self.parallel_config,
-            expanded_physical_to_logical=expanded_physical_to_logical,
-            num_valid_physical_experts=old_num_physical_experts,
+        assert self.eplb_state is not None
+        self.eplb_state.update_mapping(
+            self.model_config,
+            expanded_physical_to_logical,
         )
 
     def _pool(
@@ -3525,10 +3457,7 @@ class GPUModelRunner(
             hidden_states=hidden_states, pooling_metadata=pooling_metadata
         )
 
-        finished_mask = [
-            seq_len == prompt_len
-            for seq_len, prompt_len in zip(seq_lens_cpu, pooling_metadata.prompt_lens)
-        ]
+        finished_mask = pooling_metadata.get_pooling_cursor().get_finished_mask()
         raw_pooler_output = self.late_interaction_runner.postprocess_pooler_output(
             raw_pooler_output=raw_pooler_output,
             pooling_params=pooling_metadata.pooling_params,
@@ -3696,8 +3625,6 @@ class GPUModelRunner(
 
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
-        elif self.uses_xdrope_dim > 0:
-            positions = self.xdrope_positions.gpu[:, :num_input_tokens]
         else:
             positions = self.positions[:num_input_tokens]
             if num_input_tokens > num_scheduled_tokens:
@@ -3821,26 +3748,28 @@ class GPUModelRunner(
                     self.routed_experts_slot_mapping_device[:total],
                     non_blocking=True,
                 )
+            with gpu_sync_allowed():
+                # Get the valid generated tokens.
+                max_gen_len = sampled_token_ids.shape[-1]
+                if max_gen_len == 1:
+                    # No spec decode tokens.
+                    valid_sampled_token_ids = self._to_list(sampled_token_ids)
+                    # Mask out the sampled tokens that should not be sampled.
+                    for i in discard_sampled_tokens_req_indices:
+                        valid_sampled_token_ids[int(i)].clear()
 
-            # Get the valid generated tokens.
-            max_gen_len = sampled_token_ids.shape[-1]
-            if max_gen_len == 1:
-                # No spec decode tokens.
-                valid_sampled_token_ids = self._to_list(sampled_token_ids)
-                # Mask out the sampled tokens that should not be sampled.
-                for i in discard_sampled_tokens_req_indices:
-                    valid_sampled_token_ids[int(i)].clear()
-
-                if logprobs_tensors is not None:
-                    logprobs_lists = logprobs_tensors.tolists()
-            else:
-                # Includes spec decode tokens.
-                valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
-                    sampled_token_ids,
-                    self.input_batch.vocab_size,
-                    discard_sampled_tokens_req_indices,
-                    logprobs_tensors=logprobs_tensors,
-                )
+                    if logprobs_tensors is not None:
+                        logprobs_lists = logprobs_tensors.tolists()
+                else:
+                    # Includes spec decode tokens.
+                    valid_sampled_token_ids, logprobs_lists = (
+                        RejectionSampler.parse_output(
+                            sampled_token_ids,
+                            self.input_batch.vocab_size,
+                            discard_sampled_tokens_req_indices,
+                            logprobs_tensors=logprobs_tensors,
+                        )
+                    )
         else:
             valid_sampled_token_ids = []
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
@@ -4337,9 +4266,8 @@ class GPUModelRunner(
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
-            logits_indices, spec_decode_metadata = self._prepare_inputs(
-                scheduler_output,
-                num_scheduled_tokens_np,
+            logits_indices, spec_decode_metadata, max_num_sampled_tokens = (
+                self._prepare_inputs(scheduler_output, num_scheduled_tokens_np)
             )
 
             cascade_attn_prefix_lens = None
@@ -4426,7 +4354,7 @@ class GPUModelRunner(
                     self.input_batch,
                     self.requests,
                     self.compilation_config.static_forward_context,
-                    self.model.get_mamba_state_copy_func(),
+                    self._get_mamba_state_copy_funcs(),
                     mamba_bufs.preprocess,
                     align_ctx=mamba_bufs.postprocess_align,
                 )
@@ -4477,6 +4405,7 @@ class GPUModelRunner(
                     max_query_len=max_num_scheduled_tokens,
                     ubatch_slices=ubatch_slices_attn,
                     logits_indices=logits_indices,
+                    max_num_sampled_tokens=max_num_sampled_tokens,
                     use_spec_decode=use_spec_decode,
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
@@ -4944,7 +4873,9 @@ class GPUModelRunner(
         recv = torch.empty((num_reqs, 1), dtype=torch.int32, device=self.device)
         # skip for chunked prefill.
         if not self._is_all_reqs_chunked_prefill():
-            torch.distributed.broadcast(recv, src=pp.last_rank, group=pp.device_group)
+            self._pp_recv_work = torch.distributed.broadcast(
+                recv, src=pp.last_rank, group=pp.device_group, async_op=True
+            )
         self.input_batch.prev_sampled_token_ids = recv
 
         # construct `prev_req_id_to_index` here so `_prepare_input_ids`
@@ -5400,9 +5331,16 @@ class GPUModelRunner(
                 if load_dummy_weights:
                     self.load_config.load_format = "dummy"
                 model_loader = get_model_loader(self.load_config)
-                self.model = model_loader.load_model(
-                    vllm_config=self.vllm_config, model_config=self.model_config
-                )
+                # Capture warmup providers selected while constructing the model.
+                with self.jit_warmup_registry.activate():
+                    self.model = model_loader.load_model(
+                        vllm_config=self.vllm_config, model_config=self.model_config
+                    )
+                lookback_depth = getattr(self.model, "token_lookback_depth", 0)
+                if lookback_depth > 0:
+                    self.lookback_token_ids = self._make_buffer(
+                        self.max_num_reqs, lookback_depth, dtype=torch.int32
+                    )
                 if self.lora_config:
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
@@ -5451,11 +5389,7 @@ class GPUModelRunner(
                 # MixtureOfExperts themselves.
                 self._moe_model = get_mixture_of_experts_model(self.model)
 
-                if (
-                    self.parallel_config.enable_eplb
-                    and not load_dummy_weights
-                    and self._moe_model is not None
-                ):
+                if self._moe_model is not None and self.parallel_config.enable_eplb:
                     logger.info_once(
                         "EPLB is enabled for MoE part of model %s.",
                         self.model_config.model,
@@ -5527,13 +5461,22 @@ class GPUModelRunner(
             and cudagraph_mode != CUDAGraphMode.NONE
             and not self.parallel_config.use_ubatching
         ):
-            self.model = BreakableCUDAGraphWrapper(self.model, self.vllm_config)
+            # Scoped to PIECEWISE dispatch; FULL cudagraphs (below) are
+            # unaffected. PIECEWISE dispatch can also arise after wrapping
+            # (drafters under a FULL target mode, or a later FULL ->
+            # FULL_AND_PIECEWISE upgrade in _check_and_update_cudagraph_mode).
+            self.model = BreakableCUDAGraphWrapper(
+                self.model, self.vllm_config, runtime_mode=CUDAGraphMode.PIECEWISE
+            )
             drafter = getattr(self, "drafter", None)
             if drafter is not None and hasattr(drafter, "model"):
                 drafter.model = BreakableCUDAGraphWrapper(
-                    drafter.model, self.vllm_config
+                    drafter.model,
+                    self.vllm_config,
+                    runtime_mode=CUDAGraphMode.PIECEWISE,
                 )
-        elif (
+
+        if (
             cudagraph_mode.has_full_cudagraphs()
             and not self.parallel_config.use_ubatching
         ):
@@ -5781,7 +5724,7 @@ class GPUModelRunner(
                 scores = logits.to(torch.float32)
             else:
                 scores = self.sampler.compute_logprobs(logits)
-            token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
+            token_ids, logprobs, ranks, *_ = self.sampler.gather_logprobs(
                 scores, num_prompt_logprobs, tgt_token_ids
             )
 
@@ -5814,7 +5757,10 @@ class GPUModelRunner(
         on device instead; see`AsyncGPUModelRunnerOutput`.
         """
         try:
-            counts = [] if logits is None else count_nans_per_row(logits).tolist()
+            # Reporting per-request NaN counts requires them on the host; this
+            # path is opt-in diagnostics, so the D2H is intended.
+            with gpu_sync_allowed():
+                counts = [] if logits is None else count_nans_per_row(logits).tolist()
             num_nans_in_logits = nans_to_dict(counts, self.input_batch.req_id_to_index)
             if envs.VLLM_RAISE_ON_LOGIT_NANS:
                 raise_if_nan_logits(num_nans_in_logits)
@@ -5824,7 +5770,10 @@ class GPUModelRunner(
 
     @contextmanager
     def maybe_randomize_inputs(
-        self, input_ids: torch.Tensor | None, inputs_embeds: torch.Tensor | None
+        self,
+        input_ids: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None,
+        randomize_inputs: bool = False,
     ):
         """
         Randomize input_ids if VLLM_RANDOMIZE_DP_DUMMY_INPUTS is set.
@@ -5834,7 +5783,9 @@ class GPUModelRunner(
         """
 
         dp_size = self.vllm_config.parallel_config.data_parallel_size
-        randomize_inputs = envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
+        randomize_inputs = randomize_inputs or (
+            envs.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
+        )
         if not randomize_inputs:
             yield
         elif input_ids is not None:
@@ -5911,6 +5862,7 @@ class GPUModelRunner(
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
+        randomize_inputs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -6160,7 +6112,7 @@ class GPUModelRunner(
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
-            model_kwargs = self._init_model_kwargs()
+            model_kwargs = self._init_model_kwargs(num_reqs=0)
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
                 input_ids, inputs_embeds = self._prepare_mm_inputs(num_tokens_padded)
 
@@ -6171,15 +6123,13 @@ class GPUModelRunner(
             elif self.enable_prompt_embeds:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
-                model_kwargs = self._init_model_kwargs()
+                model_kwargs = self._init_model_kwargs(num_reqs=0)
             else:
                 input_ids = self.input_ids.gpu[:num_tokens_padded]
                 inputs_embeds = None
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
-            elif self.uses_xdrope_dim > 0:
-                positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
                 positions = self.positions[:num_tokens_padded]
 
@@ -6208,7 +6158,9 @@ class GPUModelRunner(
                     num_tokens_across_dp[:] = num_tokens_padded
 
             with (
-                self.maybe_randomize_inputs(input_ids, inputs_embeds),
+                self.maybe_randomize_inputs(
+                    input_ids, inputs_embeds, randomize_inputs=randomize_inputs
+                ),
                 set_forward_context(
                     attn_metadata,
                     self.vllm_config,
@@ -6300,9 +6252,7 @@ class GPUModelRunner(
             self.eplb_step(is_dummy=True, is_profile=is_profile)
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
-        logit_indices_device = torch.from_numpy(logit_indices).to(
-            self.device, non_blocking=True
-        )
+        logit_indices_device = async_tensor_h2d(logit_indices, device=self.device)
         return hidden_states, hidden_states[logit_indices_device]
 
     @torch.inference_mode()
@@ -6408,6 +6358,21 @@ class GPUModelRunner(
                 logits,
                 dummy_metadata,
             )
+            # All-greedy is a separate Triton specialization from the
+            # mixed-sampling path above. Compile and exercise it before serving.
+            all_greedy_metadata = replace(
+                dummy_metadata,
+                temperature=None,
+                all_greedy=True,
+                all_random=False,
+            )
+            self.rejection_sampler(
+                dummy_spec_decode_metadata,
+                draft_probs,
+                logits,
+                all_greedy_metadata,
+            )
+            torch.accelerator.synchronize()
         return sampler_output
 
     def _dummy_pooler_run_task(
@@ -6600,19 +6565,7 @@ class GPUModelRunner(
 
         logger.debug("Initialized minimal KV cache for CUDA graph profiling")
 
-    @staticmethod
-    @contextmanager
-    def _freeze_gc():
-        gc.collect()
-        should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
-        if should_freeze:
-            gc.freeze()
-        try:
-            yield
-        finally:
-            if should_freeze:
-                gc.unfreeze()
-                gc.collect()
+    _freeze_gc = staticmethod(freeze_gc_for_cudagraph_capture)
 
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
@@ -6644,9 +6597,6 @@ class GPUModelRunner(
             for i in range(len(self.kv_caches)):
                 self.kv_caches[i] = None  # type: ignore
             self.kv_caches.clear()
-        if hasattr(self, "cross_layers_kv_cache"):
-            self.cross_layers_kv_cache = None
-            self.cross_layers_attn_backend = None
         if hasattr(self, "attn_groups"):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
@@ -7343,29 +7293,36 @@ class GPUModelRunner(
             or kernel_block_sizes != self._init_kernel_block_sizes
             or max_num_blocks != self._init_max_num_blocks
             or slot_mapping_modes != self._init_slot_mapping_modes
+            or self.cp_kv_cache_interleave_size
+            != self.parallel_config.cp_kv_cache_interleave_size
         ):
             self._init_block_sizes = block_sizes
             self._init_kernel_block_sizes = kernel_block_sizes
             self._init_max_num_blocks = max_num_blocks
             self._init_slot_mapping_modes = slot_mapping_modes
-            self.input_batch = InputBatch(
-                max_num_reqs=self.max_num_reqs,
-                max_model_len=max_model_len,
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=block_sizes,
-                kernel_block_sizes=kernel_block_sizes,
-                max_num_blocks_per_req=max_num_blocks,
-                num_spec_tokens=self.num_spec_tokens,
-                logitsprocs=self.input_batch.logitsprocs,
-                logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
-                is_pooling_model=self.is_pooling_model,
-                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
-                reasoning_config=self.vllm_config.reasoning_config,
-                use_replayssm=self.cache_config.use_replayssm,
-                slot_mapping_modes=slot_mapping_modes,
+            self.cp_kv_cache_interleave_size = (
+                self.parallel_config.cp_kv_cache_interleave_size
             )
+            # Capture warmup providers registered after final KV-cache geometry is known
+            with self.jit_warmup_registry.activate():
+                self.input_batch = InputBatch(
+                    max_num_reqs=self.max_num_reqs,
+                    max_model_len=max_model_len,
+                    max_num_batched_tokens=self.max_num_tokens,
+                    device=self.device,
+                    vocab_size=self.model_config.get_vocab_size(),
+                    block_sizes=block_sizes,
+                    kernel_block_sizes=kernel_block_sizes,
+                    max_num_blocks_per_req=max_num_blocks,
+                    num_spec_tokens=self.num_spec_tokens,
+                    logitsprocs=self.input_batch.logitsprocs,
+                    logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
+                    is_pooling_model=self.is_pooling_model,
+                    cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+                    reasoning_config=self.vllm_config.reasoning_config,
+                    use_replayssm=self.cache_config.use_replayssm,
+                    slot_mapping_modes=slot_mapping_modes,
+                )
 
         assert self._init_block_sizes == block_sizes, (
             f"InputBatch block_sizes {self._init_block_sizes} != "
@@ -7376,49 +7333,6 @@ class GPUModelRunner(
             f"!= kv_cache kernel_block_sizes {kernel_block_sizes}"
         )
 
-    def _allocate_kv_cache_tensors(
-        self, kv_cache_config: KVCacheConfig
-    ) -> dict[str, torch.Tensor]:
-        """
-        Initializes the KV cache buffer with the correct size. The buffer needs
-        to be reshaped to the desired shape before being used by the models.
-
-        Args:
-            kv_cache_config: The KV cache config
-        Returns:
-            dict[str, torch.Tensor]: A map between layer names to their
-            corresponding memory buffer for KV cache.
-        """
-        kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
-        packed_backing: torch.Tensor | None = None
-        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            if kv_cache_tensor.block_stride > 0:
-                # Allocate once; all packed tensors alias the same backing.
-                if packed_backing is None:
-                    packed_backing = torch.zeros(
-                        kv_cache_tensor.size,
-                        dtype=torch.int8,
-                        device=self.device,
-                    )
-                tensor = packed_backing
-            else:
-                tensor = torch.zeros(
-                    kv_cache_tensor.size, dtype=torch.int8, device=self.device
-                )
-            for layer_name in kv_cache_tensor.shared_by:
-                kv_cache_raw_tensors[layer_name] = tensor
-
-        layer_names = set()
-        for group in kv_cache_config.kv_cache_groups:
-            for layer_name in group.layer_names:
-                if layer_name in self.runner_only_attn_layers:
-                    continue
-                layer_names.add(layer_name)
-        assert layer_names == set(kv_cache_raw_tensors.keys()), (
-            "Some layers are not correctly initialized"
-        )
-        return kv_cache_raw_tensors
-
     def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
         return itertools.chain.from_iterable(self.attn_groups)
 
@@ -7428,185 +7342,11 @@ class GPUModelRunner(
         for attn_groups in self.attn_groups:
             yield from attn_groups
 
-    def _reshape_kv_cache_tensors(
-        self,
-        kv_cache_raw_tensors: dict[str, torch.Tensor],
-        kernel_block_sizes: list[int],
-    ) -> dict[str, torch.Tensor]:
-        """
-        Reshape the KV cache tensors to the desired shape and dtype.
-
-        Args:
-            kv_cache_raw_tensors: The KV cache buffer of each layer, with
-                correct size but uninitialized shape.
-            kernel_block_sizes: The kernel block sizes for each KV cache group.
-        Returns:
-            Dict[str, torch.Tensor]: A map between layer names to their
-            corresponding memory buffer for KV cache.
-        """
-        kv_caches: dict[str, torch.Tensor] = {}
-        has_attn, has_mamba = False, False
-
-        # Map layer names to (offset, block_stride) within the packed
-        # backing tensor so we can create strided views per layer.
-        layer_packing: dict[str, tuple[int, int]] = {}
-        for kv_tensor in self.kv_cache_config.kv_cache_tensors:
-            if kv_tensor.block_stride > 0:
-                for ln in kv_tensor.shared_by:
-                    layer_packing[ln] = (kv_tensor.offset, kv_tensor.block_stride)
-        for group in self._kv_cache_spec_attn_group_iterator():
-            kv_cache_spec = group.kv_cache_spec
-            attn_backend = group.backend
-            if group.kv_cache_group_id == len(kernel_block_sizes):
-                # There may be a last group for layers without kv cache.
-                continue
-            kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
-            for layer_name in group.layer_names:
-                if layer_name in self.runner_only_attn_layers:
-                    continue
-                raw_tensor = kv_cache_raw_tensors[layer_name]
-                packing = layer_packing.get(layer_name)
-                if packing is not None:
-                    _, blk_stride = packing
-                    num_blocks = raw_tensor.numel() // blk_stride
-                else:
-                    assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
-                if isinstance(kv_cache_spec, AttentionSpec):
-                    has_attn = True
-                    num_blocks_per_kv_block = (
-                        kv_cache_spec.block_size // kernel_block_size
-                    )
-                    kernel_num_blocks = num_blocks * num_blocks_per_kv_block
-
-                    # For MLA with compression, storage_block_size != block_size
-                    if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
-                        shape_block_size = kv_cache_spec.storage_block_size
-                    else:
-                        shape_block_size = kernel_block_size
-
-                    # Skipped layers (--kv-cache-dtype-skip-layers) need
-                    # the unquantized shape.
-                    layer_cache_dtype_str = (
-                        "auto"
-                        if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
-                        else getattr(
-                            kv_cache_spec,
-                            "cache_dtype_str",
-                            None,
-                        )
-                        or self.cache_config.cache_dtype
-                    )
-                    kv_cache_shape = attn_backend.get_kv_cache_shape(
-                        kernel_num_blocks,
-                        shape_block_size,
-                        kv_cache_spec.num_kv_heads,
-                        kv_cache_spec.head_size,
-                        cache_dtype_str=layer_cache_dtype_str,
-                    )
-                    try:
-                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
-                        assert len(kv_cache_stride_order) == len(kv_cache_shape)
-                    except (AttributeError, NotImplementedError):
-                        kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-                    raw_tensor = kv_cache_raw_tensors[layer_name]
-                    kv_caches[layer_name] = _reshape_attention_kv_cache(
-                        raw_tensor,
-                        kv_cache_spec,
-                        kv_cache_shape,
-                        kv_cache_stride_order,
-                        kernel_num_blocks,
-                        packing,
-                    )
-
-                elif isinstance(kv_cache_spec, MambaSpec):
-                    has_mamba = True
-                    raw_tensor = kv_cache_raw_tensors[layer_name]
-                    page_size_bytes = kv_cache_spec.page_size_bytes
-                    # Hold a single contiguous [num_blocks, 1, 1, page_size_bytes]
-                    # int8 page view per layer; the layer's bind_kv_cache unpacks
-                    # each block's bytes into its conv/ssm state views. Keeping
-                    # one tensor per layer lets the KV connector register it
-                    # without special-casing Mamba.
-                    kv_caches[layer_name] = raw_tensor[
-                        : num_blocks * page_size_bytes
-                    ].view(num_blocks, 1, 1, page_size_bytes)
-                else:
-                    raise NotImplementedError
-
-        # Reconcile divergent KV layouts to blocks-first. Triggered by hybrid
-        # attention/mamba models, and by encoder-decoder models whose shared
-        # decoder/cross-attention allocation mixes K/V-first and blocks-first
-        # backends (see _has_mixed_attention_kv_layout).
-        if has_attn and (
-            has_mamba or self._has_mixed_attention_kv_layout(kernel_block_sizes)
-        ):
-            self._update_hybrid_attention_mamba_layout(kv_caches, kernel_block_sizes)
-
-        return kv_caches
-
-    def _has_mixed_attention_kv_layout(self, kernel_block_sizes: list[int]) -> bool:
-        """Whether attention groups disagree on the physical KV cache layout.
-
-        Encoder-decoder models (e.g. Whisper) share one raw KV allocation
-        between a decoder self-attention layer (K/V-first ROCM_ATTN, block dim
-        1) and a cross-attention layer (blocks-first, block dim 0). Mixed block
-        dims mean a block ID maps to different bytes per layer, so the shared
-        buffer must be normalized to a single (blocks-first) layout.
-        """
-        block_dims: set[int] = set()
-        for group in self._kv_cache_spec_attn_group_iterator():
-            kv_cache_spec = group.kv_cache_spec
-            if not isinstance(kv_cache_spec, AttentionSpec):
-                continue
-            if group.kv_cache_group_id == len(kernel_block_sizes):
-                continue
-            block_dims.add(
-                group.backend.get_kv_cache_block_dim(
-                    kernel_block_sizes[group.kv_cache_group_id],
-                    kv_cache_spec.num_kv_heads,
-                    kv_cache_spec.head_size,
-                    cache_dtype_str=self.cache_config.cache_dtype,
-                )
-            )
-        return len(block_dims) > 1
-
-    def _update_hybrid_attention_mamba_layout(
-        self, kv_caches: dict[str, torch.Tensor], kernel_block_sizes: list[int]
-    ) -> None:
-        """
-        Update the layout of attention layers from (2, num_blocks, ...) to
-        (num_blocks, 2, ...).
-
-        Args:
-            kv_caches: The KV cache buffer of each layer.
-            kernel_block_sizes: The kernel block sizes for each KV cache group.
-        """
-
-        for group in self._kv_cache_spec_attn_group_iterator():
-            kv_cache_spec = group.kv_cache_spec
-            if not isinstance(kv_cache_spec, AttentionSpec):
-                continue
-            block_dim = group.backend.get_kv_cache_block_dim(
-                kernel_block_sizes[group.kv_cache_group_id],
-                kv_cache_spec.num_kv_heads,
-                kv_cache_spec.head_size,
-                cache_dtype_str=self.cache_config.cache_dtype,
-            )
-            # block_dim: 0 means (num_blocks, 2, ...); 1 means (2, num_blocks, ...).
-            if block_dim == 0:
-                continue
-            assert block_dim == 1
-            for layer_name in group.layer_names:
-                kv_cache = kv_caches[layer_name]
-                hidden_size = kv_cache.shape[2:].numel()
-                kv_cache.as_strided_(
-                    size=kv_cache.shape,
-                    stride=(hidden_size, 2 * hidden_size, *kv_cache.stride()[2:]),
-                )
-
     def initialize_kv_cache_tensors(
-        self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int],
+        kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Initialize the memory buffer for KV cache.
@@ -7620,28 +7360,13 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
 
-        # Try creating KV caches optimized for kv-connector transfers
-        cache_dtype = self.cache_config.cache_dtype
-        if self.use_uniform_kv_cache(self.attn_groups):
-            kv_caches, cross_layers_kv_cache, attn_backend = (
-                self.allocate_uniform_kv_caches(
-                    kv_cache_config,
-                    self.attn_groups,
-                    cache_dtype,
-                    self.device,
-                    kernel_block_sizes,
-                )
-            )
-            self.cross_layers_kv_cache = cross_layers_kv_cache
-            self.cross_layers_attn_backend = attn_backend
-        else:
-            # Fallback to the general case
-            # Initialize the memory buffer for KV cache
-            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
-
-            # Change the memory buffer to the desired shape
-            kv_caches = self._reshape_kv_cache_tensors(
-                kv_cache_raw_tensors, kernel_block_sizes
+        allocation_context = kv_cache_allocation_context or nullcontext()
+        with allocation_context:
+            kv_caches = allocate_kv_cache(
+                kv_cache_config,
+                self.device,
+                self.cache_config.get_resolved_kv_cache_layout(),
+                kernel_block_sizes,
             )
 
         # Set up cross-layer KV cache sharing
@@ -7657,6 +7382,7 @@ class GPUModelRunner(
             self.compilation_config.static_forward_context,
             self.kv_caches,
             num_attn_module,
+            kv_cache_groups=kv_cache_config.kv_cache_groups,
         )
         return kv_caches
 
@@ -7692,6 +7418,7 @@ class GPUModelRunner(
         self,
         kv_cache_config: KVCacheConfig,
         is_profiling: bool = False,
+        kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -7702,11 +7429,14 @@ class GPUModelRunner(
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
         self._mamba_bufs = None
+        self._mamba_state_copy_funcs = None
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config, is_profiling=is_profiling)
         initialize_mamba_ssu_backend(
-            self.vllm_config.mamba_config, self.kv_cache_config
+            self.vllm_config.mamba_config,
+            self.kv_cache_config,
+            use_replayssm=self.vllm_config.cache_config.use_replayssm,
         )
         # The kernel block size for all KV cache groups. For example, if
         # kv_cache_manager uses block_size 256 for a given group, but the attention
@@ -7723,9 +7453,13 @@ class GPUModelRunner(
 
         # Reinitialize need to after initialize_attn_backend
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
-        kv_caches = self.initialize_kv_cache_tensors(
-            kv_cache_config, kernel_block_sizes
-        )
+        # Capture warmup providers that depend on allocated KV-cache strides.
+        with self.jit_warmup_registry.activate():
+            kv_caches = self.initialize_kv_cache_tensors(
+                kv_cache_config,
+                kernel_block_sizes,
+                kv_cache_allocation_context=kv_cache_allocation_context,
+            )
 
         if (
             self.speculative_config
@@ -7738,13 +7472,7 @@ class GPUModelRunner(
 
         if has_kv_transfer_group() and not is_profiling:
             kv_transfer_group = get_kv_transfer_group()
-            if self.cross_layers_kv_cache is not None:
-                assert self.cross_layers_attn_backend is not None
-                kv_transfer_group.register_cross_layers_kv_cache(
-                    self.cross_layers_kv_cache, self.cross_layers_attn_backend
-                )
-            else:
-                kv_transfer_group.register_kv_caches(kv_caches)
+            kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
     def get_routed_experts(
@@ -7857,12 +7585,7 @@ class GPUModelRunner(
             # Skip modules that don't need KV cache (eg encoder-only attention)
             if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                 if isinstance(spec, AttentionSpec):
-                    backend = attn_module.get_attn_backend()
-                    # indexes_kv_by_block_stride() -> get_kv_cache_stride_order()
-                    # -> get_kv_cache_layout() needs the current vLLM config.
-                    with set_current_vllm_config(self.vllm_config):
-                        indexes = backend.indexes_kv_by_block_stride()
-                    spec = replace(spec, indexes_kv_by_block_stride=indexes)
+                    spec = attn_module.get_attn_backend().customize_spec(spec)
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
@@ -7940,20 +7663,3 @@ class GPUModelRunner(
                     stats = self.encoder_timing_registry[req_id]
                     stats.encoder_forward_secs += per_request_time
                     stats.num_encoder_calls += 1
-
-
-@dataclass
-class EncoderTimingStats:
-    """Per-request timing statistics for encoder forward pass."""
-
-    encoder_forward_secs: float = 0.0
-    """Time spent in vision encoder forward pass (seconds)."""
-
-    num_encoder_calls: int = 0
-    """Number of times encoder was called for this request."""
-
-    def to_dict(self) -> dict[str, float | int]:
-        return {
-            "encoder_forward_secs": self.encoder_forward_secs,
-            "num_encoder_calls": self.num_encoder_calls,
-        }

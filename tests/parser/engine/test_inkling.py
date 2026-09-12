@@ -23,8 +23,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
+from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine_config import ParserState
-from vllm.parser.inkling import InklingParser, _inkling_arg_converter
+from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
+from vllm.parser.inkling import InklingParser, _inkling_arg_converter, inkling_config
 from vllm.parser.parser_manager import ParserManager
 
 MSG_MODEL = "<|message_model|>"
@@ -786,3 +788,194 @@ class TestDelegatingTwoPass:
         assert json.loads(args[0]) == {"city": "SF"}
         assert TOOL_JSON not in content
         assert END_MESSAGE not in content
+
+    @pytest.mark.parametrize("chunk_size", [1, 3, 7, 64])
+    def test_tool_start_from_message_header_streaming(
+        self, mock_tokenizer, mock_request, chunk_size
+    ):
+        """A tool call with no block of any kind ahead of it.
+
+        The generation prompt ends in ``<|message_model|>``, so this fires
+        TOOL_START straight from MESSAGE_HEADER. A tool block is the one
+        opener that confirms no reasoning is open without rendering visible
+        content, so it is the case the visible-block openers cannot cover.
+        """
+        tools = [_function_tool()]
+        mock_request.tools = tools
+        content, _, names, args = _stream_delegating(
+            _delegating(mock_tokenizer, tools),
+            mock_request,
+            _tool_block("get_weather", '{"city":"Seattle"}'),
+            chunk_size,
+            self.GEN_PROMPT,
+        )
+        assert names == ["get_weather"]
+        assert json.loads(args[0]) == {"city": "Seattle"}
+        assert content == ""
+        assert TOOL_JSON not in content
+        assert END_MESSAGE not in content
+
+    def test_function_name_header_before_tool_start_streaming(
+        self, mock_tokenizer, mock_request
+    ):
+        """The optional function name between ``<|message_model|>`` and the
+        content-kind marker is metadata: the buffered header must be
+        discarded on the way out, not flushed into content."""
+        tools = [_function_tool()]
+        mock_request.tools = tools
+        content, _, names, args = _stream_delegating(
+            _delegating(mock_tokenizer, tools),
+            mock_request,
+            "someFn" + _tool_block("get_weather", '{"city":"Seattle"}'),
+            1,
+            self.GEN_PROMPT,
+        )
+        assert names == ["get_weather"]
+        assert json.loads(args[0]) == {"city": "Seattle"}
+        assert content == ""
+
+    def test_content_state_tool_start_streaming(self, mock_tokenizer, mock_request):
+        """Same opener reached from CONTENT rather than MESSAGE_HEADER: a
+        text block closed with no ``<|message_model|>`` before the tool
+        block. Preceding text must reach content exactly once, unmarked."""
+        tools = [_function_tool()]
+        mock_request.tools = tools
+        content, _, names, args = _stream_delegating(
+            _delegating(mock_tokenizer, tools),
+            mock_request,
+            f"{TEXT_START}intro{END_MESSAGE}"
+            + _tool_block("get_weather", '{"city":"Seattle"}'),
+            1,
+            self.GEN_PROMPT,
+        )
+        assert names == ["get_weather"]
+        assert json.loads(args[0]) == {"city": "Seattle"}
+        assert content == "intro"
+
+
+def test_content_tool_start_emits_reasoning_end_in_reasoning_pass():
+    """(CONTENT, TOOL_START) must carry REASONING_END through the
+    reasoning pass. Every visible-block opener already confirms the
+    boundary (#49876), but the header-flush path
+    (MESSAGE_HEADER --END_MESSAGE--> CONTENT) reaches CONTENT without
+    one, so a tool block opening from there relies on this transition
+    alone to hand off to the tool pass."""
+    engine = StreamingParserEngine(inkling_config(), tokenizer=None)
+    engine.skip_tool_parsing = True
+    engine.reset(initial_state=ParserState.CONTENT)
+    events = engine.parse_complete(f'{TOOL_JSON}{{"name":"f","args":{{}}}}')
+    assert [e.type for e in events[:2]] == [
+        EventType.REASONING_END,
+        EventType.TEXT_CHUNK,
+    ]
+    assert events[1].value == TOOL_JSON
+
+
+def test_skip_reasoning_parsing_inert_for_shared_markers():
+    """``skip_reasoning_parsing`` may only bypass reasoning-exclusive
+    markers. Inkling has none — ``<|end_message|>`` is labelled THINK_END
+    yet also closes text, header, and tool blocks — so the flag must be
+    inert: a tool block still closes through its transition and following
+    text returns to CONTENT instead of leaking into the argument stream."""
+    engine = StreamingParserEngine(inkling_config(), tokenizer=None)
+    engine.skip_reasoning_parsing = True
+    engine.reset(initial_state=ParserState.CONTENT)
+    events = engine.parse_complete(
+        f'{TOOL_JSON}{{"name":"f","args":{{}}}}{END_MESSAGE}after'
+    )
+    types = [e.type for e in events]
+    end_idx = types.index(EventType.TOOL_CALL_END)
+    text_after = [e.value for e in events[end_idx:] if e.type == EventType.TEXT_CHUNK]
+    assert text_after == ["after"]
+
+
+class TestToolParserWithoutReasoningParser:
+    """Inkling served with only the tool parser, no ``--reasoning-parser``.
+
+    That configuration turns on ``skip_reasoning_parsing``, and Inkling
+    labels ``<|end_message|>`` as THINK_END; a bypass keyed on the label
+    would neutralize the closer of every block kind, leaking markers into
+    content and leaving tool calls unterminated. Structure must keep
+    parsing exactly as with the reasoning parser attached."""
+
+    GEN_PROMPT = [_TML_VOCAB[MSG_MODEL]]
+
+    def _tool_only(self, mock_tokenizer, tools=None):
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name="inkling",
+            enable_auto_tools=True,
+        )
+        return parser_cls(mock_tokenizer, tools or [])
+
+    def test_plain_text_non_streaming(self, mock_tokenizer, mock_request):
+        tools = [_function_tool()]
+        mock_request.tools = tools
+        _, content, calls = self._tool_only(mock_tokenizer, tools).parse(
+            f"{TEXT_START}The answer is 42.{END_MESSAGE}",
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert content == "The answer is 42."
+        assert not calls
+
+    @pytest.mark.parametrize("chunk_size", [1, 3, 64])
+    def test_plain_text_streaming(self, mock_tokenizer, mock_request, chunk_size):
+        tools = [_function_tool()]
+        mock_request.tools = tools
+        content, _, names, _ = _stream_delegating(
+            self._tool_only(mock_tokenizer, tools),
+            mock_request,
+            f"{TEXT_START}The answer is 42.{END_MESSAGE}",
+            chunk_size,
+            self.GEN_PROMPT,
+        )
+        assert content == "The answer is 42."
+        assert not names
+
+    def test_tool_block_non_streaming(self, mock_tokenizer, mock_request):
+        _, content, calls = self._tool_only(mock_tokenizer).parse(
+            _tool_block("get_weather", '{"city":"SF"}'),
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert [c.name for c in calls] == ["get_weather"]
+        assert not content
+
+    @pytest.mark.parametrize("chunk_size", [1, 3, 64])
+    def test_tool_block_streaming(self, mock_tokenizer, mock_request, chunk_size):
+        tools = [_function_tool()]
+        mock_request.tools = tools
+        content, _, names, args = _stream_delegating(
+            self._tool_only(mock_tokenizer, tools),
+            mock_request,
+            _tool_block("get_weather", '{"city":"SF"}'),
+            chunk_size,
+            self.GEN_PROMPT,
+        )
+        assert names == ["get_weather"]
+        assert json.loads(args[0]) == {"city": "SF"}
+        assert content == ""
+
+    def test_thinking_then_text_keeps_structure(self, mock_tokenizer, mock_request):
+        tools = [_function_tool()]
+        mock_request.tools = tools
+        _, content, calls = self._tool_only(mock_tokenizer, tools).parse(
+            f"{THINK_START}plan{END_MESSAGE}"
+            f"{MSG_MODEL}{TEXT_START}Let me look.{END_MESSAGE}",
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert content == "Let me look."
+        assert END_MESSAGE not in content
+        assert THINK_START not in content
+        assert not calls
+
+    def test_thinking_then_tool_still_promotes(self, mock_tokenizer, mock_request):
+        _, content, calls = self._tool_only(mock_tokenizer).parse(
+            f"{THINK_START}think{END_MESSAGE}{MSG_MODEL}"
+            + _tool_block("get_weather", '{"x":1}'),
+            mock_request,
+            enable_auto_tools=True,
+        )
+        assert [c.name for c in calls] == ["get_weather"]
+        assert not content

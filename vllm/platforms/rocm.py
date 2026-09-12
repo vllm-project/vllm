@@ -130,14 +130,6 @@ def _sync_hip_cuda_env_vars():
     hip_val = os.environ.get("HIP_VISIBLE_DEVICES") or None
     cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES") or None
 
-    if cuda_val is not None:
-        logger.warning_once(
-            "Using CUDA_VISIBLE_DEVICES on ROCm is deprecated and support "
-            "will be removed in vLLM v0.26.0. Please use HIP_VISIBLE_DEVICES "
-            "instead.",
-            scope="process",
-        )
-
     if hip_val is not None and cuda_val is not None:
         if hip_val != cuda_val:
             raise ValueError(
@@ -148,8 +140,6 @@ def _sync_hip_cuda_env_vars():
             )
     elif hip_val is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = hip_val
-    elif cuda_val is not None:
-        os.environ["HIP_VISIBLE_DEVICES"] = cuda_val
 
 
 # Sync at import time - catches misconfigurations from process start.
@@ -520,11 +510,11 @@ class RocmPlatform(Platform):
         "deepseek_v4_fp8",
         "compressed-tensors",
         "fbgemm_fp8",
+        "inc",
         "quark",
         "mxfp4",
         "mxfp8",
         "torchao",
-        "bitsandbytes",
         "modelopt",
         "modelopt_fp4",
         "modelopt_mxfp8",
@@ -546,6 +536,10 @@ class RocmPlatform(Platform):
         # Import ROCm-specific extension
         with contextlib.suppress(ImportError):
             import vllm._rocm_C  # noqa: F401
+
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
@@ -624,23 +618,38 @@ class RocmPlatform(Platform):
         if selected_backend is not None:
             try:
                 backend_class = selected_backend.get_class()
-                invalid_reasons = backend_class.validate_configuration(
+                sel_invalid_reasons = backend_class.validate_configuration(
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
                 )
             except ImportError:
-                invalid_reasons = ["ImportError"]
-            if invalid_reasons:
-                raise ValueError(
-                    f"Selected backend {selected_backend} is not valid for "
-                    f"this configuration. Reason: {invalid_reasons}"
-                )
-            else:
+                sel_invalid_reasons = ["ImportError"]
+            if not sel_invalid_reasons:
                 logger.info_once(
                     "Using %s backend (selected via --attention-backend).",
                     selected_backend.name,
                 )
                 return selected_backend.get_path()
+            # Only tolerate the mismatch for turboquant_* KV-cache layers:
+            # boundary layers keep the native dtype (served by the selected
+            # backend) while turboquant_* layers need TURBOQUANT, so no single
+            # --attention-backend can serve every layer. For any other dtype
+            # the explicit selection is genuinely invalid -> fail loud.
+            kv_dtype = attn_selector_config.kv_cache_dtype
+            if not (kv_dtype is not None and str(kv_dtype).startswith("turboquant")):
+                raise ValueError(
+                    f"Selected backend {selected_backend} is not valid for "
+                    f"this configuration. Reason: {sel_invalid_reasons}"
+                )
+            # NOTE: pass a str (not the list) -- info_once hashes its args.
+            logger.info_once(
+                "Selected backend %s is incompatible with this turboquant "
+                "layer (%s); using the auto-selected per-layer backend. "
+                "Reason: %s",
+                selected_backend.name,
+                attn_selector_config.attn_type,
+                str(sel_invalid_reasons),
+            )
 
         # No selected backend or the selected backend is invalid,
         # so we try finding a valid backend.
@@ -663,9 +672,24 @@ class RocmPlatform(Platform):
             f"{config_str}. Reasons: {reasons_str}."
         )
         if len(valid_backends_priorities) == 0:
+            # If a backend rejected the requested kv-cache dtype, list the
+            # dtypes it does accept so the limitation is discoverable.
+            supported = sorted(
+                {
+                    dt
+                    for backend, reasons in invalid_reasons.items()
+                    if any("kv_cache_dtype" in r for r in reasons)
+                    for dt in backend.get_class().supported_kv_cache_dtypes
+                }
+            )
+            hint = (
+                f" Supported kv_cache_dtype values: {', '.join(supported)}."
+                if supported
+                else ""
+            )
             raise ValueError(
                 f"No valid attention backend found for {cls.device_name} "
-                f"with {config_str}. Reasons: {reasons_str}."
+                f"with {config_str}. Reasons: {reasons_str}.{hint}"
             )
 
         # We have found some valid backends. Select the one with the
@@ -846,8 +870,25 @@ class RocmPlatform(Platform):
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
         from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.config.compilation import CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
+        model_config = vllm_config.model_config
+        if (
+            compilation_config.cudagraph_mode is None
+            and model_config is not None
+            and on_gfx950()
+            and vllm_config.use_v2_model_runner
+            and model_config.architecture
+            in {
+                "DeepseekV4ForCausalLM",
+                "DeepseekV4ForConditionalGeneration",
+            }
+        ):
+            # Default to eager after reported gfx950/MRV2 accuracy regressions:
+            # https://github.com/vllm-project/vllm/issues/52644
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
         use_aiter_fused_moe = rocm_aiter_ops.is_fused_moe_enabled()
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
         use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
@@ -881,26 +922,41 @@ class RocmPlatform(Platform):
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
 
-        if compilation_config.cudagraph_mode.has_full_cudagraphs():
-            # decode context parallel does not support full cudagraphs
-            if parallel_config.decode_context_parallel_size > 1:
-                logger.warning_once(
-                    "Decode context parallel (DCP) is enabled, which is "
-                    "incompatible with full CUDA graphs. "
-                    "Overriding cudagraph_mode to PIECEWISE."
-                )
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        if (
+            parallel_config.prefill_context_parallel_size > 1
+            and parallel_config.data_parallel_size > 1
+        ):
+            raise ValueError("PCP does not support data parallelism on ROCm yet.")
+
+        if (
+            compilation_config.cudagraph_mode.has_full_cudagraphs()
+            and parallel_config.prefill_context_parallel_size > 1
+        ):
             # prefill context parallel do not support full cudagraphs
-            elif parallel_config.prefill_context_parallel_size > 1:
-                logger.warning_once(
-                    "Prefill context parallel (PCP) is enabled, which is "
-                    "incompatible with full CUDA graphs. "
-                    "Overriding cudagraph_mode to PIECEWISE."
-                )
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            logger.warning_once(
+                "Prefill context parallel (PCP) is enabled, which is "
+                "incompatible with full CUDA graphs. "
+                "Overriding cudagraph_mode to PIECEWISE."
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
+
+        model_config = vllm_config.model_config
+        scheduler_config = vllm_config.scheduler_config
+        # Note: model_config may be None during testing
+        if (
+            model_config is not None
+            and model_config.is_mm_prefix_lm
+            and scheduler_config.is_multimodal_model
+            and not scheduler_config.disable_chunked_mm_input
+        ):
+            logger.warning_once(
+                "Forcing --disable_chunked_mm_input for models "
+                "with multimodal-bidirectional attention."
+            )
+            scheduler_config.disable_chunked_mm_input = True
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:

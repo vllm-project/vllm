@@ -32,7 +32,12 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     EncoderOnlyAttentionSpec,
     FullAttentionSpec,
+    KVCacheLayout,
+    KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
+    compute_layout_strides,
+    create_kv_cache_views,
     get_kv_quant_mode,
 )
 
@@ -80,13 +85,6 @@ def create_common_attn_metadata(
     seq_lens_cpu = seq_lens.cpu()
     max_seq_len = int(seq_lens_cpu.max())
 
-    # Create computed tokens (context length for each sequence)
-    context_lens = [
-        batch_spec.seq_lens[i] - batch_spec.query_lens[i]
-        for i in range(batch_spec.batch_size)
-    ]
-    num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
-
     # Create block table and slot mapping
     max_blocks = (max(batch_spec.seq_lens) + block_size - 1) // block_size
     if arange_block_indices:
@@ -117,8 +115,6 @@ def create_common_attn_metadata(
         query_start_loc_cpu=query_start_loc_cpu,
         seq_lens=seq_lens,
         seq_lens_cpu_upper_bound=seq_lens_cpu,
-        _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=num_computed_tokens_cpu,
         num_reqs=batch_spec.batch_size,
         num_actual_tokens=num_tokens,
         max_query_len=max_query_len,
@@ -215,6 +211,9 @@ def create_vllm_config(
     #   (these may be set during initialization normally)
     cache_config.num_gpu_blocks = num_gpu_blocks
     cache_config.num_cpu_blocks = 0
+    # Builders read the resolved layout from the config; tests that exercise a
+    # different layout overwrite this field.
+    cache_config.kv_cache_layout = "LBNHC"
 
     parallel_config = ParallelConfig(
         tensor_parallel_size=tensor_parallel_size,
@@ -379,7 +378,6 @@ full_cg_backend_configs = {
         name="RocmAttn",
         attention_config={
             "backend": "ROCM_ATTN",
-            "use_prefill_decode_attention": True,
         },
         comp_config={
             "cudagraph_mode": "FULL",
@@ -417,3 +415,43 @@ class MockMambaBuilder(BaseMambaAttentionMetadataBuilder[BaseMambaAttentionMetad
             is_prefilling=torch.tensor(is_prefilling, dtype=torch.bool)
         )
         return builder.build(0, common_metadata)
+
+
+def dense_kv_cache_tensor(
+    raw: torch.Tensor,
+    spec: KVCacheSpec,
+    num_blocks: int,
+    num_layers: int,
+    layout: KVCacheLayout,
+    layer_names: list[str] | None = None,
+) -> KVCacheTensor:
+    """The ``KVCacheTensor`` for a dense allocation of ``num_layers`` layers."""
+    layer_stride, block_stride, _, _, _ = compute_layout_strides(
+        spec, num_blocks, num_layers, layout
+    )
+    return KVCacheTensor(
+        size=raw.numel(),
+        layers=layer_names or [str(i) for i in range(num_layers)],
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+    )
+
+
+def dense_kv_cache_views(
+    raw: torch.Tensor,
+    spec: KVCacheSpec,
+    num_blocks: int,
+    num_layers: int,
+    layout: KVCacheLayout,
+    kernel_block_size: int | None = None,
+) -> list[torch.Tensor]:
+    """``create_kv_cache_views`` for a dense allocation of ``num_layers`` layers."""
+    tensor = dense_kv_cache_tensor(raw, spec, num_blocks, num_layers, layout)
+    return create_kv_cache_views(
+        raw,
+        spec,
+        num_blocks,
+        layout,
+        tensor,
+        kernel_block_size=kernel_block_size,
+    )

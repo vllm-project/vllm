@@ -28,7 +28,10 @@
             "type": "integer"
         },
         "serviceName": {
-            "type": "null"
+            "type": [
+                "null",
+                "string"
+            ]
         },
         "servicePort": {
             "type": "integer"

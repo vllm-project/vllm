@@ -87,6 +87,7 @@ fn inline_prompt_logprobs_value() -> Value {
         ndarray_value("float32", &[2, 3], probs),
         ndarray_value("int64", &[2], ranks),
         Value::Nil,
+        Value::Nil,
     ])
 }
 
@@ -241,6 +242,29 @@ fn decodes_inline_prompt_logprobs() {
 }
 
 #[test]
+fn rejects_non_none_cu_num_generated_tokens_tensor() {
+    let Value::Array(mut fields) = inline_prompt_logprobs_value() else {
+        panic!("inline_prompt_logprobs_value must be an array");
+    };
+    fields[4] = Value::from(42);
+
+    let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
+        None,
+        Some(Value::Array(fields)),
+    )))];
+
+    let error = decode_engine_core_outputs(&frames).unwrap_err();
+    let crate::error::Error::ExtValueDecode { message } = &error else {
+        panic!("expected ValueDecodeExt");
+    };
+    assert_eq!(
+        message,
+        "new_prompt_logprobs_tensors.cu_num_generated_tokens_tensor: \
+         expected None for per-request engine-core logprobs payload"
+    );
+}
+
+#[test]
 fn decodes_big_endian_payloads() {
     let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
         Some(Value::Array(vec![
@@ -276,6 +300,29 @@ fn decodes_big_endian_payloads() {
             }],
         }
     );
+}
+
+#[test]
+fn rejects_supported_array_dtypes_in_incompatible_logprobs_fields() {
+    for (ids_dtype, probs_dtype, field) in [
+        ("<u4", "<f4", "logprob_token_ids"),
+        ("<i4", "<i4", "logprobs"),
+    ] {
+        let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
+            Some(Value::Array(vec![
+                ndarray_value(ids_dtype, &[1, 1], Value::Ext(3, vec![0; 4])),
+                ndarray_value(probs_dtype, &[1, 1], Value::Ext(3, vec![0; 4])),
+                ndarray_value("<i4", &[1], Value::Ext(3, vec![1, 0, 0, 0])),
+                Value::Nil,
+            ])),
+            None,
+        )))];
+        let error = decode_engine_core_outputs(&frames).unwrap_err();
+        let crate::error::Error::ExtValueDecode { message } = error else {
+            panic!("expected ExtValueDecode");
+        };
+        assert!(message.starts_with(&format!("new_logprobs.{field}: expected dtype")));
+    }
 }
 
 #[test]

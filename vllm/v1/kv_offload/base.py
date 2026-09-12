@@ -114,17 +114,17 @@ class LookupResult(Enum):
 
 
 class OffloadPolicy(Enum):
-    # Offload only newly-computed blocks as they arrive; prefix-hit
-    # blocks (already offloaded by a prior request) are skipped.
-    BLOCK_LEVEL = "block_level"
-    # Offload all blocks for the request, including prefix hits.
+    # Offload only newly-computed chunks as they arrive; prefix-hit
+    # chunks (already offloaded by a prior request) are skipped.
+    CHUNK_LEVEL = "chunk_level"
+    # Offload all chunks for the request, including prefix hits.
     # Used by tiers that need the complete KV context for a request.
     REQUEST_LEVEL = "request_level"
 
 
 @dataclass
 class RequestOffloadingContext:
-    policy: OffloadPolicy = OffloadPolicy.BLOCK_LEVEL
+    policy: OffloadPolicy = OffloadPolicy.CHUNK_LEVEL
 
 
 class ScheduleEndContext(NamedTuple):
@@ -157,6 +157,9 @@ class OffloadingEvent:
     # True if blocks are removed, False if stored
     removed: bool
     locality: Locality | None = None
+    # Secondary tier identifier that generated the event, or None for primary.
+    ownership: str | None = None
+    removal_expected: bool = False
 
 
 """
@@ -397,10 +400,13 @@ class OffloadingManager(ABC):
 class BlockIDsLoadStoreSpec(LoadStoreSpec, ABC):
     """
     Spec for loading/storing KV blocks from given block numbers.
+
+    Subclass semantics differ: GPULoadStoreSpec.block_ids are GPU block
+    indices; CPULoadStoreSpec.block_ids are CPU cache chunk indices.
     """
 
     def __init__(self, block_ids: list[int]):
-        self.block_ids = np.array(block_ids, dtype=np.int64)
+        self.block_ids = np.array(block_ids, dtype=np.int32)
 
     def __repr__(self) -> str:
         return repr(self.block_ids)
@@ -445,10 +451,8 @@ class CanonicalKVCacheTensor:
     """
     A canonicalized KV cache tensor whose first dimension is num_blocks.
 
-    For attention backends where the raw tensor has num_blocks at a
-    non-leading physical dimension (e.g. FlashAttention's
-    (2, num_blocks, ...) layout), the tensor is split so that each
-    resulting CanonicalKVCacheTensor starts with (num_blocks, ...).
+    With standardized layouts (RFC #42082) num_blocks is always the leading
+    logical dimension.
     """
 
     # The KV cache tensor with shape (num_blocks, ...)
