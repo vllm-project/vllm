@@ -672,7 +672,7 @@ def test_async_load_reserves_blocks_for_inflight():
     (free - req_a's 3-block reservation) = 3 blocks are available to it, so it is
     held back in WAITING (holding no blocks) rather than wedging req_a.
     """
-    vllm_config = create_vllm_config()
+    vllm_config = create_vllm_config(max_num_batched_tokens=256)
     BLOCK_SIZE = vllm_config.cache_config.block_size
     scheduler = create_scheduler(vllm_config, num_blocks=8)  # usable = 7
 
