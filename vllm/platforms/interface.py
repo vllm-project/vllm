@@ -907,7 +907,7 @@ class Platform:
                 kernel_block_alignment_size = max(kernel_block_alignment_size, 128)
 
         if cache_config.mamba_cache_mode == "all":
-            # With prefix caching, align to mamba chunk size for kernel perf
+            # In "all" mode, align to the mamba chunk size for kernel perf
             # TODO(tdoublep): this constraint can be relaxed fairly
             # easily by changing the way we layout chunks in the
             # mamba2 kernels.
@@ -918,8 +918,8 @@ class Platform:
             attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
             cache_config.mamba_block_size = attn_block_size
         else:
-            # Without prefix caching, use minimum block size that satisfies
-            # both backend alignment and mamba page size compatibility
+            # In "none" and "align" modes, use the minimum block size that
+            # satisfies both backend alignment and mamba page size compatibility
             attn_block_size = kernel_block_alignment_size * cdiv(
                 mamba_page_size,
                 kernel_block_alignment_size * attn_page_size_1_token,
