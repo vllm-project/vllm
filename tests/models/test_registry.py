@@ -26,6 +26,7 @@ from vllm.platforms import current_platform
 
 from ..utils import create_new_process_for_each_test
 from .registry import HF_EXAMPLE_MODELS
+from .utils import skip_if_capability_restricted
 
 
 @pytest.mark.parametrize("model_arch", ModelRegistry.get_supported_archs())
@@ -69,6 +70,10 @@ def test_registry_imports(model_arch):
         and not current_platform.is_cuda_alike()
     ):
         pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
+
+    # _try_load_model_cls runs verify_model_arch, which rejects architectures
+    # whose kernels are missing for this GPU's compute capability.
+    skip_if_capability_restricted(model_arch)
 
     # Ensure all model classes can be imported successfully
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
