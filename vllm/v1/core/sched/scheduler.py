@@ -1617,6 +1617,14 @@ class Scheduler(SchedulerInterface):
         all_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
+        need_num_output_tokens = (
+            not self.use_v2_model_runner
+            or (
+                self.log_stats
+                and self.observability_config.enable_logging_iteration_details
+            )
+            or self.vllm_config.profiler_config.profiler is not None
+        )
         resumed_req_ids = set()
 
         num_running_reqs = len(running_reqs)
@@ -1648,9 +1656,10 @@ class Scheduler(SchedulerInterface):
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
             num_computed_tokens.append(req.num_computed_tokens)
-            num_output_tokens.append(
-                req.num_output_tokens + req.num_output_placeholders
-            )
+            if need_num_output_tokens:
+                num_output_tokens.append(
+                    req.num_output_tokens + req.num_output_placeholders
+                )
 
         return CachedRequestData(
             req_ids=req_ids,

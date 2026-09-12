@@ -50,6 +50,7 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
+from vllm.v1.utils import compute_iteration_details
 
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
@@ -275,6 +276,126 @@ def test_cached_request_data_resumed_all_token_ids_mrv1_only():
     cached = make_cached()
     assert req.request_id in cached.resumed_req_ids
     assert cached.all_token_ids == {}
+
+
+def _make_cached_request_data_with_num_output_counts(scheduler: Scheduler):
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+
+    running_zero, running_outputs, resumed = create_requests(
+        num_requests=3,
+        num_tokens=8,
+        req_ids=["running-zero", "running-outputs", "resumed"],
+    )
+    running_zero.num_computed_tokens = 8
+    running_outputs.num_computed_tokens = 9
+    resumed.num_computed_tokens = 10
+    running_outputs.append_output_token_ids([101, 102])
+    running_outputs.num_output_placeholders = 1
+    resumed.append_output_token_ids([201])
+    resumed.num_output_placeholders = 2
+
+    empty_blocks = KVCacheBlocks(blocks=((),))
+    reqs = [running_zero, running_outputs, resumed]
+    return scheduler._make_cached_request_data(
+        running_reqs=[running_zero, running_outputs],
+        resumed_reqs=[resumed],
+        num_scheduled_tokens={req.request_id: 1 for req in reqs},
+        spec_decode_tokens={},
+        req_to_new_blocks={req.request_id: empty_blocks for req in reqs},
+    )
+
+
+def test_cached_request_data_omits_num_output_tokens_for_default_mrv2():
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+
+    class CachedReqWithoutReadableOutputCount:
+        def __init__(self, request_id: str, num_computed_tokens: int):
+            self.request_id = request_id
+            self.num_computed_tokens = num_computed_tokens
+
+        @property
+        def num_output_tokens(self) -> int:
+            raise AssertionError("num_output_tokens should not be read")
+
+        @property
+        def num_output_placeholders(self) -> int:
+            raise AssertionError("num_output_placeholders should not be read")
+
+    scheduler = create_scheduler(use_v2_model_runner=True)
+    empty_blocks = KVCacheBlocks(blocks=((),))
+    running = CachedReqWithoutReadableOutputCount("running", 7)
+    resumed = CachedReqWithoutReadableOutputCount("resumed", 11)
+
+    cached = scheduler._make_cached_request_data(
+        running_reqs=[running],  # type: ignore[list-item]
+        resumed_reqs=[resumed],  # type: ignore[list-item]
+        num_scheduled_tokens={"running": 1, "resumed": 1},
+        spec_decode_tokens={},
+        req_to_new_blocks={"running": empty_blocks, "resumed": empty_blocks},
+    )
+
+    assert cached.req_ids == ["running", "resumed"]
+    assert cached.resumed_req_ids == {"resumed"}
+    assert cached.new_token_ids == []
+    assert cached.all_token_ids == {}
+    assert cached.new_block_ids == [None, None]
+    assert cached.num_computed_tokens == [7, 11]
+    assert cached.num_output_tokens == []
+
+
+@pytest.mark.parametrize(
+    (
+        "use_v2_model_runner",
+        "log_stats",
+        "enable_iteration_details",
+        "profiler",
+    ),
+    [
+        pytest.param(False, True, False, None, id="mrv1"),
+        pytest.param(True, True, True, None, id="mrv2_iteration_details"),
+        pytest.param(True, False, False, "cuda", id="mrv2_profiler"),
+    ],
+)
+def test_cached_request_data_retains_num_output_tokens_when_needed(
+    use_v2_model_runner: bool,
+    log_stats: bool,
+    enable_iteration_details: bool,
+    profiler: str | None,
+):
+    scheduler = create_scheduler(use_v2_model_runner=use_v2_model_runner)
+    scheduler.log_stats = log_stats
+    scheduler.observability_config.enable_logging_iteration_details = (
+        enable_iteration_details
+    )
+    scheduler.vllm_config.profiler_config.profiler = profiler
+
+    cached = _make_cached_request_data_with_num_output_counts(scheduler)
+
+    assert cached.req_ids == ["running-zero", "running-outputs", "resumed"]
+    assert cached.resumed_req_ids == {"resumed"}
+    assert cached.new_block_ids == [None, None, None]
+    assert cached.num_computed_tokens == [8, 9, 10]
+    assert cached.num_output_tokens == [0, 3, 3]
+    assert cached.is_context_phase("running-zero")
+    assert not cached.is_context_phase("running-outputs")
+    assert not cached.is_context_phase("resumed")
+
+    if enable_iteration_details:
+        scheduler_output = SchedulerOutput.make_empty()
+        scheduler_output.scheduled_cached_reqs = cached
+        scheduler_output.num_scheduled_tokens = {
+            "running-zero": 2,
+            "running-outputs": 1,
+            "resumed": 1,
+        }
+        scheduler_output.total_num_scheduled_tokens = 4
+
+        details = compute_iteration_details(scheduler_output)
+
+        assert details.num_ctx_requests == 1
+        assert details.num_ctx_tokens == 2
+        assert details.num_generation_requests == 2
+        assert details.num_generation_tokens == 2
 
 
 def test_schedule_partial_requests():
