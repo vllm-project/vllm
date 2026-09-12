@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from io import BytesIO
-from typing import TYPE_CHECKING
+from pickle import UnpicklingError
+from typing import TYPE_CHECKING, Final
+from zipfile import BadZipFile
 
 import pybase64
 import torch
@@ -17,6 +19,26 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig
 
 
+# How much of torch's own reason is repeated back to the caller. The reason is
+# built from bytes the caller sent, so it is bounded rather than echoed whole.
+_MAX_EMBED_ERROR_REASON_CHARS: Final = 200
+
+# What `torch.load` raises when the payload is not a tensor file at all. It has
+# no single error type for that: the zip reader raises `RuntimeError`, the
+# legacy pickle path raises `UnpicklingError`, `KeyError` or `IndexError`, and
+# an empty payload raises `EOFError`. None of these is a `ValueError`, so the
+# entrypoints' fallback mapped them to 500 -- for a blob the caller supplied.
+# `torch.OutOfMemoryError` subclasses `RuntimeError` and is a server condition,
+# so it is re-raised before this tuple is consulted.
+_UNPARSEABLE_EMBED_ERRORS: Final = (
+    EOFError,
+    LookupError,
+    RuntimeError,
+    UnpicklingError,
+    BadZipFile,
+)
+
+
 def safe_load_prompt_embeds(
     model_config: "ModelConfig",
     embed: bytes,
@@ -28,11 +50,24 @@ def safe_load_prompt_embeds(
         )
 
     with check_sparse_tensor_invariants_threadsafe():
-        tensor = torch.load(
-            BytesIO(pybase64.b64decode(embed, validate=True)),
-            weights_only=True,
-            map_location=torch.device("cpu"),
-        )
+        try:
+            tensor = torch.load(
+                BytesIO(pybase64.b64decode(embed, validate=True)),
+                weights_only=True,
+                map_location=torch.device("cpu"),
+            )
+        except torch.OutOfMemoryError:
+            raise
+        except _UNPARSEABLE_EMBED_ERRORS as exc:
+            # torch's reason is worth keeping -- for a malformed sparse tensor
+            # it names the offending index -- but it is built from the caller's
+            # own bytes, so it is truncated rather than echoed whole.
+            reason = str(exc).strip() or type(exc).__name__
+            raise VLLMValidationError(
+                "`prompt_embeds` could not be deserialized as a torch tensor: "
+                f"{reason[:_MAX_EMBED_ERROR_REASON_CHARS]}",
+                parameter="prompt_embeds",
+            ) from exc
         tensor = safe_to_dense(tensor, parameter="prompt_embeds")
 
     if tensor.dim() > 2:
