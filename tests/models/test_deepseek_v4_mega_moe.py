@@ -19,7 +19,6 @@ from vllm.models.deepseek_v4.nvidia.model import (
 from vllm.models.deepseek_v4.nvidia.mtp import DeepSeekV4MTP
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.models.deepseek_v4_1.common.mm_preprocess import (
-    IMAGE_PAD_ID,
     IMAGE_SENTINEL_BASE_ID,
 )
 from vllm.models.deepseek_v4_1.nvidia.model import DeepseekV4MoE as DeepseekV41MoE
@@ -78,7 +77,7 @@ def test_deepseek_v41_moe_routes_without_hash_table(
         moe = DeepseekV41MoE(v41_moe_config, prefix=f"model.layers.{layer_id}.ffn")
         hidden_states = torch.randn(4, config.hidden_size)
         input_ids = (
-            torch.tensor([42, IMAGE_SENTINEL_BASE_ID, IMAGE_PAD_ID, 129257])
+            torch.tensor([42, IMAGE_SENTINEL_BASE_ID, IMAGE_SENTINEL_BASE_ID, 42])
             if vision
             else None
         )
@@ -100,7 +99,7 @@ def test_deepseek_v41_moe_routes_without_hash_table(
     ).sqrt()
     bias = moe.gate.e_score_correction_bias
     if vision:
-        image_mask = (input_ids == IMAGE_SENTINEL_BASE_ID) | (input_ids == IMAGE_PAD_ID)
+        image_mask = input_ids == IMAGE_SENTINEL_BASE_ID
         bias = torch.where(image_mask[:, None], moe.gate.bias_vl, bias)
     expected_ids = (scores + bias).topk(top_k, dim=-1).indices
     expected_weights = scores.gather(1, expected_ids)
