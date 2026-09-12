@@ -1,8 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices, _when
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.triton_utils import tl, triton
 
 
@@ -70,6 +78,72 @@ def moe_fused_mul_sum_kernel(
                 a = tl.load(a_row + n * hidden_size + offs_k, mask=kmask, other=0.0)
                 acc += a.to(tl.float32) * weights[n]
         tl.store(out_row + offs_k, acc.to(outputs_ptr.dtype.element_ty), mask=kmask)
+
+
+def _moe_fused_mul_sum_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    hf_config = vllm_config.model_config.hf_config
+    hidden_size = hf_config.hidden_size
+    top_k = hf_config.num_experts_per_tok
+    input_dtype: Any = WarmupChoices(vllm_config.model_config.dtype, torch.float32)
+    output_dtype: Any = WarmupChoices(vllm_config.model_config.dtype, torch.float32)
+    has_topk_ids: Any = WarmupChoices(False, True)
+    has_expert_map: Any = WarmupChoices(False, True)
+    has_num_valid: Any = WarmupChoices(False, True)
+    _when(
+        input_dtype == output_dtype
+        and (has_topk_ids or not has_expert_map)
+        and (has_topk_ids or not has_num_valid)
+    )
+    return dict(
+        inputs=TritonWarmupTensor(
+            input_dtype,
+            shape=(1, top_k, hidden_size),
+        ),
+        topk_weights=TritonWarmupTensor(
+            torch.float32,
+            shape=(1, top_k),
+        ),
+        outputs=TritonWarmupTensor(
+            output_dtype,
+            shape=(1, hidden_size),
+        ),
+        topk_ids=(
+            TritonWarmupTensor(torch.int32, shape=(1, top_k)) if has_topk_ids else None
+        ),
+        expert_map=TritonWarmupTensor(torch.int32) if has_expert_map else None,
+        num_valid_tokens=(TritonWarmupTensor(torch.int32) if has_num_valid else None),
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=moe_fused_mul_sum_kernel,
+    warmup_inputs=_moe_fused_mul_sum_warmup_inputs,
+)
+def _MOE_FUSED_MUL_SUM_KERNEL(
+    inputs: torch.Tensor,
+    topk_weights: torch.Tensor,
+    outputs: torch.Tensor,
+    topk_ids: torch.Tensor | None,
+    expert_map: torch.Tensor | None,
+    num_valid_tokens: torch.Tensor | None,
+) -> DispatchSpec:
+    num_tokens, top_k, hidden_size = inputs.shape
+    block_k, num_warps, num_stages = _heuristic_config(
+        hidden_size,
+        inputs.dtype.itemsize,
+    )
+    return (num_tokens,), dict(
+        top_ids_ptr=topk_ids,
+        stride_m=top_k * hidden_size,
+        has_topk_ids=topk_ids is not None,
+        has_expert_map=expert_map is not None,
+        has_num_valid=num_valid_tokens is not None,
+        top_k=top_k,
+        hidden_size=hidden_size,
+        BLOCK_K=block_k,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
 
 
 def _heuristic_config(
@@ -146,27 +220,13 @@ def moe_fused_mul_sum(
         assert topk_ids.dtype in (torch.int32, torch.int64)
 
     if not isinstance(inputs, FakeTensor):
-        BLOCK_K, num_warps, num_stages = _heuristic_config(
-            hidden_size,
-            inputs.element_size(),
-        )
-        grid = (num_tokens,)
-        moe_fused_mul_sum_kernel[grid](
+        _MOE_FUSED_MUL_SUM_KERNEL(
             inputs,
             topk_weights,
             outputs,
             topk_ids,
             expert_map,
             num_valid_tokens,
-            top_k * hidden_size,
-            topk_ids is not None,
-            expert_map is not None,
-            num_valid_tokens is not None,
-            top_k,
-            hidden_size,
-            BLOCK_K,
-            num_warps=num_warps,
-            num_stages=num_stages,
         )
 
     return outputs

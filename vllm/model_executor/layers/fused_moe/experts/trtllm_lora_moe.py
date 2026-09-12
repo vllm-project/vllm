@@ -20,6 +20,7 @@ Constraints (matching the PR support matrix; final gating lives in the oracle):
 """
 
 from abc import abstractmethod
+from typing import Any
 
 import torch
 
@@ -37,6 +38,11 @@ from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -65,6 +71,37 @@ def _unpermute_activation_kernel(
     else:
         zeros = tl.zeros((BLOCK_I,), dtype=out_ptr.dtype.element_ty)
         tl.store(out_ptrs, zeros, mask=col_mask)
+
+
+def _trtllm_lora_unpermute_activation_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    num_cols = vllm_config.model_config.hf_config.moe_intermediate_size
+    dtype = vllm_config.model_config.dtype
+    return dict(
+        act_permuted=TritonWarmupTensor(dtype, shape=(1, num_cols)),
+        idx_map=TritonWarmupTensor(torch.int64),
+        out=TritonWarmupTensor(dtype, shape=(1, num_cols)),
+        intermediate_size=num_cols,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_unpermute_activation_kernel,
+    warmup_inputs=_trtllm_lora_unpermute_activation_warmup_inputs,
+)
+def _TRTLLM_LORA_UNPERMUTE_ACTIVATION_KERNEL(
+    act_permuted: torch.Tensor,
+    idx_map: torch.Tensor,
+    out: torch.Tensor,
+    intermediate_size: int,
+) -> DispatchSpec:
+    return (out.shape[0], triton.cdiv(intermediate_size, 1024)), dict(
+        act_ptr=act_permuted,
+        idx_ptr=idx_map,
+        num_cols=intermediate_size,
+        stride_ar=act_permuted.stride(0),
+        stride_or=out.stride(0),
+        BLOCK_I=1024,
+    )
 
 
 @triton.jit
@@ -105,6 +142,52 @@ def _finalize_lora_kernel(
     out = acc_base * scale + acc_delta
     tl.store(
         out_ptr + token * stride_o0 + col, out.to(out_ptr.dtype.element_ty), mask=mask
+    )
+
+
+def _trtllm_lora_finalize_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    hidden_size = vllm_config.model_config.hf_config.hidden_size
+    top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+    dtype = vllm_config.model_config.dtype
+    return dict(
+        gemm2_permuted=TritonWarmupTensor(dtype, shape=(1, hidden_size)),
+        expert_weights=TritonWarmupTensor(torch.float32, shape=(1, top_k)),
+        idx_map=TritonWarmupTensor(torch.int64, shape=(top_k,)),
+        w2_delta=TritonWarmupTensor(dtype, shape=(1, top_k, hidden_size)),
+        output=TritonWarmupTensor(dtype, shape=(1, hidden_size)),
+        top_k=top_k,
+        scale=1.0,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_finalize_lora_kernel,
+    warmup_inputs=_trtllm_lora_finalize_warmup_inputs,
+)
+def _TRTLLM_LORA_FINALIZE_KERNEL(
+    gemm2_permuted: torch.Tensor,
+    expert_weights: torch.Tensor,
+    idx_map: torch.Tensor,
+    w2_delta: torch.Tensor,
+    output: torch.Tensor,
+    *,
+    top_k: int,
+    scale: float,
+) -> DispatchSpec:
+    hidden_size = gemm2_permuted.shape[1]
+    return (output.shape[0], triton.cdiv(hidden_size, 512)), dict(
+        gemm2_ptr=gemm2_permuted,
+        weight_ptr=expert_weights,
+        idx_ptr=idx_map,
+        delta_ptr=w2_delta,
+        out_ptr=output,
+        K=hidden_size,
+        stride_g0=gemm2_permuted.stride(0),
+        stride_d0=w2_delta.stride(0),
+        stride_d1=w2_delta.stride(1),
+        stride_o0=output.stride(0),
+        TOP_K=top_k,
+        BLOCK_K=512,
     )
 
 
@@ -434,16 +517,11 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             dtype=act_permuted.dtype,
             device=act_permuted.device,
         )
-        BLOCK_I = 1024
-        grid = (num_rows, triton.cdiv(intermediate_size, BLOCK_I))
-        _unpermute_activation_kernel[grid](
+        _TRTLLM_LORA_UNPERMUTE_ACTIVATION_KERNEL(
             act_permuted,
             idx_map,
             out,
             intermediate_size,
-            act_permuted.stride(0),
-            out.stride(0),
-            BLOCK_I=BLOCK_I,
         )
         return out
 
@@ -464,23 +542,14 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         (``expert_weights`` in expanded order, ``idx_map < 0`` dropped), scale by
         ``scale``, and add the already-weighted ``w2_delta`` reduced over top_k.
         """
-        K = gemm2_permuted.size(1)
-        BLOCK_K = 512
-        grid = (num_tokens, triton.cdiv(K, BLOCK_K))
-        _finalize_lora_kernel[grid](
+        _TRTLLM_LORA_FINALIZE_KERNEL(
             gemm2_permuted,
-            expert_weights.reshape(-1),
+            expert_weights,
             idx_map,
             w2_delta,
             output,
-            K,
-            gemm2_permuted.stride(0),
-            w2_delta.stride(0),
-            w2_delta.stride(1),
-            output.stride(0),
-            scale,
-            TOP_K=top_k,
-            BLOCK_K=BLOCK_K,
+            top_k=top_k,
+            scale=scale,
         )
 
 

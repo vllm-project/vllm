@@ -24,6 +24,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.fused_moe import (
+    _triton_moe_compute_type,
+    _triton_moe_config,
+    _triton_moe_em,
     try_get_optimal_moe_config,
     write_zeros_to_output,
 )
@@ -41,6 +44,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
     kNvfp4Static,
+)
+from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
+    WarmupIntRange,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.triton_utils import tl, triton
 
@@ -254,6 +266,122 @@ def fused_moe_nvfp4_emulation_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
+def _fused_moe_nvfp4_emulation_kernel_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    hf = vllm_config.model_config.hf_config
+    hidden_size = hf.hidden_size
+    intermediate_size = hf.moe_intermediate_size
+    num_experts = hf.n_routed_experts
+    config_top_k = hf.num_experts_per_tok
+    batch_tokens: Any = WarmupIntRange(
+        1, vllm_config.scheduler_config.max_num_batched_tokens + 1
+    )
+    second_gemm: Any = WarmupChoices(False, True)
+    routed_multiplier = config_top_k if second_gemm else 1
+    n = hidden_size if second_gemm else 2 * intermediate_size
+    k = intermediate_size if second_gemm else hidden_size
+    top_k = 1 if second_gemm else config_top_k
+    mul_routed_weight = second_gemm
+    config = _triton_moe_config(
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        top_k=config_top_k,
+        config_dtype=None,
+        num_tokens=batch_tokens,
+        group_n=0,
+        group_k=0,
+    )
+    block_m = config["BLOCK_SIZE_M"]
+    block_n = config["BLOCK_SIZE_N"]
+    block_k = config["BLOCK_SIZE_K"]
+    em = _triton_moe_em(batch_tokens * routed_multiplier, top_k, block_m, False)
+    valid = batch_tokens * routed_multiplier * top_k
+    k_packed = k // 2
+    k_scale = max(1, k // 16)
+    return dict(
+        A=TritonWarmupTensor(vllm_config.model_config.dtype, shape=(1, k)),
+        B=TritonWarmupTensor(torch.uint8, shape=(num_experts, n, k_packed)),
+        C=TritonWarmupTensor(
+            vllm_config.model_config.dtype,
+            shape=(batch_tokens * routed_multiplier, top_k, n),
+        ),
+        B_scale=TritonWarmupTensor(torch.uint8, shape=(num_experts, n, k_scale)),
+        w_global_scale=TritonWarmupTensor(torch.float32, shape=(num_experts,)),
+        topk_weights=TritonWarmupTensor(torch.float32, shape=(valid,))
+        if mul_routed_weight
+        else None,
+        sorted_token_ids=TritonWarmupTensor(torch.int32, shape=(em,)),
+        expert_ids=TritonWarmupTensor(torch.int32, shape=(triton.cdiv(em, block_m),)),
+        num_tokens_post_padded=TritonWarmupTensor(torch.int32),
+        N=n,
+        K=k,
+        EM=em,
+        num_valid_tokens=valid,
+        stride_am=k,
+        stride_ak=1,
+        stride_be=n * k_packed,
+        stride_bk=1,
+        stride_bn=k_packed,
+        stride_cm=n,
+        stride_cn=1,
+        stride_bse=n * k_scale,
+        stride_bsk=1,
+        stride_bsn=k_scale,
+        block_k_diviable=k % block_k == 0,
+        MUL_ROUTED_WEIGHT=mul_routed_weight,
+        top_k=top_k,
+        compute_type=_triton_moe_compute_type(vllm_config.model_config.dtype),
+        group_size=16,
+        BLOCK_SIZE_M=block_m,
+        BLOCK_SIZE_N=block_n,
+        BLOCK_SIZE_K=block_k,
+        GROUP_SIZE_M=config["GROUP_SIZE_M"],
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=fused_moe_nvfp4_emulation_kernel,
+    warmup_inputs=_fused_moe_nvfp4_emulation_kernel_warmup_inputs,
+)
+def _fused_moe_nvfp4_emulation(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    B_scale: torch.Tensor,
+    w_global_scale: torch.Tensor,
+    topk_weights: torch.Tensor | None,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    N: int,
+    K: int,
+    EM: int,
+    num_valid_tokens: int,
+    stride_am: int,
+    stride_ak: int,
+    stride_be: int,
+    stride_bk: int,
+    stride_bn: int,
+    stride_cm: int,
+    stride_cn: int,
+    stride_bse: int,
+    stride_bsk: int,
+    stride_bsn: int,
+    *,
+    block_k_diviable: bool,
+    MUL_ROUTED_WEIGHT: bool,
+    top_k: int,
+    compute_type: tl.dtype,
+    group_size: int,
+    BLOCK_SIZE_M: int,
+    BLOCK_SIZE_N: int,
+    BLOCK_SIZE_K: int,
+    GROUP_SIZE_M: int,
+) -> DispatchSpec:
+    grid = (triton.cdiv(EM, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
+    return grid, dict(a_ptr=A, b_ptr=B, c_ptr=C, b_scale_ptr=B_scale)
+
+
 def invoke_fused_moe_nvfp4_emulation_kernel(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -280,7 +408,6 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
 
     N = B.size(1)
     K = A.size(1)
-
     M = A.size(0)
     num_tokens = M * top_k
 
@@ -291,11 +418,7 @@ def invoke_fused_moe_nvfp4_emulation_kernel(
             A.size(0) * top_k * config["BLOCK_SIZE_M"],
         )
 
-    grid = lambda META: (
-        triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
-    )
-
-    fused_moe_nvfp4_emulation_kernel[grid](
+    return _fused_moe_nvfp4_emulation(
         A,
         B,
         C,

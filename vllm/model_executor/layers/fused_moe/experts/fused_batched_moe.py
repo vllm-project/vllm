@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused batched MoE kernel."""
 
+from typing import Any
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -13,8 +15,13 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    _get_config_dtype_str,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    _triton_moe_compute_type,
+    _triton_moe_config,
+    try_get_optimal_moe_config,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
@@ -32,6 +39,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+)
+from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
+    WarmupIntRange,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton, use_tensor_descriptor
@@ -424,6 +440,148 @@ def batched_triton_kernel(
     )
 
 
+def _batched_triton_kernel_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    hf = vllm_config.model_config.hf_config
+    hidden_size = hf.hidden_size
+    intermediate_size = hf.moe_intermediate_size
+    num_experts = hf.n_routed_experts
+    top_k = hf.num_experts_per_tok
+    max_num_tokens: Any = WarmupIntRange(
+        1, vllm_config.scheduler_config.max_num_batched_tokens + 1
+    )
+    scenario: Any = WarmupChoices(0, 1, 2, 3)
+    use_td: Any = WarmupChoices(False, True)
+    second_gemm = scenario % 2 == 1
+    use_fp8 = scenario >= 2
+    n = hidden_size if second_gemm else 2 * intermediate_size
+    k = intermediate_size if second_gemm else hidden_size
+    dtype = torch.float8_e4m3fn if use_fp8 else vllm_config.model_config.dtype
+    group = 128 if use_fp8 else 0
+    config = _triton_moe_config(
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        top_k=top_k,
+        config_dtype=_get_config_dtype_str(
+            dtype=dtype,
+            use_fp8_w8a8=use_fp8,
+            use_int8_w8a16=False,
+            use_int4_w4a16=False,
+        ),
+        num_tokens=max_num_tokens,
+        group_n=group,
+        group_k=group,
+    )
+    scale_cols = triton.cdiv(k, group) if group > 0 else 1
+    return dict(
+        A=TritonWarmupTensor(dtype, shape=(num_experts, max_num_tokens, k)),
+        B=TritonWarmupTensor(dtype, shape=(num_experts, n, k)),
+        C=TritonWarmupTensor(
+            vllm_config.model_config.dtype, shape=(num_experts, max_num_tokens, n)
+        ),
+        expert_num_tokens=TritonWarmupTensor(torch.int32, shape=(num_experts,)),
+        compute_type=_triton_moe_compute_type(dtype),
+        max_num_tokens=max_num_tokens,
+        K=k,
+        N=n,
+        A_scale=TritonWarmupTensor(
+            torch.float32, shape=(num_experts, max_num_tokens, scale_cols)
+        )
+        if use_fp8
+        else None,
+        B_scale=TritonWarmupTensor(torch.float32, shape=(num_experts, n, scale_cols))
+        if use_fp8
+        else None,
+        B_zp=None,
+        stride_ae=max_num_tokens * k,
+        stride_am=k,
+        stride_ak=1,
+        stride_be=n * k,
+        stride_bk=1,
+        stride_bn=k,
+        stride_ce=max_num_tokens * n,
+        stride_cm=n,
+        stride_cn=1,
+        stride_ase=max_num_tokens * scale_cols,
+        stride_asm=scale_cols,
+        stride_ask=1,
+        stride_bse=n * scale_cols,
+        stride_bsk=1,
+        stride_bsn=scale_cols,
+        group_n=group,
+        group_k=group,
+        use_fp8_w8a8=use_fp8,
+        use_int8_w8a16=False,
+        per_act_token_quant=False,
+        BLOCK_M=config["BLOCK_SIZE_M"],
+        BLOCK_N=config["BLOCK_SIZE_N"],
+        BLOCK_K=config["BLOCK_SIZE_K"],
+        USE_TD=use_td,
+        num_warps=config["num_warps"],
+        num_stages=config["num_stages"],
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=batched_triton_kernel,
+    warmup_inputs=_batched_triton_kernel_warmup_inputs,
+)
+def _BATCHED_TRITON_KERNEL(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    expert_num_tokens: torch.Tensor,
+    compute_type: tl.dtype,
+    max_num_tokens: int,
+    K: int,
+    N: int,
+    A_scale: torch.Tensor | None,
+    B_scale: torch.Tensor | None,
+    B_zp: torch.Tensor | None,
+    stride_ae: int,
+    stride_am: int,
+    stride_ak: int,
+    stride_be: int,
+    stride_bk: int,
+    stride_bn: int,
+    stride_ce: int,
+    stride_cm: int,
+    stride_cn: int,
+    stride_ase: int,
+    stride_asm: int,
+    stride_ask: int,
+    stride_bse: int,
+    stride_bsk: int,
+    stride_bsn: int,
+    group_n: int,
+    group_k: int,
+    use_fp8_w8a8: bool,
+    use_int8_w8a16: bool,
+    per_act_token_quant: bool,
+    *,
+    BLOCK_M: int,
+    BLOCK_N: int,
+    BLOCK_K: int,
+    USE_TD: bool,
+    num_warps: int,
+    num_stages: int,
+) -> DispatchSpec:
+    grid = (
+        expert_num_tokens.shape[0],
+        triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.shape[1], BLOCK_N),
+    )
+    return grid, dict(
+        a_ptr=A,
+        b_ptr=B,
+        c_ptr=C,
+        a_scale_ptr=A_scale,
+        b_scale_ptr=B_scale,
+        b_zp_ptr=B_zp,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+
+
 def invoke_moe_batched_triton_kernel(
     A: torch.Tensor,  # [E, max_tokens, K]
     B: torch.Tensor,  # [E, N, K]
@@ -433,7 +591,7 @@ def invoke_moe_batched_triton_kernel(
     # Quantization data
     A_scale: torch.Tensor | None,
     B_scale: torch.Tensor | None,
-    B_zp: torch.Tensor,
+    B_zp: torch.Tensor | None,
     # Quantization schemes
     use_fp8_w8a8: bool,
     use_int8_w8a16: bool,
@@ -450,11 +608,6 @@ def invoke_moe_batched_triton_kernel(
     BLOCK_M = config["BLOCK_SIZE_M"]
     BLOCK_N = config["BLOCK_SIZE_N"]
     BLOCK_K = config["BLOCK_SIZE_K"]
-
-    grid = (
-        expert_num_tokens.size(0),
-        triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N),
-    )
 
     A_scale = normalize_batched_scales_shape(A_scale, expert_num_tokens.shape[0])
 
@@ -505,7 +658,7 @@ def invoke_moe_batched_triton_kernel(
     if use_td:
         set_triton_allocator(A.device)
 
-    batched_triton_kernel[grid](
+    _BATCHED_TRITON_KERNEL(
         A,
         B,
         C,
@@ -547,6 +700,8 @@ def invoke_moe_batched_triton_kernel(
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         USE_TD=use_td,
+        num_warps=config.get("num_warps", 4),
+        num_stages=config.get("num_stages", 3),
     )
 
 
