@@ -13,6 +13,10 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.serve.dev.rlhf.weight_checker import (
+    _merge_weight_checksums,
+    _WeightCheckerState,
+)
 from vllm.logger import init_logger
 from vllm.v1.engine import PauseMode
 
@@ -226,6 +230,102 @@ async def weight_info(raw_request: Request):
     return JSONResponse(content={"weight_version": weight_version})
 
 
+# ---------------------------------------------------------------------------
+# Weight checksum (checksum / reset / compare)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/weight_checker")
+async def weight_checker(raw_request: Request) -> JSONResponse:
+    """Checksum, reset, or compare model weights.
+
+    Request body::
+
+        {"action": "compare"}    -> compare current weights against the baseline
+        {"action": "checksum"}   -> return SHA-256 and store the first baseline
+        {"action": "reset"}      -> overwrite GPU weights with random values
+
+    Responses (all 200 on success):
+
+    * **compare**:  ``{"match": bool, "mismatches": [str]}``
+    * **checksum**: ``{"checksums": {name: hex_str}}``
+    * **reset**:    ``{"status": "reset"}``
+
+    Use case in RL: checksum the current weights, reset them, transfer the
+    original weights, checksum again, and compare with the first checksum.
+    A successful transfer is expected to match the baseline.
+    """
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    action = body.get("action")
+    if action not in ("compare", "checksum", "reset"):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=f"action must be one of checksum|reset|compare, got {action!r}",
+        )
+
+    client = engine_client(raw_request)
+    checker: _WeightCheckerState = raw_request.app.state.weight_checker
+
+    if action == "reset":
+        # Overwrite every weight-bearing tensor with random values on the GPU
+        await client.reset_weights()
+        return JSONResponse(content={"status": "reset"})
+
+    # Avoid an expensive checksum RPC when compare cannot succeed. compare()
+    # repeats this check to keep the state object safe when used directly.
+    if action == "compare" and not checker.has_baseline():
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="No checksum baseline; call action='checksum' first",
+        )
+
+    per_engine: list[dict[str, str]] = await client.compute_weight_checksums_all()
+    if not per_engine:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            detail="No engine returned weight checksums",
+        )
+    try:
+        checksums = _merge_weight_checksums(per_engine)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            detail=str(exc),
+        ) from exc
+
+    if action == "checksum":
+        baseline_created = checker.store_if_absent(checksums)
+        return JSONResponse(
+            content={
+                "checksums": checksums,
+                "engines": per_engine,
+                "baseline_created": baseline_created,
+            }
+        )
+
+    # action == "compare"
+    try:
+        match, mismatches = checker.compare(checksums)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=str(exc),
+        ) from exc
+
+    return JSONResponse(
+        content={
+            "match": match,
+            "mismatches": mismatches,
+        }
+    )
+
+
 @router.get("/get_world_size")
 async def get_world_size(
     raw_request: Request,
@@ -247,4 +347,8 @@ async def get_world_size(
 
 
 def attach_router(app: FastAPI):
+    # Initialize per-request state objects on the app.
+    if not hasattr(app.state, "weight_checker"):
+        app.state.weight_checker = _WeightCheckerState()
+
     app.include_router(router)
