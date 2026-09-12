@@ -267,6 +267,10 @@ class AttentionBackend(ABC):
         return None
 
     @classmethod
+    def supports_num_heads(cls, num_heads: int | None) -> str | None:
+        return None
+
+    @classmethod
     def validate_configuration(
         cls,
         head_size: int,
@@ -287,6 +291,7 @@ class AttentionBackend(ABC):
         use_pcp: bool = False,
         use_adaptive_verification: bool = False,
         use_dcp: bool = False,
+        num_heads: int | None = None,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -354,6 +359,9 @@ class AttentionBackend(ABC):
         )
         if combination_reason is not None:
             invalid_reasons.append(combination_reason)
+        num_heads_reason = cls.supports_num_heads(num_heads)
+        if num_heads_reason is not None:
+            invalid_reasons.append(num_heads_reason)
         return invalid_reasons
 
     @classmethod
