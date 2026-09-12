@@ -17,6 +17,11 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.watermarking import create_watermarker
+from vllm.v1.watermarking.spec_decode import (
+    DraftWatermarker,
+    create_speculative_draft_watermarker,
+)
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     init_attn_backend,
@@ -188,6 +193,17 @@ class DraftModelSpeculator(BaseSpeculator):
                 fill,
                 dtype=dtype,
                 device=device,
+            )
+
+        self.draft_watermarker: DraftWatermarker | None = None
+        watermark_config = getattr(vllm_config, "watermark_config", None)
+        if watermark_config is not None:
+            watermarker = create_watermarker(watermark_config)
+            self.draft_watermarker = create_speculative_draft_watermarker(
+                watermarker,
+                self.max_num_reqs,
+                device,
+                watermark_config.allow_target_only_watermarking,
             )
 
         self.supports_mm_inputs = False
@@ -395,7 +411,7 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         if draft_logits is not None:
             logits = self.model.compute_logits(hidden_states)
-            return gumbel_sample(
+            sampled = gumbel_sample(
                 logits,
                 idx_mapping,
                 temperature,
@@ -407,7 +423,22 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
+            if self.draft_watermarker is not None:
+                sampled = self.draft_watermarker.sample(
+                    logits,
+                    sampled,
+                    idx_mapping,
+                    temperature,
+                )
+            return sampled
         return self._greedy_sample_draft(hidden_states)
+
+    def prepare_watermarking(
+        self, contexts: torch.Tensor, watermarking: torch.Tensor
+    ) -> None:
+        if self.draft_watermarker is None:
+            return
+        self.draft_watermarker.prepare(contexts, watermarking)
 
     def _copy_request_inputs(
         self,
