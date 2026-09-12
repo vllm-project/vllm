@@ -689,7 +689,7 @@ def sparse_attn_indexer(
                 )
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        get_sparse_indexer_topk().run(
+        get_sparse_indexer_topk().forward(
             logits,
             seq_lens,
             next_n,

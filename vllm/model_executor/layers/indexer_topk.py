@@ -262,7 +262,7 @@ class SparseIndexerTopk:
         assert row_ends.dtype == torch.int32
         return row_ends
 
-    def run(
+    def forward(
         self,
         logits: torch.Tensor,
         seq_lens: torch.Tensor,

@@ -1513,7 +1513,9 @@ def test_sparse_indexer_decode_topk_explicit_backends(
     indices = torch.full((num_rows, top_k), -2, dtype=torch.int32, device="cuda")
     cfg = VllmConfig(kernel_config={"sparse_indexer_topk_backend": backend})
     with set_current_vllm_config(cfg):
-        SparseIndexerTopk().run(logits, seq_lens, next_n, indices, top_k, max_seq_len)
+        SparseIndexerTopk().forward(
+            logits, seq_lens, next_n, indices, top_k, max_seq_len
+        )
     torch.accelerator.synchronize()
 
     # k_i == top_k for every row here (row_ends >= 3997 > top_k).
