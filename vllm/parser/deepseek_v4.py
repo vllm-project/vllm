@@ -189,9 +189,14 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
             ),
+            # Recovery path for models that omit the tool_calls wrapper.
+            # A bare invoke prefix in plain content is weak evidence, so
+            # the call stays provisional until </invoke> closes it; text
+            # from a truncated or quoted invoke is replayed as content.
             (ParserState.CONTENT, "INVOKE_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
+                provisional=True,
             ),
             (ParserState.TOOL_NAME, "INVOKE_NAME_END"): Transition(
                 ParserState.TOOL_ARGS,

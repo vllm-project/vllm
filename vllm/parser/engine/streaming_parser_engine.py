@@ -107,6 +107,14 @@ class StreamingParserEngine:
         for each streaming delta:
             events = engine.feed(delta_text, delta_token_ids)
             # convert events to DeltaMessage
+
+    Provisional tool calls: a transition with ``provisional=True`` starts
+    a tool call on weak evidence, such as a bare invoke opener with no
+    wrapper. Until a ``TOOL_CALL_END`` arrives, every event goes into
+    ``_prov_events`` instead of the caller, and the consumed raw text is
+    kept in ``_prov_raw``. The end event releases the buffer in one
+    batch. If ``finish()`` runs first, the buffer is discarded, state and
+    ``tool_index`` are restored, and the raw text is replayed as content.
     """
 
     def __init__(
@@ -212,6 +220,13 @@ class StreamingParserEngine:
         self._message_header_buffer = ""
         self._message_header_token_count = 0
         self._in_skipped_tool_span = False
+        # Provisional tool call (see class docstring): buffered events,
+        # consumed raw text, and the state / tool_index to restore on
+        # rollback. ``_prov_events is None`` means the mode is off.
+        self._prov_events: list[SemanticEvent] | None = None
+        self._prov_raw: list[str] = []
+        self._prov_state = ParserState.CONTENT
+        self._prov_tool_index = -1
         self._reset_args_state()
 
     def feed(
@@ -224,8 +239,11 @@ class StreamingParserEngine:
 
         # Fast path: skip scanner and lexer when the delta is plain
         # content with no special tokens and no terminal-starting chars.
+        # Not taken in provisional mode: content must reach the buffer
+        # through _on_content, not the caller.
         if (
             delta_text
+            and self._prov_events is None
             and not self._lexer.buffer
             and not self._scanner._deferred_terminals
             and self._lexer._literal_first_chars.isdisjoint(delta_text)
@@ -247,7 +265,12 @@ class StreamingParserEngine:
         if len(scanner_items) == 1 and isinstance(scanner_items[0], TextChunk):
             item = scanner_items[0]
             lex_tokens = self._lexer.feed(item.text, item.token_texts, item.token_count)
-            if len(lex_tokens) == 1 and lex_tokens[0].terminal == CONTENT_TERMINAL:
+            # Same provisional-mode exclusion as the fast path above.
+            if (
+                len(lex_tokens) == 1
+                and lex_tokens[0].terminal == CONTENT_TERMINAL
+                and self._prov_events is None
+            ):
                 events = self._emit_for_state(
                     lex_tokens[0].value,
                     token_count=lex_tokens[0].token_count,
@@ -271,9 +294,16 @@ class StreamingParserEngine:
                 events.extend(self._on_terminal(item.terminal, item.text))
             elif isinstance(item, TextChunk):
                 if not item.text and item.token_count:
-                    events.extend(
-                        self._emit_for_state("", token_count=item.token_count)
+                    # Token-count-only events; in provisional mode they
+                    # belong to the buffer, or a stray ARG event would
+                    # reach the caller and open a tool slot downstream.
+                    empty_events = self._emit_for_state(
+                        "", token_count=item.token_count
                     )
+                    if self._prov_events is not None:
+                        self._prov_events.extend(empty_events)
+                    else:
+                        events.extend(empty_events)
                 else:
                     events.extend(
                         self._process_lex_tokens(
@@ -288,6 +318,18 @@ class StreamingParserEngine:
         events = self._process_scanner_items(self._scanner.flush_pending())
 
         events.extend(self._process_lex_tokens(self._lexer.flush()))
+
+        if self._prov_events is not None:
+            # A provisional tool call never closed. Drop its buffered
+            # events and replay the consumed text as plain content.
+            raw = "".join(self._prov_raw)
+            self._prov_events = None
+            self._prov_raw = []
+            self.tool_index = self._prov_tool_index
+            self.state = self._prov_state
+            self._reset_args_state()
+            if raw:
+                events.extend(self._emit_for_state(raw))
 
         if self._args_buffer:
             events.append(
@@ -397,6 +439,36 @@ class StreamingParserEngine:
     def _on_terminal(
         self, terminal: str, value: str, token_count: int = 0
     ) -> list[SemanticEvent]:
+        if self._prov_events is None:
+            transition = self.config.transitions.get((self.state, terminal))
+            if (
+                transition is None
+                or not transition.provisional
+                or self.skip_tool_parsing
+            ):
+                return self._handle_terminal(terminal, value, token_count)
+            # Enter provisional mode: hold events back until the call
+            # closes, and remember the raw text in case it never does.
+            self._prov_events = []
+            self._prov_raw = []
+            self._prov_state = self.state
+            self._prov_tool_index = self.tool_index
+
+        # Provisional mode: record the raw text, buffer the events, and
+        # release everything once the call closes.
+        self._prov_raw.append(value)
+        buffered = self._handle_terminal(terminal, value, token_count)
+        self._prov_events.extend(buffered)
+        if any(e.type == EventType.TOOL_CALL_END for e in buffered):
+            committed = self._prov_events
+            self._prov_events = None
+            self._prov_raw = []
+            return committed
+        return []
+
+    def _handle_terminal(
+        self, terminal: str, value: str, token_count: int = 0
+    ) -> list[SemanticEvent]:
         key = (self.state, terminal)
         transition = self.config.transitions.get(key)
 
@@ -498,6 +570,10 @@ class StreamingParserEngine:
 
     def _on_content(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
         if not text:
+            return []
+        if self._prov_events is not None:
+            self._prov_raw.append(text)
+            self._prov_events.extend(self._emit_for_state(text, token_count))
             return []
         return self._emit_for_state(text, token_count)
 
