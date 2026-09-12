@@ -9,8 +9,6 @@ request's block-table row. Column validity is logical shape[1], not row stride.
 
 from __future__ import annotations
 
-import importlib
-
 import pytest
 import torch
 
@@ -18,9 +16,51 @@ BLOCK_SIZE = 64
 
 
 def _import_compute(version: str):
+    """Import shipped kernel; fall back to file load if package __init__ needs _C."""
+    import importlib.util
+    import os
+    import sys
+    import types
+
     module_name = f"vllm.models.{version}.common.ops.cache_utils"
-    mod = importlib.import_module(module_name)
-    return mod.compute_global_topk_indices_and_lens
+    if module_name in sys.modules and hasattr(
+        sys.modules[module_name], "compute_global_topk_indices_and_lens"
+    ):
+        return sys.modules[module_name].compute_global_topk_indices_and_lens
+
+    try:
+        mod = importlib.import_module(module_name)
+        return mod.compute_global_topk_indices_and_lens
+    except Exception:
+        import vllm
+
+        root = os.path.join(os.path.dirname(vllm.__file__), "models")
+        version_root = os.path.join(root, version)
+
+        def ensure_ns(fullname, path):
+            if fullname in sys.modules and hasattr(sys.modules[fullname], "__path__"):
+                return
+            m = types.ModuleType(fullname)
+            m.__path__ = [path]
+            m.__file__ = os.path.join(path, "__init__.py")
+            m.__package__ = fullname
+            sys.modules[fullname] = m
+
+        ensure_ns("vllm.models", root)
+        ensure_ns(f"vllm.models.{version}", version_root)
+        ensure_ns(f"vllm.models.{version}.common", os.path.join(version_root, "common"))
+        ensure_ns(
+            f"vllm.models.{version}.common.ops",
+            os.path.join(version_root, "common", "ops"),
+        )
+        path = os.path.join(version_root, "common", "ops", "cache_utils.py")
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        assert spec is not None
+        assert spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = mod
+        spec.loader.exec_module(mod)
+        return mod.compute_global_topk_indices_and_lens
 
 
 def _run(compute, topk_indices, token_to_req, block_table, is_valid):
