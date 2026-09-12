@@ -15,7 +15,10 @@ use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
 
-use crate::client::state::{OutputReceiver, RequestRegistry, UtilityReceiver, UtilityRegistry};
+use crate::client::state::{
+    CommitResult, ContinuationKind, OutputReceiver, OutputRoute, OutputSender, ReconcileResult,
+    RequestRegistry, ResumableStopAction, StreamEvent, UtilityReceiver, UtilityRegistry,
+};
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
@@ -94,12 +97,36 @@ impl ClientInner {
         request_id: String,
         lora_name: Option<String>,
         data_parallel_rank: Option<u32>,
+        resumable: bool,
     ) -> Result<(EngineId, OutputReceiver)> {
         let mut registry = self.request_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
         }
-        registry.register(request_id, lora_name, data_parallel_rank)
+        registry.register(request_id, lora_name, data_parallel_rank, resumable)
+    }
+
+    /// Prepare one continuation ADD, rejecting it once the client is closed.
+    pub fn prepare_continuation(
+        &self,
+        request_id: &str,
+        kind: ContinuationKind,
+    ) -> Result<EngineId> {
+        let mut registry = self.request_reg.lock();
+        if registry.is_closed() {
+            return Err(self.closed_error());
+        }
+        registry.prepare_continuation(request_id, kind)
+    }
+
+    /// Release continuation accounting whose ADD never reached the engine.
+    pub fn rollback_continuation(&self, request_id: &str) {
+        self.request_reg.lock().rollback_continuation(request_id);
+    }
+
+    /// Mark a continuation ADD as sent. See [`RequestRegistry::commit_continuation`].
+    pub fn commit_continuation(&self, request_id: &str) -> CommitResult {
+        self.request_reg.lock().commit_continuation(request_id)
     }
 
     /// Allocate the next utility `call_id` and register its waiting receiver.
@@ -142,13 +169,22 @@ impl ClientInner {
         Ok(registry.abortable_request_ids(request_ids))
     }
 
-    /// Obtain stream senders for a whole engine output batch with one registry
+    /// Obtain stream routes for a whole engine output batch with one registry
     /// lock acquisition.
-    pub fn take_senders_for_outputs<'a>(
+    pub fn take_routes_for_outputs<'a>(
         &self,
         outputs: impl IntoIterator<Item = &'a EngineCoreOutput>,
-    ) -> Vec<Option<mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>>> {
-        self.request_reg.lock().senders_for_outputs(outputs)
+    ) -> Vec<Option<OutputRoute>> {
+        self.request_reg.lock().routes_for_outputs(outputs)
+    }
+
+    /// Apply deferred segment-stop accounting after the output is enqueued.
+    pub fn reconcile_segment_stop(
+        &self,
+        request_id: &str,
+        stop_action: ResumableStopAction,
+    ) -> Option<ReconcileResult> {
+        self.request_reg.lock().reconcile_segment_stop(request_id, stop_action)
     }
 
     /// Remove a batch of requests that have finished or aborted, returning
@@ -156,7 +192,7 @@ impl ClientInner {
     pub fn finish_requests<'a>(
         &self,
         request_ids: impl IntoIterator<Item = &'a String>,
-    ) -> Vec<mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>> {
+    ) -> Vec<OutputSender> {
         self.request_reg.lock().finish_many(request_ids)
     }
 
@@ -298,6 +334,20 @@ impl ClientInner {
         self.send_to_engine(engine_id, EngineCoreRequestType::Abort, &request_ids).await
     }
 
+    /// Abort leftover engine state after the client has already retired the session.
+    ///
+    /// Used when a terminal Abort/Error stop ends the session, or when a final ADD
+    /// is committed after the session was already removed. The wire command is the
+    /// same as cancellation.
+    pub async fn abort_retired_session(
+        &self,
+        engine_id: &EngineId,
+        request_id: &str,
+    ) -> Result<()> {
+        let request_id = request_id.to_string();
+        self.do_abort_requests(engine_id, std::slice::from_ref(&request_id)).await
+    }
+
     /// Shut down by closing all active request streams and utility calls with a
     /// sticky client closed error.
     pub fn shutdown(&self) {
@@ -415,10 +465,10 @@ pub(crate) async fn run_output_dispatcher_loop(
 
             match outputs {
                 EngineCoreOutputs::RequestBatch(batch) => {
-                    let senders = inner.take_senders_for_outputs(&batch.outputs);
-                    for (output, sender) in batch.outputs.into_iter().zip(senders) {
+                    let routes = inner.take_routes_for_outputs(&batch.outputs);
+                    for (output, route) in batch.outputs.into_iter().zip(routes) {
                         let request_id = output.request_id.clone();
-                        let Some(sender) = sender else {
+                        let Some(route) = route else {
                             debug!(request_id, "dropping output for inactive request");
                             continue;
                         };
@@ -428,8 +478,32 @@ pub(crate) async fn run_output_dispatcher_loop(
                             timestamp: batch.timestamp,
                             output,
                         };
-                        if sender.send(Ok(wrapped_output)).is_err() {
+                        if route
+                            .sender
+                            .send(Ok(StreamEvent::Output(Box::new(wrapped_output))))
+                            .is_err()
+                        {
                             debug!(request_id, "request output stream receiver dropped");
+                        }
+                        if let Some(stop_action) = route.stop_action
+                            && let Some(reconcile) =
+                                inner.reconcile_segment_stop(&request_id, stop_action)
+                        {
+                            trace!(request_id, "resumable session completed its last segment");
+                            if reconcile.effects.close_stream {
+                                let _ = reconcile.sender.send(Ok(StreamEvent::SessionFinished));
+                            }
+                            if reconcile.effects.cleanup_engine
+                                && let Err(error) = inner
+                                    .abort_retired_session(&reconcile.engine_id, &request_id)
+                                    .await
+                            {
+                                warn!(
+                                    request_id,
+                                    error = %error.as_report(),
+                                    "failed to abort leftover engine state for a retired session"
+                                );
+                            }
                         }
                     }
 
