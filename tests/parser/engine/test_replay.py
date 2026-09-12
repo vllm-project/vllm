@@ -34,6 +34,7 @@ from tests.parser.engine.trace_builder import _BUILDERS, build_samples
 from vllm.parser.engine import registered_adapters as _adapters_mod
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import ParserState
+from vllm.parser.mistral import MistralParser
 
 # ── Parser discovery ─────────────────────────────────────────────────
 
@@ -64,6 +65,11 @@ def _discover_parsers() -> list[_ParserInfo]:
             and obj is not ParserEngine
         ):
             continue
+        if obj is MistralParser:
+            # Mistral uses brace-balanced JSON tool args with no TOOL_END
+            # token, so it does not fit this TOOL_END-based replay harness.
+            # It is covered by tests/parser/mistral/ instead.
+            continue
         cfg = obj(bare_tok, None).parser_engine_config
         if cfg.name not in _BUILDERS:
             missing_builders.append(f"{obj.__name__} (config.name={cfg.name!r})")
@@ -77,7 +83,7 @@ def _discover_parsers() -> list[_ParserInfo]:
             raise RuntimeError(
                 f"{obj.__name__} config missing 'TOOL_END' in token_id_terminals"
             )
-        all_vals = set(cfg.terminals.values()) | set(cfg.token_id_terminals.values())
+        all_vals = cfg.terminal_literals | set(cfg.token_id_terminals.values())
         found.append(
             _ParserInfo(
                 parser_cls=obj,
@@ -85,12 +91,13 @@ def _discover_parsers() -> list[_ParserInfo]:
                 samples=build_samples(cfg.name),
                 terminals=sorted(v for v in all_vals if len(v) > 1),
                 tool_end=tool_end,
-                think_end=cfg.terminals.get("THINK_END", ""),
+                think_end=cfg.terminal_literal("THINK_END") or "",
                 tool_start=(
-                    cfg.terminals["TOOL_SECTION_START"]
+                    cfg.terminal_literal("TOOL_SECTION_START")
                     if (ParserState.CONTENT, "TOOL_SECTION_START") in cfg.transitions
-                    else cfg.terminals.get("TOOL_START", "")
-                ),
+                    else cfg.terminal_literal("TOOL_START")
+                )
+                or "",
             )
         )
     if missing_builders:

@@ -45,6 +45,14 @@ message GenerateRequest {
   uint32 truncate_prompt_tokens = 11;
 
   int32 priority = 12;
+
+  optional string session_id = 13;
+
+  // Multimodal inputs aligned with placeholder markers in token_ids.
+  repeated MediaItem media = 14;
+
+  // Loaded LoRA name; empty selects the base model.
+  string lora_name = 15;
 }
 
 message RandomSampling {
@@ -102,6 +110,8 @@ message ResponseOptions {
   bool output_token_ids = 5;
   bool output_logprobs = 6;
   optional CandidateTokens output_candidates = 7;
+  // Defaults to true when omitted.
+  optional bool skip_special_tokens = 8;
 }
 
 message KVCacheParameters {
@@ -199,4 +209,39 @@ message CandidateTokenInfo {
 // Token ids used for prompt
 message TokenIds {
   repeated uint32 ids = 1;
+}
+
+// ======================================================================================
+// Media
+// ======================================================================================
+
+enum Modality {
+  MODALITY_UNSPECIFIED = 0;
+  MODALITY_IMAGE = 1;
+  MODALITY_VIDEO = 2;
+  MODALITY_AUDIO = 3;
+}
+
+message MediaItem {
+  Modality modality = 1;
+  oneof source {
+    string url = 2;       // http:// or https://
+    string data_uri = 3;  // data:
+    bytes raw_bytes = 4;
+    PreprocessedMediaFeatures features = 7;
+  }
+  string mime_type = 5;
+  string uuid = 6;
+}
+
+// Engine-ready multimodal features produced by a version-compatible frontend.
+// `kwargs` is the MessagePack wire representation of one MmKwargsItem.
+message PreprocessedMediaFeatures {
+  // Required inline payload. Cache-only references are not accepted.
+  optional bytes kwargs = 1;
+  string identifier = 2;
+  uint64 offset = 3;
+  uint64 length = 4;
+  optional string mm_hash = 5;
+  repeated bool is_embed = 6;
 }

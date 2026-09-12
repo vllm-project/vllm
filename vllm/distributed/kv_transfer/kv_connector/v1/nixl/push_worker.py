@@ -41,6 +41,9 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorTransferResults,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -76,6 +79,9 @@ _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
 
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     """Push-specific (WRITE) worker logic. See module docstring."""
+
+    # Distinguishes push from pull in the NIXL compatibility hash.
+    _TRANSFER_MODE: str = "push"
 
     def __init__(
         self,
@@ -129,6 +135,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor"]):
         super().register_kv_caches(kv_caches)
+        if self._mixed_mem_types:
+            raise NotImplementedError(
+                "NixlPushConnector does not support mixed-memory KV caches"
+            )
         if self._push_writer_thread is None:
             self._push_writer_thread = threading.Thread(
                 target=self._push_writer_loop,
@@ -138,7 +148,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             self._push_writer_thread.start()
             logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         self._push_writer_stop.set()
         # Unblock the writer if it's waiting in the no-active-state branch.
         self._push_writer_wake.set()
@@ -156,6 +166,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Pre-process metadata; defer NIXL ops to the writer thread."""
+        if self.pcp_rank > 0:
+            return
+
         # D-side: track reqs waiting for P to push.
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
@@ -191,8 +204,15 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         for req_id in metadata.reqs_not_processed:
             self._reqs_to_process.discard(req_id)
             assert req_id not in self._reqs_to_send
+        # Rebase scheduler-clock deadlines onto this worker's clock — see the
+        # equivalent block in pull_worker.start_load_kv for the rationale.
+        now_local = time.perf_counter()
         for req_id, expiration_time in metadata.reqs_to_send.items():
             if req_id in self._reqs_to_process:
+                if metadata.scheduler_clock:
+                    expiration_time = now_local + (
+                        expiration_time - metadata.scheduler_clock
+                    )
                 self._reqs_to_send[req_id] = expiration_time
 
         # Heartbeats still leave from the main thread (base worker behaviour).
@@ -443,11 +463,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
             fut.add_done_callback(_on_handshake)
             return
+        # Keep the engine alive while it is actively receiving pushes, mirroring
+        # how pull-mode transfers touch _engine_last_active in start_load_kv.
+        self._engine_last_active[decode_engine_id] = time.perf_counter()
 
-        # Both sides stay logical here; ``_xfer_blocks_for_req`` converts each
-        # to physical with its own physical-blocks-per-logical ratio -- P uses
-        # ``self._physical_blocks_per_logical_kv_block``, D's is learned during
-        # the NIXL handshake.
         logical_local = self._as_grouped_block_ids(local_block_ids)
         logical_remote = self._as_grouped_block_ids(remote_block_ids)
         physical_local = self._logical_to_kernel_block_ids(
@@ -506,7 +525,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         )
         remote_block_ids = meta.remote.block_ids
         local_block_ids = meta.local_physical_block_ids
-        num_groups = len(local_block_ids)
+        local_region_groups = self.region_group_ids
+        remote_region_groups = self.dst_region_group_ids[engine_id]
+        groups_differ = local_region_groups != remote_region_groups
+        if groups_differ:
+            raise NotImplementedError(
+                "NixlPushConnector does not support different producer and "
+                "consumer cache-group layouts"
+            )
 
         # MLA latent is replicated across D's TP ranks: the tp-mapping
         # collapses it to one rank (fine for reads), but push must WRITE every
@@ -521,10 +547,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         else:
             write_ranks = list(plan.all_source_ranks)
 
+        num_groups = len(local_block_ids)
+
         def group_ids(block_ids: BlockIds, rank: int) -> BlockIds:
             return [
                 list(block_ids[g])
-                if (replicate_attn and _is_attention_spec(self._group_spec_types[g]))
+                if (self._is_csa_linear and tp_ratio < 0)
+                or (replicate_attn and _is_attention_spec(self._group_spec_types[g]))
                 or rank in plan.source_ranks_per_group[g]
                 else []
                 for g in range(num_groups)
@@ -619,16 +648,28 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             logger.warning("No blocks to push for request %s", request_id)
             return None
 
-        # Align per-group block counts for push.
+        # Prefix caching: D allocated only uncached blocks, so on a partial hit it
+        # sends fewer than P's. End-trim P's blocks to that same suffix so we WRITE only
+        # the uncomputed tail into D's slots. Runs on kernel ids, post-expansion.
+        remote_block_ids, local_block_ids = self._apply_prefix_caching(
+            decode_block_ids=remote_block_ids,
+            prefill_block_ids=local_block_ids,
+            decode_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
+            prefill_physical_per_logical=self._physical_blocks_per_logical_kv_block,
+        )
+
         local_block_ids = list(local_block_ids)
         remote_block_ids = list(remote_block_ids)
-        for i in range(min(len(local_block_ids), len(remote_block_ids))):
-            num_local = len(local_block_ids[i])
-            num_remote = len(remote_block_ids[i])
-            if num_local > num_remote:
-                local_block_ids[i] = local_block_ids[i][:num_remote]
-            elif num_local < num_remote:
-                remote_block_ids[i] = remote_block_ids[i][:num_local]
+        assert len(local_block_ids) == len(remote_block_ids), (
+            f"push group-count mismatch for {request_id}: {len(local_block_ids)} "
+            f"local vs {len(remote_block_ids)} remote groups"
+        )
+        for i in range(len(local_block_ids)):
+            assert len(local_block_ids[i]) == len(remote_block_ids[i]), (
+                f"push block-count mismatch for {request_id} group {i}: "
+                f"{len(local_block_ids[i])} local vs "
+                f"{len(remote_block_ids[i])} remote blocks"
+            )
 
         # Get descs ids.
         remote_block_descs_ids = self._compute_desc_ids(
@@ -636,12 +677,18 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             dst_num_blocks=self.dst_num_blocks[dst_engine_id],
             block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
+            region_num_blocks=self.dst_region_num_blocks[dst_engine_id],
+            region_group_ids=self.dst_region_group_ids[dst_engine_id],
+            uses_region_group_mapping=self.dst_uses_region_group_mapping[dst_engine_id],
         )
         local_block_descs_ids = self._compute_desc_ids(
             block_ids=local_block_ids,
             dst_num_blocks=self.dst_num_blocks[self.engine_id],
             block_size_ratio=block_size_ratio,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
+            region_num_blocks=self.dst_region_num_blocks[self.engine_id],
+            region_group_ids=self.region_group_ids,
+            uses_region_group_mapping=self._uses_region_group_mapping,
         )
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
@@ -742,13 +789,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._reqs_to_send.pop(req_id, None)
         return notified_req_ids
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_transfer_results(self) -> KVConnectorTransferResults:
         # Engine main thread asking for completions: also wake the writer
         # so it gets a chance to drain NIXL notifs (heartbeats, completion
         # notifs, late PUSH_REGs) even if it had been parked.
         self._push_writer_wake.set()
 
-        done_sending, done_recving = super().get_finished()
+        results = super().get_transfer_results()
+        done_sending = results.finished_sending
 
         # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
         # writer thread also appends to it, so guard the pop.
@@ -768,4 +816,4 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if done_sending:
             self._push_writer_wake.set()
 
-        return done_sending, done_recving
+        return results

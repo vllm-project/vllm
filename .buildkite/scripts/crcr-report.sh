@@ -1,0 +1,108 @@
+#!/bin/bash
+# Report this build's per-job results to the PyTorch Cross-Repo CI Relay (CRCR).
+#
+# Only runs in the torch-nightly lane on main. CRCR's nightly path is a
+# self-report: unlike PR-triggered callbacks there is no upstream dispatch to
+# correlate with, so the relay accepts a single "completed" callback per job and
+# forwards it to HUD (hud.pytorch.org/crcr).
+#
+# Reporting is best-effort. A relay outage, an expired mapping or a missing
+# token must never fail the nightly build, so every failure path here exits 0
+# after logging. The step is also marked soft_fail in the pipeline.
+
+set -uo pipefail
+
+# --- Gating -----------------------------------------------------------------
+# Matches the image_build.sh convention: the lane is selected inside the script
+# rather than in pipeline YAML.
+if [[ "${TORCH_NIGHTLY:-0}" != "1" ]]; then
+    echo "TORCH_NIGHTLY != 1 -- not the nightly lane, nothing to report"
+    exit 0
+fi
+
+# Defence in depth. The relay decides what a Buildkite pipeline may claim via
+# ci_providers.yml, and a pipeline that builds fork PRs should constrain
+# build_branch there. Refusing to even mint a token off main means a fork PR
+# cannot report as vllm-project/vllm even if that mapping is ever relaxed.
+if [[ "${BUILDKITE_BRANCH:-}" != "main" ]]; then
+    echo "branch '${BUILDKITE_BRANCH:-}' is not main -- refusing to report"
+    exit 0
+fi
+
+CALLBACK_URL="${CRCR_CALLBACK_URL:-}"
+if [[ -z "${CALLBACK_URL}" ]]; then
+    echo "CRCR_CALLBACK_URL unset -- skipping report"
+    exit 0
+fi
+
+# read_builds only. Needed because a job cannot see its siblings' outcomes:
+# the agent exposes only its own step, so the job list comes from the REST API.
+TOKEN_SECRET_KEY="${CRCR_BUILDKITE_TOKEN_SECRET_KEY:-CRCR_BUILDKITE_API_TOKEN}"
+BK_TOKEN="${BUILDKITE_API_TOKEN:-}"
+if [[ -z "${BK_TOKEN}" ]]; then
+    # Not in the job environment, so read it from a Buildkite secret. The agent
+    # redacts values fetched this way from the log.
+    #
+    # Report why a lookup failed. Swallowing stderr made a missing secret, a
+    # denied policy and an unusable agent indistinguishable, all surfacing as the
+    # same "no token" line. Only stderr is echoed -- stdout is the secret.
+    if ! command -v buildkite-agent >/dev/null 2>&1; then
+        echo "buildkite-agent is not on PATH; cannot read secret '${TOKEN_SECRET_KEY}'"
+    else
+        secret_err="$(mktemp)"
+        # Deliberately not passing --skip-redaction. On the deployed agent
+        # (v3.73.1) the flag cannot help: secret_get.go creates the Job API
+        # client unconditionally and only checks SkipRedaction afterwards, so
+        # under the docker plugin -- which does not expose the Job API socket to
+        # the container -- it fails before the flag is read. That ordering was
+        # only fixed in v3.107.0. Skipping redaction would also stop the token
+        # being registered with the log redactor, for no gain here.
+        if BK_TOKEN="$(buildkite-agent secret get "${TOKEN_SECRET_KEY}" 2>"${secret_err}")"; then
+            if [[ -z "${BK_TOKEN}" ]]; then
+                echo "secret '${TOKEN_SECRET_KEY}' resolved but is empty"
+            fi
+        else
+            BK_TOKEN=""
+            echo "buildkite-agent secret get '${TOKEN_SECRET_KEY}' failed" \
+                "(agent $(buildkite-agent --version 2>&1 | head -1)):"
+            sed 's/^/    /' "${secret_err}"
+        fi
+        rm -f "${secret_err}"
+    fi
+fi
+if [[ -z "${BK_TOKEN}" ]]; then
+    echo "no Buildkite API token (env BUILDKITE_API_TOKEN or secret" \
+        "'${TOKEN_SECRET_KEY}') -- skipping report"
+    exit 0
+fi
+
+AUDIENCE="pytorch-cross-repo-ci-relay"
+OIDC_TOKEN="$(buildkite-agent oidc request-token --audience "${AUDIENCE}" 2>/dev/null)"
+if [[ -z "${OIDC_TOKEN}" ]]; then
+    echo "could not mint a Buildkite OIDC token -- skipping report"
+    exit 0
+fi
+
+BUILD_JSON="$(mktemp)"
+trap 'rm -f "${BUILD_JSON}"' EXIT
+http_code="$(curl -sS -w '%{http_code}' -o "${BUILD_JSON}" \
+    -H "Authorization: Bearer ${BK_TOKEN}" \
+    "https://api.buildkite.com/v2/organizations/${BUILDKITE_ORGANIZATION_SLUG}/pipelines/${BUILDKITE_PIPELINE_SLUG}/builds/${BUILDKITE_BUILD_NUMBER}")"
+if [[ "${http_code}" != "200" ]]; then
+    echo "buildkite API returned ${http_code} -- skipping report"
+    exit 0
+fi
+
+# One callback per job, matching HUD's per-job crcr_workflow_job schema.
+# delivery_id is synthetic: the nightly path has no upstream dispatch to borrow
+# one from, so build+job is used as the idempotency key.
+# Resolved from this script's location: the pipeline runs it from
+# /vllm-workspace/tests, so a repo-relative path would not resolve.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "${SCRIPT_DIR}/crcr_report.py" \
+    --build-json "${BUILD_JSON}" \
+    --callback-url "${CALLBACK_URL}" \
+    --oidc-token "${OIDC_TOKEN}" \
+  || echo "crcr report failed -- continuing (reporting is best-effort)"
+
+exit 0

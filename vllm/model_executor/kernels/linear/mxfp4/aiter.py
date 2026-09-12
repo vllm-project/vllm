@@ -4,10 +4,33 @@
 import torch
 from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
+)
 from vllm.platforms import current_platform
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
+
+logger = init_logger(__name__)
+
+
+_ASM_FP4_SCALE_ROW_MULTIPLE = 32
+_ASM_FP4_SCALE_COL_MULTIPLE = 8
+
+
+def _asm_fp4_scale_swizzle_supported(weight_scale: torch.Tensor) -> bool:
+    # The ASM swizzle reshapes weight_scale into a fixed tile layout, requiring
+    # scale rows divisible by 32 and scale columns divisible by 8
+    if weight_scale.ndim != 2:
+        return False
+    sm, sn = weight_scale.shape
+    return (
+        sm % _ASM_FP4_SCALE_ROW_MULTIPLE == 0 and sn % _ASM_FP4_SCALE_COL_MULTIPLE == 0
+    )
+
 
 # NOTE: Do not import aiter at module scope. Importing aiter eagerly initializes HIP
 # which can force the engine core to spawn instead of fork.
@@ -28,7 +51,7 @@ if is_aiter_found_and_supported():
     ) -> torch.Tensor:
         from aiter.ops.triton.gemm_afp4wfp4 import (
             gemm_afp4wfp4,
-            gemm_afp4wfp4_preshuffled_weight_scales,
+            gemm_afp4wfp4_preshuffle,
         )
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
@@ -56,7 +79,7 @@ if is_aiter_found_and_supported():
                     x_s = x_s[:M, ...].view(torch.uint8)
 
                 y = torch.empty(M, N, device=x_q.device, dtype=out_dtype)
-                gemm_afp4wfp4_preshuffled_weight_scales(
+                gemm_afp4wfp4_preshuffle(
                     x_q.view(torch.uint8),
                     weight.view(torch.uint8).view(weight.shape[0] // 16, -1),
                     x_s,
@@ -131,15 +154,50 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.supports_mx():
             return False, "current platform does not support native MXFP4 computation"
+
+        from vllm._aiter_ops import is_aiter_found_and_supported
+        from vllm.model_executor.kernels.linear import _get_linear_backend
+
+        linear_backend = _get_linear_backend()
+
+        if (
+            current_platform.is_rocm()
+            and current_platform.supports_mx()
+            and "AiterMxfp4LinearKernel" not in envs.VLLM_DISABLED_KERNELS
+            and linear_backend == "auto"
+            and not is_aiter_found_and_supported()
+        ):
+            logger.warning_once(
+                "This platform supports native MXFP4 W4A4 MOE "
+                "computation via AITER MOE backend, but AITER is not "
+                "found or not supported. Consider installing AITER: "
+                "https://github.com/ROCm/aiter."
+            )
+
         if is_aiter_found_and_supported():
             return True, None
         return False, "AITER not found or not supported on the current platform"
 
     @classmethod
-    def can_implement(cls, c: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        if config.activation_quant_key != kMxfp4Dynamic:
+            return False, "only supports MXFP4 dynamic activation"
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.use_asm_gemm and not _asm_fp4_scale_swizzle_supported(
+            layer.weight_scale.data
+        ):
+            logger.warning_once(
+                "AITER ASM FP4 GEMM requires weight_scale dims divisible by "
+                "(%d, %d), but this layer has weight_scale shape %s. Falling "
+                "back to the AITER Triton FP4 GEMM for this layer.",
+                _ASM_FP4_SCALE_ROW_MULTIPLE,
+                _ASM_FP4_SCALE_COL_MULTIPLE,
+                tuple(layer.weight_scale.data.shape),
+            )
+            self.use_asm_gemm = False
+
         if self.use_asm_gemm:
             from aiter.ops.shuffle import shuffle_weight
 

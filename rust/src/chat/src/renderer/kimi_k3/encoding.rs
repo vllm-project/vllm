@@ -126,7 +126,7 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
             resolved.sort_by_key(|item| (item.0, item.1));
         }
 
-        for (xtml_index, (_, _, content, name)) in resolved.into_iter().enumerate() {
+        for (position, _, content, name) in resolved {
             let tool_name = name.as_deref().ok_or_else(|| {
                 Error::ChatTemplate(
                     "Kimi K3 tool messages need a resolvable tool name: \
@@ -135,7 +135,7 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
                         .to_string(),
                 )
             })?;
-            write_tool_message(out, tool_name, xtml_index + 1, &content)?;
+            write_tool_message(out, tool_name, position, &content)?;
         }
         Ok(())
     };
@@ -191,7 +191,7 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
     }
     flush_tool_run(&mut out, &mut pending_tool_run, &tool_call_id_index)?;
 
-    match &request.tool_choice {
+    match request.tool_choice() {
         ChatToolChoice::Required => {
             write_internal_system(
                 &mut out,
@@ -202,7 +202,7 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
         }
         // Emit only when tools are present: Rust defaults tool_choice to None
         // for tool-free requests, which must not inject a tool-choice message.
-        ChatToolChoice::None if !request.tools.is_empty() => {
+        ChatToolChoice::None if !request.tools().is_empty() => {
             write_internal_system(
                 &mut out,
                 "tool-choice",
@@ -226,7 +226,7 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
 fn request_tools(request: &ChatRequest) -> &[ChatTool] {
     // Declare tools whenever the request carries them. K3 tool-declare is
     // independent of tool_choice; tool_choice only injects control messages.
-    request.tools.as_slice()
+    request.initial_tools()
 }
 
 fn thinking_enabled(request: &ChatRequest) -> Result<bool> {
@@ -236,11 +236,15 @@ fn thinking_enabled(request: &ChatRequest) -> Result<bool> {
     if let Some(enable_thinking) = request.parse_template_bool("enable_thinking")? {
         return Ok(enable_thinking);
     }
+    if let Some(reasoning_effort) = request.chat_options.reasoning_effort {
+        return Ok(reasoning_effort != crate::request::ReasoningEffort::None);
+    }
     Ok(request
         .chat_options
-        .reasoning_effort
-        .map(|effort| effort != crate::request::ReasoningEffort::None)
-        .unwrap_or(true))
+        .template_kwargs
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        != Some("none"))
 }
 
 fn thinking_effort(request: &ChatRequest) -> Result<String> {
@@ -251,13 +255,22 @@ fn thinking_effort(request: &ChatRequest) -> Result<String> {
             ))
         })?
     } else if let Some(effort) = request.chat_options.reasoning_effort {
-        effort.as_str()
+        if effort == crate::request::ReasoningEffort::None {
+            DEFAULT_THINKING_EFFORT
+        } else {
+            effort.as_str()
+        }
     } else if let Some(value) = request.chat_options.template_kwargs.get("reasoning_effort") {
-        value.as_str().ok_or_else(|| {
+        let effort = value.as_str().ok_or_else(|| {
             Error::ChatTemplate(format!(
                 "template kwarg `reasoning_effort` must be a string, got {value}"
             ))
-        })?
+        })?;
+        if effort == "none" {
+            DEFAULT_THINKING_EFFORT
+        } else {
+            effort
+        }
     } else {
         DEFAULT_THINKING_EFFORT
     };
@@ -291,12 +304,17 @@ fn write_tool_declare(
     let mut specs = Vec::with_capacity(tools.len());
     for tool in tools {
         let mut function = Map::new();
-        function.insert(
-            "description".to_string(),
-            Value::String(tool.description.clone().unwrap_or_default()),
-        );
+        if let Some(description) = &tool.description {
+            function.insert(
+                "description".to_string(),
+                Value::String(description.clone()),
+            );
+        }
         function.insert("name".to_string(), Value::String(tool.name.clone()));
         function.insert("parameters".to_string(), sort_json(&tool.parameters));
+        if let Some(strict) = tool.strict {
+            function.insert("strict".to_string(), Value::Bool(strict));
+        }
         specs.push(json!({
             "function": Value::Object(function),
             "type": "function",

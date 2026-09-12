@@ -316,6 +316,48 @@ def test_cp_gather_fp8_shuffled_blocks():
     assert torch.equal(dst[:, NOPE_DIM:], expected[:, NOPE_DIM:])
 
 
+def test_cp_gather_fp8_mixes_resident_and_pinned_host_rows():
+    seq_lens = [7, 5]
+    block_size = 4
+    (
+        cache,
+        block_table,
+        workspace_starts,
+        num_reqs,
+        total_tokens,
+        expected,
+    ) = _build_test_case(seq_lens, block_size)
+
+    device_cache = cache.clone()
+    host_cache = cache.cpu().pin_memory().view(-1, ENTRY_BYTES)
+    device_rows = torch.arange(host_cache.shape[0], dtype=torch.int32, device="cuda")
+    use_device = device_rows % 2 == 0
+    host_rows = device_rows.clone()
+    device_rows.masked_fill_(~use_device, -1)
+
+    host_cache[use_device.cpu()] = 0
+    device_cache.view(-1, ENTRY_BYTES)[~use_device] = 0
+    dst = torch.empty(
+        total_tokens, NOPE_DIM + ROPE_DIM, dtype=torch.bfloat16, device="cuda"
+    )
+
+    ops.cp_gather_and_upconvert_fp8_kv_cache(
+        device_cache,
+        dst,
+        block_table,
+        workspace_starts,
+        num_reqs,
+        host_cache=host_cache,
+        host_row_ids=host_rows,
+        device_row_ids=device_rows,
+    )
+
+    torch.testing.assert_close(
+        dst[:, :NOPE_DIM], expected[:, :NOPE_DIM], atol=1e-3, rtol=1e-2
+    )
+    assert torch.equal(dst[:, NOPE_DIM:], expected[:, NOPE_DIM:])
+
+
 @pytest.mark.parametrize(
     "gather_seq_lens,seq_starts",
     [
@@ -407,6 +449,60 @@ def test_cp_gather_fp8_large_seqlens(seq_lens, block_size):
         cache, dst, block_table, workspace_starts_t, num_reqs
     )
 
+    torch.testing.assert_close(
+        dst[:, :NOPE_DIM], expected[:, :NOPE_DIM], atol=1e-3, rtol=1e-2
+    )
+    assert torch.equal(dst[:, NOPE_DIM:], expected[:, NOPE_DIM:])
+
+
+def test_cp_gather_fp8_large_uneven_sequences_with_starts():
+    """Gather uneven long request slices through the page-oriented path."""
+    gather_seq_lens = [17, 32_768, 71]
+    seq_starts = [3, 17, 5]
+    full_seq_lens = [
+        start + length for start, length in zip(seq_starts, gather_seq_lens)
+    ]
+    (
+        cache,
+        block_table,
+        full_workspace_starts,
+        num_reqs,
+        _total_tokens,
+        full_expected,
+    ) = _build_test_case_fast(full_seq_lens, block_size=64)
+
+    workspace_starts = torch.zeros(num_reqs, dtype=torch.int32, device="cuda")
+    workspace_starts[1:] = torch.tensor(
+        gather_seq_lens[:-1], dtype=torch.int32, device="cuda"
+    ).cumsum(dim=0)
+    seq_starts_t = torch.tensor(seq_starts, dtype=torch.int32, device="cuda")
+    dst = torch.empty(
+        sum(gather_seq_lens),
+        NOPE_DIM + ROPE_DIM,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+
+    ops.cp_gather_and_upconvert_fp8_kv_cache(
+        cache,
+        dst,
+        block_table,
+        workspace_starts,
+        num_reqs,
+        seq_starts_t,
+    )
+
+    expected = torch.cat(
+        [
+            full_expected[
+                full_workspace_starts[req_id]
+                + seq_starts[req_id] : full_workspace_starts[req_id]
+                + seq_starts[req_id]
+                + gather_seq_lens[req_id]
+            ]
+            for req_id in range(num_reqs)
+        ]
+    )
     torch.testing.assert_close(
         dst[:, :NOPE_DIM], expected[:, :NOPE_DIM], atol=1e-3, rtol=1e-2
     )

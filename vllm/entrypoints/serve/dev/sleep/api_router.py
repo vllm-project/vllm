@@ -24,8 +24,6 @@ async def sleep(raw_request: Request):
     level = raw_request.query_params.get("level", "1")
     mode = raw_request.query_params.get("mode", "abort")
     await engine_client(raw_request).sleep(int(level), mode)
-    # FIXME: in v0 with frontend multiprocessing, the sleep command
-    # is sent but does not finish yet when we return a response.
     return Response(status_code=200)
 
 
@@ -37,8 +35,6 @@ async def wake_up(raw_request: Request):
         tags = None
     logger.info("wake up the engine with tags: %s", tags)
     await engine_client(raw_request).wake_up(tags)
-    # FIXME: in v0 with frontend multiprocessing, the wake-up command
-    # is sent but does not finish yet when we return a response.
     return Response(status_code=200)
 
 

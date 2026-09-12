@@ -13,7 +13,7 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar
 from vllm.v1.utils import ConstantList
 
-from .utils import create_requests, create_scheduler
+from .utils import create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
 
@@ -66,6 +66,49 @@ def test_stop_by_max_tokens(max_tokens: int):
     assert total_num_scheduled_tokens == expected_total_num_scheduled_tokens
 
 
+def test_no_spec_decode_padding_up_to_max_model_len():
+    """Uniform spec-decode padding must leave room for the sampled token.
+
+    Padding a single-token decode up to exactly max_model_len makes the
+    running-loop max_model_len cap negative on the next step (async
+    scheduling schedules it before the output that would stop the request),
+    and a negative num_scheduled_tokens crashes the model runner. The
+    request is scheduled un-padded instead.
+
+    Modelled on a disaggregated decode worker, where every request arrives
+    with all but the last prompt token already computed.
+    """
+    max_model_len = 32
+    num_spec = 1
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        max_model_len=max_model_len,
+        num_speculative_tokens=num_spec,
+        speculative_method="ngram_gpu",
+    )
+
+    # A running decode, so padding's "something already scheduled and no
+    # prefill this step" precondition holds for the request below.
+    (filler,) = create_requests(num_requests=1, num_tokens=4, req_ids=["filler"])
+    scheduler.add_request(filler)
+    sched_output = scheduler.schedule()
+    scheduler.update_from_output(sched_output, _make_model_runner_output(sched_output))
+
+    (request,) = create_requests(
+        num_requests=1, num_tokens=max_model_len - num_spec, req_ids=["boundary"]
+    )
+    request.num_computed_tokens = request.num_tokens - 1
+    scheduler.add_request(request)
+
+    sched_output = scheduler.schedule()
+    assert sched_output.num_scheduled_tokens["boundary"] == 1
+    assert "boundary" not in sched_output.scheduled_spec_decode_tokens
+    assert request.num_computed_tokens < max_model_len
+
+    scheduler.update_from_output(sched_output, _make_model_runner_output(sched_output))
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+
+
 def test_abort():
     scheduler = create_scheduler(async_scheduling=True)
     requests = create_requests(num_requests=10, max_tokens=20)
@@ -100,6 +143,32 @@ def test_abort():
     for i, req in enumerate(requests):
         assert req.status == RequestStatus.FINISHED_ABORTED
         assert req.num_output_tokens == abort_order_copy.index(i)
+
+
+def test_connector_metadata_precedes_async_placeholder_advance(monkeypatch):
+    """Mirroring must see earlier unresolved outputs, excluding the current step."""
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    (request,) = create_requests(num_requests=1, num_tokens=4, max_tokens=4)
+    scheduler.add_request(request)
+
+    assert scheduler.connector is not None
+    build_connector_meta = scheduler.connector.build_connector_meta
+    observed_placeholders = []
+
+    def record_placeholders(scheduler_output):
+        observed_placeholders.append(request.num_output_placeholders)
+        return build_connector_meta(scheduler_output)
+
+    monkeypatch.setattr(
+        scheduler.connector, "build_connector_meta", record_placeholders
+    )
+    scheduler.schedule()
+    scheduler.schedule()
+
+    assert observed_placeholders == [0, 1]
 
 
 def test_preempt():
@@ -272,6 +341,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
 
     scheduler.perf_metrics = None
     scheduler.connector = None
+    scheduler.ec_connector = None
     scheduler.structured_output_manager = Mock()
     scheduler.structured_output_manager.should_advance.return_value = True
     scheduler.structured_output_manager.trim_reasoning_for_advance.side_effect = (
@@ -290,6 +360,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.vllm_config = Mock()
     scheduler.vllm_config.model_config.enable_return_routed_experts = False
     scheduler.enable_return_routed_experts = False
+    scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
     scheduler.make_stats = Mock(return_value=None)
@@ -638,3 +709,100 @@ def test_reset_prefix_cache_with_inflight_output_under_kv_pressure(pp_size: int)
         _assert_positions_consistent(req, engine)
         # All stale shares fully drained by the end.
         assert getattr(req, "num_stale_output_tokens", 0) == 0
+
+
+def test_requires_kv_delivery_defaults_to_producer_role():
+    # No connector: nothing is handed off, so keep the lossless deliver-stale
+    # path on preemption.
+    assert create_scheduler(async_scheduling=True).requires_kv_delivery is False
+    # Only a producer hands KV off when a request completes.
+    for role, expected in (
+        ("kv_producer", True),
+        ("kv_both", True),
+        ("kv_consumer", False),
+    ):
+        scheduler = create_scheduler(
+            async_scheduling=True, use_kv_connector=True, kv_role=role
+        )
+        assert scheduler.requires_kv_delivery is expected, role
+
+
+@pytest.mark.parametrize(
+    ("kv_role", "defer_free"),
+    [
+        ("kv_producer", False),
+        ("kv_consumer", False),
+        ("kv_consumer", True),
+    ],
+)
+def test_kv_pressure_preempt_mid_handoff(kv_role: str, defer_free: bool):
+    """P/D race: KV pressure hits while the output of a request's final
+    prefill chunk -- the hand-off token that would finish it -- is in flight.
+
+    When the victim's blocks free immediately, the request is preempted. On a
+    producer, that output must be dropped so the request recomputes; delivering
+    it would finish the request and hand off blocks the preemption already
+    freed, so the consumer pulls garbage. A consumer hands nothing off, so it
+    keeps the lossless deliver-stale path.
+
+    A consumer with overlapping batches (async scheduling or PP) instead fences
+    the victim's free behind its in-flight output, so the allocation retry
+    stops instead of preempting; the request then finishes from that output
+    once it lands. The gate depends on the platform (async scheduling is
+    force-disabled on CPU), so force the flag to cover both paths everywhere.
+    """
+    is_producer = kv_role == "kv_producer"
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_kv_connector=True,
+        kv_role=kv_role,
+        num_blocks=5,
+        block_size=16,
+        max_num_batched_tokens=512,
+    )
+    assert scheduler.requires_kv_delivery is is_producer
+    # The production gate requires overlapping batches, which async
+    # scheduling only provides off-CPU.
+    scheduler.defer_block_free = defer_free
+
+    # 32-token prompts fill 2 blocks each, exhausting the usable pool, so the
+    # next decode allocation targets the tail of the running queue (the
+    # handoff request) while its prefill output is still in flight.
+    decoder = create_requests(
+        num_requests=1, num_tokens=32, max_tokens=8, req_ids=["decoder"]
+    )[0]
+    handoff = create_requests(
+        num_requests=1, num_tokens=32, max_tokens=1, req_ids=["handoff"]
+    )[0]
+    scheduler.add_request(decoder)
+    scheduler.add_request(handoff)
+    sched_output = scheduler.schedule()
+    assert handoff.status == RequestStatus.RUNNING
+    assert handoff.num_output_placeholders == 1
+
+    scheduler.schedule()
+    if defer_free:
+        # The victim's blocks are fenced behind its in-flight output, so
+        # preempting it could not satisfy the allocation; the retry stops
+        # instead of preempting.
+        assert handoff.status == RequestStatus.RUNNING
+        assert handoff.num_stale_output_tokens == 0
+    else:
+        # Blocks free immediately, so the handoff request is preempted.
+        assert handoff.status == RequestStatus.PREEMPTED
+        assert handoff.num_stale_output_tokens == handoff.num_prompt_tokens
+        assert handoff.drop_stale_output is is_producer
+
+    scheduler.update_from_output(sched_output, _make_model_runner_output(sched_output))
+
+    assert handoff.num_stale_output_tokens == 0
+    if is_producer:
+        # Dropped: recomputed from the waiting queue, so the hand-off happens
+        # against real KV.
+        assert not handoff.is_finished()
+        assert handoff.status == RequestStatus.PREEMPTED
+        assert handoff.num_output_tokens == 0
+        assert handoff.request_id in scheduler.requests
+    else:
+        assert handoff.is_finished()
+        assert handoff.num_output_tokens == 1

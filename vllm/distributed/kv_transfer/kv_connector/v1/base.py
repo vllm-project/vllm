@@ -34,8 +34,8 @@ The class provides the following primitives:
         save_kv_layer() - starts saving KV for layer i (maybe async)
         wait_for_save() - blocks until all saves are done
 
-        get_finished() - called with ids of finished requests, returns
-            ids of requests that have completed async sending/recving.
+        get_transfer_results() - returns async send/receive completions and
+            receive failures in one snapshot.
         build_connector_worker_meta() - builds metadata to be sent
             back to the scheduler-side connector
 """
@@ -43,12 +43,13 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -63,7 +64,7 @@ if TYPE_CHECKING:
     )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.block_pool import BlockPool
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
@@ -80,6 +81,19 @@ CopyBlocksOp = Callable[
 ]
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class KVConnectorTransferResults:
+    """Asynchronous transfer completions from one worker snapshot.
+
+    Failed receives also appear in ``finished_recving`` so the scheduler can
+    release the request from its transfer wait state.
+    """
+
+    finished_sending: set[str] = field(default_factory=set)
+    finished_recving: set[str] = field(default_factory=set)
+    failed_recving: set[str] = field(default_factory=set)
 
 
 class SupportsHMA(ABC):
@@ -174,12 +188,25 @@ class KVConnectorBase_V1(ABC):
     """
 
     @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        """
-        Indicates whether this connector prefers KV blocks that hold KV data for all
-        layers, which can speed up KV data transfers. Defaults to False.
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        """Whether external hits can complete divergent local hybrid hits.
+
+        A capable connector restores lagging recurrent state when the local
+        full-attention group reaches a deeper boundary. Defaults to False.
         """
         return False
+
+    @property
+    def requires_kv_delivery(self) -> bool:
+        """Whether this connector hands off KV that must be reliably delivered.
+
+        If True, a request preempted while its hand-off is still pending is
+        recomputed rather than allowed to finish and hand off blocks that the
+        preemption already freed. Defaults to the producer role, since only a
+        producer hands KV off when a request completes. Best-effort caches
+        return False, as a dropped save is just a future cache miss.
+        """
+        return self._kv_transfer_config.is_kv_producer
 
     def __init__(
         self,
@@ -198,6 +225,7 @@ class KVConnectorBase_V1(ABC):
         else:
             raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
         self._kv_cache_config = kv_cache_config
+        self._kv_cache_manager: KVCacheManager | None = None
         self._role = role
 
     @property
@@ -258,28 +286,20 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]
-    ):
-        """
-        Initialize with a single KV cache tensor used by all layers.
-        The first dimension should be num_layers.
-        This function will only be called for models with uniform layers,
-        and only if the prefers_cross_layer_blocks is set to True.
-        Only one of the functions
-        {register_kv_caches, register_cross_layers_kv_cache} will be called.
-
-        Args:
-            kv_cache: a cross-layers kv cache tensor
-            attn_backend: The attention backend that corresponds to all layers
-        """
-        return
-
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """
         Set the xPU-specific ops for copying KV between host and device.
         Needed when host buffer is used for kv transfer (e.g., in NixlConnector)
         """
+        return
+
+    # TODO(NickLucche): group model-runner lifecycle hooks in the interface.
+    def finish_forward(self) -> None:
+        """Notify the connector that the model no longer reads this step's KV."""
+        return
+
+    def reset_capture_state(self) -> None:
+        """Reset worker state mutated while capturing CUDA graphs."""
         return
 
     def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
@@ -293,8 +313,8 @@ class KVConnectorBase_V1(ABC):
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
-        KV buffer. This is called from the forward context before the
-        forward pass to enable async loading during model execution.
+        KV buffer. Loads required by the current forward start before it;
+        independent asynchronous loads may start after it is submitted.
 
         Args:
             forward_context (ForwardContext): the forward context.
@@ -372,6 +392,16 @@ class KVConnectorBase_V1(ABC):
         """
         return None, None
 
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        """Return completed sends, receives, and receive failures together."""
+        finished_sending, finished_recving = self.get_finished(finished_req_ids)
+        return KVConnectorTransferResults(
+            finished_sending=set(finished_sending or ()),
+            finished_recving=set(finished_recving or ()),
+        )
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
         Get the set of block IDs that failed to load.
@@ -384,9 +414,9 @@ class KVConnectorBase_V1(ABC):
             - Applies to both sync- and async-loading requests.
             - Async loading: failed blocks may be reported in any forward pass
               up to and including the pass where the request ID is returned by
-              `get_finished()`. Even if failures occur, the request must still
-              be reported via `get_finished()`, and the failed block IDs must
-              appear here no later than that same pass.
+              `get_transfer_results()`. Even if failures occur, the request
+              must still be reported as finished receiving, and the failed
+              block IDs must appear here no later than that same pass.
             - Sync loading: failed blocks should be reported in the forward
               pass in which they are detected.
         """
@@ -439,6 +469,11 @@ class KVConnectorBase_V1(ABC):
     # ==============================
     # Scheduler-side methods
     # ==============================
+
+    def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
+        """Bind the scheduler's cache manager after it has been constructed."""
+        self._kv_cache_manager = kv_cache_manager
+        self.bind_gpu_block_pool(kv_cache_manager.block_pool)
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         """
@@ -565,6 +600,19 @@ class KVConnectorBase_V1(ABC):
         """
         return False, None
 
+    def register_finished_partial_tail(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        """Register finish-time partial-tail sources before block cleanup.
+
+        Returns True when the connector accepts responsibility for the sources
+        and the request's blocks must remain alive until ``get_finished()``.
+        """
+        return False
+
     def take_events(self) -> Iterable["KVCacheEvent"]:
         """
         Take the KV cache events from the connector.
@@ -573,6 +621,10 @@ class KVConnectorBase_V1(ABC):
             New KV cache events since the last call.
         """
         return ()
+
+    def has_pending_block_frees(self) -> bool:
+        """Whether pending transfers can release blocks instead of preemption."""
+        return False
 
     def has_pending_push_work(self) -> bool:
         """Return True if the connector has push-mode work that requires

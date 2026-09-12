@@ -25,6 +25,14 @@
  *     matching MLA's _q_scale / _k_scale / _v_scale (the cache latent uses a
  *     separate cache scale). Per-tensor E4M3.
  *
+ *   K/V pack (fused_kimi_k3_mla_kv_concat{,_quant_fp8}):
+ *     - k_out[t, h] = [k_nope[t, h] | k_pe[t]], cast to fp8 by the _quant_fp8
+ *       variant, which also writes v_fp8[t, h] = cast(v[t, h])
+ *     The chunked-context epilogue: no cache insert, no q, no RoPE (the cached
+ *     k_pe is already rotated) and no scaling. `k_nope`/`v` are strided views
+ * of one kv_b_proj output and `k_pe` may already be fp8 (a plain fp8 cache is
+ *     gathered without dequantizing); the outputs are contiguous.
+ *
  *   fp8_ds_mla (fused_kimi_k3_mla_key_concat_ds_mla_insert):
  *     - full key concat (bf16), and cache insert in DeepSeek's 656-byte
  *       block-scaled layout (NoPE fp8 in 4 tiles of 128 with per-tile dynamic
@@ -94,6 +102,9 @@ constexpr int kQkHeadDim = kQkNopeHeadDim + kQkRopeHeadDim;  // 192
 constexpr int kVHeadDim = 128;                               // V
 constexpr int kCacheEntry = kKvLoraRank + kQkRopeHeadDim;    // 576
 constexpr int kVecElems = 8;  // 8 bf16 == one uint4 load / one uint2 fp8 store
+// Max token count for the decode epilogue's 3-warps-per-row split; larger
+// batches have enough rows for one warp per row.
+constexpr int kDecodeRowSplitMaxTokens = 64;
 
 #if defined(USE_ROCM) && defined(__gfx942__)
 constexpr float kFp8Max = 224.0f;
@@ -116,60 +127,98 @@ __device__ __forceinline__ void copyChunk8(void* dst, const scalar_t* src,
   uint4 const v = *reinterpret_cast<const uint4*>(src);
   if constexpr (FP8 || APPLY_ROPE) {
     using Converter = vllm::_typeConvert<scalar_t>;
-    auto const* p =
-        reinterpret_cast<typename Converter::packed_hip_type const*>(&v);
-    float f[kVecElems];
-#pragma unroll
-    for (int i = 0; i < 4; i++) {
-      float2 x = Converter::convert(p[i]);
-      f[2 * i] = x.x;
-      f[2 * i + 1] = x.y;
-    }
-    if constexpr (APPLY_ROPE) {
-#pragma unroll
-      for (int i = 0; i < kVecElems / 2; i++) {
-        int const pair_idx = rope_elem_base / 2 + i;
-        float const cos = static_cast<float>(cos_sin[pair_idx]);
-        float const sin =
-            static_cast<float>(cos_sin[pair_idx + kQkRopeHeadDim / 2]);
-        float const x = f[2 * i];
-        float const y = f[2 * i + 1];
-        f[2 * i] = x * cos - y * sin;
-        f[2 * i + 1] = x * sin + y * cos;
-      }
-    }
-    if constexpr (!FP8) {
-      uint4 out;
-      auto* o = reinterpret_cast<typename Converter::packed_hip_type*>(&out);
-#pragma unroll
-      for (int i = 0; i < kVecElems / 2; i++) {
-        o[i] = Converter::convert(make_float2(f[2 * i], f[2 * i + 1]));
-      }
-      *reinterpret_cast<uint4*>(dst) = out;
+    if constexpr (!Converter::exists) {
       return;
-    }
+    } else {
+      auto const* p =
+          reinterpret_cast<typename Converter::packed_hip_type const*>(&v);
+      float f[kVecElems];
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        float2 x = Converter::convert(p[i]);
+        f[2 * i] = x.x;
+        f[2 * i + 1] = x.y;
+      }
+      if constexpr (APPLY_ROPE) {
+#pragma unroll
+        for (int i = 0; i < kVecElems / 2; i++) {
+          int const pair_idx = rope_elem_base / 2 + i;
+          float const cos = static_cast<float>(cos_sin[pair_idx]);
+          float const sin =
+              static_cast<float>(cos_sin[pair_idx + kQkRopeHeadDim / 2]);
+          float const x = f[2 * i];
+          float const y = f[2 * i + 1];
+          f[2 * i] = x * cos - y * sin;
+          f[2 * i + 1] = x * sin + y * cos;
+        }
+      }
+      if constexpr (!FP8) {
+        uint4 out;
+        auto* o = reinterpret_cast<typename Converter::packed_hip_type*>(&out);
+#pragma unroll
+        for (int i = 0; i < kVecElems / 2; i++) {
+          o[i] = Converter::convert(make_float2(f[2 * i], f[2 * i + 1]));
+        }
+        *reinterpret_cast<uint4*>(dst) = out;
+        return;
+      }
 #ifndef USE_ROCM
-    uint2 out;
-    auto* o2 = reinterpret_cast<__nv_fp8x2_storage_t*>(&out);
+      uint2 out;
+      auto* o2 = reinterpret_cast<__nv_fp8x2_storage_t*>(&out);
   #pragma unroll
-    for (int i = 0; i < 4; i++) {
-      float2 s = make_float2(f[2 * i] * scale_inv, f[2 * i + 1] * scale_inv);
-      s.x = fminf(fmaxf(s.x, -kFp8Max), kFp8Max);
-      s.y = fminf(fmaxf(s.y, -kFp8Max), kFp8Max);
-      o2[i] = __nv_cvt_float2_to_fp8x2(s, __NV_SATFINITE, __NV_E4M3);
-    }
-    *reinterpret_cast<uint2*>(dst) = out;
+      for (int i = 0; i < 4; i++) {
+        float2 s = make_float2(f[2 * i] * scale_inv, f[2 * i + 1] * scale_inv);
+        s.x = fminf(fmaxf(s.x, -kFp8Max), kFp8Max);
+        s.y = fminf(fmaxf(s.y, -kFp8Max), kFp8Max);
+        o2[i] = __nv_cvt_float2_to_fp8x2(s, __NV_SATFINITE, __NV_E4M3);
+      }
+      *reinterpret_cast<uint2*>(dst) = out;
 #else
-    uint8_t out[kVecElems];
+      uint8_t out[kVecElems];
   #pragma unroll
-    for (int i = 0; i < kVecElems; i++) {
-      float s = fminf(fmaxf(f[i] * scale_inv, -kFp8Max), kFp8Max);
-      out[i] = rocm_cvt_float_to_fp8_e4m3(s);
-    }
-    *reinterpret_cast<uint2*>(dst) = *reinterpret_cast<uint2 const*>(out);
+      for (int i = 0; i < kVecElems; i++) {
+        float s = fminf(fmaxf(f[i] * scale_inv, -kFp8Max), kFp8Max);
+        out[i] = rocm_cvt_float_to_fp8_e4m3(s);
+      }
+      *reinterpret_cast<uint2*>(dst) = *reinterpret_cast<uint2 const*>(out);
 #endif
+    }
   } else {
     *reinterpret_cast<uint4*>(dst) = v;
+  }
+}
+
+// Cast 8 source elements (one uint4 of bf16/fp16) to E4M3 with no scaling,
+// using the native pairwise converters so the result is bit-identical to
+// `src.to(torch.float8_e4m3fn)`.
+template <typename scalar_t>
+__device__ __forceinline__ void copyChunk8UnitFp8(uint8_t* dst,
+                                                  const scalar_t* src) {
+  using Converter = vllm::_typeConvert<scalar_t>;
+  if constexpr (!Converter::exists) {
+    return;
+  } else {
+#ifndef USE_ROCM
+    uint4 const input = *reinterpret_cast<const uint4*>(src);
+    auto const* input2 =
+        reinterpret_cast<typename Converter::packed_hip_type const*>(&input);
+    uint2 output;
+    auto* output2 = reinterpret_cast<__nv_fp8x2_storage_t*>(&output);
+  #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      if constexpr (std::is_same_v<scalar_t, c10::BFloat16>) {
+        output2[i] = __nv_cvt_bfloat16raw2_to_fp8x2(
+            static_cast<__nv_bfloat162_raw>(input2[i]), __NV_SATFINITE,
+            __NV_E4M3);
+      } else {
+        output2[i] = __nv_cvt_halfraw2_to_fp8x2(
+            static_cast<__half2_raw>(input2[i]), __NV_SATFINITE, __NV_E4M3);
+      }
+    }
+    *reinterpret_cast<uint2*>(dst) = output;
+#else
+    copyChunk8<scalar_t, true>(dst, src, 1.0f);
+#endif
   }
 }
 
@@ -188,6 +237,38 @@ __device__ __forceinline__ void writeFullKey(void* dst, const scalar_t* k_nope,
       int const rope_e = e - kQkNopeHeadDim;
       copyChunk8<scalar_t, FP8, APPLY_ROPE>(
           d + e * dst_elem_size, k_pe + rope_e, scale_inv, cos_sin, rope_e);
+    }
+  }
+}
+
+// Unscaled full-key writer for the chunked-context pack, driven by a half warp
+// (16 lanes x 8 elems covers NoPE 128; 8 of them cover RoPE 64). Unlike
+// `writeFullKey` there is no scale and no RoPE (a gathered k_pe is already
+// rotated), and KPE_FP8 handles a k_pe that the gather left in the fp8 cache
+// layout -- so neither dtype needs an intermediate cast or a broadcast copy.
+template <typename scalar_t, bool FP8, bool KPE_FP8>
+__device__ __forceinline__ void writeFullKeyPack(void* dst,
+                                                 const scalar_t* k_nope,
+                                                 const void* k_pe, int laneId) {
+  static_assert(!KPE_FP8 || FP8, "an fp8 k_pe requires an fp8 key output");
+  constexpr int kElemSize = FP8 ? 1 : sizeof(scalar_t);
+  auto* d = reinterpret_cast<uint8_t*>(dst);
+  for (int e = laneId * kVecElems; e < kQkHeadDim; e += 16 * kVecElems) {
+    void* out = d + e * kElemSize;
+    const scalar_t* src = k_nope + e;
+    if (e >= kQkNopeHeadDim) {
+      int const rope_e = e - kQkNopeHeadDim;
+      if constexpr (KPE_FP8) {
+        *reinterpret_cast<uint2*>(out) = *reinterpret_cast<const uint2*>(
+            reinterpret_cast<const uint8_t*>(k_pe) + rope_e);
+        continue;
+      }
+      src = reinterpret_cast<const scalar_t*>(k_pe) + rope_e;
+    }
+    if constexpr (FP8) {
+      copyChunk8UnitFp8(reinterpret_cast<uint8_t*>(out), src);
+    } else {
+      *reinterpret_cast<uint4*>(out) = *reinterpret_cast<const uint4*>(src);
     }
   }
 }
@@ -221,14 +302,18 @@ __device__ __forceinline__ void writePrefillQuery(
 // Concat + store a 576-wide latent: dst[e] = [a512 | b64], e in [0, 576). Used
 // for the decode query mqa_q = [ql_nope | q_pe] and the plain latent cache
 // entry [kv_c | k_pe]. FP8 packs to E4M3 (dst_elem_size 1); bf16 stores uint4.
+// A single warp passes (laneId, 32); a row split across W warps passes
+// (part * 32 + laneId, W * 32). __restrict__ lets the compiler batch loads
+// ahead of stores past the byte-typed dst.
 template <typename scalar_t, bool FP8, bool APPLY_ROPE = false>
-__device__ __forceinline__ void writeLatent576(void* dst, const scalar_t* a512,
-                                               const scalar_t* b64, int laneId,
-                                               int dst_elem_size,
-                                               float scale_inv,
-                                               const float* cos_sin = nullptr) {
+__device__ __forceinline__ void writeLatent576(
+    void* __restrict__ dst, const scalar_t* __restrict__ a512,
+    const scalar_t* __restrict__ b64, int lane, int lane_stride,
+    int dst_elem_size, float scale_inv,
+    const float* __restrict__ cos_sin = nullptr) {
   auto* d = reinterpret_cast<uint8_t*>(dst);
-  for (int e = laneId * kVecElems; e < kCacheEntry; e += 32 * kVecElems) {
+  for (int e = lane * kVecElems; e < kCacheEntry;
+       e += lane_stride * kVecElems) {
     if (e < kKvLoraRank) {
       copyChunk8<scalar_t, FP8>(d + e * dst_elem_size, a512 + e, scale_inv);
     } else {
@@ -281,13 +366,18 @@ __device__ __forceinline__ void writeDsMlaCache(
   scalar_t* rope_dst = row16 + kKvLoraRank / 2 + 8 + laneId * 2;
   if constexpr (APPLY_ROPE) {
     using Converter = vllm::_typeConvert<scalar_t>;
-    using packed_t = typename Converter::packed_hip_type;
-    packed_t const src = *reinterpret_cast<packed_t const*>(pe + laneId * 2);
-    float2 const xy = Converter::convert(src);
-    float const cos = static_cast<float>(cos_sin[laneId]);
-    float const sin = static_cast<float>(cos_sin[laneId + kQkRopeHeadDim / 2]);
-    *reinterpret_cast<packed_t*>(rope_dst) = Converter::convert(
-        make_float2(xy.x * cos - xy.y * sin, xy.x * sin + xy.y * cos));
+    if constexpr (!Converter::exists) {
+      return;
+    } else {
+      using packed_t = typename Converter::packed_hip_type;
+      packed_t const src = *reinterpret_cast<packed_t const*>(pe + laneId * 2);
+      float2 const xy = Converter::convert(src);
+      float const cos = static_cast<float>(cos_sin[laneId]);
+      float const sin =
+          static_cast<float>(cos_sin[laneId + kQkRopeHeadDim / 2]);
+      *reinterpret_cast<packed_t*>(rope_dst) = Converter::convert(
+          make_float2(xy.x * cos - xy.y * sin, xy.x * sin + xy.y * cos));
+    }
   } else {
     *reinterpret_cast<int32_t*>(rope_dst) =
         *reinterpret_cast<const int32_t*>(pe + laneId * 2);
@@ -345,7 +435,7 @@ __global__ void fusedKimiK3MLAKeyConcatKVCacheInsertKernel(
                       (slot_id % cache_block_size) * cache_token_stride;
       writeLatent576<scalar_t, false, APPLY_ROPE>(
           row, kv_c + tokenIdx * kv_c_tok_stride,
-          k_pe + tokenIdx * k_pe_tok_stride, laneId, sizeof(scalar_t), 1.0f,
+          k_pe + tokenIdx * k_pe_tok_stride, laneId, 32, sizeof(scalar_t), 1.0f,
           rope_cache);
     }
   }
@@ -429,7 +519,73 @@ __global__ void fusedKimiK3MLAQKVQuantKVCacheFp8Kernel(
                      (slot_id % cache_block_size) * cache_token_stride;
       writeLatent576<scalar_t, true, APPLY_ROPE>(
           row, kv_c + tokenIdx * kv_c_tok_stride,
-          k_pe + tokenIdx * k_pe_tok_stride, laneId, 1, ksi, rope_cache);
+          k_pe + tokenIdx * k_pe_tok_stride, laneId, 32, 1, ksi, rope_cache);
+    }
+  }
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  cudaTriggerProgrammaticLaunchCompletion();
+#endif
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// K/V pack variant (chunked context): concatenate the strided kv_b_proj output
+// with k_pe into a contiguous row-major key, casting to E4M3 (and casting V
+// into its own contiguous output) when FP8. Unlike the other kernels this one
+// has no per-token cache slot, so a warp handles two (token, head) rows -- 16
+// lanes each -- and the grid is capped so a long context becomes a grid-stride
+// loop instead of a huge launch.
+// ────────────────────────────────────────────────────────────────────────────
+template <typename scalar_t, bool FP8, bool KPE_FP8>
+__global__ void fusedKimiK3MLAKVConcatPackKernel(
+    const scalar_t* __restrict__ k_nope, int64_t const kn_tok_stride,
+    int64_t const kn_head_stride, const void* __restrict__ k_pe,
+    int64_t const k_pe_tok_stride, const scalar_t* __restrict__ v,
+    int64_t const v_tok_stride, int64_t const v_head_stride,
+    void* __restrict__ k_out, int64_t const ko_tok_stride,
+    int64_t const ko_head_stride, uint8_t* __restrict__ v_fp8,
+    int64_t const vo_tok_stride, int64_t const vo_head_stride,
+    int const num_tokens, int const num_heads) {
+  int const warpsPerBlock = blockDim.x / 32;
+  int const laneId = threadIdx.x % 16;
+  int const rowInWarp = (threadIdx.x % 32) / 16;
+  int64_t const globalWarpIdx =
+      static_cast<int64_t>(blockIdx.x) * warpsPerBlock + threadIdx.x / 32;
+  int64_t const totalRows = static_cast<int64_t>(num_tokens) * num_heads;
+  if (globalWarpIdx * 2 >= totalRows) return;
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  cudaGridDependencySynchronize();
+#endif
+
+  constexpr int kOutElemSize = FP8 ? 1 : sizeof(scalar_t);
+  int64_t const gridStride =
+      static_cast<int64_t>(gridDim.x) * warpsPerBlock * 2;
+  for (int64_t row = globalWarpIdx * 2 + rowInWarp; row < totalRows;
+       row += gridStride) {
+    int const tokenIdx = static_cast<int>(row / num_heads);
+    int const headIdx = static_cast<int>(row % num_heads);
+    const void* pe;
+    if constexpr (KPE_FP8) {
+      pe = reinterpret_cast<const uint8_t*>(k_pe) + tokenIdx * k_pe_tok_stride;
+    } else {
+      pe = reinterpret_cast<const scalar_t*>(k_pe) + tokenIdx * k_pe_tok_stride;
+    }
+    writeFullKeyPack<scalar_t, FP8, KPE_FP8>(
+        reinterpret_cast<uint8_t*>(k_out) +
+            (tokenIdx * ko_tok_stride + headIdx * ko_head_stride) *
+                kOutElemSize,
+        k_nope + tokenIdx * kn_tok_stride + headIdx * kn_head_stride, pe,
+        laneId);
+
+    // bf16 V needs no cast, so it stays a strided view of the kv_b_proj output.
+    if constexpr (FP8) {
+      const scalar_t* vh =
+          v + tokenIdx * v_tok_stride + headIdx * v_head_stride;
+      uint8_t* vo = v_fp8 + tokenIdx * vo_tok_stride + headIdx * vo_head_stride;
+      for (int e = laneId * kVecElems; e < kVHeadDim; e += 16 * kVecElems) {
+        copyChunk8UnitFp8(vo + e, vh + e);
+      }
     }
   }
 
@@ -511,8 +667,20 @@ __global__ void fusedKimiK3MLAKeyConcatDsMlaInsertKernel(
 // Decode epilogue: concat mqa_q = [ql_nope | q_pe] (576) + latent cache insert,
 // run right before forward_mqa. Q_FP8 quantizes mqa_q; KV_FP8 quantizes the
 // plain per-tensor cache. (ds_mla cache uses the separate kernel below.)
+//
+// SPLIT warps cooperate on each 576-wide row: decode batches have too few
+// rows to hide the load->store latency with one warp per row, so batches up
+// to kDecodeRowSplitMaxTokens launch SPLIT=3 (one 8-element chunk per lane).
+//
+// Only ql_nope / q_pe come from the producing GEMM chain, so everything else
+// (slot_mapping, scales, rope table, cache-row inputs) is read before the
+// grid-dependency wait, and the cache-slot warps skip the wait entirely.
+// The dependent-launch trigger stays at the end of the kernel: it releases
+// the consuming FMHA's grid-dependency wait, so it must not fire before this
+// kernel's stores to mqa_q are issued.
 // ────────────────────────────────────────────────────────────────────────────
-template <typename scalar_t, bool Q_FP8, bool KV_FP8, bool APPLY_ROPE>
+template <typename scalar_t, bool Q_FP8, bool KV_FP8, bool APPLY_ROPE,
+          int SPLIT = 1>
 __global__ void fusedKimiK3MLADecodeQConcatKVCacheKernel(
     const scalar_t* __restrict__ ql_nope, int64_t const qn_tok_stride,
     int64_t const qn_head_stride, const scalar_t* __restrict__ q_pe,
@@ -534,13 +702,13 @@ __global__ void fusedKimiK3MLADecodeQConcatKVCacheKernel(
   int const laneId = threadIdx.x % 32;
   int const globalWarpIdx = blockIdx.x * warpsPerBlock + threadIdx.x / 32;
   int const slotsPerToken = num_heads + 1;
-  int const tokenIdx = globalWarpIdx / slotsPerToken;
-  int const slotIdx = globalWarpIdx % slotsPerToken;
+  int const globalSlotIdx = globalWarpIdx / SPLIT;
+  int const part = globalWarpIdx % SPLIT;
+  int const tokenIdx = globalSlotIdx / slotsPerToken;
+  int const slotIdx = globalSlotIdx % slotsPerToken;
   if (tokenIdx >= num_tokens) return;
-
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  cudaGridDependencySynchronize();
-#endif
+  int const lane = part * 32 + laneId;
+  constexpr int kLaneStride = SPLIT * 32;
 
   const float* rope_cache = nullptr;
   if constexpr (APPLY_ROPE) {
@@ -549,12 +717,18 @@ __global__ void fusedKimiK3MLADecodeQConcatKVCacheKernel(
 
   if (slotIdx < num_heads) {
     float const qsi = Q_FP8 ? __ldg(q_scale_inv) : 1.0f;
-    writeLatent576<scalar_t, Q_FP8, APPLY_ROPE>(
+    uint8_t* const dst =
         reinterpret_cast<uint8_t*>(mqa_q) +
-            (tokenIdx * mq_tok_stride + slotIdx * mq_head_stride) * kMqElem,
-        ql_nope + tokenIdx * qn_tok_stride + slotIdx * qn_head_stride,
-        q_pe + tokenIdx * qpe_tok_stride + slotIdx * qpe_head_stride, laneId,
-        kMqElem, qsi, rope_cache);
+        (tokenIdx * mq_tok_stride + slotIdx * mq_head_stride) * kMqElem;
+    const scalar_t* const nope_src =
+        ql_nope + tokenIdx * qn_tok_stride + slotIdx * qn_head_stride;
+    const scalar_t* const pe_src =
+        q_pe + tokenIdx * qpe_tok_stride + slotIdx * qpe_head_stride;
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+    cudaGridDependencySynchronize();
+#endif
+    writeLatent576<scalar_t, Q_FP8, APPLY_ROPE>(
+        dst, nope_src, pe_src, lane, kLaneStride, kMqElem, qsi, rope_cache);
   } else {
     int64_t const slot_id = slot_mapping[tokenIdx];
     if (slot_id >= 0) {
@@ -565,7 +739,7 @@ __global__ void fusedKimiK3MLADecodeQConcatKVCacheKernel(
                slot_id % cache_block_size * cache_token_stride) *
                   kCacheElem,
           kv_c + tokenIdx * kv_c_tok_stride, k_pe + tokenIdx * k_pe_tok_stride,
-          laneId, kCacheElem, ksi, rope_cache);
+          lane, kLaneStride, kCacheElem, ksi, rope_cache);
     }
   }
 
@@ -611,7 +785,7 @@ __global__ void fusedKimiK3MLADecodeQConcatDsMlaKernel(
         mqa_q + tokenIdx * mq_tok_stride + slotIdx * mq_head_stride,
         ql_nope + tokenIdx * qn_tok_stride + slotIdx * qn_head_stride,
         q_pe + tokenIdx * qpe_tok_stride + slotIdx * qpe_head_stride, laneId,
-        sizeof(scalar_t), 1.0f, rope_cache);
+        32, sizeof(scalar_t), 1.0f, rope_cache);
   } else {
     int64_t const slot_id = slot_mapping[tokenIdx];
     if (slot_id >= 0) {
@@ -629,16 +803,20 @@ __global__ void fusedKimiK3MLADecodeQConcatDsMlaKernel(
 #endif
 }
 
-// PDL-aware launch of a (token, num_heads + 1)-warp grid.
+// PDL-aware launch of a (token, slots_per_token)-row grid, `rows_per_warp` rows
+// to a warp. `max_blocks > 0` caps the grid, leaving the kernel's grid-stride
+// loop to cover the remaining rows.
 template <typename KernelT, typename... Args>
-static void launchPdl(KernelT kernel, int num_tokens, int num_heads,
-                      cudaStream_t stream, Args... args) {
+static void launchPdlSlots(KernelT kernel, int num_tokens, int slots_per_token,
+                           int rows_per_warp, int max_blocks,
+                           cudaStream_t stream, Args... args) {
   constexpr int kBlockSize = 256;
   constexpr int kWarpsPerBlock = kBlockSize / 32;
-  int64_t const total_warps =
-      static_cast<int64_t>(num_tokens) * (num_heads + 1);
-  int const grid =
+  int64_t const total_rows = static_cast<int64_t>(num_tokens) * slots_per_token;
+  int64_t const total_warps = (total_rows + rows_per_warp - 1) / rows_per_warp;
+  int grid =
       static_cast<int>((total_warps + kWarpsPerBlock - 1) / kWarpsPerBlock);
+  if (max_blocks > 0 && grid > max_blocks) grid = max_blocks;
 #ifndef USE_ROCM
   static int const sm_version = getSMVersion();
   cudaLaunchConfig_t config;
@@ -659,6 +837,28 @@ static void launchPdl(KernelT kernel, int num_tokens, int num_heads,
   // not parse the CUDA launch syntax in this libtorch_stable file).
   kernel<<<grid, kBlockSize, 0, stream>>>(args...);
   // clang-format on
+#endif
+}
+
+// Cache-inserting kernels use one extra warp per token for the cache slot.
+template <typename KernelT, typename... Args>
+static void launchPdl(KernelT kernel, int num_tokens, int num_heads,
+                      cudaStream_t stream, Args... args) {
+  launchPdlSlots(kernel, num_tokens, num_heads + 1, 1, 0, stream, args...);
+}
+
+void checkBfloat16Support(torch::headeronly::ScalarType dtype) {
+#ifndef USE_ROCM
+  if (dtype == torch::headeronly::ScalarType::BFloat16) {
+    static int const sm_version = getSMVersion();
+    STD_TORCH_CHECK(
+        sm_version >= 80,
+        "Kimi K3 fused MLA operations require sm_80+ (Ampere or newer); got "
+        "sm_",
+        sm_version);
+  }
+#else
+  (void)dtype;
 #endif
 }
 
@@ -735,6 +935,7 @@ void fused_kimi_k3_mla_key_concat_kv_cache_insert(
                       kv_c_normed.scalar_type() == dt &&
                       k_out.scalar_type() == dt && k_cache.scalar_type() == dt,
                   "all tensors must share k_nope's (bf16/fp16) dtype");
+  kk3::checkBfloat16Support(dt);
 
   int const num_tokens = static_cast<int>(k_nope.size(0));
   int const num_heads = static_cast<int>(k_nope.size(1));
@@ -827,6 +1028,7 @@ void fused_kimi_k3_mla_key_concat_ds_mla_insert(
   STD_TORCH_CHECK(slot_mapping.device().is_cuda() &&
                       slot_mapping.scalar_type() == ScalarType::Long,
                   "slot_mapping must be int64 CUDA");
+  kk3::checkBfloat16Support(dt);
 
   int const num_tokens = static_cast<int>(k_nope.size(0));
   int const num_heads = static_cast<int>(k_nope.size(1));
@@ -873,6 +1075,128 @@ void fused_kimi_k3_mla_key_concat_ds_mla_insert(
         } else {
           launch(
               kk3::fusedKimiK3MLAKeyConcatDsMlaInsertKernel<scalar_t, false>);
+        }
+      });
+}
+
+namespace {
+// Shared checks for the chunked-context K/V pack ops. `k_nope` / `v` are
+// strided views of one kv_b_proj output and `k_pe` is a strided view of the
+// gathered context workspace, so only a unit last-dim stride (not full
+// contiguity) is required of the inputs. Returns true when `k_pe` is still in
+// the fp8 cache layout.
+bool check_kv_concat_inputs(torch::stable::Tensor const& k_nope,
+                            torch::stable::Tensor const& k_pe,
+                            torch::stable::Tensor const& k_out,
+                            torch::headeronly::ScalarType out_dtype) {
+  using torch::headeronly::ScalarType;
+  ScalarType const dt = k_nope.scalar_type();
+  STD_TORCH_CHECK(k_nope.device().is_cuda() && k_nope.dim() == 3 &&
+                      k_nope.size(2) == 128 && k_nope.stride(2) == 1,
+                  "k_nope must be CUDA [T, H, 128] with unit last stride");
+  bool const k_pe_is_fp8 = k_pe.scalar_type() == ScalarType::Float8_e4m3fn;
+  STD_TORCH_CHECK(
+      k_pe.device() == k_nope.device() && k_pe.dim() == 2 &&
+          k_pe.size(1) == 64 && k_pe.stride(1) == 1 &&
+          (k_pe.scalar_type() == dt ||
+           (k_pe_is_fp8 && out_dtype == ScalarType::Float8_e4m3fn)),
+      "k_pe must be CUDA [T, 64] with unit last-dim stride and use the input "
+      "dtype, or float8_e4m3fn when the key output is fp8");
+  STD_TORCH_CHECK(k_out.device() == k_nope.device() && k_out.is_contiguous() &&
+                      k_out.scalar_type() == out_dtype && k_out.dim() == 3 &&
+                      k_out.size(2) == 192 && k_out.size(0) == k_nope.size(0) &&
+                      k_out.size(1) == k_nope.size(1) &&
+                      k_pe.size(0) == k_nope.size(0),
+                  "k_out must be a contiguous CUDA [T, H, 192] tensor of the "
+                  "output dtype matching k_nope's token and head dimensions");
+  vllm::kimi_k3_fused_ops::checkBfloat16Support(dt);
+  return k_pe_is_fp8;
+}
+}  // namespace
+
+void fused_kimi_k3_mla_kv_concat(
+    torch::stable::Tensor const& k_nope,  // [T, H, 128] bf16/fp16
+    torch::stable::Tensor const& k_pe,    // [T, 64] same dtype as k_nope
+    torch::stable::Tensor& k_out) {       // [T, H, 192] same dtype, written
+  namespace kk3 = vllm::kimi_k3_fused_ops;
+  torch::headeronly::ScalarType const dt = k_nope.scalar_type();
+  check_kv_concat_inputs(k_nope, k_pe, k_out, dt);
+
+  int const num_tokens = static_cast<int>(k_nope.size(0));
+  int const num_heads = static_cast<int>(k_nope.size(1));
+  if (num_tokens == 0) return;
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      k_nope.get_device_index());
+  const cudaStream_t stream =
+      get_current_cuda_stream(k_nope.get_device_index());
+
+  VLLM_STABLE_DISPATCH_HALF_TYPES(dt, "fused_kimi_k3_mla_kv_concat", [&] {
+    kk3::launchPdlSlots(
+        kk3::fusedKimiK3MLAKVConcatPackKernel<scalar_t, false, false>,
+        num_tokens, num_heads, 2, get_device_prop()->multiProcessorCount * 8,
+        stream, reinterpret_cast<scalar_t const*>(k_nope.const_data_ptr()),
+        k_nope.stride(0), k_nope.stride(1), k_pe.const_data_ptr(),
+        k_pe.stride(0), static_cast<scalar_t const*>(nullptr), int64_t{0},
+        int64_t{0}, k_out.mutable_data_ptr(), k_out.stride(0), k_out.stride(1),
+        static_cast<uint8_t*>(nullptr), int64_t{0}, int64_t{0}, num_tokens,
+        num_heads);
+  });
+}
+
+void fused_kimi_k3_mla_kv_concat_quant_fp8(
+    torch::stable::Tensor const& k_nope,  // [T, H, 128] bf16/fp16
+    torch::stable::Tensor const& k_pe,    // [T, 64] bf16/fp16/fp8
+    torch::stable::Tensor const& v,       // [T, H, 128] bf16/fp16
+    torch::stable::Tensor& k_fp8,         // [T, H, 192] fp8, written
+    torch::stable::Tensor& v_fp8) {       // [T, H, 128] fp8, written
+  using torch::headeronly::ScalarType;
+  namespace kk3 = vllm::kimi_k3_fused_ops;
+  ScalarType const dt = k_nope.scalar_type();
+  bool const k_pe_is_fp8 =
+      check_kv_concat_inputs(k_nope, k_pe, k_fp8, ScalarType::Float8_e4m3fn);
+  STD_TORCH_CHECK(v.device() == k_nope.device() && v.scalar_type() == dt &&
+                      v.dim() == 3 && v.size(2) == 128 && v.stride(2) == 1 &&
+                      v.size(0) == k_nope.size(0) &&
+                      v.size(1) == k_nope.size(1),
+                  "v must match k_nope's dtype and token/head dimensions and "
+                  "have shape [T, H, 128] with unit last stride");
+  STD_TORCH_CHECK(v_fp8.device() == k_nope.device() && v_fp8.is_contiguous() &&
+                      v_fp8.scalar_type() == ScalarType::Float8_e4m3fn &&
+                      v_fp8.dim() == 3 && v_fp8.size(2) == 128 &&
+                      v_fp8.size(0) == k_nope.size(0) &&
+                      v_fp8.size(1) == k_nope.size(1),
+                  "v_fp8 must be a contiguous CUDA [T, H, 128] fp8 tensor "
+                  "matching k_nope's token and head dimensions");
+
+  int const num_tokens = static_cast<int>(k_nope.size(0));
+  int const num_heads = static_cast<int>(k_nope.size(1));
+  if (num_tokens == 0) return;
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      k_nope.get_device_index());
+  const cudaStream_t stream =
+      get_current_cuda_stream(k_nope.get_device_index());
+
+  VLLM_STABLE_DISPATCH_HALF_TYPES(
+      dt, "fused_kimi_k3_mla_kv_concat_quant_fp8", [&] {
+        auto launch = [&](auto kernel) {
+          kk3::launchPdlSlots(
+              kernel, num_tokens, num_heads, 2,
+              get_device_prop()->multiProcessorCount * 8, stream,
+              reinterpret_cast<scalar_t const*>(k_nope.const_data_ptr()),
+              k_nope.stride(0), k_nope.stride(1), k_pe.const_data_ptr(),
+              k_pe.stride(0),
+              reinterpret_cast<scalar_t const*>(v.const_data_ptr()),
+              v.stride(0), v.stride(1), k_fp8.mutable_data_ptr(),
+              k_fp8.stride(0), k_fp8.stride(1),
+              reinterpret_cast<uint8_t*>(v_fp8.mutable_data_ptr()),
+              v_fp8.stride(0), v_fp8.stride(1), num_tokens, num_heads);
+        };
+        if (k_pe_is_fp8) {
+          launch(kk3::fusedKimiK3MLAKVConcatPackKernel<scalar_t, true, true>);
+        } else {
+          launch(kk3::fusedKimiK3MLAKVConcatPackKernel<scalar_t, true, false>);
         }
       });
 }
@@ -940,6 +1264,7 @@ void fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert(
   check_scale(k_scale_inv, "k_scale_inv must be scalar float32 CUDA");
   check_scale(v_scale_inv, "v_scale_inv must be scalar float32 CUDA");
   check_scale(cache_scale_inv, "cache_scale_inv must be scalar float32 CUDA");
+  kk3::checkBfloat16Support(dt);
 
   int const num_tokens = static_cast<int>(k_nope.size(0));
   int const num_heads = static_cast<int>(k_nope.size(1));
@@ -1053,6 +1378,7 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_insert(
                       k_cache.size(1) == cache_block_size &&
                       k_cache.size(2) == 576 && k_cache.stride(2) == 1,
                   "k_cache shape [nblk, block_size, 576] contiguous");
+  kk3::checkBfloat16Support(dt);
 
   int const num_tokens = static_cast<int>(ql_nope.size(0));
   int const num_heads = static_cast<int>(ql_nope.size(1));
@@ -1066,9 +1392,9 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_insert(
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       dt, "fused_kimi_k3_mla_decode_q_concat_kv_cache_insert", [&] {
-        auto launch = [&](auto kernel) {
-          kk3::launchPdl(
-              kernel, num_tokens, num_heads, stream,
+        auto launch = [&](auto kernel, int row_split) {
+          kk3::launchPdlSlots(
+              kernel, num_tokens, (num_heads + 1) * row_split, 1, 0, stream,
               reinterpret_cast<scalar_t const*>(ql_nope.const_data_ptr()),
               ql_nope.stride(0), ql_nope.stride(1),
               reinterpret_cast<scalar_t const*>(q_pe.const_data_ptr()),
@@ -1087,12 +1413,32 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_insert(
                                cos_sin_cache.value().const_data_ptr())
                          : nullptr);
         };
+        // Split decode-sized rows across 3 warps (see the kernel comment).
+        bool const split_rows = num_tokens <= kk3::kDecodeRowSplitMaxTokens;
         if (apply_rope) {
-          launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, false,
-                                                               false, true>);
+          if (split_rows) {
+            launch(
+                kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, false,
+                                                              false, true, 3>,
+                3);
+          } else {
+            launch(
+                kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, false,
+                                                              false, true>,
+                1);
+          }
         } else {
-          launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, false,
-                                                               false, false>);
+          if (split_rows) {
+            launch(
+                kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, false,
+                                                              false, false, 3>,
+                3);
+          } else {
+            launch(
+                kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, false,
+                                                              false, false>,
+                1);
+          }
         }
       });
 }
@@ -1127,6 +1473,7 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert(
   };
   check_scale(q_scale_inv, "q_scale_inv must be scalar float32 CUDA");
   check_scale(cache_scale_inv, "cache_scale_inv must be scalar float32 CUDA");
+  kk3::checkBfloat16Support(dt);
 
   int const num_tokens = static_cast<int>(ql_nope.size(0));
   int const num_heads = static_cast<int>(ql_nope.size(1));
@@ -1140,9 +1487,9 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert(
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       dt, "fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert", [&] {
-        auto launch = [&](auto kernel) {
-          kk3::launchPdl(
-              kernel, num_tokens, num_heads, stream,
+        auto launch = [&](auto kernel, int row_split) {
+          kk3::launchPdlSlots(
+              kernel, num_tokens, (num_heads + 1) * row_split, 1, 0, stream,
               reinterpret_cast<scalar_t const*>(ql_nope.const_data_ptr()),
               ql_nope.stride(0), ql_nope.stride(1),
               reinterpret_cast<scalar_t const*>(q_pe.const_data_ptr()),
@@ -1162,12 +1509,29 @@ void fused_kimi_k3_mla_decode_q_concat_kv_cache_fp8_insert(
                                cos_sin_cache.value().const_data_ptr())
                          : nullptr);
         };
+        // Split decode-sized rows across 3 warps (see the kernel comment).
+        bool const split_rows = num_tokens <= kk3::kDecodeRowSplitMaxTokens;
         if (apply_rope) {
-          launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, true,
-                                                               true, true>);
+          if (split_rows) {
+            launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, true,
+                                                                 true, true, 3>,
+                   3);
+          } else {
+            launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, true,
+                                                                 true, true>,
+                   1);
+          }
         } else {
-          launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, true,
-                                                               true, false>);
+          if (split_rows) {
+            launch(
+                kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, true,
+                                                              true, false, 3>,
+                3);
+          } else {
+            launch(kk3::fusedKimiK3MLADecodeQConcatKVCacheKernel<scalar_t, true,
+                                                                 true, false>,
+                   1);
+          }
         }
       });
 }
@@ -1192,6 +1556,7 @@ void fused_kimi_k3_mla_decode_q_concat_ds_mla_insert(
           k_cache.dim() == 3 && k_cache.size(1) == cache_block_size &&
           k_cache.size(2) == 656 && k_cache.stride(2) == 1,
       "k_cache shape [nblk, block_size, 656] uint8 contiguous");
+  kk3::checkBfloat16Support(dt);
 
   int const num_tokens = static_cast<int>(ql_nope.size(0));
   int const num_heads = static_cast<int>(ql_nope.size(1));

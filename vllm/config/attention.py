@@ -4,13 +4,33 @@
 from dataclasses import field
 from typing import Any, Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from vllm.config.utils import config
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-IndexerKVDType = Literal["bf16", "fp8", "mxfp4", "nvfp4"]
+IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
+MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
+
+
+@config
+class HiSparseConfig:
+    """Configuration for HiSparse sparse-MLA KV offloading."""
+
+    device_buffer_size: int | None = Field(default=None, gt=0)
+    """Total per-request GPU hot-buffer rows, including the newest-token slot.
+
+    Defaults to one top-k per decode query plus one top-k of LRU slack. The
+    physical allocation is rounded up to the GPU cache block size selected
+    from the active backends.
+    """
+
+    eager_host_mirror: bool = True
+    """Mirror decode-written KV rows to the host pool during the forward so
+    page spills complete without moving data. When disabled, decode rows stay
+    resident-only and evicted pages are copied to host at spill time. Prefill
+    rows are always mirrored during the forward."""
 
 
 @config
@@ -19,6 +39,9 @@ class AttentionConfig:
 
     backend: AttentionBackendEnum | None = None
     """Attention backend to use. Use "auto" or None for automatic selection."""
+
+    minimax_m3_msa_decode_backend: MiniMaxM3MSADecodeBackend = "triton"
+    """Sparse decode kernel used by the MiniMax M3 MSA backend."""
 
     backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
     """Per-KV-cache-group attention backend overrides, keyed by
@@ -34,10 +57,6 @@ class AttentionConfig:
     flash_attn_version: Literal[2, 3, 4] | None = None
     """Force vllm to use a specific flash-attention version (2, 3, or 4).
     Only valid when using the flash-attention backend."""
-
-    use_prefill_decode_attention: bool = False
-    """Use separate prefill and decode kernels for attention instead of
-    the unified triton kernel."""
 
     flash_attn_max_num_splits_for_cuda_graph: int = 32
     """Flash Attention max number splits for cuda graph decode."""
@@ -61,12 +80,15 @@ class AttentionConfig:
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
 
-    use_fp4_indexer_cache: bool = False
-    """If set, use fp4 indexer cache for dsv32 family model (not support yet)"""
+    indexer_kv_dtype: IndexerKVDType = "auto"
+    """Data type for the sparse-attention indexer K cache. "auto" picks the
+    model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
+    indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
+    support in the backend."""
 
-    indexer_kv_dtype: IndexerKVDType = "bf16"
-    """Data type for the sparse-attention indexer K cache. Quantized formats
-    (fp8, mxfp4, nvfp4) require indexer kernel support in the backend."""
+    hisparse_config: HiSparseConfig | None = None
+    """HiSparse host-resident KV configuration. Setting this enables experimental
+    Model Runner V2-only HiSparse sparse-MLA decode hot-buffering."""
 
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
@@ -89,13 +111,32 @@ class AttentionConfig:
     flex_attn_q_block_size: int | None = None
     """Logical Q block size for the flex attention block mask.
     Must be a power of 2 and divisible by flex_attn_block_m.
-    If None, uses the default (16 on PyTorch >= 2.9, 128 otherwise)."""
+    If None, uses 16 for paged KV attention on PyTorch >= 2.9, and 128
+    for encoder-only attention or older PyTorch versions."""
 
     flex_attn_kv_block_size: int | None = None
     """Logical KV block size for the flex attention block mask.
     Must be a power of 2 and divisible by flex_attn_block_n.
-    If None, uses the default (kv_cache_block_size on PyTorch >= 2.9,
-    128 otherwise)."""
+    If None, uses the KV cache block size for paged KV attention on
+    PyTorch >= 2.9, and 128 for encoder-only attention or older PyTorch
+    versions."""
+
+    def __post_init__(self) -> None:
+        msa_aliases: dict[AttentionBackendEnum, MiniMaxM3MSADecodeBackend] = {
+            AttentionBackendEnum.CUTLASS_MSA: "cutlass",
+            AttentionBackendEnum.TRITON_MSA: "triton",
+        }
+        if self.backend in msa_aliases:
+            self.minimax_m3_msa_decode_backend = msa_aliases[self.backend]
+            # The alias selects only MiniMax's sparse decode kernel. Dense
+            # layers still use the platform's normal automatic backend.
+            self.backend = None
+
+    def resolve_indexer_kv_dtype(self, default: IndexerKVDType) -> IndexerKVDType:
+        """Resolve `indexer_kv_dtype`, substituting `default` for "auto"."""
+        if self.indexer_kv_dtype == "auto":
+            return default
+        return self.indexer_kv_dtype
 
     def compute_hash(self) -> str:
         """
@@ -107,8 +148,7 @@ class AttentionConfig:
         """
         from vllm.config.utils import get_hash_factors, hash_factors
 
-        ignored_factors: set[str] = set()
-        factors = get_hash_factors(self, ignored_factors)
+        factors = get_hash_factors(self, set())
         return hash_factors(factors)
 
     @field_validator("backend", mode="before")

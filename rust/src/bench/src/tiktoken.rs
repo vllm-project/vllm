@@ -19,9 +19,9 @@ const NUM_RESERVED_SPECIAL_TOKENS: u32 = 256;
 pub struct TiktokenTokenizer {
     bpe: tiktoken_rs::CoreBPE,
     vocab_size: u32,
-    #[allow(dead_code)]
     num_base_tokens: u32,
-    /// IDs of all special tokens (for filtering from allowed_tokens)
+    /// Registered special token IDs. File-based tokenizers exclude them from
+    /// allowed tokens; built-in tokenizers retain the previously allowed IDs.
     special_token_ids: Vec<u32>,
     /// Reverse mapping: token_id -> byte sequence, for lossy UTF-8 decoding.
     /// Empty for built-in encodings (use bpe.decode instead).
@@ -113,12 +113,17 @@ impl TiktokenTokenizer {
     }
 
     /// Create from a built-in tiktoken encoding (o200k_base, cl100k_base, etc.)
-    pub fn from_builtin_bpe(bpe: tiktoken_rs::CoreBPE, vocab_size: u32) -> Self {
+    pub fn from_builtin_bpe(
+        bpe: tiktoken_rs::CoreBPE,
+        vocab_size: u32,
+        num_base_tokens: u32,
+        special_token_ids: Vec<u32>,
+    ) -> Self {
         Self {
             bpe,
             vocab_size,
-            num_base_tokens: vocab_size,
-            special_token_ids: Vec::new(),
+            num_base_tokens,
+            special_token_ids,
             decoder: Vec::new(),
             is_builtin: true,
         }
@@ -152,14 +157,15 @@ impl TiktokenTokenizer {
         self.vocab_size
     }
 
-    /// Get non-special token IDs whose byte representation is valid UTF-8.
-    /// Excludes ALL special tokens (like Python's `set(all_tokens) - set(prohibited_tokens)`).
+    /// Get token IDs that can be decoded safely.
+    ///
+    /// File-based tokenizers exclude special tokens and tokens whose byte
+    /// representation is not valid UTF-8.
     pub fn get_allowed_tokens(&self) -> Vec<u32> {
         if self.is_builtin {
-            // For built-in encodings, return full token range.
-            // Note: when used with random dataset, these IDs are sent to vLLM as-is;
-            // ensure the model's tokenizer is compatible (e.g. GPT-4o for o200k_base).
-            return (0..self.vocab_size).collect();
+            return (0..self.num_base_tokens)
+                .chain(self.special_token_ids.iter().copied())
+                .collect();
         }
         let special_set: std::collections::HashSet<u32> =
             self.special_token_ids.iter().copied().collect();
@@ -185,12 +191,22 @@ impl TiktokenTokenizer {
 /// These encodings are bundled with tiktoken-rs — no network download required.
 /// Useful for consistent cross-model token counting (e.g. Artificial Analysis methodology).
 pub fn load_builtin_tiktoken(encoding: &str) -> Result<TiktokenTokenizer> {
-    let (bpe, vocab_size) = match encoding {
-        "o200k_base" => (tiktoken_rs::o200k_base(), 200_275u32),
-        "cl100k_base" => (tiktoken_rs::cl100k_base(), 100_277u32),
-        "p50k_base" => (tiktoken_rs::p50k_base(), 50_281u32),
-        "p50k_edit" => (tiktoken_rs::p50k_edit(), 50_281u32),
-        "r50k_base" | "gpt2" => (tiktoken_rs::r50k_base(), 50_257u32),
+    let (bpe, vocab_size, num_base_tokens, special_token_ids) = match encoding {
+        "o200k_base" => (
+            tiktoken_rs::o200k_base(),
+            200_275u32,
+            199_998u32,
+            vec![199_999, 200_018],
+        ),
+        "cl100k_base" => (
+            tiktoken_rs::cl100k_base(),
+            100_277u32,
+            100_256u32,
+            vec![100_257, 100_258, 100_259, 100_260, 100_276],
+        ),
+        "p50k_base" => (tiktoken_rs::p50k_base(), 50_281u32, 50_281u32, vec![]),
+        "p50k_edit" => (tiktoken_rs::p50k_edit(), 50_281u32, 50_281u32, vec![]),
+        "r50k_base" | "gpt2" => (tiktoken_rs::r50k_base(), 50_257u32, 50_256u32, vec![50_256]),
         _ => {
             return Err(BenchError::Tokenizer(format!(
                 "Unknown built-in tiktoken encoding: '{encoding}'. \
@@ -205,7 +221,12 @@ pub fn load_builtin_tiktoken(encoding: &str) -> Result<TiktokenTokenizer> {
         vocab_size,
         "loaded tokenizer"
     );
-    Ok(TiktokenTokenizer::from_builtin_bpe(bpe, vocab_size))
+    Ok(TiktokenTokenizer::from_builtin_bpe(
+        bpe,
+        vocab_size,
+        num_base_tokens,
+        special_token_ids,
+    ))
 }
 
 /// Try to load a tiktoken tokenizer from a local directory or HuggingFace model repo.
@@ -551,4 +572,45 @@ fn find_unescaped(s: &str, ch: char) -> Option<usize> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_allowed_tokens_are_decodable() {
+        let cases = [
+            ("o200k_base", 200_000),
+            ("cl100k_base", 100_261),
+            ("p50k_base", 50_281),
+            ("p50k_edit", 50_281),
+            ("r50k_base", 50_257),
+            ("gpt2", 50_257),
+        ];
+
+        for (encoding, expected_count) in cases {
+            let tokenizer = load_builtin_tiktoken(encoding).unwrap();
+            let allowed_tokens = tokenizer.get_allowed_tokens();
+
+            assert_eq!(allowed_tokens.len(), expected_count, "{encoding}");
+            for token_id in allowed_tokens {
+                tokenizer
+                    .decode(&[token_id])
+                    .unwrap_or_else(|error| panic!("{encoding} token {token_id}: {error}"));
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_builtin_allowed_tokens_skip_unassigned_ids() {
+        let o200k = load_builtin_tiktoken("o200k_base").unwrap().get_allowed_tokens();
+        assert_eq!(&o200k[199_997..], &[199_997, 199_999, 200_018]);
+
+        let cl100k = load_builtin_tiktoken("cl100k_base").unwrap().get_allowed_tokens();
+        assert_eq!(
+            &cl100k[100_255..],
+            &[100_255, 100_257, 100_258, 100_259, 100_260, 100_276]
+        );
+    }
 }

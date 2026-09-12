@@ -33,7 +33,7 @@ from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
     VLLM_BUILTIN_STRUCTURAL_TAG_MODELS,
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS,
-    _get_function_parameters,
+    get_function_parameters,
     get_model_structural_tag,
 )
 
@@ -78,6 +78,67 @@ def test_supported_structural_tag_models_include_vllm_builtins():
         XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
     )
     assert "hermes" in VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
+
+
+@pytest.mark.parametrize("choice", ["auto", "required", "get_weather"])
+def test_deepseek_v41_format_constraints_ignore_parameter_schema(
+    choice,
+    sample_tools_strict,
+):
+    tool_choice = (
+        ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name=choice)
+        )
+        if choice == "get_weather"
+        else choice
+    )
+    tag = get_model_structural_tag(
+        "deepseek_v41", sample_tools_strict, tool_choice, reasoning=False
+    )
+    grammar = Grammar.from_structural_tag(tag)
+    begin = '\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name="get_weather">\n'
+    end = "</｜DSML｜ invoke>\n</｜DSML｜ calls>"
+    parameter = (
+        '<｜DSML｜ parameter name="undeclared" string="false">'
+        '{"nested": [true, null, 1.5]}</｜DSML｜ parameter>\n'
+    )
+    # Required city is omitted; extra and repeated fields remain unconstrained.
+    assert _is_grammar_accept_string(grammar, begin + end)
+    assert _is_grammar_accept_string(grammar, begin + parameter * 2 + end)
+    assert not _is_grammar_accept_string(
+        grammar,
+        begin + parameter.replace('{"nested": [true, null, 1.5]}', "invalid") + end,
+    )
+    assert not _is_grammar_accept_string(
+        grammar, (begin + end).replace('name="get_weather"', 'name="unknown"')
+    )
+    assert not _is_grammar_accept_string(
+        grammar, begin + parameter.replace("｜ parameter", "｜parameter") + end
+    )
+    assert _is_grammar_accept_string(grammar, "Hello") == (choice == "auto")
+
+
+def test_deepseek_v41_named_choice_emits_one_call(sample_tools):
+    tag = get_model_structural_tag(
+        "deepseek_v41",
+        sample_tools,
+        ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name="get_weather")
+        ),
+        reasoning=False,
+    )
+    grammar = Grammar.from_structural_tag(tag)
+    call = '<｜DSML｜ invoke name="get_weather">\n</｜DSML｜ invoke>\n'
+    assert _is_grammar_accept_string(
+        grammar, "\n\n<｜DSML｜ calls>\n" + call + "</｜DSML｜ calls>"
+    )
+    assert not _is_grammar_accept_string(
+        grammar, "\n\n<｜DSML｜ calls>\n" + call * 2 + "</｜DSML｜ calls>"
+    )
+    assert (
+        get_model_structural_tag("deepseek_v41", sample_tools, "auto", reasoning=False)
+        is None
+    )
 
 
 @pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
@@ -177,6 +238,7 @@ _K3_TOOLS_CLOSE = "<|close|>tools<|sep|>"
 _K3_CALL_CLOSE = "<|close|>call<|sep|>"
 _K3_ARG_CLOSE = "<|close|>argument<|sep|>"
 _K3_MESSAGE_CLOSE = "<|close|>message<|sep|>"
+_K3_END_OF_MSG = "<|end_of_msg|>"
 
 
 def _k3_tools_by_name() -> list[ChatCompletionToolsParam]:
@@ -357,6 +419,20 @@ def test_kimi_k3_auto_strict_allows_response_only(sample_tools_strict):
     assert _is_grammar_accept_string(grammar, _k3_response("Just answering."))
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        _K3_RESPONSE_OPEN + "answer<|close|>message",
+        _K3_RESPONSE_OPEN + "answer<|open|>tools",
+        _K3_RESPONSE_OPEN + "answer" + _K3_END_OF_MSG,
+    ],
+)
+def test_kimi_k3_response_body_rejects_reserved_marker_prefixes(body: str):
+    assert not _is_grammar_accept_string(
+        _k3_grammar("required"), body, require_termination=False
+    )
+
+
 @pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
 def test_get_model_structural_tag_supports_named_tool_choice(
     model: str,
@@ -530,7 +606,7 @@ def test_get_function_parameters_relaxes_function_strict_false():
         strict=False,
     )
 
-    assert _get_function_parameters(function) is True
+    assert get_function_parameters(function) is True
 
 
 def _k3_tools_with_root_defs() -> list[ChatCompletionToolsParam]:
