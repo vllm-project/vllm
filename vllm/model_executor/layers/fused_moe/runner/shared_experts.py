@@ -57,6 +57,16 @@ class SharedExperts(torch.nn.Module):
 
         self._mk_can_overlap_shared_experts = mk_can_overlap_shared_experts
 
+        # Outside gfx950, running the shared experts on the aux stream prevents
+        # new communicators from finishing their initialization while an
+        # Elastic EP rescale is in flight, so the rescale never completes. Keep
+        # multi-stream off there until that interaction is fixed.
+        self._is_multistream_safe = True
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950
+
+            self._is_multistream_safe = on_gfx950()
+
         # Allow disabling of the separate shared experts stream for
         # debug purposes.
         # TODO: Remove this after more extensive testings with TP/DP
@@ -112,6 +122,7 @@ class SharedExperts(torch.nn.Module):
             and self._stream is not None
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+            and self._is_multistream_safe
         )
 
         if should_run_shared_in_aux_stream:
