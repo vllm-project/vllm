@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+import statistics
+
 import numpy as np
 import pytest
 import torch
@@ -19,6 +22,22 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 def _has_device_capability(major: int) -> bool:
     return current_platform.is_cuda() and current_platform.has_device_capability(major)
+
+
+# DeepSelect is compiled for sm_100a/sm_103a only.
+requires_sm100 = pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="DeepSelect requires SM100a/SM103a",
+)
+
+
+def _assert_indices_match(
+    logits: torch.Tensor, indices: torch.Tensor, top_k: int
+) -> None:
+    """Selected indices must reproduce torch.topk's values (order-free)."""
+    ref = torch.topk(logits, top_k, dim=-1).values.sort(dim=-1).values
+    got = logits.gather(-1, indices.long()).sort(dim=-1).values
+    torch.testing.assert_close(got, ref, atol=0, rtol=0)
 
 
 COOPERATIVE_TOPK_BACKEND = pytest.param(
@@ -1317,10 +1336,7 @@ def test_workspace_topk_padded_stride(top_k: int, backend: str) -> None:
             )
 
 
-@pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="DeepSelect requires SM100a/SM103a",
-)
+@requires_sm100
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("batch_size", [1, 8, 64])
 @pytest.mark.parametrize("vocab_size", [4096, 131072])
@@ -1371,10 +1387,7 @@ def test_deep_select_topk(
     ), "DeepSelect topk results don't match torch.topk"
 
 
-@pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="DeepSelect requires SM100a/SM103a",
-)
+@requires_sm100
 @torch.inference_mode()
 def test_deep_select_topk_preallocated_output() -> None:
     """DeepSelect writes into a preallocated aligned buffer (no `end`)."""
@@ -1452,13 +1465,7 @@ SPARSE_INDEXER_EXPLICIT_BACKENDS = [
             not _has_flashinfer_topk(), reason="requires flashinfer top-k"
         ),
     ),
-    pytest.param(
-        "deep_select",
-        marks=pytest.mark.skipif(
-            not current_platform.is_device_capability_family(100),
-            reason="requires SM100a/SM103a and vllm._deepselect_C",
-        ),
-    ),
+    pytest.param("deep_select", marks=requires_sm100),
 ]
 
 
@@ -1542,11 +1549,34 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
         with set_current_vllm_config(cfg):
             return SparseIndexerTopk().resolve_backend(t, k, num_rows)
 
-    if current_platform.is_device_capability_family(100):
-        assert resolve("auto") == "deep_select"
-    if _has_cooperative_topk():
+    is_sm100 = current_platform.is_device_capability_family(100)
+    has_coop = _has_cooperative_topk()
+    has_fi = _has_flashinfer_topk()
+
+    if has_coop:
+        # topk >= 2048: cooperative wins up to its 64-row limit.
+        assert resolve("auto") == "cooperative"
         # Below the DeepSelect row threshold -> cooperative.
-        assert resolve("auto", num_rows=8) == "cooperative"
+        assert resolve("auto", k=512, num_rows=8) == "cooperative"
+    if is_sm100:
+        # Small topk at/above the DeepSelect row threshold -> deep_select.
+        assert resolve("auto", k=512) == "deep_select"
+    if has_coop and is_sm100:
+        # topk=1024 crossover: cooperative below 64 rows, deep_select at 64.
+        assert resolve("auto", k=1024, num_rows=32) == "cooperative"
+        assert resolve("auto", k=1024) == "deep_select"
+        if has_fi:
+            # topk >= 2048 past cooperative's 64-row limit: flashinfer wins
+            # for shorter contexts, deep_select for long ones.
+            assert resolve("auto", k=2048, num_rows=128) == "flashinfer"
+            long_logits = torch.empty(1, 1048576, dtype=torch.float32, device="cuda")
+            assert resolve("auto", t=long_logits, k=2048, num_rows=128) == (
+                "deep_select"
+            )
+        # topk >= 2048 past cooperative's limit below 64K context ->
+        # persistent.
+        short_logits = torch.empty(1, 32768, dtype=torch.float32, device="cuda")
+        assert resolve("auto", t=short_logits, k=2048, num_rows=128) == "persistent"
     # Above cooperative's 64-row limit and DeepSelect-incompatible stride
     # -> persistent.
     assert resolve("auto", unaligned_logits, num_rows=128) == "persistent"
@@ -1558,12 +1588,12 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
     assert resolve("per_row") == "per_row"
     assert resolve("torch") == "torch"
     assert resolve("persistent") == "persistent"
-    if _has_cooperative_topk():
+    if has_coop:
         assert resolve("cooperative") == "cooperative"
-    if _has_flashinfer_topk():
+    if has_fi:
         assert resolve("flashinfer") == "flashinfer"
-    if current_platform.is_device_capability_family(100):
-        # Forced deep_select ignores the 32-row auto threshold.
+    if is_sm100:
+        # Explicit deep_select ignores the 32-row auto threshold.
         assert resolve("deep_select", num_rows=1) == "deep_select"
         with pytest.raises(RuntimeError, match="constraints"):
             resolve("deep_select", unaligned_logits)
@@ -1575,6 +1605,101 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
         resolve("persistent", k=3000)
     with pytest.raises(RuntimeError, match="topk_tokens must be in"):
         resolve("cooperative", k=3000)
-    if not current_platform.is_device_capability_family(100):
+    if not is_sm100:
         with pytest.raises(RuntimeError, match="SM100a/SM103a"):
             resolve("deep_select")
+
+
+# (model, index_topk) pairs the auto heuristic must stay optimal for.
+SPARSE_INDEXER_TOPK_MODEL_SHAPES = [
+    ("DeepSeek-V4-Flash", 512),
+    ("DeepSeek-V4.1-Flash", 512),
+    ("DeepSeek-V4-Pro", 1024),
+    ("GLM-5.3", 2048),
+]
+
+
+@requires_sm100
+@pytest.mark.parametrize("model,index_topk", SPARSE_INDEXER_TOPK_MODEL_SHAPES)
+@torch.inference_mode()
+def test_sparse_indexer_topk_auto_is_fastest(
+    workspace_init, model: str, index_topk: int
+) -> None:
+    """ "auto" must resolve to the fastest applicable backend per shape."""
+    from flashinfer.testing import bench_gpu_time_with_cupti
+
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
+
+    backends = [
+        "deep_select",
+        "cooperative",
+        "persistent",
+        "per_row",
+        "flashinfer",
+        "torch",
+    ]
+    dispatchers = {}
+    for backend in ["auto", *backends]:
+        cfg = VllmConfig(kernel_config={"sparse_indexer_topk_backend": backend})
+        with set_current_vllm_config(cfg):
+            dispatchers[backend] = SparseIndexerTopk()
+
+    def bench_us(fn):
+        for _ in range(5):
+            fn()
+        torch.accelerator.synchronize()
+        times = bench_gpu_time_with_cupti(
+            fn, dry_run_time_ms=10, repeat_time_ms=30, cold_l2_cache=True
+        )
+        return statistics.median(times) * 1e3
+
+    # All default CUDA graph capture sizes <= 256 at a long-context vocab
+    # (the batch dimension drives the backend crossover), plus a coarse grid
+    # over the short/extreme vocab ends.
+    shapes = [(bs, 131072) for bs in [1, 2, 4, *range(8, 257, 8)]]
+    shapes += [(bs, v) for bs in (1, 64, 256) for v in (4096, 1048576)]
+    # Short-context shapes past cooperative's 64-row limit, where the
+    # topk=2048 bands (persistent / flashinfer) apply.
+    shapes += [(bs, v) for bs in (72, 128, 256) for v in (16384, 32768, 65536)]
+    for batch, vocab in shapes:
+        logits = torch.randn(batch, vocab, dtype=torch.float32, device="cuda")
+        seq_lens = torch.full((batch, 1), vocab, dtype=torch.int32, device="cuda")
+        topk_indices = torch.empty(batch, index_topk, dtype=torch.int32, device="cuda")
+
+        times = {}
+        for name, dispatcher in dispatchers.items():
+            run = functools.partial(
+                dispatcher, logits, seq_lens, 1, topk_indices, index_topk, vocab
+            )
+            try:
+                topk_indices.fill_(-7)  # poison against stale results
+                run()
+                torch.accelerator.synchronize()
+            except RuntimeError:
+                continue  # backend constraints unmet for this shape
+            _assert_indices_match(logits, topk_indices, index_topk)
+            # Production decode runs under CUDA graphs: capture the backend
+            # and validate + time graph replay.
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                run()
+            torch.cuda.current_stream().wait_stream(side)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                run()
+            topk_indices.fill_(-7)
+            graph.replay()
+            torch.accelerator.synchronize()
+            _assert_indices_match(logits, topk_indices, index_topk)
+            times[name] = bench_us(graph.replay)
+
+        resolved = dispatchers["auto"].resolve_backend(logits, index_topk, batch)
+        best = min(times.values())
+        assert times[resolved] <= best * 1.25 + 2, (
+            f"{model} (topk={index_topk}) bs={batch} vocab={vocab}: "
+            f"auto picked {resolved} ({times[resolved]:.1f}us) but the "
+            f"fastest is {best:.1f}us; all times: "
+            f"{ {k: round(v, 1) for k, v in times.items()} }"
+        )

@@ -25,9 +25,26 @@ except ImportError:
 # DeepSelect (vllm._deepselect_C)
 # ---------------------------------------------------------------------------
 
-# Below this row count the existing cooperative/persistent top-k kernels are
-# faster than DeepSelect's per-SM kernels.
+# "auto" heuristic breakpoints, measured on GB200 and enforced by
+# tests/kernels/test_top_k_per_row.py::test_sparse_indexer_topk_auto_is_fastest.
+
+# Below this row count cooperative/persistent are faster than DeepSelect.
 DEEP_SELECT_MIN_ROWS = 32
+
+# cooperative_topk's hard row limit.
+_COOPERATIVE_MAX_ROWS = 64
+
+# topk at/below which DeepSelect wins from DEEP_SELECT_MIN_ROWS up; between
+# this and _WIDE_TOPK cooperative wins below _COOPERATIVE_MAX_ROWS instead.
+_COOPERATIVE_CROSSOVER_TOPK = 1024
+
+# topk at which DeepSelect falls back to its maxtopk-4096 instantiation:
+# cooperative wins within its row limit, FlashInfer wins in
+# _FI_WIDE_TOPK_VOCAB_RANGE (past the row/row-count limits below), and
+# persistent wins at shorter contexts.
+_WIDE_TOPK = 2048
+_FI_WIDE_TOPK_VOCAB_RANGE = (65536, 131072)
+_FI_WIDE_TOPK_MAX_ROWS = 256
 
 # Matches the -1 fill convention used for topk_indices_buffer elsewhere.
 IDX_OOB_FILL_VALUE = -1
@@ -156,17 +173,7 @@ class SparseIndexerTopk(torch.nn.Module):
         """Resolve the decode top-k implementation from the configured
         backend ("auto" heuristic chain, or a validated explicit value)."""
         if self._backend == "auto":
-            if (
-                self._has_deep_select
-                and is_deep_select_supported(logits, topk_tokens)
-                and num_rows >= DEEP_SELECT_MIN_ROWS
-            ):
-                return "deep_select"
-            if not self._cooperative_constraints(logits, topk_tokens, num_rows):
-                return "cooperative"
-            if self._is_cuda and topk_tokens in (512, 1024, 2048):
-                return "persistent"
-            return "per_row"
+            return self._resolve_auto(logits, topk_tokens, num_rows)
 
         failures: list[str] = []
         if self._backend == "cooperative":
@@ -201,6 +208,47 @@ class SparseIndexerTopk(torch.nn.Module):
                 + "; ".join(failures)
             )
         return self._backend
+
+    def _resolve_auto(
+        self, logits: torch.Tensor, topk_tokens: int, num_rows: int
+    ) -> str:
+        """Pick the fastest applicable backend. Breakpoints are the named
+        constants at module level (GB200 measurements)."""
+        num_cols = logits.shape[1]
+        coop_ok = not self._cooperative_constraints(logits, topk_tokens, num_rows)
+        persistent_ok = self._is_cuda and topk_tokens in (512, 1024, 2048)
+
+        if coop_ok and (
+            topk_tokens >= _WIDE_TOPK
+            or (
+                topk_tokens >= _COOPERATIVE_CROSSOVER_TOPK
+                and num_rows < _COOPERATIVE_MAX_ROWS
+            )
+            or num_rows < DEEP_SELECT_MIN_ROWS
+        ):
+            return "cooperative"
+        if topk_tokens >= _WIDE_TOPK and num_rows > _COOPERATIVE_MAX_ROWS:
+            lo, hi = _FI_WIDE_TOPK_VOCAB_RANGE
+            if (
+                lo < num_cols <= hi
+                and num_rows <= _FI_WIDE_TOPK_MAX_ROWS
+                and logits.is_contiguous()
+                and self._has_flashinfer_topk
+            ):
+                return "flashinfer"
+            if num_cols <= lo and persistent_ok:
+                return "persistent"
+        if (
+            self._has_deep_select
+            and is_deep_select_supported(logits, topk_tokens)
+            and num_rows >= DEEP_SELECT_MIN_ROWS
+        ):
+            return "deep_select"
+        if coop_ok:
+            return "cooperative"
+        if persistent_ok:
+            return "persistent"
+        return "per_row"
 
     def _cooperative_constraints(
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
