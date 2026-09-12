@@ -104,6 +104,7 @@ from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
+    has_compiled_submodule,
     make_cudagraph_stats,
 )
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -152,6 +153,7 @@ from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
     maybe_create_adaptive_verification_manager,
+    resolve_adaptive_cudagraph_mode,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
@@ -678,8 +680,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config,
             use_replayssm=self.cache_config.use_replayssm,
         )
+        piecewise_capture_available = bool(
+            envs.VLLM_USE_BREAKABLE_CUDAGRAPH or has_compiled_submodule(self.model)
+        )
         if self.adaptive_verification is not None:
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+            self.compilation_config.cudagraph_mode = resolve_adaptive_cudagraph_mode(
+                self.compilation_config.cudagraph_mode,
+                piecewise_capture_available=piecewise_capture_available,
+            )
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
@@ -689,6 +697,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_config=self.kv_cache_config,
             max_num_reqs=self.max_num_reqs,
             is_profiling=is_profiling,
+            piecewise_capture_available=piecewise_capture_available,
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
@@ -2027,7 +2036,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
-        if self.speculator is not None and self.speculator.supports_mm_inputs:
+        # The encoder runner exists only on the first PP rank, so later ranks
+        # have no cached embeddings to gather.
+        if (
+            self.speculator is not None
+            and self.speculator.supports_mm_inputs
+            and self.model_state.supports_mm_inputs
+        ):
             # Get cached multimodal embeddings for draft forward.
             # NOTE: This is done here because postprocess updates
             # num_computed_prefill_tokens.

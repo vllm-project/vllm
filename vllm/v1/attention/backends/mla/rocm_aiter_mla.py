@@ -22,6 +22,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, largest_power_of_2_divisor
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -796,7 +797,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # build) keeps it off the per-layer forward path where a sync would
         # break CUDA Graph capture.  Using the device-side reduce_indptr is
         # acceptable since build is allowed to incur an occasional sync.
-        num_partial_tiles = int(self.fp8_ps_reduce_indptr[-1].item())
+        with gpu_sync_allowed():
+            num_partial_tiles = int(self.fp8_ps_reduce_indptr[-1].item())
 
         # Attach PS metadata to the metadata object so forward_mha can read it.
         metadata.fp8_prefill_qo_indptr = qo_indptr
