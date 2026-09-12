@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
+import os
 from abc import ABC, abstractmethod
 
 import tokenizers
@@ -60,10 +61,69 @@ class IncrementalDetokenizer:
 
         if USE_FAST_DETOKENIZER and isinstance(tokenizer, TokenizersBackend):
             # Fast tokenizer => use tokenizers library DecodeStream.
-            return FastIncrementalDetokenizer(tokenizer, request)
+            detokenizer: BaseIncrementalDetokenizer = FastIncrementalDetokenizer(
+                tokenizer, request
+            )
+        else:
+            # Fall back to slow python-based incremental detokenization.
+            detokenizer = SlowIncrementalDetokenizer(tokenizer, request)
+        _maybe_arm_reasoning_stop_guard(detokenizer, tokenizer, request)
+        return detokenizer
 
-        # Fall back to slow python-based incremental detokenization.
-        return SlowIncrementalDetokenizer(tokenizer, request)
+
+def _reasoning_markers() -> tuple[str, str]:
+    """Reasoning segment markers, preferring the deployment's reasoning
+    config over the common defaults so the guard is not model-specific."""
+    start, end = "<think>", "</think>"
+    try:
+        from vllm.config import get_current_vllm_config
+
+        reasoning_config = getattr(
+            get_current_vllm_config(), "reasoning_config", None
+        )
+        if reasoning_config is not None:
+            start = getattr(reasoning_config, "reasoning_start_str", "") or start
+            end = getattr(reasoning_config, "reasoning_end_str", "") or end
+    except Exception:
+        pass
+    return start, end
+
+
+def _maybe_arm_reasoning_stop_guard(
+    detokenizer: "BaseIncrementalDetokenizer",
+    tokenizer: TokenizerLike,
+    request: EngineCoreRequest,
+) -> None:
+    """Keep client stop strings dormant while the reasoning segment is open.
+
+    With think-in-prompt templates the prompt ends with the reasoning start
+    token, so generation begins INSIDE the reasoning segment. Evaluating
+    client ``stop`` strings there truncates the chain-of-thought whenever it
+    restates a stop phrase (lm-evaluation-harness sends ``stop[:4]`` on every
+    request): the end marker never arrives and the reasoning parser yields
+    ``content: None``. Hosted deployments scope stops to content; this guard
+    matches that behavior. EOS and ``max_tokens`` are unaffected, and requests
+    whose prompt does not end inside reasoning are untouched.
+
+    Opt-out (process-wide): ``VLLM_SUPPRESS_STOPS_IN_REASONING=0``.
+    """
+    if os.environ.get("VLLM_SUPPRESS_STOPS_IN_REASONING", "1") == "0":
+        return
+    if not detokenizer.stop:
+        return
+    prompt_token_ids = request.prompt_token_ids
+    if not prompt_token_ids:
+        return
+    start_str, end_str = _reasoning_markers()
+    try:
+        think_id = tokenizer.convert_tokens_to_ids(start_str)
+    except Exception:
+        think_id = None
+    if think_id is None or think_id < 0:
+        return
+    if prompt_token_ids[-1] == think_id:
+        detokenizer.reasoning_stop_guard = True
+        detokenizer.reasoning_end_str = end_str
 
 
 class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
@@ -89,6 +149,12 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         else:
             self.stop_buffer_length = 0
         self._last_output_text_offset: int = 0
+
+        # Set by _maybe_arm_reasoning_stop_guard(): while True and the
+        # reasoning segment has not closed, client stop strings stay dormant.
+        self.reasoning_stop_guard: bool = False
+        self._reasoning_closed: bool = False
+        self.reasoning_end_str: str = "</think>"
 
         # Generation data
         self.output_text = ""
@@ -127,8 +193,25 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             self.token_ids.append(skipped_stop_token_id)
 
         # 2) Evaluate stop strings.
+        # Keep stops dormant while the reasoning segment is open; on closing,
+        # evaluate only text FOLLOWING the end marker. With spec decoding this
+        # update() may carry the reasoning tail in the same multi-token chunk
+        # as the marker, and a stop inside that tail must not fire.
+        if self.reasoning_stop_guard and not self._reasoning_closed:
+            marker = self.reasoning_end_str
+            search_from = max(0, stop_check_offset - (len(marker) - 1))
+            marker_index = self.output_text.find(marker, search_from)
+            if marker_index != -1:
+                self._reasoning_closed = True
+                stop_check_offset = max(
+                    stop_check_offset, marker_index + len(marker)
+                )
         stop_string = None
-        if self.stop and self.num_output_tokens() > self.min_tokens:
+        if (
+            self.stop
+            and self.num_output_tokens() > self.min_tokens
+            and (not self.reasoning_stop_guard or self._reasoning_closed)
+        ):
             stop = check_stop_strings(
                 output_text=self.output_text,
                 new_char_count=len(self.output_text) - stop_check_offset,
