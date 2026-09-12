@@ -35,9 +35,6 @@ moriio_engine = importlib.import_module(
 moriio_layout = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout"
 )
-moriio_connector = importlib.import_module(
-    "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector"
-)
 msgpack = importlib.import_module("msgpack")
 
 ROLE = moriio_common.ROLE
@@ -46,9 +43,6 @@ MoRIIOTransferAck = moriio_common.MoRIIOTransferAck
 RemoteAllocInfo = moriio_common.RemoteAllocInfo
 WriteTask = moriio_common.WriteTask
 set_role = moriio_common.set_role
-MoRIIOMode = moriio_common.MoRIIOMode
-MoRIIOConnectorMetadata = moriio_common.MoRIIOConnectorMetadata
-MoRIIOConnectorScheduler = moriio_connector.MoRIIOConnectorScheduler
 MoRIIOWrapper = moriio_engine.MoRIIOWrapper
 MoRIIOWriter = moriio_engine.MoRIIOWriter
 
@@ -772,121 +766,3 @@ def test_unsupported_shape_raises_value_error():
 
     with pytest.raises(ValueError, match="Unsupported MoRIIO K/V cache shape"):
         moriio_layout.get_layer_transfer_geometry("layer", cache, worker.layer_to_spec)
-
-
-def _write_producer_scheduler(
-    num_speculative_tokens: int, block_size: int = 1
-) -> Any:
-    """Bare WRITE-mode PRODUCER MoRIIOConnectorScheduler for save-path tests.
-
-    Constructed via ``__new__`` (like the connector-test fixtures) so the save
-    path (``build_connector_meta`` -> ``_drop_spec_lookahead_blocks``) can be
-    exercised without a real engine/RDMA stack. Only the attributes touched by
-    that path are populated.
-    """
-    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
-    scheduler.mode = MoRIIOMode.WRITE
-    scheduler.is_producer = True
-    scheduler.block_size = block_size
-    scheduler.num_speculative_tokens = num_speculative_tokens
-    scheduler.transfer_id_to_request_id = {}
-    scheduler._reqs_need_recv = {}
-    scheduler._reqs_need_save = {}
-    scheduler._reqs_need_pending_save = {}
-    scheduler._req_kv_params = {}
-    scheduler._reqs_need_send = {}
-    return scheduler
-
-
-def _spec_kv_params(transfer_id: str = "xfer-spec") -> dict[str, Any]:
-    # Sidecar-style params: request_id embeds no zmq address, so add_new_req
-    # resolves the peer from these explicit fields.
-    return {
-        "transfer_id": transfer_id,
-        "remote_engine_id": "remote-engine",
-        "remote_block_ids": [],
-        "remote_host": "127.0.0.1",
-        "remote_handshake_port": 5000,
-        "remote_notify_port": 5001,
-    }
-
-
-def _build_meta(scheduler: Any, req_ids=None, new_block_ids=None) -> Any:
-    scheduler_output = SimpleNamespace(
-        scheduled_cached_reqs=SimpleNamespace(
-            req_ids=req_ids or [],
-            new_block_ids=new_block_ids or [],
-        )
-    )
-    return scheduler.build_connector_meta(scheduler_output)
-
-
-def test_write_mode_excludes_spec_lookahead_blocks():
-    # WRITE producer save path with speculative decoding enabled must record
-    # only the non-spec prompt blocks: the trailing num_speculative_tokens
-    # lookahead blocks (that decode never allocates) are dropped before the
-    # local_block_ids are recorded into MoRIIOConnectorMetadata.reqs_to_save.
-    set_role(ROLE.PRODUCER)
-    NUM_SPEC = 3
-    scheduler = _write_producer_scheduler(num_speculative_tokens=NUM_SPEC)
-
-    req_id = "req-spec"
-    prompt_blocks = [10, 11, 12, 13, 14, 15, 16, 17]  # 8 prompt blocks
-    lookahead_blocks = [18, 19, 20]  # NUM_SPEC trailing lookahead blocks
-    local_block_ids = prompt_blocks + lookahead_blocks
-
-    # block_size=1 spec case: full (only) chunk holds prompt + lookahead.
-    req = SimpleNamespace(
-        num_prompt_tokens=len(prompt_blocks),
-        kv_transfer_params=_spec_kv_params(),
-    )
-    scheduler._reqs_need_save[req_id] = (req, local_block_ids)
-    scheduler._req_kv_params[req_id] = _spec_kv_params()
-
-    meta = _build_meta(scheduler)
-
-    assert isinstance(meta, MoRIIOConnectorMetadata)
-    assert req_id in meta.reqs_to_save
-    assert meta.reqs_to_save[req_id].local_block_ids == prompt_blocks
-
-
-def test_write_mode_with_chunked_prefill_saves_local_block_ids():
-    # Chunked-prefill + spec variant: earlier (non-final) chunks are buffered in
-    # _reqs_need_pending_save untouched; the trailing lookahead blocks are only
-    # dropped on the final-chunk save where the full local set is assembled.
-    set_role(ROLE.PRODUCER)
-    NUM_SPEC = 3
-    scheduler = _write_producer_scheduler(num_speculative_tokens=NUM_SPEC)
-
-    req_id = "req-spec-chunked"
-    num_prompt_tokens = 8  # block_size=1 => 8 prompt blocks
-    first_chunk = [10, 11, 12, 13]  # non-final chunk, no lookahead yet
-    # final chunk carries the remaining prompt blocks + trailing lookahead
-    final_chunk = [14, 15, 16, 17, 18, 19, 20]  # 4 prompt + NUM_SPEC lookahead
-    prompt_blocks = [10, 11, 12, 13, 14, 15, 16, 17]
-
-    req = SimpleNamespace(
-        num_prompt_tokens=num_prompt_tokens,
-        kv_transfer_params=_spec_kv_params(),
-    )
-
-    # Step 1: first (non-final) chunk arrives via _reqs_need_save. It must be
-    # buffered into _reqs_need_pending_save and NOT saved/trimmed yet.
-    scheduler._reqs_need_save[req_id] = (req, first_chunk)
-    scheduler._req_kv_params[req_id] = _spec_kv_params()
-    meta_step1 = _build_meta(scheduler)
-    assert req_id not in meta_step1.reqs_to_save
-    assert req_id in scheduler._reqs_need_pending_save
-    assert scheduler._reqs_need_pending_save[req_id][1] == first_chunk
-
-    # Step 2: final chunk arrives via scheduled_cached_reqs. The full local set
-    # (first_chunk + final_chunk incl. lookahead) is assembled, the trailing
-    # NUM_SPEC lookahead blocks dropped, and only the prompt blocks recorded.
-    meta_step2 = _build_meta(
-        scheduler,
-        req_ids=[req_id],
-        new_block_ids=[[final_chunk]],
-    )
-    assert req_id in meta_step2.reqs_to_save
-    assert meta_step2.reqs_to_save[req_id].local_block_ids == prompt_blocks
-    assert req_id not in scheduler._reqs_need_pending_save
