@@ -25,6 +25,7 @@ from .uno_kv_budget import (
     MODEL_REVISION,
     SURVIVOR_FINISH_MAX_TOKENS,
     SURVIVOR_MAX_MODEL_LEN,
+    allocatable_blocks,
     engine_minimum_kv_bytes,
     kv_bytes_per_block,
     mixed_admission_blocks,
@@ -33,6 +34,7 @@ from .uno_kv_budget import (
     prompt_token_ids_are_pairwise_content_distinct,
     qwen3_geometry,
     survivor_kv_budget,
+    worst_case_crossing_tokens,
 )
 from .utils import (
     assert_request_outputs_match,
@@ -48,8 +50,8 @@ pytestmark = pytest.mark.skipif(
 
 # Eight repeats give each peer ~104 body tokens beyond the shared prefix: enough
 # to stay tag-unique and cache-distinct, small enough that all four prompts are
-# admitted together (mixed_admission_blocks well below the budget) before their
-# generations grow the resident footprint past it.
+# admitted together (mixed_admission_blocks below the allocatable pool) before
+# their generations grow the resident footprint past it.
 _PEER_REPEATS = 8
 
 
@@ -197,6 +199,14 @@ class _MixedPhase:
     receipts: list[str]
     # Highest scheduler-reported KV occupancy observed during the mixed phase.
     peak_kv_cache_usage: float
+    # Generated-token count per finish peer at every step, reduced to the
+    # largest gap ever seen between the fastest and the slowest peer. This is
+    # the receipt for the failure class the round-9 redesign closed: peers that
+    # drift apart never hold their footprints at the same time, so a
+    # grow-together budget is never crossed (see `worst_case_crossing_tokens`).
+    max_generation_lag: int
+    # Generated-token count per finish peer when it finished.
+    final_lengths: dict[str, int]
 
 
 def _run_survivor_with_peers(
@@ -235,10 +245,20 @@ def _run_survivor_with_peers(
     preempted_while_active: dict[str, int] = {}
     receipts: list[str] = []
     peak_kv_cache_usage = 0.0
+    max_generation_lag = 0
     seen_preemptions: dict[str, int] = {}
     while engine.has_unfinished_requests():
         outputs = engine.step()
         peak_kv_cache_usage = max(peak_kv_cache_usage, scheduler.get_kv_cache_usage())
+        live_lengths = [
+            len(request.output_token_ids)
+            for request in (scheduler.requests.get(rid) for rid in finish_ids)
+            if request is not None
+        ]
+        if len(live_lengths) == len(finish_ids):
+            max_generation_lag = max(
+                max_generation_lag, max(live_lengths) - min(live_lengths)
+            )
         for output in outputs:
             if output.request_id == seed_id:
                 if output.outputs:
@@ -298,6 +318,10 @@ def _run_survivor_with_peers(
         preempted_while_active=preempted_while_active,
         receipts=receipts,
         peak_kv_cache_usage=peak_kv_cache_usage,
+        max_generation_lag=max_generation_lag,
+        final_lengths={
+            request_id: len(tokens) for request_id, tokens in finished.items()
+        },
     )
 
 
@@ -319,10 +343,13 @@ def test_uno_continuous_batching_survivor_matches_solo(
     compared request is one of the two long peers, and its preemption is read
     from the scheduler at the step it happens, so the token-equality gate can
     only pass for a request that was still generating (the short seed finishes
-    before the budget is crossed and the abort peer is retired early). Each
+    before the pool is crossed and the abort peer is retired early). Each
     preempted peer's greedy token IDs are compared against the same prompt run
-    alone under batch-invariant settings; if no finish peer was preempted while
-    active the test skips rather than passing on a resume it never exercised.
+    alone under batch-invariant settings.
+
+    The geometry is sized so the crossing happens for every interleaving of the
+    two peers, not only when they grow at the same rate, so a run that observes
+    no preemption FAILS with its receipt instead of skipping.
     """
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setattr(envs, "VLLM_USE_V2_MODEL_RUNNER", True)
@@ -347,9 +374,11 @@ def test_uno_continuous_batching_survivor_matches_solo(
     finish_sampling = SamplingParams(
         # Long enough that the peers' generation growth, not their prompt size,
         # is what exhausts the KV budget and forces preemption. With prefix
-        # caching disabled, the two long peers cross the 81-block budget at
-        # 376 generated tokens, before the 512 cap, so a peer cannot finish
-        # naturally before the scheduler preempts it.
+        # caching disabled, the two long peers cross the 68 allocatable blocks
+        # at 280 generated tokens growing together, and at 536 when one of them
+        # stalls at its admission footprint -- both below the 640 cap, so a peer
+        # cannot finish naturally before the scheduler preempts one whatever
+        # their relative acceptance rates are.
         temperature=0,
         max_tokens=SURVIVOR_FINISH_MAX_TOKENS,
         ignore_eos=True,
@@ -366,19 +395,32 @@ def test_uno_continuous_batching_survivor_matches_solo(
 
     # Preemption is forced by GROWTH, not by prompt size. Prefix caching is off,
     # so all four prompts own their prompt blocks and are admitted together
-    # (mixed_admission_blocks) below the 81-block budget. The two finish peers
-    # then generate SURVIVOR_FINISH_MAX_TOKENS tokens each, so their independent
-    # growth (mixed_growth_blocks) passes the budget. The scheduler's running
-    # loop preempts the last running request when allocate_slots fails; the
-    # short seed finishes before the crossing and the abort peer is retired, so
-    # the preempted request is one of the two long peers and its resumed tokens
-    # are the correctness gate.
-    # Both inequalities and the crossing point are asserted with their counts
-    # here and pinned on CPU by test_uno_mrv2.py (an inverted run with a cap
-    # below the crossing must fail).
+    # (mixed_admission_blocks) below the 68 allocatable blocks. The two finish
+    # peers then generate SURVIVOR_FINISH_MAX_TOKENS tokens each, so their
+    # independent growth (mixed_growth_blocks) passes the pool. The scheduler's
+    # running loop preempts the last running request when allocate_slots fails;
+    # the short seed finishes before the crossing and the abort peer is retired,
+    # so the preempted request is one of the two long peers and its resumed
+    # tokens are the correctness gate.
+    #
+    # The crossing must not depend on the two peers growing at the same rate.
+    # Uno's acceptance is prompt-dependent, and a peer that lags its twin far
+    # enough lets the leader reach its cap inside the pool: the pair's
+    # footprints are then never resident together, allocate_slots never fails
+    # and the gate cannot fire (that is exactly how the 81-block/512-token
+    # configuration skipped on two cards). So the load-bearing pre-gate is
+    # `worst_case_crossing_tokens`, the crossing with every other long peer
+    # stalled at its admission footprint. All four inequalities are asserted
+    # with their counts here and pinned on CPU by test_uno_mrv2.py and
+    # tests/v1/spec_decode/test_uno_preemption.py, which drives the real
+    # scheduler over this geometry for several acceptance ratios.
     max_model_len = SURVIVOR_MAX_MODEL_LEN
     kv_cache_budget_bytes = survivor_kv_budget()
     budget_blocks = kv_cache_budget_bytes // kv_bytes_per_block()
+    # One block of the pinned pool is the pool's null block and is never handed
+    # to a request; `get_kv_cache_usage` also divides by this number, so the
+    # printed peak and these inequalities share one denominator.
+    pool_blocks = allocatable_blocks(budget_blocks)
     tokenizer = AutoTokenizer.from_pretrained(
         MODEL_ID, revision=MODEL_REVISION, local_files_only=HF_HUB_OFFLINE
     )
@@ -423,8 +465,13 @@ def test_uno_continuous_batching_survivor_matches_solo(
     crossing_tokens = mixed_crossing_tokens(
         max(prompt_tokens[1:3]),
         shared_prefix_tokens,
-        budget_blocks,
+        pool_blocks,
         prefix_cache_enabled=False,
+    )
+    worst_case_crossing = worst_case_crossing_tokens(
+        max(prompt_tokens[1:3]),
+        [min(prompt_tokens[1:3])],
+        pool_blocks,
     )
     kv_floor = engine_minimum_kv_bytes(max_model_len)
     kv_floor_blocks = kv_floor // kv_bytes_per_block()
@@ -434,24 +481,38 @@ def test_uno_continuous_batching_survivor_matches_solo(
         f"{kv_cache_budget_bytes} B ({budget_blocks} blocks) at "
         f"max_model_len={max_model_len}"
     )
-    assert admission_blocks < budget_blocks, (
-        "the four prompts do not fit the KV budget together, so the peers would "
+    assert admission_blocks < pool_blocks, (
+        "the four prompts do not fit the KV pool together, so the peers would "
         "wait instead of growing into preemption: unique prompt footprint plus "
-        f"one decode block each is {admission_blocks} blocks, the budget is "
-        f"{budget_blocks} blocks (prompt tokens {prompt_tokens}, shared prefix "
+        f"one decode block each is {admission_blocks} blocks, the pool holds "
+        f"{pool_blocks} allocatable blocks of the pinned {budget_blocks} "
+        f"(prompt tokens {prompt_tokens}, shared prefix "
         f"{shared_prefix_tokens} tokens)"
     )
-    assert growth_blocks > budget_blocks, (
-        "the mixed phase cannot exhaust the KV budget by growth: if every "
+    assert growth_blocks > pool_blocks, (
+        "the mixed phase cannot exhaust the KV pool by growth: if every "
         f"running request reached its cap the footprint is {growth_blocks} "
-        f"blocks, the budget is {budget_blocks} blocks (prompt tokens "
-        f"{prompt_tokens}, max_tokens {max_tokens})"
+        f"blocks, the pool holds {pool_blocks} allocatable blocks (prompt "
+        f"tokens {prompt_tokens}, max_tokens {max_tokens})"
     )
-    # The two long peers alone must cross the budget before either can finish
-    # naturally, or preemption could never reach the compared request: the
-    # scheduler only preempts while a request is still generating.
+    # The load-bearing pre-gate: even with one long peer stalled at its
+    # admission footprint, the other must outgrow the pool before it can reach
+    # its cap. Without this the gate only fires when the peers happen to grow
+    # at the same rate, which is what let two cards skip with every prompt
+    # distinct and the pool one block short of full.
+    assert worst_case_crossing < finish_sampling.max_tokens, (
+        "the survivor geometry cannot force preemption for every interleaving: "
+        f"one long peer plus the other's admission footprint crosses the "
+        f"{pool_blocks}-block pool only after {worst_case_crossing} generated "
+        f"tokens, at or past the {finish_sampling.max_tokens} cap, so a peer "
+        "that outruns its twin can finish inside the pool and the resume path "
+        "is never exercised. Raise SURVIVOR_FINISH_MAX_TOKENS or lower "
+        "SURVIVOR_KV_HEADROOM_BLOCKS rather than accepting a non-firing run"
+    )
+    # The pair growing together must also cross well before the cap; this is
+    # the best case and is reported for continuity with the earlier receipts.
     assert crossing_tokens < finish_sampling.max_tokens, (
-        "the two long peers alone cross the KV budget only after "
+        "the two long peers together cross the KV pool only after "
         f"{crossing_tokens} generated tokens, at or past the "
         f"{finish_sampling.max_tokens} cap, so a peer could finish before the "
         "scheduler ever preempts it"
@@ -473,9 +534,10 @@ def test_uno_continuous_batching_survivor_matches_solo(
     print(
         "survivor KV arithmetic: prefix_cache=False, "
         f"floor_blocks={kv_floor_blocks}, budget_blocks={budget_blocks}, "
-        f"admission_blocks={admission_blocks}, growth_blocks={growth_blocks}, "
-        f"crossing_tokens={crossing_tokens}, prompt_tokens={prompt_tokens}, "
-        f"max_tokens={max_tokens}"
+        f"pool_blocks={pool_blocks}, admission_blocks={admission_blocks}, "
+        f"growth_blocks={growth_blocks}, crossing_tokens={crossing_tokens}, "
+        f"worst_case_crossing_tokens={worst_case_crossing}, "
+        f"prompt_tokens={prompt_tokens}, max_tokens={max_tokens}"
     )
 
     common = dict(
@@ -544,22 +606,37 @@ def test_uno_continuous_batching_survivor_matches_solo(
     print(f"survivor peak KV cache usage: {mixed.peak_kv_cache_usage:.3%}")
     print(f"survivor prompt token-id distinctness: {prompt_distinctness}")
     print(
+        f"survivor generation lag: max_generation_lag={mixed.max_generation_lag} "
+        f"tokens, final_lengths={mixed.final_lengths}"
+    )
+    print(
         f"survivor preempted-while-active counts: {mixed.preempted_while_active} "
         f"(solo lengths: {[len(ids) for ids in solo_ids.values()]})"
     )
 
     # The token-equality gate is only load-bearing for a request that was still
-    # generating when it was preempted. If no long peer was, the run never
-    # exercised the resume path: skip with the receipt rather than passing on an
-    # assertion that could not have failed (checklist row 2).
-    if not mixed.preempted_while_active:
-        pytest.skip(
-            "no finish peer was preempted while still generating, so the resume "
-            "path was not exercised; "
-            f"peak_kv_cache_usage={mixed.peak_kv_cache_usage:.3%}; "
-            f"prompt_token_id_distinctness={prompt_distinctness}; "
-            f"receipts={mixed.receipts}"
-        )
+    # generating when it was preempted. The geometry above makes that event
+    # unavoidable for every interleaving, so a run without it is a FAILURE, not
+    # a skip: either the pre-gate arithmetic no longer matches the engine's
+    # allocator, or the resume path is not being reached (checklist rows 2, 29).
+    #
+    # Note that a peak below 100% is not evidence the pool never filled: the
+    # step that takes the last block is the same step whose next allocation
+    # fails and frees the victim's blocks, so the per-step sample can top out
+    # one block short (98.750% of a 69-block pool is 79 of 80). Read
+    # `receipts` and `max_generation_lag`, not the peak.
+    assert mixed.preempted_while_active, (
+        "no finish peer was preempted while still generating, so the resume "
+        "path was not exercised. The geometry asserts this cannot happen: "
+        f"pool_blocks={pool_blocks}, growth_blocks={growth_blocks}, "
+        f"worst_case_crossing_tokens={worst_case_crossing} < "
+        f"cap {finish_sampling.max_tokens}. Receipt: "
+        f"peak_kv_cache_usage={mixed.peak_kv_cache_usage:.3%}; "
+        f"max_generation_lag={mixed.max_generation_lag}; "
+        f"final_lengths={mixed.final_lengths}; "
+        f"prompt_token_id_distinctness={prompt_distinctness}; "
+        f"receipts={mixed.receipts}"
+    )
 
     for request_id, count in mixed.preempted_while_active.items():
         assert count >= 1, (request_id, count)

@@ -614,9 +614,13 @@ def test_survivor_preemption_arithmetic_fits_then_overflows_the_budget():
     swaps max_tokens back to [96, 4, 4, 2] and must fail the growth assertion.
 
     The compared request is one of the two long peers, so the crossing point
-    (when the pair alone outgrows the budget) must sit below the cap: above it a
-    peer could finish naturally before preemption and the resume path would
-    never run. An inverted run with the cap at 320 fails this assertion.
+    must sit below the cap: above it a peer could finish naturally before
+    preemption and the resume path would never run. Both crossings are pinned:
+    the pair growing together, and the worst case where one peer stalls at its
+    admission footprint while the other runs to its cap. An inverted run with a
+    cap below either crossing fails these assertions, and
+    ``tests/v1/spec_decode/test_uno_preemption.py`` drives the real scheduler
+    over the same geometry to prove the arithmetic matches the allocator.
     """
     from tests.v1.e2e.spec_decode import uno_kv_budget as budget
 
@@ -629,6 +633,11 @@ def test_survivor_preemption_arithmetic_fits_then_overflows_the_budget():
         64,
     ]
     budget_blocks = budget.survivor_kv_budget() // budget.kv_bytes_per_block()
+    # The pool hands out one block fewer than the pinned override (its null
+    # block), and `get_kv_cache_usage` divides by the same number, so every
+    # inequality below is stated against the allocatable count.
+    pool_blocks = budget.allocatable_blocks(budget_blocks)
+    assert pool_blocks == budget_blocks - 1
 
     admission = budget.mixed_admission_blocks(
         prompt_tokens, shared_prefix_tokens, prefix_cache_enabled=False
@@ -642,23 +651,38 @@ def test_survivor_preemption_arithmetic_fits_then_overflows_the_budget():
     crossing = budget.mixed_crossing_tokens(
         prompt_tokens[1],
         shared_prefix_tokens,
-        budget_blocks,
+        pool_blocks,
         prefix_cache_enabled=False,
     )
-
-    assert admission < budget_blocks, (
-        f"all four prompts must be admitted together: {admission} blocks of "
-        f"unique prompt footprint (incl. one decode block each) vs budget "
-        f"{budget_blocks}"
+    worst_case_crossing = budget.worst_case_crossing_tokens(
+        prompt_tokens[1], [prompt_tokens[2]], pool_blocks
     )
-    assert growth > budget_blocks, (
-        f"the mixed phase must exhaust the budget by growth: {growth} blocks if "
-        f"every request reached its cap vs budget {budget_blocks}"
+
+    assert admission < pool_blocks, (
+        f"all four prompts must be admitted together: {admission} blocks of "
+        f"unique prompt footprint (incl. one decode block each) vs pool "
+        f"{pool_blocks}"
+    )
+    assert growth > pool_blocks, (
+        f"the mixed phase must exhaust the pool by growth: {growth} blocks if "
+        f"every request reached its cap vs pool {pool_blocks}"
     )
     assert crossing < budget.SURVIVOR_FINISH_MAX_TOKENS, (
-        f"the two long peers alone cross the budget only at {crossing} generated "
+        f"the two long peers together cross the pool only at {crossing} "
+        f"generated tokens, at or past the {budget.SURVIVOR_FINISH_MAX_TOKENS} "
+        "cap, so a peer could finish before the scheduler preempts it"
+    )
+    # The crossing must not require the peers to grow at the same rate: Uno's
+    # acceptance is prompt-dependent, and a peer that outruns its twin by
+    # enough blocks makes a grow-together budget uncrossable. This is the
+    # assertion that fails for the former 81-block/512-token configuration,
+    # which skipped on two cards with every prompt distinct.
+    assert worst_case_crossing < budget.SURVIVOR_FINISH_MAX_TOKENS, (
+        f"one long peer plus the other's admission footprint crosses the "
+        f"{pool_blocks}-block pool only at {worst_case_crossing} generated "
         f"tokens, at or past the {budget.SURVIVOR_FINISH_MAX_TOKENS} cap, so a "
-        "peer could finish before the scheduler preempts it"
+        "peer that outruns its twin can finish inside the pool and the resume "
+        "path is never exercised"
     )
     assert all(
         tokens + cap < budget.SURVIVOR_MAX_MODEL_LEN
@@ -673,8 +697,8 @@ def test_survivor_preemption_arithmetic_fits_then_overflows_the_budget():
         shared_prefix_tokens,
         prefix_cache_enabled=False,
     )
-    assert old_growth <= budget_blocks, (
+    assert old_growth <= pool_blocks, (
         f"the old max_tokens=4 peers ({old_growth} blocks) unexpectedly clear "
-        f"the growth gate ({budget_blocks} blocks); the inverted run would not "
+        f"the growth gate ({pool_blocks} blocks); the inverted run would not "
         "fire"
     )

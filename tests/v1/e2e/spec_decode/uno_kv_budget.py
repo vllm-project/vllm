@@ -30,17 +30,33 @@ QWEN3_NUM_KV_HEADS = 8
 QWEN3_HEAD_DIM = 128
 
 # The survivor engine runs at a shorter context so its admission floor (65
-# blocks) sits below the mixed phase's no-prefix-sharing footprint (135
+# blocks) sits below the mixed phase's no-prefix-sharing footprint (151
 # blocks). At max_model_len=2048 the floor (129 blocks) nearly equals it.
 SURVIVOR_MAX_MODEL_LEN = 1024
-SURVIVOR_HEADROOM = (5, 4)
+
+# Blocks granted above the engine's single-request admission floor. Four blocks
+# put the budget at 69 (68 allocatable, see `allocatable_blocks`), which admits
+# the four mixed-phase prompts (65 blocks) and still forces preemption for every
+# interleaving of the two long peers (see `worst_case_crossing_tokens`). A wider
+# margin re-opens the desynchronisation hole this replaced: with the former
+# 25% headroom (81 blocks) a peer that lagged its twin by ~285 generated tokens
+# let the leader reach its cap inside the pool, so `allocate_slots` never failed
+# and the gate never fired.
+SURVIVOR_KV_HEADROOM_BLOCKS = 4
+
+# Uno reserves `num_speculative_tokens` KV slots past the scheduled query rows
+# (`VllmConfig.num_lookahead_tokens`), so a running request holds one block more
+# than its committed tokens imply. The survivor engine pins K=8.
+SURVIVOR_LOOKAHEAD_TOKENS = 8
 
 # Prefix caching is disabled in the survivor test. The finish peers therefore
-# keep generating until their independent resident sets grow past the
-# 81-block budget. The pair crosses at 376 generated tokens, so 512 leaves
-# margin before either peer's natural finish. The abort peer is retired after
-# two tokens and holds only its own prompt blocks while it runs.
-SURVIVOR_FINISH_MAX_TOKENS = 512
+# keep generating until their resident sets grow past the 68 allocatable
+# blocks. Growing together they cross at 280 generated tokens; with one peer
+# stalled at its admission footprint the leader crosses at 536. A 640-token cap
+# leaves at least six block-groups of margin in the worst case, so no peer can
+# finish before the scheduler has to preempt one. The abort peer is retired
+# after two tokens and holds only its own prompt blocks while it runs.
+SURVIVOR_FINISH_MAX_TOKENS = 640
 
 # The K-matrix engine keeps upstream's 4096 context on a 2 GiB budget, far above
 # its 257-block floor.
@@ -75,20 +91,47 @@ def engine_minimum_kv_bytes(max_model_len: int) -> int:
 
 
 def survivor_kv_budget() -> int:
-    """Survivor e2e budget: the admission floor plus 25% headroom.
+    """Survivor e2e budget: the admission floor plus a fixed block margin.
 
     ``SURVIVOR_MAX_MODEL_LEN=1024`` gives a floor of 65 blocks and a budget of
-    81.25 blocks (81 after rounding); the mixed phase is sized so that all four
-    prompts are admitted together but their generations grow past the budget,
-    which is what forces preemption/recompute.
+    ``65 + SURVIVOR_KV_HEADROOM_BLOCKS`` = 69 blocks; the mixed phase is sized so
+    that all four prompts are admitted together but the two long peers cannot
+    both reach their cap inside the pool no matter how far apart their
+    generation rates drift, which is what forces preemption/recompute.
     """
-    numerator, denominator = SURVIVOR_HEADROOM
-    return engine_minimum_kv_bytes(SURVIVOR_MAX_MODEL_LEN) * numerator // denominator
+    floor_blocks = engine_minimum_kv_bytes(SURVIVOR_MAX_MODEL_LEN) // (
+        kv_bytes_per_block()
+    )
+    return (floor_blocks + SURVIVOR_KV_HEADROOM_BLOCKS) * kv_bytes_per_block()
+
+
+def allocatable_blocks(budget_blocks: int) -> int:
+    """Blocks a request can actually be given out of a ``budget_blocks`` pool.
+
+    ``BlockPool`` pops one block off the free queue as the null block, and
+    ``get_usage`` divides by ``num_gpu_blocks - 1``. A pool pinned with
+    ``num_gpu_blocks_override=69`` therefore hands out 68 blocks, and a reported
+    usage of 98.750% is 79 of 80 blocks, not 80 of 81. Every survivor
+    inequality is stated against this number so the printed receipt and the
+    arithmetic share one denominator.
+    """
+    return budget_blocks - 1
 
 
 def blocks_for_tokens(tokens: int) -> int:
     """Blocks the allocator rounds a request's ``tokens`` up to."""
     return cdiv(tokens, BLOCK_SIZE)
+
+
+def min_resident_blocks(prompt_tokens: int) -> int:
+    """Blocks an admitted request holds before it has generated anything.
+
+    Its rounded prompt plus one block for the first decode step (which is also
+    what the Uno lookahead reservation rounds into for these prompt lengths).
+    A request that is merely lagging, rather than preempted or finished, never
+    holds less than this while it is running.
+    """
+    return blocks_for_tokens(prompt_tokens) + 1
 
 
 def prompt_token_ids_are_pairwise_content_distinct(
@@ -159,22 +202,48 @@ def mixed_growth_blocks(
     )
 
 
+def worst_case_crossing_tokens(
+    peer_prompt_tokens: int,
+    other_peer_prompt_tokens: Sequence[int],
+    allocatable: int,
+) -> int:
+    """Generated tokens at which ONE peer alone must outgrow the pool.
+
+    ``mixed_crossing_tokens`` assumes the long peers grow together. They do not:
+    Uno's acceptance is prompt-dependent, so one peer can run several times
+    faster than its twin, and a pair that only crosses *together* never crosses
+    at all when the leader reaches its cap while the laggard still sits near its
+    admission footprint. This is the counted version of that worst case -- the
+    leader's own footprint plus the minimum resident footprint of every other
+    live long peer -- and the survivor e2e asserts it is below the cap, so the
+    scheduler must preempt for every interleaving rather than for the lucky
+    ones.
+    """
+    held = sum(min_resident_blocks(tokens) for tokens in other_peer_prompt_tokens)
+    tokens = 0
+    while True:
+        if blocks_for_tokens(peer_prompt_tokens + tokens) + held > allocatable:
+            return tokens
+        tokens += 1
+
+
 def mixed_crossing_tokens(
     peer_prompt_tokens: int,
     shared_prefix_tokens: int,
-    budget_blocks: int,
+    capacity_blocks: int,
     *,
     prefix_cache_enabled: bool,
 ) -> int:
-    """Generated tokens at which the two long peers alone outgrow the budget.
+    """Generated tokens at which the two long peers TOGETHER outgrow the pool.
 
-    By the time the pair has grown this far the short seed has finished and the
-    abort peer is retired. Without prefix caching, each peer owns its complete
-    prompt-plus-generation footprint; with prefix caching, the warmed prefix is
-    stored once and each peer contributes only its unique growth. The survivor
-    e2e test asserts this is below ``SURVIVOR_FINISH_MAX_TOKENS``: if the
-    crossing were at or past the cap, a peer could finish naturally before the
-    scheduler had to preempt one.
+    ``capacity_blocks`` is the allocatable count, not the pinned override (see
+    ``allocatable_blocks``). By the time the pair has grown this far the short
+    seed has finished and the abort peer is retired. Without prefix caching,
+    each peer owns its complete prompt-plus-generation footprint; with prefix
+    caching, the warmed prefix is stored once and each peer contributes only its
+    unique growth. This is the *best* case for the gate and is reported for
+    continuity; the assertion that makes the gate fire is
+    ``worst_case_crossing_tokens``, which does not assume equal rates.
     """
     prefix_blocks = blocks_for_tokens(shared_prefix_tokens)
     tokens = 0
@@ -186,6 +255,6 @@ def mixed_crossing_tokens(
             resident_blocks = prefix_blocks + 2 * unique
         else:
             resident_blocks = 2 * blocks_for_tokens(peer_prompt_tokens + tokens)
-        if resident_blocks > budget_blocks:
+        if resident_blocks > capacity_blocks:
             return tokens
         tokens += 1
