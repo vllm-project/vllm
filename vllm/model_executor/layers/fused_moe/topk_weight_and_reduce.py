@@ -164,8 +164,8 @@ class TopKWeightAndReduceNaiveBatched(mk.TopKWeightAndReduce):
         first_expert = num_local_experts * self.rank
         last_expert = first_expert + num_local_experts
 
-        # Vectorized weighted scatter-add (single nonzero sync instead of a
-        # per-expert loop; mirrors the dispatch path).
+        # Vectorized weight application and reduction (single nonzero sync
+        # instead of a per-expert loop; mirrors the dispatch path).
         local_ids = torch.arange(
             first_expert, last_expert, device=topk_ids.device
         ).view(-1, 1, 1)
@@ -174,10 +174,18 @@ class TopKWeightAndReduceNaiveBatched(mk.TopKWeightAndReduce):
         slots = hits.to(torch.int32).cumsum(dim=1) - 1  # [E_local, T]
         e_idx, t_idx = hits.nonzero(as_tuple=True)
         gathered = fused_expert_output[e_idx, slots[e_idx, t_idx], :]
+        matched_routes = matching[e_idx, t_idx]
+        route_slots = matched_routes.to(torch.int32).argmax(dim=1)
         if not apply_router_weight_on_input:
-            # weight of token t at expert e: the topk weight on the matching slot
-            weights = (matching * topk_weights.unsqueeze(0)).sum(dim=2)  # [E_local, T]
-            gathered = gathered * weights[e_idx, t_idx].unsqueeze(1).to(gathered.dtype)
-        output.index_add_(0, t_idx, gathered.to(output.dtype))
+            weights = (matched_routes * topk_weights[t_idx]).sum(dim=1)
+            gathered = gathered * weights.unsqueeze(1).to(gathered.dtype)
+
+        reduction_input = torch.zeros(
+            (num_tokens, topk_ids.size(1), K),
+            device=output.device,
+            dtype=output.dtype,
+        )
+        reduction_input[t_idx, route_slots] = gathered.to(output.dtype)
+        ops.moe_sum(reduction_input, output)
 
         return output
