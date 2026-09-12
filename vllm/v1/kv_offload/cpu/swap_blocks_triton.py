@@ -53,6 +53,7 @@ def swap_blocks_batch(
     is_src_access_order_any: bool = False,
     *,
     bytes_per_chunk: int,
+    src_addr_delta: int = 0,
 ) -> None:
     """Triton implementation of ``swap_blocks_batch`` for small CPU->GPU batches."""
     n = src_addrs.numel()
@@ -65,8 +66,13 @@ def swap_blocks_batch(
             is_src_access_order_any=is_src_access_order_any,
         )
         return
+    src = src_addrs.to("cuda", non_blocking=True)
+    if src_addr_delta:
+        # host -> device address on ROCm's non-unified mmap. .to() copied
+        # from CPU above, so src is a fresh tensor and add_ is safe.
+        src.add_(src_addr_delta)
     _swap_blocks_kernel[(min(NUM_SMS, n),)](
-        src_addrs.to("cuda", non_blocking=True),
+        src,
         dst_addrs.to("cuda", non_blocking=True),
         sizes.to("cuda", non_blocking=True),
         n,

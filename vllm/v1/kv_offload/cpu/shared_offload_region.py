@@ -209,6 +209,7 @@ class SharedOffloadRegion:
         self._views: list[torch.Tensor] = []
         self._canonical_offset = 0
         self.is_pinned: bool = False
+        self.device_delta: int = 0
 
     def create_next_worker_view(self, tensor_page_size: int) -> torch.Tensor:
         """Allocate a strided int8 view for this worker, one canonical tensor.
