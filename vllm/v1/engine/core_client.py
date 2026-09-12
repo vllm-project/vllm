@@ -276,6 +276,8 @@ class EngineCoreClient(ABC):
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        *,
+        wait_for_inflight_batches: bool = False,
     ) -> list[_R]:
         raise NotImplementedError
 
@@ -377,6 +379,8 @@ class EngineCoreClient(ABC):
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        *,
+        wait_for_inflight_batches: bool = False,
     ) -> list[_R]:
         raise NotImplementedError
 
@@ -521,8 +525,12 @@ class InprocClient(EngineCoreClient):
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        *,
+        wait_for_inflight_batches: bool = False,
     ) -> list[_R]:
-        return self.engine_core.collective_rpc(method, timeout, args, kwargs)
+        return self.engine_core.collective_rpc(
+            method, timeout, args, kwargs, wait_for_inflight_batches
+        )
 
     def dp_engines_running(self) -> bool:
         return False
@@ -1172,8 +1180,12 @@ class SyncMPClient(MPClient):
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        *,
+        wait_for_inflight_batches: bool = False,
     ) -> list[_R]:
-        return self.call_utility("collective_rpc", method, timeout, args, kwargs)
+        return self.call_utility(
+            "collective_rpc", method, timeout, args, kwargs, wait_for_inflight_batches
+        )
 
     def save_sharded_state(
         self, path: str, pattern: str | None = None, max_size: int | None = None
@@ -1484,9 +1496,11 @@ class AsyncMPClient(MPClient):
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        *,
+        wait_for_inflight_batches: bool = False,
     ) -> list[_R]:
         return await self.call_utility_async(
-            "collective_rpc", method, timeout, args, kwargs
+            "collective_rpc", method, timeout, args, kwargs, wait_for_inflight_batches
         )
 
     async def compute_weight_checksums_async(self) -> list[dict[str, str]]:
