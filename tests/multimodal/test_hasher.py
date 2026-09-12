@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 
 from vllm.config.multimodal import MMHasherAlgorithm
 from vllm.multimodal.hasher import MultiModalHasher
@@ -204,8 +204,6 @@ def test_hash_image_exif_id():
 def test_hash_image_malformed_exif():
     # Test that images with malformed EXIF headers (e.g. invalid TIFF header)
     # do not raise an unhandled exception during hashing and fall back to image data.
-    from PIL import ImageOps
-
     buf = BytesIO()
     Image.new("RGB", (64, 48)).save(buf, "JPEG")
     jpg = buf.getvalue()
