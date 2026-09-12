@@ -1681,7 +1681,10 @@ class Qwen2VLForConditionalGeneration(
         values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
-        pixel_values = values.pop("pixel_values")
+        pixel_values = self.input_norm(
+            values.pop("pixel_values"),
+            self.visual.dtype,
+        )
         metadata = values
         return self.visual(pixel_values, None, encoder_metadata=metadata)
 
@@ -1690,7 +1693,9 @@ class Qwen2VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         path: str = "default",
     ) -> torch.Tensor:
-        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
+        pixel_values = self.input_norm(
+            self._get_pixel_values_by_modality(mm_kwargs), self.visual.dtype
+        )
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
         return self.visual(pixel_values, grid_thw)
 

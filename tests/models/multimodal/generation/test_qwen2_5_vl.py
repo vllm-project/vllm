@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
+import torch
 
 from vllm.assets.image import ImageAsset
+from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from vllm.multimodal.video import sample_frames_from_video
 from vllm.platforms import current_platform
 
@@ -49,6 +53,71 @@ def _encoder_cudagraph_config(*, max_vision_items: int) -> dict:
         "cudagraph_mm_encoder": True,
         "encoder_cudagraph_max_vision_items_per_batch": max_vision_items,
     }
+
+
+def test_qwen2_5_vl_encoder_cudagraph_normalizes_pixels() -> None:
+    """Graph replay and eager fallback match the normal image input path."""
+
+    class InputNorm:
+        def __init__(self):
+            self.dtypes: list[torch.dtype] = []
+
+        def __call__(
+            self, pixel_values: torch.Tensor, dtype: torch.dtype
+        ) -> torch.Tensor:
+            self.dtypes.append(dtype)
+            return pixel_values.to(dtype) + 1
+
+    class Visual:
+        dtype = torch.float16
+
+        def prepare_encoder_metadata(
+            self, *_args, **_kwargs
+        ) -> dict[str, torch.Tensor]:
+            return {}
+
+        def __call__(
+            self, pixel_values: torch.Tensor, grid_thw: list[list[int]], **_kwargs
+        ) -> torch.Tensor:
+            self.pixel_values = pixel_values
+            self.grid_thw = grid_thw
+            return pixel_values
+
+    visual = Visual()
+    input_norm = InputNorm()
+    adapter = SimpleNamespace(
+        visual=visual,
+        input_norm=input_norm,
+        get_input_modality=lambda _: "image",
+        _get_grid_thw_by_modality=lambda kwargs: kwargs["image_grid_thw"],
+        _get_pixel_values_by_modality=lambda kwargs: kwargs["pixel_values"],
+    )
+    pixel_values = torch.zeros(4, 12)
+    mm_kwargs = {
+        "pixel_values": pixel_values,
+        "image_grid_thw": [[1, 2, 2]],
+    }
+
+    replay = (
+        Qwen2_5_VLForConditionalGeneration.prepare_encoder_cudagraph_replay_buffers(
+            adapter, mm_kwargs, max_batch_size=1, max_frames_per_batch=1
+        )
+    )
+    expected = torch.ones_like(pixel_values, dtype=visual.dtype)
+    torch.testing.assert_close(replay.values["pixel_values"], pixel_values)
+    cudagraph_output = Qwen2_5_VLForConditionalGeneration.encoder_cudagraph_forward(
+        adapter, {"pixel_values": pixel_values}
+    )
+    torch.testing.assert_close(cudagraph_output, expected)
+    assert visual.grid_thw is None
+
+    output = Qwen2_5_VLForConditionalGeneration.encoder_eager_forward(
+        adapter, mm_kwargs
+    )
+    torch.testing.assert_close(output, expected)
+    torch.testing.assert_close(visual.pixel_values, expected)
+    assert visual.grid_thw == [[1, 2, 2]]
+    assert input_norm.dtypes == [visual.dtype, visual.dtype]
 
 
 @pytest.mark.core_model
