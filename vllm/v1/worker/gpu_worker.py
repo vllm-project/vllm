@@ -1281,7 +1281,7 @@ class Worker(WorkerBase):
             logger.debug("Starting CUDA profiler")
             return CudaProfilerWrapper(profiler_config)
 
-        assert profiler_type == "proton"
+        assert profiler_type == "proton", f"Unknown profiler type: {profiler_type}"
         logger.debug("Starting Proton profiler with trace name: %s", trace_name)
         return ProtonProfilerWrapper(profiler_config, worker_name=trace_name)
 
