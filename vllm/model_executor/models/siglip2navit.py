@@ -248,6 +248,7 @@ class Siglip2Attention(nn.Module):
         values = values.view(seq_length, self.num_heads_per_partition, self.head_dim)
 
         if self.use_rope:
+            assert position_embeddings is not None
             cos, sin = position_embeddings
             queries, keys = apply_rotary_pos_emb(
                 queries.unsqueeze(0),
