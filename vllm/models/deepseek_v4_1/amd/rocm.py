@@ -13,7 +13,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.models.deepseek_v4_1.attention import DeepseekV4Attention
+from vllm.models.deepseek_v4_1.attention import AttentionOutput, DeepseekV4Attention
 from vllm.models.deepseek_v4_1.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v4_1.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
@@ -659,8 +659,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
-        output: torch.Tensor,
+        output: AttentionOutput,
     ) -> None:
+        assert isinstance(output, torch.Tensor)
         assert output.shape == q.shape, (
             f"output buffer shape {output.shape} must match q shape {q.shape}"
         )
