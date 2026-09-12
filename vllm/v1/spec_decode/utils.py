@@ -326,7 +326,11 @@ def copy_and_expand_eagle_inputs_kernel(
     total_input_tokens,  # tl.int32
     num_padding_slots_per_request,  # tl.int32
     shift_input_ids,  # tl.bool
+    anchor_flags_ptr,  # [num_reqs] int32: 1 if this request gets an anchor row
+    out_is_anchor_mask_ptr,  # [total_draft_tokens_in_batch] (output)
+    net_new_slots_per_request,  # tl.int32: output rows added per request
     BLOCK_SIZE_TOKENS: tl.constexpr,  # Blocks along token dim to handle prefills
+    ANCHOR: tl.constexpr,  # PARD-2: prepend the token-0 anchor row
 ):
     """
     Copy and expand inputs from the target model to the drafting buffers for Eagle
@@ -348,21 +352,33 @@ def copy_and_expand_eagle_inputs_kernel(
     if shift_input_ids:
         num_valid_tokens = query_end_loc - query_start_loc
         input_offset = 1
-        output_start = query_start_loc + request_idx * (
-            num_padding_slots_per_request - 1
-        )
     else:
         num_valid_tokens = query_end_loc - query_start_loc + 1
         input_offset = 0
-        output_start = query_start_loc + request_idx * num_padding_slots_per_request
+    # Rows added per request, uniform across the batch: it equals
+    # num_padding_slots_per_request - 1 with the shift and
+    # num_padding_slots_per_request without, plus one more when ANCHOR.
+    output_start = query_start_loc + request_idx * net_new_slots_per_request
 
     # Number of rejected tokens from previous speculation
     num_rejected = next_query_start_loc - query_end_loc - 1
 
-    # Total output tokens for this request
-    total_output_tokens = (
-        num_valid_tokens + num_padding_slots_per_request + num_rejected
-    )
+    # Total output tokens for this request (layout without the anchor)
+    base_total = num_valid_tokens + num_padding_slots_per_request + num_rejected
+    if ANCHOR:
+        # PARD-2 anchor: every request gets exactly one extra row. A request
+        # whose first target position is 0 (its prefill) gets the anchor row
+        # -- token 0, position 0, zero hidden state -- at the FRONT, and all
+        # of its real rows shift by one. Any other request instead gets a junk
+        # (rejected) row at the END, so the per-request row count stays
+        # uniform. Real rows keep their true positions (target position + 1)
+        # so that the draft KV layout matches the reference implementation,
+        # which feeds the draft the full unshifted sequence.
+        anchor = tl.load(anchor_flags_ptr + request_idx)
+        total_output_tokens = base_total + 1
+    else:
+        anchor = 0
+        total_output_tokens = base_total
 
     # Process tokens in this block
     j = token_batch_idx * BLOCK_SIZE_TOKENS + tl.arange(0, BLOCK_SIZE_TOKENS)
@@ -375,20 +391,25 @@ def copy_and_expand_eagle_inputs_kernel(
     # [num_valid_tokens + num_padding_slots_per_request, total_output_tokens):
     #     rejected slots
     in_bounds = j < total_output_tokens
-    is_valid_region = j < num_valid_tokens
-    is_bonus_region = j == num_valid_tokens
-    is_parallel_draft_region = (j > num_valid_tokens) & (
-        j < num_valid_tokens + num_padding_slots_per_request
+    jj = j - anchor  # index into the layout without the anchor row
+    is_anchor_row = (anchor == 1) & (j == 0)
+    is_junk_row = (anchor == 0) & (j == base_total) & in_bounds
+    is_valid_region = (jj >= 0) & (jj < num_valid_tokens)
+    is_bonus_region = jj == num_valid_tokens
+    is_parallel_draft_region = (jj > num_valid_tokens) & (
+        jj < num_valid_tokens + num_padding_slots_per_request
     )
-    is_rejected_region = j >= num_valid_tokens + num_padding_slots_per_request
+    is_rejected_region = (
+        (jj >= num_valid_tokens + num_padding_slots_per_request) & (jj < base_total)
+    ) | is_junk_row
 
     # Compute output indices
     out_idx = output_start + j
 
     # For valid tokens, compute input index
-    in_idx = query_start_loc + input_offset + j
+    in_idx = query_start_loc + input_offset + jj
     # Clamp to avoid out-of-bounds access (masked loads still need valid addresses)
-    in_idx_clamped = tl.minimum(in_idx, total_input_tokens - 1)
+    in_idx_clamped = tl.minimum(tl.maximum(in_idx, 0), total_input_tokens - 1)
 
     # Load input tokens (masked to valid region)
     token_ids = tl.load(
@@ -407,12 +428,19 @@ def copy_and_expand_eagle_inputs_kernel(
         is_parallel_draft_region, parallel_drafting_token_id, token_ids
     )
     token_ids = tl.where(is_rejected_region, padding_token_id, token_ids)
+    if ANCHOR:
+        first_token = tl.load(target_token_ids_ptr + query_start_loc)
+        token_ids = tl.where(is_anchor_row, first_token, token_ids)
 
     # Build final positions:
     # Positions are NOT shifted - they start from the first input position and increment
     # Output position j gets start_pos + j
     # (e.g., input positions [5,6,7] -> output [5,6,7,8,9,...])
-    positions = start_pos + j
+    if ANCHOR:
+        positions = start_pos + jj + 1  # true positions (+1 for the anchor entry)
+        positions = tl.where(is_anchor_row, start_pos, positions)
+    else:
+        positions = start_pos + j
     # Rejected positions are don't-care, set to 0
     positions = tl.where(is_rejected_region, 0, positions)
 
@@ -423,11 +451,11 @@ def copy_and_expand_eagle_inputs_kernel(
     # Compute indices of new tokens (bonus + parallel drafting) for sampling
     # New tokens are at positions
     #     [num_valid_tokens, num_valid_tokens + num_padding_slots_per_request)
-    is_new_token_region = (j >= num_valid_tokens) & (
-        j < num_valid_tokens + num_padding_slots_per_request
+    is_new_token_region = (jj >= num_valid_tokens) & (
+        jj < num_valid_tokens + num_padding_slots_per_request
     )
     new_token_local_idx = (
-        j - num_valid_tokens
+        jj - num_valid_tokens
     )  # 0 for bonus, 1, 2, ... for parallel drafting
     new_token_out_idx = (
         request_idx * num_padding_slots_per_request + new_token_local_idx
@@ -438,8 +466,8 @@ def copy_and_expand_eagle_inputs_kernel(
     # Hidden states don't get shifted, so we map all input tokens (including rejected)
     if shift_input_ids:
         num_input_tokens_this_request = next_query_start_loc - query_start_loc
-        is_input_region = j < num_input_tokens_this_request
-        src_idx = query_start_loc + j
+        is_input_region = (jj >= 0) & (jj < num_input_tokens_this_request)
+        src_idx = query_start_loc + jj
         tl.store(out_hidden_state_mapping_ptr + src_idx, out_idx, mask=is_input_region)
 
     # Store outputs
@@ -447,6 +475,10 @@ def copy_and_expand_eagle_inputs_kernel(
     tl.store(out_positions_ptr + out_idx, positions, mask=in_bounds)
     tl.store(out_is_rejected_token_mask_ptr + out_idx, is_rejected_out, mask=in_bounds)
     tl.store(out_is_masked_token_mask_ptr + out_idx, is_masked_out, mask=in_bounds)
+    if ANCHOR:
+        tl.store(
+            out_is_anchor_mask_ptr + out_idx, is_anchor_row & in_bounds, mask=in_bounds
+        )
     tl.store(
         out_new_token_indices_ptr + new_token_out_idx,
         out_idx,
