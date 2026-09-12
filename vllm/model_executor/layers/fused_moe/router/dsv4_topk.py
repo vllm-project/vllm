@@ -1,10 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 
 _TOPK = 6
 
@@ -33,6 +42,14 @@ def can_use_dsv4_topk(
         and renormalize
         and indices_dtype in (torch.int32, torch.uint32, torch.int64)
     )
+
+
+def _image_sentinel_base_id() -> int:
+    from vllm.models.deepseek_v4.common.mm_preprocess import (
+        IMAGE_SENTINEL_BASE_ID,
+    )
+
+    return IMAGE_SENTINEL_BASE_ID
 
 
 if current_platform.is_cuda():
@@ -112,6 +129,63 @@ if current_platform.is_cuda():
         tl.store(topk_weights_ptr + output_offsets, selected_weights, mask=output_mask)
         tl.store(topk_ids_ptr + output_offsets, selected_ids, mask=output_mask)
 
+    def _dsv4_topk_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+        hf_config = vllm_config.model_config.hf_config
+        num_experts = hf_config.n_routed_experts
+        has_vl: Any = WarmupChoices(
+            False,
+            getattr(vllm_config.model_config.hf_config, "vision_n_layers", 0) > 0,
+        )
+        launch_pdl: Any = WarmupChoices(False, True)
+        return dict(
+            gating_output=TritonWarmupTensor(torch.float32, shape=(1, num_experts)),
+            correction_bias=TritonWarmupTensor(torch.float32, shape=(num_experts,)),
+            topk_weights=TritonWarmupTensor(torch.float32, shape=(1, _TOPK)),
+            topk_ids=TritonWarmupTensor(
+                torch.int64
+                if vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+                else torch.int32,
+                shape=(1, _TOPK),
+            ),
+            routed_scaling_factor=float(
+                getattr(hf_config, "routed_scaling_factor", 1.0)
+            ),
+            input_ids=TritonWarmupTensor(torch.int64) if has_vl else None,
+            bias_vl=TritonWarmupTensor(torch.float32, shape=(num_experts,))
+            if has_vl
+            else None,
+            image_sentinel_lo=_image_sentinel_base_id() if has_vl else 0,
+            launch_pdl=launch_pdl,
+        )
+
+    @triton_kernel_dispatcher_with_warmup(
+        kernel=_dsv4_topk_kernel,
+        warmup_inputs=_dsv4_topk_warmup_inputs,
+    )
+    def _DSV4_TOPK_KERNEL(
+        gating_output: torch.Tensor,
+        correction_bias: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        routed_scaling_factor: float,
+        input_ids: torch.Tensor | None = None,
+        bias_vl: torch.Tensor | None = None,
+        image_sentinel_lo: int = 0,
+        launch_pdl: bool | None = None,
+    ) -> DispatchSpec:
+        num_tokens, num_experts = gating_output.shape
+        return (num_tokens,), dict(
+            NUM_EXPERTS=num_experts,
+            BLOCK_N=next_power_of_2(num_experts),
+            HAS_VL=bias_vl is not None and image_sentinel_lo > 0,
+            num_warps=1,
+            launch_pdl=(
+                current_platform.is_arch_support_pdl()
+                if launch_pdl is None
+                else launch_pdl
+            ),
+        )
+
 
 def dsv4_topk(
     gating_output: torch.Tensor,
@@ -123,7 +197,6 @@ def dsv4_topk(
     image_sentinel_lo: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens, num_experts = gating_output.shape
-    has_vl = bias_vl is not None and image_sentinel_lo > 0
     if bias_vl is not None:
         assert input_ids is not None, "bias_vl routing requires input_ids"
         assert bias_vl.dtype == torch.float32 and bias_vl.is_contiguous()
@@ -133,7 +206,7 @@ def dsv4_topk(
     topk_weights = gating_output.new_empty(shape, dtype=torch.float32)
     topk_ids = gating_output.new_empty(shape, dtype=indices_dtype)
     if num_tokens > 0:
-        _dsv4_topk_kernel[(num_tokens,)](
+        _DSV4_TOPK_KERNEL(
             gating_output,
             correction_bias,
             topk_weights,
@@ -142,10 +215,5 @@ def dsv4_topk(
             input_ids,
             bias_vl,
             image_sentinel_lo,
-            NUM_EXPERTS=num_experts,
-            BLOCK_N=triton.next_power_of_2(num_experts),
-            HAS_VL=has_vl,
-            num_warps=1,
-            launch_pdl=current_platform.is_arch_support_pdl(),
         )
     return topk_weights, topk_ids

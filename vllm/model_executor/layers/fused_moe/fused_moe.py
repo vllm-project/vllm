@@ -31,6 +31,15 @@ from vllm.model_executor.layers.fused_moe.utils import (
     resolve_moe_use_td,
     warn_if_moe_use_td_ineffective,
 )
+from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
+    WarmupIntRange,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
@@ -295,6 +304,8 @@ def fused_moe_kernel_gptq_awq(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
+# NOTE(zyongye): we can remove all the wna16 kernel
+# once we drop off sm75 support
 @triton.jit
 def fused_moe_kernel(
     # Pointers to matrices
@@ -610,8 +621,187 @@ def fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-# NOTE(zyongye): we can remove all the wna16 kernel
-# once we drop off sm75 support
+def _fused_moe_triton_kernel_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    hf = vllm_config.model_config.hf_config
+    hidden_size = hf.hidden_size
+    intermediate_size = hf.moe_intermediate_size
+    num_experts = hf.n_routed_experts
+    config_top_k = hf.num_experts_per_tok
+    batch_tokens: Any = WarmupIntRange(
+        1, vllm_config.scheduler_config.max_num_batched_tokens + 1
+    )
+    scenario: Any = WarmupChoices(0, 1, 2, 3, 4, 5, 6, 7)
+    second_gemm = scenario % 2 == 1
+    naive = scenario % 4 >= 2
+    use_fp8 = scenario >= 4
+    routed_multiplier = config_top_k if second_gemm else 1
+    n = hidden_size if second_gemm else 2 * intermediate_size
+    k = intermediate_size if second_gemm else hidden_size
+    top_k = 1 if second_gemm else config_top_k
+    mul_weight = second_gemm
+    dtype = torch.float8_e4m3fn if use_fp8 else vllm_config.model_config.dtype
+    group = 128 if use_fp8 else 0
+    config = _triton_moe_config(
+        num_experts=num_experts,
+        hidden_size=hidden_size,
+        intermediate_size=intermediate_size,
+        top_k=config_top_k,
+        config_dtype=_get_config_dtype_str(
+            use_fp8_w8a8=use_fp8,
+            use_int8_w8a16=False,
+            use_int4_w4a16=False,
+            dtype=dtype,
+        ),
+        num_tokens=batch_tokens,
+        group_n=group,
+        group_k=group,
+    )
+    block_m = config["BLOCK_SIZE_M"]
+    em = _triton_moe_em(batch_tokens * routed_multiplier, top_k, block_m, naive)
+    valid = batch_tokens * routed_multiplier * top_k
+    scale_cols = triton.cdiv(k, group) if group > 0 else 1
+    return dict(
+        A=TritonWarmupTensor(dtype, shape=(1, k)),
+        B=TritonWarmupTensor(dtype, shape=(1, n, k)),
+        C=TritonWarmupTensor(torch.bfloat16, shape=(1, top_k, n)),
+        B_bias=None,
+        A_scale=TritonWarmupTensor(torch.float32, shape=(1, scale_cols))
+        if use_fp8
+        else None,
+        B_scale=TritonWarmupTensor(torch.float32, shape=(1, n, scale_cols))
+        if use_fp8
+        else None,
+        topk_weights=TritonWarmupTensor(torch.float32) if mul_weight else None,
+        sorted_token_ids=None if naive else TritonWarmupTensor(torch.int32),
+        expert_ids=TritonWarmupTensor(torch.int32),
+        num_tokens_post_padded=TritonWarmupTensor(torch.int32),
+        N=n,
+        K=k,
+        EM=em,
+        num_valid_tokens=valid,
+        stride_am=k,
+        stride_ak=1,
+        stride_be=n * k,
+        stride_bk=1,
+        stride_bn=k,
+        stride_cm=n,
+        stride_cn=1,
+        stride_asm=scale_cols if group else 0,
+        stride_ask=1 if group else 0,
+        stride_bse=n * scale_cols if group else 0,
+        stride_bsk=1 if group else 0,
+        stride_bsn=scale_cols if group else 0,
+        stride_bbe=0,
+        stride_bbn=0,
+        group_n=group,
+        group_k=group,
+        dtype=dtype,
+        A_ROWS=valid,
+        naive_block_assignment=naive,
+        BLOCK_SIZE_M=block_m,
+        BLOCK_SIZE_N=config["BLOCK_SIZE_N"],
+        BLOCK_SIZE_K=config["BLOCK_SIZE_K"],
+        GROUP_SIZE_M=config["GROUP_SIZE_M"],
+        SPLIT_K=config["SPLIT_K"],
+        MUL_ROUTED_WEIGHT=mul_weight,
+        top_k=top_k,
+        compute_type=_triton_moe_compute_type(dtype),
+        use_fp8_w8a8=use_fp8,
+        use_int8_w8a8=False,
+        use_int8_w8a16=False,
+        per_channel_quant=False,
+        HAS_BIAS=False,
+        SWAP_AB=use_fp8 and enable_swap_ab(block_m, config["BLOCK_SIZE_N"]),
+        USE_TD=resolve_moe_use_td() and not use_fp8 and k % config["BLOCK_SIZE_K"] == 0,
+        num_warps=config["num_warps"],
+        num_stages=config["num_stages"],
+        waves_per_eu=config.get("waves_per_eu"),
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=fused_moe_kernel,
+    warmup_inputs=_fused_moe_triton_kernel_warmup_inputs,
+)
+def _FUSED_MOE_TRITON_KERNEL(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    B_bias: torch.Tensor | None,
+    A_scale: torch.Tensor | None,
+    B_scale: torch.Tensor | None,
+    topk_weights: torch.Tensor | None,
+    sorted_token_ids: torch.Tensor | None,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    N: int,
+    K: int,
+    EM: int,
+    num_valid_tokens: int,
+    stride_am: int,
+    stride_ak: int,
+    stride_be: int,
+    stride_bk: int,
+    stride_bn: int,
+    stride_cm: int,
+    stride_cn: int,
+    stride_asm: int,
+    stride_ask: int,
+    stride_bse: int,
+    stride_bsk: int,
+    stride_bsn: int,
+    stride_bbe: int,
+    stride_bbn: int,
+    group_n: int,
+    group_k: int,
+    *,
+    dtype: torch.dtype,
+    A_ROWS: int,
+    naive_block_assignment: bool,
+    BLOCK_SIZE_M: int,
+    BLOCK_SIZE_N: int,
+    BLOCK_SIZE_K: int,
+    GROUP_SIZE_M: int,
+    SPLIT_K: int,
+    MUL_ROUTED_WEIGHT: bool,
+    top_k: int,
+    compute_type: tl.dtype,
+    use_fp8_w8a8: bool,
+    use_int8_w8a8: bool,
+    use_int8_w8a16: bool,
+    per_channel_quant: bool,
+    HAS_BIAS: bool,
+    SWAP_AB: bool,
+    USE_TD: bool = False,
+    num_warps: int = 4,
+    num_stages: int = 3,
+    waves_per_eu: int | None = None,
+    matrix_instr_nonkdim: int | None = None,
+    kpack: int | None = None,
+) -> DispatchSpec:
+    grid: Any = lambda META: (
+        triton.cdiv(EM, META["BLOCK_SIZE_M"])
+        * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
+    )
+    launch_kwargs = dict(
+        a_ptr=A,
+        b_ptr=B,
+        c_ptr=C,
+        b_bias_ptr=B_bias,
+        a_scale_ptr=A_scale,
+        b_scale_ptr=B_scale,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+    if waves_per_eu is not None:
+        launch_kwargs["waves_per_eu"] = waves_per_eu
+    if matrix_instr_nonkdim is not None:
+        launch_kwargs["matrix_instr_nonkdim"] = matrix_instr_nonkdim
+    if kpack is not None:
+        launch_kwargs["kpack"] = kpack
+    return grid, launch_kwargs
+
+
 def invoke_fused_moe_wna16_cuda_kernel(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -833,10 +1023,6 @@ def invoke_fused_moe_triton_kernel(
             )
     else:
         EM = num_tokens * config["BLOCK_SIZE_M"]
-    grid = lambda META: (
-        triton.cdiv(EM, META["BLOCK_SIZE_M"])
-        * triton.cdiv(B.size(1), META["BLOCK_SIZE_N"]),
-    )
     HAS_BIAS = B_bias is not None
 
     config = config.copy()
@@ -857,13 +1043,12 @@ def invoke_fused_moe_triton_kernel(
             BLOCK_SIZE_K,
         )
         use_td = False
-
     # Triton treats 0-D tensor arguments as scalar values, but the kernel
     # loads tensor-wise activation scales through a pointer.
     if A_scale is not None and A_scale.ndim == 0:
         A_scale = A_scale.reshape(1)
 
-    fused_moe_kernel[grid](
+    _FUSED_MOE_TRITON_KERNEL(
         A,
         B,
         C,
@@ -894,6 +1079,8 @@ def invoke_fused_moe_triton_kernel(
         B_bias.stride(1) if B_bias is not None else 0,
         0 if block_shape is None else block_shape[0],
         0 if block_shape is None else block_shape[1],
+        dtype=A.dtype,
+        A_ROWS=A.size(0),
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         top_k=top_k,
         compute_type=compute_type,
@@ -1052,6 +1239,41 @@ def compute_identity_kernel(
     )
 
 
+def _compute_identity_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    hidden_dim = vllm_config.model_config.hf_config.hidden_size
+    top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+    dtype = vllm_config.model_config.dtype
+    num_tokens: Any = WarmupIntRange(
+        1, min(vllm_config.scheduler_config.max_num_batched_tokens, 16) + 1
+    )
+    return dict(
+        top_k=top_k,
+        hidden_states=TritonWarmupTensor(dtype, shape=(num_tokens, hidden_dim)),
+        expert_scales=TritonWarmupTensor(torch.float32, shape=(num_tokens, top_k)),
+        num_tokens=num_tokens,
+        output=TritonWarmupTensor(dtype, shape=(num_tokens, hidden_dim)),
+        hidden_dim=hidden_dim,
+        scales_stride=top_k,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=compute_identity_kernel, warmup_inputs=_compute_identity_warmup_inputs
+)
+def _COMPUTE_IDENTITY_KERNEL(
+    *,
+    top_k: int,
+    hidden_states: torch.Tensor,
+    expert_scales: torch.Tensor,
+    num_tokens: int,
+    output: torch.Tensor,
+    hidden_dim: int,
+    scales_stride: int,
+) -> DispatchSpec:
+    block_size = 256
+    return (num_tokens * (hidden_dim // block_size),), dict(BLOCK_SIZE=block_size)
+
+
 def zero_experts_compute_triton(
     expert_indices: torch.Tensor,
     expert_scales: torch.Tensor,
@@ -1059,9 +1281,7 @@ def zero_experts_compute_triton(
     zero_expert_type: str,
     hidden_states: torch.Tensor,
 ) -> torch.Tensor:
-    N = expert_indices.numel()
     top_k = expert_indices.size(-1)
-    grid = lambda meta: (triton.cdiv(N, meta["BLOCK_SIZE"]),)
 
     if zero_expert_type == "identity":
         zero_expert_mask = expert_indices < num_experts
@@ -1076,16 +1296,14 @@ def zero_experts_compute_triton(
     hidden_dim = hidden_states.size(-1)
     num_tokens = hidden_states.size(0)
 
-    grid = lambda meta: (num_tokens * (hidden_dim // meta["BLOCK_SIZE"]),)
-    compute_identity_kernel[grid](
-        top_k,
-        hidden_states,
-        zero_expert_scales,
-        num_tokens,
-        output,
-        hidden_dim,
-        zero_expert_scales.stride(0),
-        BLOCK_SIZE=256,
+    _COMPUTE_IDENTITY_KERNEL(
+        top_k=top_k,
+        hidden_states=hidden_states,
+        expert_scales=zero_expert_scales,
+        num_tokens=num_tokens,
+        output=output,
+        hidden_dim=hidden_dim,
+        scales_stride=zero_expert_scales.stride(0),
     )
 
     return output
@@ -1449,6 +1667,59 @@ def try_get_optimal_moe_config(
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
     return config
+
+
+def _triton_moe_config(
+    *,
+    num_experts: int,
+    hidden_size: int,
+    intermediate_size: int,
+    top_k: int,
+    config_dtype: str | None,
+    num_tokens: int,
+    group_n: int,
+    group_k: int,
+) -> dict[str, int]:
+    block_shape = [group_n, group_k] if group_n > 0 and group_k > 0 else None
+    config = try_get_optimal_moe_config(
+        (num_experts, 2 * intermediate_size, hidden_size),
+        (num_experts, hidden_size, intermediate_size),
+        top_k,
+        config_dtype,
+        num_tokens,
+        block_shape=block_shape,
+    )
+    block_size_k = (
+        min(config["BLOCK_SIZE_K"], min(group_n, group_k))
+        if block_shape is not None
+        else config["BLOCK_SIZE_K"]
+    )
+    return {
+        **config,
+        "BLOCK_SIZE_K": block_size_k,
+        "num_warps": config.get("num_warps", 4),
+        "num_stages": config.get("num_stages", 3),
+    }
+
+
+def _triton_moe_compute_type(dtype: torch.dtype) -> tl.dtype:
+    if dtype == torch.float32:
+        return tl.float32
+    if dtype == torch.float16:
+        return tl.float16
+    return tl.bfloat16
+
+
+def _triton_moe_em(
+    num_tokens: int,
+    top_k: int,
+    block_size_m: int,
+    naive_block_assignment: bool,
+) -> int:
+    routed_tokens = num_tokens * top_k
+    if naive_block_assignment:
+        return routed_tokens * block_size_m
+    return triton.cdiv(routed_tokens, block_size_m) * block_size_m
 
 
 def fused_experts_op(

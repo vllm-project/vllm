@@ -9,7 +9,16 @@ steps:
   source_file_dependencies:
   - vllm/utils/jit_monitor.py
   - vllm/v1/worker/gpu_worker.py
+  - vllm/cute_utils/
+  - vllm/model_executor/kernels/
+  - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/warmup/
+  - vllm/models/common/ops/
+  - vllm/models/deepseek_v4/
+  - vllm/v1/attention/
+  - vllm/v1/sample/
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/
   - vllm/config/observability.py
   - tests/jit_monitor/test_no_runtime_jit.py
   - tests/models/registry.py

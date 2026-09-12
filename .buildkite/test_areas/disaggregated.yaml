@@ -287,7 +287,7 @@ steps:
     PREFILL_BLOCK_SIZE: "256"
     DECODE_BLOCK_SIZE: "256"
     MODEL_NAMES: "deepseek-ai/DeepSeek-V4-Flash"
-    VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--kv-cache-dtype,fp8"
+    VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--kv-cache-dtype,fp8,--jit-monitor-mode,error"
     # The V4 indexer only supports block-outermost layouts; let it pick.
     PREFILLER_KV_LAYOUT: ""
     DECODER_KV_LAYOUT: ""

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import abstractmethod
 from collections.abc import Callable
+from typing import Any
 
 import torch
 
@@ -9,11 +10,18 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
+    _EPLB_MAP_BLOCK_SIZE = 256
 
     @triton.jit
     def _eplb_map_and_record_i32_kernel(
@@ -92,6 +100,58 @@ if current_platform.is_cuda_alike():
         safe_physical_id = tl.where(physical_id >= 0, physical_id, 0)
         tl.atomic_add(out_ptr + safe_physical_id, 1, mask=valid)
 
+    def _eplb_map_and_record_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+        top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+        num_logical_experts = vllm_config.model_config.hf_config.n_routed_experts
+        num_redundant_experts = (
+            vllm_config.parallel_config.eplb_config.num_redundant_experts
+        )
+        has_num_unpadded: Any = WarmupChoices(False, True)
+        output_dtype: Any = WarmupChoices(torch.int32, torch.int64)
+        return dict(
+            topk_ids=TritonWarmupTensor(torch.int32),
+            logical_replica_count=TritonWarmupTensor(torch.int64),
+            logical_to_physical_map=TritonWarmupTensor(torch.int64),
+            out=TritonWarmupTensor(output_dtype),
+            expert_load_view=TritonWarmupTensor(torch.int32),
+            record_enabled=TritonWarmupTensor(torch.bool),
+            num_unpadded_tokens=TritonWarmupTensor(torch.int32)
+            if has_num_unpadded
+            else None,
+            num_logical_experts=num_logical_experts,
+            map_slots=1024,
+            out_size=num_logical_experts + num_redundant_experts,
+            numel=1,
+            num_active_experts=top_k,
+        )
+
+    @triton_kernel_dispatcher_with_warmup(
+        kernel=_eplb_map_and_record_i32_kernel,
+        warmup_inputs=_eplb_map_and_record_warmup_inputs,
+    )
+    def _EPLB_MAP_AND_RECORD_KERNEL(
+        topk_ids: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        out: torch.Tensor,
+        expert_load_view: torch.Tensor,
+        record_enabled: torch.Tensor,
+        num_unpadded_tokens: torch.Tensor | None,
+        num_logical_experts: int,
+        map_slots: int,
+        out_size: int,
+        numel: int,
+        num_active_experts: int,
+    ) -> DispatchSpec:
+        grid = (triton.cdiv(numel, _EPLB_MAP_BLOCK_SIZE),)
+        return grid, dict(
+            logical_to_physical_ptr=logical_to_physical_map,
+            out_ids_ptr=out,
+            out_ptr=expert_load_view,
+            HAS_NUM_UNPADDED=num_unpadded_tokens is not None,
+            BLOCK_SIZE=_EPLB_MAP_BLOCK_SIZE,
+        )
+
     def _eplb_map_and_record_triton(
         topk_ids: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
@@ -106,9 +166,8 @@ if current_platform.is_cuda_alike():
             return topk_ids
         num_active_experts = topk_ids_in.shape[-1]
         out_flat = torch.empty((numel,), device=topk_ids.device, dtype=topk_ids.dtype)
-        grid = lambda meta: (triton.cdiv(numel, meta["BLOCK_SIZE"]),)
         assert expert_load_view.is_contiguous()
-        _eplb_map_and_record_i32_kernel[grid](
+        _EPLB_MAP_AND_RECORD_KERNEL(
             topk_ids_in,
             logical_replica_count.contiguous(),
             logical_to_physical_map.contiguous(),
@@ -121,8 +180,6 @@ if current_platform.is_cuda_alike():
             expert_load_view.shape[0],
             numel,
             num_active_experts,
-            HAS_NUM_UNPADDED=num_unpadded_tokens is not None,
-            BLOCK_SIZE=256,
         )
         return out_flat.reshape(topk_ids.shape)
 

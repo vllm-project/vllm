@@ -9,6 +9,7 @@ MoE/MLA/SSM and the sampler) run mixed, so they are unaffected.
 """
 
 from dataclasses import dataclass
+from functools import partial
 
 import pytest
 
@@ -18,38 +19,37 @@ from vllm.inputs import TokensPrompt
 from ..models.utils import dummy_hf_overrides
 from ..utils import create_new_process_for_each_test
 
-# Warmup coverage is still incomplete for these backends, so the monitor fires
-# during inference. Tracked in https://github.com/vllm-project/vllm/issues/49349;
-# drop this once the warmup contract migrations land.
-pytestmark = pytest.mark.skip(reason="Kernel warmup coverage is still incomplete")
-
 
 @dataclass(frozen=True)
 class JitModel:
     model: str
     draft: str | None = None
     trust_remote_code: bool = False
+    num_dummy_layers: int | None = None
 
 
 JIT_MONITOR_MODELS = [
-    JitModel("Qwen/Qwen3-0.6B"),
-    JitModel("deepseek-ai/DeepSeek-V2-Lite-Chat", trust_remote_code=True),
-    JitModel("deepseek-ai/DeepSeek-V3", trust_remote_code=True),
-    JitModel("ibm-granite/granite-4.0-tiny-preview"),
     JitModel(
-        "luccafong/deepseek_mtp_main_random",
-        draft="luccafong/deepseek_mtp_draft_random",
+        "deepseek-ai/DeepSeek-V4-Flash",
         trust_remote_code=True,
+        num_dummy_layers=4,
     ),
     JitModel(
-        "eagle618/deepseek-v3-random",
-        draft="eagle618/eagle-deepseek-v3-random",
+        "deepseek-ai/DeepSeek-V4-Flash",
+        draft="deepseek-ai/DeepSeek-V4-Flash",
         trust_remote_code=True,
+        num_dummy_layers=4,
     ),
+    JitModel(
+        "deepseek-ai/DeepSeek-V4-Pro",
+        trust_remote_code=True,
+        num_dummy_layers=4,
+    ),
+    JitModel("google/gemma-4-31B-it", trust_remote_code=True),
 ]
 
 
-def _run_shape_battery(llm: LLM) -> None:
+def _run_shape_battery(llm: LLM, *, speculative: bool) -> None:
     """Exercise diverse compile keys so missing warmup keys surface.
 
     Token-id prompts keep shapes exact and avoid depending on a tokenizer.
@@ -76,18 +76,26 @@ def _run_shape_battery(llm: LLM) -> None:
             temperature=0.8, top_k=20, top_p=0.9, min_p=0.1, max_tokens=8, seed=0
         ),
     ):
+        # min_p is currently rejected with speculative decoding.
+        if speculative and sampling_params.min_p > 0:
+            continue
         llm.generate(medium, sampling_params)
 
     # Heterogeneous SamplingParams in one step, where missing sampler warmup
     # keys most often hide.
+    heterogeneous_params = [
+        SamplingParams(temperature=0.0, max_tokens=8),
+        SamplingParams(temperature=0.8, top_k=20, max_tokens=8, seed=0),
+        SamplingParams(temperature=0.8, top_p=0.9, max_tokens=8, seed=0),
+        SamplingParams(temperature=0.8, min_p=0.1, max_tokens=8, seed=0),
+    ]
+    if speculative:
+        heterogeneous_params = [
+            params for params in heterogeneous_params if params.min_p == 0.0
+        ]
     llm.generate(
-        [medium] * 4,
-        [
-            SamplingParams(temperature=0.0, max_tokens=8),
-            SamplingParams(temperature=0.8, top_k=20, max_tokens=8, seed=0),
-            SamplingParams(temperature=0.8, top_p=0.9, max_tokens=8, seed=0),
-            SamplingParams(temperature=0.8, min_p=0.1, max_tokens=8, seed=0),
-        ],
+        [medium] * len(heterogeneous_params),
+        heterogeneous_params,
     )
 
 
@@ -107,10 +115,15 @@ def can_run_without_jit(spec: JitModel):
         max_num_seqs=8,
         gpu_memory_utilization=0.80,
         load_format="dummy",
-        hf_overrides=dummy_hf_overrides,
+        hf_overrides=(
+            partial(dummy_hf_overrides, num_dummy_layers=spec.num_dummy_layers)
+            if spec.num_dummy_layers is not None
+            else dummy_hf_overrides
+        ),
         # cuda graphs cover captured decode shapes, run eager.
         enforce_eager=False,
         jit_monitor_mode="error",
+        jit_monitor_verbose=True,
         speculative_config={
             "model": spec.draft,
             "num_speculative_tokens": 2,
@@ -120,7 +133,7 @@ def can_run_without_jit(spec: JitModel):
     )
 
     try:
-        _run_shape_battery(llm)
+        _run_shape_battery(llm, speculative=spec.draft is not None)
     except Exception as e:
         # The monitor's message contains "during inference"; distinguish a real
         # JIT miss from an unrelated crash.
@@ -132,7 +145,11 @@ def can_run_without_jit(spec: JitModel):
         raise
 
 
-@pytest.mark.parametrize("spec", JIT_MONITOR_MODELS, ids=lambda s: s.model)
+@pytest.mark.parametrize(
+    "spec",
+    JIT_MONITOR_MODELS,
+    ids=lambda s: f"{s.model}-{'mtp' if s.draft else 'base'}",
+)
 def test_no_runtime_jit(spec: JitModel, monkeypatch: pytest.MonkeyPatch):
     """Assert JIT-heavy backends do not JIT-compile during inference."""
     # Set here rather than in the child so the spawned process inherits it:

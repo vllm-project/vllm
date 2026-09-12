@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from typing import Any
 
 import deep_ep
 import torch
@@ -16,6 +17,15 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     swizzle_mxfp8_scale,
+)
+from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
+    WarmupIntRange,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
@@ -540,24 +550,59 @@ def _globalize_recv_topk_idx_kernel(
     tl.store(topk_idx_ptr + offs, tl.where(valid, g, -1), mask=mask)
 
 
+def _globalize_recv_topk_idx_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    topk = vllm_config.model_config.hf_config.num_experts_per_tok
+    num_experts = vllm_config.model_config.hf_config.n_routed_experts
+    num_tokens: Any = WarmupIntRange(
+        1, vllm_config.scheduler_config.max_num_batched_tokens + 1
+    )
+    rank_expert_offset: Any = WarmupChoices(0, 1, 2)
+    return dict(
+        recv_topk_idx=TritonWarmupTensor(torch.int64, shape=(num_tokens, topk)),
+        psum_recv_per_rank=TritonWarmupTensor(
+            torch.int32, shape=(vllm_config.parallel_config.data_parallel_size,)
+        ),
+        rank_expert_offset=rank_expert_offset,
+        num_experts=num_experts,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_globalize_recv_topk_idx_kernel,
+    warmup_inputs=_globalize_recv_topk_idx_warmup_inputs,
+)
+def _GLOBALIZE_RECV_TOPK_IDX_KERNEL(
+    recv_topk_idx: torch.Tensor,
+    psum_recv_per_rank: torch.Tensor,
+    rank_expert_offset: int,
+    num_experts: int,
+    *,
+    n_elements: int | None = None,
+    block: int = 1024,
+) -> DispatchSpec:
+    topk = recv_topk_idx.shape[1]
+    if n_elements is None:
+        n_elements = recv_topk_idx.shape[0] * topk
+    return (triton.cdiv(n_elements, block),), dict(
+        topk_idx_ptr=recv_topk_idx,
+        psum_ptr=psum_recv_per_rank,
+        P=psum_recv_per_rank.shape[0],
+        n_elements=n_elements,
+        topk=topk,
+        BLOCK=block,
+    )
+
+
 def _globalize_recv_topk_idx(
     recv_topk_idx: torch.Tensor,  # [N, topk] local expert IDs, -1 = non-local
     psum_recv_per_rank: torch.Tensor,
     rank_expert_offset: int,
     num_experts: int,
 ) -> torch.Tensor:
-    N, topk = recv_topk_idx.shape
-    n = N * topk
-    BLOCK = 1024
-    grid = (triton.cdiv(n, BLOCK),)
-    _globalize_recv_topk_idx_kernel[grid](
+    _GLOBALIZE_RECV_TOPK_IDX_KERNEL(
         recv_topk_idx,
         psum_recv_per_rank,
-        psum_recv_per_rank.shape[0],
         rank_expert_offset,
         num_experts,
-        n,
-        topk=topk,
-        BLOCK=BLOCK,
     )
     return recv_topk_idx

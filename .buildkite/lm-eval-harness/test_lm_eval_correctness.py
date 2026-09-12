@@ -72,6 +72,10 @@ def launch_lm_eval(eval_config, tp_size):
     if moe_backend is not None:
         model_args += f"moe_backend={moe_backend},"
 
+    jit_monitor_mode = eval_config.get("jit_monitor_mode")
+    if jit_monitor_mode is not None:
+        model_args += f"jit_monitor_mode={jit_monitor_mode},"
+
     if current_platform.is_rocm():
         rocm_load_strategy = eval_config.get("rocm_safetensors_load_strategy")
         if rocm_load_strategy is not None:

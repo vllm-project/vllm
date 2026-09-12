@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
 from vllm.models.inkling.nvidia import moe
 from vllm.models.inkling.nvidia.model import _TmlForCausalLMBase
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 def test_gate_loads_directly_into_padded_runtime_weight() -> None:
@@ -28,6 +29,39 @@ def test_gate_loads_directly_into_padded_runtime_weight() -> None:
     assert gate.weight.shape == (8, 4)
     torch.testing.assert_close(gate.weight[:7], loaded)
     torch.testing.assert_close(gate.weight[7], torch.zeros(4))
+
+
+def test_gate_registers_ll_bf16_warmups(monkeypatch) -> None:
+    registrations = []
+
+    monkeypatch.setattr(
+        moe.current_platform, "has_device_capability", lambda capability: True
+    )
+    monkeypatch.setattr(moe.ll_bf16, "is_available", lambda: True)
+    monkeypatch.setattr(
+        moe.ll_bf16._LL_BF16_GEMM_C1_PDL_KERNEL,
+        "register_warmup",
+        lambda **kwargs: registrations.append(("c1_pdl", kwargs)),
+    )
+    monkeypatch.setattr(
+        moe.ll_bf16._LL_BF16_GEMM_KERNEL,
+        "register_warmup",
+        lambda **kwargs: registrations.append(("default", kwargs)),
+    )
+
+    with set_default_torch_dtype(torch.bfloat16):
+        moe.InklingGate(
+            d_model=8,
+            n_routed_experts=5,
+            n_shared_experts=2,
+            experts_per_token=2,
+            route_scale=1.0,
+        )
+
+    assert registrations == [
+        ("c1_pdl", {"shapes": ((8, 8),), "m_values": (1,)}),
+        ("default", {"shapes": ((8, 8),), "m_values": range(2, 65)}),
+    ]
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")

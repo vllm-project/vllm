@@ -6,13 +6,26 @@ and updated to fit vllm needs and terminology.
 """
 
 import math
+from typing import Any
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.utils import count_expert_num_tokens
+from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
+    WarmupIntRange,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import get_mk_alignment_for_contiguous_layout
+from vllm.utils.deep_gemm import (
+    get_mk_alignment_for_contiguous_layout,
+    get_theoretical_mk_alignment_for_contiguous_layout,
+)
 from vllm.utils.math_utils import round_up
 
 
@@ -111,6 +124,22 @@ def apply_expert_map(expert_id, expert_map):
     return expert_id
 
 
+def _deep_gemm_local_num_experts(vllm_config: Any) -> int:
+    num_experts = vllm_config.model_config.hf_config.n_routed_experts
+    parallel_config = vllm_config.parallel_config
+    eplb_config = getattr(parallel_config, "eplb_config", None)
+    num_experts += int(getattr(eplb_config, "num_redundant_experts", 0) or 0)
+    if parallel_config.enable_expert_parallel:
+        try:
+            from vllm.distributed.parallel_state import get_ep_group
+
+            world_size = get_ep_group().world_size
+        except Exception:
+            world_size = parallel_config.data_parallel_size
+        num_experts //= max(world_size, 1)
+    return num_experts
+
+
 @triton.jit
 def _fwd_kernel_ep_scatter_1(
     num_recv_tokens_per_expert,
@@ -155,6 +184,52 @@ def _fwd_kernel_ep_scatter_1(
             cur_expert,
             mask=mask,
         )
+
+
+def _deepgemm_ep_scatter_start_kernel_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    num_experts = _deep_gemm_local_num_experts(vllm_config)
+    top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+    num_tokens: Any = WarmupIntRange(
+        1, vllm_config.scheduler_config.max_num_batched_tokens + 1
+    )
+    max_align_m = get_mk_alignment_for_contiguous_layout()[0]
+    align_m = min(
+        get_theoretical_mk_alignment_for_contiguous_layout(
+            expected_m=num_tokens * top_k, num_groups=num_experts
+        )
+        or max_align_m,
+        max_align_m,
+    )
+    return dict(
+        num_recv_tokens_per_expert=TritonWarmupTensor(
+            torch.int32, shape=(num_experts,)
+        ),
+        expert_start_loc=TritonWarmupTensor(torch.int32),
+        m_indices=TritonWarmupTensor(torch.int32),
+        align_m=align_m,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_fwd_kernel_ep_scatter_1,
+    warmup_inputs=_deepgemm_ep_scatter_start_kernel_warmup_inputs,
+)
+def _DEEPGEMM_EP_SCATTER_START_KERNEL(
+    num_recv_tokens_per_expert: torch.Tensor,
+    expert_start_loc: torch.Tensor,
+    m_indices: torch.Tensor,
+    *,
+    align_m: int,
+) -> DispatchSpec:
+    num_experts = num_recv_tokens_per_expert.shape[0]
+    # BLOCK_E is the m_indices fill-loop tile (masked), independent of align_m.
+    return (num_experts,), dict(
+        num_experts=num_experts,
+        num_warps=8,
+        BLOCK_E=128,
+        BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
+        ALIGN_M=align_m,
+    )
 
 
 @triton.jit
@@ -271,76 +346,81 @@ def _fwd_kernel_ep_scatter_2(
                     )
 
 
-@torch.no_grad()
-def ep_scatter(
+def _deepgemm_ep_scatter_copy_kernel_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    hidden_size = vllm_config.model_config.hf_config.hidden_size
+    topk_num = vllm_config.model_config.hf_config.num_experts_per_tok
+    total_token_num: Any = WarmupIntRange(
+        1, vllm_config.scheduler_config.max_num_batched_tokens + 1
+    )
+    pack_ue8m0: Any = WarmupChoices(False, True)
+    has_expert_map: Any = WarmupChoices(False, True)
+    default_block_size = get_mk_alignment_for_contiguous_layout()[1]
+    block_size = 32 if pack_ue8m0 else default_block_size
+    scale_hidden_size = hidden_size // block_size
+    scale_dtype = torch.int32 if pack_ue8m0 else torch.float32
+    output_scale_strides = (1, 16) if pack_ue8m0 else (scale_hidden_size, 1)
+    return dict(
+        recv_x=TritonWarmupTensor(
+            torch.float8_e4m3fn, shape=(total_token_num, hidden_size)
+        ),
+        recv_x_scale=TritonWarmupTensor(
+            scale_dtype, shape=(total_token_num, scale_hidden_size)
+        ),
+        recv_topk=TritonWarmupTensor(torch.int32, shape=(total_token_num, topk_num)),
+        expert_map=TritonWarmupTensor(torch.int32) if has_expert_map else None,
+        expert_start_loc=TritonWarmupTensor(torch.int32),
+        output_tensor=TritonWarmupTensor(
+            torch.float8_e4m3fn, shape=(total_token_num, hidden_size)
+        ),
+        output_tensor_scale=TritonWarmupTensor(
+            scale_dtype,
+            shape=(total_token_num, scale_hidden_size),
+            strides=output_scale_strides,
+        ),
+        output_index=TritonWarmupTensor(torch.int32, shape=(total_token_num, topk_num)),
+        block_size=block_size,
+        pack_ue8m0=pack_ue8m0,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_fwd_kernel_ep_scatter_2,
+    warmup_inputs=_deepgemm_ep_scatter_copy_kernel_warmup_inputs,
+)
+def _DEEPGEMM_EP_SCATTER_COPY_KERNEL(
     recv_x: torch.Tensor,
     recv_x_scale: torch.Tensor,
     recv_topk: torch.Tensor,
-    num_recv_tokens_per_expert: torch.Tensor,
     expert_map: torch.Tensor | None,
     expert_start_loc: torch.Tensor,
     output_tensor: torch.Tensor,
     output_tensor_scale: torch.Tensor,
-    m_indices: torch.Tensor,
     output_index: torch.Tensor,
-    align_m: int = 128,
-    block_size: int = 128,
-    pack_ue8m0: bool = False,
-):
-    # BLOCK_E is the m_indices fill-loop tile (masked), independent of align_m.
-    BLOCK_E = 128
-    BLOCK_D = block_size  # block size of activation-scale quantization
-    num_warps = 8
-    num_experts = num_recv_tokens_per_expert.shape[0]
+    *,
+    block_size: int,
+    pack_ue8m0: bool,
+) -> DispatchSpec:
     hidden_size = recv_x.shape[1]
-    # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
-    grid = num_experts
-
-    assert m_indices.shape[0] % align_m == 0
-    assert expert_start_loc.shape[0] == num_experts
-
     # pack_ue8m0: scatter packs 4 UE8M0 bytes per int32; else copies scales as-is.
-    scale_hidden_size = hidden_size // BLOCK_D
+    scale_hidden_size = hidden_size // block_size
     scale_packed_size = (scale_hidden_size + 3) // 4 if pack_ue8m0 else 1
-
-    _fwd_kernel_ep_scatter_1[(grid,)](
-        num_recv_tokens_per_expert,
-        expert_start_loc,
-        m_indices,
-        num_experts=num_experts,
-        num_warps=num_warps,
-        BLOCK_E=BLOCK_E,
-        BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
-        ALIGN_M=align_m,
-    )
-
-    grid = min(recv_topk.shape[0], 1024 * 8)
-
-    _fwd_kernel_ep_scatter_2[(grid,)](
-        recv_topk.shape[0],
-        expert_start_loc,
-        recv_x,
-        recv_x.stride(0),
-        recv_x.stride(1),
-        recv_x_scale,
-        recv_x_scale.stride(0),
-        recv_x_scale.stride(1),
-        recv_topk,
-        recv_topk.stride(0),
-        recv_topk.stride(1),
-        output_tensor,
-        output_tensor.stride(0),
-        output_tensor.stride(1),
-        output_tensor_scale,
-        output_tensor_scale.stride(0),
-        output_tensor_scale.stride(1),
-        output_index,
-        output_index.stride(0),
-        output_index.stride(1),
+    return (min(recv_topk.shape[0], 1024 * 8),), dict(
+        total_token_num=recv_topk.shape[0],
+        recv_x_stride0=recv_x.stride(0),
+        recv_x_stride1=recv_x.stride(1),
+        recv_x_scale_stride0=recv_x_scale.stride(0),
+        recv_x_scale_stride1=recv_x_scale.stride(1),
+        recv_topk_stride0=recv_topk.stride(0),
+        recv_topk_stride1=recv_topk.stride(1),
+        output_tensor_stride0=output_tensor.stride(0),
+        output_tensor_stride1=output_tensor.stride(1),
+        output_tensor_scale_stride0=output_tensor_scale.stride(0),
+        output_tensor_scale_stride1=output_tensor_scale.stride(1),
+        output_index_stride0=output_index.stride(0),
+        output_index_stride1=output_index.stride(1),
         topk_num=recv_topk.shape[1],
-        expert_map=expert_map,
         HAS_EXPERT_MAP=expert_map is not None,
-        num_warps=num_warps,
+        num_warps=8,
         HIDDEN_SIZE=hidden_size,
         HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
         SCALE_HIDDEN_SIZE=scale_hidden_size,
@@ -349,7 +429,52 @@ def ep_scatter(
         SCALE_PACKED_SIZE=scale_packed_size,
         SCALE_PACKED_SIZE_PAD=triton.next_power_of_2(scale_packed_size),
     )
-    return
+
+
+class DeepGemmEPScatter:
+    def __init__(
+        self,
+        *,
+        start: Any,
+        copy: Any,
+    ) -> None:
+        self.start = start
+        self.copy = copy
+
+    def __call__(
+        self,
+        recv_x: torch.Tensor,
+        recv_x_scale: torch.Tensor,
+        recv_topk: torch.Tensor,
+        num_recv_tokens_per_expert: torch.Tensor,
+        expert_map: torch.Tensor | None,
+        expert_start_loc: torch.Tensor,
+        output_tensor: torch.Tensor,
+        output_tensor_scale: torch.Tensor,
+        m_indices: torch.Tensor,
+        output_index: torch.Tensor,
+        align_m: int,
+        block_size: int,
+        pack_ue8m0: bool,
+    ) -> None:
+        self.start(
+            num_recv_tokens_per_expert,
+            expert_start_loc,
+            m_indices,
+            align_m=align_m,
+        )
+        self.copy(
+            recv_x,
+            recv_x_scale,
+            recv_topk,
+            expert_map,
+            expert_start_loc,
+            output_tensor,
+            output_tensor_scale,
+            output_index,
+            block_size=block_size,
+            pack_ue8m0=pack_ue8m0,
+        )
 
 
 @triton.jit
@@ -414,6 +539,103 @@ def _fwd_kernel_ep_gather(
         )
 
 
+def _deepgemm_ep_gather_kernel_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    hidden_size = vllm_config.model_config.hf_config.hidden_size
+    topk_num = vllm_config.model_config.hf_config.num_experts_per_tok
+    dtype = vllm_config.model_config.dtype
+    total_token_num: Any = WarmupIntRange(
+        1, vllm_config.scheduler_config.max_num_batched_tokens + 1
+    )
+    has_expert_map: Any = WarmupChoices(False, True)
+    topk_shape = (total_token_num, topk_num)
+    return dict(
+        input_tensor=TritonWarmupTensor(dtype, shape=(total_token_num, hidden_size)),
+        recv_topk_ids=TritonWarmupTensor(torch.int32, shape=topk_shape),
+        recv_topk_weight=TritonWarmupTensor(torch.float32, shape=topk_shape),
+        input_index=TritonWarmupTensor(torch.int32, shape=topk_shape),
+        expert_map=TritonWarmupTensor(torch.int32) if has_expert_map else None,
+        output_tensor=TritonWarmupTensor(dtype, shape=(total_token_num, hidden_size)),
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_fwd_kernel_ep_gather,
+    warmup_inputs=_deepgemm_ep_gather_kernel_warmup_inputs,
+)
+def _DEEPGEMM_EP_GATHER_KERNEL(
+    input_tensor: torch.Tensor,
+    recv_topk_ids: torch.Tensor,
+    recv_topk_weight: torch.Tensor,
+    input_index: torch.Tensor,
+    expert_map: torch.Tensor | None,
+    output_tensor: torch.Tensor,
+) -> DispatchSpec:
+    num_warps = 2
+    num_tokens = output_tensor.shape[0]
+    hidden_size = input_tensor.shape[1]
+    block_d = math.gcd(hidden_size, 1024)
+    assert hidden_size % block_d == 0
+    grid = (triton.cdiv(hidden_size, block_d), min(num_tokens, 1024))
+
+    return grid, dict(
+        total_token_num=num_tokens,
+        input_tensor_stride0=input_tensor.stride(0),
+        input_tensor_stride1=input_tensor.stride(1),
+        recv_topk_ids_stride0=recv_topk_ids.stride(0),
+        recv_topk_ids_stride1=recv_topk_ids.stride(1),
+        recv_topk_weight_stride0=recv_topk_weight.stride(0),
+        recv_topk_weight_stride1=recv_topk_weight.stride(1),
+        input_index_stride0=input_index.stride(0),
+        input_index_stride1=input_index.stride(1),
+        output_tensor_stride0=output_tensor.stride(0),
+        output_tensor_stride1=output_tensor.stride(1),
+        topk_num=recv_topk_ids.shape[1],
+        HAS_EXPERT_MAP=expert_map is not None,
+        num_warps=num_warps,
+        BLOCK_D=block_d,
+    )
+
+
+@torch.no_grad()
+def ep_scatter(
+    recv_x: torch.Tensor,
+    recv_x_scale: torch.Tensor,
+    recv_topk: torch.Tensor,
+    num_recv_tokens_per_expert: torch.Tensor,
+    expert_map: torch.Tensor | None,
+    expert_start_loc: torch.Tensor,
+    output_tensor: torch.Tensor,
+    output_tensor_scale: torch.Tensor,
+    m_indices: torch.Tensor,
+    output_index: torch.Tensor,
+    align_m: int = 128,
+    block_size: int = 128,
+    pack_ue8m0: bool = False,
+):
+    block_d = block_size  # block size of activation-scale quantization
+    num_experts = num_recv_tokens_per_expert.shape[0]
+
+    assert m_indices.shape[0] % align_m == 0
+    assert expert_start_loc.shape[0] == num_experts
+
+    _DEEPGEMM_EP_SCATTER(
+        recv_x,
+        recv_x_scale,
+        recv_topk,
+        num_recv_tokens_per_expert,
+        expert_map,
+        expert_start_loc,
+        output_tensor,
+        output_tensor_scale,
+        m_indices,
+        output_index,
+        align_m,
+        block_d,
+        pack_ue8m0,
+    )
+    return
+
+
 @torch.no_grad()
 def ep_gather(
     input_tensor: torch.Tensor,
@@ -423,35 +645,13 @@ def ep_gather(
     expert_map: torch.Tensor | None,
     output_tensor: torch.Tensor,
 ):
-    num_warps = 2
-    num_tokens = output_tensor.shape[0]
-    hidden_size = input_tensor.shape[1]
-    BLOCK_D = math.gcd(hidden_size, 1024)
-    assert hidden_size % BLOCK_D == 0
-    grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
-
-    _fwd_kernel_ep_gather[grid](
-        num_tokens,
+    _DEEPGEMM_EP_GATHER_KERNEL(
         input_tensor,
-        input_tensor.stride(0),
-        input_tensor.stride(1),
         recv_topk_ids,
-        recv_topk_ids.stride(0),
-        recv_topk_ids.stride(1),
         recv_topk_weight,
-        recv_topk_weight.stride(0),
-        recv_topk_weight.stride(1),
         input_index,
-        input_index.stride(0),
-        input_index.stride(1),
+        expert_map,
         output_tensor,
-        output_tensor.stride(0),
-        output_tensor.stride(1),
-        topk_num=recv_topk_ids.shape[1],
-        expert_map=expert_map,
-        HAS_EXPERT_MAP=expert_map is not None,
-        num_warps=num_warps,
-        BLOCK_D=BLOCK_D,
     )
     return
 
@@ -567,3 +767,9 @@ def deepgemm_unpermute_and_reduce(
         expert_map=expert_map,
         output_tensor=output,
     )
+
+
+_DEEPGEMM_EP_SCATTER = DeepGemmEPScatter(
+    start=_DEEPGEMM_EP_SCATTER_START_KERNEL,
+    copy=_DEEPGEMM_EP_SCATTER_COPY_KERNEL,
+)

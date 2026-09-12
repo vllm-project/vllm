@@ -216,6 +216,21 @@ class InklingGate(nn.Module):
             torch.empty(padded_experts, d_model), requires_grad=False
         )
         set_weight_attrs(self.weight, {"weight_loader": self._load_weight})
+        if (
+            self.weight.dtype == torch.bfloat16
+            and d_model % 8 == 0
+            and current_platform.has_device_capability(90)
+            and ll_bf16.is_available()
+        ):
+            shapes = ((self.weight.shape[1], self.weight.shape[0]),)
+            ll_bf16._LL_BF16_GEMM_C1_PDL_KERNEL.register_warmup(
+                shapes=shapes,
+                m_values=(1,),
+            )
+            ll_bf16._LL_BF16_GEMM_KERNEL.register_warmup(
+                shapes=shapes,
+                m_values=range(2, _INKLING_LL_BF16_MAX_TOKENS + 1),
+            )
         if use_global_scale:
             self.global_scale = Parameter(
                 torch.empty(1, dtype=torch.float32), requires_grad=False

@@ -82,7 +82,9 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferSM120Attention,
 )
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
-from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
+from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import (
+    _PREPARE_MEGAMOE_INPUTS_KERNEL,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.flashinfer_moe_ep import (
@@ -729,19 +731,19 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 self.top_k,
                 "fp8xfp4",
             )
-
-        prepare_megamoe_inputs(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            symm_buffer.x[:num_tokens],
-            symm_buffer.x_sf[:num_tokens],
-            symm_buffer.topk_idx[:num_tokens],
-            symm_buffer.topk_weights[:num_tokens],
-            is_padding=is_padding,
-            shared_x_sf=shared_x_sf,
-            shared_block_m=shared_block_m,
-        )
+        if num_tokens > 0:
+            _PREPARE_MEGAMOE_INPUTS_KERNEL(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                symm_buffer.x[:num_tokens],
+                symm_buffer.x_sf[:num_tokens],
+                symm_buffer.topk_idx[:num_tokens],
+                symm_buffer.topk_weights[:num_tokens],
+                is_padding=is_padding,
+                shared_x_sf=shared_x_sf,
+                shared_block_m=shared_block_m,
+            )
 
         assert self._transformed_l1_weights is not None
         assert self._transformed_l2_weights is not None
@@ -897,6 +899,115 @@ class DeepseekV4MoE(nn.Module):
             self._init_mega_moe_experts(vllm_config, config, prefix)
         else:
             self._init_fused_moe_experts(vllm_config, config, quant_config, prefix)
+
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
+                _DSV4_TOPK_KERNEL,
+            )
+
+            if vllm_config.parallel_config.enable_eplb:
+                from vllm.model_executor.layers.fused_moe.router.base_router import (
+                    _EPLB_MAP_AND_RECORD_KERNEL,
+                )
+
+                _EPLB_MAP_AND_RECORD_KERNEL.register_warmup()
+            if (
+                config.n_routed_experts in (256, 384)
+                and config.num_experts_per_tok == 6
+                and config.norm_topk_prob
+                and config.scoring_func == "sqrtsoftplus"
+            ):
+                _DSV4_TOPK_KERNEL.register_warmup()
+            if self.use_mega_moe:
+                from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+                    _DEEPGEMM_EP_GATHER_KERNEL,
+                    _DEEPGEMM_EP_SCATTER_COPY_KERNEL,
+                    _DEEPGEMM_EP_SCATTER_START_KERNEL,
+                )
+
+                _PREPARE_MEGAMOE_INPUTS_KERNEL.register_warmup()
+                _DEEPGEMM_EP_SCATTER_START_KERNEL.register_warmup()
+                _DEEPGEMM_EP_SCATTER_COPY_KERNEL.register_warmup()
+                _DEEPGEMM_EP_GATHER_KERNEL.register_warmup()
+            else:
+                from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (  # noqa: E501
+                    DeepGemmExperts,
+                    DeepGemmFP4Experts,
+                )
+                from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (  # noqa: E501
+                    _BATCHED_TRITON_KERNEL,
+                    BatchedTritonExperts,
+                )
+                from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+                    TritonExperts,
+                )
+                from vllm.model_executor.layers.fused_moe.fused_moe import (
+                    _COMPUTE_IDENTITY_KERNEL,
+                    _FUSED_MOE_TRITON_KERNEL,
+                )
+                from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import (
+                    _MOE_FUSED_MUL_SUM_KERNEL,
+                )
+                from vllm.model_executor.layers.fused_moe.utils import (
+                    _COUNT_EXPERT_NUM_TOKENS_KERNEL,
+                    _SWIGLU_LIMIT_PAD_AWARE_KERNEL,
+                )
+
+                experts_cls = getattr(
+                    self.experts.routed_experts.quant_method,
+                    "experts_cls",
+                    None,
+                )
+                if not isinstance(experts_cls, type) or issubclass(
+                    experts_cls, TritonExperts
+                ):
+                    _FUSED_MOE_TRITON_KERNEL.register_warmup()
+                if not isinstance(experts_cls, type) or issubclass(
+                    experts_cls, BatchedTritonExperts
+                ):
+                    _BATCHED_TRITON_KERNEL.register_warmup()
+                if isinstance(experts_cls, type) and issubclass(
+                    experts_cls, (DeepGemmExperts, DeepGemmFP4Experts)
+                ):
+                    from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (  # noqa: E501
+                        _DEEPGEMM_EP_GATHER_KERNEL,
+                        _DEEPGEMM_EP_SCATTER_COPY_KERNEL,
+                        _DEEPGEMM_EP_SCATTER_START_KERNEL,
+                    )
+
+                    _DEEPGEMM_EP_SCATTER_START_KERNEL.register_warmup()
+                    _DEEPGEMM_EP_SCATTER_COPY_KERNEL.register_warmup()
+                    _DEEPGEMM_EP_GATHER_KERNEL.register_warmup()
+                _COMPUTE_IDENTITY_KERNEL.register_warmup()
+                _MOE_FUSED_MUL_SUM_KERNEL.register_warmup()
+                _COUNT_EXPERT_NUM_TOKENS_KERNEL.register_warmup()
+                _SWIGLU_LIMIT_PAD_AWARE_KERNEL.register_warmup()
+
+                from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (  # noqa: E501
+                    Nvfp4QuantizationEmulationTritonExperts,
+                    _fused_moe_nvfp4_emulation,
+                )
+
+                if isinstance(experts_cls, type) and issubclass(
+                    experts_cls, Nvfp4QuantizationEmulationTritonExperts
+                ):
+                    _fused_moe_nvfp4_emulation.register_warmup()
+
+                if vllm_config.lora_config is not None:
+                    from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (  # noqa: E501
+                        _TRTLLM_LORA_FINALIZE_KERNEL,
+                        _TRTLLM_LORA_UNPERMUTE_ACTIVATION_KERNEL,
+                    )
+
+                    _TRTLLM_LORA_UNPERMUTE_ACTIVATION_KERNEL.register_warmup()
+                    _TRTLLM_LORA_FINALIZE_KERNEL.register_warmup()
+
+                if vllm_config.parallel_config.all2all_backend == "deepep_v2":
+                    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2 import (  # noqa: E501
+                        _GLOBALIZE_RECV_TOPK_IDX_KERNEL,
+                    )
+
+                    _GLOBALIZE_RECV_TOPK_IDX_KERNEL.register_warmup()
 
     def _init_mega_moe_experts(
         self,
@@ -1210,6 +1321,53 @@ class DeepseekV4DecoderLayer(nn.Module):
             requires_grad=False,
         )
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+                _HC_PRENORM_GEMM_TILELANG_KERNEL,
+                _MHC_FUSED_TILELANG_KERNEL,
+                _MHC_POST_TILELANG_KERNEL,
+                _MHC_PRE_BIG_FUSE_TILELANG_KERNEL,
+            )
+            from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+            include_pre_gemm_splits = is_deep_gemm_supported()
+            _MHC_PRE_BIG_FUSE_TILELANG_KERNEL.register_warmup(
+                vllm_config,
+                hidden_size=self.hidden_size,
+                hc_mult=self.hc_mult,
+                use_norm_weight=True,
+                include_pre_gemm_splits=include_pre_gemm_splits,
+                include_broadcast_splits=(
+                    get_pp_group().is_first_rank and extract_layer_index(prefix) == 0
+                ),
+                rms_eps=self.rms_norm_eps,
+                hc_pre_eps=self.hc_eps,
+                hc_sinkhorn_eps=self.hc_eps,
+                hc_post_mult_value=self.hc_post_alpha,
+                sinkhorn_repeat=self.hc_sinkhorn_iters,
+                norm_eps=(
+                    self.attn_norm.variance_epsilon,
+                    self.ffn_norm.variance_epsilon,
+                ),
+                broadcast_norm_eps=self.attn_norm.variance_epsilon,
+            )
+            if not include_pre_gemm_splits:
+                _HC_PRENORM_GEMM_TILELANG_KERNEL.register_warmup(
+                    vllm_config,
+                    hidden_size=self.hidden_size,
+                    hc_mult=self.hc_mult,
+                    n_out=self.hc_mult * (2 + self.hc_mult),
+                )
+            _MHC_POST_TILELANG_KERNEL.register_warmup(
+                hidden_size=self.hidden_size,
+                hc_mult=self.hc_mult,
+            )
+            _MHC_FUSED_TILELANG_KERNEL.register_warmup(
+                vllm_config,
+                hidden_size=self.hidden_size,
+                hc_mult=self.hc_mult,
+            )
+
     def forward(
         self,
         x: torch.Tensor,
@@ -1401,6 +1559,18 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
         else:
             self._mtp_hidden_buffer = None
+
+        if vllm_config.kernel_config.enable_jit_warmup and get_pp_group().is_last_rank:
+            from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+                _HC_HEAD_FUSED_TILELANG_KERNEL,
+            )
+
+            _HC_HEAD_FUSED_TILELANG_KERNEL.register_warmup(
+                hidden_size=config.hidden_size,
+                hc_mult=self.hc_mult,
+                rms_eps=self.rms_norm_eps,
+                hc_eps=self.hc_eps,
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

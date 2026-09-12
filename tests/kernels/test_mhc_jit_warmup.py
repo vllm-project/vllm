@@ -1,0 +1,365 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Validate JIT dispatch against pre-contract behavior."""
+
+from typing import Any
+
+import pytest
+
+from vllm.platforms import current_platform
+
+if not current_platform.is_cuda_alike():
+    pytest.skip("NVIDIA dispatch tests require CUDA", allow_module_level=True)
+
+from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+    HcHeadFusedTileLangKernel,
+    HcPrenormGemmTileLangKernel,
+    MhcFusedTileLangKernel,
+    MhcPostTileLangKernel,
+    MhcPreBigFuseTileLangKernel,
+)
+from vllm.model_executor.warmup import jit_warmup_tilelang_helper
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        (
+            dict(
+                num_tokens=64,
+                hc_hidden_size=4096,
+                hidden_size=2048,
+                hc_mult=2,
+                n_out=128,
+            ),
+            (2048, 2, 128, 1024, 4, 1, False, 1),
+        ),
+        (
+            dict(
+                num_tokens=1024,
+                hc_hidden_size=4096,
+                hidden_size=2048,
+                hc_mult=2,
+                n_out=128,
+            ),
+            (2048, 2, 128, 512, 12, 1, True, 2),
+        ),
+        (
+            dict(
+                num_tokens=64,
+                hc_hidden_size=4096,
+                hidden_size=2048,
+                hc_mult=2,
+                n_out=128,
+                n_thr=256,
+                tile_n=8,
+                n_splits=4,
+            ),
+            (2048, 2, 128, 256, 8, 4, False, 1),
+        ),
+    ],
+)
+def test_hc_prenorm_gemm_dispatch_matches_legacy_runtime_config(
+    kwargs: dict[str, Any],
+    expected: tuple[int, int, int, int, int, int, bool, int],
+) -> None:
+    kernel = HcPrenormGemmTileLangKernel()
+
+    assert kernel.dispatch(**kwargs) == kernel.CompileKey(*expected)
+
+
+@pytest.mark.parametrize(
+    ("is_broadcast", "use_norm_weight", "expected_use_norm", "expected_eps"),
+    [
+        (False, False, False, 0.0),
+        (False, True, True, 1.0e-5),
+        (True, False, True, 2.0e-5),
+    ],
+)
+def test_mhc_pre_big_fuse_dispatch_matches_legacy_runtime_config(
+    is_broadcast: bool,
+    use_norm_weight: bool,
+    expected_use_norm: bool,
+    expected_eps: float,
+) -> None:
+    kernel = MhcPreBigFuseTileLangKernel()
+
+    assert kernel.dispatch(
+        hidden_size=4096,
+        hc_mult=4,
+        n_splits=2,
+        is_broadcast=is_broadcast,
+        use_norm_weight=use_norm_weight,
+        rms_eps=1.0e-6,
+        hc_pre_eps=2.0e-6,
+        hc_sinkhorn_eps=3.0e-6,
+        hc_post_mult_value=0.5,
+        sinkhorn_repeat=3,
+        norm_eps=1.0e-5,
+        broadcast_norm_eps=2.0e-5,
+    ) == kernel.CompileKey(
+        hidden_size=4096,
+        hc_mult=4,
+        n_splits=2,
+        use_norm_weight=expected_use_norm,
+        is_broadcast=is_broadcast,
+        rms_eps=1.0e-6,
+        hc_pre_eps=2.0e-6,
+        hc_sinkhorn_eps=3.0e-6,
+        hc_post_mult_value=0.5,
+        sinkhorn_repeat=3,
+        norm_eps=expected_eps,
+    )
+
+
+@pytest.mark.parametrize(
+    ("is_broadcast", "use_norm_weight", "expected_middle"),
+    [
+        (False, False, ("post", "comb", "layer", "post", "post")),
+        (
+            False,
+            True,
+            ("post", "comb", "layer", "norm", "post", "post"),
+        ),
+        (True, True, ("resout", "post", "comb", "layer", "norm")),
+    ],
+)
+def test_mhc_pre_big_fuse_kernel_args_match_selected_signature(
+    is_broadcast: bool,
+    use_norm_weight: bool,
+    expected_middle: tuple[str, ...],
+) -> None:
+    """Keep dispatcher arguments aligned with all three TileLang signatures."""
+    kernel = MhcPreBigFuseTileLangKernel()
+    compile_key = kernel.CompileKey(
+        hidden_size=4096,
+        hc_mult=4,
+        n_splits=2,
+        use_norm_weight=use_norm_weight,
+        is_broadcast=is_broadcast,
+        rms_eps=1.0e-6,
+        hc_pre_eps=2.0e-6,
+        hc_sinkhorn_eps=3.0e-6,
+        hc_post_mult_value=0.5,
+        sinkhorn_repeat=3,
+        norm_eps=1.0e-5,
+    )
+
+    args = kernel._kernel_args(
+        compile_key,
+        gemm_out_mul="mul",
+        gemm_out_sqrsum="sum",
+        hc_scale="scale",
+        hc_base="base",
+        residual="res",
+        residual_out="resout" if is_broadcast else None,
+        post_mix="post",
+        comb_mix="comb",
+        layer_input="layer",
+        norm_weight="norm" if use_norm_weight else None,
+    )
+    expected_tail = (
+        4096,
+        1.0e-6,
+        2.0e-6,
+        3.0e-6,
+        0.5,
+        3,
+        *((1.0e-5,) if use_norm_weight else ()),
+        2,
+        4,
+    )
+
+    assert args == (
+        "mul",
+        "sum",
+        "scale",
+        "base",
+        "res",
+        *expected_middle,
+        *expected_tail,
+    )
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "hidden_size", "expected_n_splits", "expected_tile_n"),
+    [(4, 4096, 8, 2), (4, 8192, 4, 2), (8, 4096, 4, 3)],
+)
+def test_mhc_fused_dispatch_matches_legacy_runtime_config(
+    num_tokens: int,
+    hidden_size: int,
+    expected_n_splits: int,
+    expected_tile_n: int,
+) -> None:
+    kernel = MhcFusedTileLangKernel()
+
+    assert kernel.dispatch(
+        num_tokens=num_tokens,
+        hidden_size=hidden_size,
+        hc_mult=4,
+    ) == kernel.CompileKey(
+        hidden_size=hidden_size,
+        hc_mult=4,
+        n_splits=expected_n_splits,
+        tile_n=expected_tile_n,
+    )
+
+
+@pytest.mark.parametrize(
+    ("kernel", "compile_key"),
+    [
+        (
+            HcPrenormGemmTileLangKernel(),
+            HcPrenormGemmTileLangKernel.CompileKey(
+                hidden_size=2048,
+                hc_mult=2,
+                n_out=128,
+                n_thr=1024,
+                tile_n=4,
+                n_splits=1,
+                use_block_m=False,
+                block_m=1,
+            ),
+        ),
+        (
+            HcPrenormGemmTileLangKernel(),
+            HcPrenormGemmTileLangKernel.CompileKey(
+                hidden_size=2048,
+                hc_mult=2,
+                n_out=128,
+                n_thr=512,
+                tile_n=12,
+                n_splits=1,
+                use_block_m=False,
+                block_m=1,
+            ),
+        ),
+        (
+            HcPrenormGemmTileLangKernel(),
+            HcPrenormGemmTileLangKernel.CompileKey(
+                hidden_size=2048,
+                hc_mult=2,
+                n_out=128,
+                n_thr=512,
+                tile_n=12,
+                n_splits=1,
+                use_block_m=True,
+                block_m=2,
+            ),
+        ),
+        (
+            MhcPreBigFuseTileLangKernel(),
+            MhcPreBigFuseTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                n_splits=2,
+                use_norm_weight=True,
+                is_broadcast=False,
+                rms_eps=1.0e-6,
+                hc_pre_eps=2.0e-6,
+                hc_sinkhorn_eps=3.0e-6,
+                hc_post_mult_value=0.5,
+                sinkhorn_repeat=3,
+                norm_eps=1.0e-5,
+            ),
+        ),
+        (
+            MhcPreBigFuseTileLangKernel(),
+            MhcPreBigFuseTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                n_splits=1,
+                use_norm_weight=False,
+                is_broadcast=False,
+                rms_eps=1.0e-6,
+                hc_pre_eps=2.0e-6,
+                hc_sinkhorn_eps=3.0e-6,
+                hc_post_mult_value=0.5,
+                sinkhorn_repeat=3,
+                norm_eps=0.0,
+            ),
+        ),
+        (
+            MhcPreBigFuseTileLangKernel(),
+            MhcPreBigFuseTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                n_splits=2,
+                use_norm_weight=True,
+                is_broadcast=True,
+                rms_eps=1.0e-6,
+                hc_pre_eps=2.0e-6,
+                hc_sinkhorn_eps=3.0e-6,
+                hc_post_mult_value=0.5,
+                sinkhorn_repeat=3,
+                norm_eps=1.0e-5,
+            ),
+        ),
+        (
+            MhcPostTileLangKernel(),
+            MhcPostTileLangKernel.CompileKey(hidden_size=4096, hc_mult=4),
+        ),
+        (
+            MhcFusedTileLangKernel(),
+            MhcFusedTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                n_splits=4,
+                tile_n=3,
+            ),
+        ),
+        (
+            MhcFusedTileLangKernel(),
+            MhcFusedTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                n_splits=8,
+                tile_n=2,
+            ),
+        ),
+        (
+            MhcFusedTileLangKernel(),
+            MhcFusedTileLangKernel.CompileKey(
+                hidden_size=8192,
+                hc_mult=4,
+                n_splits=4,
+                tile_n=2,
+            ),
+        ),
+        (
+            HcHeadFusedTileLangKernel(),
+            HcHeadFusedTileLangKernel.CompileKey(
+                hidden_size=4096,
+                hc_mult=4,
+                rms_eps=1.0e-6,
+                hc_eps=2.0e-6,
+            ),
+        ),
+    ],
+)
+def test_tilelang_warmup_inputs_reproduce_compile_key(
+    monkeypatch: pytest.MonkeyPatch,
+    kernel: Any,
+    compile_key: Any,
+) -> None:
+    compiled: list[Any] = []
+    single_kernel = isinstance(
+        kernel,
+        (MhcPostTileLangKernel, MhcFusedTileLangKernel, HcHeadFusedTileLangKernel),
+    )
+    expected_kernel = kernel.kernel() if single_kernel else kernel.kernel(compile_key)
+    if single_kernel:
+        monkeypatch.setattr(
+            kernel,
+            "dispatch",
+            lambda **kwargs: pytest.fail("single-kernel launch must not dispatch"),
+        )
+    monkeypatch.setattr(
+        jit_warmup_tilelang_helper,
+        "compile_tilelang",
+        lambda jit_impl, *args, **kwargs: compiled.append(jit_impl),
+    )
+
+    kernel.compile(compile_key)
+
+    assert compiled == [expected_kernel]

@@ -17,9 +17,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
-from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
-    deepseek_v4_mhc_warmup,
-)
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     write_flashinfer_autotune_cache,
@@ -41,9 +38,6 @@ from vllm.model_executor.warmup.qwen_vl_triton_warmup import qwen_vl_triton_warm
 from vllm.model_executor.warmup.replayssm_warmup import (
     replayssm_autotune_warmup,
 )
-from vllm.model_executor.warmup.spec_decode_rejection_warmup import (
-    spec_decode_rejection_warmup,
-)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
@@ -53,91 +47,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
-
-_LL_BF16_WARMUP_M_RANGE = range(1, 17)
-
-
-def _ll_bf16_router_shapes_from_model(
-    model: torch.nn.Module,
-) -> tuple[tuple[int, int], ...]:
-    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
-
-    shapes: set[tuple[int, int]] = set()
-    for module in model.modules():
-        if not isinstance(module, GateLinear):
-            continue
-        weight = getattr(module, "weight", None)
-        if not isinstance(weight, torch.Tensor):
-            continue
-        if weight.dim() != 2 or weight.dtype != torch.bfloat16:
-            continue
-        n, k = weight.shape
-        if k % 8 == 0:
-            shapes.add((int(k), int(n)))
-    return tuple(sorted(shapes))
-
-
-def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
-    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-        is_available as is_ll_bf16_gemm_available,
-    )
-    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-        ll_bf16_gemm_kernel,
-    )
-
-    if not is_ll_bf16_gemm_available():
-        return
-
-    shapes = _ll_bf16_router_shapes_from_model(model)
-    if not shapes:
-        logger.debug_once(
-            "Skipping ll_bf16 router GEMM warmup: no bf16 GateLinear shapes found."
-        )
-        return
-
-    logger.info_once("Warming up ll_bf16 router GEMM kernels for shapes: %s.", shapes)
-    ll_bf16_gemm_kernel.warmup(
-        shapes=shapes,
-        m_values=_LL_BF16_WARMUP_M_RANGE,
-    )
-
-
-def _warmup_bf16x3_router_gemm(
-    model: torch.nn.Module,
-    max_num_tokens: int,
-) -> None:
-    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
-        warmup_bf16x3_router_gemm,
-    )
-    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
-
-    gate = next(
-        (
-            module
-            for module in model.modules()
-            if isinstance(module, GateLinear) and module.allow_bf16x3_router_gemm
-        ),
-        None,
-    )
-    if gate is None:
-        logger.debug_once(
-            "Skipping BF16x3 router GEMM warmup: no eligible GateLinear found."
-        )
-        return
-
-    min_num_tokens = gate.FP32_MAX_TOKENS + 1 if gate.allow_fp32_router_gemm else 1
-    logger.info_once(
-        "Warming up BF16x3 router GEMM for K=%d, M=%d.",
-        gate.input_size,
-        gate.output_size,
-    )
-    configs = warmup_bf16x3_router_gemm(
-        gate.input_size,
-        gate.output_size,
-        min_num_tokens,
-        max_num_tokens,
-    )
-    logger.info_once("Warmed up BF16x3 router GEMM configs: %s.", configs)
 
 
 def _warmup_kimi_k3_gemm_rs_ar() -> None:
@@ -175,7 +84,10 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         logger.info("JIT kernel warmup starting.")
         jit_warmup_start = time.perf_counter()
         try:
-            worker.model_runner.jit_warmup_registry.warmup()
+            registry = (
+                worker.model_runner.jit_warmup_registry  # type: ignore[attr-defined]
+            )
+            registry.warmup()
         except Exception:
             logger.exception(
                 "JIT kernel warmup failed after %.2fs.",
@@ -194,29 +106,10 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     compilation_config = worker.vllm_config.compilation_config
     cudagraph_capture_sizes = list(compilation_config.cudagraph_capture_sizes or [])
 
-    # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
-    # layer per token; warm them across token sizes first so the first real
-    # request doesn't pay JIT cost. No-op for non-DSv4 models (gated inside).
-    deepseek_v4_mhc_warmup(
-        worker.get_model(),
-        max_tokens=worker.scheduler_config.max_num_batched_tokens,
-        cudagraph_capture_sizes=cudagraph_capture_sizes,
-    )
-
     # Run next so input-prep kernels JIT against pristine runner state.
     if enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
-        spec_decode_rejection_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
-
-    if enable_jit_warmup and current_platform.is_device_capability_family(100):
-        _warmup_bf16x3_router_gemm(
-            worker.get_model(),
-            worker.scheduler_config.max_num_batched_tokens,
-        )
-
-    if current_platform.has_device_capability(90):
-        _warmup_ll_bf16_router_gemm(worker.get_model())
 
     _warmup_kimi_k3_gemm_rs_ar()
 

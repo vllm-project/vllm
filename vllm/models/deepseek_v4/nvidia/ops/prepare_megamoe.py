@@ -7,9 +7,20 @@ routing top-k tensors into the int64/float32 layout that the DeepGEMM
 MegaMoE kernels consume.
 """
 
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.triton_utils import tl, triton
+
+_PREPARE_MEGAMOE_BLOCK_K = 128
+_PREPARE_MEGAMOE_GROUP_K = 32
 
 
 @triton.jit
@@ -145,7 +156,59 @@ def _prepare_megamoe_inputs_kernel(
         )
 
 
-def prepare_megamoe_inputs(
+def _prepare_megamoe_inputs_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    hf_config = vllm_config.model_config.hf_text_config
+    hidden_size = hf_config.hidden_size
+    top_k = hf_config.num_experts_per_tok
+    max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    shared_block_m: Any = WarmupChoices(
+        1,
+        *(
+            (8, 16, 32, 64, 96, 128, 192)
+            if getattr(
+                vllm_config.model_config.hf_text_config,
+                "n_shared_experts",
+                None,
+            )
+            is not None
+            else ()
+        ),
+    )
+    has_padding: Any = WarmupChoices(False, True)
+    padding_aligned: Any = WarmupChoices(False, True)
+    x_scale_width = hidden_size // _PREPARE_MEGAMOE_BLOCK_K
+    shared_rows = triton.cdiv(shared_block_m, 128) * 128
+    # Mirrors DeepGEMM's get_num_max_shared_sf_tokens buffer layout.
+    shared_stride_k = triton.cdiv(max_tokens, 384) * 384 * 16
+    return dict(
+        hidden_states=TritonWarmupTensor(torch.bfloat16, shape=(1, hidden_size)),
+        topk_weights=TritonWarmupTensor(torch.float32, shape=(1, top_k)),
+        topk_ids=TritonWarmupTensor(torch.int64, shape=(1, top_k)),
+        x_fp8=TritonWarmupTensor(torch.float8_e4m3fn, shape=(1, hidden_size)),
+        x_sf=TritonWarmupTensor(torch.int32, shape=(1, x_scale_width)),
+        topk_idx_out=TritonWarmupTensor(torch.int64, shape=(1, top_k)),
+        topk_weights_out=TritonWarmupTensor(torch.float32, shape=(1, top_k)),
+        is_padding=(
+            TritonWarmupTensor(torch.bool, aligned=padding_aligned)
+            if has_padding
+            else None
+        ),
+        shared_x_sf=TritonWarmupTensor(
+            torch.int32,
+            shape=(shared_rows, x_scale_width),
+            strides=(1, shared_stride_k),
+        )
+        if shared_block_m != 1
+        else None,
+        shared_block_m=shared_block_m if shared_block_m != 1 else None,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_prepare_megamoe_inputs_kernel,
+    warmup_inputs=_prepare_megamoe_inputs_warmup_inputs,
+)
+def _PREPARE_MEGAMOE_INPUTS_KERNEL(
     hidden_states: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -156,10 +219,8 @@ def prepare_megamoe_inputs(
     is_padding: torch.Tensor | None = None,
     shared_x_sf: torch.Tensor | None = None,
     shared_block_m: int | None = None,
-) -> None:
+) -> DispatchSpec:
     num_tokens, hidden_size = hidden_states.shape
-    if num_tokens == 0:
-        return
     if hidden_size % 128 != 0:
         raise ValueError(
             "DeepSeek V4 MegaMoE input staging requires hidden_size to be "
@@ -180,8 +241,8 @@ def prepare_megamoe_inputs(
         assert shared_block_m is not None
         if shared_block_m <= 0:
             raise ValueError("MegaMoE shared_block_m must be positive.")
-        expected_sf_k = hidden_size // 128
-        if shared_x_sf.ndim != 2 or shared_x_sf.shape[1] != expected_sf_k:
+        expected_sf_k = hidden_size // _PREPARE_MEGAMOE_BLOCK_K
+        if len(shared_x_sf.shape) != 2 or shared_x_sf.shape[1] != expected_sf_k:
             raise ValueError(
                 "MegaMoE shared_x_sf must have shape "
                 f"(*, {expected_sf_k}), got {tuple(shared_x_sf.shape)}."
@@ -194,41 +255,32 @@ def prepare_megamoe_inputs(
                 f"{required_rows}, got {shared_x_sf.shape[0]}."
             )
 
-    block_k = 128
-    grid = (num_tokens, triton.cdiv(hidden_size, block_k))
+    block_k = _PREPARE_MEGAMOE_BLOCK_K
     block_topk = triton.next_power_of_2(top_k)
+    grid = (num_tokens, triton.cdiv(hidden_size, block_k))
     padding_stride_m = is_padding.stride(0) if is_padding is not None else 0
-    _prepare_megamoe_inputs_kernel[grid](
-        hidden_states,
-        x_fp8,
-        x_sf,
-        shared_x_sf,
-        topk_ids,
-        topk_weights,
-        is_padding,
-        topk_idx_out,
-        topk_weights_out,
-        hidden_states.stride(0),
-        hidden_states.stride(1),
-        x_fp8.stride(0),
-        x_fp8.stride(1),
-        x_sf.stride(0),
-        x_sf.stride(1),
-        shared_x_sf.stride(0) if shared_x_sf is not None else 0,
-        shared_x_sf.stride(1) if shared_x_sf is not None else 0,
-        topk_ids.stride(0),
-        topk_ids.stride(1),
-        topk_weights.stride(0),
-        topk_weights.stride(1),
-        padding_stride_m,
-        topk_idx_out.stride(0),
-        topk_idx_out.stride(1),
-        topk_weights_out.stride(0),
-        topk_weights_out.stride(1),
-        hidden_size,
-        top_k,
+    return grid, dict(
+        hidden_stride_m=hidden_states.stride(0),
+        hidden_stride_k=hidden_states.stride(1),
+        x_stride_m=x_fp8.stride(0),
+        x_stride_k=x_fp8.stride(1),
+        x_sf_stride_m=x_sf.stride(0),
+        x_sf_stride_k=x_sf.stride(1),
+        shared_x_sf_stride_m=shared_x_sf.stride(0) if shared_x_sf is not None else 0,
+        shared_x_sf_stride_k=shared_x_sf.stride(1) if shared_x_sf is not None else 0,
+        topk_ids_stride_m=topk_ids.stride(0),
+        topk_ids_stride_k=topk_ids.stride(1),
+        topk_weights_stride_m=topk_weights.stride(0),
+        topk_weights_stride_k=topk_weights.stride(1),
+        is_padding_stride_m=padding_stride_m,
+        topk_idx_stride_m=topk_idx_out.stride(0),
+        topk_idx_stride_k=topk_idx_out.stride(1),
+        topk_weights_out_stride_m=topk_weights_out.stride(0),
+        topk_weights_out_stride_k=topk_weights_out.stride(1),
+        hidden_size=hidden_size,
+        top_k=top_k,
         BLOCK_K=block_k,
-        GROUP_K=32,
+        GROUP_K=_PREPARE_MEGAMOE_GROUP_K,
         BLOCK_TOPK=block_topk,
         SHARED_BLOCK_M=shared_block_m or 1,
         num_warps=4,

@@ -57,16 +57,21 @@ def _can_precompile(a, b):
 
 def _gemm(a, b):
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
-        ll_bf16_gemm,
-        ll_bf16_gemm_kernel,
+        _LL_BF16_GEMM_C1_PDL_KERNEL,
+        _LL_BF16_GEMM_KERNEL,
     )
+    from vllm.platforms import current_platform
 
+    kernel = _LL_BF16_GEMM_C1_PDL_KERNEL if a.shape[0] == 1 else _LL_BF16_GEMM_KERNEL
     if _can_precompile(a, b):
-        compile_key = ll_bf16_gemm_kernel.dispatch(
-            M=a.shape[0], K=a.shape[1], N=b.shape[0]
+        compile_key = kernel.dispatch(
+            M=a.shape[0],
+            K=a.shape[1],
+            N=b.shape[0],
+            use_pdl=current_platform.is_arch_support_pdl(),
         )
-        ll_bf16_gemm_kernel.compile(compile_key)
-    return ll_bf16_gemm(a, b)
+        kernel.compile(compile_key)
+    return kernel(a, b)
 
 
 def test_c1_pdl_kernel_is_selected_automatically(monkeypatch):
@@ -82,8 +87,8 @@ def test_c1_pdl_kernel_is_selected_automatically(monkeypatch):
         calls.append(("c1_pdl", hidden_states.shape[0]))
         return hidden_states
 
-    monkeypatch.setattr(ll_bf16, "ll_bf16_gemm_kernel", default_kernel)
-    monkeypatch.setattr(ll_bf16, "ll_bf16_gemm_c1_pdl_kernel", c1_pdl_kernel)
+    monkeypatch.setattr(ll_bf16, "_LL_BF16_GEMM_KERNEL", default_kernel)
+    monkeypatch.setattr(ll_bf16, "_LL_BF16_GEMM_C1_PDL_KERNEL", c1_pdl_kernel)
     weight = torch.empty(4, 8, device="cuda", dtype=torch.bfloat16)
 
     ll_bf16.ll_bf16_gemm(torch.empty(1, 8, device="cuda", dtype=torch.bfloat16), weight)
@@ -419,7 +424,7 @@ def test_gate_linear_uses_ll_bf16_for_bf16_fast_path(monkeypatch):
     x = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
     calls = []
 
-    def fake_ll_bf16_gemm(hidden_states, router_weight):
+    def fake_ll_bf16_gemm(hidden_states, router_weight, output_dtype):
         calls.append((hidden_states, router_weight))
         return torch.full(
             (hidden_states.shape[0], router_weight.shape[0]),
@@ -429,7 +434,7 @@ def test_gate_linear_uses_ll_bf16_for_bf16_fast_path(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16._LL_BF16_GEMM_KERNEL",
         fake_ll_bf16_gemm,
     )
     out, bias = gate(x)
@@ -441,7 +446,7 @@ def test_gate_linear_uses_ll_bf16_for_bf16_fast_path(monkeypatch):
     assert calls[0][1] is gate.weight
 
 
-def test_gate_linear_fp32_weight_falls_back(monkeypatch):
+def test_gate_linear_fp32_weight_falls_back(monkeypatch, default_vllm_config):
     gate = _make_gate_linear(monkeypatch, params_dtype=torch.float32)
     assert not gate.allow_ll_bf16_gemm
     x = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
@@ -450,7 +455,7 @@ def test_gate_linear_fp32_weight_falls_back(monkeypatch):
         raise AssertionError("ll_bf16_gemm should not run for fp32 weights")
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16._LL_BF16_GEMM_KERNEL",
         fail_ll_bf16_gemm,
     )
     out, _ = gate(x)
@@ -466,7 +471,7 @@ def test_gate_linear_non_bf16_activation_falls_back(monkeypatch):
         raise AssertionError("ll_bf16_gemm should not run for non-bf16 activations")
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16._LL_BF16_GEMM_KERNEL",
         fail_ll_bf16_gemm,
     )
     out, _ = gate(x)
@@ -495,7 +500,7 @@ def test_gate_linear_m_gt_16_falls_back(monkeypatch):
         raise AssertionError("ll_bf16_gemm should not run for M > 16")
 
     monkeypatch.setattr(
-        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16._LL_BF16_GEMM_KERNEL",
         fail_ll_bf16_gemm,
     )
     out, _ = gate(x)
@@ -564,21 +569,28 @@ def test_invalid_output_dtype():
     a = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(64, 2048, dtype=torch.bfloat16, device="cuda")
     with pytest.raises(ValueError, match="output_dtype=torch.float32"):
-        from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import ll_bf16_gemm
+        from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+            _LL_BF16_GEMM_KERNEL,
+        )
 
-        ll_bf16_gemm(a, b, output_dtype=torch.bfloat16)
+        _LL_BF16_GEMM_KERNEL(a, b, output_dtype=torch.bfloat16)
 
 
-def test_cache_miss_compiles_dotprod():
+def test_cache_miss_compiles_and_caches_dotprod():
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import LLBf16Gemm
+    from vllm.platforms import current_platform
 
     torch.manual_seed(42)
     a = torch.randn(3, 64, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(17, 64, dtype=torch.bfloat16, device="cuda")
     kernel = LLBf16Gemm()
-    out = kernel(a, b)
-    assert out.shape == (3, 17)
-    _assert_close(out, _ref(a, b), context="cache miss dotprod")
+    compile_key = kernel.dispatch(
+        M=3, K=64, N=17, use_pdl=current_platform.is_arch_support_pdl()
+    )
+
+    kernel(a, b)
+
+    assert compile_key in kernel._compiled_cache
 
 
 if __name__ == "__main__":

@@ -3,25 +3,140 @@
 import ast
 import inspect
 from abc import abstractmethod
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from functools import cached_property
-from typing import Any, ClassVar, Generic, TypeVar, cast
+from collections.abc import Callable, Hashable, Iterable, Mapping
+from contextlib import nullcontext, suppress
+from dataclasses import dataclass, field
+from functools import cache, cached_property, update_wrapper
+from typing import Any, Generic, ParamSpec, Protocol, TypeVar, cast, overload
 
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
     get_ast_full_name,
     get_function_source_node,
 )
+from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 
 CompileKeyT = TypeVar("CompileKeyT")
-# ``(grid, launch_kwargs)`` or ``(grid, launch_kwargs, outputs)`` for
-# self-allocating kernels. ``grid=None`` skips the launch (e.g. empty batch)
-# but still returns the declared outputs.
+P = ParamSpec("P")
+# ``kernel_launcher`` also supports a ``None`` grid when no launch is needed.
 LaunchSpec = (
     tuple[tuple[int, ...] | None, dict[str, Any]]
     | tuple[tuple[int, ...] | None, dict[str, Any], Any]
 )
+# Dispatchers select a concrete launch configuration for a Triton kernel.
+DispatchSpec = (
+    tuple[tuple[int, ...], dict[str, Any]] | tuple[tuple[int, ...], dict[str, Any], Any]
+)
+
+
+@dataclass(frozen=True)
+class _LaunchBindingPlan:
+    input_targets: tuple[tuple[int, str], ...]
+    stride_targets: tuple[tuple[str, str, int], ...]
+
+
+class _TritonWarmupInputs(dict[str, Any]):
+    def __init__(self, kernel: Any, inputs: dict[str, Any]) -> None:
+        super().__init__(inputs)
+        self.kernel = kernel
+
+
+@cache
+def _launch_binding_plan(
+    arg_names: tuple[str, ...],
+    input_names: tuple[str, ...],
+    launch_names: tuple[str, ...],
+) -> _LaunchBindingPlan:
+    arg_name_set = set(arg_names)
+    launch_name_set = set(launch_names)
+
+    def kernel_arg(input_name: str) -> str | None:
+        pointer_name = f"{input_name}_ptr"
+        candidates = (
+            input_name,
+            pointer_name,
+            input_name.upper(),
+            pointer_name.upper(),
+        )
+        return next(
+            (candidate for candidate in candidates if candidate in arg_name_set),
+            None,
+        )
+
+    input_targets = tuple(
+        (index, target)
+        for index, name in enumerate(input_names)
+        if (target := kernel_arg(name)) is not None and target not in launch_name_set
+    )
+    bound_names = launch_name_set | {target for _, target in input_targets}
+    stride_targets = []
+    for target in arg_names:
+        if target in bound_names:
+            continue
+        name, separator, dim = target.rpartition("_stride")
+        if not separator:
+            name, separator, dim = target.rpartition("_STRIDE")
+        dim = dim.removeprefix("_")
+        if separator and (not dim or dim.isdigit()):
+            pointer = f"{name}_PTR" if separator == "_STRIDE" else f"{name}_ptr"
+            source = name if name in bound_names else pointer
+            if source in bound_names:
+                stride_targets.append((target, source, int(dim or 0)))
+    return _LaunchBindingPlan(input_targets, tuple(stride_targets))
+
+
+def triton_warmup_inputs(
+    kernel: Any,
+    *args: Any,
+    grid: tuple[int, ...],
+    pointer_dtypes: (
+        Mapping[Any, Iterable[str]] | Iterable[tuple[Any, Iterable[str]]] | None
+    ) = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Build inputs that compile a Triton kernel without an owner adapter.
+
+    The returned mapping retains the native kernel so ``compile`` can bypass a
+    structured owner ``__call__`` whose signature may not match the kernel.
+    """
+    arg_names = tuple(kernel.arg_names)
+    if len(args) > len(arg_names):
+        raise ValueError(
+            f"Received {len(args)} positional inputs for {len(arg_names)} "
+            "Triton kernel arguments"
+        )
+    inputs = dict(zip(arg_names, args))
+    duplicate_names = inputs.keys() & kwargs.keys()
+    if duplicate_names:
+        raise ValueError(
+            f"Triton inputs passed twice: {', '.join(sorted(duplicate_names))}"
+        )
+    inputs.update(kwargs)
+    if pointer_dtypes is not None:
+        function_def = get_function_source_node(kernel)
+        if not isinstance(function_def, ast.FunctionDef):
+            raise ValueError("Expected Triton kernel to be defined as a function")
+        pointer_names = _pointer_arg_names(function_def, arg_names)
+        groups = (
+            pointer_dtypes.items()
+            if isinstance(pointer_dtypes, Mapping)
+            else pointer_dtypes
+        )
+        for dtype, names in groups:
+            for name in names:
+                if name not in arg_names:
+                    raise ValueError(f"Unknown Triton pointer argument: {name}")
+                if name not in pointer_names:
+                    raise ValueError(f"Triton argument is not a pointer: {name}")
+                if name in inputs:
+                    raise ValueError(f"Triton input passed twice: {name}")
+                inputs[name] = TritonWarmupTensor(dtype)
+        missing_pointers = pointer_names - inputs.keys()
+        if missing_pointers:
+            names = ", ".join(sorted(missing_pointers))
+            raise ValueError(f"Missing Triton pointer inputs: {names}")
+    return _TritonWarmupInputs(kernel, {"grid": grid, **inputs})
 
 
 def triton_scalar_specialization_rep(value: int) -> int:
@@ -72,12 +187,19 @@ class TritonWarmupTensor:
     aligned: bool = True
     shape: tuple[int, ...] = (1,)
     strides: tuple[int, ...] | None = None
+    init: Any = 0
 
     def data_ptr(self) -> int:
         return 0 if self.aligned else 1
 
     def ptr_range(self) -> int:
         return 0
+
+    @property
+    def device(self) -> Any:
+        import torch
+
+        return torch.device(current_platform.device_type)
 
     def stride(self, dim: int | None = None) -> int | tuple[int, ...]:
         if self.strides is None:
@@ -95,9 +217,10 @@ class TritonWarmupTensor:
 class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
     """Triton owner whose runtime launch specification is reused for warmup."""
 
-    kernel: ClassVar[Any]
+    kernel: Any
     _warming = False
     _warming_compile_key: CompileKeyT | None = None
+    _run_autotune = False
 
     @abstractmethod
     def warmup_inputs(self, compile_key: CompileKeyT) -> dict[str, Any]:
@@ -109,7 +232,29 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         self._warming = True
         self._warming_compile_key = compile_key
         try:
-            cast(Callable[..., None], self)(**inputs)
+            if isinstance(inputs, _TritonWarmupInputs):
+                native_inputs = dict(inputs)
+                grid = native_inputs.pop("grid")
+                if self._run_autotune:
+                    inputs.kernel[grid](**native_inputs)
+                else:
+                    native_inputs = {
+                        name: _triton_metadata_arg(value)
+                        for name, value in native_inputs.items()
+                    }
+                    if "launch_pdl" in native_inputs and hasattr(
+                        compile_key, "launch_pdl"
+                    ):
+                        native_inputs["launch_pdl"] = compile_key.launch_pdl
+                    warmup = getattr(inputs.kernel, "warmup", None)
+                    if warmup is None:
+                        raise TypeError(
+                            "Native Triton warmup inputs require a kernel with "
+                            "a warmup method"
+                        )
+                    warmup(grid=(1,), **native_inputs)
+            else:
+                cast(Callable[..., None], self)(**inputs)
         finally:
             self._warming = False
             self._warming_compile_key = None
@@ -126,6 +271,21 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
             f"Cannot inspect kernel parameters for {type(self.kernel).__name__}"
         )
 
+    def _prepare_launch_kwargs(
+        self,
+        input_names: tuple[str, ...],
+        input_values: tuple[Any, ...],
+        launch_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        plan = _launch_binding_plan(
+            self._kernel_arg_names, input_names, tuple(launch_kwargs)
+        )
+        for index, target in plan.input_targets:
+            launch_kwargs[target] = input_values[index]
+        for target, source, dim in plan.stride_targets:
+            launch_kwargs[target] = launch_kwargs[source].stride(dim)
+        return launch_kwargs
+
     def launch(
         self,
         launch_spec: LaunchSpec,
@@ -136,15 +296,19 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         else:
             grid, launch_kwargs = launch_spec
             outputs = None
-        kwargs = dict(launch_kwargs)
+        kwargs = self._prepare_launch_kwargs(
+            tuple(inputs), tuple(inputs.values()), dict(launch_kwargs)
+        )
         kernel = kwargs.pop("kernel", None) or self.kernel
         runtime_launcher = kwargs.pop("_runtime_launcher", None)
         runtime_launcher_arg_count = kwargs.pop("_runtime_launcher_arg_count", 0)
-        for name, value in inputs.items():
-            target = name if name in self._kernel_arg_names else f"{name}_ptr"
-            if target in self._kernel_arg_names and target not in kwargs:
-                kwargs[target] = value
         if self._warming:
+            if self._run_autotune:
+                result = kernel[grid](**kwargs)
+                return outputs if outputs is not None else result
+            kwargs = {
+                name: _triton_metadata_arg(value) for name, value in kwargs.items()
+            }
             if (
                 self._warming_compile_key is not None
                 and "launch_pdl" in kwargs
@@ -166,6 +330,364 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
         else:
             kernel[grid](**kwargs)
         return outputs
+
+
+@dataclass(frozen=True)
+class TritonJitKey:
+    """Process-local identity of one Triton JIT specialization."""
+
+    jit_function_id: int
+    jit_function_key: Hashable
+    device: Hashable
+    cache_key: Hashable
+
+
+@dataclass(frozen=True)
+class TritonCompileKey:
+    """Triton-derived compile key with one non-comparing replay input."""
+
+    jit_keys: frozenset[TritonJitKey]
+    inputs: tuple[tuple[str, Any], ...] = field(compare=False, hash=False, repr=False)
+
+
+def _triton_key_deriver(
+    kernel: Any,
+) -> Callable[[Mapping[str, Any]], set[TritonJitKey]]:
+    """Prepare Triton's key derivation once for one kernel and device."""
+    knobs = triton.knobs
+    Autotuner = triton.runtime.autotuner.Autotuner
+    Heuristics = triton.runtime.autotuner.Heuristics
+    driver = triton.runtime.driver
+    JITFunction = triton.runtime.jit.JITFunction
+    compute_cache_key = triton.runtime.jit.compute_cache_key
+
+    if isinstance(kernel, Heuristics):
+        derive_inner = _triton_key_deriver(kernel.fn)
+
+        def derive_heuristic(kwargs: Mapping[str, Any]) -> set[TritonJitKey]:
+            heuristic_kwargs = dict(kwargs)
+            for name, heuristic in kernel.values.items():
+                heuristic_kwargs[name] = heuristic(heuristic_kwargs)
+            return derive_inner(heuristic_kwargs)
+
+        return derive_heuristic
+
+    if isinstance(kernel, Autotuner):
+        derive_inner = _triton_key_deriver(kernel.fn)
+
+        def derive_autotuned(kwargs: Mapping[str, Any]) -> set[TritonJitKey]:
+            previous_nargs = getattr(kernel, "nargs", None)
+            kernel.nargs = {}
+            try:
+                configs = kernel.prune_configs(dict(kwargs))
+            finally:
+                kernel.nargs = previous_nargs
+            keys: set[TritonJitKey] = set()
+            for config in configs:
+                conflicts = kwargs.keys() & config.kwargs.keys()
+                if conflicts:
+                    names = ", ".join(sorted(conflicts))
+                    raise ValueError(f"Conflicting autotune parameters: {names}")
+                keys.update(derive_inner(dict(kwargs) | config.all_kwargs()))
+            return keys
+
+        return derive_autotuned
+
+    if not isinstance(kernel, JITFunction):
+        raise TypeError(f"Unsupported Triton kernel wrapper: {type(kernel).__name__}")
+
+    device = cast(Hashable, driver.active.get_current_device())
+    _, kernel_key_cache, _, _, binder = kernel.device_caches[device]
+    jit_function_id = id(kernel)
+    jit_function_key = cast(Hashable, kernel.cache_key)
+    debug = kernel.debug or knobs.runtime.debug
+    instrumentation_mode = knobs.compilation.instrumentation_mode
+    fpsan_homomorphic_casts = getattr(
+        knobs.compilation, "fpsan_homomorphic_casts", None
+    )
+    inspection_hook = knobs.runtime.add_stages_inspection_hook
+
+    def derive_jit(kwargs: Mapping[str, Any]) -> set[TritonJitKey]:
+        binder_kwargs = dict(kwargs)
+        binder_kwargs["debug"] = binder_kwargs.get("debug", debug) or debug
+        binder_kwargs["instrumentation_mode"] = instrumentation_mode
+        if fpsan_homomorphic_casts is not None:
+            binder_kwargs["fpsan_homomorphic_casts"] = fpsan_homomorphic_casts
+        _, specialization, options = binder(**binder_kwargs)
+        if inspection_hook is not None:
+            _, inspection_hash = inspection_hook()
+            specialization.append(f'("custom_pipeline", {inspection_hash})')
+        cache_key = cast(
+            Hashable,
+            compute_cache_key(kernel_key_cache, specialization, options),
+        )
+        return {
+            TritonJitKey(
+                jit_function_id,
+                jit_function_key,
+                device,
+                cache_key,
+            )
+        }
+
+    return derive_jit
+
+
+WarmupCases = Mapping[str, Any] | Iterable[Mapping[str, Any]]
+
+
+class _AutomaticTritonJitKernel(VllmTritonJitKernel[TritonCompileKey]):
+    def warmup_inputs(self, compile_key: TritonCompileKey) -> dict[str, Any]:
+        return dict(compile_key.inputs)
+
+    def _provider_cases(
+        self,
+        provider: Callable[..., WarmupCases],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Iterable[Mapping[str, Any]]:
+        cases_node = get_function_source_node(provider)
+        if any(
+            isinstance(node, ast.Call)
+            and (get_ast_full_name(node.func) or "").split(".")[-1]
+            in {"WarmupIntRange", "WarmupChoices", "_when"}
+            for node in ast.walk(cases_node)
+        ):
+            return self._expand_warmup_cases(provider, *args, **kwargs)
+        cases = provider(*args, **kwargs)
+        return (cases,) if isinstance(cases, Mapping) else cases
+
+
+def _is_autotuned(kernel: Any) -> bool:
+    Autotuner = triton.runtime.autotuner.Autotuner
+
+    while kernel is not None:
+        if isinstance(kernel, Autotuner):
+            return True
+        kernel = getattr(kernel, "fn", None)
+    return False
+
+
+def _triton_metadata_arg(value: Any) -> Any:
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    if not isinstance(value, FakeTensor):
+        return value
+    return TritonWarmupTensor(
+        value.dtype,
+        aligned=getattr(value, "_vllm_warmup_aligned", True),
+        shape=tuple(value.shape),
+        strides=tuple(value.stride()),
+    )
+
+
+def _materialize_warmup_case(
+    case: Mapping[str, Any],
+    *,
+    real: bool,
+    mode: Any,
+    cache: dict[TritonWarmupTensor, Any],
+) -> dict[str, Any]:
+    import torch
+
+    def materialize(value: Any) -> Any:
+        if not isinstance(value, TritonWarmupTensor):
+            return value
+        if not real:
+            try:
+                return cache[value]
+            except KeyError:
+                pass
+            except TypeError:
+                # Unhashable initializers are uncommon and safe to materialize directly.
+                pass
+
+        strides = cast(tuple[int, ...], value.stride())
+        with mode:
+            tensor = torch.empty_strided(
+                value.shape,
+                strides,
+                dtype=value.dtype,
+                device=value.device,
+            )
+        if real:
+            if callable(value.init):
+                value.init(tensor)
+            else:
+                tensor.fill_(value.init)
+        else:
+            tensor._vllm_warmup_aligned = value.aligned
+            with suppress(TypeError):
+                cache[value] = tensor
+        return tensor
+
+    return {name: materialize(value) for name, value in case.items()}
+
+
+class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
+    def __init__(
+        self,
+        kernel: Any,
+        warmup_inputs: Callable[..., WarmupCases],
+        dispatch: Callable[..., DispatchSpec] | None,
+    ) -> None:
+        self.kernel = kernel
+        self._run_autotune = _is_autotuned(kernel)
+        self._warmup_inputs_fn = warmup_inputs
+        self._dispatch_fn = dispatch
+        self._dispatch_arg_names: tuple[str, ...] = ()
+        self._dispatch_defaults: dict[str, Any] = {}
+        if dispatch is not None:
+            parameters = tuple(inspect.signature(dispatch).parameters.values())
+            if any(
+                parameter.kind
+                in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+                for parameter in parameters
+            ):
+                raise TypeError("Triton dispatchers require explicit parameters")
+            self._dispatch_arg_names = tuple(parameter.name for parameter in parameters)
+            self._dispatch_defaults = {
+                parameter.name: parameter.default
+                for parameter in parameters
+                if parameter.default is not inspect.Parameter.empty
+            }
+        super().__init__()
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if self._dispatch_fn is None:
+            grid = kwargs.pop("grid") if not args else args[0]
+            kernel_args = () if not args else args[1:]
+            inputs = triton_warmup_inputs(
+                self.kernel, *kernel_args, grid=grid, **kwargs
+            )
+            inputs.pop("grid")
+            return self.launch((grid, inputs), {})
+        spec = self._dispatch_fn(*args, **kwargs)
+        input_values = args
+        if len(args) != len(self._dispatch_arg_names):
+            input_values += tuple(
+                kwargs[name] if name in kwargs else self._dispatch_defaults[name]
+                for name in self._dispatch_arg_names[len(args) :]
+            )
+        return self.launch(spec, dict(zip(self._dispatch_arg_names, input_values)))
+
+    def __getitem__(self, grid: tuple[int, ...]) -> Callable[..., Any]:
+        return cast(Callable[..., Any], self.kernel[grid])
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.kernel, name)
+
+    def get_warmup_keys(
+        self, *, vllm_config: Any | None = None, **kwargs: Any
+    ) -> list[TritonCompileKey]:
+        keys: list[TritonCompileKey] = []
+        seen_jit_keys: set[frozenset[TritonJitKey]] = set()
+        if "vllm_config" in inspect.signature(self._warmup_inputs_fn).parameters:
+            kwargs.setdefault("vllm_config", vllm_config)
+        cases = self._provider_cases(self._warmup_inputs_fn, **kwargs)
+        derive_keys = _triton_key_deriver(self.kernel)
+        materialize = self._run_autotune
+        mode: Any = nullcontext() if self._run_autotune else None
+        materialized: dict[TritonWarmupTensor, Any] = {}
+        for case in cases:
+            inputs = (
+                _materialize_warmup_case(
+                    case,
+                    real=self._run_autotune,
+                    mode=mode,
+                    cache=materialized,
+                )
+                if materialize
+                else case
+            )
+            if self._dispatch_fn is None:
+                prepared = dict(inputs)
+                prepared.pop("grid")
+            else:
+                dispatch_inputs = {
+                    name: inputs[name]
+                    for name in self._dispatch_arg_names
+                    if name in inputs
+                }
+                try:
+                    _, launch_kwargs = self._dispatch_fn(**dispatch_inputs)[:2]
+                except (AssertionError, AttributeError, TypeError):
+                    if materialize:
+                        raise
+                    from torch._subclasses.fake_tensor import FakeTensorMode
+
+                    materialize = True
+                    mode = FakeTensorMode()
+                    inputs = _materialize_warmup_case(
+                        case,
+                        real=False,
+                        mode=mode,
+                        cache=materialized,
+                    )
+                    dispatch_inputs = {
+                        name: inputs[name]
+                        for name in self._dispatch_arg_names
+                        if name in inputs
+                    }
+                    _, launch_kwargs = self._dispatch_fn(**dispatch_inputs)[:2]
+                prepared = self._prepare_launch_kwargs(
+                    tuple(inputs),
+                    tuple(inputs.values()),
+                    dict(launch_kwargs),
+                )
+            if materialize:
+                prepared = {
+                    name: _triton_metadata_arg(value)
+                    for name, value in prepared.items()
+                }
+            jit_keys = frozenset(derive_keys(prepared))
+            if jit_keys and jit_keys not in seen_jit_keys:
+                seen_jit_keys.add(jit_keys)
+                keys.append(TritonCompileKey(jit_keys, tuple(inputs.items())))
+        return keys
+
+
+class TritonKernelDispatcher(Protocol[P]):
+    """Callable Triton launcher with compile-time warmup support."""
+
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> Any: ...
+
+    def register_warmup(self, *args: Any, **kwargs: Any) -> None: ...
+
+
+@overload
+def triton_kernel_dispatcher_with_warmup(
+    *,
+    warmup_inputs: Callable[..., WarmupCases],
+    kernel: None = None,
+) -> Callable[[Any], Any]: ...
+
+
+@overload
+def triton_kernel_dispatcher_with_warmup(
+    *,
+    warmup_inputs: Callable[..., WarmupCases],
+    kernel: Any,
+) -> Callable[[Callable[P, DispatchSpec]], TritonKernelDispatcher[P]]: ...
+
+
+def triton_kernel_dispatcher_with_warmup(
+    *,
+    warmup_inputs: Callable[..., WarmupCases],
+    kernel: Any | None = None,
+) -> Callable[[Any], Any]:
+    """Decorate a dispatch function or a native Triton kernel for warmup."""
+
+    def decorate(dispatch: Any) -> Any:
+        owner = _DecoratedTritonJitKernel(
+            dispatch if kernel is None else kernel,
+            warmup_inputs,
+            None if kernel is None else dispatch,
+        )
+        update_wrapper(owner, dispatch, updated=())
+        return owner
+
+    return decorate
 
 
 @dataclass(frozen=True)

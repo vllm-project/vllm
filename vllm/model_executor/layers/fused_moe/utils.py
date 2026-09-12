@@ -3,7 +3,7 @@
 import functools
 from collections.abc import Iterable
 from math import prod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
@@ -41,6 +41,15 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
 from vllm.model_executor.models.utils import PPMissingLayer
+from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
+    WarmupIntRange,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -161,6 +170,49 @@ def _count_expert_num_tokens(
         tl.store(expert_num_tokens_ptr + curr_expert, tl.sum(acc))
 
 
+def _count_expert_num_tokens_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
+    top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+    num_tokens: Any = WarmupIntRange(
+        1,
+        min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            4096 // vllm_config.model_config.hf_config.num_experts_per_tok,
+        )
+        + 1,
+    )
+    num_experts: Any = WarmupChoices(1, 2, 16)
+    has_expert_map: Any = WarmupChoices(False, True)
+    return dict(
+        topk_ids=TritonWarmupTensor(torch.int32, shape=(num_tokens, top_k)),
+        expert_num_tokens=TritonWarmupTensor(torch.int32, shape=(num_experts,)),
+        num_local_experts=num_experts,
+        expert_map=TritonWarmupTensor(torch.int32) if has_expert_map else None,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_count_expert_num_tokens,
+    warmup_inputs=_count_expert_num_tokens_warmup_inputs,
+)
+def _COUNT_EXPERT_NUM_TOKENS_KERNEL(
+    topk_ids: torch.Tensor,
+    expert_num_tokens: torch.Tensor,
+    num_local_experts: int,
+    expert_map: torch.Tensor | None,
+    *,
+    block_size: int | None = None,
+) -> DispatchSpec:
+    topk_numel = prod(topk_ids.shape)
+    if block_size is None:
+        block_size = triton.next_power_of_2(min(topk_numel, 1024))
+    return (num_local_experts,), dict(
+        num_experts=num_local_experts,
+        topk_numel=topk_numel,
+        HAS_EXPERT_MAP=expert_map is not None,
+        BLOCK_SIZE=block_size,
+    )
+
+
 def count_expert_num_tokens(
     topk_ids: torch.Tensor, num_local_experts: int, expert_map: torch.Tensor | None
 ) -> torch.Tensor:
@@ -184,18 +236,11 @@ def count_expert_num_tokens(
         (num_local_experts), device=topk_ids.device, dtype=torch.int32
     )
 
-    grid = num_local_experts
-    BLOCK_SIZE = min(topk_ids.numel(), 1024)
-    BLOCK_SIZE = triton.next_power_of_2(BLOCK_SIZE)
-
-    _count_expert_num_tokens[(grid,)](
+    _COUNT_EXPERT_NUM_TOKENS_KERNEL(
         topk_ids,
         expert_num_tokens,
         num_local_experts,
-        topk_ids.numel(),
         expert_map,
-        HAS_EXPERT_MAP=expert_map is not None,
-        BLOCK_SIZE=BLOCK_SIZE,
     )
 
     return expert_num_tokens
@@ -521,7 +566,13 @@ def _swiglu_limit_torch(
     output.copy_(F.silu(gate) * up)
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "hidden_size",
+        "input_row_stride",
+        "swiglu_limit",
+    ]
+)
 def _swiglu_limit_pad_aware_kernel(
     input_ptr,  # [num_tokens, 2 * hidden_size]
     output_ptr,  # [num_tokens, hidden_size]
@@ -577,6 +628,48 @@ def _swiglu_limit_pad_aware_kernel(
             )
 
 
+def _swiglu_limit_pad_aware_warmup_inputs(
+    vllm_config: Any,
+) -> dict[str, Any]:
+    num_tokens: Any = WarmupIntRange(
+        1, vllm_config.scheduler_config.max_num_batched_tokens + 1
+    )
+    has_limit: Any = WarmupChoices(False, True)
+    has_expert_map: Any = WarmupChoices(False, True)
+    return dict(
+        output=TritonWarmupTensor(torch.bfloat16, shape=(num_tokens, 1)),
+        input=TritonWarmupTensor(torch.bfloat16, shape=(num_tokens, 2), strides=(2, 1)),
+        topk_ids=TritonWarmupTensor(torch.int32),
+        swiglu_limit=1.0 if has_limit else 0.0,
+        expert_map=TritonWarmupTensor(torch.int32) if has_expert_map else None,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_swiglu_limit_pad_aware_kernel,
+    warmup_inputs=_swiglu_limit_pad_aware_warmup_inputs,
+)
+def _SWIGLU_LIMIT_PAD_AWARE_KERNEL(
+    output: torch.Tensor,
+    input: torch.Tensor,
+    topk_ids: torch.Tensor,
+    swiglu_limit: float,
+    expert_map: torch.Tensor | None,
+) -> DispatchSpec:
+    num_tokens, gate_up_size = input.shape
+    hidden_size = gate_up_size // 2
+    block_size = 1024
+    return (min(num_tokens, 256), triton.cdiv(hidden_size, block_size)), dict(
+        hidden_size=hidden_size,
+        input_row_stride=gate_up_size,
+        num_tokens=num_tokens,
+        HAS_LIMIT=swiglu_limit > 0,
+        HAS_EXPERT_MAP=expert_map is not None,
+        BLOCK_SIZE=block_size,
+        num_warps=4,
+    )
+
+
 def _swiglu_limit_pad_aware(
     output: torch.Tensor,
     input: torch.Tensor,
@@ -584,26 +677,16 @@ def _swiglu_limit_pad_aware(
     swiglu_limit: float,
     expert_map: torch.Tensor | None = None,
 ) -> None:
-    num_tokens, gate_up_size = input.shape
-    hidden_size = gate_up_size // 2
+    num_tokens = input.shape[0]
     if num_tokens == 0:
         return
 
-    BLOCK_SIZE = 1024
-    grid = (min(num_tokens, 256), triton.cdiv(hidden_size, BLOCK_SIZE))
-    _swiglu_limit_pad_aware_kernel[grid](
-        input,
+    _SWIGLU_LIMIT_PAD_AWARE_KERNEL(
         output,
+        input,
         topk_ids,
-        expert_map,
-        hidden_size,
-        gate_up_size,
-        num_tokens,
         swiglu_limit,
-        HAS_LIMIT=swiglu_limit > 0,
-        HAS_EXPERT_MAP=expert_map is not None,
-        BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=4,
+        expert_map,
     )
 
 
