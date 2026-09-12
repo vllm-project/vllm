@@ -981,11 +981,9 @@ class CombineTopkSwaIndicesKernel(
                 else max_c128a_topk + 1
             ),
         )
-        image_width = (
-            _hf_config_int(vllm_config, "vision_max_n_token", 0)
-            if _hf_config_int(vllm_config, "vision_n_layers", 0) > 0
-            else 0
-        )
+        from vllm.v1.attention.backends.mla.sparse_swa import swa_max_image_tokens
+
+        image_width = swa_max_image_tokens(vllm_config)
         # Warm both the plain-window variant (batches without image spans)
         # and the in-image bidirectional variant.
         image_widths = [0, image_width] if image_width > 0 else [0]
@@ -1523,11 +1521,9 @@ class BuildFlashinferMixedSparseIndicesKernel(
             )
         else:
             swa_index_width = window_size
-        max_image_tokens = (
-            int(getattr(hf_config, "vision_max_n_token", 0) or 0)
-            if int(getattr(hf_config, "vision_n_layers", 0) or 0) > 0
-            else 0
-        )
+        from vllm.v1.attention.backends.mla.sparse_swa import swa_max_image_tokens
+
+        max_image_tokens = swa_max_image_tokens(vllm_config)
         image_widths = (0, max_image_tokens) if max_image_tokens > 0 else 0
         index_topk = int(getattr(hf_config, "index_topk", 0) or 0)
         compress_ratios = tuple(

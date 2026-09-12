@@ -795,11 +795,9 @@ class CombineTopkSwaIndicesKernel(
             return []
 
         window_size = _hf_config_int(vllm_config, "sliding_window", 128)
-        image_width = (
-            _hf_config_int(vllm_config, "vision_max_n_token", 0)
-            if _hf_config_int(vllm_config, "vision_n_layers", 0) > 0
-            else 0
-        )
+        from vllm.v1.attention.backends.mla.sparse_swa import swa_max_image_tokens
+
+        image_width = swa_max_image_tokens(vllm_config)
         # Warm both the plain-window variant (batches without image spans)
         # and the in-image bidirectional variant.
         image_widths = [0, image_width] if image_width > 0 else [0]

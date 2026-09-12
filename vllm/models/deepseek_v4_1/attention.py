@@ -62,7 +62,10 @@ from vllm.v1.attention.backends.mla.indexer import (
     dsa_indexer_uses_fp4,
     get_max_prefill_buffer_size,
 )
-from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.v1.attention.backends.mla.sparse_swa import (
+    DeepseekV4SWACache,
+    swa_max_image_tokens,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -236,11 +239,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.window_size = config.sliding_window
         # Vision variant: image spans are visible bidirectionally, widening
         # prefill SWA index rows by up to max_image_tokens columns.
-        self.max_image_tokens = (
-            getattr(config, "vision_max_n_token", 0)
-            if getattr(config, "vision_n_layers", 0) > 0
-            else 0
-        )
+        self.max_image_tokens = swa_max_image_tokens(vllm_config)
         # ---- v4.1 sparse-attention topology ----
         # compress_ratios has one entry per layer (MTP layers included):
         # 0 = pure sliding window, 1 = full-length compressed cache,
