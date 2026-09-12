@@ -460,11 +460,13 @@ class NixlBaseConnectorWorker:
                     for spec in iter_layer_specs(group.kv_cache_spec)
                 )
             ]
-            if len(ple_groups) != 1 or len(ple_groups[0][1].layer_names) != 1:
+            if len(ple_groups) > 1 or any(
+                len(group.layer_names) != 1 for _, group in ple_groups
+            ):
                 raise ValueError(
-                    "CSA-linear NIXL requires exactly one PLE cache owner."
+                    "CSA-linear NIXL requires at most one PLE cache owner."
                 )
-            self._ple_group_index = ple_groups[0][0]
+            self._ple_group_index = ple_groups[0][0] if ple_groups else None
 
         if self._has_mamba:
             assert self._is_hma_required
@@ -530,9 +532,6 @@ class NixlBaseConnectorWorker:
         # DCP support is scoped to MLA, with dcp_size in (1, tp_size): either fully
         # replicated or fully sharded. A DCP rank is always derivable this way.
         self.dcp_rank = self.tp_rank % self.dcp_size
-        if self._has_mamba and self.dcp_size > 1:
-            # Prefix-cache-aware DCP slicing isn't implemented for the Mamba group.
-            raise ValueError("DCP is not supported for hybrid MLA+Mamba models.")
 
         self.num_blocks = kv_cache_config.num_blocks
         self.enable_permute_local_kv = False
@@ -656,6 +655,9 @@ class NixlBaseConnectorWorker:
         self._recving_transfers = defaultdict[ReqId, list[TransferHandle]](list)
         # Track the expiration time of requests that are waiting to be sent.
         self._reqs_to_send: dict[ReqId, float] = {}
+        # Replicated-KV PCP ranks > 0 never transfer; requests they are asked
+        # to send are reported finished immediately (see get_finished).
+        self._replicated_pcp_done_sending: set[ReqId] = set()
         # Set of requests that have been part of a batch, regardless of status.
         self._reqs_to_process: set[ReqId] = set()
 
@@ -2174,6 +2176,11 @@ class NixlBaseConnectorWorker:
             f"DCP sizes must divide one another: local={self.dcp_size}, "
             f"remote={remote_dcp_size} (engine {remote_engine_id})."
         )
+        if self._has_mamba and self.dcp_size != remote_dcp_size:
+            raise RuntimeError(
+                "Hybrid MLA+Mamba NIXL transfers require matching DCP sizes, "
+                f"got local={self.dcp_size}, remote={remote_dcp_size}."
+            )
 
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
         block_size_ratio = self.transfer_topo.block_size_ratio(
@@ -2542,6 +2549,9 @@ class NixlBaseConnectorWorker:
         assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
+
+        done_sending.update(self._replicated_pcp_done_sending)
+        self._replicated_pcp_done_sending.clear()
 
         # Drain queue of requests where handshake or transfer setup failed.
         failed_recv_reqs = set[ReqId]()
@@ -3133,7 +3143,9 @@ class NixlBaseConnectorWorker:
         to be "optimal" until a new handshake is performed.
 
         Engines with active transfers or pending handshakes cannot be stale:
-        - Active transfers touch _engine_last_active in start_load_kv.
+        - Reads stamp _engine_last_active when they are issued, and engines a
+          transfer is still reading from are held back explicitly, since the
+          stamp is not refreshed while the read runs.
         - Pending handshakes don't have an _engine_last_active entry yet
         """
         # NOTE (NickLucche): This does NOT currently prevent OOMing if a huge number
@@ -3144,9 +3156,24 @@ class NixlBaseConnectorWorker:
             return
 
         now = time.perf_counter()
+        busy = self._engines_with_inflight_transfers()
         for eid, last_active in list(self._engine_last_active.items()):
-            if now - last_active > self._engine_ttl:
+            if now - last_active > self._engine_ttl and eid not in busy:
                 self._cleanup_remote_engine(eid)
+
+    def _engines_with_inflight_transfers(self) -> set[EngineId]:
+        """Remote engines a transfer is still reading from.
+
+        The timestamp is stamped when a read is issued and not refreshed while
+        it runs, so a transfer that outlives the TTL leaves its engine looking
+        idle. A peer that has lost its NIC holds one indefinitely.
+        """
+        return {
+            meta.remote.engine_id
+            for req_id in self._recving_transfers
+            if (meta := self._recving_metadata.get(req_id)) is not None
+            and meta.remote is not None
+        }
 
     def _cleanup_remote_engine(
         self, engine_id: EngineId, *, log_eviction: bool = True

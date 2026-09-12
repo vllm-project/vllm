@@ -682,6 +682,65 @@ async fn unary_generate_returns_collected_text() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn engine_error_finish_returns_internal_for_unary_and_streaming() {
+    for streaming in [false, true] {
+        for prefix in [vec![], vec![b'h' as u32]] {
+            let mut output_specs = Vec::new();
+            if !prefix.is_empty() {
+                output_specs.push((prefix.clone(), None));
+            }
+            output_specs.push((vec![], Some(EngineCoreFinishReason::Error)));
+            let (mut client, server_task, engine_task) =
+                grpc_test_server(b"engine-grpc-error", output_specs).await;
+            let request = pb::GenerateRequest {
+                request_id: "test-engine-error".to_string(),
+                model: "test-model".to_string(),
+                prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+                stopping: Some(pb::StoppingCriteria {
+                    max_new_tokens: 10,
+                    ..Default::default()
+                }),
+                response: Some(pb::ResponseOptions {
+                    output_token_ids: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+
+            let status = if streaming {
+                let mut stream =
+                    client.generate_stream(request).await.expect("start stream").into_inner();
+                let mut received_tokens = Vec::new();
+                let status = loop {
+                    match stream.message().await {
+                        Ok(Some(response)) => {
+                            if let Some(output) = response.outputs {
+                                assert!(
+                                    output.finish_info.is_none(),
+                                    "error became a finish event"
+                                );
+                                received_tokens.extend(output.token_ids);
+                            }
+                        }
+                        Ok(None) => panic!("engine error ended as a successful stream"),
+                        Err(status) => break status,
+                    }
+                };
+                assert_eq!(received_tokens, prefix);
+                status
+            } else {
+                client.generate(request).await.expect_err("engine error must fail the RPC")
+            };
+            assert_eq!(status.code(), tonic::Code::Internal);
+
+            engine_task.await.expect("mock engine task");
+            server_task.abort();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn unary_generate_with_token_ids_prompt() {
     let (mut client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-token-ids", default_stream_output_specs()).await;
@@ -728,7 +787,7 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
                 assert_eq!(features.len(), 2);
 
                 for (feature, identifier) in features.iter().zip(["image-1", "image-2"]) {
-                    assert_eq!(feature.modality, "image");
+                    assert_eq!(feature.modality.as_str(), "image");
                     assert_eq!(feature.identifier, identifier);
                     assert!(feature.mm_position.length > 1);
                     assert_eq!(

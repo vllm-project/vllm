@@ -398,6 +398,56 @@ class TestCSALinearGrouping:
         assert len(gdn) == 10
 
 
+class TestSlidingWindowBucketCap:
+    def test_sliding_window_bucket_is_capped_at_the_main_page(self):
+        """DeepSeek-V4.1 shape: 43 SlidingWindowMLASpec SWA caches beside an
+        unbalanced 8-layer paged MLA bucket. Left whole, the SWA bucket would
+        set the block width and the MLA group would fill under a third of
+        every block; capped, it splits into groups no wider than the MLA
+        page."""
+        config = _shared_layout_config()
+        specs: dict[str, KVCacheSpec] = {}
+        for layer, ratio in ((2, 2), (8, 2), (14, 2), (20, 1)):
+            specs[f"layers.{layer}.attn"] = MLAAttentionSpec(
+                block_size=128,
+                num_kv_heads=1,
+                head_size=584,
+                dtype=torch.uint8,
+                tokens_per_state=ratio,
+                alignment=576,
+            )
+            specs[f"layers.{layer}.idx"] = MLAAttentionSpec(
+                block_size=128,
+                num_kv_heads=1,
+                head_size=132,
+                dtype=torch.uint8,
+                tokens_per_state=ratio,
+                alignment=576,
+            )
+        for layer in range(43):
+            specs[f"layers.{layer}.swa"] = SlidingWindowMLASpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=584,
+                dtype=torch.uint8,
+                sliding_window=128,
+                alignment=576,
+            )
+        groups = get_kv_cache_groups(config, specs)
+        pages = _pages(groups)
+        main = next(g for g in groups if "layers.2.attn" in g.layer_names)
+        main_bytes = sum(pages[n] for n in main.layer_names)
+        assert _get_kv_cache_bytes_per_block(groups) == main_bytes
+        swa_groups = [g for g in groups if g.layer_names[0].endswith(".swa")]
+        per_group = main_bytes // pages["layers.0.swa"]
+        assert len(swa_groups) == -(-43 // per_group)
+        for g in swa_groups:
+            assert sum(pages[n] for n in g.layer_names) <= main_bytes
+        assert sorted(n for g in swa_groups for n in g.layer_names) == sorted(
+            f"layers.{i}.swa" for i in range(43)
+        )
+
+
 class TestDensePacking:
     def test_bytes_per_block_is_largest_group(self):
         groups, g1, g2 = _mixed_page_groups()
@@ -548,3 +598,55 @@ class TestDensePacking:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestCompressorRingGroup:
+    def test_ring_beside_paged_groups_keeps_the_kv_block_as_scheduler_block(self):
+        """DeepSeek-V4.1 compressor state: a CircularBufferSpec ring (capacity
+        8) beside 128-token paged MLA groups and 64-token SWA groups. The ring
+        claims one block per request, never hashes, and does not disturb the
+        scheduler/hash block sizes the paged groups imply."""
+        config = _shared_layout_config()
+        config.cache_config.enable_prefix_caching = True
+        specs: dict[str, KVCacheSpec] = {
+            "layers.2.attn": MLAAttentionSpec(
+                block_size=128,
+                num_kv_heads=1,
+                head_size=584,
+                dtype=torch.uint8,
+                tokens_per_state=2,
+                alignment=576,
+            ),
+            "layers.2.attn.compressor.state_cache": CircularBufferSpec(
+                block_size=8,
+                num_kv_heads=1,
+                head_size=1024,
+                head_size_v=0,
+                dtype=torch.float32,
+            ),
+        }
+        for layer in range(4):
+            specs[f"layers.{layer}.attn.swa_cache"] = SlidingWindowMLASpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=584,
+                dtype=torch.uint8,
+                sliding_window=128,
+                alignment=576,
+            )
+        groups = get_kv_cache_groups(config, specs)
+        ring_groups = [g for g in groups if "state_cache" in g.layer_names[0]]
+        assert len(ring_groups) == 1
+        assert not ring_groups[0].kv_cache_spec.prefix_cacheable
+        kv_cache_config = get_kv_cache_config_from_groups(
+            config, groups, available_memory=64 * _get_kv_cache_bytes_per_block(groups)
+        )
+        assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (128, 64)
+        manager = KVCacheManager(
+            generate_scheduler_kv_cache_config([kv_cache_config]),
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=64,
+            scheduler_block_size=128,
+        )
+        assert len(manager.coordinator.single_type_managers) == len(groups)
