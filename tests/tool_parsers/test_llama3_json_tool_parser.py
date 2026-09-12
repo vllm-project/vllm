@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import MagicMock, patch
+import json
 
 import pytest
 from transformers import AutoTokenizer
@@ -36,7 +36,9 @@ def test_extract_tool_calls_simple(parser):
     assert result.tool_calls[0].type == "function"
     assert result.tool_calls[0].function.name == "getOpenIncidentsTool"
     assert result.tool_calls[0].function.arguments == "{}"
-    assert result.content is None
+    # Engine-based parser returns leading prose as content (legacy
+    # dropped it); text after the last call is still dropped.
+    assert result.content == "Here is the result:"
 
 
 def test_extract_tool_calls_with_arguments(parser):
@@ -64,13 +66,18 @@ def test_extract_tool_calls_no_json(parser):
 
 
 def test_extract_tool_calls_invalid_json(parser):
-    # Test with invalid JSON
+    # Malformed params after a valid "name": streaming has already sent
+    # the name and cannot retract it, so the call is still reported — but
+    # the arguments are cut back to the longest closeable prefix and
+    # closed, so a client never receives invalid JSON.
     model_output = '{"name": "invalidTool", "parameters": {invalid json}'
     result = parser.extract_tool_calls(model_output, None)
 
-    assert result.tools_called is False
-    assert len(result.tool_calls) == 0
-    assert result.content == model_output
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "invalidTool"
+    assert result.tool_calls[0].function.arguments == "{}"
+    assert json.loads(result.tool_calls[0].function.arguments) == {}
 
 
 def test_extract_tool_calls_with_arguments_key(parser):
@@ -141,6 +148,7 @@ def test_extract_tool_calls_multiple_json_with_surrounding_text(parser):
     assert result.tool_calls[0].function.name == "searchTool"
     assert result.tool_calls[1].function.name == "getOpenIncidentsTool"
     assert result.tool_calls[2].function.name == "searchTool"
+    assert result.content == "Here are the results:"
 
 
 def test_extract_tool_calls_deeply_nested_json(parser):
@@ -242,28 +250,12 @@ def test_extract_tool_calls_missing_name_key(parser):
 
 
 def test_extract_tool_calls_missing_parameters_and_arguments_key(parser):
-    # Test that missing both "parameters" and "arguments" keys returns content
+    # A "name"-only envelope carries no parameters/arguments key, so it is
+    # not a tool call and comes back as content — matching legacy, which
+    # raised KeyError and fell back to content.
     model_output = '{"name": "toolWithoutParams"}'
     result = parser.extract_tool_calls(model_output, None)
 
     assert result.tools_called is False
     assert len(result.tool_calls) == 0
     assert result.content == model_output
-
-
-def test_regex_timeout_handling(parser):
-    """Test regex timeout is handled gracefully"""
-    fake_problematic_input = "{hello world[A(A=" + "\t)A(A=,\t" * 2
-
-    # create a mock regex that raises TimeoutError
-    mock_regex = MagicMock()
-    mock_regex.finditer.side_effect = TimeoutError("Regex timeout")
-
-    with patch.object(parser, "tool_call_start_regex", mock_regex):
-        result = parser.extract_tool_calls(fake_problematic_input, None)
-
-        # should treat as regular text when regex times out
-        assert result.content == fake_problematic_input
-        assert result.tools_called is False
-        assert len(result.tool_calls) == 0
-        mock_regex.finditer.assert_called_once()
