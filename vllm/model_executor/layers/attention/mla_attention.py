@@ -414,6 +414,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     """
 
     supports_dense_mha_prefill: ClassVar[bool] = True
+    # Under PCP+DCP only the decode rows carry an LSE; the base forward
+    # merges a full-batch LSE, so subclasses opt in with their own forward.
+    supports_pcp_dcp: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -644,6 +647,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
                     _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
 
+        if self.use_pcp and self.impl.dcp_world_size > 1 and not self.supports_pcp_dcp:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support PCP+DCP."
+            )
         self.dcp_manager: MLADCPManager | None = None
         if self.impl.dcp_world_size > 1:
             query_dtype = (
@@ -1057,11 +1064,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     query_start_loc = attn_metadata.query_start_loc[
                         : attn_metadata.num_decodes + 1
                     ]
-                if self.use_pcp and lse.shape[0] != attn_out.shape[0]:
-                    raise NotImplementedError(
-                        "PCP+DCP is not supported through the base "
-                        "MLAAttention.forward."
-                    )
                 attn_out = self.dcp_manager.combine(
                     attn_out,
                     lse,

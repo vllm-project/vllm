@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 import torch.nn as nn
@@ -118,6 +118,7 @@ class DeepseekV32Indexer(nn.Module):
 class DeepseekV32Attention(MLAAttention):
     indexer: "DeepseekV32Indexer | None"
     indexer_cls: "type[DeepseekV32Indexer]" = DeepseekV32Indexer
+    supports_pcp_dcp: ClassVar[bool] = True
 
     def __init__(
         self,

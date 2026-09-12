@@ -26,6 +26,7 @@ from vllm.utils.deep_gemm import (
     native_next_n_supported,
 )
 from vllm.utils.platform_utils import num_compute_units
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -45,6 +46,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
 )
+from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 logger = init_logger(__name__)
 
@@ -303,41 +305,42 @@ def build_pcp_global_chunk_plan(
     assert np.all(region_padded > 0), (
         f"PCP+DCP prefill got an empty context: {region_padded.tolist()}"
     )
-    region_extent = region_padded * dcp_world_size
-    region_start = np.zeros(len(region_first_row) + 1, dtype=np.int64)
-    np.cumsum(region_extent, out=region_start[1:])
-    region_padded_cu = np.zeros(len(region_first_row) + 1, dtype=np.int64)
-    np.cumsum(region_padded, out=region_padded_cu[1:])
-    total = int(region_start[-1])
-    padded_total = int(region_padded_cu[-1])
 
-    row_start = np.empty(num_rows + 1, dtype=np.int64)
-    row_start[:num_rows] = region_start[region_of_row]
-    row_start[num_rows] = total
+    # Pinned host buffers, filled in place so the copies below are async.
+    cu = torch.zeros((3, num_rows + 1), dtype=torch.int32, pin_memory=PIN_MEMORY)
+    row_start_cu, global_cu, padded_cu = cu
+    # Only a region's first row carries its extent.
+    first_row = torch.from_numpy(region_first_row)
+    row_padded = torch.zeros(num_rows, dtype=torch.int32)
+    row_padded[first_row] = torch.from_numpy(region_padded).int()
+    torch.cumsum(row_padded * dcp_world_size, 0, out=global_cu[1:])
+    torch.cumsum(row_padded, 0, out=padded_cu[1:])
+    row_start_cu[:num_rows] = global_cu[first_row][torch.from_numpy(region_of_row)]
+    row_start_cu[num_rows] = global_cu[num_rows]
+    total = int(global_cu[num_rows])
+    padded_total = int(padded_cu[num_rows])
 
-    global_cu = np.zeros(num_rows + 1, dtype=np.int64)
-    global_cu[1:] = region_start[region_of_row + 1]
-
-    padded_cu = np.zeros(num_rows + 1, dtype=np.int64)
-    padded_cu[1:] = region_padded_cu[region_of_row + 1]
-
-    idx = np.empty(total, dtype=np.int64)
+    idx = torch.empty(total, dtype=torch.int64, pin_memory=PIN_MEMORY)
+    idx_np = idx.numpy()
+    region_start = global_cu[first_row].numpy()
+    region_padded_start = padded_cu[first_row].numpy()
     for i in range(len(region_first_row)):
-        g = int(region_extent[i])
+        g = int(region_padded[i]) * dcp_world_size
         t = np.arange(g, dtype=np.int64)
-        idx[region_start[i] : region_start[i] + g] = (
+        idx_np[region_start[i] : region_start[i] + g] = (
             (t % dcp_world_size) * padded_total
-            + region_padded_cu[i]
+            + region_padded_start[i]
             + t // dcp_world_size
         )
 
+    cu = async_copy_to_gpu(cu, device=device)
     return PCPGlobalChunkPlan(
-        row_start_cu=torch.from_numpy(row_start.astype(np.int32)).to(device),
-        global_cu=torch.from_numpy(global_cu.astype(np.int32)).to(device),
-        padded_local_cu=torch.from_numpy(padded_cu.astype(np.int32)).to(device),
+        row_start_cu=cu[0],
+        global_cu=cu[1],
+        padded_local_cu=cu[2],
         padded_local_total=padded_total,
         total=total,
-        deinterleave_idx=torch.from_numpy(idx).to(device),
+        deinterleave_idx=async_copy_to_gpu(idx, device=device),
     )
 
 
