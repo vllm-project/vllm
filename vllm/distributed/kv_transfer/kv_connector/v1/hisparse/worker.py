@@ -15,6 +15,9 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.stats import (
+    HiSparseKVConnectorStats,
+)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tp_group,
@@ -66,6 +69,9 @@ def _allocate_dma_descriptors(size: int) -> _DMADescriptors:
         dst.numpy(),
         sizes.numpy(),
     )
+
+
+_METRICS_INTERVAL = 2000
 
 
 def _get_hisparse_cache(
@@ -311,6 +317,9 @@ class HiSparseConnectorWorker:
         self._pending_transfer_events: deque[tuple[torch.Event, tuple[int, ...]]] = (
             deque()
         )
+        self._metrics_calls = 0
+        self._metrics_event = torch.Event()
+        self._metrics_pending = False
         self._init_dma()
         if self.is_host_writer:
             for layer_index, handle in enumerate(cache_handles):
@@ -495,6 +504,36 @@ class HiSparseConnectorWorker:
     def reset_hot_state(self) -> None:
         for runtime in self.leader_runtimes:
             runtime.reset_hot_state()
+
+    def get_kv_connector_stats(self) -> HiSparseKVConnectorStats | None:
+        stats = None
+        if self._metrics_pending and self._metrics_event.query():
+            stats = HiSparseKVConnectorStats()
+            for runtime in self.leader_runtimes:
+                group = runtime.index_group
+                hits, misses = group.swap_stats_host.tolist()
+                if hits or misses:
+                    stats.record_snapshot(hits, misses, misses * group.stats_row_bytes)
+            self._metrics_pending = False
+            if stats.is_empty():
+                stats = None
+
+        self._metrics_calls += 1
+        if (
+            self._metrics_calls % _METRICS_INTERVAL == 0
+            and not self._metrics_pending
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            compute_stream = current_stream()
+            for runtime in self.leader_runtimes:
+                group = runtime.index_group
+                compute_stream.wait_stream(group.copy_stream)
+                group.swap_stats_host.copy_(group.swap_stats, non_blocking=True)
+                group.swap_stats.zero_()
+                group.copy_stream.wait_stream(compute_stream)
+            self._metrics_event.record()
+            self._metrics_pending = True
+        return stats
 
     def _release_completed_dma_descriptors(self) -> None:
         pending = self._pending_dma_descriptors
