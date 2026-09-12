@@ -140,7 +140,8 @@ class MockNixlAgent:
     check_xfer_state: Callable
     query_memory: Callable
 
-    def __init__(self):
+    def __init__(self, agent_name, config):
+        self._capture_telemetry = config.capture_telemetry
         self._stored_obj_keys: set[str] = set()
         # handle_id -> (op, [obj_keys])
         self._pending: dict[int, tuple[str, list[str]]] = {}
@@ -204,6 +205,8 @@ class MockNixlAgent:
         pass
 
     def get_xfer_telemetry(self, handle):
+        if not self._capture_telemetry:
+            raise RuntimeError("Telemetry capture is disabled")
         return SimpleNamespace(xferDuration=1000)
 
     def _query_memory(self, queries, mem_type, agent_name):
@@ -233,15 +236,19 @@ def _make_tier(
     **tier_kwargs,
 ) -> tuple[ObjectStoreSecondaryTierManager, MockNixlAgent]:
     """Create a tier backed by a fresh MockNixlAgent."""
-    mock_agent = MockNixlAgent()
     if primary_kv_view is None:
         tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
         primary_kv_view = memoryview(tensor.numpy())
     with (
-        patch("vllm.v1.kv_offload.tiering.obj.manager.nixl_agent_config"),
+        patch(
+            "vllm.v1.kv_offload.tiering.obj.manager.nixl_agent_config",
+            side_effect=lambda backends, capture_telemetry=False: SimpleNamespace(
+                capture_telemetry=capture_telemetry
+            ),
+        ),
         patch(
             "vllm.v1.kv_offload.tiering.obj.manager.nixl_agent",
-            return_value=mock_agent,
+            side_effect=MockNixlAgent,
         ),
     ):
         tier = ObjectStoreSecondaryTierManager(
@@ -252,7 +259,7 @@ def _make_tier(
             prefix=_RUN_PREFIX,
             **tier_kwargs,
         )
-    return tier, mock_agent
+    return tier, tier._agent
 
 
 def drain(
@@ -316,14 +323,16 @@ class TestMockObjTierBasic:
         assert lookup_and_wait(self.tier, [key(999)]) == [LookupResult.MISS]
 
     def test_store_then_load_roundtrip(self):
+        """Completed stores and loads report transfer timing without an env override."""
         self.tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
         results = drain(self.tier)
-        assert results[0].success
+        assert results == [JobResult(job_id=1, success=True, transfer_time=0.001)]
 
         self.tier.submit_load(make_job(2, [key(1), key(2)], [0, 1]))
         results = drain(self.tier)
-        assert len(results) == 1
-        assert results[0].success
+        assert results == [JobResult(job_id=2, success=True, transfer_time=0.001)]
+        assert not self.tier._transfers
+        assert list(self.tier.get_finished_jobs()) == []
 
     def test_multiple_jobs_tracked_independently(self):
         self.tier.submit_store(make_job(1, [key(1)], [0]))

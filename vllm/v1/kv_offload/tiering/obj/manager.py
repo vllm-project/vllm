@@ -147,7 +147,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         # mark its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
 
-        agent_config = nixl_agent_config(backends=[])
+        agent_config = nixl_agent_config(backends=[], capture_telemetry=True)
         self._agent = nixl_agent("ObjAgent", agent_config)
         obj_config = ObjStoreConfig(**store_config)
         params = {**obj_config.to_nixl_params(), "num_threads": str(io_threads)}
