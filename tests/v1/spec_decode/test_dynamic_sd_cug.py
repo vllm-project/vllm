@@ -74,11 +74,11 @@ def _create_vllm_config_for_dsd(
             num_spec_per_batch_size = [
                 (qlen, qlen, qlen - 1) for qlen in range(1, max_decode_query_len + 1)
             ]
-        speculative_config.num_speculative_tokens_per_batch_size = (
+        speculative_config.speculative_token_schedule = (
             num_spec_per_batch_size
         )
     else:
-        speculative_config.num_speculative_tokens_per_batch_size = None
+        speculative_config.speculative_token_schedule = None
     vllm_config.speculative_config = speculative_config
 
     return vllm_config
