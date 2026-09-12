@@ -675,6 +675,9 @@ class EngineArgs:
     kv_cache_metrics_sample: float = get_field(
         ObservabilityConfig, "kv_cache_metrics_sample"
     )
+    prefix_cache_hit_rate_window: int = get_field(
+        ObservabilityConfig, "prefix_cache_hit_rate_window"
+    )
     cudagraph_metrics: bool = ObservabilityConfig.cudagraph_metrics
     enable_layerwise_nvtx_tracing: bool = (
         ObservabilityConfig.enable_layerwise_nvtx_tracing
@@ -1539,6 +1542,10 @@ class EngineArgs:
             **observability_kwargs["kv_cache_metrics_sample"],
         )
         observability_group.add_argument(
+            "--prefix-cache-hit-rate-window",
+            **observability_kwargs["prefix_cache_hit_rate_window"],
+        )
+        observability_group.add_argument(
             "--cudagraph-metrics",
             **observability_kwargs["cudagraph_metrics"],
         )
@@ -2015,6 +2022,7 @@ class EngineArgs:
             per_request_spec_decode_metrics=self.per_request_spec_decode_metrics,
             kv_cache_metrics=self.kv_cache_metrics,
             kv_cache_metrics_sample=self.kv_cache_metrics_sample,
+            prefix_cache_hit_rate_window=self.prefix_cache_hit_rate_window,
             cudagraph_metrics=self.cudagraph_metrics,
             enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
             enable_mfu_metrics=self.enable_mfu_metrics,
