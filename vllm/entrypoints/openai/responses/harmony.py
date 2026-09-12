@@ -162,7 +162,7 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
         else:
             contents = []
 
-        if contents and contents[0].text:
+        if contents and any(part.text for part in contents):
             msg = Message.from_role_and_contents(role, contents)
             msg = msg.with_channel("final")
             msgs.append(msg)

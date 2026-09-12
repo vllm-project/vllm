@@ -284,6 +284,11 @@ def flatten_input_text_content(content: Any) -> str | None:
             texts.append(item)
             continue
         if isinstance(item, dict):
+            if item.get("type") == "refusal":
+                text = text_from_content_part(item)
+                if text:
+                    texts.append(text)
+                continue
             text = item.get("text")
             if text is not None:
                 texts.append(text)
@@ -442,7 +447,7 @@ def parse_chat_input_to_harmony_message(
 
     # Only add assistant messages if they have content, as reasoning or tool calling
     # assistant messages were already added above.
-    if role == "assistant" and contents and contents[0].text:
+    if role == "assistant" and contents and any(part.text for part in contents):
         msg = Message.from_role_and_contents(role, contents)
         # Send non-tool assistant messages to the final channel
         msg = msg.with_channel("final")
