@@ -290,6 +290,9 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
             transfer_mode=self._TRANSFER_MODE,
+            # P-side cache hits, so D can report them in prompt_tokens_details
+            # instead of its own (~100%) hit rate from the KV transfer.
+            remote_prefill_cached_tokens=request.num_cached_tokens,
         )
 
     def build_connector_meta(

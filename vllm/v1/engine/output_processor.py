@@ -152,6 +152,7 @@ class RequestState:
         n: int | None = None,
         temperature: float | None = None,
         stream_input: bool = False,
+        remote_prefill_cached_tokens: int | None = None,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -176,6 +177,11 @@ class RequestState:
         self.queue = queue
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
+        # P/D: cache hits reported by the remote prefill worker via
+        # kv_transfer_params. When set, reported as num_cached_tokens in
+        # place of the local count, which sees KVs pulled from the remote
+        # prefill as a (near-100%) cache hit.
+        self.remote_prefill_cached_tokens = remote_prefill_cached_tokens
         # Per-sequence spec-decode accumulator; arrives once (on finish) via
         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
@@ -227,7 +233,16 @@ class RequestState:
         log_stats: bool,
         stream_interval: int,
     ) -> "RequestState":
+        remote_prefill_cached_tokens = None
         if sampling_params := request.sampling_params:
+            if sampling_params.extra_args:
+                kv_transfer_params = sampling_params.extra_args.get(
+                    "kv_transfer_params"
+                )
+                if kv_transfer_params and kv_transfer_params.get("do_remote_prefill"):
+                    cached = kv_transfer_params.get("remote_prefill_cached_tokens")
+                    if isinstance(cached, int):
+                        remote_prefill_cached_tokens = cached
             if not sampling_params.detokenize:
                 tokenizer = None
             output_kind = sampling_params.output_kind
@@ -278,6 +293,7 @@ class RequestState:
             log_stats=log_stats,
             stream_interval=stream_interval,
             stream_input=request.resumable,
+            remote_prefill_cached_tokens=remote_prefill_cached_tokens,
         )
 
     def make_request_output(
@@ -680,6 +696,8 @@ class OutputProcessor:
                     req_state.num_cache_creation_tokens = (
                         engine_core_output.prefill_stats.num_cache_creation_tokens
                     )
+                if req_state.remote_prefill_cached_tokens is not None:
+                    req_state.num_cached_tokens = req_state.remote_prefill_cached_tokens
                 req_state.is_prefilling = False
 
             if engine_core_output.spec_decode_metrics is not None:

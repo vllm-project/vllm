@@ -211,6 +211,12 @@ class Request:
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
+        # Prompt tokens served from cache (local prefix cache + external KV
+        # transfer) on the first scheduled prefill. Unlike prefill_stats,
+        # this survives take_prefill_stats() so KV connectors can export it
+        # (e.g. to the decode instance in P/D disaggregation) on finish.
+        self.num_cached_tokens = 0
+
         # Per-request speculative-decoding acceptance accumulator. Populated by
         # the scheduler when --per-request-spec-decode-metrics is set (eagerly on
         # add_request, then observed each verify step); stays None otherwise.
