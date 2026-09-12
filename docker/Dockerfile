@@ -640,7 +640,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         python3 use_existing_torch.py --prefix; \
     fi \
     && if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
-        sed -Ei '/^[[:space:]]*(flashinfer-python|nvidia-cutlass-dsl\[cu13\])[[:space:]]*==/Id' \
+        sed -Ei '/^[[:space:]]*(flashinfer-python|nvidia-cutlass-dsl\[cu13\]|quack-kernels)[[:space:]]*==/Id' \
             requirements/cuda.txt; \
     fi
 

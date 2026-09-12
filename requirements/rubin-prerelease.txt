@@ -2,15 +2,25 @@
 # Installed when INSTALL_RUBIN_PRERELEASE=true (see docker/Dockerfile).
 # TODO(rubin-bringup): delete once Rubin APIs ship in regular PyTorch wheels
 # (vllm-project/vllm#49735).
---pre
 --extra-index-url https://download.pytorch.org/whl/nightly/cu134
+--extra-index-url https://flashinfer.ai/whl/cu134
+--extra-index-url https://flashinfer.ai/whl
 
 torch==2.15.0.dev20260903+cu134
-torchvision==0.30.0.dev20260903+cu134
-torchaudio==2.11.0.dev20260903+cu134
+# Match each architecture's torchvision wheel to the pinned torch nightly.
+torchvision==0.30.0.dev20260903+cu134; platform_machine == "x86_64"
+torchvision==0.30.0.dev20260904+cu134; platform_machine == "aarch64"
+torchaudio==2.11.0.dev20260902+cu134
 
-# docker/Dockerfile strips these two from requirements/cuda.txt whenever
+# docker/Dockerfile strips these packages from requirements/cuda.txt whenever
 # INSTALL_RUBIN_PRERELEASE=true, so they must be pinned here instead to
 # still get installed.
 nvidia-cutlass-dsl[cu13]==4.8.0.dev0
-flashinfer-python==0.6.18
+flashinfer-python==0.6.18.post1
+quack-kernels==0.6.5
+
+cuda-python==13.4.1
+cuda-bindings==13.4.1
+flashinfer-jit-cache==0.6.18.post1+cu134
+flashinfer-cubin==0.6.18.post1
+nixl==1.4.1
