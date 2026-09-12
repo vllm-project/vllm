@@ -51,7 +51,7 @@ message ServerInfo {
   uint32 max_loras = 10;
   RlCapabilities rl_capabilities = 11;
   // Full-attention block size in tokens after initialization; absent if unavailable.
-  optional uint64 effective_attention_block_size = 12;
+  optional uint64 effective_attention_block_size = 14;
 }
 
 message RlCapabilities {
