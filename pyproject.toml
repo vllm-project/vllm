@@ -81,6 +81,8 @@ select = [
     "G",
     # flake8-no-pep420
     "INP",
+    # pylint: logging args do not match the format string placeholders
+    "PLE1205", "PLE1206",
 ]
 ignore = [
     # star imports
