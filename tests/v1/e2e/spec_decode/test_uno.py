@@ -301,6 +301,7 @@ def _run_survivor_with_peers(
     )
 
 
+@pytest.mark.forked
 @pytest.mark.skipif(
     not current_platform.is_cuda(),
     reason="Uno survivor batching requires an NVIDIA CUDA device",
