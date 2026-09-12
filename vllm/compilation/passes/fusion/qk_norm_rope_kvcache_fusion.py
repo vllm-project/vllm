@@ -440,6 +440,12 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
             return
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
+        if not attn_layers:
+            logger.warning(
+                "QK Norm + RoPE + KV cache fusion is enabled, but no attention "
+                "layers were found in CompilationConfig.static_forward_context, "
+                "so no fusion patterns were registered."
+            )
 
         for _, layer in attn_layers.items():
             if not layer.impl.fused_qk_norm_rope_kvcache_supported():
