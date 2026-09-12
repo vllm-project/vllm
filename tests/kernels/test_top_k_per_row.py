@@ -1333,9 +1333,9 @@ def test_deep_select_topk(
     top_k: int,
 ) -> None:
     """DeepSelect wrapper vs torch.topk with variable per-row ends."""
-    from vllm.model_executor.layers import deep_select_topk
+    from vllm.model_executor.layers import indexer_topk
 
-    if not deep_select_topk.is_available():
+    if not indexer_topk.DEEP_SELECT_AVAILABLE:
         pytest.skip("vllm._deepselect_C is not built")
 
     set_random_seed(0)
@@ -1352,7 +1352,7 @@ def test_deep_select_topk(
     col_idx = torch.arange(vocab_size, device="cuda")
     logits[col_idx[None, :] >= row_ends[:, None]] = 1e30
 
-    indices = deep_select_topk.topk(logits, top_k, end=row_ends)
+    indices = indexer_topk.deep_select_topk(logits, top_k, end=row_ends)
     torch.accelerator.synchronize()
 
     assert indices.shape == (batch_size, top_k)
@@ -1381,9 +1381,9 @@ def test_deep_select_topk(
 @torch.inference_mode()
 def test_deep_select_topk_preallocated_output() -> None:
     """DeepSelect writes into a preallocated aligned buffer (no `end`)."""
-    from vllm.model_executor.layers import deep_select_topk
+    from vllm.model_executor.layers import indexer_topk
 
-    if not deep_select_topk.is_available():
+    if not indexer_topk.DEEP_SELECT_AVAILABLE:
         pytest.skip("vllm._deepselect_C is not built")
 
     set_random_seed(0)
@@ -1398,7 +1398,7 @@ def test_deep_select_topk_preallocated_output() -> None:
     # whose stride(0) is 32B-aligned.
     buffer = torch.full((batch_size, 4096), -2, dtype=torch.int32, device="cuda")
     output_idx = buffer[:, :top_k]
-    result = deep_select_topk.topk(logits, top_k, output_idx=output_idx)
+    result = indexer_topk.deep_select_topk(logits, top_k, output_idx=output_idx)
     torch.accelerator.synchronize()
 
     assert result.data_ptr() == output_idx.data_ptr()
@@ -1428,9 +1428,9 @@ def _has_flashinfer_topk() -> bool:
 def _has_deep_select() -> bool:
     if not current_platform.is_device_capability_family(100):
         return False
-    from vllm.model_executor.layers import deep_select_topk
+    from vllm.model_executor.layers import indexer_topk
 
-    return deep_select_topk.is_available()
+    return indexer_topk.DEEP_SELECT_AVAILABLE
 
 
 def _has_cooperative_topk() -> bool:
@@ -1486,7 +1486,7 @@ def test_sparse_indexer_decode_topk_explicit_backends(
     row to its seq_len (dirty data past the end must never be selected) and
     match torch.topk on the valid region."""
     from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.model_executor.layers.sparse_attn_indexer import SparseIndexerTopk
+    from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
 
     set_random_seed(0)
     torch.set_default_device("cuda:0")
@@ -1536,7 +1536,7 @@ def test_sparse_indexer_decode_topk_explicit_backends(
 def test_sparse_indexer_topk_backend_resolution() -> None:
     """Auto heuristic chain and fail-fast validation of explicit backends."""
     from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.model_executor.layers import sparse_attn_indexer as sai
+    from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
 
     # 1024B-aligned stride: 131072 * 4 bytes.
     logits = torch.randn(64, 131072, dtype=torch.float32, device="cuda")
@@ -1554,7 +1554,7 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
     ) -> str:
         cfg = VllmConfig(kernel_config={"sparse_indexer_topk_backend": backend})
         with set_current_vllm_config(cfg):
-            return sai.SparseIndexerTopk().resolve_backend(t, k, num_rows)
+            return SparseIndexerTopk().resolve_backend(t, k, num_rows)
 
     if _has_deep_select():
         assert resolve("auto") == "deep_select"

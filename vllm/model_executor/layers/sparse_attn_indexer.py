@@ -19,7 +19,10 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
     select_candidate_blocks as _select_candidate_blocks,
 )
-from vllm.model_executor.layers import deep_select_topk
+from vllm.model_executor.layers.indexer_topk import (
+    RADIX_TOPK_WORKSPACE_SIZE,
+    get_sparse_indexer_topk,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -45,15 +48,6 @@ from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
-
-try:
-    from flashinfer.topk import (
-        top_k_ragged_transform as _fi_top_k_ragged_transform,
-    )
-except ImportError:
-    _fi_top_k_ragged_transform = None
-
-RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
@@ -304,215 +298,6 @@ def kv_cache_as_quant_view(
             stride=(page_bytes, fp4_bytes, fp4_bytes, 1),
         )
     return kv_cache.unsqueeze(-2)
-
-
-class SparseIndexerTopk:
-    """Dispatcher for the DSA sparse indexer decode top-k kernel.
-
-    "auto" applies the heuristic chain deep_select -> cooperative ->
-    persistent -> per_row. Explicit backend values are validated against
-    their constraints and raise RuntimeError when unmet; the 32-row threshold
-    of "auto" is a performance heuristic and does not apply to the forced
-    "deep_select".
-    """
-
-    def __init__(self) -> None:
-        kernel_config = get_current_vllm_config().kernel_config
-        self._backend = kernel_config.sparse_indexer_topk_backend
-        self._is_cuda = current_platform.is_cuda()
-        self._has_deep_select = self._is_cuda and deep_select_topk.is_available()
-        self._has_flashinfer_topk = _fi_top_k_ragged_transform is not None
-        self._cooperative_capable = self._is_cuda and (
-            current_platform.has_device_capability(90)
-            and not current_platform.is_device_capability_family(120)
-        )
-
-    def resolve_backend(
-        self, logits: torch.Tensor, topk_tokens: int, num_rows: int
-    ) -> str:
-        """Resolve the decode top-k implementation from the configured
-        backend ("auto" heuristic chain, or a validated explicit value)."""
-        if self._backend == "auto":
-            if (
-                self._has_deep_select
-                and deep_select_topk.supports(logits, topk_tokens)
-                and num_rows >= deep_select_topk.DEEP_SELECT_MIN_ROWS
-            ):
-                return "deep_select"
-            if not self._cooperative_constraints(logits, topk_tokens, num_rows):
-                return "cooperative"
-            if self._is_cuda and topk_tokens in (512, 1024, 2048):
-                return "persistent"
-            return "per_row"
-
-        failures: list[str] = []
-        if self._backend == "cooperative":
-            failures = self._cooperative_constraints(logits, topk_tokens, num_rows)
-        elif self._backend == "persistent":
-            if not self._is_cuda:
-                failures.append("requires a CUDA platform")
-            if topk_tokens not in (512, 1024, 2048):
-                failures.append(
-                    f"topk_tokens must be in (512, 1024, 2048), got {topk_tokens}"
-                )
-        elif self._backend == "deep_select":
-            if not self._is_cuda:
-                failures.append("requires a CUDA platform")
-            elif not self._has_deep_select:
-                failures.append(
-                    "the DeepSelect extension (vllm._deepselect_C) is not available"
-                )
-            elif not deep_select_topk.supports(logits, topk_tokens):
-                failures.append(
-                    f"inputs violate DeepSelect's constraints: dtype={logits.dtype},"
-                    f" stride={logits.stride()}, topk={topk_tokens}"
-                )
-        elif self._backend == "flashinfer":
-            if not self._is_cuda:
-                failures.append("requires a CUDA platform")
-            if not self._has_flashinfer_topk:
-                failures.append(
-                    "flashinfer.topk.top_k_ragged_transform is not importable"
-                )
-        if failures:
-            raise RuntimeError(
-                f"sparse_indexer_topk_backend='{self._backend}' was requested, but: "
-                + "; ".join(failures)
-            )
-        return self._backend
-
-    def _cooperative_constraints(
-        self, logits: torch.Tensor, topk_tokens: int, num_rows: int
-    ) -> list[str]:
-        """Unmet constraints of cooperative_topk (empty when applicable)."""
-        failures = []
-        if not self._is_cuda:
-            failures.append("requires a CUDA platform")
-        if topk_tokens not in (512, 1024, 2048):
-            failures.append(
-                f"topk_tokens must be in (512, 1024, 2048), got {topk_tokens}"
-            )
-        if num_rows > 64:
-            failures.append(f"num_rows must be <= 64, got {num_rows}")
-        if logits.stride(0) % 4 != 0:
-            failures.append(
-                f"logits.stride(0) must be divisible by 4, got {logits.stride(0)}"
-            )
-        if self._is_cuda and not self._cooperative_capable:
-            failures.append("requires SM90+ and is not supported on the SM12x family")
-        return failures
-
-    @staticmethod
-    def _row_ends(seq_lens: torch.Tensor, next_n: int, num_rows: int) -> torch.Tensor:
-        """Per-row exclusive end offsets (int32, (num_rows,)) for top-k
-        kernels that take ragged lengths (DeepSelect, FlashInfer, torch
-        reference).
-
-        seq_lens is (B, next_n) per-row effective lens for native spec decode
-        and (B, 1) otherwise, in which case per-row lens are derived the same
-        way as the other decode top-k kernels.
-        """
-        if seq_lens.numel() == num_rows:
-            row_ends = seq_lens.reshape(-1)
-        else:
-            next_n_offsets = torch.arange(
-                next_n, dtype=torch.int32, device=seq_lens.device
-            )
-            row_ends = (seq_lens.reshape(-1, 1) - next_n + 1 + next_n_offsets).reshape(
-                -1
-            )
-        assert row_ends.dtype == torch.int32
-        return row_ends
-
-    def run(
-        self,
-        logits: torch.Tensor,
-        seq_lens: torch.Tensor,
-        next_n: int,
-        topk_indices: torch.Tensor,
-        topk_tokens: int,
-        max_seq_len: int,
-    ) -> None:
-        """Run the resolved decode top-k implementation, writing into
-        topk_indices (int32, -1 fill for rows shorter than topk_tokens)."""
-        backend = self.resolve_backend(logits, topk_tokens, logits.shape[0])
-        if backend == "deep_select":
-            row_ends = self._row_ends(seq_lens, next_n, logits.shape[0])
-            deep_select_topk.topk(
-                logits, topk_tokens, end=row_ends, output_idx=topk_indices
-            )
-        elif backend == "cooperative":
-            (topk_workspace,) = current_workspace_manager().get_simultaneous(
-                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
-            )
-            torch.ops._C.cooperative_topk(
-                logits,
-                seq_lens,
-                topk_indices,
-                topk_workspace,
-                topk_tokens,
-                max_seq_len,
-            )
-        elif backend == "persistent":
-            (topk_workspace,) = current_workspace_manager().get_simultaneous(
-                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
-            )
-            torch.ops._C.persistent_topk(
-                logits,
-                seq_lens,
-                topk_indices,
-                topk_workspace,
-                topk_tokens,
-                logits.shape[1],
-            )
-        elif backend == "flashinfer":
-            assert _fi_top_k_ragged_transform is not None
-            row_ends = self._row_ends(seq_lens, next_n, logits.shape[0])
-            offsets = torch.zeros(
-                logits.shape[0], dtype=torch.int32, device=logits.device
-            )
-            # Restricts each row to [0, row_ends[i]) and returns int32
-            # indices with -1 fill past the row length; write into the
-            # int32 buffer.
-            indices = _fi_top_k_ragged_transform(logits, offsets, row_ends, topk_tokens)
-            topk_indices.copy_(indices)
-        elif backend == "torch":
-            # Debug reference: mask everything past each row's end, then topk.
-            row_ends = self._row_ends(seq_lens, next_n, logits.shape[0])
-            cols = torch.arange(logits.shape[1], device=logits.device)
-            masked = logits.masked_fill(
-                cols.unsqueeze(0) >= row_ends.unsqueeze(1), float("-inf")
-            )
-            indices = masked.topk(topk_tokens, dim=-1).indices
-            in_range = torch.arange(topk_tokens, device=logits.device).unsqueeze(
-                0
-            ) < row_ends.unsqueeze(1)
-            indices = torch.where(in_range, indices, -1)
-            topk_indices.copy_(indices)
-        else:
-            assert backend == "per_row", f"unknown topk backend: {backend}"
-            ops.top_k_per_row_decode(
-                logits,
-                next_n,
-                seq_lens,
-                topk_indices,
-                logits.shape[0],
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
-
-
-_topk_dispatcher: SparseIndexerTopk | None = None
-
-
-def _get_topk_dispatcher() -> SparseIndexerTopk:
-    """Process-wide dispatcher singleton: the backend config is fixed at
-    engine init, so availability probing is cached at first use."""
-    global _topk_dispatcher
-    if _topk_dispatcher is None:
-        _topk_dispatcher = SparseIndexerTopk()
-    return _topk_dispatcher
 
 
 @eager_break_during_capture
@@ -904,7 +689,7 @@ def sparse_attn_indexer(
                 )
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        _get_topk_dispatcher().run(
+        get_sparse_indexer_topk().run(
             logits,
             seq_lens,
             next_n,
