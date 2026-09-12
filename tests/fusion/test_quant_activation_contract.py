@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Contract tests for the QuantizedActivation linear-kernel integration."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -125,6 +127,50 @@ def test_bridge_marks_supporting_and_skips_others():
     layer = torch.nn.Module()
     expose_input_quant_key(layer, unsupported)
     assert not hasattr(layer, "input_quant_key")
+
+
+@pytest.mark.parametrize("scale", [0.125, 0.25, 0.0, -1.0, float("nan"), float("inf")])
+@pytest.mark.parametrize("method_kind", ["modelopt", "fp8", "compressed_tensors"])
+def test_gdn_shares_only_equal_valid_static_scales_and_rechecks_reload(
+    scale, method_kind
+):
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        QwenGatedDeltaNetAttention,
+        _shared_input_quant,
+    )
+
+    def projection(value):
+        layer = ColumnParallelLinear.__new__(ColumnParallelLinear)
+        torch.nn.Module.__init__(layer)
+        kernel = _probe(CutlassFP8ScaledMMLinearKernel)
+        kernel.quant_fp8 = torch.nn.Identity()
+        kernel.quant_fp8.num_token_padding = None
+        if method_kind == "compressed_tensors":
+            layer.scheme = SimpleNamespace(fp8_linear=kernel)
+            layer.quant_method = SimpleNamespace()
+        else:
+            attr = "kernel" if method_kind == "modelopt" else "fp8_linear"
+            layer.quant_method = SimpleNamespace(**{attr: kernel})
+        layer.input_scale = torch.tensor([value], dtype=torch.float32, device="cpu")
+        return layer
+
+    qkvz, ba = projection(scale), projection(scale)
+    selected = _shared_input_quant(qkvz, ba)
+    assert (selected is not None) == (scale > 0 and scale != float("inf"))
+    assert qkvz.input_scale.data_ptr() != ba.input_scale.data_ptr()
+
+    layer = SimpleNamespace(
+        in_proj_qkvz=qkvz, in_proj_ba=ba, _allow_shared_input_quant=True
+    )
+    QwenGatedDeltaNetAttention.process_weights_after_loading(layer, torch.bfloat16)
+    assert layer._shared_input_quant is selected
+    ba.input_scale = torch.tensor([0.5], device="cpu")
+    QwenGatedDeltaNetAttention.process_weights_after_loading(layer, torch.bfloat16)
+    assert layer._shared_input_quant is None
+    ba.input_scale = None  # Dynamic quantization cannot share a static input.
+    assert _shared_input_quant(qkvz, ba) is None
+    assert _shared_input_quant(None, ba) is None  # Separate/LoRA projections.
 
 
 def test_as_quantized_activation_validates_key():
