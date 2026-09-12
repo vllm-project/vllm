@@ -4,8 +4,9 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
+from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -16,6 +17,7 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
     resolve_block_hashes,
 )
+from vllm.v1.hisparse.block_pool import SharedEventQueueBlockPool
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
@@ -23,7 +25,10 @@ from vllm.v1.kv_cache_interface import (
     CrossAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
     KpoolTailSpec,
+    KVCacheGroupRole,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -37,6 +42,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 
+if TYPE_CHECKING:
+    from vllm.v1.hisparse.coordinator import HiSparseCoordinator
+
 logger = init_logger(__name__)
 
 
@@ -47,6 +55,19 @@ class SingleTypeKVCacheManager(ABC):
     """
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
+
+    # Keep this group's longer prefix until external cache lookup completes.
+    retains_longer_hit: bool = False
+
+    @property
+    def has_positionally_stable_blocks(self) -> bool:
+        """Whether positional offload scans can follow this block table.
+
+        True means already-scanned indices will not be reused for a different
+        token range. Managers may still null blocks that left their retention
+        window, as long as the cursor's positional history remains valid.
+        """
+        return True
 
     def __init__(
         self,
@@ -119,7 +140,9 @@ class SingleTypeKVCacheManager(ABC):
         # aligned segment (SWA). Initialized lazily by the coordinator after
         # determining the attention groups.
         self.use_eagle = False
-
+        # ``CacheConfig.enable_mamba_fine_grained_prefix_cache``, narrowed and set
+        # by ``KVCacheManager``; only an EAGLE Mamba "align" group ever gets it.
+        self.fine_grained_prefix_cache = False
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
@@ -449,6 +472,8 @@ class SingleTypeKVCacheManager(ABC):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        *,
+        replay_boundaries: Sequence[int],
     ) -> None:
         """
         Cache the blocks for the request.
@@ -461,6 +486,8 @@ class SingleTypeKVCacheManager(ABC):
                 keeps dense checkpointing; ``0`` keeps only the latest replay
                 boundary; a positive multiple of ``scheduler_block_size`` keeps
                 a tail once per that-sized segment. Only SWA acts on it.
+            replay_boundaries: Positions a later request replaying this prompt
+                can resume at, from ``get_replay_boundaries``.
         """
         num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
@@ -469,9 +496,9 @@ class SingleTypeKVCacheManager(ABC):
             return
 
         # Token boundaries whose reachable tail must be retained under sparse
-        # retention: the replay boundary (``num_prompt - 1``, capped by
-        # ``get_computed_blocks``) and any detected shared-prefix junction.
-        reachable_boundaries = [request.num_prompt_tokens - 1]
+        # retention: every position a replaying sibling can resume at (see
+        # ``get_replay_boundaries``) and any detected shared-prefix junction.
+        reachable_boundaries = [*replay_boundaries]
         if request.shared_prefix_boundary:
             reachable_boundaries.append(request.shared_prefix_boundary)
 
@@ -813,8 +840,15 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        *,
+        replay_boundaries: Sequence[int],
     ) -> None:
-        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        super().cache_blocks(
+            request,
+            num_tokens,
+            retention_interval=retention_interval,
+            replay_boundaries=replay_boundaries,
+        )
         hash_block_size = self.block_pool.hash_block_size
         if self.block_size == hash_block_size:
             return
@@ -1216,6 +1250,8 @@ class CircularBufferManager(FullAttentionManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        *,
+        replay_boundaries: Sequence[int],
     ) -> None:
         return
 
@@ -1408,6 +1444,12 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 class MambaManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
 
+    @property
+    def has_positionally_stable_blocks(self) -> bool:
+        # Align-mode Mamba can null interior states and relocate speculative
+        # blocks in place. Other modes retain positional identity.
+        return self.mamba_cache_mode != "align"
+
     def __init__(
         self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs
     ) -> None:
@@ -1429,11 +1471,12 @@ class MambaManager(SingleTypeKVCacheManager):
             # Mapping from request ID to the index of the block
             # allocated in the previous step
             self.last_state_block_idx: dict[str, int] = {}
+            self._num_retired_blocks: dict[str, int] = {}
             # The set of the requests that have been allocated blocks
             self._allocated_block_reqs: set[str] = set()
-            # Absolute checkpoint position selected by the scheduler for the
-            # current allocation.
-            self._checkpoint_positions: dict[str, int] = {}
+            # checkpoint position and reserved block index for the current
+            # allocation.
+            self._checkpoints: dict[str, tuple[int, int]] = {}
             # Requests that registered their own last-prompt-boundary partial
             # tail (producers). A later CoW hands its private copy to the
             # connector; a request that finishes first hands off this table
@@ -1579,6 +1622,27 @@ class MambaManager(SingleTypeKVCacheManager):
 
         return mask
 
+    def _remove_blocks_in_range(
+        self, request_id: str, first_block: int, last_block: int
+    ) -> None:
+        if self.mamba_cache_mode != "align":
+            return super()._remove_blocks_in_range(request_id, first_block, last_block)
+        blocks = self.req_to_blocks.get(request_id, [])
+        first_block = max(first_block, self._num_retired_blocks.get(request_id, 0))
+        last_block = min(last_block, len(blocks))
+        if first_block >= last_block:
+            return
+        freed: list[KVCacheBlock] = []
+        # Mamba prefill leaves null gaps between states awaiting retirement.
+        for i in range(last_block - 1, first_block - 1, -1):
+            if blocks[i].is_null:
+                continue
+            freed.append(blocks[i])
+            blocks[i] = self._null_block
+        if freed:
+            self.block_pool.free_blocks(freed)
+        self._num_retired_blocks[request_id] = last_block
+
     def remove_skipped_blocks(
         self,
         request_id: str,
@@ -1722,7 +1786,14 @@ class MambaManager(SingleTypeKVCacheManager):
                 checkpoint_position = 0
             checkpoint_block = int(checkpoint_position > 0)
             if not apply_admission_cap:
-                self._checkpoint_positions[request_id] = checkpoint_position
+                if checkpoint_position > 0:
+                    checkpoint_idx = cdiv(num_tokens, self.block_size) - 2
+                    self._checkpoints[request_id] = (
+                        checkpoint_position,
+                        checkpoint_idx,
+                    )
+                else:
+                    self._checkpoints.pop(request_id, None)
             if num_new_blocks > 0:
                 blocks_allocated = request_id in self._allocated_block_reqs
                 if not (checkpoint_block and blocks_allocated):
@@ -1760,8 +1831,7 @@ class MambaManager(SingleTypeKVCacheManager):
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
-            checkpoint_position = self._checkpoint_positions.get(request_id, 0)
-            checkpoint_block = int(checkpoint_position > 0)
+            checkpoint_block = int(request_id in self._checkpoints)
             partial_hit = self._partial_hit_reqs.get(request_id)
             has_partial_hit = partial_hit is not None
             # `num_required_blocks` might be less than `len(req_blocks)` if blocks are
@@ -1893,7 +1963,8 @@ class MambaManager(SingleTypeKVCacheManager):
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
-            self._checkpoint_positions.pop(request_id, None)
+            self._num_retired_blocks.pop(request_id, None)
+            self._checkpoints.pop(request_id, None)
             self._producer_partial_tail_reqs.pop(request_id, None)
             # An offer is only guaranteed to hold committed bytes until the end
             # of the pass that made it. This request's blocks are going back to
@@ -1920,9 +1991,16 @@ class MambaManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        *,
+        replay_boundaries: Sequence[int],
     ) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
-        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        super().cache_blocks(
+            request,
+            num_tokens,
+            retention_interval=retention_interval,
+            replay_boundaries=replay_boundaries,
+        )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if self.mamba_cache_mode == "align":
             partial_hash = self._cache_partial_tail_block(request, num_tokens)
@@ -1963,10 +2041,9 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> BlockHashWithGroupId | None:
         hash_block_size = self.block_pool.hash_block_size
         # Re-key the reserved block at its exported checkpoint boundary.
-        checkpoint_position = self._checkpoint_positions.get(request.request_id, 0)
-        if checkpoint_position > 0:
-            # TODO: Store the reserved slot explicitly for multi-module MTP.
-            checkpoint_idx = cdiv(num_tokens, self.block_size) - 2
+        checkpoint = self._checkpoints.get(request.request_id)
+        if checkpoint is not None:
+            checkpoint_position, checkpoint_idx = checkpoint
             blocks = self.req_to_blocks[request.request_id]
             assert 0 <= checkpoint_idx < len(blocks)
             checkpoint_block = blocks[checkpoint_idx]
@@ -1989,7 +2066,22 @@ class MambaManager(SingleTypeKVCacheManager):
         latest_prompt_hash_boundary = (
             request.num_prompt_tokens // hash_block_size
         ) * hash_block_size
-        if num_tokens != latest_prompt_hash_boundary:
+        if self.use_eagle:
+            # Eagle groups match one hash unit past the candidate and drop it,
+            # so register the tail one unit lower.
+            latest_prompt_hash_boundary = max(
+                latest_prompt_hash_boundary - hash_block_size, 0
+            )
+        # The junction is the other position a sibling resumes at: where one was
+        # observed to stop, and where the scheduler already ends a chunk. Bounded
+        # to the prompt chunk being computed -- during decode the target is the
+        # running state block, mutated in place, which equals what its key
+        # promises only after that step's forward.
+        if num_tokens != latest_prompt_hash_boundary and not (
+            self.fine_grained_prefix_cache
+            and num_tokens == request.shared_prefix_boundary
+            and request.num_computed_tokens < num_tokens <= request.num_prompt_tokens
+        ):
             return None
 
         block_idx = num_tokens // self.block_size
@@ -2049,6 +2141,8 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        *,
+        replay_boundaries: Sequence[int],
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.
@@ -2106,14 +2200,390 @@ class SinkFullAttentionManager(FullAttentionManager):
         )
         sink_len = kv_cache_spec.sink_len
         assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
-        num_sink_block = sink_len // self.block_size
-        self.sink_blocks = self.block_pool.free_block_queue.popleft_n(num_sink_block)
+
+
+class HiSparseSourceManager(FullAttentionManager):
+    """Host-tier manager with a private pool; publishes hashes once durable.
+
+    Host capacity is best effort: a page that cannot get a host block keeps a
+    null host entry, so its GPU copy is never written back and stays pinned.
+    """
+
+    coordinator: "HiSparseCoordinator | None" = None
+    # The host tier keeps prefixes the device groups have already lost.
+    retains_longer_hit = True
+
+    @property
+    def records_new_block_ids(self) -> bool:
+        return False
+
+    def take_new_block_ids(self) -> list[int]:
+        self.new_block_ids = []
+        return []
+
+    def bind_host_pool(self, num_blocks: int) -> None:
+        """Replace the device pool this group was built with by a host one."""
+        device_pool = self.block_pool
+        self.block_pool = SharedEventQueueBlockPool(
+            num_gpu_blocks=num_blocks,
+            enable_caching=self.enable_caching and self.kv_cache_spec.prefix_cacheable,
+            hash_block_size=device_pool.hash_block_size,
+            enable_kv_cache_events=device_pool.enable_kv_cache_events,
+            metrics_collector=device_pool.metrics_collector,
+            medium=MEDIUM_CPU,
+            event_owner=device_pool,
+        )
+        self._null_block = self.block_pool.null_block
+
+    def take_pending_cow_copies(self) -> list[tuple[KVCacheBlock, KVCacheBlock]]:
+        """Host copies never reach the worker's generic block-copy path."""
+        return []
+
+    def take_host_cow_copies(self) -> list[tuple[KVCacheBlock, KVCacheBlock]]:
+        """Drain host copies for the coordinator to hand to the connector."""
+        copies = self._pending_cow_copies
+        self._pending_cow_copies = []
+        return copies
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+    ) -> int:
+        if (
+            total_computed_tokens > num_local_computed_tokens
+            or self._has_partial_local_hit(
+                new_computed_blocks, num_local_computed_tokens
+            )
+        ):
+            # External loads need real destinations; future GPU-computed pages
+            # remain best effort. Use the same admission sentinel as Mamba.
+            required = super().get_num_blocks_to_allocate(
+                request_id,
+                total_computed_tokens,
+                new_computed_blocks,
+                total_computed_tokens,
+                num_local_computed_tokens,
+                total_computed_tokens,
+            )
+            if required > self.block_pool.get_num_free_blocks():
+                assert self.coordinator is not None
+                assert self.coordinator.gpu_pool is not None
+                return self.coordinator.gpu_pool.num_gpu_blocks + 1
+        return 0
+
+    def allocate_new_blocks(
+        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+    ) -> list[KVCacheBlock]:
+        req_blocks = self.req_to_blocks[request_id]
+        num_required = cdiv(num_tokens, self.block_size)
+        num_free = self.block_pool.get_num_free_blocks()
+        if request_id in self._partial_hit_reqs:
+            num_free -= 1
+        fit_blocks = min(num_required, len(req_blocks) + max(0, num_free))
+        new_blocks = super().allocate_new_blocks(
+            request_id,
+            fit_blocks * self.block_size,
+            min(num_tokens_main_model, fit_blocks * self.block_size),
+        )
+        req_blocks.extend([self._null_block] * (num_required - len(req_blocks)))
+        return new_blocks
+
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        if num_external_computed_tokens <= 0:
+            return
+        # The connector writes these pages; only a successful receive makes
+        # them readable, not advancing the request's computed-token count.
+        assert self.coordinator is not None
+        self.coordinator.record_pending_host_import(
+            request_id, num_local_computed_tokens + num_external_computed_tokens
+        )
+        super().allocate_external_computed_blocks(
+            request_id, num_local_computed_tokens, num_external_computed_tokens
+        )
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+        *,
+        replay_boundaries: Sequence[int],
+    ) -> None:
+        assert self.coordinator is not None
+        self.coordinator.publish_when_ready(
+            request,
+            num_tokens,
+            retention_interval,
+            replay_boundaries=replay_boundaries,
+        )
+
+    def publish_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+        *,
+        replay_boundaries: Sequence[int],
+    ) -> None:
+        super().cache_blocks(
+            request,
+            num_tokens,
+            retention_interval=retention_interval,
+            replay_boundaries=replay_boundaries,
+        )
+
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        assert self.coordinator is not None
+        self.coordinator.free(request_id)
+        return super().pop_blocks_for_free(request_id)
+
+
+class _HiSparseAuxiliaryManager(SingleTypeKVCacheManager):
+    """Base for ephemeral groups whose host source owns prefix caching."""
+
+    coordinator: "HiSparseCoordinator | None" = None
+
+    def __init__(self, kv_cache_spec: KVCacheSpec, **kwargs) -> None:
+        # Never prefix-cached, but the per-step ``cache_blocks`` hook is where
+        # residency work runs, so stay opted in regardless of prefix caching.
+        kwargs["enable_caching"] = True
+        super().__init__(kv_cache_spec, **kwargs)
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+        *,
+        replay_boundaries: Sequence[int],
+    ) -> None:
+        return None
+
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+        return 0
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes: BlockHashList,
+        max_length: int,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+        kv_cache_spec: KVCacheSpec,
+        drop_eagle_block: bool,
+        alignment_tokens: int,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        return tuple([] for _ in kv_cache_group_ids), 0
+
+
+class HiSparseHotManager(_HiSparseAuxiliaryManager):
+    """Allocate a hot region only after a request acquires CPU-only history."""
+
+    def __init__(self, kv_cache_spec: HiSparseHotSpec, **kwargs) -> None:
+        super().__init__(kv_cache_spec, **kwargs)
+        self.blocks_per_request = kv_cache_spec.blocks_per_request
+        self.hot_required: set[str] = set()
+
+    def require_hot(self, request_id: str) -> None:
+        self.hot_required.add(request_id)
+
+    def has_hot(self, request_id: str) -> bool:
+        return len(self.req_to_blocks.get(request_id, ())) == self.blocks_per_request
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+    ) -> int:
+        assert not new_computed_blocks
+        # A hot region is needed to read host-backed history: an external
+        # import, a new request resuming a host prefix, or one already asked
+        # to transition. Running requests keep their earlier answer.
+        host_import = total_computed_tokens > num_local_computed_tokens
+        resumes_host_prefix = (
+            num_local_computed_tokens > 0 and request_id not in self.num_cached_block
+        )
+        if host_import or resumes_host_prefix or request_id in self.hot_required:
+            return self.get_num_required_blocks(request_id)
+        return 0
+
+    def get_num_required_blocks(self, request_id: str) -> int:
+        return max(
+            self.blocks_per_request - len(self.req_to_blocks.get(request_id, ())),
+            0,
+        )
+
+    def add_local_computed_blocks(
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        assert not new_computed_blocks
+        self.num_cached_block[request_id] = 0
+        assert self.coordinator is not None
+        if num_local_computed_tokens > 0 or not self.coordinator.resident_managers:
+            self.require_hot(request_id)
+
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        self.require_hot(request_id)
+
+    def allocate_new_blocks(
+        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+    ) -> list[KVCacheBlock]:
+        # Cold admissions can bypass add_local_computed_blocks.
+        self.num_cached_block[request_id] = 0
+        if request_id not in self.hot_required:
+            return []
+        req_blocks = self.req_to_blocks[request_id]
+        num_new_blocks = self.blocks_per_request - len(req_blocks)
+        if num_new_blocks <= 0:
+            return []
+        new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+        req_blocks.extend(new_blocks)
+        return new_blocks
+
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        self.hot_required.discard(request_id)
+        return super().pop_blocks_for_free(request_id)
+
+
+class HiSparseResidentManager(_HiSparseAuxiliaryManager):
+    """Track GPU-resident pages for otherwise host-backed KV."""
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_local_computed_tokens: int,
+        num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
+    ) -> int:
+        del num_tokens_main_model
+        assert not new_computed_blocks
+        if total_computed_tokens > num_local_computed_tokens:
+            if total_computed_tokens % self.block_size != 0:
+                raise ValueError(
+                    "A host-only HiSparse import must end on a cache-block boundary."
+                )
+            imported_pages = total_computed_tokens // self.block_size
+            return max(cdiv(num_tokens, self.block_size) - imported_pages, 0)
+        existing = len(self.req_to_blocks.get(request_id, ()))
+        host_pages = cdiv(num_local_computed_tokens, self.block_size)
+        required = cdiv(num_tokens, self.block_size)
+        if apply_admission_cap:
+            assert self._max_admission_blocks_per_request is not None
+            required = min(required, self._max_admission_blocks_per_request)
+        return max(required - max(existing, host_pages), 0)
+
+    def allocate_external_computed_blocks(
+        self,
+        request_id: str,
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        """Represent imported host history with null resident pages."""
+        assert num_external_computed_tokens > 0
+        num_tokens = num_local_computed_tokens + num_external_computed_tokens
+        blocks = self.req_to_blocks[request_id]
+        tail_page = cdiv(num_tokens, self.block_size) - 1
+        if len(blocks) <= tail_page:
+            blocks.extend([self._null_block] * (tail_page + 1 - len(blocks)))
+
+    def add_local_computed_blocks(
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        assert not new_computed_blocks
+        req_blocks = self.req_to_blocks[request_id]
+        assert not req_blocks
+        num_host_pages = cdiv(num_local_computed_tokens, self.block_size)
+        req_blocks.extend([self._null_block] * num_host_pages)
+        self.num_cached_block[request_id] = 0
+        assert self.coordinator is not None
+        self.coordinator.commit_computed_blocks(request_id, num_host_pages)
+
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+        retention_interval: int | None = None,
+        *,
+        replay_boundaries: Sequence[int],
+    ) -> None:
+        assert self.coordinator is not None
+        self.coordinator.plan_prefix_materialization(request.request_id, num_tokens)
+        self.coordinator.update_residency(request.request_id)
+
+    def allocate_new_blocks(
+        self, request_id: str, num_tokens: int, num_tokens_main_model: int
+    ) -> list[KVCacheBlock]:
+        del num_tokens_main_model
+        req_blocks = self.req_to_blocks[request_id]
+        num_new_blocks = cdiv(num_tokens, self.block_size) - len(req_blocks)
+        if num_new_blocks <= 0:
+            return []
+        new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+        req_blocks.extend(new_blocks)
+        return new_blocks
+
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        assert self.coordinator is not None
+        self.coordinator.free(request_id)
+        return super().pop_blocks_for_free(request_id)
+
+    def adopt_resident_page(
+        self, request_id: str, block_idx: int, block: KVCacheBlock
+    ) -> bool:
+        """Point a null prefix page at a pinned GPU copy of its contents."""
+        blocks = self.req_to_blocks.get(request_id)
+        if blocks is None or block_idx >= len(blocks) or not blocks[block_idx].is_null:
+            return False
+        blocks[block_idx] = block
+        return True
+
+    def get_resident_page(self, request_id: str, block_idx: int) -> KVCacheBlock | None:
+        blocks = self.req_to_blocks.get(request_id)
+        if blocks is None or block_idx >= len(blocks):
+            return None
+        block = blocks[block_idx]
+        return None if block.is_null else block
 
 
 def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec,
     max_in_flight_tokens: int,
     max_model_len: int,
+    role: str | None = None,
     **kwargs,
 ) -> SingleTypeKVCacheManager:
     """
@@ -2131,7 +2601,7 @@ def get_manager_for_kv_cache_spec(
     Returns:
         An instance of the appropriate SingleTypeKVCacheManager subclass
     """
-    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
+    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec, role)
     assert manager_class is not None, (
         f"No manager registered for KVCacheSpec {type(kv_cache_spec)}"
     )
@@ -2143,7 +2613,7 @@ def get_manager_for_kv_cache_spec(
     # FullAttentionSpec sizing without a separate admission cap.
     if isinstance(
         kv_cache_spec,
-        (SlidingWindowSpec, ChunkedLocalAttentionSpec),
+        (SlidingWindowSpec, ChunkedLocalAttentionSpec, HiSparseResidentSpec),
     ):
         kwargs["max_admission_blocks_per_request"] = (
             kv_cache_spec.max_admission_blocks_per_request(
@@ -2157,10 +2627,23 @@ def get_manager_for_kv_cache_spec(
 
 def register_all_kvcache_specs(vllm_config):
     """Built-in spec registration"""
+    KVCacheSpecRegistry.register_role_manager(
+        KVCacheGroupRole.HISPARSE_SOURCE, HiSparseSourceManager
+    )
     KVCacheSpecRegistry.register(
         FullAttentionSpec,
         FullAttentionManager,
         uniform_type_base_spec=FullAttentionSpec,
+    )
+    KVCacheSpecRegistry.register(
+        HiSparseHotSpec,
+        HiSparseHotManager,
+        uniform_type_base_spec=HiSparseHotSpec,
+    )
+    KVCacheSpecRegistry.register(
+        HiSparseResidentSpec,
+        HiSparseResidentManager,
+        uniform_type_base_spec=HiSparseResidentSpec,
     )
 
     KVCacheSpecRegistry.register(

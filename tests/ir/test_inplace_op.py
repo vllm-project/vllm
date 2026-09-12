@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
 import torch
 from torch import Tensor
 from torch.fx.experimental.proxy_tensor import make_fx
 
 import vllm.ir.op
 from vllm.ir.op import IrOp, IrOpInplaceOverload
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 @vllm.ir.register_op(allow_inplace=True)
