@@ -17,6 +17,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
 )
+from vllm.platforms import current_platform
 
 
 class _FakeLmHead:
@@ -137,19 +138,24 @@ def test_fp32_head_rejects_quantized_lm_head(default_vllm_config):
         lp._get_logits(torch.randn(4, 16, dtype=torch.bfloat16), lm_head, None)
 
 
+@pytest.mark.parametrize("head_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("soft_cap", [2.0, 30.0])
 def test_replicated_lm_head_skips_tp_communication_and_preserves_processing(
     default_vllm_config,
+    monkeypatch,
+    head_dtype,
+    soft_cap,
 ):
     from unittest import mock
 
     vocab_size, hidden_size = 12, 8
-    soft_cap, scale = 2.0, 0.5
+    scale = 0.5
     lp = LogitsProcessor(
         vocab_size,
         soft_cap=soft_cap,
         scale=scale,
     )
-    lp.head_dtype = torch.float32
+    lp.head_dtype = head_dtype
 
     hidden_states = torch.randn(4, hidden_size, dtype=torch.bfloat16)
     weight = torch.randn(vocab_size, hidden_size, dtype=torch.bfloat16)
@@ -165,6 +171,11 @@ def test_replicated_lm_head_skips_tp_communication_and_preserves_processing(
             disable_tp=True,
         )
     lm_head.weight_loader(lm_head.weight, weight)
+    monkeypatch.setattr(
+        lm_head.quant_method,
+        "apply",
+        lambda layer, x, bias=None: torch.nn.functional.linear(x, layer.weight, bias),
+    )
     assert lm_head.tp_size == 1
 
     with mock.patch.object(lp, "_gather_logits") as gather_mock:
@@ -172,9 +183,11 @@ def test_replicated_lm_head_skips_tp_communication_and_preserves_processing(
 
     gather_mock.assert_not_called()
 
-    expected = torch.nn.functional.linear(hidden_states.float(), weight.float())
+    expected = torch.nn.functional.linear(
+        hidden_states.to(head_dtype), weight.to(head_dtype)
+    )
     expected = torch.tanh(expected / soft_cap) * soft_cap * scale
-    torch.testing.assert_close(logits, expected)
+    torch.testing.assert_close(logits, expected, rtol=0, atol=0)
 
     all_gather_path = (
         "vllm.model_executor.layers.logits_processor.tensor_model_parallel_all_gather"
@@ -184,6 +197,84 @@ def test_replicated_lm_head_skips_tp_communication_and_preserves_processing(
 
     all_gather.assert_not_called()
     assert torch.equal(top, expected.argmax(dim=-1))
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_soft_cap_preserves_caller_logits(default_vllm_config, dtype):
+    """Soft capping keeps per-operation rounding and leaves input logits intact."""
+    lp = LogitsProcessor(64, logits_as_input=True, soft_cap=30.0, scale=0.5)
+    logits = torch.linspace(-100, 100, 4 * 72, dtype=dtype).reshape(4, 72)[:, :64]
+    original = logits.clone()
+
+    actual = lp(None, logits)
+
+    expected = torch.tanh(original / 30.0) * 30.0 * 0.5
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(logits, original, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("logits_as_input", [False, True])
+def test_soft_cap_preserves_gradients(
+    default_vllm_config, monkeypatch, logits_as_input
+):
+    """The inference memory optimization must preserve differentiable callers."""
+    lp = LogitsProcessor(8, logits_as_input=logits_as_input, soft_cap=30.0, scale=0.5)
+    inputs = torch.linspace(-100, 100, 24).reshape(3, 8).requires_grad_()
+    original = inputs.detach().clone()
+    weight = torch.eye(8) * 2
+    head = _FakeLmHead(weight)
+    monkeypatch.setattr(
+        head.quant_method,
+        "apply",
+        lambda layer, x, bias=None: torch.nn.functional.linear(x, layer.weight, bias),
+    )
+
+    actual = lp(head, inputs)
+    projected = (
+        inputs if logits_as_input else torch.nn.functional.linear(inputs, weight)
+    )
+    expected = torch.tanh(projected / 30.0) * 30.0 * 0.5
+    actual_grad = torch.autograd.grad(actual.sum(), inputs)[0]
+    expected_grad = torch.autograd.grad(expected.sum(), inputs)[0]
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=0)
+    torch.testing.assert_close(inputs, original, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Allocation regression is tested on CUDA and ROCm",
+)
+@torch.inference_mode()
+def test_soft_cap_uses_projection_storage(default_vllm_config, monkeypatch):
+    """Large-vocabulary processing must not allocate another logits tensor."""
+    if not torch.accelerator.is_available():
+        pytest.skip("Requires an available CUDA or ROCm device")
+
+    vocab_size = 262144
+    lp = LogitsProcessor(vocab_size, soft_cap=30.0)
+    projected_logits = torch.linspace(
+        -100,
+        100,
+        16 * vocab_size,
+        dtype=torch.bfloat16,
+        device=current_platform.device_type,
+    ).view(16, vocab_size)
+    expected = torch.tanh(projected_logits / 30.0) * 30.0
+    logits_bytes = projected_logits.numel() * projected_logits.element_size()
+    monkeypatch.setattr(lp, "_apply_head", lambda *args: projected_logits)
+    lm_head = _FakeLmHead(torch.empty(0))
+    torch.accelerator.synchronize()
+    torch.accelerator.reset_peak_memory_stats()
+    before = torch.accelerator.memory_allocated()
+    assert before >= logits_bytes
+
+    result = lp(lm_head, torch.empty(0))
+    torch.accelerator.synchronize()
+
+    assert torch.accelerator.max_memory_allocated() - before < logits_bytes
+    torch.testing.assert_close(result, expected, rtol=0, atol=0)
 
 
 def test_get_top_tokens_honors_head_dtype(default_vllm_config):

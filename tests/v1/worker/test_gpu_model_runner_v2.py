@@ -17,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 
@@ -295,3 +296,93 @@ def test_capture_model_profile_only_skips_lock(monkeypatch):
     runner.capture_model(profile_only=True)
 
     assert lock_calls == []
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "num_speculative_tokens", "chunk_limit", "expected_logits"),
+    [
+        pytest.param(16, 0, None, 4, id="non-speculative"),
+        pytest.param(16, 2, None, 12, id="full-verification"),
+        pytest.param(10, 2, None, 10, id="token-limited"),
+        pytest.param(3, 2, None, 3, id="fewer-tokens-than-requests"),
+        pytest.param(16, 2, 5, 5, id="adaptive-limited"),
+        pytest.param(16, 2, 3, 4, id="adaptive-no-drafts"),
+    ],
+)
+def test_profile_run_covers_speculative_logits(
+    monkeypatch, num_tokens, num_speculative_tokens, chunk_limit, expected_logits
+):
+    """KV sizing must include every verification row, within the token budget."""
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.supports_mm_inputs = False
+    runner.max_num_reqs = 4
+    runner.max_num_tokens = num_tokens
+    runner.decode_query_len = num_speculative_tokens + 1
+    runner.vocab_size = 8
+    runner.speculative_config = SimpleNamespace(
+        enable_adaptive_verification=chunk_limit is not None
+    )
+    runner.device = torch.device("cpu")
+    runner.is_last_pp_rank = True
+    runner.pooling_runner = None
+    runner.batch_sharder = None
+    runner.input_buffers = InputBuffers(4, num_tokens, runner.device)
+    hidden_states = torch.zeros(num_tokens, 2)
+    runner._dummy_run = lambda *args, **kwargs: (hidden_states, hidden_states[:4])
+    runner.reset_encoder_cache = lambda: None
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+    # Non-adaptive verification may span multiple sampler chunks.
+    monkeypatch.setattr(
+        model_runner_module,
+        "get_max_chunk_logits",
+        lambda vocab: chunk_limit if chunk_limit is not None else 5,
+    )
+
+    logits_rows = []
+
+    def compute_logits(hidden):
+        logits_rows.append(hidden.shape[0])
+        return torch.zeros(hidden.shape[0], 8)
+
+    runner.model = SimpleNamespace(compute_logits=compute_logits)
+    sampled_batches = []
+    rejected_batches = []
+    sampler_output = SimpleNamespace(num_sampled=None, num_rejected=None)
+
+    def sample(logits, batch):
+        sampled_batches.append(batch)
+        return sampler_output
+
+    runner.sampler = sample
+    draft_logits = torch.zeros(4, num_speculative_tokens, 8)
+    runner.speculator = SimpleNamespace(draft_logits=draft_logits)
+
+    def reject(logits, batch, draft):
+        assert draft is draft_logits
+        assert logits.shape[0] == batch.logits_indices.numel()
+        rejected_batches.append(batch)
+        return sampler_output
+
+    runner.rejection_sampler = reject if num_speculative_tokens else None
+    runner.profile_run()
+
+    assert logits_rows == [expected_logits]
+    num_reqs = min(4, num_tokens)
+    assert len(rejected_batches) == int(expected_logits > num_reqs)
+    assert len(sampled_batches) == int(expected_logits == num_reqs)
+    batch = (sampled_batches + rejected_batches)[0]
+    assert batch.num_reqs == num_reqs
+    assert batch.num_draft_tokens == expected_logits - num_reqs
+    assert batch.cu_num_logits_np[-1] == expected_logits
+    assert batch.cu_num_logits.tolist() == batch.cu_num_logits_np.tolist()
+    if expected_logits > num_reqs:
+        assert batch.num_draft_tokens_per_req is not None
+    else:
+        assert batch.num_draft_tokens_per_req is None
+    for i, (start, end) in enumerate(
+        zip(batch.cu_num_logits_np[:-1], batch.cu_num_logits_np[1:])
+    ):
+        if batch.num_draft_tokens_per_req is not None:
+            assert batch.num_draft_tokens_per_req[i] == end - start - 1
+        assert batch.expanded_idx_mapping[start:end].tolist() == [i] * (end - start)
+        assert batch.expanded_local_pos[start:end].tolist() == list(range(end - start))

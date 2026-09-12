@@ -891,17 +891,52 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
-        num_reqs = hidden_states.shape[0]
-        logits = self.model.compute_logits(hidden_states)
+        num_reqs = min(hidden_states.shape[0], self.max_num_reqs)
+        num_logits = num_reqs
+        if self.rejection_sampler is not None:
+            num_logits = min(hidden_states.shape[0], num_reqs * self.decode_query_len)
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.enable_adaptive_verification
+            ):
+                num_logits = max(
+                    num_reqs, min(num_logits, get_max_chunk_logits(self.vocab_size))
+                )
         dummy_input_batch = InputBatch.make_dummy(
-            num_reqs, num_reqs, self.input_buffers
+            num_reqs, num_logits, self.input_buffers
         )
+        if num_logits > num_reqs:
+            # Verification materializes logits for draft tokens as well as the
+            # bonus token, even though the forward dummy batch samples one row
+            # per request. Profile these rows before sizing the KV cache.
+            dummy_input_batch.num_draft_tokens = num_logits - num_reqs
+            dummy_input_batch.num_draft_tokens_per_req = (
+                dummy_input_batch.num_scheduled_tokens - 1
+            )
+            dummy_input_batch.logits_indices = torch.arange(
+                num_logits, device=self.device
+            )
+            dummy_input_batch.cu_num_logits = dummy_input_batch.query_start_loc
+            dummy_input_batch.cu_num_logits_np = dummy_input_batch.query_start_loc_np
+            num_logits_per_req = torch.from_numpy(
+                dummy_input_batch.num_scheduled_tokens
+            ).to(self.device)
+            dummy_input_batch.expanded_idx_mapping = torch.repeat_interleave(
+                dummy_input_batch.idx_mapping,
+                num_logits_per_req,
+                output_size=num_logits,
+            )
+            dummy_input_batch.expanded_local_pos = (
+                dummy_input_batch.logits_indices
+                - dummy_input_batch.cu_num_logits[
+                    dummy_input_batch.expanded_idx_mapping
+                ]
+            ).to(torch.int32)
 
         # NOTE(woosuk): During the initial memory profiling, the sampler may skip
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
         # during actual execution.
-        assert self.sampler is not None
-        self.sampler(logits, dummy_input_batch)
+        self.sample(hidden_states, dummy_input_batch, None)
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
@@ -934,7 +969,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.is_last_pp_rank:
             assert sample_hidden_states is not None
             if self.pooling_runner is None:
-                self._dummy_sampler_run(sample_hidden_states)
+                assert hidden_states is not None
+                self._dummy_sampler_run(hidden_states)
             else:
                 self._dummy_pooler_run(hidden_states)
 
