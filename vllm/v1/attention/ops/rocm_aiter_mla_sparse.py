@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import importlib
+import json
 import math
+import os
+from dataclasses import dataclass
 from importlib.util import find_spec
 
 import torch
@@ -10,6 +13,7 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -29,6 +33,31 @@ _C2_PAGED_MQA_INPUT_CACHE: dict[
     tuple[tuple[int, ...], tuple[int, ...], str, tuple[int, ...], tuple[int, ...], str, int],
     tuple[torch.Tensor, torch.Tensor],
 ] = {}
+
+
+@dataclass(frozen=True)
+class PagedMQAOutKey:
+    graph_rows: int
+    max_model_len: int
+    dtype: torch.dtype
+    device: torch.device
+    graph_mode: str
+    rank: int
+
+
+@dataclass
+class PagedMQAOutHandle:
+    key: PagedMQAOutKey
+    tensor: torch.Tensor
+    data_ptr: int
+    base_ptr: int
+    shape: tuple[int, int]
+    stride: tuple[int, int]
+    storage_offset: int
+    storage_nbytes: int
+
+
+_PAGED_MQA_OUT_HANDLES: dict[PagedMQAOutKey, PagedMQAOutHandle] = {}
 
 
 def _c2_get_persistent_paged_mqa_inputs(
@@ -67,6 +96,208 @@ def _c2_get_persistent_paged_mqa_inputs(
     staged_context_lens.copy_(context_lens)
     staged_block_tables.copy_(block_tables)
     return staged_context_lens, staged_block_tables
+
+
+def _use_2d_paged_mqa_out_logits_for_current_backend() -> bool:
+    if _ON_GFX942 or _ON_GFX950:
+        return True
+    try:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        return bool(rocm_aiter_ops.is_rdna_aiter_enabled())
+    except Exception:
+        return bool(_ON_RDNA)
+
+
+def _selected_paged_mqa_graph_size() -> int | None:
+    try:
+        forward_context = get_forward_context()
+    except AssertionError:
+        return None
+
+    batch_descriptor = forward_context.batch_descriptor
+    if batch_descriptor is None:
+        return None
+    return int(batch_descriptor.num_tokens)
+
+
+def _paged_mqa_graph_rows(
+    *,
+    hidden_states: torch.Tensor,
+    batch_size: int,
+    next_n: int,
+    selected_graph_size: int | None = None,
+) -> int:
+    if selected_graph_size is not None:
+        return int(selected_graph_size)
+    return int(hidden_states.shape[0])
+
+
+def _paged_mqa_logits_shape(
+    *,
+    graph_rows: int,
+    max_model_len: int,
+) -> tuple[int, int]:
+    return (int(graph_rows), int(max_model_len))
+
+
+def _paged_mqa_capture_active() -> bool:
+    try:
+        return bool(torch.cuda.is_current_stream_capturing())
+    except Exception:
+        return False
+
+
+def _paged_mqa_log(tag: str, payload: dict[str, object]) -> None:
+    payload = {
+        "stage": os.environ.get("PAGED_MQA_DEBUG_STAGE", ""),
+        "rank": os.environ.get("RANK", os.environ.get("LOCAL_RANK", "")),
+        "pid": os.getpid(),
+        **payload,
+    }
+    print(f"{tag} " + json.dumps(payload, sort_keys=True), flush=True)
+
+
+def _paged_mqa_rank() -> int:
+    return int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")))
+
+
+def _paged_mqa_out_graph_mode_key() -> str:
+    try:
+        forward_context = get_forward_context()
+    except AssertionError:
+        return "eager"
+
+    # Warmup runs before capture with runtime_mode == NONE, but it is still the
+    # phase that must allocate the future capture handle. Normalize all capture-
+    # eligible paths to one stable key so warmup and capture share it.
+    if (
+        forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
+        or forward_context.batch_descriptor is not None
+    ):
+        return "paged_mqa_capture"
+    return "eager"
+
+
+def _paged_mqa_capture_graph_mode_key() -> str:
+    return "paged_mqa_capture"
+
+
+def validate_paged_mqa_out_handle(handle: PagedMQAOutHandle) -> None:
+    t = handle.tensor
+    expected_nbytes = (
+        int(handle.key.graph_rows)
+        * int(handle.key.max_model_len)
+        * int(t.element_size())
+    )
+    checks = [
+        tuple(int(x) for x in t.shape)
+        == (int(handle.key.graph_rows), int(handle.key.max_model_len)),
+        tuple(int(x) for x in t.stride()) == (int(handle.key.max_model_len), 1),
+        int(t.storage_offset()) == 0,
+        int(t.data_ptr()) == int(handle.data_ptr),
+        int(t.untyped_storage().data_ptr()) == int(handle.base_ptr),
+        int(t.untyped_storage().nbytes()) >= expected_nbytes,
+        t.dtype == handle.key.dtype,
+        t.device == handle.key.device,
+    ]
+    if not all(checks):
+        _paged_mqa_log(
+            "PAGED_MQA_VALIDATE_FAIL",
+            {
+                "graph_rows": handle.key.graph_rows,
+                "max_model_len": handle.key.max_model_len,
+                "shape": list(t.shape),
+                "stride": list(t.stride()),
+                "storage_offset": int(t.storage_offset()),
+                "storage_nbytes": int(t.untyped_storage().nbytes()),
+                "data_ptr": hex(int(t.data_ptr())),
+                "base_ptr": hex(int(t.untyped_storage().data_ptr())),
+            },
+        )
+        raise RuntimeError("invalid paged-MQA out_logits handle")
+
+
+def require_paged_mqa_out_handle(
+    key: PagedMQAOutKey,
+) -> PagedMQAOutHandle:
+    capturing = _paged_mqa_capture_active()
+    handle = _PAGED_MQA_OUT_HANDLES.get(key)
+    if handle is None:
+        if capturing:
+            raise RuntimeError(
+                f"paged-MQA out_logits allocated during capture: {key}"
+            )
+        tensor = current_workspace_manager().get_simultaneous(
+            ((key.graph_rows, key.max_model_len), key.dtype),
+        )[0]
+        handle = PagedMQAOutHandle(
+            key=key,
+            tensor=tensor,
+            data_ptr=int(tensor.data_ptr()),
+            base_ptr=int(tensor.untyped_storage().data_ptr()),
+            shape=tuple(int(x) for x in tensor.shape),
+            stride=tuple(int(x) for x in tensor.stride()),
+            storage_offset=int(tensor.storage_offset()),
+            storage_nbytes=int(tensor.untyped_storage().nbytes()),
+        )
+        _PAGED_MQA_OUT_HANDLES[key] = handle
+    validate_paged_mqa_out_handle(handle)
+    return handle
+
+
+def _record_paged_mqa_out_handle(
+    key: PagedMQAOutKey,
+    tensor: torch.Tensor,
+) -> PagedMQAOutHandle:
+    handle = PagedMQAOutHandle(
+        key=key,
+        tensor=tensor,
+        data_ptr=int(tensor.data_ptr()),
+        base_ptr=int(tensor.untyped_storage().data_ptr()),
+        shape=tuple(int(x) for x in tensor.shape),
+        stride=tuple(int(x) for x in tensor.stride()),
+        storage_offset=int(tensor.storage_offset()),
+        storage_nbytes=int(tensor.untyped_storage().nbytes()),
+    )
+    _PAGED_MQA_OUT_HANDLES[key] = handle
+    validate_paged_mqa_out_handle(handle)
+    return handle
+
+
+def _reserve_paged_mqa_out_handle_for_capture(
+    *,
+    graph_rows: int,
+    max_model_len: int,
+    device: torch.device,
+    workspace_manager,
+) -> None:
+    reserve_key = PagedMQAOutKey(
+        graph_rows=int(graph_rows),
+        max_model_len=int(max_model_len),
+        dtype=torch.float32,
+        device=device,
+        graph_mode=_paged_mqa_capture_graph_mode_key(),
+        rank=_paged_mqa_rank(),
+    )
+    reserve_shape = _paged_mqa_logits_shape(
+        graph_rows=graph_rows,
+        max_model_len=max_model_len,
+    )
+    reserved_tensor = workspace_manager.get_simultaneous(
+        (reserve_shape, torch.float32),
+    )[0]
+    _record_paged_mqa_out_handle(reserve_key, reserved_tensor)
+    _paged_mqa_log(
+        "PAGED_MQA_PRECAPTURE_RESERVE",
+        {
+            "graph_rows": int(graph_rows),
+            "max_model_len": int(max_model_len),
+            "shape": list(reserve_shape),
+            "data_ptr": hex(int(reserved_tensor.data_ptr())),
+            "base_ptr": hex(int(reserved_tensor.untyped_storage().data_ptr())),
+        },
+    )
 
 @triton.jit
 def _indexer_k_quant_and_cache_kernel(
@@ -523,6 +754,7 @@ def rocm_fp8_paged_mqa_logits(
     block_tables: torch.Tensor,
     schedule_metadata: torch.Tensor,
     max_model_len: int,
+    out_logits: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits using paged KV-cache.
 
@@ -556,13 +788,33 @@ def rocm_fp8_paged_mqa_logits(
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
 
     if aiter_paged_mqa_logits_module is not None:
-        if _ON_GFX942 or _ON_GFX950:
+        if _use_2d_paged_mqa_out_logits_for_current_backend():
+            if out_logits is None:
+                raise RuntimeError(
+                    "paged-MQA out_logits must be explicitly provided"
+                )
+        
             deepgemm_fp8_paged_mqa_logits = (
                 aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits
             )
             batch_size, next_n, heads, _ = q_fp8.shape
-            (out_logits,) = current_workspace_manager().get_simultaneous(
-                ((batch_size * next_n, max_model_len), torch.float32),
+            expected_shape = (batch_size * next_n, max_model_len)
+            if tuple(int(x) for x in out_logits.shape) != expected_shape:
+                raise RuntimeError(
+                    f"explicit paged-MQA out_logits has shape "
+                    f"{tuple(out_logits.shape)}, expected {expected_shape}"
+                )
+            _paged_mqa_log(
+                "PAGED_MQA_VALIDATE_OK",
+                {
+                    "capture_active": _paged_mqa_capture_active(),
+                    "shape": list(out_logits.shape),
+                    "stride": list(out_logits.stride()),
+                    "storage_offset": int(out_logits.storage_offset()),
+                    "storage_nbytes": int(out_logits.untyped_storage().nbytes()),
+                    "data_ptr": hex(int(out_logits.data_ptr())),
+                    "base_ptr": hex(int(out_logits.untyped_storage().data_ptr())),
+                },
             )
             deepgemm_fp8_paged_mqa_logits(
                 q_fp8,
@@ -780,11 +1032,49 @@ def rocm_aiter_sparse_attn_indexer(
 
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
         # batch_size * next_n <= hidden_states.shape[0] == max_num_batched_tokens
-        if _ON_GFX942 or _ON_GFX950:
-            workspace_manager.get_simultaneous(
-                ((hidden_states.shape[0], max_model_len), torch.float32),
+        selected_graph_size = _selected_paged_mqa_graph_size()
+        graph_rows = _paged_mqa_graph_rows(
+            hidden_states=hidden_states,
+            batch_size=int(q_fp8.shape[0]),
+            next_n=q_fp8.shape[1],
+            selected_graph_size=selected_graph_size,
+        )
+        if _use_2d_paged_mqa_out_logits_for_current_backend():
+            reserve_shape = _paged_mqa_logits_shape(
+                graph_rows=graph_rows,
+                max_model_len=max_model_len,
+            )
+            _paged_mqa_log(
+                "PAGED_MQA_RESERVE",
+                {
+                    "capture_active": _paged_mqa_capture_active(),
+                    "backend_2d": True,
+                    "graph_rows": graph_rows,
+                    "actual_rows": int(q_fp8.shape[0]) * int(q_fp8.shape[1]),
+                    "max_model_len": int(max_model_len),
+                    "shape": list(reserve_shape),
+                    "dtype": str(torch.float32),
+                },
+            )
+            _reserve_paged_mqa_out_handle_for_capture(
+                graph_rows=int(graph_rows),
+                max_model_len=int(max_model_len),
+                device=hidden_states.device,
+                workspace_manager=workspace_manager,
             )
         else:
+            _paged_mqa_log(
+                "PAGED_MQA_RESERVE",
+                {
+                    "capture_active": _paged_mqa_capture_active(),
+                    "backend_2d": False,
+                    "graph_rows": graph_rows,
+                    "actual_rows": int(q_fp8.shape[0]) * int(q_fp8.shape[1]),
+                    "max_model_len": int(max_model_len),
+                    "shape": [int(q_fp8.shape[1]), int(hidden_states.shape[0]), int(max_model_len)],
+                    "dtype": str(torch.float32),
+                },
+            )
             workspace_manager.get_simultaneous(
                 (
                     (q_fp8.shape[1], hidden_states.shape[0], max_model_len),
@@ -910,12 +1200,57 @@ def rocm_aiter_sparse_attn_indexer(
         batch_size = padded_q_fp8_decode_tokens.shape[0]
         next_n = padded_q_fp8_decode_tokens.shape[1]
         assert batch_size == decode_metadata.seq_lens.shape[0]
-        num_padded_tokens = batch_size * next_n
+        actual_rows = int(batch_size) * int(next_n)
+        num_padded_tokens = actual_rows
 
         paged_mqa_seq_lens, paged_mqa_block_table = _c2_get_persistent_paged_mqa_inputs(
             context_lens=decode_metadata.seq_lens,
             block_tables=decode_metadata.block_table,
         )
+        selected_graph_size = _selected_paged_mqa_graph_size()
+        graph_rows = _paged_mqa_graph_rows(
+            hidden_states=hidden_states,
+            batch_size=batch_size,
+            next_n=next_n,
+            selected_graph_size=selected_graph_size,
+        )
+        paged_mqa_out_full = None
+        paged_mqa_out = None
+        if _use_2d_paged_mqa_out_logits_for_current_backend():
+            out_key = PagedMQAOutKey(
+                graph_rows=int(graph_rows),
+                max_model_len=int(max_model_len),
+                dtype=torch.float32,
+                device=padded_q_fp8_decode_tokens.device,
+                graph_mode=_paged_mqa_out_graph_mode_key(),
+                rank=_paged_mqa_rank(),
+            )
+            handle = require_paged_mqa_out_handle(out_key)
+            paged_mqa_out_full = handle.tensor
+            paged_mqa_out = paged_mqa_out_full[:actual_rows, :]
+            if tuple(int(x) for x in paged_mqa_out.shape) != (
+                actual_rows,
+                int(max_model_len),
+            ):
+                raise RuntimeError(
+                    "explicit paged-MQA slice shape mismatch "
+                    f"{tuple(paged_mqa_out.shape)} != {(actual_rows, int(max_model_len))}"
+                )
+            _paged_mqa_log(
+                "PAGED_MQA_CALL",
+                {
+                    "capture_active": _paged_mqa_capture_active(),
+                    "actual_rows": actual_rows,
+                    "graph_rows": graph_rows,
+                    "max_model_len": int(max_model_len),
+                    "out_logits_shape": list(paged_mqa_out.shape),
+                    "out_logits_stride": list(paged_mqa_out.stride()),
+                    "storage_offset": int(paged_mqa_out.storage_offset()),
+                    "storage_nbytes": int(paged_mqa_out.untyped_storage().nbytes()),
+                    "data_ptr": hex(int(paged_mqa_out.data_ptr())),
+                    "base_ptr": hex(int(paged_mqa_out.untyped_storage().data_ptr())),
+                },
+            )
         logits = rocm_fp8_paged_mqa_logits(
             padded_q_fp8_decode_tokens,
             kv_cache,
@@ -924,6 +1259,7 @@ def rocm_aiter_sparse_attn_indexer(
             paged_mqa_block_table,
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
+            out_logits=paged_mqa_out,
         )
 
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
