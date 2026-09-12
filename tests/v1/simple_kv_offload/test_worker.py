@@ -53,6 +53,7 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
+from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.utils import allocate_kv_cache
 
@@ -80,7 +81,8 @@ def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
     return backend, gpu["k"], cpu["k"]
 
 
-def test_no_forward_step_completes_cpu_store(monkeypatch):
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_no_forward_step_completes_cpu_store(monkeypatch, use_v2):
     """A finished request's final store must drain without another model step."""
     backend, gpu, cpu = _make_backend()
     worker = SimpleCPUOffloadWorker(None, None, cpu_capacity_bytes=0)
@@ -97,7 +99,17 @@ def test_no_forward_step_completes_cpu_store(monkeypatch):
     monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
     try:
         gpu.fill_(91)
-        result = KVConnectorModelRunnerMixin.kv_connector_no_forward(output, None)
+        if use_v2:
+            active = ActiveKVConnector.__new__(ActiveKVConnector)
+            active.kv_connector = connector
+            active._disabled = False
+            active._pending_load_start = False
+            module = "vllm.v1.worker.gpu.kv_connector"
+            monkeypatch.setattr(f"{module}.is_forward_context_available", lambda: True)
+            monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
+            result = active.no_forward(output)
+        else:
+            result = KVConnectorModelRunnerMixin.kv_connector_no_forward(output, None)
         completion = (
             result.kv_connector_output.kv_connector_worker_meta
             if result.kv_connector_output is not None
