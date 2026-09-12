@@ -16,6 +16,7 @@ import torch
 from typing_extensions import TypedDict
 
 from tests.v1.attention.utils import create_vllm_config
+from vllm.config import MultiModalConfig
 from vllm.models.deepseek_v4.common.ops.cache_utils import (
     build_flashinfer_mixed_sparse_indices,
     combine_topk_swa_indices,
@@ -462,7 +463,9 @@ def test_flashinfer_mixed_sparse_indices_with_image_spans():
     assert actual == exp_rows[1:]
 
 
-def make_builder(vision: bool) -> DeepseekSparseSWAMetadataBuilder:
+def make_builder(
+    vision: bool, language_model_only: bool = False
+) -> DeepseekSparseSWAMetadataBuilder:
     overrides: dict = {"sliding_window": WINDOW}
     if vision:
         overrides.update(vision_n_layers=2, vision_max_n_token=MAX_IMG)
@@ -472,6 +475,10 @@ def make_builder(vision: bool) -> DeepseekSparseSWAMetadataBuilder:
         max_num_seqs=8,
         hf_config_override=overrides,
     )
+    if language_model_only:
+        vllm_config.model_config.multimodal_config = MultiModalConfig(
+            language_model_only=True
+        )
     spec = SlidingWindowMLASpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=1,
@@ -559,6 +566,22 @@ def test_builder_no_image_spans_fast_path():
     )
     assert md.prefill_swa_lens.cpu().tolist() == lens
     assert md.prefill_swa_indices[:, 0].cpu().tolist() == rows
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_builder_vision_model_language_model_only_keeps_window():
+    """Vision checkpoint served with --language-model-only: no image can
+    reach the model, so prefill rows keep the plain window instead of
+    window + vision_max_n_token (128 + 1024 = 1152 on V4.1-Flash, a top-k the
+    SM120 sparse-MLA kernels do not instantiate)."""
+    seq_lens = [30, 12]
+    query_lens = [30, 12]
+    builder = make_builder(vision=True, language_model_only=True)
+    assert builder.max_image_tokens == 0
+    assert builder.prefill_index_width == WINDOW
+    md = build_metadata(builder, seq_lens, query_lens, None)
+    assert md.prefill_swa_indices.shape[-1] == WINDOW
+    assert md.prefill_left_visible is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
