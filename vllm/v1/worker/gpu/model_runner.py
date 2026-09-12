@@ -953,6 +953,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.pooling_runner is not None:
             self.pooling_runner.clear()
 
+    def release_late_interaction_queries(self, query_keys: list[str]) -> None:
+        if self.pooling_runner is not None:
+            self.pooling_runner.release_late_interaction_queries(query_keys)
+
     @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
         """Estimate the GPU memory required to capture CUDA graphs."""

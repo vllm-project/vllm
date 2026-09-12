@@ -1021,6 +1021,9 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         self.late_interaction_runner.clear()
 
+    def release_late_interaction_queries(self, query_keys: list[str]) -> None:
+        self.late_interaction_runner.release_queries(query_keys)
+
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
             if self.uses_mrope:

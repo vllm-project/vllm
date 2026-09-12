@@ -967,7 +967,25 @@ class EngineCore:
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
+        wait_for_inflight_batches: bool = False,
     ) -> list[_R]:
+        if wait_for_inflight_batches and self.batch_queue:
+            # Ray model execution and worker RPCs run on different threads.
+            # Consume each pending output once, in execution order, and retain
+            # it for the scheduler's subsequent update_from_output().
+            for index in reversed(range(len(self.batch_queue))):
+                future, scheduler_output, exec_future = self.batch_queue[index]
+                completed: Future[ModelRunnerOutput] = Future()
+                try:
+                    completed.set_result(future.result())
+                except Exception as exc:
+                    completed.set_exception(exc)
+                self.batch_queue[index] = (
+                    completed,
+                    scheduler_output,
+                    completed if exec_future is future else exec_future,
+                )
+                completed.result()
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
     def set_weight_version(self, weight_version: str) -> None:
