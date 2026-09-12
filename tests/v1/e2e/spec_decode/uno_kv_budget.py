@@ -30,8 +30,10 @@ QWEN3_NUM_KV_HEADS = 8
 QWEN3_HEAD_DIM = 128
 
 # The survivor engine runs at a shorter context so its admission floor (65
-# blocks) sits below the mixed phase's no-prefix-sharing footprint (151
-# blocks). At max_model_len=2048 the floor (129 blocks) nearly equals it.
+# blocks) sits below the mixed phase's no-prefix-sharing footprint (153 blocks
+# with the K lookahead slots the allocator reserves; it read 151 before the
+# arithmetic became K-aware). At max_model_len=2048 the floor (129 blocks)
+# nearly equals it.
 SURVIVOR_MAX_MODEL_LEN = 1024
 
 # Blocks granted above the engine's single-request admission floor. Four blocks

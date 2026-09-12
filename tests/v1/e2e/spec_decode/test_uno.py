@@ -1295,11 +1295,16 @@ def test_uno_greedy_matches_base_model(
 
     def instrument_receipt() -> str:
         """What this comparison could and could not measure, as one line."""
+        # Every parametrised mode is named, so a receipt detached from its
+        # pytest id still identifies the case: without dual_stream,
+        # eight_candidates_graphs and native_overlap_graphs read identically.
         return (
             f"uno greedy instrument: K={k}, card={device_name}, "
             f"sm_{capability[0]}{capability[1]}, enforce_eager={enforce_eager}, "
+            f"prefix_cache={enable_prefix_caching}, dual_stream={dual_stream}, "
             f"graphs_expected={expect_graphs}, "
-            f"prefix_cache={enable_prefix_caching}, control_arms={control_arms}, "
+            f"representative_case={representative_case}, "
+            f"control_arms={control_arms}, "
             "control_divergences="
             f"{[format_divergences(sorted(batch)) for batch in control_divergences]}"
             f", prompts_per_batch={[len(batch) for batch in ref_outputs]}"

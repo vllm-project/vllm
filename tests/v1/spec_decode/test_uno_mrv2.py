@@ -817,6 +817,12 @@ def test_token_agreement_counts_prompts_and_locates_the_first_divergence():
     matched, divergences = budget.token_agreement([[1, 2, 3]], [[1, 2]])
     assert (matched, divergences) == (0, [(0, 2)])
 
+    # A first-token difference is t0, not a falsy value that reads as "no
+    # divergence" anywhere downstream.
+    matched, divergences = budget.token_agreement([[1, 2]], [[9, 2]])
+    assert (matched, divergences) == (0, [(0, 0)])
+    assert budget.format_divergences(divergences) == ["p0/t0"]
+
     with pytest.raises(AssertionError):
         budget.token_agreement([[1]], [[1], [2]])
 
@@ -836,6 +842,9 @@ def test_token_agreement_counts_prompts_and_locates_the_first_divergence():
         # The count comparison this replaced passed exactly this row: three
         # matches each, but Uno broke a prompt the control reproduced.
         ([(2, 31)], [(0, 12), (2, 31)], False),
+        # Terra's coordinates for the same hazard, with the divergence at the
+        # very first token, which also pins that token_agreement reports t0.
+        ([(2, 31)], [(0, 0)], False),
     ],
 )
 def test_exact_token_verdict_contains_divergences_per_prompt(
