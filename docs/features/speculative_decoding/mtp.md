@@ -74,3 +74,22 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
   is a good default to start with.
 - If your model does not support MTP, use another method such as EAGLE or draft
   model speculation.
+
+## Qwen3.8 Flash Next FP8 proposal head
+
+Qwen3.8 Flash Next checkpoints can opt into a private rowwise-FP8 copy of the
+shared BF16 vocabulary head for MTP proposals. Target verification continues
+to use the original BF16 head:
+
+```bash
+VLLM_QWEN4_EXP_FP8_DRAFT_HEAD=1 VLLM_USE_V2_MODEL_RUNNER=1 \
+vllm serve <model> --enforce-eager --tensor-parallel-size 2 \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":4}'
+```
+
+The opt-in currently requires NVIDIA CUDA, BF16 model and head dtypes, Model
+Runner V2, eager execution, TP1 or TP2, and PP/PCP/DCP size 1. It does not
+support LoRA, batch-invariant mode, sleep mode, weight transfer, a custom
+LM-head parallel group, a quantized LM head, or runtime weight reload. The
+private FP8 copy adds approximately one byte per rank-local vocabulary-head
+weight plus one FP32 scale per row. Restart the engine after changing weights.

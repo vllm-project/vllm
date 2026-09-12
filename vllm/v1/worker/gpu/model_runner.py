@@ -530,6 +530,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return speculator.model
 
     def reload_weights(self, *args, **kwargs) -> None:
+        draft_model = self.get_draft_model()
+        before_target_model_reload = (
+            getattr(draft_model, "before_target_model_reload", None)
+            if draft_model is not None
+            else None
+        )
+        if before_target_model_reload is not None:
+            before_target_model_reload()
+
         # TODO(Wentao): Use full version instead of import when fully migrated to v2
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
 
