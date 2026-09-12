@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (L4) Plugin Integration'
+  key: plugin-tests-2-gpus
   device: intel_gpu
   timeout_in_minutes: 35
   num_devices: 2
@@ -75,6 +76,7 @@ steps:
     pytest -v -s plugins_tests/test_oot_registration_offline.py || true &&
     pytest -v -s plugins_tests/lora_resolvers || true'
 - label: ':nvidia: (H200 MIG 18GB) GGUF Plugin'
+  key: gguf-plugin
   device: intel_gpu
   timeout_in_minutes: 30
   optional: false
@@ -102,6 +104,7 @@ steps:
     cd tests &&
     pytest -v -s plugins_tests/gguf || true'
 - label: ':nvidia: (H200 MIG 18GB) BitsAndBytes Plugin'
+  key: bitsandbytes-plugin
   device: intel_gpu
   timeout_in_minutes: 30
   optional: false
@@ -130,6 +133,7 @@ steps:
     cd tests &&
     pytest -v -s plugins_tests/bitsandbytes -m not distributed || true'
 - label: ':nvidia: (L4) BitsAndBytes Plugin'
+  key: bitsandbytes-plugin-2-gpus
   device: intel_gpu
   timeout_in_minutes: 15
   num_devices: 2

@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (H200 MIG 18GB) Basic Correctness'
+  key: basic-correctness
   device: intel_gpu
   timeout_in_minutes: 68
   working_dir: .
