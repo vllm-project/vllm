@@ -1483,9 +1483,8 @@ def test_sparse_indexer_decode_topk_explicit_backends(
     """Every explicit sparse-indexer decode top-k backend must restrict each
     row to its seq_len (dirty data past the end must never be selected) and
     match torch.topk on the valid region."""
-    from vllm.model_executor.layers.sparse_attn_indexer import (
-        run_sparse_indexer_decode_topk,
-    )
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.sparse_attn_indexer import SparseIndexerTopk
 
     set_random_seed(0)
     torch.set_default_device("cuda:0")
@@ -1510,9 +1509,9 @@ def test_sparse_indexer_decode_topk_explicit_backends(
     logits[col_idx[None, :] >= row_ends[:, None]] = 1e30  # dirty tail
 
     indices = torch.full((num_rows, top_k), -2, dtype=torch.int32, device="cuda")
-    run_sparse_indexer_decode_topk(
-        backend, logits, seq_lens, next_n, indices, top_k, max_seq_len
-    )
+    cfg = VllmConfig(kernel_config={"sparse_indexer_topk_backend": backend})
+    with set_current_vllm_config(cfg):
+        SparseIndexerTopk().run(logits, seq_lens, next_n, indices, top_k, max_seq_len)
     torch.accelerator.synchronize()
 
     # k_i == top_k for every row here (row_ends >= 3997 > top_k).
@@ -1553,7 +1552,7 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
     ) -> str:
         cfg = VllmConfig(kernel_config={"sparse_indexer_topk_backend": backend})
         with set_current_vllm_config(cfg):
-            return sai._resolve_sparse_indexer_topk_backend(t, k, num_rows)
+            return sai.SparseIndexerTopk().resolve_backend(t, k, num_rows)
 
     if _has_deep_select():
         assert resolve("auto") == "deep_select"

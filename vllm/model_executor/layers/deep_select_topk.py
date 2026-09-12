@@ -4,6 +4,9 @@
 
 DeepSelect (https://github.com/deepseek-ai/DeepSelect, MIT license) provides
 high-performance per-row top-k selection kernels for SM100a/SM103a.
+
+The extension is built against the PyTorch stable ABI: importing it registers
+the `deep_select` torch library ops, which are then called via `torch.ops`.
 """
 
 import functools
@@ -18,20 +21,22 @@ DEEP_SELECT_MIN_ROWS = 32
 IDX_OOB_FILL_VALUE = -1
 
 try:
-    import vllm._deepselect_C as _ds
+    import vllm._deepselect_C  # noqa: F401  (registers torch.ops.deep_select)
+
+    _ds_available = True
 except ImportError:
-    _ds = None
+    _ds_available = False
 
 
 def is_available() -> bool:
     """Whether the DeepSelect CUDA extension was built and can be imported."""
-    return _ds is not None
+    return _ds_available
 
 
 @functools.lru_cache(maxsize=1)
 def get_stride_requirement() -> tuple[int, int]:
     """Stride alignment requirement (input, output) in bytes."""
-    return _ds.get_alignment_requirement()
+    return torch.ops.deep_select.get_alignment_requirement()
 
 
 def supports(input: torch.Tensor, topk: int) -> bool:
@@ -81,7 +86,7 @@ def topk(
     Returns:
         The (num_rows, topk) indices tensor.
     """
-    assert _ds is not None, "DeepSelect extension is not available"
+    assert _ds_available, "DeepSelect extension is not available"
     assert input.dim() == 2 and input.stride(1) == 1
     assert input.stride(0) * input.element_size() % get_stride_requirement()[0] == 0
 
@@ -93,7 +98,7 @@ def topk(
     else:
         assert output_idx.dtype == indices_dtype
 
-    _ds.topk(
+    torch.ops.deep_select.topk(
         input,
         topk,
         None,  # begin is not supported

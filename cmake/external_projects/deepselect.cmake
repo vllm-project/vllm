@@ -18,8 +18,8 @@ if(DEEPSELECT_SRC_DIR)
 else()
   FetchContent_Declare(
         deepselect
-        GIT_REPOSITORY https://github.com/deepseek-ai/DeepSelect.git
-        GIT_TAG 0f03b68748b304863fdf0181a11458d04ae533a9 # v1.0.0
+        GIT_REPOSITORY https://github.com/ZJY0516/DeepSelect.git
+        GIT_TAG c0e1f9cd40d3fdc79e75f2d14d1520936915f6b8 # stable-abi branch
         GIT_SUBMODULES "csrc/3rdparty/cutlass"
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
@@ -66,8 +66,10 @@ if(DEEPSELECT_ARCHS)
         "-U__CUDA_NO_HALF_OPERATORS__" "-U__CUDA_NO_HALF_CONVERSIONS__"
         "-U__CUDA_NO_HALF2_OPERATORS__" "-U__CUDA_NO_BFLOAT16_CONVERSIONS__")
 
-    # DeepSelect exposes a raw PYBIND11_MODULE (no TORCH_LIBRARY shim), so it
-    # cannot use the stable ABI; see the deepgemm.cmake comment for details.
+    # DeepSelect is built against the PyTorch stable ABI
+    # (STABLE_TORCH_LIBRARY + hand-written PyInit named after
+    # TORCH_EXTENSION_NAME), so it needs neither pybind11 nor
+    # libtorch_python; see _C_stable_libtorch for the in-tree equivalent.
     define_extension_target(
         _deepselect_C
         DESTINATION vllm
@@ -76,20 +78,23 @@ if(DEEPSELECT_ARCHS)
         COMPILE_FLAGS ${VLLM_DEEPSELECT_GPU_FLAGS}
         ARCHITECTURES ${VLLM_GPU_ARCHES}
         INCLUDE_DIRECTORIES ${DeepSelect_INCLUDES}
+        USE_SABI 3
         WITH_SOABI)
 
-    # PYBIND11_MODULE bindings need pybind11's at::Tensor casters, which live
-    # in libtorch_python (loaded RTLD_LOCAL by `import torch`).
-    find_library(DEEPSELECT_TORCH_PYTHON torch_python
-        PATHS "${TORCH_INSTALL_PREFIX}/lib" NO_DEFAULT_PATH REQUIRED)
-    target_link_libraries(_deepselect_C PRIVATE ${DEEPSELECT_TORCH_PYTHON})
+    # Only use C-shim APIs available in PyTorch 2.10.
+    # _deepselect_C is abi compatible with PyTorch >= TORCH_TARGET_VERSION.
+    target_compile_definitions(_deepselect_C PRIVATE
+        TORCH_TARGET_VERSION=0x020A000000000000ULL)
+
+    # Needed to use cuda APIs from C-shim
+    if(VLLM_GPU_LANG STREQUAL "CUDA")
+        target_compile_definitions(_deepselect_C PRIVATE USE_CUDA)
+    endif()
 
     # DeepSelect requires C++20 (std::format, template lambdas, etc.)
     target_compile_options(_deepselect_C PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:-std=c++20>
-        $<$<COMPILE_LANGUAGE:CUDA>:-std=c++20>
-        # CUDA TUs get this from __CUDACC__; only the host TU needs it.
-        $<$<COMPILE_LANGUAGE:CXX>:-DKERUTILS_IS_BUILD_ON_CUDA>)
+        $<$<COMPILE_LANGUAGE:CUDA>:-std=c++20>)
 else()
     message(STATUS "DeepSelect will not compile: unsupported CUDA architecture ${CUDA_ARCHS}")
     # Create an empty target for setup.py on unsupported systems
