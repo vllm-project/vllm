@@ -792,6 +792,7 @@ def sparse_attn_indexer_kpool(
                 decode_metadata.schedule_metadata,
                 max_model_len=max_model_len,
                 clean_logits=False,
+                indices=decode_metadata.indices,
             )
         num_rows = logits.shape[0]
         # kpool: logits are pool-granular -> select topk_tokens//kpool pools,
