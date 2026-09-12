@@ -19,4 +19,6 @@ TritonFlashInferBackend = create_composite_attention_backend(
     head_sizes=(256, 512),
     kernel_block_sizes=(64,),
     device_major=10,
+    # Use FlashInfer's KV writer to keep the following PDL decode compatible.
+    kv_cache_update_variant=1,
 )
