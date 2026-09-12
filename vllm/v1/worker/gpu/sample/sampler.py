@@ -59,6 +59,9 @@ class Sampler:
             TraceReplayState(req_states) if enable_trace_replay else None
         )
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
+        self.needs_non_temperature_logits_processing = np.zeros(
+            max_num_reqs, dtype=bool
+        )
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
@@ -79,7 +82,7 @@ class Sampler:
 
         states = self.sampling_states
         temperature = states.temperature.np[req_idx]
-        self.needs_logits_processing[req_idx] = (
+        needs_non_temperature_processing = (
             self.logit_bias_state.use_logit_bias[req_idx]
             or self.penalties_state.use_penalty[req_idx]
             or self.bad_words_state.num_bad_words.np[req_idx] > 0
@@ -87,10 +90,15 @@ class Sampler:
                 self.thinking_budget_state.enabled
                 and self.thinking_budget_state.use_thinking_budget[req_idx]
             )
-            or (temperature != 0.0 and temperature != 1.0)
             or states.min_p.np[req_idx] != 0.0
             or states.top_k.np[req_idx] != states.vocab_size
             or states.top_p.np[req_idx] != 1.0
+        )
+        self.needs_non_temperature_logits_processing[req_idx] = (
+            needs_non_temperature_processing
+        )
+        self.needs_logits_processing[req_idx] = needs_non_temperature_processing or (
+            temperature != 0.0 and temperature != 1.0
         )
 
     def apply_staged_writes(self) -> None:
