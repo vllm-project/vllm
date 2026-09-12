@@ -37,6 +37,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ReqMeta,
     TransferId,
     WriteTask,
+    coerce_kv_int_param,
     fold_local_rank,
     get_moriio_mode,
     get_peer_zmq_from_request_id,
@@ -688,22 +689,42 @@ class MoRIIOConnectorScheduler:
                 assert request.kv_transfer_params is not None, (
                     "kv_transfer_params should not be None"
                 )
-
-                remote_dp_rank = request.kv_transfer_params.get("remote_dp_rank", 0)
+                if not isinstance(request.kv_transfer_params, dict):
+                    logger.warning(
+                        "Got invalid KVTransferParams: %s. This "
+                        "request will not utilize KVTransfer",
+                        request.kv_transfer_params,
+                    )
+                    return
 
                 # Effective DP fan-out for the per-pod port/host math below
                 # (see _remote_dp_rank_for_port / _pod_idx). Capped to the
                 # per-pod local size when the router advertises it (Wide-EP).
-                _dp_size = int(request.kv_transfer_params.get("remote_dp_size", 1) or 1)
+                # Present-but-malformed sizes must not reach bare int() and
+                # kill EngineCore; refuse KV transfer instead.
                 try:
-                    _dp_local = int(
-                        request.kv_transfer_params.get("remote_dp_size_local", 0) or 0
+                    remote_dp_rank = coerce_kv_int_param(
+                        request.kv_transfer_params, "remote_dp_rank", 0
                     )
-                    if _dp_local > 0:
-                        _dp_size = min(_dp_size, _dp_local)
-                except (TypeError, ValueError):
-                    _dp_local = 0
-
+                    _dp_size = (
+                        coerce_kv_int_param(
+                            request.kv_transfer_params, "remote_dp_size", 1
+                        )
+                        or 1
+                    )
+                    _dp_local = coerce_kv_int_param(
+                        request.kv_transfer_params, "remote_dp_size_local", 0
+                    )
+                except ValueError:
+                    logger.warning(
+                        "Got invalid KVTransferParams: %s. This "
+                        "request will not utilize KVTransfer",
+                        request.kv_transfer_params,
+                    )
+                    request.kv_transfer_params["do_remote_prefill"] = False
+                    return
+                if _dp_local > 0:
+                    _dp_size = min(_dp_size, _dp_local)
                 # Rank routing is ROUTER-AUTHORITATIVE: honor the router-pinned
                 # remote_dp_rank (matched to the X-data-parallel-rank dispatch
                 # pin). Self-deriving a rank could disagree and notify a rank

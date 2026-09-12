@@ -37,6 +37,29 @@ from enum import Enum
 logger = init_logger(__name__)
 
 
+def coerce_kv_int_param(
+    params: dict[str, Any],
+    key: str,
+    default: int,
+) -> int:
+    """Return ``int(params[key])``, or ``default`` when the key is absent.
+
+    A present-but-non-integer value raises ``ValueError`` so callers can fail
+    closed without letting bare ``int(...)`` kill EngineCore.
+    """
+    if key not in params:
+        return default
+    raw = params[key]
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"kv_transfer_params[{key!r}] must be an integer, got {raw!r}"
+        ) from e
+
+
 Transfer = tuple[int, float]
 EngineId = str
 ReqId = str
@@ -549,12 +572,27 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         if not isinstance(_pod_hosts, list):
             _pod_hosts = [_pod_hosts]
         _pod_hosts = [str(h) for h in _pod_hosts]
-        _remote_dp_size_local = int(
-            kv_transfer_params.get(
-                "remote_dp_size_local",
-                kv_transfer_params.get("remote_dp_size", 1),
+        try:
+            _remote_dp_size = coerce_kv_int_param(
+                kv_transfer_params, "remote_dp_size", 1
             )
-        )
+            if not _remote_dp_size:
+                _remote_dp_size = 1
+            _remote_dp_size_local = coerce_kv_int_param(
+                kv_transfer_params, "remote_dp_size_local", _remote_dp_size
+            )
+            _remote_dp_rank = coerce_kv_int_param(
+                kv_transfer_params, "remote_dp_rank", 0
+            )
+        except ValueError as e:
+            logger.warning(
+                "Got invalid KVTransferParams for %s: %s (%s). "
+                "This request will not utilize KVTransfer",
+                request_id,
+                kv_transfer_params,
+                e,
+            )
+            return
 
         _req = ReqMeta(
             transfer_id=transfer_id,
@@ -574,8 +612,8 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
                 or kv_transfer_params.get("tp_size")
                 or 0
             ),
-            remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
-            remote_dp_rank=kv_transfer_params.get("remote_dp_rank", 0),
+            remote_dp_size=_remote_dp_size,
+            remote_dp_rank=_remote_dp_rank,
             multi_pod_hosts=_pod_hosts,
             remote_dp_size_local=_remote_dp_size_local,
         )
