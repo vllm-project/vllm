@@ -900,6 +900,9 @@ class SpeculativeConfig:
             "qwen3_5_moe",
             "qwen3_5_text",
             "qwen3_5_moe_text",
+        ) and (hf_config.architectures or [None])[0] not in (
+            "Qwen3DSparkModel",
+            _QWEN3_OMNI_DSPARK_ARCHITECTURE,
         ):
             # Checkpoints that ship only the text config resolve to the
             # `qwen3_5_text` / `qwen3_5_moe_text` model types and carry the
