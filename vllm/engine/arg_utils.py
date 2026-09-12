@@ -369,6 +369,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                 "max_num_scheduled_tokens",
                 "kv_cache_memory_bytes",
                 "safetensors_prefetch_block_size",
+                "paged_shm_block_size",
                 "max_num_queued_tokens",
             }
             if name == "max_model_len":
@@ -617,6 +618,8 @@ class EngineArgs:
     mm_processor_device: MMProcessorDevice = "auto"
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
     mm_device_do_normalize: bool | None = MultiModalConfig.mm_device_do_normalize
+    paged_shm_block_size: int | None = MultiModalConfig.paged_shm_block_size
+
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -1461,6 +1464,9 @@ class EngineArgs:
                 "default": None,
             },
         )
+        multimodal_group.add_argument(
+            "--paged-shm-block-size", **multimodal_kwargs["paged_shm_block_size"]
+        )
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -1874,6 +1880,7 @@ class EngineArgs:
             mm_processor_device=self.mm_processor_device,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,
+            paged_shm_block_size=self.paged_shm_block_size,
         )
 
     def validate_tensorizer_args(self):
