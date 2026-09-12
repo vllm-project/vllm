@@ -330,11 +330,31 @@ pull_request_rules:
     - label != stale
     - or:
       - files~=^vllm/models/deepseek_v4/
-      - title~=(?i)(?:\bDSv4\b|deepseek[-\s]?v4)
+      # Trailing (?![._]?1) keeps V4.1 out: DeepseekV41ForCausalLM is a
+      # distinct architecture with its own tree and label (DSv4.1).
+      - title~=(?i)(?:\bDSv4\b|deepseek[-\s_]?v4)(?![._]?1)
   actions:
     label:
       add:
         - DSv4
+
+- name: label-dsv4-1
+  description: Automatically apply DSv4.1 label
+  conditions:
+    - label != stale
+    - or:
+      # The 4.1 sources spell the model three ways: deepseek_v4_1 (models),
+      # deepseek_v41 (most) and deepseekv41 (tool parsers).
+      - files~=^vllm/models/deepseek_v4_1/
+      - files~=^vllm/(?:parser|tokenizers|reasoning|transformers_utils/configs)/deepseek_v41.*\.py
+      - files~=^vllm/tool_parsers/deepseekv41.*\.py
+      - files~=^rust/src/(?:chat|parser)/src/.*deepseek_v41
+      - files~=^tests/.*deepseek_?v41
+      - title~=(?i)(?:\bDSv4[._]?1\b|deepseek[-\s_]?v4[._]?1)
+  actions:
+    label:
+      add:
+        - DSv4.1
 
 - name: label-nvidia
   description: Automatically apply nvidia label
