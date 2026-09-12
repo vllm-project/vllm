@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 # being imported for _all_lora_classes below
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
+    ClassificationHeadWithLoRA,
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
     FusedMoE3DWithLoRA,
@@ -143,6 +144,17 @@ def from_layer_logits_processor(
     return ret
 
 
+def from_layer_classification(
+    layer: nn.Module,
+    max_loras: int,
+    lora_config: LoRAConfig,
+    model_config: PretrainedConfig | None = None,
+) -> ClassificationHeadWithLoRA:
+    instance_layer = ClassificationHeadWithLoRA(layer)
+    instance_layer.create_lora_weights(max_loras, lora_config, model_config)
+    return instance_layer
+
+
 def replace_submodule(
     model: nn.Module, module_name: str, new_module: nn.Module
 ) -> nn.Module:
@@ -193,13 +205,14 @@ def parse_fine_tuned_lora_name(
     start_index = 2 if name.startswith("base_model.model.") else 0
 
     parts = name.split(".")
-    if (
-        parts[-1] == "weight"
-        and len(parts) >= 2
-        and (parts[-2] == "lora_A" or parts[-2] == "lora_B")
-    ):
-        new_name = ".".join(parts[start_index:-2])
-        return new_name, parts[-2] == "lora_A"
+    if (parts[-1] == "weight" or parts[-1] == "bias") and len(parts) >= 2:
+        if parts[-2] in ["lora_A", "lora_B"]:
+            new_name = ".".join(parts[start_index:-2])
+            return new_name, parts[-2] == "lora_A"
+        # For modules_to_save in classification.
+        elif parts[-2] in ["score", "classifier"]:
+            new_name = parts[-2]
+            return new_name, False
 
     if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
         new_name = ".".join(parts[start_index:-1])
