@@ -355,6 +355,7 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
         attention_config=SimpleNamespace(backend=None),
         cache_config=SimpleNamespace(),
         model_config=SimpleNamespace(get_vocab_size=Mock(return_value=100)),
+        load_config=SimpleNamespace(load_format="auto"),
     )
 
     def fake_replace(config, **changes):
@@ -366,6 +367,10 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
         patch.object(dspark_utils, "replace", side_effect=fake_replace),
         patch(
             "vllm.v1.worker.gpu.spec_decode.eagle.utils.get_pp_group",
+            return_value=SimpleNamespace(world_size=1),
+        ),
+        patch(
+            "vllm.v1.worker.gpu.spec_decode.utils.get_pp_group",
             return_value=SimpleNamespace(world_size=1),
         ),
         patch(
