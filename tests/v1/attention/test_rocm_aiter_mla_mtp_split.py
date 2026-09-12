@@ -999,9 +999,13 @@ def test_a_bf16_padded_rank_past_qlen4_keeps_the_schedule_when_non_causal(monkey
     assert metadata.has_persistent_metadata
 
 
-@pytest.mark.parametrize("num_heads", [8, 12, 16])
+@pytest.mark.parametrize("num_heads", [8, 12, 16, 33, 48, 80, 112])
 def test_a_two_token_fp8_block_is_refused_without_a_fold(monkeypatch, num_heads):
-    """16-head (and padded-to-16) qlen-2 fp8 has no non-causal kernel."""
+    """16-head (and padded-to-16) qlen-2 fp8 has no non-causal kernel.
+
+    48/80/112 (and 33 padded to 48) fold to H16 while keeping Q2, so they
+    must be refused the same way as native 16-head qlen 2.
+    """
     with pytest.raises(ValueError, match="2-token"):
         _build_non_causal(
             monkeypatch,

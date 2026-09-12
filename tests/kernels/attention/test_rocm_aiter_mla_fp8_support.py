@@ -237,3 +237,72 @@ def test_decode_fwd_forwards_causal_to_aiter(monkeypatch, causal):
         causal=causal,
     )
     assert seen == [causal]
+
+
+def _aiter_mla_validate(
+    monkeypatch,
+    *,
+    dtype,
+    kv_cache_dtype,
+    use_non_causal,
+):
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backend import AttentionType
+    from vllm.v1.attention.backends.mla import rocm_aiter_mla
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLABackend
+
+    _install_fake_aiter_modules(monkeypatch, supports_fp8=True, supports_causal=True)
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_non_causal_asm_kernels", lambda: True
+    )
+    return AiterMLABackend.validate_configuration(
+        head_size=576,
+        dtype=dtype,
+        kv_cache_dtype=kv_cache_dtype,
+        block_size=1,
+        use_mla=True,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        use_per_head_quant_scales=False,
+        device_capability=DeviceCapability(9, 5),
+        attn_type=AttentionType.DECODER,
+        use_non_causal=use_non_causal,
+    )
+
+
+def test_non_causal_fp16_auto_cache_is_rejected(monkeypatch):
+    """Pinned AITER aborts fp16 Q; auto-select must fall through to Triton."""
+    import torch
+
+    reasons = _aiter_mla_validate(
+        monkeypatch,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        use_non_causal=True,
+    )
+    assert any("non-causal fp16" in reason for reason in reasons)
+
+
+def test_non_causal_bf16_auto_cache_is_accepted(monkeypatch):
+    import torch
+
+    reasons = _aiter_mla_validate(
+        monkeypatch,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        use_non_causal=True,
+    )
+    assert reasons == []
+
+
+def test_causal_fp16_auto_cache_is_still_accepted(monkeypatch):
+    import torch
+
+    reasons = _aiter_mla_validate(
+        monkeypatch,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        use_non_causal=False,
+    )
+    assert reasons == []

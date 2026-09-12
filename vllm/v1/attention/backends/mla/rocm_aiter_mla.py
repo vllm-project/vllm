@@ -4,7 +4,7 @@
 import functools
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Final
+from typing import TYPE_CHECKING, ClassVar, Final
 
 import torch
 
@@ -36,6 +36,9 @@ from vllm.v1.attention.ops.rocm_aiter_mla_merge import (
     merge_mla_segments_triton,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
+
+if TYPE_CHECKING:
+    from vllm.platforms.interface import DeviceCapability
 
 logger = init_logger(__name__)
 
@@ -275,6 +278,59 @@ class AiterMLABackend(MLACommonBackend):
             rocm_aiter_ops.mla_decode_supports_non_causal()
             and _aiter_mla_non_causal_asm_kernels()
         )
+
+    @classmethod
+    def validate_configuration(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        use_per_head_quant_scales: bool,
+        device_capability: "DeviceCapability",
+        attn_type: str,
+        has_sliding_window: bool = False,
+        use_non_causal: bool = False,
+        use_batch_invariant: bool = False,
+        use_kv_connector: bool = False,
+        use_pcp: bool = False,
+        use_adaptive_verification: bool = False,
+        use_dcp: bool = False,
+    ) -> list[str]:
+        invalid_reasons = super().validate_configuration(
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            use_mla,
+            has_sink,
+            use_sparse,
+            use_mm_prefix,
+            use_per_head_quant_scales,
+            device_capability,
+            attn_type,
+            has_sliding_window,
+            use_non_causal,
+            use_batch_invariant,
+            use_kv_connector,
+            use_pcp,
+            use_adaptive_verification,
+            use_dcp,
+        )
+        # Arch/signature cannot express this: the backend still advertises
+        # fp16, so a DSpark draft with kv_cache_dtype="auto" would select
+        # AITER and abort with `unsupport Q dtype:fp16`. Causal fp16 is fine.
+        if (
+            use_non_causal
+            and dtype == torch.float16
+            and kv_cache_dtype in (None, "auto", "float16")
+        ):
+            invalid_reasons.append("non-causal fp16 MLA decode not supported")
+        return invalid_reasons
 
     @staticmethod
     def get_impl_cls() -> type["AiterMLAImpl"]:
@@ -1096,10 +1152,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
         ):
             # AITER's fp8 dispatch folds (gqa 16, qlen 3 or 4) onto the
-            # qseqlen-4 kernel but never lists 2. 32/64/96/128 heads at
-            # qlen 2 fold onto that 16-head / 4-token non-causal kernel;
-            # native 16-head qlen 2 has no entry and aborts the process
-            # rather than raising. The bf16 fold has no such hole.
+            # qseqlen-4 kernel but never lists 2. Only 32/64/96/128 heads
+            # at qlen 2 fold onto that 16-head / 4-token non-causal kernel;
+            # 16-head qlen 2, and padded 48/80/112, keep Q2 and abort the
+            # process rather than raising. The bf16 fold has no such hole.
             raise ValueError(
                 "AITER has no non-causal fp8 MLA kernel for this 2-token "
                 "query block. Pin the draft to TRITON_MLA for this "
@@ -1276,6 +1332,10 @@ class AiterMLAHelper:
     # fold that reaches a persistent one is gfx950-only.
     _ASM_PADDED_MAX_PS_QLEN: Final = 4
     _AITER_UNSUPPORTED_HEADS: ClassVar[tuple[int, ...]] = ()
+    # Pinned AITER v0.1.21.post2 folds these fp8 qlen-2 counts onto the
+    # non-causal 16-head / 4-token kernel. Other multiples of 16 (48/80/112)
+    # fold to H16 while keeping Q2, which has no non-causal fp8 entry.
+    _AITER_FP8_NON_CAUSAL_QLEN2_HEADS: ClassVar[tuple[int, ...]] = (32, 64, 96, 128)
 
     @staticmethod
     def qo_indptr_for_uniform_qlen(
@@ -1319,10 +1379,11 @@ class AiterMLAHelper:
 
         Pinned AITER v0.1.21.post2 folds 32/64/96/128 heads at qlen 2 onto the
         non-causal 16-head / 4-token kernel. A 16-head (or padded-to-16) qlen-2
-        block has no matching entry.
+        block has no matching entry, and padded 48/80/112 keep Q2 after the
+        H16 fold.
         """
         kernel_heads = AiterMLAHelper.get_actual_mla_num_heads(num_heads)
-        return kernel_heads >= 2 * AiterMLAHelper._AITER_MIN_MLA_HEADS
+        return kernel_heads in AiterMLAHelper._AITER_FP8_NON_CAUSAL_QLEN2_HEADS
 
     @staticmethod
     def get_actual_mla_num_heads(num_heads: int) -> int:

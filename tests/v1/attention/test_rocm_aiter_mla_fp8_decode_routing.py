@@ -199,8 +199,18 @@ def test_a_causal_small_head_bf16_block_still_uses_gluon(gluon_available):
 
 @pytest.mark.parametrize(
     "num_heads, expected",
-    [(16, False), (32, True), (96, True)],
+    [
+        (16, False),
+        (32, True),
+        (33, False),
+        (48, False),
+        (64, True),
+        (80, False),
+        (96, True),
+        (112, False),
+        (128, True),
+    ],
 )
 def test_fp8_qlen2_fold_matches_pinned_aiter_kernel_table(num_heads, expected):
-    """16-head qlen 2 has no non-causal fp8 kernel; 32+ heads fold to 16/4."""
+    """Only 32/64/96/128 fold qlen 2 onto the 16/4 kernel; 48/80/112 keep Q2."""
     assert AiterMLAHelper.has_fp8_non_causal_qlen2_kernel(num_heads) is expected
