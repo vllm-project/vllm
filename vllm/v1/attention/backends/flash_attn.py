@@ -5,12 +5,13 @@
 import copy
 import functools
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import numpy as np
 import torch
 
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, zip_inputs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
@@ -25,6 +26,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.fa_utils import (
     FA4_HD256_PAGE_SIZE,
+    compile_flash_attn_varlen_func_from_specs,
     flash_attn_supports_kv_cache_dtype,
     flash_attn_supports_quant_query_input,
     get_flash_attn_version,
@@ -76,6 +78,258 @@ from vllm.v1.worker.cp_utils import (
 )
 
 logger = init_logger(__name__)
+
+FA4_DENSE_FLOAT_DTYPES = (torch.bfloat16, torch.float16)
+FA4_DENSE_Q_TILE = 128
+FA4_DENSE_NUM_BLOCKS = 256
+FA4_DENSE_MAX_SEQLEN_K = 8192
+
+
+class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"]):
+    """Own every dense FA4 forward specialization used by this backend."""
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        q_stage: int
+        is_split_kv: bool
+        q_dtype: torch.dtype
+        kv_dtype: torch.dtype
+        out_dtype: torch.dtype
+        qhead_per_kvhead: int
+        head_dim: int
+        page_size: int
+        is_paged: bool
+        uses_cu_seqlens_k: bool
+        has_window_left: bool
+        has_window_right: bool
+        softcap: float
+        causal: bool
+        return_lse: bool
+        has_q_descale: bool
+        has_k_descale: bool
+        has_v_descale: bool
+        mask_kind: str
+        mm_prefix_sliding_window: int
+        mm_prefix_sliding_window_left: int | None
+        fp8_kv_dequant: bool
+
+    @staticmethod
+    def kernel(*args: Any, **kwargs: Any) -> Any:
+        assert flash_attn_varlen_func is not None
+        return flash_attn_varlen_func(*args, **kwargs)
+
+    def dispatch(
+        self,
+        *,
+        q_stage: int,
+        is_split_kv: bool,
+        q_dtype: torch.dtype,
+        kv_dtype: torch.dtype,
+        out_dtype: torch.dtype,
+        num_qo_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        page_size: int,
+        window_size: tuple[int, int],
+        softcap: float,
+        causal: bool,
+        is_paged: bool,
+        uses_cu_seqlens_k: bool,
+        return_lse: bool,
+        has_q_descale: bool,
+        has_k_descale: bool,
+        has_v_descale: bool,
+        mask_kind: str,
+        mm_prefix_sliding_window: int,
+        mm_prefix_sliding_window_left: int | None,
+        fp8_kv_dequant: bool = False,
+    ) -> CompileKey:
+        return self.CompileKey(
+            q_stage=q_stage,
+            is_split_kv=is_split_kv,
+            q_dtype=q_dtype,
+            kv_dtype=kv_dtype,
+            out_dtype=out_dtype,
+            qhead_per_kvhead=num_qo_heads // num_kv_heads,
+            head_dim=head_dim,
+            page_size=page_size,
+            is_paged=is_paged,
+            uses_cu_seqlens_k=uses_cu_seqlens_k,
+            has_window_left=window_size[0] >= 0,
+            has_window_right=window_size[1] >= 0,
+            softcap=softcap,
+            causal=causal,
+            return_lse=return_lse,
+            has_q_descale=has_q_descale,
+            has_k_descale=has_k_descale,
+            has_v_descale=has_v_descale,
+            mask_kind=mask_kind,
+            mm_prefix_sliding_window=mm_prefix_sliding_window,
+            mm_prefix_sliding_window_left=mm_prefix_sliding_window_left,
+            fp8_kv_dequant=fp8_kv_dequant,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        q_dtype: torch.dtype,
+        kv_dtype: torch.dtype,
+        out_dtype: torch.dtype,
+        num_qo_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        page_size: int,
+        window_size: tuple[int, int],
+        softcap: float,
+        causal: bool,
+        mm_prefix_sliding_window: int,
+        mm_prefix_sliding_window_left: int | None,
+        fa_version: int,
+        is_paged: bool = True,
+        uses_cu_seqlens_k: bool = False,
+        return_lse: bool = False,
+        has_q_descale: bool = False,
+        has_k_descale: bool = False,
+        has_v_descale: bool = False,
+        mask_kind: str = "none",
+        fp8_kv_dequant: bool = False,
+    ) -> list[CompileKey]:
+        capability = current_platform.get_device_capability()
+        major = capability.major if capability is not None else None
+        is_fp8 = kv_dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+        supported = (
+            q_dtype in FA4_DENSE_FLOAT_DTYPES
+            and kv_dtype == q_dtype
+            and major in (9, 10, 11)
+        ) or (q_dtype == kv_dtype and is_fp8 and major == 10)
+        supported = supported or (
+            fp8_kv_dequant
+            and q_dtype in FA4_DENSE_FLOAT_DTYPES
+            and kv_dtype == torch.float8_e4m3fn
+            and major == 9
+            and is_paged
+        )
+        if fa_version != 4 or not supported:
+            return []
+
+        q_stages = (1, 2) if major in (10, 11) else (1,)
+        split_states = (False, True)
+        if uses_fa4_hd256_kernel(head_dim):
+            if is_paged and page_size != FA4_HD256_PAGE_SIZE:
+                return []
+            split_states = (False,)
+
+        runtime_variant = dict(
+            window_size=window_size,
+            causal=causal,
+            is_paged=is_paged,
+            uses_cu_seqlens_k=uses_cu_seqlens_k,
+            return_lse=return_lse,
+            has_q_descale=has_q_descale,
+            has_k_descale=has_k_descale,
+            has_v_descale=has_v_descale,
+            mask_kind=mask_kind,
+            mm_prefix_sliding_window=mm_prefix_sliding_window,
+            mm_prefix_sliding_window_left=mm_prefix_sliding_window_left,
+            fp8_kv_dequant=fp8_kv_dequant,
+        )
+        return self._trace_dispatch(self.dispatch)(
+            zip_inputs(runtime_variant),
+            q_stage=q_stages,
+            is_split_kv=split_states,
+            q_dtype=q_dtype,
+            kv_dtype=kv_dtype,
+            out_dtype=out_dtype,
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            page_size=page_size,
+            softcap=softcap,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        assert compile_flash_attn_varlen_func_from_specs is not None
+        max_seqlen_q = FA4_DENSE_Q_TILE + 1 if compile_key.q_stage == 2 else 1
+        num_splits = 2 if compile_key.is_split_kv else 1
+        kv_shape = (
+            FA4_DENSE_NUM_BLOCKS,
+            compile_key.page_size,
+            1,
+            compile_key.head_dim,
+        )
+        kv_stride = (
+            2 * compile_key.page_size * compile_key.head_dim,
+            2 * compile_key.head_dim,
+            2 * compile_key.head_dim,
+            1,
+        )
+        if not compile_key.is_paged:
+            kv_shape = (FA4_DENSE_MAX_SEQLEN_K, 1, compile_key.head_dim)
+            kv_stride = None
+        mask_mod = None
+        aux_tensor_shapes = None
+        if compile_key.mask_kind == "mm_prefix":
+            mask_mod = _make_mm_prefix_mask_mod(
+                sliding_window=compile_key.mm_prefix_sliding_window,
+                sliding_window_left=compile_key.mm_prefix_sliding_window_left,
+            )
+            aux_tensor_shapes = [(max_seqlen_q, 2), (2,)]
+        elif compile_key.mask_kind == "rswa":
+            mask_mod = _make_rswa_mask_mod()
+            aux_tensor_shapes = [(1,), (1,)]
+        compile_flash_attn_varlen_func_from_specs(
+            q_shape=(
+                max_seqlen_q,
+                compile_key.qhead_per_kvhead,
+                compile_key.head_dim,
+            ),
+            k_shape=kv_shape,
+            v_shape=kv_shape,
+            k_stride=kv_stride,
+            v_stride=kv_stride,
+            q_dtype=compile_key.q_dtype,
+            k_dtype=compile_key.kv_dtype,
+            v_dtype=compile_key.kv_dtype,
+            out_dtype=compile_key.out_dtype,
+            cu_seqlens_q_shape=(2,),
+            cu_seqlens_k_shape=(2,) if compile_key.uses_cu_seqlens_k else None,
+            seqused_k_shape=(1,)
+            if compile_key.is_paged and not compile_key.uses_cu_seqlens_k
+            else None,
+            page_table_shape=(
+                1,
+                FA4_DENSE_MAX_SEQLEN_K // compile_key.page_size,
+            )
+            if compile_key.is_paged
+            else None,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=FA4_DENSE_MAX_SEQLEN_K,
+            causal=compile_key.causal,
+            window_size=[
+                1 if compile_key.has_window_left else -1,
+                1 if compile_key.has_window_right else -1,
+            ],
+            softcap=compile_key.softcap,
+            num_splits=num_splits,
+            fa_version=4,
+            return_softmax_lse=compile_key.return_lse,
+            q_descale=compile_key.has_q_descale,
+            k_descale=compile_key.has_k_descale,
+            v_descale=compile_key.has_v_descale,
+            mask_mod=mask_mod,
+            aux_tensor_shapes=aux_tensor_shapes,
+            fp8_kv_dequant=compile_key.fp8_kv_dequant,
+        )
+
+    def __call__(
+        self,
+        *,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        **kwargs: Any,
+    ) -> Any:
+        return self.kernel(q=q, k=k, v=v, **kwargs)
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -452,6 +706,203 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             )
             == 4
         )
+
+        fa_version = get_flash_attn_version(
+            head_size=self.headdim,
+            kv_cache_block_size=self.block_size,
+            supports_fa4_hd256=True,
+        )
+        if vllm_config.kernel_config.enable_jit_warmup and fa_version == 4:
+            out_dtype = self.model_config.dtype
+            quantized = is_quantized_kv_cache(self.kv_cache_dtype)
+            q_dtype = current_platform.fp8_dtype() if quantized else out_dtype
+            kv_dtype = q_dtype
+            has_descales = quantized
+            dcp_world_size = self.parallel_config.decode_context_parallel_size
+            attn_layers = get_layers_from_vllm_config(
+                vllm_config, Attention, layer_names
+            )
+            runtime_variants = set()
+            for layer in attn_layers.values():
+                if not isinstance(layer.impl, FlashAttentionImpl):
+                    continue
+                softcap = float(layer.impl.logits_soft_cap)
+                window_size = layer.impl.sliding_window
+
+                if layer.impl.attn_type in (
+                    AttentionType.ENCODER_ONLY,
+                    AttentionType.ENCODER,
+                ):
+                    runtime_variants.add(
+                        (
+                            window_size,
+                            softcap,
+                            False,
+                            False,
+                            True,
+                            False,
+                            "none",
+                            0,
+                            None,
+                            self.num_heads_q,
+                        )
+                    )
+                    continue
+
+                if dcp_world_size > 1:
+                    runtime_variants.add(
+                        (
+                            window_size,
+                            softcap,
+                            True,
+                            False,
+                            True,
+                            True,
+                            "none",
+                            0,
+                            None,
+                            self.num_heads_q,
+                        )
+                    )
+                    runtime_variants.add(
+                        (
+                            window_size,
+                            softcap,
+                            False,
+                            True,
+                            False,
+                            True,
+                            "none",
+                            0,
+                            None,
+                            self.num_heads_q * dcp_world_size,
+                        )
+                    )
+                    continue
+
+                runtime_variants.add(
+                    (
+                        window_size,
+                        softcap,
+                        True,
+                        True,
+                        False,
+                        False,
+                        "none",
+                        0,
+                        None,
+                        self.num_heads_q,
+                    )
+                )
+
+                if window_size in (None, (-1, -1)):
+                    runtime_variants.add(
+                        (
+                            (-1, -1),
+                            softcap,
+                            False,
+                            True,
+                            False,
+                            True,
+                            "none",
+                            0,
+                            None,
+                            self.num_heads_q,
+                        )
+                    )
+                    runtime_variants.add(
+                        (
+                            (-1, -1),
+                            softcap,
+                            True,
+                            True,
+                            False,
+                            True,
+                            "none",
+                            0,
+                            None,
+                            self.num_heads_q,
+                        )
+                    )
+
+                if self.model_config.rswa_window is not None:
+                    runtime_variants.add(
+                        (
+                            (-1, -1),
+                            softcap,
+                            True,
+                            True,
+                            False,
+                            False,
+                            "rswa",
+                            0,
+                            None,
+                            self.num_heads_q,
+                        )
+                    )
+
+                if not self.model_config.is_mm_prefix_lm:
+                    continue
+                sw_val = (
+                    1 + window_size[0]
+                    if window_size is not None and window_size[0] >= 0
+                    else None
+                )
+                mm_clamp_sw = (
+                    sw_val
+                    if getattr(layer, "mm_prefix_clamp_sliding_window", False)
+                    and sw_val is not None
+                    else 0
+                )
+                runtime_variants.add(
+                    (
+                        (-1, -1),
+                        softcap,
+                        False,
+                        True,
+                        False,
+                        False,
+                        "mm_prefix",
+                        mm_clamp_sw,
+                        sw_val,
+                        self.num_heads_q,
+                    )
+                )
+
+            for (
+                window_size,
+                softcap,
+                causal,
+                is_paged,
+                uses_cu_seqlens_k,
+                return_lse,
+                mask_kind,
+                mm_prefix_sliding_window,
+                mm_prefix_sliding_window_left,
+                num_qo_heads,
+            ) in runtime_variants:
+                _FA4_DENSE_ATTENTION_KERNEL.register_warmup(
+                    q_dtype=q_dtype,
+                    kv_dtype=kv_dtype,
+                    out_dtype=out_dtype,
+                    num_qo_heads=num_qo_heads,
+                    num_kv_heads=self.num_heads_kv,
+                    head_dim=self.headdim,
+                    page_size=self.block_size,
+                    window_size=window_size,
+                    softcap=softcap,
+                    causal=causal,
+                    is_paged=is_paged,
+                    uses_cu_seqlens_k=uses_cu_seqlens_k,
+                    return_lse=return_lse,
+                    has_q_descale=has_descales,
+                    has_k_descale=has_descales,
+                    has_v_descale=has_descales,
+                    mask_kind=mask_kind,
+                    mm_prefix_sliding_window=mm_prefix_sliding_window,
+                    mm_prefix_sliding_window_left=mm_prefix_sliding_window_left,
+                    fa_version=fa_version,
+                )
 
         try:
             from vllm.distributed.parallel_state import get_dcp_group
@@ -1160,7 +1611,7 @@ class FlashAttentionImpl(AttentionImpl):
                     block_table = block_table[:, :num_pages]
                     num_splits = 1
 
-                flash_attn_varlen_func(
+                _FA4_DENSE_ATTENTION_KERNEL(
                     q=query[:num_actual_tokens],
                     k=key_cache,
                     v=value_cache,
@@ -1276,7 +1727,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         query = query.contiguous()
         if attn_metadata.max_dcp_context_kv_len == 0:
-            flash_attn_varlen_func(
+            _FA4_DENSE_ATTENTION_KERNEL(
                 q=query,
                 k=key,
                 v=value,
@@ -1339,7 +1790,7 @@ class FlashAttentionImpl(AttentionImpl):
             assert attn_metadata.max_dcp_context_kv_len is not None
             assert self.vllm_flash_attn_version is not None
             context_attn_out, context_lse = run_split_fa2_dcp_context_attention(
-                flash_attn_varlen_func,
+                _FA4_DENSE_ATTENTION_KERNEL,
                 query_across_dcp,
                 key_cache,
                 value_cache,
@@ -1366,7 +1817,7 @@ class FlashAttentionImpl(AttentionImpl):
                 num_context_prefill_tokens,
             )
         else:
-            context_attn_out, context_lse = flash_attn_varlen_func(
+            context_attn_out, context_lse = _FA4_DENSE_ATTENTION_KERNEL(
                 q=query_across_dcp,
                 k=key_cache,
                 v=value_cache,
@@ -1398,7 +1849,7 @@ class FlashAttentionImpl(AttentionImpl):
         )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
 
-        query_attn_out, query_lse = flash_attn_varlen_func(
+        query_attn_out, query_lse = _FA4_DENSE_ATTENTION_KERNEL(
             q=query,
             k=key,
             v=value,
@@ -1473,7 +1924,7 @@ class FlashAttentionImpl(AttentionImpl):
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )
-        flash_attn_varlen_func(
+        _FA4_DENSE_ATTENTION_KERNEL(
             q=query,
             k=key,
             v=value,
@@ -1610,6 +2061,7 @@ def _make_mm_prefix_mask_mod(
     return mm_prefix_mask_mod
 
 
+@functools.cache
 def _make_rswa_mask_mod():
     """Build a CuTE-DSL mask_mod for Reference Sliding Window Attention (R-SWA).
 
@@ -1781,7 +2233,7 @@ def cascade_attention(
     descale_shape = (cu_prefix_query_lens.shape[0] - 1, key_cache.shape[-2])
 
     # Process shared prefix.
-    prefix_output, prefix_lse = flash_attn_varlen_func(
+    prefix_output, prefix_lse = _FA4_DENSE_ATTENTION_KERNEL(
         q=query,
         k=key_cache,
         v=value_cache,
@@ -1809,7 +2261,7 @@ def cascade_attention(
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
 
     # Process suffix per query.
-    suffix_output, suffix_lse = flash_attn_varlen_func(
+    suffix_output, suffix_lse = _FA4_DENSE_ATTENTION_KERNEL(
         q=query,
         k=key_cache,
         v=value_cache,
@@ -1833,3 +2285,6 @@ def cascade_attention(
 
     # Merge prefix and suffix outputs, and store the result in output.
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output, suffix_lse)
+
+
+_FA4_DENSE_ATTENTION_KERNEL = FA4DenseAttentionKernel()

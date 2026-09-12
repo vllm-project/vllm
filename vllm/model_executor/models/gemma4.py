@@ -19,7 +19,7 @@
 """Gemma 4 model implementation for vLLM."""
 
 from collections.abc import Iterable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from itertools import islice
 
 import regex as re
@@ -60,6 +60,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    LaunchSpec,
+    TritonWarmupTensor,
+    VllmTritonJitKernel,
+    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -162,6 +168,84 @@ def _gemma4_routing_kernel(
     tl.store(topk_weights_ptr + base_off, all_weights, mask=top_mask)
 
 
+class Gemma4RoutingKernel(VllmTritonJitKernel["Gemma4RoutingKernel.CompileKey"]):
+    kernel = staticmethod(_gemma4_routing_kernel)
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        num_experts: int
+        topk: int
+        block_e: int
+        num_warps: int
+        scale_dtype: torch.dtype
+
+    def dispatch(
+        self,
+        *,
+        num_experts: int,
+        topk: int,
+        scale_dtype: torch.dtype,
+        num_warps: int = 1,
+    ) -> CompileKey:
+        return self.CompileKey(
+            num_experts=num_experts,
+            topk=topk,
+            block_e=triton.next_power_of_2(num_experts),
+            num_warps=num_warps,
+            scale_dtype=scale_dtype,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        num_experts: int,
+        topk: int,
+        scale_dtype: torch.dtype,
+    ) -> list[CompileKey]:
+        return self._trace_dispatch(self.dispatch)(
+            num_experts=num_experts,
+            topk=topk,
+            scale_dtype=scale_dtype,
+            num_warps=1,
+        )
+
+    def warmup_inputs(self, compile_key: CompileKey) -> dict[str, object]:
+        return dict(
+            gating=TritonWarmupTensor(
+                torch.float32, shape=(1, compile_key.num_experts)
+            ),
+            per_expert_scale=TritonWarmupTensor(
+                compile_key.scale_dtype, shape=(compile_key.num_experts,)
+            ),
+            topk_weights=TritonWarmupTensor(torch.float32, shape=(1, compile_key.topk)),
+            topk_ids=TritonWarmupTensor(torch.int32, shape=(1, compile_key.topk)),
+            num_experts=compile_key.num_experts,
+            topk=compile_key.topk,
+            block_e=compile_key.block_e,
+            num_warps=compile_key.num_warps,
+        )
+
+    @kernel_launcher
+    def __call__(
+        self,
+        gating: torch.Tensor,
+        per_expert_scale: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        *,
+        num_experts: int,
+        topk: int,
+        block_e: int,
+        num_warps: int = 1,
+    ) -> LaunchSpec:
+        return (gating.shape[0],), dict(
+            E=num_experts,
+            K=topk,
+            BLOCK_E=block_e,
+            num_warps=num_warps,
+        )
+
+
 def gemma4_fused_routing_kernel_triton(
     gating_output: torch.Tensor,
     topk: int,
@@ -174,14 +258,14 @@ def gemma4_fused_routing_kernel_triton(
     weights = torch.empty(T, topk, dtype=torch.float32, device=gating_output.device)
     ids = torch.empty(T, topk, dtype=torch.int32, device=gating_output.device)
     BLOCK_E = triton.next_power_of_2(E)
-    _gemma4_routing_kernel[(T,)](
+    _GEMMA4_ROUTING_KERNEL(
         gating_output,
         per_expert_scale,
         weights,
         ids,
-        E,
-        topk,
-        BLOCK_E,
+        num_experts=E,
+        topk=topk,
+        block_e=BLOCK_E,
         num_warps=num_warps,
     )
     return weights, ids
@@ -371,6 +455,14 @@ class Gemma4MoE(nn.Module):
             custom_routing_function=routing_function,
             activation="gelu_tanh",
         )
+
+        # Register only on platforms that use the Triton routing path.
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+            _GEMMA4_ROUTING_KERNEL.register_warmup(
+                num_experts=config.num_experts,
+                topk=config.top_k_experts,
+                scale_dtype=self.per_expert_scale.dtype,
+            )
 
     def forward(self, x: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
         return self.experts(x, router_logits)
@@ -1745,3 +1837,6 @@ class Gemma4ForCausalLM(
         )
         loader = AutoWeightsLoader(self)
         return loader.load_weights(_weight_iterator(), mapper=mapper)
+
+
+_GEMMA4_ROUTING_KERNEL = Gemma4RoutingKernel()
