@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (H200 MIG 35GB) LoRA Shard %N'
+  key: lora
   device: intel_gpu
   timeout_in_minutes: 40
   parallelism: 4
@@ -27,6 +28,7 @@ steps:
     'cd tests &&
     pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py || true'
 - label: ':nvidia: (L4) LoRA TP (Distributed) %N'
+  key: lora-tp-distributed
   device: intel_gpu
   timeout_in_minutes: 25
   parallelism: 4

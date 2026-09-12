@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (B200) Sequence Parallel Correctness'
+  key: sequence-parallel-correctness-tests-2xb200
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 2
@@ -26,6 +27,7 @@ steps:
     'export VLLM_TEST_CLEAN_GPU_MEMORY=1 || true &&
     pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py || true'
 - label: ':nvidia: (B200) AsyncTP Correctness'
+  key: asynctp-correctness-tests-b200
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 2
@@ -49,6 +51,7 @@ steps:
     'export VLLM_TEST_CLEAN_GPU_MEMORY=1 || true &&
     pytest -v -s tests/compile/correctness_e2e/test_async_tp.py || true'
 - label: ':nvidia: (H100) Distributed Compile'
+  key: distributed-compile-unit-tests-2xh100
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 2
@@ -75,6 +78,7 @@ steps:
     'export VLLM_TEST_CLEAN_GPU_MEMORY=1 || true &&
     pytest -s -v tests/compile/passes/distributed || true'
 - label: ':nvidia: (B200) Fusion and Compile'
+  key: fusion-and-compile-unit-tests-2xb200
   device: intel_gpu
   timeout_in_minutes: 30
   working_dir: .
@@ -118,6 +122,7 @@ steps:
     pytest -v -s tests/compile/passes/test_silu_mul_quant_manual_fusion.py || true &&
     pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py || true'
 - label: ':nvidia: (H100) Fusion E2E Quick'
+  key: fusion-e2e-quick-h100
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 1
@@ -147,6 +152,7 @@ steps:
     'pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k inductor_partition and not +rms_norm and not +quant_fp8 || true &&
     pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k inductor_partition and not +rms_norm and +quant_fp8 and (qwen3 or deepseek) || true'
 - label: ':nvidia: (H100) Fusion E2E Config Sweep'
+  key: fusion-e2e-config-sweep-h100
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 1
@@ -176,6 +182,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k llama-3 || true'
 - label: ':nvidia: (B200) Fusion E2E Config Sweep'
+  key: fusion-e2e-config-sweep-b200
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 1
@@ -198,6 +205,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k inductor_partition and (FLASHINFER and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek)) or llama-3) || true'
 - label: ':nvidia: (H100) Fusion E2E TP2 Quick'
+  key: fusion-e2e-tp2-quick-h100
   device: intel_gpu
   timeout_in_minutes: 35
   num_devices: 2
@@ -227,6 +235,7 @@ steps:
     'pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek)) || true &&
     pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek)) || true'
 - label: ':nvidia: (H100) Fusion E2E TP2 AR-RMS Config Sweep'
+  key: fusion-e2e-tp2-ar-rms-config-sweep-h100
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 2
@@ -256,6 +265,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k llama-3 || true'
 - label: ':nvidia: (H100) Fusion E2E TP2 AsyncTP Config Sweep'
+  key: fusion-e2e-tp2-asynctp-config-sweep-h100
   device: intel_gpu
   timeout_in_minutes: 40
   num_devices: 2
@@ -285,6 +295,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k llama-3 || true'
 - label: ':nvidia: (B200) Fusion E2E TP2'
+  key: fusion-e2e-tp2-b200
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 2
