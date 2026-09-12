@@ -1622,7 +1622,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Dedicated XQA decode also serves non-causal batches, so its workspace
         # must be reserved before the arena is locked.
         trtllm_decode = self.use_trtllm_decode_attention and (
-            not non_causal or self.use_dedicated_xqa
+            not non_causal or self.use_xqa
         )
         native_decode = not self.use_trtllm_decode_attention and not non_causal
         return FlashInferWorkspaceRoutes(
