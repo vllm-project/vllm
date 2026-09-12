@@ -18,6 +18,9 @@ from .base import BaseLayerWithLoRA
 
 
 class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
+    _expand_input_uses_lora_dtype = True
+    _uses_lora_shrink = False
+
     def __init__(self, base_layer: VocabParallelEmbedding) -> None:
         super().__init__()
         self.base_layer = base_layer
