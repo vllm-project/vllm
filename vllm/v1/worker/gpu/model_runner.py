@@ -1173,9 +1173,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         # batch_idx -> req_id
-        req_ids = sort_batch_req_ids(
-            num_tokens_per_req, draft_tokens, self.decode_query_len
-        )
+        if (
+            not draft_tokens
+            and max_query_len == self.decode_query_len
+            and num_toks == num_reqs * self.decode_query_len
+        ):
+            req_ids = list(num_tokens_per_req)
+        else:
+            req_ids = sort_batch_req_ids(
+                num_tokens_per_req, draft_tokens, self.decode_query_len
+            )
 
         numtoks_iter = map(num_tokens_per_req.__getitem__, req_ids)
         num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
