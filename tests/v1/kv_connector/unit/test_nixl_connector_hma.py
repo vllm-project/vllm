@@ -1886,6 +1886,7 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool(kernel_block_size
         ],
     )
     vllm_config = create_vllm_config(block_size=16)
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
     fake_backend = MagicMock()
     fake_backend.get_supported_kernel_block_sizes.return_value = [kernel_block_size]
@@ -2031,6 +2032,7 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     assert fa_descs[:, 0].tolist() == expected_addrs
     assert all(size == unified_page // 3 for size in fa_descs[:, 1])
     worker.nixl_wrapper.register_memory.assert_called_once()
+    assert worker.xfer_handshake_metadata is not None
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes,
         type=NixlAgentMetadata,

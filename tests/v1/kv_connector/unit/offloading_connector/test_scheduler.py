@@ -254,10 +254,11 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
         generate_store_output(keys)
     )
 
+    block_ids_by_req: dict[str, tuple[list[int], ...]] = {}
     output = SimpleNamespace(
         kv_connector_block_state=KVConnectorBlockState(
             req_ids=set(),
-            resolve_block_ids={}.__getitem__,
+            resolve_block_ids=block_ids_by_req.__getitem__,
             boundary_state_offloads={"req": [(1, 99, 28)]},
         )
     )
@@ -314,10 +315,11 @@ def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
         generate_store_output(keys)
     )
 
+    block_ids_by_req: dict[str, tuple[list[int], ...]] = {}
     output = SimpleNamespace(
         kv_connector_block_state=KVConnectorBlockState(
             req_ids=set(),
-            resolve_block_ids={}.__getitem__,
+            resolve_block_ids=block_ids_by_req.__getitem__,
             boundary_state_offloads={"req": [(1, 98, 16), (1, 99, 28)]},
         )
     )
@@ -341,13 +343,14 @@ def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
     indexer_config = scheduler.config.kv_group_configs[1]
     scheduler.config = scheduler.config._replace(kv_group_configs=(indexer_config,))
     _make_partial_tail_request(scheduler)
-    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+    _as_mock(scheduler.manager.prepare_store).side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
 
     jobs = scheduler._build_aligned_boundary_store_jobs({"req": [(1, 98, 16)]})
 
     [job] = jobs.values()
+    assert isinstance(job.src_spec, GPULoadStoreSpec)
     assert job.src_spec.group_sizes == [1]
     assert job.src_spec.block_indices == [0]
 
@@ -360,10 +363,11 @@ def test_aligned_boundary_store_flushes_before_block_reuse(cow_reuse):
         generate_store_output(keys)
     )
 
+    block_ids_by_req: dict[str, tuple[list[int], ...]] = {}
     output = SchedulerOutput.make_empty()
     output.kv_connector_block_state = KVConnectorBlockState(
         req_ids=set(),
-        resolve_block_ids={}.__getitem__,
+        resolve_block_ids=block_ids_by_req.__getitem__,
         boundary_state_offloads={"req": [(1, 99, 16)]},
     )
     meta = scheduler.build_connector_meta(output)
@@ -444,7 +448,7 @@ def test_lookup_cap_stops_at_authoritative_prefix_boundary():
     scheduler = _make_partial_tail_scheduler()
     request = _make_partial_tail_request(scheduler)
     request.skip_reading_prefix_cache = False
-    scheduler.manager.lookup.return_value = LookupResult.HIT
+    _as_mock(scheduler.manager.lookup).return_value = LookupResult.HIT
 
     tokens, load_async = scheduler.get_num_new_matched_tokens(
         request, 0, max_num_new_tokens=20
@@ -4581,12 +4585,13 @@ class TestMambaHybridOffloadServing:
         req_status.group_states[0].block_ids[:] = list(range(1, n_full + 1))
         req_status.group_states[1].block_ids[:] = list(range(101, 101 + n_mamba + 1))
 
+        block_ids_by_req: dict[str, tuple[list[int], ...]] = {}
         out = SimpleNamespace(
             num_scheduled_tokens={"A": self.PROMPT_TOKENS},
             finished_req_ids=set(),
             kv_connector_block_state=KVConnectorBlockState(
                 req_ids=set(),
-                resolve_block_ids={}.__getitem__,
+                resolve_block_ids=block_ids_by_req.__getitem__,
                 boundary_state_offloads={"A": [(1, 101, self.MAMBA_BLOCK)]},
             ),
         )
