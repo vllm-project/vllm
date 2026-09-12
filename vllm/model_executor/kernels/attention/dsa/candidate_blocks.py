@@ -67,28 +67,6 @@ def _block_scores_kernel(
             tl.store(scores + row * nblocks + pin, float("inf"))
 
 
-@triton.jit(do_not_specialize=["k"])
-def _store_candidates_kernel(
-    values,
-    indices,
-    output,
-    out_stride_row,
-    out_stride_col,
-    k,
-    OUT_K: tl.constexpr,
-    TILE: tl.constexpr,
-):
-    row = tl.program_id(0).to(tl.int64)
-    cols = tl.program_id(1) * TILE + tl.arange(0, TILE)
-    value = tl.load(values + row * k + cols, cols < k, other=-float("inf"))
-    index = tl.load(indices + row * k + cols, cols < k, other=-1)
-    tl.store(
-        output + row * out_stride_row + cols * out_stride_col,
-        tl.where(value > -float("inf"), index, -1),
-        cols < OUT_K,
-    )
-
-
 @triton.jit(do_not_specialize=["width", "nblocks"])
 def _candidate_flags_kernel(
     candidates,
@@ -169,6 +147,102 @@ def _mask_candidates_kernel(
         )
 
 
+@triton.jit
+def _ordered_key(x):
+    # fp32 -> uint32 whose unsigned order matches the float order.
+    b = x.to(tl.int32, bitcast=True)
+    flip = tl.where(b < 0, -1, -2147483648)  # negatives: flip all bits; else: flip sign
+    return (b ^ flip).to(tl.uint32, bitcast=True)
+
+
+@triton.jit(do_not_specialize=["width", "nblocks"])
+def _topk_candidates_kernel(
+    scores,
+    starts,
+    ends,
+    output,
+    out_stride_row,
+    out_stride_col,
+    stride_start,
+    stride_end,
+    width,
+    nblocks,
+    BLOCK_SIZE: tl.constexpr,
+    K: tl.constexpr,
+    HAS_STARTS: tl.constexpr,
+    ROW_REPEAT: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    # Exact top-K block ids of one row over its own block scores, with a static
+    # launch shape: a row with at most K blocks keeps them all; a longer row
+    # goes through a 4-pass radix select on the fp32 keys. Output order is
+    # unspecified (the consumer only tests membership); -1 pads the rest.
+    row = tl.program_id(0).to(tl.int64)
+    start = tl.load(starts + row // ROW_REPEAT * stride_start) if HAS_STARTS else 0
+    end_raw = tl.load(ends + row // ROW_REPEAT * stride_end)
+    end = tl.minimum(end_raw, width)
+    n = tl.cdiv(tl.maximum(end - start, 0), BLOCK_SIZE)
+    n = tl.minimum(n, nblocks)
+    # A pin past the row's range (end beyond the buffer width) was written by
+    # the score kernel at index pin < nblocks with +inf; it is a candidate too.
+    pin = (end_raw - start - 1) // BLOCK_SIZE
+    has_far_pin = (end_raw > start) & (pin >= n) & (pin < nblocks)
+    n_eff = tl.where(has_far_pin, n + 1, n)
+    out_cols = tl.arange(0, K)
+    if n_eff <= K:
+        ids = tl.where(out_cols < n, out_cols, -1)
+        ids = tl.where((out_cols == n) & has_far_pin, pin, ids)
+        tl.store(output + row * out_stride_row + out_cols * out_stride_col, ids)
+    else:
+        offs = tl.arange(0, TILE)
+        n_scan = tl.where(has_far_pin, pin + 1, n)
+        d_bins = tl.arange(0, 256)
+        remaining = tl.full([1], K, tl.int32)
+        prefix = tl.full([1], 0, tl.uint32)
+        for shift in tl.static_range(24, -8, -8):
+            hist = tl.zeros([256], tl.int32)
+            for t in range(0, tl.cdiv(n_scan, TILE)):
+                idx = t * TILE + offs
+                valid = (idx < n) | ((idx == pin) & has_far_pin)
+                v = tl.load(scores + row * nblocks + idx, valid, other=-float("inf"))
+                key = _ordered_key(v)
+                if shift == 24:
+                    match = valid
+                else:
+                    match = valid & ((key >> (shift + 8)) == (prefix >> (shift + 8)))
+                digit = tl.where(match, ((key >> shift) & 255).to(tl.int32), 0)
+                hist += tl.histogram(digit, 256)
+                hist -= tl.where(d_bins == 0, tl.sum((~match).to(tl.int32), 0), 0)
+            total = tl.sum(hist, 0)
+            above = total - tl.cumsum(hist, 0)   # keys whose digit is strictly greater
+            # threshold digit: the largest d with at least `remaining` keys at digit >= d
+            cand = tl.where(above + hist >= remaining, d_bins, -1)
+            d = tl.max(cand, 0)
+            above_d = tl.sum(tl.where(d_bins == d, above, 0), 0)
+            remaining = remaining - above_d
+            prefix = prefix | (d.to(tl.uint32) << shift)
+        # prefix is the K-th largest key: take every key above it and
+        # `remaining` of the keys equal to it, in index order.
+        n_written = tl.zeros([1], tl.int32)
+        n_ties = tl.zeros([1], tl.int32)
+        for t in range(0, tl.cdiv(n_scan, TILE)):
+            idx = t * TILE + offs
+            valid = (idx < n) | ((idx == pin) & has_far_pin)
+            v = tl.load(scores + row * nblocks + idx, valid, other=-float("inf"))
+            key = _ordered_key(v)
+            gt = valid & (key > prefix)
+            eq = valid & (key == prefix)
+            eq_i = eq.to(tl.int32)
+            eq_rank = tl.cumsum(eq_i, 0) - eq_i + n_ties
+            take = gt | (eq & (eq_rank < remaining))
+            take_i = take.to(tl.int32)
+            pos = tl.cumsum(take_i, 0) - take_i + n_written
+            tl.store(output + row * out_stride_row + pos * out_stride_col, idx, take & (pos < K))
+            n_written += tl.sum(take_i, 0)
+            n_ties += tl.sum(eq_i, 0)
+        tl.store(output + row * out_stride_row + out_cols * out_stride_col, -1, out_cols >= n_written)
+
+
 def select_candidate_blocks(
     logits: torch.Tensor,
     row_ks: torch.Tensor | None,
@@ -191,7 +265,7 @@ def select_candidate_blocks(
         out.fill_(-1)
         return
     nblocks = triton.cdiv(width, block_size)
-    scores = logits.new_full((rows, nblocks), -float("inf"))
+    scores = logits.new_empty((rows, nblocks))
     _block_scores_kernel[(rows, _ROW_PROGRAMS)](
         logits,
         row_ks,
@@ -208,18 +282,25 @@ def select_candidate_blocks(
         128,
         _ROW_PROGRAMS,
     )
-    # Keep the existing top-k tie behavior.
-    top = scores.topk(min(topk_blocks, nblocks), dim=-1)
-    _store_candidates_kernel[(rows, triton.cdiv(topk_blocks, 256))](
-        top.values,
-        top.indices,
+    # Exact per-row top-k over the row's own block scores with a static grid
+    # (the row length is read on the device), instead of torch.topk over the
+    # full `nblocks` width of the buffer for every row.
+    _topk_candidates_kernel[(rows,)](
+        scores,
+        row_ks,
+        row_ke,
         out,
         *out.stride(),
-        top.values.shape[1],
+        row_ks.stride(0) if row_ks is not None else 0,
+        row_ke.stride(0),
+        width,
+        nblocks,
+        block_size,
         topk_blocks,
-        256,
+        row_ks is not None,
+        row_repeat,
+        1024,
     )
-
 
 def apply_candidate_mask(
     logits: torch.Tensor,
