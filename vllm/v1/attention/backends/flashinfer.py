@@ -5,7 +5,7 @@
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
@@ -44,6 +44,7 @@ from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
     flashinfer_xqa_batch_decode_with_kv_cache,
     force_use_trtllm_attention,
+    has_flashinfer_cutedsl_decode,
     pin_host_range_buf,
     supports_trtllm_attention,
     use_trtllm_attention,
@@ -90,6 +91,11 @@ from vllm.v1.kv_cache_interface import (
     iter_layer_specs,
 )
 from vllm.v1.utils import CpuGpuBuffer
+
+if TYPE_CHECKING:
+    # flashinfer>=0.6.15 only; imported lazily at runtime (see
+    # _get_cutedsl_decode_wrapper).
+    from flashinfer.cute_dsl.attention import BatchDecodePagedCuteDSLWrapper
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 FLASHINFER_PREFILL_WORKSPACE_BYTES_PER_ELEM = 16
@@ -639,6 +645,13 @@ class FlashInferTrtllmAPIDecode:
 
 
 @dataclass
+class CuteDSLDecode:
+    """Metadata for the CuteDSL non-causal decode pathway (DFlash)."""
+
+    wrapper: "BatchDecodePagedCuteDSLWrapper"
+
+
+@dataclass
 class FlashInferMetadata:
     num_actual_tokens: int
     """Total number of tokens in the batch (excluding padding)."""
@@ -663,7 +676,7 @@ class FlashInferMetadata:
     Will be `None` if `num_prefill_tokens == 0`.
     """
 
-    decode: FIDecode | FlashInferTrtllmAPIDecode | None
+    decode: FIDecode | FlashInferTrtllmAPIDecode | CuteDSLDecode | None
     """
     Holds the metadata for the decode portion of the batch.
     Will be `None` if `num_decode_tokens == 0`.
@@ -703,6 +716,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             None  # Wrapper for non-causal prefill (DFlash)
         )
         self._decode_wrapper = None  # Wrapper for decode (general shape)
+        # Wrapper for non-causal CuteDSL decode (DFlash); created lazily.
+        self._cutedsl_decode_wrapper: BatchDecodePagedCuteDSLWrapper | None = None
 
         if envs.VLLM_BATCH_INVARIANT:
             self.decode_fixed_split_size = 2048
@@ -915,6 +930,30 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.kv_cache_dtype,
             arch,
         )
+
+        # Static gate for the CuteDSL non-causal decode path (DFlash). Scope is
+        # deliberately narrow for a correctness-first Phase 1: SM100 only,
+        # full-attention only (no SWA / logits soft cap / sinks), kv_data_type
+        # == q_data_type so non-quantized KV only. Anything else keeps the
+        # existing non-causal prefill fallback. Not gated on enable_cuda_graph:
+        # draft builders inherit it from the target, and non-causal capture is
+        # already excluded by get_cudagraph_support().
+        self._use_cutedsl_decode = (
+            envs.VLLM_FLASHINFER_CUTEDSL_DECODE
+            and has_flashinfer_cutedsl_decode()
+            and current_platform.is_device_capability_family(100)
+            and not self.is_kvcache_nvfp4
+            and not self.use_dcp
+            and not self.has_sinks
+            and self.window_left == -1
+            and (self.logits_soft_cap or 0.0) == 0.0
+            and self.kv_cache_dtype == self.model_config.dtype
+            and self.head_dim % 64 == 0
+            and self.page_size in (8, 16, 32, 64)
+            and self.num_kv_heads > 0
+            and self.num_qo_heads % self.num_kv_heads == 0
+        )
+
         # Preparing persistent buffers
         self.paged_kv_indptr = CpuGpuBuffer(
             max_num_reqs + 1, dtype=torch.int32, device=self.device, pin_memory=False
@@ -1236,6 +1275,28 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         return decode_wrapper
 
+    @staticmethod
+    def _is_uniform_query_batch(common_attn_metadata: CommonAttentionMetadata) -> bool:
+        num_reqs = common_attn_metadata.num_reqs
+        qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
+        q_lens = qo_indptr_cpu[1 : num_reqs + 1] - qo_indptr_cpu[:num_reqs]
+        q_len = int(q_lens[0])
+        return (
+            q_len > 0
+            and bool((q_lens == q_len).all())
+            and q_len * num_reqs == common_attn_metadata.num_actual_tokens
+        )
+
+    def _get_cutedsl_decode_wrapper(self) -> "BatchDecodePagedCuteDSLWrapper":
+        if self._cutedsl_decode_wrapper is None:
+            from flashinfer.cute_dsl.attention import BatchDecodePagedCuteDSLWrapper
+
+            # Shares the uint8 workspace; the wrapper reinterprets it as fp32.
+            self._cutedsl_decode_wrapper = BatchDecodePagedCuteDSLWrapper(
+                self._get_workspace_buffer()
+            )
+        return self._cutedsl_decode_wrapper
+
     def _get_cascade_wrapper(self):
         if self._cascade_wrapper is None:
             self._cascade_wrapper = MultiLevelCascadeAttentionWrapper(
@@ -1309,6 +1370,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         causal = common_attn_metadata.causal
+        # Non-causal DFlash uses the CuteDSL paged decode kernel when enabled
+        # and the batch has a uniform q_len per request; else falls back to the
+        # non-causal prefill wrapper below. XQA (SM90 / SM12x) handles
+        # non-causal decode itself, so it keeps the decode route.
+        use_cutedsl_decode = (
+            not causal
+            and self._use_cutedsl_decode
+            and num_reqs > 0
+            and self._is_uniform_query_batch(common_attn_metadata)
+        )
         route_decode = causal or self.use_xqa
         if route_decode:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
@@ -1318,6 +1389,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     require_uniform=not self.use_xqa,
                 )
             )
+        elif use_cutedsl_decode:
+            num_decodes = num_reqs
+            num_prefills = 0
+            num_decode_tokens = num_actual_tokens
+            num_prefill_tokens = 0
         else:
             num_decodes = 0
             num_prefills = num_reqs
@@ -1716,6 +1792,32 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         qo_indptr[: num_decodes + 1] if self.use_dcp else None
                     ),
                 )
+            elif use_cutedsl_decode:
+                assert paged_kv_indices is not None
+                wrapper = self._get_cutedsl_decode_wrapper()
+                wrapper.plan(
+                    indptr=self.paged_kv_indptr.gpu[: num_reqs + 1],
+                    indices=paged_kv_indices,
+                    seq_lens=seq_lens[:num_decodes],
+                    num_qo_heads=self.num_qo_heads,
+                    num_kv_heads=self.num_kv_heads,
+                    head_dim=self.head_dim,
+                    page_size=self.page_size,
+                    q_data_type=self.q_data_type_decode,
+                    kv_data_type=self.kv_cache_dtype,
+                    sm_scale=self.sm_scale,
+                    # "auto" may resolve to atomic reduction, which requires a
+                    # zero-initialized out buffer (done in forward()). Atomic
+                    # summation order is non-deterministic, so batch-invariant
+                    # mode forces the deterministic kernel reduction.
+                    reduction="kernel" if envs.VLLM_BATCH_INVARIANT else "auto",
+                    q_len_per_req=num_decode_tokens // num_decodes,
+                    # Dense mask; window_right defaults to 0 (causal).
+                    window_left=None,
+                    window_right=None,
+                    max_kv_len=max_seq_len,
+                )
+                attn_metadata.decode = CuteDSLDecode(wrapper=wrapper)
             else:
                 assert seq_lens_cpu is not None
                 pure_decode = num_prefills == 0
@@ -2008,6 +2110,7 @@ class FlashInferImpl(AttentionImpl):
         decode_with_xqa = decode_kernel == FlashInferDecodeKernel.XQA
         decode_with_trtllm_gen = decode_kernel == FlashInferDecodeKernel.TRTLLM_GEN
         decode_with_flashinfer_trtllm_api = decode_with_xqa or decode_with_trtllm_gen
+        decode_use_cutedsl = isinstance(attn_metadata.decode, CuteDSLDecode)
 
         # The attn+quant fusion happens when output_scale is provided.
         if output_scale is None:
@@ -2368,7 +2471,24 @@ class FlashInferImpl(AttentionImpl):
                 layer._q_scale,
             )
 
-            if not decode_with_flashinfer_trtllm_api:
+            if decode_use_cutedsl:
+                assert isinstance(attn_metadata.decode, CuteDSLDecode)
+                # K/V views are [num_pages, num_kv_heads, page_size, head_dim];
+                # the kernel wants page_size before heads (head_dim innermost).
+                k_cache = kv_cache_tuple[0].transpose(1, 2)
+                v_cache = kv_cache_tuple[1].transpose(1, 2)
+                # Atomic reduction accumulates into out; zero-init is required
+                # (no-op overhead for kernel/none reduction, which overwrite).
+                out = output[:num_decode_tokens]
+                out.zero_()
+                attn_metadata.decode.wrapper.run(
+                    decode_query,
+                    k_cache,
+                    v_cache,
+                    out=out,
+                    sm_scale=self.scale,
+                )
+            elif not decode_with_flashinfer_trtllm_api:
                 assert isinstance(attn_metadata.decode, FIDecode)
                 decode_wrapper = attn_metadata.decode.wrapper
                 assert decode_wrapper is not None
