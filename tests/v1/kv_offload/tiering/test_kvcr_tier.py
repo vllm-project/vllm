@@ -515,35 +515,9 @@ def test_kvcr_tier_requires_self_describing_inventory_events(monkeypatch):
         )
 
 
-def test_kvcr_tier_waits_for_all_completions_and_drains(monkeypatch):
+def test_kvcr_tier_accumulates_block_results(monkeypatch):
     """Wait for every block result and preserve partial success while draining."""
-
-    class DrainingKVCR(RecordingKVCR):
-        def __init__(self):
-            super().__init__()
-            self.polls: list[list[tuple[OpHandle, dict[BlockKey, OpEntryResult]]]] = []
-
-        def deliver(
-            self,
-            blocks: Mapping[BlockKey, list[MemDescriptor]],
-            request_id: str | None = None,
-        ) -> OpHandle:
-            op_handle = self._next_op_handle
-            self._next_op_handle += 1
-            self.deliver_calls.append((op_handle, dict(blocks), request_id))
-            keys = list(blocks)
-            self.polls = [
-                [(op_handle, _op_entries({keys[0]: True}))],
-                [(op_handle, _op_entries({keys[1]: False}))],
-            ]
-            return op_handle
-
-        def poll_completed(
-            self,
-        ) -> Iterable[tuple[OpHandle, dict[BlockKey, OpEntryResult]]]:
-            return self.polls.pop(0) if self.polls else []
-
-    kvcr = DrainingKVCR()
+    kvcr = RecordingKVCR()
     tier = _make_tier(monkeypatch, kvcr)
     keys = [OffloadKey(b"k0"), OffloadKey(b"k1")]
     tier.submit_load(
@@ -556,7 +530,12 @@ def test_kvcr_tier_waits_for_all_completions_and_drains(monkeypatch):
         )
     )
 
+    op_handle, _, _ = kvcr.deliver_calls[0]
+    kvcr.completed.clear()
+    kvcr.complete(op_handle, {keys[0]: True})
     assert list(tier.get_finished_jobs()) == []
+
+    kvcr.complete(op_handle, {keys[1]: False})
     tier.drain_jobs()
 
     [result] = tier.get_finished_jobs()
