@@ -48,7 +48,7 @@ class DummyRequest(Request):
         )
 
 
-def create_scheduler() -> Scheduler:
+def create_scheduler(num_blocks: int = 1000) -> Scheduler:
     vllm_config = VllmConfig(device_config=DeviceConfig("cpu"))
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
@@ -58,10 +58,10 @@ def create_scheduler() -> Scheduler:
     vllm_config.model_config.max_model_len = 1024
     vllm_config.model_config.enable_return_routed_experts = False
     vllm_config.cache_config = MagicMock()
-    vllm_config.cache_config.num_gpu_blocks = 1000
+    vllm_config.cache_config.num_gpu_blocks = num_blocks
     vllm_config.cache_config.enable_prefix_caching = False
     kv_cache_config = KVCacheConfig(
-        num_blocks=1000,
+        num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec(
@@ -83,6 +83,45 @@ def create_scheduler() -> Scheduler:
 
 
 class TestStreamingScheduler(unittest.TestCase):
+    def test_resumed_sessions_make_progress_under_kv_pressure(self):
+        scheduler = create_scheduler(num_blocks=5)
+        sessions = [
+            DummyRequest(f"session-{i}", prompt_token_ids=[i + 1] * 32)
+            for i in range(2)
+        ]
+        for session in sessions:
+            scheduler.add_request(session)
+
+        first = scheduler.schedule()
+        assert set(first.num_scheduled_tokens) == {s.request_id for s in sessions}
+
+        model_output = ModelRunnerOutput(
+            req_ids=[s.request_id for s in sessions],
+            req_id_to_index={s.request_id: i for i, s in enumerate(sessions)},
+            sampled_token_ids=[[STOP_TOKEN] for _ in sessions],
+            logprobs=None,
+            prompt_logprobs_dict={s.request_id: None for s in sessions},
+            pooler_output=[],
+        )
+        scheduler.update_from_output(first, model_output)
+        assert not scheduler.running
+        assert all(
+            s.status == RequestStatus.WAITING_FOR_STREAMING_REQ for s in sessions
+        )
+
+        for session in sessions:
+            scheduler.add_request(
+                DummyRequest(session.request_id, prompt_token_ids=[9] * 32)
+            )
+
+        assert all(s.status == RequestStatus.WAITING for s in sessions)
+        assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() < 2
+
+        resumed = scheduler.schedule()
+        assert sessions[0].request_id in resumed.num_scheduled_tokens
+        assert resumed.preempted_req_ids == {sessions[1].request_id}
+        assert sessions[1].num_computed_tokens == 0
+
     def test_add_request(self):
         scheduler = create_scheduler()
 
