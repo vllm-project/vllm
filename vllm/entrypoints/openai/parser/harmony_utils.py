@@ -261,6 +261,13 @@ def auto_drop_analysis_messages(msgs: list[Message]) -> list[Message]:
     return cleaned_msgs
 
 
+def text_from_content_part(part: dict) -> str:
+    """Extract text from an OpenAI content part, including refusal parts."""
+    if part.get("type") == "refusal":
+        return part.get("refusal") or part.get("text") or ""
+    return part.get("text", "")
+
+
 def flatten_input_text_content(content: Any) -> str | None:
     """
     Extract text parts from a Chat Completion or Responses API content field and
@@ -277,6 +284,11 @@ def flatten_input_text_content(content: Any) -> str | None:
             texts.append(item)
             continue
         if isinstance(item, dict):
+            if item.get("type") == "refusal":
+                text = text_from_content_part(item)
+                if text:
+                    texts.append(text)
+                continue
             text = item.get("text")
             if text is not None:
                 texts.append(text)
@@ -431,12 +443,11 @@ def parse_chat_input_to_harmony_message(
     if isinstance(content, str):
         contents = [TextContent(text=content)]
     else:
-        # TODO: Support refusal.
-        contents = [TextContent(text=c.get("text", "")) for c in content]
+        contents = [TextContent(text=text_from_content_part(c)) for c in content]
 
     # Only add assistant messages if they have content, as reasoning or tool calling
     # assistant messages were already added above.
-    if role == "assistant" and contents and contents[0].text:
+    if role == "assistant" and contents and any(part.text for part in contents):
         msg = Message.from_role_and_contents(role, contents)
         # Send non-tool assistant messages to the final channel
         msg = msg.with_channel("final")

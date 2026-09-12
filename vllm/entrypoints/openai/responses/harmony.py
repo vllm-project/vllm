@@ -35,6 +35,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     flatten_input_text_content,
     get_system_or_developer_message,
     is_function_recipient,
+    text_from_content_part,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
@@ -60,8 +61,7 @@ def _parse_harmony_format_message(chat_msg: dict) -> Message:
 
     raw_content = chat_msg.get("content", "")
     if isinstance(raw_content, list):
-        # TODO: Support refusal and non-text content types.
-        contents = [TextContent(text=c.get("text", "")) for c in raw_content]
+        contents = [TextContent(text=text_from_content_part(c)) for c in raw_content]
     elif isinstance(raw_content, str):
         contents = [TextContent(text=raw_content)]
     else:
@@ -98,6 +98,18 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
     tool_calls = chat_msg.get("tool_calls")
     if role == "assistant" and tool_calls:
         msgs: list[Message] = []
+        content = flatten_input_text_content(chat_msg.get("content"))
+        if content:
+            commentary_msg = Message.from_role_and_content(Role.ASSISTANT, content)
+            commentary_msg = commentary_msg.with_channel("commentary")
+            msgs.append(commentary_msg)
+
+        reasoning = chat_msg.get("reasoning")
+        if reasoning:
+            analysis_msg = Message.from_role_and_content(Role.ASSISTANT, reasoning)
+            analysis_msg = analysis_msg.with_channel("analysis")
+            msgs.append(analysis_msg)
+
         for call in tool_calls:
             func = call.get("function", {})
             name = func.get("name", "")
@@ -133,13 +145,35 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
             return [msg]
         return []
 
-    # Default: user/assistant messages
+    # Assistant without tool calls: reasoning → analysis, content → final
+    if role == "assistant":
+        msgs: list[Message] = []
+        reasoning = chat_msg.get("reasoning")
+        if reasoning:
+            analysis_msg = Message.from_role_and_content(Role.ASSISTANT, reasoning)
+            analysis_msg = analysis_msg.with_channel("analysis")
+            msgs.append(analysis_msg)
+
+        content = chat_msg.get("content")
+        if isinstance(content, str):
+            contents = [TextContent(text=content)]
+        elif content:
+            contents = [TextContent(text=text_from_content_part(c)) for c in content]
+        else:
+            contents = []
+
+        if contents and any(part.text for part in contents):
+            msg = Message.from_role_and_contents(role, contents)
+            msg = msg.with_channel("final")
+            msgs.append(msg)
+        return msgs
+
+    # Default: user messages
     content = chat_msg.get("content", "")
     if isinstance(content, str):
         contents = [TextContent(text=content)]
     else:
-        # TODO: Support refusal.
-        contents = [TextContent(text=c.get("text", "")) for c in content]
+        contents = [TextContent(text=text_from_content_part(c)) for c in content]
     msg = Message.from_role_and_contents(role, contents)
     return [msg]
 
@@ -173,7 +207,7 @@ def response_input_to_harmony(
         elif isinstance(content, str):
             msg = Message.from_role_and_content(role, content)
         else:
-            contents = [TextContent(text=c.get("text", "")) for c in content]
+            contents = [TextContent(text=text_from_content_part(c)) for c in content]
             msg = Message.from_role_and_contents(role, contents)
         if role == "assistant":
             msg = msg.with_channel("final")

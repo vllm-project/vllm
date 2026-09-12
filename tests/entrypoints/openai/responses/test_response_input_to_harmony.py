@@ -87,6 +87,43 @@ class TestResponseInputToHarmonyMessage:
         assert msg.channel == "final"
         assert msg.content[0].text == "The answer is 42."
 
+    def test_assistant_refusal_content_is_preserved(self):
+        """Responses request.input may replay OpenAI refusal content parts."""
+        msg = response_input_to_harmony(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "refusal", "refusal": "I can't help with that"},
+                ],
+            },
+            prev_responses=[],
+        )
+
+        assert msg.author.role == Role.ASSISTANT
+        assert msg.channel == "final"
+        assert len(msg.content) == 1
+        assert msg.content[0].text == "I can't help with that"
+
+    def test_assistant_mixed_text_and_refusal_content(self):
+        msg = response_input_to_harmony(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "Sorry, "},
+                    {"type": "refusal", "refusal": "I can't help with that"},
+                ],
+            },
+            prev_responses=[],
+        )
+
+        assert msg.author.role == Role.ASSISTANT
+        assert msg.channel == "final"
+        assert len(msg.content) == 2
+        assert msg.content[0].text == "Sorry, "
+        assert msg.content[1].text == "I can't help with that"
+
     def test_developer_message_gets_instructions_prefix(self):
         """Developer messages must use DeveloperContent which adds the
         '# Instructions' header the model was trained on."""
