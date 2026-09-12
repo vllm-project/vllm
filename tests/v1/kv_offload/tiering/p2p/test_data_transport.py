@@ -166,6 +166,46 @@ class TestNixlTransportWithMockedAgent:
         assert result.done == ()
         assert tid in result.failed
 
+    def test_poll_marks_check_xfer_state_exception_as_failed(self):
+        """check_xfer_state exception → failed result, cleanup, handle release.
+
+        Regression test for https://github.com/vllm-project/vllm/issues/49528.
+        """
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+
+        tid = transport.write_blocks("peer:1", [0], [1])
+
+        transport._agent.check_xfer_state.side_effect = RuntimeError("NIXL boom")
+        result = transport.poll()
+
+        assert result.done == ()
+        assert tid in result.failed
+        assert tid not in transport._inflight
+        transport._agent.release_xfer_handle.assert_called_once()
+
+    def test_poll_does_not_retry_after_check_xfer_state_exception(self):
+        """Exception-failed transfer must not be retried on subsequent polls.
+
+        Regression test for https://github.com/vllm-project/vllm/issues/49528.
+        """
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+
+        transport.write_blocks("peer:1", [0], [1])
+
+        transport._agent.check_xfer_state.side_effect = RuntimeError("NIXL boom")
+        transport.poll()
+
+        # Reset side_effect so a second check_xfer_state would succeed —
+        # but it should never be called because the transfer was drained.
+        transport._agent.check_xfer_state.side_effect = None
+        transport._agent.check_xfer_state.reset_mock()
+
+        result = transport.poll()
+        assert result == PollResult(done=(), failed=())
+        transport._agent.check_xfer_state.assert_not_called()
+
     def test_poll_ignores_in_progress(self):
         """Transfers in PROC/PEND state stay inflight."""
         transport = self._make_transport()
