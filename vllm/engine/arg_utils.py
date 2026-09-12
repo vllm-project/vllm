@@ -76,7 +76,12 @@ from vllm.config.cache import (
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
-from vllm.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
+from vllm.config.kernel import (
+    IrOpPriorityConfig,
+    LinearBackend,
+    MoEBackend,
+    SparseIndexerTopkBackend,
+)
 from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.lora import MaxLoRARanks
 from vllm.config.mamba import MambaBackendEnum, MambaSSUAlgorithm
@@ -505,6 +510,9 @@ class EngineArgs:
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
     moe_backend: MoEBackend = KernelConfig.moe_backend
     linear_backend: LinearBackend = KernelConfig.linear_backend
+    sparse_indexer_topk_backend: SparseIndexerTopkBackend = (
+        KernelConfig.sparse_indexer_topk_backend
+    )
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     enable_dbo: bool = ParallelConfig.enable_dbo
@@ -2547,6 +2555,8 @@ class EngineArgs:
             kernel_config.moe_backend = self.moe_backend
         if self.linear_backend != "auto":
             kernel_config.linear_backend = self.linear_backend
+        if self.sparse_indexer_topk_backend != "auto":
+            kernel_config.sparse_indexer_topk_backend = self.sparse_indexer_topk_backend
 
         # Transfer top-level ir_op_priority into KernelConfig.ir_op_priority
         for op_name, op_priority in asdict(self.ir_op_priority).items():
