@@ -1557,10 +1557,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     ) -> PersistentWorkspaceProfilingSupport:
         if vllm_config.parallel_config.decode_context_parallel_size > 1:
             return PersistentWorkspaceProfilingSupport.UNSUPPORTED
-        # MM-prefix execution owns a lazily-created custom-mask prefill
-        # wrapper that is not covered by the causal reservation contract.
-        if vllm_config.model_config.is_mm_prefix_lm:
-            return PersistentWorkspaceProfilingSupport.UNSUPPORTED
         kv_specs = iter_layer_specs(kv_cache_spec)
         # Non-causal execution owns a separate prefill wrapper that is not
         # covered by the causal reservation contract below.
@@ -1810,6 +1806,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         add_wrapper(
             "noncausal_prefill", getattr(self, "_noncausal_prefill_wrapper", None)
         )
+        add_wrapper("mm_prefill", getattr(self, "_mm_prefill_wrapper", None))
         add_wrapper("decode", getattr(self, "_decode_wrapper", None))
         add_wrapper("cascade", getattr(self, "_cascade_wrapper", None))
 
@@ -1865,6 +1862,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             "workspace_wrapper_count": len(unique_wrappers),
             "prefill_wrappers": kind_counts.get("prefill", 0),
             "noncausal_prefill_wrappers": kind_counts.get("noncausal_prefill", 0),
+            "mm_prefill_wrappers": kind_counts.get("mm_prefill", 0),
             "decode_wrappers": kind_counts.get("decode", 0),
             "decode_cudagraph_wrappers": kind_counts.get("decode_cudagraph", 0),
             "cascade_wrappers": kind_counts.get("cascade", 0),
@@ -2421,8 +2419,24 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # module-global workspace. Reuse the measured size instead of touching
         # the global allocator twice during one profiling reservation.
         trtllm_workspace_bytes = self._last_reserved_trtllm_workspace_bytes
+        # Grow the shared float arena to its default before the runtime
+        # wrappers below are built. A wrapper that asks for the default at
+        # construction then finds it already there, so none of them can be the
+        # allocation that grows the arena after execution has locked it. The
+        # CUDA graph reservation above keeps its own ordering; the arena only
+        # ever grows, so hoisting this leaves the final size unchanged.
+        if workspace_routes.native_prefill or workspace_routes.native_decode:
+            self._get_workspace_buffer(self._default_workspace_buffer_size())
+
         if workspace_routes.native_prefill:
             self._get_prefill_wrapper(causal=True)
+            # mm-prefix batches are served by a second, mask-owning prefill
+            # wrapper. It is otherwise built on the first batch that carries
+            # bidirectional ranges, which is after the arena is locked, so it
+            # is materialized and registered here like every other persistent
+            # wrapper. The range buffers gate it the same way build() does.
+            if self.is_mm_prefix_lm and self.mm_prefix_query_ranges_np is not None:
+                self._register_workspace_wrapper(self._get_mm_prefill_wrapper())
 
         if workspace_routes.native_decode:
             max_decode_tokens = min(
@@ -2437,9 +2451,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     if 0 < batch_size <= self._decode_cudagraph_max_bs:
                         self._get_decode_wrapper(batch_size, use_cudagraph=True)
 
-        if workspace_routes.native_prefill or workspace_routes.native_decode:
-            default_float_bytes = self._default_workspace_buffer_size()
-            self._get_workspace_buffer(default_float_bytes)
         debug_info = self.get_workspace_reserve_debug_info()
         return (
             _buffer_nbytes(self._workspace_state.buffer)

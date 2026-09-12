@@ -438,12 +438,207 @@ def test_flashinfer_separate_cudagraph_memory_profile_gate():
     )
 
 
+def _nbytes(buffer: torch.Tensor | None) -> int:
+    return 0 if buffer is None else buffer.numel() * buffer.element_size()
+
+
+def _reservation_builder(flashinfer_backend, *, default_float_bytes, is_mm_prefix_lm):
+    """Builder wired for the native-prefill reservation leg on CPU."""
+    WorkspaceSizes = flashinfer_backend.WorkspaceSizes
+    builder = flashinfer_backend.FlashInferMetadataBuilder.__new__(
+        flashinfer_backend.FlashInferMetadataBuilder
+    )
+    builder._workspace_buffer = None
+    builder._workspace_state = flashinfer_backend._FlashInferWorkspaceState()
+    builder._last_reserved_workspace_sizes = WorkspaceSizes(0, 0)
+    builder._last_reserved_trtllm_workspace_bytes = 0
+    builder.device = torch.device("cpu")
+    builder.use_dcp = False
+    builder.use_xqa = False
+    builder.use_trtllm_prefill_attention = False
+    # Decode is routed to trtllm so the reservation under test stays on the
+    # native prefill leg.
+    builder.use_trtllm_decode_attention = True
+    builder.enable_cuda_graph = False
+    builder.kv_cache_spec = _attention_spec(128)
+    builder.is_mm_prefix_lm = is_mm_prefix_lm
+    builder.mm_prefix_query_ranges_np = object() if is_mm_prefix_lm else None
+    builder.model_config = SimpleNamespace(
+        dtype=torch.float16,
+        is_mm_prefix_lm=is_mm_prefix_lm,
+        max_model_len=1024,
+    )
+    builder.vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8, max_num_seqs=4),
+    )
+    builder._prefill_wrapper = None
+    builder._mm_prefill_wrapper = None
+    builder._noncausal_prefill_wrapper = None
+    builder._decode_wrapper = None
+    builder._decode_wrappers_cudagraph = {}
+    builder._cascade_wrapper = None
+    builder._default_workspace_buffer_size = lambda: default_float_bytes
+    # The CUDA graph leg keeps its own ordering and is not what these tests
+    # cover, so it is stubbed out rather than reproduced.
+    builder.reserve_workspace_for_cudagraph_capture = lambda: 0
+    return builder
+
+
+def _install_prefill_factories(builder, monkeypatch, mm_calls, *, mm_int_bytes=512):
+    causal_wrapper = _FakeFlashInferWrapper(int_workspace_bytes=64)
+
+    def get_prefill_wrapper(causal=True):
+        assert causal
+        if builder._prefill_wrapper is None:
+            causal_wrapper._float_workspace_buffer = builder._get_workspace_buffer(
+                builder._native_initial_workspace_buffer_size()
+            )
+            builder._prefill_wrapper = causal_wrapper
+            builder._register_workspace_wrapper(causal_wrapper)
+        return builder._prefill_wrapper
+
+    def get_mm_prefill_wrapper():
+        mm_calls.append(1)
+        if builder._mm_prefill_wrapper is None:
+            # Asks for the full default, the way the mm wrapper does.
+            builder._mm_prefill_wrapper = _FakeFlashInferWrapper(
+                builder._get_workspace_buffer(),
+                int_workspace_bytes=mm_int_bytes,
+            )
+        return builder._mm_prefill_wrapper
+
+    monkeypatch.setattr(builder, "_get_prefill_wrapper", get_prefill_wrapper)
+    monkeypatch.setattr(builder, "_get_mm_prefill_wrapper", get_mm_prefill_wrapper)
+    return causal_wrapper
+
+
+def test_persistent_reserve_grows_arena_before_runtime_wrappers(monkeypatch):
+    """The runtime wrappers below the hoist never grow the arena themselves.
+
+    This covers only the wrappers built inside
+    ``reserve_workspace_for_memory_profiling``; the CUDA graph reservation it
+    calls first keeps its own ordering and is stubbed out here.
+    """
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    default_float_bytes = 4096
+    builder = _reservation_builder(
+        flashinfer_backend,
+        default_float_bytes=default_float_bytes,
+        is_mm_prefix_lm=True,
+    )
+    arena_bytes_when_built = []
+    mm_calls: list[int] = []
+
+    causal_wrapper = _install_prefill_factories(builder, monkeypatch, mm_calls)
+    inner = builder._get_prefill_wrapper
+
+    def recording_get_prefill_wrapper(causal=True):
+        if builder._prefill_wrapper is None:
+            arena_bytes_when_built.append(
+                _nbytes(current_workspace_manager().get_workspace())
+            )
+        return inner(causal=causal)
+
+    monkeypatch.setattr(builder, "_get_prefill_wrapper", recording_get_prefill_wrapper)
+
+    reset_workspace_manager()
+    init_workspace_manager(torch.device("cpu"))
+    try:
+        builder.reserve_workspace_for_memory_profiling()
+        assert arena_bytes_when_built == [default_float_bytes]
+        assert causal_wrapper._float_workspace_buffer is not None
+    finally:
+        reset_workspace_manager()
+
+
+def test_persistent_reserve_covers_the_mm_prefill_wrapper(monkeypatch):
+    """The mask-owning wrapper is reserved, registered and accounted."""
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    default_float_bytes = 4096
+    mm_int_bytes = 512
+    builder = _reservation_builder(
+        flashinfer_backend,
+        default_float_bytes=default_float_bytes,
+        is_mm_prefix_lm=True,
+    )
+    mm_calls: list[int] = []
+    causal_wrapper = _install_prefill_factories(
+        builder, monkeypatch, mm_calls, mm_int_bytes=mm_int_bytes
+    )
+
+    reset_workspace_manager()
+    init_workspace_manager(torch.device("cpu"))
+    try:
+        reserved = builder.reserve_workspace_for_memory_profiling()
+
+        mm_wrapper = builder._mm_prefill_wrapper
+        assert mm_wrapper is not None
+        assert mm_calls
+        assert not current_workspace_manager().is_locked()
+
+        builder.rebind_workspace_after_reservation()
+        arena = current_workspace_manager().get_workspace()
+        assert _nbytes(arena) == default_float_bytes
+        assert mm_wrapper._float_workspace_buffer.data_ptr() == arena.data_ptr()
+        assert causal_wrapper._float_workspace_buffer.data_ptr() == arena.data_ptr()
+
+        debug_info = builder.get_workspace_reserve_debug_info()
+        assert debug_info["mm_prefill_wrappers"] == 1
+        assert debug_info["actual_int_workspace_bytes"] >= mm_int_bytes + 64
+        assert reserved >= _nbytes(arena) + mm_int_bytes
+
+        lock_workspace()
+        arena_bytes = _nbytes(arena)
+        arena_ptr = arena.data_ptr()
+        # The runtime path re-enters both factories after the lock.
+        assert builder._get_mm_prefill_wrapper() is mm_wrapper
+        builder._get_workspace_buffer()
+        arena_after = current_workspace_manager().get_workspace()
+        assert _nbytes(arena_after) == arena_bytes
+        assert arena_after.data_ptr() == arena_ptr
+    finally:
+        reset_workspace_manager()
+
+
+def test_persistent_reserve_skips_mm_wrapper_on_a_plain_model(monkeypatch):
+    """``_get_mm_prefill_wrapper`` exists on every builder, so the reservation
+    has to be gated on the model, not on the factory being present."""
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    assert hasattr(
+        flashinfer_backend.FlashInferMetadataBuilder, "_get_mm_prefill_wrapper"
+    )
+
+    builder = _reservation_builder(
+        flashinfer_backend, default_float_bytes=2048, is_mm_prefix_lm=False
+    )
+    mm_calls: list[int] = []
+    _install_prefill_factories(builder, monkeypatch, mm_calls)
+
+    reset_workspace_manager()
+    init_workspace_manager(torch.device("cpu"))
+    try:
+        builder.reserve_workspace_for_memory_profiling()
+        assert mm_calls == []
+        assert builder._mm_prefill_wrapper is None
+        debug_info = builder.get_workspace_reserve_debug_info()
+        assert debug_info["mm_prefill_wrappers"] == 0
+        assert _nbytes(current_workspace_manager().get_workspace()) == 2048
+    finally:
+        reset_workspace_manager()
+
+
 @pytest.mark.parametrize(
     ("decode_context_parallel_size", "is_mm_prefix_lm", "expected"),
     [
         pytest.param(1, False, True, id="single-rank"),
         pytest.param(2, False, False, id="dcp-fallback"),
-        pytest.param(1, True, False, id="mm-prefix-fallback"),
+        pytest.param(1, True, True, id="mm-prefix-profiled"),
     ],
 )
 def test_flashinfer_persistent_workspace_profile_gate(
@@ -1064,6 +1259,8 @@ def test_flashinfer_memory_profile_materializes_runtime_wrapper_fallbacks(
     builder.helper_available = helper_available
     builder.calls = []
     builder.reserve_decode_calls = []
+    builder.is_mm_prefix_lm = False
+    builder.mm_prefix_query_ranges_np = None
     builder.kv_cache_spec = SimpleNamespace(non_causal=False)
     builder.model_config = SimpleNamespace(
         max_model_len=16,
