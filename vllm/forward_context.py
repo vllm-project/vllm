@@ -185,6 +185,24 @@ class ForwardContext:
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
 
+    # For torch.compile cold start times, we need to avoid hard-coding
+    # any strings into the graph. Right now, the
+    # vllm.unified_kv_cache_update and vllm.unified_attention_with_output
+    # custom operators hard-code strings into the graph.
+    #
+    # The workaround is to store a list of the strings that each of those
+    # custom ops needs in the ForwardContext (all_kv_layers)
+    # as well as a counter (kv_layer_index).
+    # The ForwardContext object is alive for the duration of the forward pass.
+    # When the custom op needs a layer string, get the next string
+    # from all_kv_layers and increment the counter.
+    #
+    # This assumes that the custom operators will always be executed in
+    # order and that torch.compile will not try to reorder these
+    # operations with respect to each other.
+    all_kv_layers: list[str] | None = None
+    kv_layer_index: int = 0
+
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -226,9 +244,12 @@ def create_forward_context(
     else:
         all_moe_layers = None
 
+    all_kv_layers = vllm_config.compilation_config.static_all_kv_layers or None
+
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         all_moe_layers=all_moe_layers,
+        all_kv_layers=all_kv_layers,
         attn_metadata=attn_metadata,
         slot_mapping=slot_mapping or {},
         dp_metadata=dp_metadata,
