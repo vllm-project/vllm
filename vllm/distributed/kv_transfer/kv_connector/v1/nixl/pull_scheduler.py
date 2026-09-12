@@ -31,6 +31,29 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
 
+    def _should_recompute_remote_kv(
+        self, request: "Request", count: int
+    ) -> bool:
+        """Return whether a remote KV pull should be recomputed locally.
+
+        The recompute threshold applies to both remote-prefill requests
+        (P→D) and remote-decode requests (D→P). In either case, pulling a
+        small number of tokens can cost more than computing them locally due
+        to the fixed transfer setup overhead.
+        """
+        if (
+            self.kv_recompute_threshold > 0
+            and 0 < count < self.kv_recompute_threshold
+        ):
+            logger.debug(
+                "Skipping remote pull for %s: %d remote tokens < threshold %d",
+                request.request_id,
+                count,
+                self.kv_recompute_threshold,
+            )
+            return True
+        return False
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
@@ -63,6 +86,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             actual = self._get_remote_prefill_token_count(len(token_ids))
             count = actual - num_computed_tokens
             if count > 0:
+                if self._should_recompute_remote_kv(request, count):
+                    return 0, False
                 return count, True
 
         if (
@@ -88,18 +113,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                 min(remote_num_tokens, request.num_prompt_tokens) - num_computed_tokens
             )
             if count > 0:
-                # Check kv_recompute_threshold: skip pull if
-                # remote tokens are below the threshold.
-                if (
-                    self.kv_recompute_threshold > 0
-                    and count < self.kv_recompute_threshold
-                ):
-                    logger.debug(
-                        "Skipping remote pull for %s: %d remote tokens < threshold %d",
-                        request.request_id,
-                        count,
-                        self.kv_recompute_threshold,
-                    )
+                if self._should_recompute_remote_kv(request, count):
                     return 0, False
                 return count, True
 
