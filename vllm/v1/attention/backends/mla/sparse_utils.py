@@ -407,6 +407,8 @@ def triton_convert_req_index_to_global_index(
     prefill_workspace_request_ids: torch.Tensor | None = None,
     prefill_workspace_starts: torch.Tensor | None = None,
     return_valid_counts: bool = False,
+    out: torch.Tensor | None = None,
+    valid_counts_out: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     out[token_id, indice_id] =
@@ -462,16 +464,36 @@ def triton_convert_req_index_to_global_index(
     # contiguous prefix [0, valid_count) and leaves the tail unwritten, so
     # pre-fill -1 there. flash_mla_sparse_fwd then bounds attention to
     # [:topk_length] == exactly the valid set (no dropped tokens).
-    if return_valid_counts:
-        out = torch.full_like(token_indices_c, -1)
+    if out is None:
+        out = (
+            torch.full_like(token_indices_c, -1)
+            if return_valid_counts
+            else torch.empty_like(token_indices_c)
+        )
     else:
-        out = torch.empty_like(token_indices_c)
+        assert out.dtype == token_indices_c.dtype
+        assert out.device == token_indices_c.device
+        assert out.shape == token_indices_c.shape
+        assert out.is_contiguous()
+        if return_valid_counts:
+            out.fill_(-1)
 
     valid_counts: torch.Tensor | None = None
     if return_valid_counts:
-        # Zero-init only matters for the atomic accumulation path.
-        alloc = torch.empty if single_tile else torch.zeros
-        valid_counts = alloc(num_tokens, dtype=torch.int32, device=token_indices.device)
+        if valid_counts_out is None:
+            # Zero-init only matters for the atomic accumulation path.
+            alloc = torch.empty if single_tile else torch.zeros
+            valid_counts = alloc(
+                num_tokens, dtype=torch.int32, device=token_indices.device
+            )
+        else:
+            assert valid_counts_out.dtype == torch.int32
+            assert valid_counts_out.device == token_indices.device
+            assert valid_counts_out.shape == (num_tokens,)
+            assert valid_counts_out.is_contiguous()
+            valid_counts = valid_counts_out
+            if not single_tile:
+                valid_counts.zero_()
 
     # Prepare prefill pointers
     if HAS_PREFILL_WORKSPACE:

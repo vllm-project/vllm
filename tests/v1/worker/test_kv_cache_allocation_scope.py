@@ -5,8 +5,10 @@ from contextlib import AbstractContextManager
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
 import torch
 
+import vllm.v1.hisparse.binding as hisparse_binding
 import vllm.v1.worker.gpu.attn_utils as attn_utils
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner
 from vllm.v1.worker.gpu_worker import Worker
@@ -26,7 +28,8 @@ class _AllocationScope(AbstractContextManager):
         self.active = False
 
 
-def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
+@pytest.mark.parametrize("hisparse", [False, True])
+def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch, hisparse) -> None:
     scope = _AllocationScope()
     kv_caches = {"layer": torch.empty(0)}
 
@@ -38,23 +41,48 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch) -> None:
         assert not scope.active
 
     monkeypatch.setattr(attn_utils, "allocate_kv_cache", allocate)
-    monkeypatch.setattr(attn_utils, "bind_kv_cache", bind)
+    monkeypatch.setattr(attn_utils, "bind_kv_cache_to_layers", bind)
     monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda config: {})
 
+    hisparse_bindings = []
+    if hisparse:
+        host_pool = SimpleNamespace()
+
+        def bind_hisparse(**kwargs):
+            hisparse_bindings.append(kwargs)
+            assert scope.active
+            assert kwargs["kv_caches"] is kv_caches
+            assert kwargs["host_pool"] is host_pool
+            return [
+                SimpleNamespace(
+                    view=SimpleNamespace(cache=torch.empty(1, 1, 1), block_size=1),
+                    runtime=SimpleNamespace(),
+                )
+            ]
+
+        monkeypatch.setattr(hisparse_binding, "HiSparseHostPool", lambda: host_pool)
+        monkeypatch.setattr(hisparse_binding, "allocate_hisparse_kv_caches", allocate)
+        monkeypatch.setattr(hisparse_binding, "bind_hisparse_kv_caches", bind_hisparse)
+
     config = SimpleNamespace(
+        attention_config=SimpleNamespace(
+            hisparse_config=object() if hisparse else None
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=1),
         cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: None),
         model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="test")),
     )
     result = attn_utils.init_kv_cache(
-        [],
         {},
         SimpleNamespace(kv_cache_groups=[]),
         torch.device("cpu"),
         [],
         config,
         kv_cache_allocation_context=scope,
+        block_tables=SimpleNamespace(),
     )
 
+    assert len(hisparse_bindings) == int(hisparse)
     assert result is kv_caches
     assert not scope.active
 
