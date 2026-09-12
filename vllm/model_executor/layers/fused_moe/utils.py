@@ -500,7 +500,8 @@ def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
 
     For a detailed explanation, see: `docs/serving/data_parallel_deployment.md`
     """
-    return max(moe_config.max_num_tokens * moe_config.dp_size, 8192)
+    dp_size = moe_config.elastic_ep_max_dp_size or moe_config.dp_size
+    return max(moe_config.max_num_tokens * dp_size, 8192)
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)

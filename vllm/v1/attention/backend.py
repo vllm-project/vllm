@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.hisparse.runtime import HiSparseCacheHandle
     from vllm.v1.kv_cache_interface import (
         AttentionSpec,
         KVCacheLayout,
@@ -493,19 +494,21 @@ class CommonAttentionMetadata:
         # Built from the device query_start_loc: adaptive verification decides the
         # per-request draft split on device, so the CPU copy carries the right total
         # but not the right per-request boundaries. Padding requests have a query
-        # length of zero and drop out of the repeat.
+        # length of zero and are skipped by the device boundary search.
         num_mapped_tokens = int(self.query_start_loc_cpu[-1])
-        query_lens = self.query_start_loc[1:] - self.query_start_loc[:-1]
-        assert buffer.shape[0] >= max(num_mapped_tokens, num_tokens)
-        token_to_req_indices = torch.repeat_interleave(
-            torch.arange(query_lens.shape[0], dtype=torch.int32, device=buffer.device),
-            query_lens,
-            output_size=num_mapped_tokens,
+        from vllm.v1.attention.ops.metadata import _token_request_mapping_kernel
+
+        num_output_tokens = max(num_mapped_tokens, num_tokens)
+        assert buffer.shape[0] >= num_output_tokens
+        _token_request_mapping_kernel[((num_output_tokens + 255) // 256,)](
+            self.query_start_loc,
+            buffer,
+            self.query_start_loc.shape[0] - 1,
+            num_mapped_tokens,
+            num_output_tokens,
+            num_warps=4,
         )
-        buffer[:num_mapped_tokens].copy_(token_to_req_indices)
-        if num_mapped_tokens < num_tokens:
-            buffer[num_mapped_tokens:num_tokens].zero_()
-        self._token_to_req_indices_cache = buffer[: max(num_mapped_tokens, num_tokens)]
+        self._token_to_req_indices_cache = buffer[:num_output_tokens]
         return self._token_to_req_indices_cache[:num_tokens]
 
     # TODO(lucas): remove once we have FULL-CG spec-decode support
@@ -851,6 +854,9 @@ class AttentionImplBase(ABC, Generic[T]):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
 
+    def prepare_for_batch(self, attn_metadata: T | None) -> None:
+        """Prepare implementation-specific state for the current batch."""
+
 
 class AttentionImpl(AttentionImplBase[T], Generic[T]):
     """Standard attention implementation with forward method."""
@@ -969,6 +975,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """MLA attention implementation with forward_mqa and forward_mha methods."""
 
+    hisparse_cache: "HiSparseCacheHandle | None" = None
     supports_pcp: bool = True
 
     @abstractmethod
