@@ -41,11 +41,12 @@ def _triton_kernel_moe_supports_current_device() -> bool:
     p = current_platform
     if p.is_cuda():
         cap = p.get_device_capability()
-        # Keep the original `(9, 0) <= cap < (11, 0)` window on
-        # CUDA (covers Hopper SM90 and Blackwell SM100, excludes
-        # SM120) — this PR is ROCm-scoped and the broader CUDA
-        # range was not validated.
-        return cap is not None and (9, 0) <= (cap.major, cap.minor) < (11, 0)
+        # `(9, 0) <= cap < (13, 0)` covers Hopper SM90, datacenter
+        # Blackwell SM100/103, and consumer Blackwell SM120/SM121
+        # (RTX 50-series, GB10 / DGX Spark). The kernels are pure
+        # Triton JIT (no SM90-only wgmma or SM10x-only tcgen05.*),
+        # so the wider upper bound is safe; verified on SM 12.1.
+        return cap is not None and (9, 0) <= (cap.major, cap.minor) < (13, 0)
     if p.is_rocm():
         from vllm.platforms.rocm import on_gfx1x, on_gfx9
 
