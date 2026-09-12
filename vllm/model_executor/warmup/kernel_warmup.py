@@ -25,6 +25,7 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     write_flashinfer_autotune_cache,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
+    autotune_hisparse_flashinfer_attention,
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
@@ -42,6 +43,9 @@ from vllm.model_executor.warmup.replayssm_warmup import (
 )
 from vllm.model_executor.warmup.spec_decode_rejection_warmup import (
     spec_decode_rejection_warmup,
+)
+from vllm.model_executor.warmup.watermark_sample_warmup import (
+    watermark_sample_warmup,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -206,6 +210,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     if enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
         spec_decode_rejection_warmup(worker)
+        watermark_sample_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
 
     if enable_jit_warmup and current_platform.is_device_capability_family(100):
@@ -353,9 +358,12 @@ def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ..
     return tuple(dict.fromkeys(token_counts))
 
 
-def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:
+def _run_flashinfer_autotune_dummy_runs(
+    runner: "GPUModelRunner", *, skip_attn: bool = False
+) -> None:
     import vllm.utils.flashinfer as fi_utils
 
+    dummy_run_kwargs = {"skip_attn": True} if skip_attn else {}
     for num_tokens in _flashinfer_autotune_token_counts(runner):
         tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(num_tokens)
         logger.info(
@@ -369,6 +377,7 @@ def _run_flashinfer_autotune_dummy_runs(runner: "GPUModelRunner") -> None:
                 skip_eplb=True,
                 is_profile=True,
                 randomize_inputs=True,
+                **dummy_run_kwargs,
             )
 
 
@@ -431,7 +440,14 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             torch.inference_mode(),
             fi_utils.autotune(tune_mode=True, **autotune_kwargs),
         ):
-            _run_flashinfer_autotune_dummy_runs(runner)
+            hisparse_enabled = (
+                runner.vllm_config.attention_config.hisparse_config is not None
+            )
+            if hisparse_enabled:
+                # HiSparse hot-buffer attention is bounded by decode batch
+                # size, not the prefill-sized batch used for the full model.
+                autotune_hisparse_flashinfer_attention(runner)
+            _run_flashinfer_autotune_dummy_runs(runner, skip_attn=hisparse_enabled)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
     finally:
