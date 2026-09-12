@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import errno
-import fcntl
 import mmap
 import os
 import time
@@ -36,8 +35,7 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
             )
         if time.monotonic() > deadline:
             raise TimeoutError(
-                "Timed out waiting for mmap file to reach "
-                f"{expected_size} bytes; actual size is {file_stat.st_size} bytes"
+                f"Timed out waiting for mmap file to reach {expected_size} bytes"
             )
         time.sleep(0.005)
 
@@ -83,6 +81,9 @@ class SharedOffloadRegion:
     given, the path is unlinked once every worker has mapped the file, so
     the kernel reclaims the memory when the last worker exits, no matter
     how it exits; mappings taken before the unlink stay valid.
+
+    Creator-only population pre-faults the entire region before the barrier
+    and requires that barrier to keep joiners from using unpopulated pages.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -99,6 +100,8 @@ class SharedOffloadRegion:
         creator_memory_check: Callable[[int], None] | None = None,
         populate_only_on_creator: bool = False,
     ) -> None:
+        if populate_only_on_creator and barrier is None:
+            raise ValueError("Creator-only population requires a barrier.")
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_chunk % self.page_size == 0
 
@@ -110,7 +113,6 @@ class SharedOffloadRegion:
         self._creator = False  # set True only if this worker creates the file
         self.fd: int | None = None
         self.mmap_obj: mmap.mmap | None = None
-        creator_population_lock = False
         self.rank = rank
         if rank is not None:
             # byte offset to this worker's first slot within each chunk row
@@ -127,14 +129,6 @@ class SharedOffloadRegion:
                 # for the file to reach expected size.
                 self.fd = os.open(self.mmap_path, os.O_RDWR)
                 _wait_for_file_size(self.fd, self.total_size_bytes)
-                if populate_only_on_creator:
-                    fcntl.flock(self.fd, fcntl.LOCK_SH)
-                    fcntl.flock(self.fd, fcntl.LOCK_UN)
-                    if os.fstat(self.fd).st_nlink == 0:
-                        raise RuntimeError(
-                            "Shared offload region creator failed during "
-                            "initialization."
-                        ) from None
                 logger.info("Opened existing mmap file %s", self.mmap_path)
             else:
                 # Creator path. We won O_EXCL, so we own the file: any
@@ -142,22 +136,14 @@ class SharedOffloadRegion:
                 # land on a 0-byte stub and spin in _wait_for_file_size
                 # for the full 30 s timeout.
                 self._creator = True
-                if populate_only_on_creator:
-                    fcntl.flock(self.fd, fcntl.LOCK_EX)
-                    creator_population_lock = True
                 if creator_memory_check is not None:
                     creator_memory_check(self.total_size_bytes)
                 check_shm_free_space(self.total_size_bytes)
                 os.ftruncate(self.fd, self.total_size_bytes)
                 logger.info(
-                    "Created mmap file %s (%d bytes, %.2f GB; blocks=%d, "
-                    "row_stride=%d, worker_page=%d)",
+                    "Created mmap file %s (%.2f GB)",
                     self.mmap_path,
-                    self.total_size_bytes,
                     self.total_size_bytes / 1e9,
-                    self.num_chunks,
-                    self._row_stride,
-                    cpu_page_size,
                 )
 
             self.mmap_obj = mmap.mmap(
@@ -167,36 +153,10 @@ class SharedOffloadRegion:
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
 
-            if not populate_only_on_creator or self._creator:
+            if populate_only_on_creator and self._creator:
                 populate_write_fn = _get_populate_write_fn(self.mmap_obj)
-
-                if rank is not None:
-                    # Populate only this worker's pages (one slot per block row).
-                    worker_offset = rank * cpu_page_size
-                    _t0 = time.perf_counter()
-                    page_size = self.page_size
-                    for block in range(num_chunks):
-                        raw_offset = block * self._row_stride + worker_offset
-                        aligned_offset = (raw_offset // page_size) * page_size
-                        end = raw_offset + cpu_page_size
-                        aligned_length = end - aligned_offset
-                        populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
-                    logger.debug(
-                        "MADV_POPULATE_WRITE loop: %d blocks in %.3f s",
-                        num_chunks,
-                        time.perf_counter() - _t0,
-                    )
-                else:
-                    # No rank — populate the entire shared region in one call.
-                    _t0 = time.perf_counter()
-                    populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
-                    logger.debug(
-                        "MADV_POPULATE_WRITE entire region: %.3f s",
-                        time.perf_counter() - _t0,
-                    )
+                populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
         except Exception:
-            if creator_population_lock and self.fd is not None:
-                fcntl.flock(self.fd, fcntl.LOCK_UN)
             if self._creator:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(self.mmap_path)
@@ -207,6 +167,10 @@ class SharedOffloadRegion:
             if self.fd is not None:
                 os.close(self.fd)
                 self.fd = None
+            # Peers block inside the barrier until the collective times out if
+            # we die before reaching it.  Arrive anyway so every worker calls
+            # barrier() exactly once and they fail on their own errors instead
+            # of hanging; a failure here must not replace ours.
             if barrier is not None:
                 try:
                     barrier()
@@ -216,12 +180,11 @@ class SharedOffloadRegion:
                         exc_info=True,
                     )
             raise
-        else:
-            if creator_population_lock:
-                assert self.fd is not None
-                fcntl.flock(self.fd, fcntl.LOCK_UN)
 
         if barrier is not None:
+            # Every worker has mapped the file once the barrier releases, so
+            # its name is no longer needed and dropping it here means no exit
+            # path — including SIGKILL — can leak the file.
             try:
                 barrier()
             except Exception:
@@ -244,6 +207,35 @@ class SharedOffloadRegion:
         self._canonical_offset = 0
         self.is_pinned: bool = False
         self.pinned_addresses: list[int] = []
+
+        if populate_only_on_creator:
+            return
+
+        populate_write_fn = _get_populate_write_fn(self.mmap_obj)
+
+        if rank is not None:
+            # Populate only this worker's pages (one slot per chunk row).
+            worker_offset = rank * cpu_page_size
+            _t0 = time.perf_counter()
+            page_size = self.page_size
+            for chunk in range(num_chunks):
+                raw_offset = chunk * self._row_stride + worker_offset
+                aligned_offset = (raw_offset // page_size) * page_size
+                end = raw_offset + cpu_page_size
+                aligned_length = end - aligned_offset
+                populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
+            logger.debug(
+                "MADV_POPULATE_WRITE loop: %d chunks in %.3f s",
+                num_chunks,
+                time.perf_counter() - _t0,
+            )
+        else:
+            # No rank — populate the entire shared region in one call.
+            _t0 = time.perf_counter()
+            populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
+            logger.debug(
+                "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
+            )
 
     @property
     def base_tensor(self) -> torch.Tensor:

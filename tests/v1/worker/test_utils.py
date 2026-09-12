@@ -229,6 +229,8 @@ def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
 @pytest.mark.skip_global_cleanup
 def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     page = mmap.PAGESIZE
+    tp_group = MagicMock()
+    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
 
     class FakeSharedOffloadRegion:
         BLOCK_SIZE_ALIGNMENT = page
@@ -296,6 +298,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         "rank": 0,
         "kv_bytes_per_chunk": 4 * page,
         "cpu_page_size": 64,
+        "barrier": tp_group.barrier,
         "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
         "populate_only_on_creator": True,
     }
@@ -315,6 +318,7 @@ def test_shared_host_pool_tracks_successful_registrations(
 ):
     """Only successful registrations may be unregistered on allocation failure."""
     page = mmap.PAGESIZE
+    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", MagicMock())
     backing = torch.empty(3 * page, dtype=torch.uint8)
     region = MagicMock(base_tensor=backing, pinned_addresses=[], is_pinned=False)
     monkeypatch.setattr(

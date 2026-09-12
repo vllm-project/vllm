@@ -186,30 +186,6 @@ def _mp_race_construct_and_write(
         done_queue.put({"rank": rank, "error": repr(e)})
 
 
-def _mp_read_replicated_slot(engine_id: str, result_queue) -> None:
-    try:
-        region = SharedOffloadRegion(
-            engine_id=engine_id,
-            num_chunks=3,
-            rank=0,
-            kv_bytes_per_chunk=PAGE_SIZE,
-            cpu_page_size=PAGE_SIZE,
-        )
-        view = region.create_next_canonical_view(PAGE_SIZE)
-        assert region.fd is not None
-        result_queue.put(
-            {
-                "inode": os.fstat(region.fd).st_ino,
-                "contents_match": view[2].tolist() == [37] * PAGE_SIZE,
-                "error": None,
-            }
-        )
-        del view
-        region.cleanup()
-    except Exception as e:
-        result_queue.put({"inode": None, "contents_match": False, "error": repr(e)})
-
-
 def _mp_barrier_construct_and_hold(
     engine_id: str,
     rank: int,
@@ -217,28 +193,43 @@ def _mp_barrier_construct_and_hold(
     barrier,
     fill_value: int,
     done_queue,
+    replicated: bool = False,
 ) -> None:
     """Construct with a real cross-process barrier, write, then hold the
     mapping (no cleanup) until the parent SIGKILLs this process."""
     try:
+        populate_calls = 0
+        get_populate_write_fn = region_module._get_populate_write_fn
+
+        def track_population(mmap_obj):
+            nonlocal populate_calls
+            populate_calls += 1
+            return get_populate_write_fn(mmap_obj)
+
+        region_module._get_populate_write_fn = track_population
         region = SharedOffloadRegion(
             engine_id=engine_id,
             num_chunks=2,
-            rank=rank,
-            kv_bytes_per_chunk=num_workers * PAGE_SIZE,
+            rank=0 if replicated else rank,
+            kv_bytes_per_chunk=PAGE_SIZE if replicated else num_workers * PAGE_SIZE,
             cpu_page_size=PAGE_SIZE,
             barrier=lambda: barrier.wait(30),
+            populate_only_on_creator=replicated,
         )
         # The constructor's barrier precedes the creator's unlink.
         barrier.wait(30)
         t = region.create_next_worker_view(PAGE_SIZE)
-        t[:, :] = fill_value
+        if not replicated or rank == 0:
+            t[:, :] = fill_value
+        barrier.wait(30)
         done_queue.put(
             {
                 "rank": rank,
                 "error": None,
                 "inode": os.fstat(region.fd).st_ino,
                 "path_exists": os.path.exists(region.mmap_path),
+                "populate_calls": populate_calls,
+                "contents_match": bool((t == (1 if replicated else fill_value)).all()),
             }
         )
         time.sleep(60)  # hold the mapping until killed
@@ -672,41 +663,6 @@ def test_multi_worker_race_shared_memory_visible(iid):
         _cleanup_file(regions[0].mmap_path)
 
 
-@pytest.mark.skip_global_cleanup
-@pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="requires /dev/shm")
-def test_replicated_workers_share_the_same_slot_across_processes(iid):
-    creator = _make_region(iid, num_chunks=3, rank=0)
-    creator_view = creator.create_next_canonical_view(PAGE_SIZE)
-    creator_view[2].fill_(37)
-    assert creator.fd is not None
-    creator_inode = os.fstat(creator.fd).st_ino
-
-    ctx = get_mp_context()
-    result_queue = ctx.Queue()
-    reader = ctx.Process(
-        target=_mp_read_replicated_slot,
-        args=(iid, result_queue),
-    )
-    reader.start()
-    try:
-        reader_result = result_queue.get(timeout=30)
-        assert reader_result["error"] is None
-        assert reader_result["inode"] == creator_inode
-        assert reader_result["contents_match"]
-    finally:
-        reader.join(timeout=10)
-        if reader.is_alive():
-            reader.terminate()
-            reader.join(timeout=10)
-        del creator_view
-        creator.cleanup()
-        _cleanup_file(creator.mmap_path)
-        result_queue.close()
-        result_queue.join_thread()
-
-    assert reader.exitcode == 0
-
-
 def test_multiprocess_race_construct_and_write(iid):
     """N processes race to construct the same SharedOffloadRegion, each writes
     fill_value = rank+1 into their slot; parent verifies interleaved layout."""
@@ -1038,7 +994,8 @@ def test_barrier_failure_unlinks_creator_and_raises(iid):
     assert not os.path.exists(path)
 
 
-def test_mp_barrier_unlinks_file_and_survives_sigkill(iid):
+@pytest.mark.parametrize("replicated", [False, True])
+def test_mp_barrier_unlinks_file_and_survives_sigkill(iid, replicated):
     """With a real cross-process barrier every worker maps one shared inode,
     the name is gone while they run, and SIGKILL leaks nothing."""
     num_workers = 2
@@ -1049,7 +1006,7 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid):
     procs = [
         ctx.Process(
             target=_mp_barrier_construct_and_hold,
-            args=(iid, rank, num_workers, barrier, rank + 1, done_queue),
+            args=(iid, rank, num_workers, barrier, rank + 1, done_queue, replicated),
         )
         for rank in range(num_workers)
     ]
@@ -1061,6 +1018,10 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid):
             assert r["error"] is None, f"rank {r['rank']}: {r['error']}"
         assert len({r["inode"] for r in results}) == 1, "workers split onto two files"
         assert not any(r["path_exists"] for r in results)
+        assert all(r["contents_match"] for r in results)
+        assert sum(r["populate_calls"] for r in results) == (
+            1 if replicated else num_workers
+        )
         assert not os.path.exists(path)
     finally:
         for p in procs:
@@ -1072,23 +1033,36 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid):
         assert restarted._creator is True, "restart must be able to create anew"
 
 
-def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch):
+@pytest.mark.parametrize("failure_phase", ["shm", "memory", "population"])
+def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch, failure_phase):
     """A worker that dies before the rendezvous must still arrive at the
     barrier, or its peers block in the collective until it times out."""
-    import vllm.v1.kv_offload.cpu.shared_offload_region as region
-
-    monkeypatch.setattr(
-        region,
-        "check_shm_free_space",
-        MagicMock(side_effect=RuntimeError("Insufficient space")),
+    failure = MagicMock(side_effect=ValueError("Insufficient space"))
+    memory_check = failure if failure_phase == "memory" else None
+    if failure_phase == "shm":
+        monkeypatch.setattr(region_module, "check_shm_free_space", failure)
+    elif failure_phase == "population":
+        monkeypatch.setattr(region_module, "_get_populate_write_fn", failure)
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    seen_at_barrier = []
+    barrier = MagicMock(
+        side_effect=lambda: seen_at_barrier.append(os.path.exists(path))
     )
-    barrier = MagicMock()
 
-    with pytest.raises(RuntimeError, match="Insufficient space"):
-        _make_region(iid, barrier=barrier)
+    with pytest.raises(ValueError, match="Insufficient space"):
+        SharedOffloadRegion(
+            engine_id=iid,
+            num_chunks=1,
+            rank=0,
+            kv_bytes_per_chunk=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            barrier=barrier,
+            creator_memory_check=memory_check,
+            populate_only_on_creator=True,
+        )
 
     barrier.assert_called_once_with()
-    assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+    assert seen_at_barrier == [False]
 
 
 def test_mmap_failure_unlinks_creator_before_releasing_peers(iid, monkeypatch):

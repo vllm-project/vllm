@@ -15,6 +15,7 @@ import psutil
 import torch
 
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -352,6 +353,7 @@ def allocate_hisparse_host_pools(
         rank=0,
         kv_bytes_per_chunk=num_blocks * host_block_stride,
         cpu_page_size=sum(tensor_sizes),
+        barrier=get_tp_group().barrier,
         creator_memory_check=check_hisparse_host_memory,
         populate_only_on_creator=True,
     )
