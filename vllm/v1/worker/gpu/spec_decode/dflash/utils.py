@@ -20,6 +20,20 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     draft_model_config = speculative_config.draft_model_config
+
+    # The drafter wants a per-drafter KV-cache dtype (e.g. NVFP4) even when the
+    # engine's global cache_config targets a different one. Do NOT replace() a
+    # fresh cache_config object: the draft's attention impl binds it via
+    # get_current_vllm_config(), but the KV cache layout is resolved by the
+    # engine core and adopted into the worker's *single* cache_config (via
+    # set_kv_cache_layout before cudagraph capture). A replaced copy would stay
+    # at layout=None and crash on get_resolved_kv_cache_layout() during capture.
+    # cache_dtype is only read at attention-impl construction, so set it in place
+    # (the draft is the only model here whose impl reads it; the target already
+    # resolved its own KV dtype at build time).
+    if speculative_config.kv_cache_dtype is not None:
+        vllm_config.cache_config.cache_dtype = speculative_config.kv_cache_dtype
+
     # Select an attention backend that supports the drafter's attention: mixing
     # a non-causal layer onto a causal-only backend would fail.
     draft_vllm_config = replace(
@@ -28,14 +42,6 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             vllm_config.attention_config,
             use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
             backend=speculative_config.attention_backend,
-        ),
-        cache_config=(
-            replace(
-                vllm_config.cache_config,
-                cache_dtype=speculative_config.kv_cache_dtype,
-            )
-            if speculative_config.kv_cache_dtype is not None
-            else vllm_config.cache_config
         ),
     )
     with set_model_tag("dflash_head"):

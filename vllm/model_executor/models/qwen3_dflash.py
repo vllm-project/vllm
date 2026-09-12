@@ -23,9 +23,13 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_to_dtype,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -461,6 +465,29 @@ class DFlashQwen3Model(nn.Module):
             embeds = torch.where(is_mask, self.mask_embedding.to(embeds.dtype), embeds)
         return embeds
 
+    def _kv_proj_weight(self, attn: DFlashQwen3Attention) -> torch.Tensor:
+        """KV rows of the layer's qkv_proj in compute dtype.
+
+        Non-quantized drafts expose the plain weight. NVFP4 (compressed-
+        tensors) drafts store packed fp4 weights plus per-group and global
+        scales; dequantize the KV rows so the fused context-KV GEMM can run
+        as a plain high-precision GEMM.
+        """
+        qkv_proj = attn.qkv_proj
+        if isinstance(qkv_proj.quant_method, UnquantizedLinearMethod):
+            return qkv_proj.weight[attn.q_size :]
+        # CT stores weight_global_scale as its divisor; the reciprocal is the
+        # scale used by the GEMM kernel after process_weights_after_loading.
+        global_scale = 1.0 / qkv_proj.weight_global_scale.max()
+        return dequantize_to_dtype(
+            qkv_proj.weight_packed[attn.q_size :],
+            qkv_proj.weight_scale[attn.q_size :],
+            global_scale,
+            dtype=qkv_proj.params_dtype,
+            block_size=16,
+            swizzle=False,
+        )
+
     def _build_context_kv_buffers(
         self,
         layers_attn: list[nn.Module],
@@ -469,7 +496,7 @@ class DFlashQwen3Model(nn.Module):
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
         # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
-        kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+        kv_weights = [self._kv_proj_weight(a) for a in layers_attn]
         self._fused_kv_weight = torch.cat(kv_weights, dim=0)
         if has_bias:
             kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
