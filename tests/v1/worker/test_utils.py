@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import mmap
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -186,6 +187,232 @@ def test_hisparse_submits_layer_mirror_at_replayed_attention_boundary(
     handle.finish_kv_update()
 
     assert handle.submit_layer_mirror.call_count == expected_calls
+
+
+def _hisparse_parallel_config(**overrides):
+    values = {
+        "tensor_parallel_size": 2,
+        "pipeline_parallel_size": 1,
+        "prefill_context_parallel_size": 1,
+        "decode_context_parallel_size": 1,
+        "world_size": 2,
+        "distributed_executor_backend": "mp",
+        "nnodes_within_dp": 1,
+        "data_parallel_index": 3,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    config = SimpleNamespace(parallel_config=_hisparse_parallel_config())
+
+    assert hisparse_runtime_module.use_shared_hisparse_host_pool(config)
+
+    unsupported = (
+        {"tensor_parallel_size": 1, "world_size": 1},
+        {"pipeline_parallel_size": 2, "world_size": 4},
+        {"prefill_context_parallel_size": 2, "world_size": 4},
+        {"decode_context_parallel_size": 2},
+        {"world_size": 4},
+        {"distributed_executor_backend": "ray"},
+        {"nnodes_within_dp": 2},
+    )
+    for overrides in unsupported:
+        config.parallel_config = _hisparse_parallel_config(**overrides)
+        assert not hisparse_runtime_module.use_shared_hisparse_host_pool(config)
+
+
+@pytest.mark.skip_global_cleanup
+def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
+    page = mmap.PAGESIZE
+    tp_group = MagicMock()
+    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", lambda: tp_group)
+
+    class FakeSharedOffloadRegion:
+        BLOCK_SIZE_ALIGNMENT = page
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.total_size_bytes = kwargs["num_chunks"] * kwargs["kv_bytes_per_chunk"]
+            self.base_tensor = torch.empty(self.total_size_bytes, dtype=torch.int8)
+            self.is_pinned = False
+            self.pinned_addresses = []
+            self.view_sizes = []
+            self.offset = 0
+
+        def create_next_canonical_view(self, size):
+            self.view_sizes.append(size)
+            view = torch.as_strided(
+                self.base_tensor,
+                size=(self.kwargs["num_chunks"], size),
+                stride=(self.kwargs["kv_bytes_per_chunk"], 1),
+                storage_offset=self.offset,
+            )
+            self.offset += size
+            return view
+
+        def cleanup(self):
+            pass
+
+    monkeypatch.setattr(
+        hisparse_runtime_module, "SharedOffloadRegion", FakeSharedOffloadRegion
+    )
+    registration_ranges = MagicMock(return_value=((0, page), (page, 4 * page)))
+    monkeypatch.setattr(
+        hisparse_runtime_module,
+        "_hisparse_registration_ranges",
+        registration_ranges,
+    )
+    pinned: list[torch.Tensor] = []
+
+    def pin_tensor(tensor):
+        pinned.append(tensor)
+
+    monkeypatch.setattr(hisparse_runtime_module, "pin_tensor", pin_tensor)
+    config = SimpleNamespace(
+        instance_id="instance",
+        parallel_config=_hisparse_parallel_config(
+            tensor_parallel_size=1,
+            world_size=1,
+            distributed_executor_backend="uni",
+        ),
+    )
+
+    pools, private_pools, region = hisparse_runtime_module.allocate_hisparse_host_pools(
+        config,
+        [24, 40],
+        num_blocks=4,
+        host_block_stride=page,
+        use_shared_host_pool=True,
+    )
+
+    assert region is not None
+    assert private_pools == []
+    assert region.kwargs == {
+        "engine_id": "hisparse_instance_dp3",
+        "num_chunks": 1,
+        "rank": 0,
+        "kv_bytes_per_chunk": 4 * page,
+        "cpu_page_size": 64,
+        "barrier": tp_group.barrier,
+        "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
+        "populate_only_on_creator": True,
+    }
+    assert region.view_sizes == [24, 40]
+    assert [pool.shape for pool in pools] == [(24,), (40,)]
+    registration_ranges.assert_called_once_with([24, 40], 4, page)
+    assert [
+        (tensor.data_ptr() - region.base_tensor.data_ptr(), tensor.nbytes)
+        for tensor in pinned
+    ] == [(0, page), (page, 3 * page)]
+    assert region.is_pinned
+
+
+@pytest.mark.parametrize("fail_registration", [None, 1, 2])
+def test_shared_host_pool_tracks_successful_registrations(
+    monkeypatch, fail_registration
+):
+    """Only successful registrations may be unregistered on allocation failure."""
+    page = mmap.PAGESIZE
+    monkeypatch.setattr(hisparse_runtime_module, "get_tp_group", MagicMock())
+    backing = torch.empty(3 * page, dtype=torch.uint8)
+    region = MagicMock(base_tensor=backing, pinned_addresses=[], is_pinned=False)
+    monkeypatch.setattr(
+        hisparse_runtime_module, "SharedOffloadRegion", lambda **kw: region
+    )
+    monkeypatch.setattr(
+        hisparse_runtime_module,
+        "_hisparse_registration_ranges",
+        lambda *args: ((0, page), (page, 3 * page)),
+    )
+    cudart = MagicMock()
+    cudart.cudaHostRegister.side_effect = [
+        SimpleNamespace(value=int(fail_registration == i)) for i in (1, 2)
+    ]
+    monkeypatch.setattr(torch.cuda, "cudart", lambda: cudart)
+    config = SimpleNamespace(
+        instance_id="test", parallel_config=SimpleNamespace(data_parallel_index=0)
+    )
+    context = (
+        pytest.raises(RuntimeError, match="cudaHostRegister failed")
+        if fail_registration
+        else nullcontext()
+    )
+    with context:
+        hisparse_runtime_module.allocate_hisparse_host_pools(
+            config, [3 * page], 3, page, use_shared_host_pool=True
+        )
+    successful = 2 if fail_registration is None else fail_registration - 1
+    assert region.pinned_addresses == [
+        backing.data_ptr() + i * page for i in range(successful)
+    ]
+    assert region.is_pinned == bool(successful)
+    assert region.cleanup.call_count == int(fail_registration is not None)
+    attempts = 2 if fail_registration is None else fail_registration
+    assert (
+        cudart.cudaHostRegister.call_args_list
+        == [
+            call(backing.data_ptr(), page, 0),
+            call(backing.data_ptr() + page, 2 * page, 0),
+        ][:attempts]
+    )
+
+
+def test_shared_host_pool_registers_layer_spans_in_one_backing(monkeypatch):
+    """Aliased tensor configs must not count the shared backing once per view."""
+    region = SimpleNamespace(base_tensor=torch.empty(64, dtype=torch.int8))
+    allocate = MagicMock(return_value=([], [], region))
+    monkeypatch.setattr(
+        hisparse_runtime_module, "allocate_hisparse_host_pools", allocate
+    )
+    config = SimpleNamespace(
+        hisparse_shared_host_pool=True,
+        hisparse_host_num_blocks=4,
+        hisparse_host_block_stride=16,
+        kv_cache_tensors=[
+            SimpleNamespace(
+                host_resident=True,
+                layers=["a", "b"],
+                offset=0,
+                layer_stride=12,
+                size=44,
+            ),
+            SimpleNamespace(
+                host_resident=True, layers=["c"], offset=24, layer_stride=20, size=44
+            ),
+        ],
+    )
+    vllm_config = SimpleNamespace()
+    pool = hisparse_runtime_module.HiSparseHostPool(vllm_config, config)
+    backing = pool.allocate(44)
+    allocate.assert_called_once_with(
+        vllm_config, [12, 12, 20], 4, 16, use_shared_host_pool=True
+    )
+    assert backing.numel() == 44
+    assert backing.data_ptr() == region.base_tensor.data_ptr()
+    assert pool.registered is region.base_tensor
+
+
+def test_hisparse_registration_chunks_end_between_host_blocks():
+    """Registration seams must not bisect a DMA-addressable host block."""
+    page = mmap.PAGESIZE
+    ranges = hisparse_runtime_module._hisparse_registration_ranges(
+        tensor_sizes=[4 * 3 * page, 4 * 5 * page],
+        num_blocks=4,
+        host_block_stride=8 * page,
+        max_chunk_bytes=10 * page,
+    )
+
+    assert ranges == (
+        (0, 9 * page),
+        (9 * page, 17 * page),
+        (17 * page, 27 * page),
+        (27 * page, 32 * page),
+    )
 
 
 def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
@@ -929,6 +1156,32 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     )
     assert len(shared_states) == 2
     assert streams == []
+
+
+def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
+    worker = object.__new__(HiSparseConnectorWorker)
+    worker._initialized = True
+    worker._slot_mapping_staging = None
+    worker.dma_stream = None
+    worker.cache_handles = []
+    worker.pinned_host_pools = []
+    worker.shared_host_region = object()
+    released = False
+
+    def release_pinned_state(runtimes, pinned_host_pools, shared_host_region):
+        nonlocal released
+        assert runtimes == []
+        assert pinned_host_pools == []
+        assert shared_host_region is worker.shared_host_region
+        released = True
+
+    monkeypatch.setattr(
+        hisparse_worker_module, "release_pinned_state", release_pinned_state
+    )
+
+    worker.shutdown()
+
+    assert released
 
 
 class _TestReplaySSMMixer(MambaMixer2):

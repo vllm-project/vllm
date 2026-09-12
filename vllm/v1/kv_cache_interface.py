@@ -1435,6 +1435,12 @@ class KVCacheConfig:
     hisparse_host_num_blocks: int | None = None
     """Capacity of the dedicated HiSparse host-block manager, when enabled."""
 
+    hisparse_host_block_stride: int | None = None
+    """Physical bytes between consecutive HiSparse host blocks."""
+
+    hisparse_shared_host_pool: bool = False
+    """Whether local TP ranks share one physical HiSparse host pool."""
+
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
         """IDs of cache groups that participate in external KV transfer."""

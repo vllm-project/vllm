@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import errno
 import mmap
 import os
@@ -27,6 +28,10 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
     while True:
         if os.fstat(fd).st_size >= expected_size:
             return
+        if os.fstat(fd).st_nlink == 0:
+            raise RuntimeError(
+                "Shared offload region creator failed during initialization."
+            )
         if time.monotonic() > deadline:
             raise TimeoutError(
                 f"Timed out waiting for mmap file to reach {expected_size} bytes"
@@ -75,6 +80,9 @@ class SharedOffloadRegion:
     given, the path is unlinked once every worker has mapped the file, so
     the kernel reclaims the memory when the last worker exits, no matter
     how it exits; mappings taken before the unlink stay valid.
+
+    Creator-only population pre-faults the entire region before the barrier
+    and requires that barrier to keep joiners from using unpopulated pages.
     """
 
     BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
@@ -87,7 +95,12 @@ class SharedOffloadRegion:
         kv_bytes_per_chunk: int,
         cpu_page_size: int,
         barrier: Callable[[], None] | None = None,
+        *,
+        creator_memory_check: Callable[[int], None] | None = None,
+        populate_only_on_creator: bool = False,
     ) -> None:
+        if populate_only_on_creator and barrier is None:
+            raise ValueError("Creator-only population requires a barrier.")
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_chunk % self.page_size == 0
 
@@ -112,25 +125,18 @@ class SharedOffloadRegion:
                 # Joiner path — another worker won O_EXCL. Reopen and wait
                 # for the file to reach expected size.
                 self.fd = os.open(self.mmap_path, os.O_RDWR)
-                try:
-                    _wait_for_file_size(self.fd, self.total_size_bytes)
-                except (TimeoutError, OSError):
-                    os.close(self.fd)
-                    raise
+                _wait_for_file_size(self.fd, self.total_size_bytes)
                 logger.info("Opened existing mmap file %s", self.mmap_path)
             else:
                 # Creator path. We won O_EXCL, so we own the file: any
                 # failure here must clean up so concurrent joiners don't
                 # land on a 0-byte stub and spin in _wait_for_file_size
                 # for the full 30 s timeout.
-                try:
-                    check_shm_free_space(self.total_size_bytes)
-                    os.ftruncate(self.fd, self.total_size_bytes)
-                except (RuntimeError, OSError):
-                    os.unlink(self.mmap_path)
-                    os.close(self.fd)
-                    raise
                 self._creator = True
+                if creator_memory_check is not None:
+                    creator_memory_check(self.total_size_bytes)
+                check_shm_free_space(self.total_size_bytes)
+                os.ftruncate(self.fd, self.total_size_bytes)
                 logger.info(
                     "Created mmap file %s (%.2f GB)",
                     self.mmap_path,
@@ -143,10 +149,21 @@ class SharedOffloadRegion:
                 flags=mmap.MAP_SHARED,
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
+
+            if populate_only_on_creator and self._creator:
+                populate_write_fn = _get_populate_write_fn(self.mmap_obj)
+                populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
         except Exception:
             if self._creator:
-                os.unlink(self.mmap_path)
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self.mmap_path)
                 self._creator = False
+            if hasattr(self, "mmap_obj") and self.mmap_obj is not None:
+                self.mmap_obj.close()
+                self.mmap_obj = None
+            if hasattr(self, "fd") and self.fd is not None:
+                os.close(self.fd)
+                self.fd = None
             # Peers block inside the barrier until the collective times out if
             # we die before reaching it.  Arrive anyway so every worker calls
             # barrier() exactly once and they fail on their own errors instead
@@ -169,15 +186,27 @@ class SharedOffloadRegion:
                 barrier()
             except Exception:
                 if self._creator:
-                    os.unlink(self.mmap_path)
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(self.mmap_path)
                     self._creator = False
                 self.mmap_obj.close()
                 os.close(self.fd)
+                self.mmap_obj = None
+                self.fd = None
                 raise
             if self._creator:
                 os.unlink(self.mmap_path)
                 self._creator = False
                 logger.info("Unlinked mmap file %s", self.mmap_path)
+
+        self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
+        self._views: list[torch.Tensor] = []
+        self._canonical_offset = 0
+        self.is_pinned: bool = False
+        self.pinned_addresses: list[int] = []
+
+        if populate_only_on_creator:
+            return
 
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
 
@@ -205,10 +234,11 @@ class SharedOffloadRegion:
                 "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
             )
 
-        self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
-        self._views: list[torch.Tensor] = []
-        self._canonical_offset = 0
-        self.is_pinned: bool = False
+    @property
+    def base_tensor(self) -> torch.Tensor:
+        if self._base is None:
+            raise RuntimeError("Shared offload region has been released.")
+        return self._base
 
     def create_next_worker_view(self, tensor_page_size: int) -> torch.Tensor:
         """Allocate a strided int8 view for this worker, one canonical tensor.
@@ -311,13 +341,18 @@ class SharedOffloadRegion:
         if self.is_pinned and self._base is not None:
             if current_platform.is_cuda_alike():
                 base_ptr = self._base.data_ptr()
-                result = torch.cuda.cudart().cudaHostUnregister(base_ptr)
-                if result.value != 0:
-                    logger.warning(
-                        "cudaHostUnregister failed for rank=%d (code=%d)",
-                        self.rank,
-                        result,
-                    )
+                addresses = self.pinned_addresses or [base_ptr]
+                for address in reversed(addresses):
+                    result = torch.cuda.cudart().cudaHostUnregister(address)
+                    if result.value != 0:
+                        logger.warning(
+                            "cudaHostUnregister failed for rank=%d, "
+                            "address=%#x (code=%d)",
+                            self.rank,
+                            address,
+                            result.value,
+                        )
+                self.pinned_addresses.clear()
             self.is_pinned = False
         # Release views before _base: each view holds a _base reference and a
         # direct StorageImpl reference.  Freeing views first lets both refcounts

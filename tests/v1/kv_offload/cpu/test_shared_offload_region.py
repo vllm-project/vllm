@@ -10,11 +10,12 @@ import os
 import threading
 import time
 import uuid
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
 from vllm.utils.system_utils import get_mp_context
+from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     SharedOffloadRegion,
     _wait_for_file_size,
@@ -192,28 +193,43 @@ def _mp_barrier_construct_and_hold(
     barrier,
     fill_value: int,
     done_queue,
+    replicated: bool = False,
 ) -> None:
     """Construct with a real cross-process barrier, write, then hold the
     mapping (no cleanup) until the parent SIGKILLs this process."""
     try:
+        populate_calls = 0
+        get_populate_write_fn = region_module._get_populate_write_fn
+
+        def track_population(mmap_obj):
+            nonlocal populate_calls
+            populate_calls += 1
+            return get_populate_write_fn(mmap_obj)
+
+        region_module._get_populate_write_fn = track_population
         region = SharedOffloadRegion(
             engine_id=engine_id,
             num_chunks=2,
-            rank=rank,
-            kv_bytes_per_chunk=num_workers * PAGE_SIZE,
+            rank=0 if replicated else rank,
+            kv_bytes_per_chunk=PAGE_SIZE if replicated else num_workers * PAGE_SIZE,
             cpu_page_size=PAGE_SIZE,
             barrier=lambda: barrier.wait(30),
+            populate_only_on_creator=replicated,
         )
         # The constructor's barrier precedes the creator's unlink.
         barrier.wait(30)
         t = region.create_next_worker_view(PAGE_SIZE)
-        t[:, :] = fill_value
+        if not replicated or rank == 0:
+            t[:, :] = fill_value
+        barrier.wait(30)
         done_queue.put(
             {
                 "rank": rank,
                 "error": None,
                 "inode": os.fstat(region.fd).st_ino,
                 "path_exists": os.path.exists(region.mmap_path),
+                "populate_calls": populate_calls,
+                "contents_match": bool((t == (1 if replicated else fill_value)).all()),
             }
         )
         time.sleep(60)  # hold the mapping until killed
@@ -752,6 +768,26 @@ def test_cleanup_idempotent(iid):
     r.cleanup()  # must be a no-op
 
 
+def test_cleanup_unregisters_every_pinned_chunk(iid, monkeypatch):
+    """cleanup() must release every chunk from a split host registration."""
+    r = _make_region(iid)
+    cudart = MagicMock()
+    cudart.cudaHostUnregister.return_value = MagicMock(value=0)
+    monkeypatch.setattr(region_module, "current_platform", MagicMock())
+    region_module.current_platform.is_cuda_alike.return_value = True
+    monkeypatch.setattr(region_module.torch.cuda, "cudart", lambda: cudart)
+    r.pinned_addresses = [0x100000, 0x200000, 0x300000]
+    r.is_pinned = True
+
+    r.cleanup()
+
+    assert cudart.cudaHostUnregister.call_args_list == [
+        call(0x300000),
+        call(0x200000),
+        call(0x100000),
+    ]
+
+
 def test_cleanup_after_create_next_worker_view_releases_mmap(iid):
     """cleanup() must close the mmap even after create_next_worker_view was called.
     create_next_worker_view returns a view that shares storage with _base; both must be
@@ -811,9 +847,51 @@ def test_wait_for_file_size_timeout(tmp_path):
         os.close(fd)
 
 
+@pytest.mark.skip_global_cleanup
+def test_wait_for_file_size_rejects_unlinked_file(tmp_path):
+    path = tmp_path / "unlinked.mmap"
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.unlink(path)
+        with pytest.raises(RuntimeError, match="creator failed"):
+            _wait_for_file_size(fd, PAGE_SIZE, timeout=1.0)
+    finally:
+        os.close(fd)
+
+
 # ---------------------------------------------------------------------------
 # Constructor — capacity validation
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.skipif(not os.path.isdir("/dev/shm"), reason="requires /dev/shm")
+def test_creator_memory_check_runs_only_for_creator(iid):
+    checked_sizes: list[int] = []
+    creator = SharedOffloadRegion(
+        engine_id=iid,
+        num_chunks=4,
+        rank=0,
+        kv_bytes_per_chunk=PAGE_SIZE,
+        cpu_page_size=PAGE_SIZE,
+        creator_memory_check=checked_sizes.append,
+    )
+    joiner: SharedOffloadRegion | None = None
+    try:
+        joiner = SharedOffloadRegion(
+            engine_id=iid,
+            num_chunks=4,
+            rank=0,
+            kv_bytes_per_chunk=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            creator_memory_check=checked_sizes.append,
+        )
+        assert checked_sizes == [4 * PAGE_SIZE]
+    finally:
+        if joiner is not None:
+            joiner.cleanup()
+        creator.cleanup()
+        _cleanup_file(creator.mmap_path)
 
 
 def test_insufficient_space_raises_clear_error(monkeypatch):
@@ -916,7 +994,8 @@ def test_barrier_failure_unlinks_creator_and_raises(iid):
     assert not os.path.exists(path)
 
 
-def test_mp_barrier_unlinks_file_and_survives_sigkill(iid):
+@pytest.mark.parametrize("replicated", [False, True])
+def test_mp_barrier_unlinks_file_and_survives_sigkill(iid, replicated):
     """With a real cross-process barrier every worker maps one shared inode,
     the name is gone while they run, and SIGKILL leaks nothing."""
     num_workers = 2
@@ -927,7 +1006,7 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid):
     procs = [
         ctx.Process(
             target=_mp_barrier_construct_and_hold,
-            args=(iid, rank, num_workers, barrier, rank + 1, done_queue),
+            args=(iid, rank, num_workers, barrier, rank + 1, done_queue, replicated),
         )
         for rank in range(num_workers)
     ]
@@ -939,6 +1018,10 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid):
             assert r["error"] is None, f"rank {r['rank']}: {r['error']}"
         assert len({r["inode"] for r in results}) == 1, "workers split onto two files"
         assert not any(r["path_exists"] for r in results)
+        assert all(r["contents_match"] for r in results)
+        assert sum(r["populate_calls"] for r in results) == (
+            1 if replicated else num_workers
+        )
         assert not os.path.exists(path)
     finally:
         for p in procs:
@@ -950,23 +1033,36 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid):
         assert restarted._creator is True, "restart must be able to create anew"
 
 
-def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch):
+@pytest.mark.parametrize("failure_phase", ["shm", "memory", "population"])
+def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch, failure_phase):
     """A worker that dies before the rendezvous must still arrive at the
     barrier, or its peers block in the collective until it times out."""
-    import vllm.v1.kv_offload.cpu.shared_offload_region as region
-
-    monkeypatch.setattr(
-        region,
-        "check_shm_free_space",
-        MagicMock(side_effect=RuntimeError("Insufficient space")),
+    failure = MagicMock(side_effect=ValueError("Insufficient space"))
+    memory_check = failure if failure_phase == "memory" else None
+    if failure_phase == "shm":
+        monkeypatch.setattr(region_module, "check_shm_free_space", failure)
+    elif failure_phase == "population":
+        monkeypatch.setattr(region_module, "_get_populate_write_fn", failure)
+    path = f"/dev/shm/vllm_offload_{iid}.mmap"
+    seen_at_barrier = []
+    barrier = MagicMock(
+        side_effect=lambda: seen_at_barrier.append(os.path.exists(path))
     )
-    barrier = MagicMock()
 
-    with pytest.raises(RuntimeError, match="Insufficient space"):
-        _make_region(iid, barrier=barrier)
+    with pytest.raises(ValueError, match="Insufficient space"):
+        SharedOffloadRegion(
+            engine_id=iid,
+            num_chunks=1,
+            rank=0,
+            kv_bytes_per_chunk=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            barrier=barrier,
+            creator_memory_check=memory_check,
+            populate_only_on_creator=True,
+        )
 
     barrier.assert_called_once_with()
-    assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+    assert seen_at_barrier == [False]
 
 
 def test_mmap_failure_unlinks_creator_before_releasing_peers(iid, monkeypatch):
