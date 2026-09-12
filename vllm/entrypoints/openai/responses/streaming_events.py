@@ -1117,7 +1117,19 @@ def split_delta(delta: DeltaMessage) -> list[DeltaMessage]:
 
     The Responses API emits typed SSE events (one type per event), so a
     compound DeltaMessage must be split before entering the state machine.
-    Order: reasoning -> content -> tool_calls (grouped by index).
+    Order: tool-call continuations (argument-only groups) -> reasoning ->
+    content -> named tool_calls (grouped by index).
+
+    A tool-call group whose first delta carries no function name can only be
+    the continuation of the tool call that is already open: a raw model
+    stream never interleaves reasoning or content inside a single tool-call
+    block, so when one engine step spans the end of a tool call and the start
+    of the following reasoning/content segment (e.g. with speculative
+    decoding, where a step can cross several structural boundaries), the
+    argument tail must be replayed before the state machine transitions away.
+    Emitting it after reasoning/content would close the open tool call and
+    then reopen TOOL_CALL through open() with name=None, which fails
+    ResponseFunctionToolCallItem validation mid-stream.
     """
     has_reasoning = delta.reasoning is not None
     has_content = delta.content is not None
@@ -1130,17 +1142,26 @@ def split_delta(delta: DeltaMessage) -> list[DeltaMessage]:
     ):
         return [delta]
 
-    deltas: list[DeltaMessage] = []
-    if has_reasoning:
-        deltas.append(DeltaMessage(reasoning=delta.reasoning))
-    if has_content:
-        deltas.append(DeltaMessage(content=delta.content))
+    continuations: list[DeltaMessage] = []
+    opens: list[DeltaMessage] = []
     if has_tools:
         groups: dict[int | None, list[DeltaToolCall]] = {}
         for tc in delta.tool_calls:
             groups.setdefault(tc.index, []).append(tc)
         for tcs in groups.values():
-            deltas.append(DeltaMessage(tool_calls=tcs))
+            first_fn = tcs[0].function
+            group = DeltaMessage(tool_calls=tcs)
+            if first_fn is not None and first_fn.name is None:
+                continuations.append(group)
+            else:
+                opens.append(group)
+
+    deltas: list[DeltaMessage] = list(continuations)
+    if has_reasoning:
+        deltas.append(DeltaMessage(reasoning=delta.reasoning))
+    if has_content:
+        deltas.append(DeltaMessage(content=delta.content))
+    deltas.extend(opens)
     return deltas or [delta]
 
 
@@ -1240,6 +1261,20 @@ class SimpleStreamingEventProcessor:
         handlers = self._STATE_HANDLERS[target_state]
         if target_state == _StateType.TOOL_CALL:
             assert tool_call is not None
+            if tool_call.function.name is None:
+                # Defensive: an argument-only continuation delta reached
+                # open() while no tool call was in progress (split_delta
+                # normally replays continuations before any state switch).
+                # Reuse the last opened call's identity instead of failing
+                # ResponseFunctionToolCallItem validation mid-stream, which
+                # would abort the SSE stream after headers are sent and leave
+                # the client without a terminal response event.
+                return handlers.open_fn(
+                    self.state,
+                    self.state.tool_call_name or "",
+                    tool_call.index,
+                    self.state.tool_call_namespace,
+                )
             call_name = resolve_responses_tool_call_name(
                 tool_call.function.name,
                 tool_call_name_map=self.tool_call_name_map,
