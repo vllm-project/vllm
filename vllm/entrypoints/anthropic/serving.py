@@ -144,8 +144,8 @@ class AnthropicServingMessages(OpenAIServingChat):
         """Auto-detect whether the chat template requires system-first ordering.
 
         Renders a [system, user, system, user] conversation against the
-        template; if it raises (e.g. Qwen's ``loop.first`` guard), the
-        model needs inline system messages merged into the leading block.
+        template; if it raises (e.g. Qwen's ``loop.first`` guard), inline
+        system messages are converted to user messages before rendering.
         """
         if not chat_template:
             return True
@@ -199,11 +199,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         """Convert Anthropic message format to OpenAI format"""
         openai_messages: list[dict[str, Any]] = []
 
-        cls._convert_system_message(
-            anthropic_request,
-            openai_messages,
-            merge_inline_system=merge_inline_system,
-        )
+        cls._convert_system_message(anthropic_request, openai_messages)
         cls._convert_messages(
             anthropic_request.messages,
             openai_messages,
@@ -221,8 +217,6 @@ class AnthropicServingMessages(OpenAIServingChat):
         cls,
         anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         openai_messages: list[dict[str, Any]],
-        *,
-        merge_inline_system: bool = False,
     ) -> None:
         """Convert Anthropic system message to OpenAI format"""
         system_parts: list[str] = []
@@ -239,17 +233,6 @@ class AnthropicServingMessages(OpenAIServingChat):
                         if block.text.startswith("x-anthropic-billing-header"):
                             continue
                         system_parts.append(block.text)
-
-        # When the template requires system-first ordering, extract inline
-        # system messages from the messages array and merge them into the
-        # top-level block so the template doesn't reject them.
-        if merge_inline_system:
-            for msg in anthropic_request.messages:
-                if msg.role != "system":
-                    continue
-                text = cls._extract_system_text(msg)
-                if text:
-                    system_parts.append(text)
 
         if system_parts:
             openai_messages.append({"role": "system", "content": "".join(system_parts)})
@@ -286,11 +269,18 @@ class AnthropicServingMessages(OpenAIServingChat):
             # doesn't strip billing headers and may produce messages with
             # no "content" key.
             if msg.role == "system":
-                if merge_inline_system:
-                    continue  # already merged into top-level by _convert_system_message
                 text = cls._extract_system_text(msg)
                 if text:
-                    openai_messages.append({"role": "system", "content": text})
+                    if merge_inline_system:
+                        cls._append_user_message(
+                            openai_messages,
+                            {
+                                "role": "user",
+                                "content": [{"type": "text", "text": text}],
+                            },
+                        )
+                    else:
+                        openai_messages.append({"role": "system", "content": text})
                 continue
 
             openai_msg: dict[str, Any] = {"role": msg.role}  # type: ignore
@@ -301,7 +291,34 @@ class AnthropicServingMessages(OpenAIServingChat):
                 cls._convert_message_content(msg, openai_msg, openai_messages)
 
             if not (msg.role == "user" and "content" not in openai_msg):
-                openai_messages.append(openai_msg)
+                if msg.role == "user" and merge_inline_system:
+                    cls._append_user_message(openai_messages, openai_msg)
+                else:
+                    openai_messages.append(openai_msg)
+
+    @classmethod
+    def _append_user_message(
+        cls,
+        openai_messages: list[dict[str, Any]],
+        message: dict[str, Any],
+    ) -> None:
+        """Append a user message, merging it with an adjacent user turn."""
+        if openai_messages and openai_messages[-1]["role"] == "user":
+            previous = openai_messages[-1]
+            previous_content = previous["content"]
+            message_content = message["content"]
+            if isinstance(previous_content, str) and isinstance(message_content, str):
+                previous["content"] = previous_content + message_content
+                return
+
+            if isinstance(previous_content, str):
+                previous_content = [{"type": "text", "text": previous_content}]
+            if isinstance(message_content, str):
+                message_content = [{"type": "text", "text": message_content}]
+            previous["content"] = [*previous_content, *message_content]
+            return
+
+        openai_messages.append(message)
 
     @classmethod
     def _convert_message_content(
