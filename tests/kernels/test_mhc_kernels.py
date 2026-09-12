@@ -350,6 +350,12 @@ def test_deepseek_v41_mhc_fused_post_pre_delayed(num_tokens, hidden_size, carrie
     for with_aux, without in zip(captured[:5], unchanged, strict=True):
         torch.testing.assert_close(with_aux, without, atol=0, rtol=0)
 
+    # The unnormalized epilogue has its own fused aux path.
+    bare = torch.ops.vllm.mhc_fused_post_pre_delayed_tilelang(
+        x, residual, post_layer_mix, comb_res_mix, *mix_args, pre_mix, None, 1e-6, True
+    )
+    torch.testing.assert_close(bare[5], bare[0].mean(dim=1), atol=0, rtol=0)
+
     # Decode replays this op from a captured graph.
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
