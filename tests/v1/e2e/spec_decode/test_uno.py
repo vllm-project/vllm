@@ -51,9 +51,9 @@ from .uno_kv_budget import (
     SURVIVOR_PROMPT_TOKENS,
     allocatable_blocks,
     engine_minimum_kv_bytes,
-    exact_token_verdict,
     format_divergences,
     kv_bytes_per_block,
+    matrix_verdicts,
     mid_generation_preemption_counts,
     mixed_admission_blocks,
     mixed_crossing_tokens,
@@ -62,6 +62,8 @@ from .uno_kv_budget import (
     qwen3_geometry,
     resolve_internal_request_ids,
     survivor_kv_budget,
+    text_agreement,
+    text_verdict,
     token_agreement,
     usage_with_free_blocks,
     worst_case_crossing_tokens,
@@ -1281,6 +1283,11 @@ def test_uno_greedy_matches_base_model(
     def _ids(batch_outputs):
         return [list(output.outputs[0].token_ids) for output in batch_outputs]
 
+    def _texts(batch_outputs):
+        return [output.outputs[0].text for output in batch_outputs]
+
+    adapter_off_divergences: list[tuple[int, int]] | None = None
+    adapter_off_text: list[int] | None = None
     control_arms: list[str] = ["repeat_1", "repeat_2"]
     control_divergences: list[set[tuple[int, int]]] = [set() for _ in batches]
     for arm_outputs in repeat_outputs:
@@ -1363,24 +1370,21 @@ def test_uno_greedy_matches_base_model(
                 assert abs(adapter_off_acceptance - trained_acceptance[-1]) < 0.5
             # Judged against the same noise floor as the Uno comparison: the
             # adapter-disabled arm is still an engine-to-engine comparison.
-            adapter_off_control = sorted(control_divergences[-1])
+            # Collected here, judged below beside the Uno comparison. The
+            # separate-engine control arm has not contributed to the floor at
+            # this point in the run, and this arm is promised the same floor.
             _matched, adapter_off_divergences = token_agreement(
                 _ids(ref_outputs[-1]), _ids(adapter_off_outputs)
+            )
+            _text_matched, adapter_off_text = text_agreement(
+                _texts(ref_outputs[-1]), _texts(adapter_off_outputs)
             )
             assert_request_outputs_match(
                 ref_outputs[-1],
                 adapter_off_outputs,
-                required_matches=len(ref_outputs[-1]) - len(adapter_off_control),
-                context="adapter-disabled",
+                required_matches=0,
+                context="adapter-disabled (diagnostics only; judged below)",
             )
-            ok, reason = exact_token_verdict(
-                adapter_off_control, adapter_off_divergences, len(ref_outputs[-1])
-            )
-            print(
-                "adapter-disabled: divergences "
-                f"{format_divergences(adapter_off_divergences)}; {reason}"
-            )
-            assert ok, f"adapter-disabled: {reason}.\n{instrument_receipt()}"
         states = speculative.llm.llm_engine.collective_rpc(_uno_execution_state)
         assert all(state["shared_model"] for state in states)
         assert all(
@@ -1447,24 +1451,64 @@ def test_uno_greedy_matches_base_model(
             f"Uno K={k}, prefix_cache={enable_prefix_caching}, batch={batch_index}"
         )
         control_batch = sorted(control_divergences[batch_index])
+        control_prompts = [prompt for prompt, _ in control_batch]
         uno_matched, uno_divergences = token_agreement(
             _ids(ref_batch), _ids(spec_batch)
         )
-        # Text matches are held to the same floor: where the plain engine does
-        # not reproduce itself, neither comparison can demand more of Uno.
+        uno_text_matched, uno_text = text_agreement(
+            _texts(ref_batch), _texts(spec_batch)
+        )
+        # Diagnostics only: the helper prints the first mismatching texts and
+        # token ids, which is what a failure needs. Its threshold is not the
+        # gate -- a count of divergence coordinates over-credits a control that
+        # diverged twice inside one prompt and can fall below zero once several
+        # arms contribute, so both views are judged by containment below.
         assert_request_outputs_match(
             ref_batch,
             spec_batch,
-            required_matches=len(ref_batch) - len(control_batch),
-            context=context,
+            required_matches=0,
+            context=f"{context} (diagnostics only)",
         )
-        ok, reason = exact_token_verdict(control_batch, uno_divergences, len(ref_batch))
-        # Printed on the passing path too: a green run must still say where Uno
-        # diverged and what the floor was, or the next reader cannot tell a
-        # clean card from a bounded one.
+
+        # Every candidate for this batch is judged against ONE completed floor,
+        # including the adapter-disabled arm, which is collected inside the Uno
+        # engine's context but judged here so it cannot be held to a floor that
+        # the separate-engine control had not yet joined.
+        candidates: dict[str, list[tuple[int, int]]] = {context: uno_divergences}
+        text_candidates: dict[str, list[int]] = {context: uno_text}
+        if batch_index == len(batches) - 1 and adapter_off_divergences is not None:
+            candidates["adapter-disabled"] = adapter_off_divergences
+            text_candidates["adapter-disabled"] = adapter_off_text or []
+        verdicts = matrix_verdicts(control_batch, candidates, len(ref_batch))
+
+        # Printed on the passing path too: a green run must still say where the
+        # candidate diverged and what the floor was, or the next reader cannot
+        # tell a clean card from a bounded one.
         print(
-            f"{context}: exact tokens uno={uno_matched}/{len(ref_batch)}, "
+            f"{context}: exact tokens uno={uno_matched}/{len(ref_batch)}, text "
+            f"uno={uno_text_matched}/{len(ref_batch)}, "
             f"uno_divergences={format_divergences(uno_divergences)}, "
-            f"control_divergences={format_divergences(control_batch)}; {reason}"
+            f"uno_text_divergences={[f'p{p}' for p in uno_text]}, "
+            f"control_divergences={format_divergences(control_batch)}"
         )
-        assert ok, f"{context}: {reason}.\n{instrument_receipt()}"
+        for name, (ok, reason) in verdicts.items():
+            print(f"{name}: {reason}")
+            assert ok, f"{name}: {reason}.\n{instrument_receipt()}"
+        for name, divergent_prompts in text_candidates.items():
+            ok, reason = text_verdict(
+                control_prompts, divergent_prompts, len(ref_batch)
+            )
+            print(f"{name} (text): {reason}")
+            assert ok, f"{name} (text): {reason}.\n{instrument_receipt()}"
+            # Identical tokens with different text is not a sampling
+            # difference; it is the detokeniser, and it gets its own verdict
+            # rather than being folded into either containment message.
+            token_prompts = {
+                prompt for prompt, _ in candidates.get(name, uno_divergences)
+            }
+            text_only = sorted(set(divergent_prompts) - token_prompts)
+            assert not text_only, (
+                f"{name}: prompts {text_only} produced identical token ids but "
+                "different text, so the difference is in detokenisation rather "
+                f"than in generation.\n{instrument_receipt()}"
+            )

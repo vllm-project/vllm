@@ -866,6 +866,84 @@ def test_exact_token_verdict_contains_divergences_per_prompt(
         assert "reproduced exactly" in reason
 
 
+def test_text_floor_is_containment_not_a_subtracted_count():
+    """A count of coordinates is not a count of prompts, and can go negative.
+
+    The control is a union over arms, so one prompt can contribute several
+    coordinates: two arms diverging at prompt 2 tokens 31 and 55 give two
+    coordinates for one prompt. Subtracting that from the prompt count
+    over-credits the control, and with enough arms drops below zero, which the
+    old threshold helper rejects outright -- failing an exact candidate on a
+    card whose control merely wobbled twice inside one prompt.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    control = [(2, 31), (2, 55)]
+    assert len(control) == 2 and len({prompt for prompt, _ in control}) == 1
+    # The arithmetic this replaced: 4 - 2 = 2, against 3 true clean prompts.
+    assert len(control) != len({prompt for prompt, _ in control})
+
+    control_prompts = [prompt for prompt, _ in control]
+    # An exact candidate passes, whatever the control's coordinate count.
+    ok, reason = budget.text_verdict(control_prompts, [], 4)
+    assert ok, reason
+    # A candidate that only reproduces the control's own wobble passes.
+    ok, _ = budget.text_verdict(control_prompts, [2], 4)
+    assert ok
+    # One that breaks a prompt the control reproduced does not.
+    ok, reason = budget.text_verdict(control_prompts, [0], 4)
+    assert not ok and "[0]" in reason
+
+    # Five arms wobbling inside one prompt used to give 4 - 5 = -1.
+    many = [(2, token) for token in (3, 11, 31, 55, 60)]
+    ok, _ = budget.text_verdict([p for p, _ in many], [], 4)
+    assert ok
+
+
+def test_text_agreement_reports_prompt_indices():
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    matched, divergent = budget.text_agreement(["a", "b"], ["a", "b"])
+    assert (matched, divergent) == (2, [])
+    matched, divergent = budget.text_agreement(["a", "b", "c"], ["a", "x", "c"])
+    assert (matched, divergent) == (2, [1])
+    with pytest.raises(AssertionError):
+        budget.text_agreement(["a"], ["a", "b"])
+
+
+def test_matrix_verdicts_hold_every_candidate_to_one_floor():
+    """Both matrix arms are judged against the same completed control.
+
+    The adapter-disabled arm is collected inside the Uno engine's context,
+    before the separate-engine control has joined the floor, and used to be
+    judged there as well -- a weaker floor than the Uno comparison got, under a
+    comment promising the same one. Routing every candidate for a batch through
+    one call is that promise in code: if either candidate were handed an empty
+    floor it would fail here, since both diverge only where the control does.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    control = [(2, 31)]
+    verdicts = budget.matrix_verdicts(
+        control,
+        {"uno batch 1": [(2, 31)], "adapter-disabled": [(2, 55)]},
+        4,
+    )
+    assert set(verdicts) == {"uno batch 1", "adapter-disabled"}
+    for name, (ok, reason) in verdicts.items():
+        assert ok, f"{name}: {reason}"
+        assert "p2/t31" in reason, f"{name} was not judged against the control"
+
+    # And the floor still bites: a candidate outside it fails in the same call.
+    verdicts = budget.matrix_verdicts(
+        control, {"uno": [(2, 31)], "adapter-disabled": [(0, 0)]}, 4
+    )
+    assert verdicts["uno"][0] and not verdicts["adapter-disabled"][0]
+
+    with pytest.raises(TypeError):
+        budget.matrix_verdicts(3, {"uno": [(2, 31)]}, 4)
+
+
 def test_exact_token_verdict_refuses_match_counts():
     """Counts must not reach the verdict from any call site.
 

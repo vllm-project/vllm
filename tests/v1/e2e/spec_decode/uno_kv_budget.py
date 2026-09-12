@@ -14,7 +14,7 @@ module, which already requires the model, cross-checks the literals against
 ``AutoConfig`` for ``MODEL_REVISION``.
 """
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from itertools import combinations
 
 from vllm.utils.math_utils import cdiv
@@ -310,24 +310,102 @@ def exact_token_verdict(
     deterministic regime without a special case: an empty control admits only an
     empty candidate.
     """
-    control_prompts = {prompt for prompt, _ in control_divergences}
-    candidate_prompts = {prompt for prompt, _ in candidate_divergences}
-    extra = sorted(candidate_prompts - control_prompts)
-    ok = not extra
+    extra = uncontained_prompts(
+        [prompt for prompt, _ in control_divergences],
+        [prompt for prompt, _ in candidate_divergences],
+    )
     control_text = format_divergences(sorted(control_divergences)) or "none"
     candidate_text = format_divergences(sorted(candidate_divergences)) or "none"
-    if ok:
-        reason = (
-            f"candidate divergences {candidate_text} are contained in the "
-            f"plain control's {control_text} over {total} prompts"
+    return _containment_reason(extra, control_text, candidate_text, total, "tokens")
+
+
+def uncontained_prompts(
+    control_prompts: Iterable[int],
+    candidate_prompts: Iterable[int],
+) -> list[int]:
+    """Prompts the candidate broke that the control reproduced exactly.
+
+    The one containment rule both the token and the text comparison read, so
+    they cannot drift apart. Passing a count rather than prompt indices raises
+    here, which is what keeps a call site from regressing to the threshold
+    arithmetic this replaced.
+    """
+    return sorted(set(candidate_prompts) - set(control_prompts))
+
+
+def _containment_reason(
+    extra: Sequence[int],
+    control_text,
+    candidate_text,
+    total: int,
+    kind: str,
+) -> tuple[bool, str]:
+    if not extra:
+        return True, (
+            f"candidate {kind} divergences {candidate_text} are contained in "
+            f"the plain control's {control_text} over {total} prompts"
         )
-    else:
-        reason = (
-            f"candidate diverges at prompts {extra} that the plain control "
-            f"reproduced exactly: candidate {candidate_text} against control "
-            f"{control_text} over {total} prompts"
-        )
-    return ok, reason
+    return False, (
+        f"candidate {kind} diverge at prompts {list(extra)} that the plain "
+        f"control reproduced exactly: candidate {candidate_text} against "
+        f"control {control_text} over {total} prompts"
+    )
+
+
+def text_agreement(
+    reference: Sequence[str],
+    candidate: Sequence[str],
+) -> tuple[int, list[int]]:
+    """Per-prompt exact-text agreement and the prompts that differ.
+
+    Detokenised text is a second view of the same comparison, so it is judged
+    by the same containment rule rather than by a match threshold: subtracting
+    a divergence count from the prompt count over-credits a control that
+    diverged twice within one prompt, and can fall below zero once several
+    control arms contribute.
+    """
+    assert len(reference) == len(candidate), (
+        f"output counts differ: {len(reference)} vs {len(candidate)}"
+    )
+    divergent = [
+        index
+        for index, (left, right) in enumerate(zip(reference, candidate))
+        if left != right
+    ]
+    return len(reference) - len(divergent), divergent
+
+
+def text_verdict(
+    control_prompts: Sequence[int],
+    candidate_prompts: Sequence[int],
+    total: int,
+) -> tuple[bool, str]:
+    """Judge text divergences by the same containment rule as the tokens."""
+    extra = uncontained_prompts(control_prompts, candidate_prompts)
+    control_text = [f"p{prompt}" for prompt in sorted(set(control_prompts))] or "none"
+    candidate_text = [
+        f"p{prompt}" for prompt in sorted(set(candidate_prompts))
+    ] or "none"
+    return _containment_reason(extra, control_text, candidate_text, total, "text")
+
+
+def matrix_verdicts(
+    control_divergences: Sequence[tuple[int, int]],
+    candidates: Mapping[str, Sequence[tuple[int, int]]],
+    total: int,
+) -> dict[str, tuple[bool, str]]:
+    """Judge every candidate for one batch against ONE completed floor.
+
+    The adapter-disabled arm used to be judged inside the Uno engine's context,
+    before the separate-engine control had contributed to the floor, so it was
+    held to a weaker floor than the Uno comparison while the comment promised
+    the same one. Taking every candidate for a batch through a single call is
+    the structural form of that promise.
+    """
+    return {
+        name: exact_token_verdict(control_divergences, divergences, total)
+        for name, divergences in candidates.items()
+    }
 
 
 def resolve_internal_request_ids(
