@@ -529,24 +529,35 @@ def test_reshape_and_cache_nvfp4_physical_hnd_shape(
         )
         return result_hnd.permute(0, 2, 1, 3)
 
-    # K scales are stored linearly on every arch; V scales are 4x4-swizzled for
-    # the SM100 trtllm-gen reader and linear for the FlashInfer reader on SM12x
-    # (same rule as test_reshape_and_cache_flash above).
-    v_scales_swizzled = not current_platform.is_device_capability_family(120)
+    # This dequantizes what the write kernel just wrote, so the layout here
+    # follows the writer, not whichever attention kernel later reads the cache.
+    # reshape_and_cache_flash stores K block scales linearly and V block scales
+    # 4x4-swizzled on every architecture: nvfp4_kv_cache_kernels.cu has no
+    # architecture branch (its only preprocessor conditional is
+    # CVT_FP4_PACK16, a packing variant), and dequant_nvfp4_kv_cache says the
+    # same - "pass False for K and True for V".
     result_key = dequant(nvfp4_key_data, key_scale_cache, k_scale.item(), False)
-    result_value = dequant(
-        nvfp4_value_data, value_scale_cache, v_scale.item(), v_scales_swizzled
-    )
+    result_value = dequant(nvfp4_value_data, value_scale_cache, v_scale.item(), True)
 
     result_key_flat = result_key.reshape(num_slots, num_heads, head_size)
     result_value_flat = result_value.reshape(num_slots, num_heads, head_size)
 
-    torch.testing.assert_close(
-        result_key_flat[slot_mapping], key.float(), atol=1.5, rtol=0.5
-    )
-    torch.testing.assert_close(
-        result_value_flat[slot_mapping], value.float(), atol=1.5, rtol=0.5
-    )
+    # Elementwise tolerance alone does not pin the scale layout down: a
+    # structurally wrong ordering can stay inside atol=1.5/rtol=0.5 while
+    # every scale lands on the wrong token. Bound relative L2 as well --
+    # normal NVFP4 round-trip loss here is ~0.1, and an independently
+    # measured wrong-layout regime sits at 0.76-0.79 (see #50336, which
+    # adds the same guard to the parametrized test).
+    for name, got, want in (
+        ("key", result_key_flat[slot_mapping], key.float()),
+        ("value", result_value_flat[slot_mapping], value.float()),
+    ):
+        torch.testing.assert_close(got, want, atol=1.5, rtol=0.5)
+        rel_l2 = (
+            torch.linalg.vector_norm(got - want)
+            / torch.linalg.vector_norm(want)
+        ).item()
+        assert rel_l2 < 0.15, f"{name} relative L2 {rel_l2:.4f} exceeds 0.15"
 
 
 @torch.inference_mode()
