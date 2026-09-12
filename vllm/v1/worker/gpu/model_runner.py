@@ -20,6 +20,7 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from copy import deepcopy
 from typing import Any, NamedTuple
@@ -198,6 +199,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculative_config is not None and self.speculative_config.use_dspark()
         )
         self.observability_config = vllm_config.observability_config
+        self.dp_profiler_is_ready: Callable[[], bool] | None = None
+        self.dp_profiler_advance: Callable[[bool], None] | None = None
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         self.device = device
@@ -1661,7 +1664,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.ubatch_runner is not None and not skip_attn_for_dummy_run
             ),
             uniform_decode=uniform_tok_count == self.decode_query_len,
+            profiler_ready=(
+                self.dp_profiler_is_ready() if self.dp_profiler_is_ready else None
+            ),
         )
+
+        if self.dp_profiler_advance is not None and dp_sync is not None:
+            assert dp_sync.profiler_ready is not None
+            self.dp_profiler_advance(dp_sync.profiler_ready)
 
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.

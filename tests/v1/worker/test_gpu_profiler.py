@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from contextlib import nullcontext
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, Mock, call, patch
 from uuid import UUID
 
 import pytest
+import torch
 from pydantic import ValidationError
 
+import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
@@ -21,6 +23,12 @@ from vllm.profiler.wrapper import ProtonProfilerWrapper, WorkerProfiler
 from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
+
+
+def _bind_profiler_mode_helper(worker) -> None:
+    worker._use_dp_synchronized_profiler_iterations = MethodType(
+        Worker._use_dp_synchronized_profiler_iterations, worker
+    )
 
 
 class ConcreteWorkerProfiler(WorkerProfiler):
@@ -249,6 +257,24 @@ def test_mixed_delay_and_stop(default_profiler_config):
     assert profiler.start_call_count == 0
 
 
+def test_synchronized_iterations_disabled_by_default():
+    assert ProfilerConfig().synchronize_iterations_across_dp is False
+
+
+def test_synchronized_iterations_accept_cuda_profiler():
+    config = ProfilerConfig(
+        profiler="cuda",
+        synchronize_iterations_across_dp=True,
+    )
+
+    assert config.synchronize_iterations_across_dp is True
+
+
+def test_synchronized_iterations_require_profiler():
+    with pytest.raises(ValueError, match="requires profiler to be set"):
+        ProfilerConfig(synchronize_iterations_across_dp=True)
+
+
 class TestIsUriPath:
     """Tests for the _is_uri_path helper function."""
 
@@ -288,7 +314,10 @@ class TestAnnotateProfile:
     def _annotate(self, detailed: bool) -> str:
         worker = MagicMock()
         worker.vllm_config.profiler_config.detailed_trace_annotation = detailed
+        worker.profiler_config.synchronize_iterations_across_dp = False
+        worker.parallel_config.data_parallel_size = 1
         worker.profiler = MagicMock()
+        _bind_profiler_mode_helper(worker)
 
         ctx_req = MagicMock(req_id="ctx1", num_computed_tokens=0)
         cached = CachedRequestData(
@@ -322,13 +351,229 @@ class TestAnnotateProfile:
 
     def test_skips_annotation_work_after_profiler_stops(self):
         worker = MagicMock()
+        worker.profiler_config.synchronize_iterations_across_dp = False
+        worker.parallel_config.data_parallel_size = 1
         worker.profiler.is_running = False
+        _bind_profiler_mode_helper(worker)
 
         context = Worker.annotate_profile(worker, scheduler_output=None)
 
         worker.profiler.step.assert_called_once_with()
         worker.profiler.annotate_context_manager.assert_not_called()
         assert isinstance(context, nullcontext)
+
+    def test_synchronized_mode_suppresses_rank_local_step(self):
+        worker = MagicMock()
+        worker.profiler_config.synchronize_iterations_across_dp = True
+        worker.parallel_config.data_parallel_size = 2
+        worker.profiler.is_running = False
+        _bind_profiler_mode_helper(worker)
+
+        Worker.annotate_profile(worker, scheduler_output=None)
+
+        worker.profiler.step.assert_not_called()
+
+
+class TestDPSynchronizedProfiler:
+    def _worker(self, profiler):
+        worker = MagicMock()
+        worker.profiler = profiler
+        worker._dp_profiler_requested = True
+        worker._dp_profiler_session_started = False
+        return worker
+
+    def test_waits_until_every_rank_is_ready(self, default_profiler_config):
+        profiler = ConcreteWorkerProfiler(default_profiler_config)
+        worker = self._worker(profiler)
+
+        Worker._advance_dp_synchronized_profiler(worker, False)
+
+        assert profiler.start_call_count == 0
+        assert profiler._active_iteration_count == 0
+
+        Worker._advance_dp_synchronized_profiler(worker, True)
+
+        assert profiler.start_call_count == 1
+        assert profiler._active_iteration_count == 1
+
+    def test_profile_request_arms_without_starting_locally(self):
+        worker = MagicMock()
+        worker.rank = 0
+        worker.profiler = MagicMock()
+        worker.profiler_config.synchronize_iterations_across_dp = True
+        worker.parallel_config.data_parallel_size = 2
+        worker._dp_profiler_requested = False
+        _bind_profiler_mode_helper(worker)
+
+        with patch(
+            "vllm.distributed.utils.get_worker_rank_suffix",
+            return_value="rank0",
+        ):
+            Worker.profile(worker)
+
+        assert worker._dp_profiler_requested is True
+        worker.profiler.start.assert_not_called()
+
+    def test_delayed_start_counts_shared_boundaries(self, default_profiler_config):
+        default_profiler_config.delay_iterations = 2
+        profiler = ConcreteWorkerProfiler(default_profiler_config)
+        worker = self._worker(profiler)
+
+        Worker._advance_dp_synchronized_profiler(worker, True)
+        assert not profiler.is_running
+
+        Worker._advance_dp_synchronized_profiler(worker, True)
+        assert profiler.is_running
+        assert profiler.start_call_count == 1
+
+    def test_auto_stop_resets_synchronized_session(self, default_profiler_config):
+        default_profiler_config.max_iterations = 1
+        profiler = ConcreteWorkerProfiler(default_profiler_config)
+        worker = self._worker(profiler)
+
+        Worker._advance_dp_synchronized_profiler(worker, True)
+        Worker._advance_dp_synchronized_profiler(worker, True)
+
+        assert not profiler.is_armed
+        assert profiler.stop_call_count == 1
+        assert worker._dp_profiler_requested is False
+        assert worker._dp_profiler_session_started is False
+
+    def test_restart_after_auto_stop(self, default_profiler_config):
+        default_profiler_config.max_iterations = 1
+        profiler = ConcreteWorkerProfiler(default_profiler_config)
+        worker = self._worker(profiler)
+
+        Worker._advance_dp_synchronized_profiler(worker, True)
+        Worker._advance_dp_synchronized_profiler(worker, True)
+        worker._dp_profiler_requested = True
+        Worker._advance_dp_synchronized_profiler(worker, True)
+
+        assert profiler.start_call_count == 2
+        assert worker._dp_profiler_session_started is True
+
+    def test_peer_stop_ends_local_capture(self, default_profiler_config):
+        profiler = ConcreteWorkerProfiler(default_profiler_config)
+        worker = self._worker(profiler)
+        Worker._advance_dp_synchronized_profiler(worker, True)
+
+        Worker._advance_dp_synchronized_profiler(worker, False)
+
+        assert profiler.stop_call_count == 1
+        assert worker._dp_profiler_requested is False
+        assert worker._dp_profiler_session_started is False
+
+
+class _BoundaryObserved(Exception):
+    pass
+
+
+class _StopAfterBoundaryBatch:
+    @property
+    def num_tokens(self):
+        raise _BoundaryObserved
+
+
+def _v1_boundary_result():
+    return (
+        CUDAGraphMode.NONE,
+        _StopAfterBoundaryBatch(),
+        False,
+        None,
+        None,
+        True,
+    )
+
+
+def test_v1_execute_model_advances_profiler_once_after_dp_agreement():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.execute_model_state = None
+    runner.speculative_config = None
+    runner.synchronize_input_prep = nullcontext
+    runner._update_states = Mock()
+    runner.cache_config = SimpleNamespace(kv_sharing_fast_prefill=False)
+    runner.num_prompt_logprobs = 0
+    runner.input_batch = SimpleNamespace(num_reqs=1, req_ids=["request"])
+    runner._prepare_inputs = Mock(return_value=(None, None, None))
+    runner.cascade_attn_enabled = False
+    runner.parallel_config = SimpleNamespace(use_ubatching=False)
+    runner._allow_microbatching = Mock(return_value=False)
+    runner._determine_batch_execution_and_padding = Mock(
+        return_value=_v1_boundary_result()
+    )
+    runner.dp_profiler_advance = Mock()
+    scheduler_output = MagicMock(
+        total_num_scheduled_tokens=1,
+        num_scheduled_tokens={"request": 1},
+        scheduled_encoder_inputs={},
+    )
+
+    with (
+        patch.object(
+            gpu_model_runner_module,
+            "has_kv_transfer_group",
+            return_value=False,
+        ),
+        pytest.raises(_BoundaryObserved),
+    ):
+        GPUModelRunner.execute_model(runner, scheduler_output)
+
+    runner.dp_profiler_advance.assert_called_once_with(True)
+
+
+def test_v1_dummy_run_advances_profiler_once_after_dp_agreement():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None)
+    )
+    runner.max_num_tokens = 4
+    runner.max_num_reqs = 4
+    runner.scheduler_config = SimpleNamespace(max_num_seqs=4)
+    runner.uniform_decode_query_len = 1
+    runner._determine_batch_execution_and_padding = Mock(
+        return_value=_v1_boundary_result()
+    )
+    runner.dp_profiler_advance = Mock()
+
+    with pytest.raises(_BoundaryObserved):
+        GPUModelRunner._dummy_run(runner, 1, skip_eplb=True)
+
+    runner.dp_profiler_advance.assert_called_once_with(True)
+
+
+@pytest.mark.parametrize(
+    ("readiness", "expected"),
+    [([1, 0], False), ([1, 1], True)],
+)
+def test_legacy_dp_sync_carries_profiler_readiness(readiness, expected):
+    from vllm.v1.worker import dp_utils
+
+    reduced = torch.tensor(
+        [
+            [64, 64],
+            [64, 64],
+            [0, 0],
+            [0, 0],
+            readiness,
+        ],
+        dtype=torch.int32,
+    )
+    parallel_config = SimpleNamespace(
+        disable_nccl_for_dp_synchronization=True,
+        num_ubatches=1,
+    )
+
+    with patch.object(dp_utils, "_run_ar", return_value=reduced):
+        *_, profiler_ready = dp_utils._synchronize_dp_ranks(
+            num_tokens_unpadded=64,
+            num_tokens_padded=64,
+            should_attempt_ubatching=False,
+            cudagraph_mode=0,
+            parallel_config=parallel_config,
+            profiler_ready=True,
+        )
+
+    assert profiler_ready is expected
 
 
 def test_profiler_entered_during_capture():
@@ -610,6 +855,9 @@ def test_gpu_worker_creates_proton_profiler():
     worker.rank = 1
     worker.profiler = None
     worker.profiler_config.profiler = "proton"
+    worker.profiler_config.synchronize_iterations_across_dp = False
+    worker.parallel_config.data_parallel_size = 1
+    _bind_profiler_mode_helper(worker)
 
     with (
         patch(
@@ -630,6 +878,9 @@ def test_gpu_worker_recreates_proton_profiler_for_each_run():
     worker.rank = 1
     worker.profiler = None
     worker.profiler_config.profiler = "proton"
+    worker.profiler_config.synchronize_iterations_across_dp = False
+    worker.parallel_config.data_parallel_size = 1
+    _bind_profiler_mode_helper(worker)
 
     with (
         patch(

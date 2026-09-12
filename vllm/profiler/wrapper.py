@@ -55,6 +55,11 @@ class WorkerProfiler(ABC):
         """Whether the underlying profiler is currently collecting data."""
         return self._running
 
+    @property
+    def is_armed(self) -> bool:
+        """Whether a start request is active, including a delayed start."""
+        return self._active
+
     @abstractmethod
     def _start(self) -> None:
         """Start the profiler."""

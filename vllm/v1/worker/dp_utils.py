@@ -43,17 +43,23 @@ def _run_ar(
     padded_num_tokens_per_ubatch: int,
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
+    profiler_ready: bool | None,
 ) -> torch.Tensor:
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
     # Populate this rank's contribution on CPU to reduce GPU syncs.
     pin_memory = PIN_MEMORY and torch.device(device).type == "cuda"
-    tensor_cpu = torch.zeros(4, dp_size, dtype=torch.int32, pin_memory=pin_memory)
+    num_fields = 5 if profiler_ready is not None else 4
+    tensor_cpu = torch.zeros(
+        num_fields, dp_size, dtype=torch.int32, pin_memory=pin_memory
+    )
     tensor_cpu[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor_cpu[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor_cpu[2][dp_rank] = 1 if should_ubatch else 0
     tensor_cpu[3][dp_rank] = cudagraph_mode
+    if profiler_ready is not None:
+        tensor_cpu[4][dp_rank] = int(profiler_ready)
     tensor = tensor_cpu.to(device, non_blocking=True)
     dist.all_reduce(tensor, group=group)
     return tensor
@@ -109,7 +115,8 @@ def _synchronize_dp_ranks(
     should_attempt_ubatching: bool,
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
-) -> tuple[bool, torch.Tensor | None, int]:
+    profiler_ready: bool | None,
+) -> tuple[bool, torch.Tensor | None, int, bool | None]:
     """
     1. Decides if each DP rank is going to microbatch. Either all ranks
     run with microbatching or none of them do.
@@ -125,6 +132,8 @@ def _synchronize_dp_ranks(
         num_tokens_after_padding: A tensor containing the total number of
         tokens per-microbatch for each DP rank including any DP padding.
         synced_cudagraph_mode: The synchronized cudagraph mode (min across ranks)
+        synced_profiler_ready: Whether all DP ranks have armed synchronized
+            profiler stepping, or None when readiness was not included.
     ]
 
     """
@@ -139,6 +148,7 @@ def _synchronize_dp_ranks(
         padded_num_tokens_per_ubatch=num_tokens_padded,
         cudagraph_mode=cudagraph_mode,
         parallel_config=parallel_config,
+        profiler_ready=profiler_ready,
     )
 
     # Only the NCCL path leaves `tensor` on device. With Gloo -- the default
@@ -169,7 +179,18 @@ def _synchronize_dp_ranks(
         # should_dp_pad is True
         num_tokens_after_padding = _post_process_dp_padding(tensor, should_dp_pad)
 
-    return should_ubatch, num_tokens_after_padding, synced_cudagraph_mode
+        synced_profiler_ready = (
+            bool(torch.all(tensor[4] == 1).item())
+            if profiler_ready is not None
+            else None
+        )
+
+    return (
+        should_ubatch,
+        num_tokens_after_padding,
+        synced_cudagraph_mode,
+        synced_profiler_ready,
+    )
 
 
 def coordinate_batch_across_dp(
@@ -179,7 +200,8 @@ def coordinate_batch_across_dp(
     num_tokens_padded: int | None = None,
     uniform_decode: bool | None = None,
     cudagraph_mode: int = 0,
-) -> tuple[bool, torch.Tensor | None, int]:
+    profiler_ready: bool | None = None,
+) -> tuple[bool, torch.Tensor | None, int, bool | None]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch
     should be split into microbatches.
@@ -194,6 +216,8 @@ def coordinate_batch_across_dp(
             only contains single token decodes
         cudagraph_mode: The cudagraph mode for this rank (0=NONE, 1=PIECEWISE, 2=FULL).
             DP padding is enabled when synced cudagraph mode across ranks is not NONE.
+        profiler_ready: Whether this rank has armed synchronized profiler
+            stepping. When set, the result reports whether every rank is ready.
 
     Returns: tuple[
         ubatch_slices: if this is set then all DP ranks have agreed to
@@ -202,12 +226,14 @@ def coordinate_batch_across_dp(
         tokens per-microbatch for each DP rank including padding. Will be
         padded up to the max value across all DP ranks when cudagraph is enabled.
         synced_cudagraph_mode: The synchronized cudagraph mode (min across ranks)
+        synced_profiler_ready: Whether all DP ranks have armed synchronized
+            profiler stepping, or None when not requested.
     ]
 
     """
     if parallel_config.data_parallel_size == 1:
         # Early exit.
-        return False, None, cudagraph_mode
+        return False, None, cudagraph_mode, profiler_ready
 
     # If the caller has explicitly enabled microbatching.
     should_attempt_ubatching = False
@@ -223,14 +249,23 @@ def coordinate_batch_across_dp(
     if num_tokens_padded is None:
         num_tokens_padded = num_tokens_unpadded
 
-    (should_ubatch, num_tokens_after_padding, synced_cudagraph_mode) = (
-        _synchronize_dp_ranks(
-            num_tokens_unpadded,
-            num_tokens_padded,
-            should_attempt_ubatching,
-            cudagraph_mode,
-            parallel_config,
-        )
+    (
+        should_ubatch,
+        num_tokens_after_padding,
+        synced_cudagraph_mode,
+        synced_profiler_ready,
+    ) = _synchronize_dp_ranks(
+        num_tokens_unpadded,
+        num_tokens_padded,
+        should_attempt_ubatching,
+        cudagraph_mode,
+        parallel_config,
+        profiler_ready,
     )
 
-    return (should_ubatch, num_tokens_after_padding, synced_cudagraph_mode)
+    return (
+        should_ubatch,
+        num_tokens_after_padding,
+        synced_cudagraph_mode,
+        synced_profiler_ready,
+    )

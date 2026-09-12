@@ -514,6 +514,8 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        self.dp_profiler_is_ready: Callable[[], bool] | None = None
+        self.dp_profiler_advance: Callable[[bool], None] | None = None
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         model_config = self.model_config
@@ -3972,6 +3974,7 @@ class GPUModelRunner(
         bool,
         torch.Tensor | None,
         CUDAGraphStat | None,
+        bool | None,
     ]:
         uniform_decode = self._is_uniform_decode(
             max_num_scheduled_tokens=max_num_scheduled_tokens,
@@ -4023,16 +4026,23 @@ class GPUModelRunner(
         # Extra coordination when running data-parallel since we need to coordinate
         # across ranks
         should_ubatch, num_tokens_across_dp = False, None
+        synced_profiler_ready = None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
-            should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
-                coordinate_batch_across_dp(
-                    num_tokens_unpadded=num_tokens,
-                    parallel_config=self.parallel_config,
-                    allow_microbatching=allow_microbatching,
-                    num_tokens_padded=num_tokens_padded,
-                    uniform_decode=uniform_decode,
-                    cudagraph_mode=cudagraph_mode.value,
-                )
+            (
+                should_ubatch,
+                num_tokens_across_dp,
+                synced_cudagraph_mode,
+                synced_profiler_ready,
+            ) = coordinate_batch_across_dp(
+                num_tokens_unpadded=num_tokens,
+                parallel_config=self.parallel_config,
+                allow_microbatching=allow_microbatching,
+                num_tokens_padded=num_tokens_padded,
+                uniform_decode=uniform_decode,
+                cudagraph_mode=cudagraph_mode.value,
+                profiler_ready=(
+                    self.dp_profiler_is_ready() if self.dp_profiler_is_ready else None
+                ),
             )
 
             # Extract DP-synced values
@@ -4063,6 +4073,7 @@ class GPUModelRunner(
             should_ubatch,
             num_tokens_across_dp,
             cudagraph_stats,
+            synced_profiler_ready,
         )
 
     def _register_layerwise_nvtx_hooks(self) -> None:
@@ -4286,6 +4297,7 @@ class GPUModelRunner(
                 should_ubatch,
                 num_tokens_across_dp,
                 cudagraph_stats,
+                profiler_ready,
             ) = self._determine_batch_execution_and_padding(
                 num_tokens=num_tokens_unpadded,
                 num_reqs=num_reqs,
@@ -4297,6 +4309,12 @@ class GPUModelRunner(
                     num_reqs, num_scheduled_tokens_np
                 ),
             )
+
+            if self.dp_profiler_advance is not None:
+                # All-rank idle polls return above. V1 reaches this agreement
+                # only for nonempty real or dummy forwards.
+                assert profiler_ready is not None
+                self.dp_profiler_advance(profiler_ready)
 
             logger.debug(
                 "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
@@ -5953,30 +5971,39 @@ class GPUModelRunner(
 
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
-        _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = (
-            self._determine_batch_execution_and_padding(
-                num_tokens=num_tokens_unpadded,
-                num_reqs=num_reqs,
-                num_scheduled_tokens_np=num_scheduled_tokens,
-                max_num_scheduled_tokens=max_query_len,
-                use_cascade_attn=False,
-                allow_microbatching=allow_microbatching,
-                force_eager=is_profile
-                or (cudagraph_runtime_mode == CUDAGraphMode.NONE),
-                # `force_uniform_decode` is used for cudagraph capture; because for
-                # capturing mixed prefill-decode batches, we sometimes use
-                # num_tokens == num_reqs which looks like a uniform decode batch to the
-                # dispatcher; but we actually want to capture a piecewise cudagraph
-                force_uniform_decode=uniform_decode,
-                # `force_has_lora` is used for cudagraph capture; because LoRA is
-                # activated later in the context manager, but we need to know the
-                # LoRA state when determining the batch descriptor for capture
-                force_has_lora=num_active_loras > 0,
-                # `force_num_active_loras` is used for cudagraph capture; because we
-                # need to capture graphs for specific num_active_loras counts
-                force_num_active_loras=num_active_loras,
-            )
+        (
+            _cudagraph_mode,
+            batch_desc,
+            should_ubatch,
+            num_tokens_across_dp,
+            _,
+            profiler_ready,
+        ) = self._determine_batch_execution_and_padding(
+            num_tokens=num_tokens_unpadded,
+            num_reqs=num_reqs,
+            num_scheduled_tokens_np=num_scheduled_tokens,
+            max_num_scheduled_tokens=max_query_len,
+            use_cascade_attn=False,
+            allow_microbatching=allow_microbatching,
+            force_eager=is_profile or (cudagraph_runtime_mode == CUDAGraphMode.NONE),
+            # `force_uniform_decode` is used for cudagraph capture; because for
+            # capturing mixed prefill-decode batches, we sometimes use
+            # num_tokens == num_reqs which looks like a uniform decode batch to the
+            # dispatcher; but we actually want to capture a piecewise cudagraph
+            force_uniform_decode=uniform_decode,
+            # `force_has_lora` is used for cudagraph capture; because LoRA is
+            # activated later in the context manager, but we need to know the
+            # LoRA state when determining the batch descriptor for capture
+            force_has_lora=num_active_loras > 0,
+            # `force_num_active_loras` is used for cudagraph capture; because we
+            # need to capture graphs for specific num_active_loras counts
+            force_num_active_loras=num_active_loras,
         )
+        if self.dp_profiler_advance is not None:
+            # Dummy runs always contain at least one token, so this is a shared
+            # execution boundary rather than an all-rank idle poll.
+            assert profiler_ready is not None
+            self.dp_profiler_advance(profiler_ready)
 
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = _cudagraph_mode
