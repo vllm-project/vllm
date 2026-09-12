@@ -21,7 +21,7 @@ from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
 )
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
-    get_sparse_indexer_topk,
+    SparseIndexerTopk,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
@@ -689,7 +689,7 @@ def sparse_attn_indexer(
                 )
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        get_sparse_indexer_topk().forward(
+        SparseIndexerTopk()(
             logits,
             seq_lens,
             next_n,

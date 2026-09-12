@@ -278,25 +278,17 @@ class KernelConfig:
     """
 
     sparse_indexer_topk_backend: SparseIndexerTopkBackend = "auto"
-    """Backend for the DSA sparse attention indexer decode top-k kernel.
-    Available options:
+    """Backend for the DSA sparse indexer decode top-k kernel. Available options:
 
-    - "auto": Pick the fastest applicable implementation, in the order
-      "deep_select" (SM100a/SM103a only, topk <= 4096, fp32/bf16 logits,
-      1024B-aligned row stride, at least 32 rows) -> "cooperative"
-      (topk in {512, 1024, 2048}, <= 64 rows, SM90+ non-SM12x) ->
-      "persistent" (topk in {512, 1024, 2048}) -> "per_row"
-    - "deep_select": Use the DeepSelect top-k kernel (vllm._deepselect_C).
-      Same constraints as "auto" except the 32-row threshold
+    - "auto": Automatically select the best backend based on shape and hardware
+    - "deep_select": Use DeepSelect kernels (SM100a/SM103a only)
     - "cooperative": Use vLLM's cooperative_topk kernel
     - "persistent": Use vLLM's persistent_topk kernel
-    - "per_row": Use vLLM's top_k_per_row_decode kernel (no constraints)
+    - "per_row": Use vLLM's top_k_per_row_decode kernel
     - "flashinfer": Use FlashInfer's top_k_ragged_transform kernel
-      (debug/benchmark)
     - "torch": Use a plain torch.topk implementation (debug reference)
 
-    Explicit (non-"auto") values raise RuntimeError when their constraints
-    are not met.
+    Explicit values raise RuntimeError when their constraints are not met.
     """
 
     linear_backend: LinearBackend = "auto"

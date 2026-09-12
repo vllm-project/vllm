@@ -19,8 +19,7 @@ else()
   FetchContent_Declare(
         deepselect
         GIT_REPOSITORY https://github.com/ZJY0516/DeepSelect.git
-        GIT_TAG c0e1f9cd40d3fdc79e75f2d14d1520936915f6b8 # stable-abi branch
-        GIT_SUBMODULES "csrc/3rdparty/cutlass"
+        GIT_TAG c0e1f9cd40d3fdc79e75f2d14d1520936915f6b8
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
@@ -66,10 +65,6 @@ if(DEEPSELECT_ARCHS)
         "-U__CUDA_NO_HALF_OPERATORS__" "-U__CUDA_NO_HALF_CONVERSIONS__"
         "-U__CUDA_NO_HALF2_OPERATORS__" "-U__CUDA_NO_BFLOAT16_CONVERSIONS__")
 
-    # DeepSelect is built against the PyTorch stable ABI
-    # (STABLE_TORCH_LIBRARY + hand-written PyInit named after
-    # TORCH_EXTENSION_NAME), so it needs neither pybind11 nor
-    # libtorch_python; see _C_stable_libtorch for the in-tree equivalent.
     define_extension_target(
         _deepselect_C
         DESTINATION vllm
@@ -91,7 +86,7 @@ if(DEEPSELECT_ARCHS)
         target_compile_definitions(_deepselect_C PRIVATE USE_CUDA)
     endif()
 
-    # DeepSelect requires C++20 (std::format, template lambdas, etc.)
+    # DeepSelect requires C++20
     target_compile_options(_deepselect_C PRIVATE
         $<$<COMPILE_LANGUAGE:CXX>:-std=c++20>
         $<$<COMPILE_LANGUAGE:CUDA>:-std=c++20>)

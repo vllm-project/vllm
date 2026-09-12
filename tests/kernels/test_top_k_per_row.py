@@ -1335,9 +1335,6 @@ def test_deep_select_topk(
     """DeepSelect wrapper vs torch.topk with variable per-row ends."""
     from vllm.model_executor.layers import indexer_topk
 
-    if not indexer_topk.DEEP_SELECT_AVAILABLE:
-        pytest.skip("vllm._deepselect_C is not built")
-
     set_random_seed(0)
     torch.set_default_device("cuda:0")
 
@@ -1383,9 +1380,6 @@ def test_deep_select_topk_preallocated_output() -> None:
     """DeepSelect writes into a preallocated aligned buffer (no `end`)."""
     from vllm.model_executor.layers import indexer_topk
 
-    if not indexer_topk.DEEP_SELECT_AVAILABLE:
-        pytest.skip("vllm._deepselect_C is not built")
-
     set_random_seed(0)
     torch.set_default_device("cuda:0")
 
@@ -1425,14 +1419,6 @@ def _has_flashinfer_topk() -> bool:
     return True
 
 
-def _has_deep_select() -> bool:
-    if not current_platform.is_device_capability_family(100):
-        return False
-    from vllm.model_executor.layers import indexer_topk
-
-    return indexer_topk.DEEP_SELECT_AVAILABLE
-
-
 def _has_cooperative_topk() -> bool:
     return _has_device_capability(
         90
@@ -1469,7 +1455,7 @@ SPARSE_INDEXER_EXPLICIT_BACKENDS = [
     pytest.param(
         "deep_select",
         marks=pytest.mark.skipif(
-            not _has_deep_select(),
+            not current_platform.is_device_capability_family(100),
             reason="requires SM100a/SM103a and vllm._deepselect_C",
         ),
     ),
@@ -1513,9 +1499,7 @@ def test_sparse_indexer_decode_topk_explicit_backends(
     indices = torch.full((num_rows, top_k), -2, dtype=torch.int32, device="cuda")
     cfg = VllmConfig(kernel_config={"sparse_indexer_topk_backend": backend})
     with set_current_vllm_config(cfg):
-        SparseIndexerTopk().forward(
-            logits, seq_lens, next_n, indices, top_k, max_seq_len
-        )
+        SparseIndexerTopk()(logits, seq_lens, next_n, indices, top_k, max_seq_len)
     torch.accelerator.synchronize()
 
     # k_i == top_k for every row here (row_ends >= 3997 > top_k).
@@ -1558,7 +1542,7 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
         with set_current_vllm_config(cfg):
             return SparseIndexerTopk().resolve_backend(t, k, num_rows)
 
-    if _has_deep_select():
+    if current_platform.is_device_capability_family(100):
         assert resolve("auto") == "deep_select"
     if _has_cooperative_topk():
         # Below the DeepSelect row threshold -> cooperative.
@@ -1578,7 +1562,7 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
         assert resolve("cooperative") == "cooperative"
     if _has_flashinfer_topk():
         assert resolve("flashinfer") == "flashinfer"
-    if _has_deep_select():
+    if current_platform.is_device_capability_family(100):
         # Forced deep_select ignores the 32-row auto threshold.
         assert resolve("deep_select", num_rows=1) == "deep_select"
         with pytest.raises(RuntimeError, match="constraints"):
@@ -1591,6 +1575,6 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
         resolve("persistent", k=3000)
     with pytest.raises(RuntimeError, match="topk_tokens must be in"):
         resolve("cooperative", k=3000)
-    if current_platform.is_device_capability_family(100) and not _has_deep_select():
-        with pytest.raises(RuntimeError, match="not available"):
+    if not current_platform.is_device_capability_family(100):
+        with pytest.raises(RuntimeError, match="SM100a/SM103a"):
             resolve("deep_select")

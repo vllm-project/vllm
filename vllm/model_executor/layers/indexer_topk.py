@@ -1,17 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Top-k kernel selection for the DSA sparse attention indexer.
+"""Top-k kernels for the DSA sparse attention indexer."""
 
-Available backends: DeepSelect (`vllm._deepselect_C`, SM100a/SM103a), vLLM's
-cooperative_topk / persistent_topk / top_k_per_row_decode, FlashInfer's
-top_k_ragged_transform, and a plain torch.topk reference. `SparseIndexerTopk`
-selects among them via `kernel_config.sparse_indexer_topk_backend`.
-
-DeepSelect (https://github.com/deepseek-ai/DeepSelect, MIT license) is built
-against the PyTorch stable ABI: importing it registers the `deep_select`
-torch library ops, which are then called via `torch.ops`.
-"""
-
+import contextlib
 import functools
 
 import torch
@@ -41,12 +32,8 @@ DEEP_SELECT_MIN_ROWS = 32
 # Matches the -1 fill convention used for topk_indices_buffer elsewhere.
 IDX_OOB_FILL_VALUE = -1
 
-try:
+with contextlib.suppress(ImportError):
     import vllm._deepselect_C  # noqa: F401  (registers torch.ops.deep_select)
-
-    DEEP_SELECT_AVAILABLE = True
-except ImportError:
-    DEEP_SELECT_AVAILABLE = False
 
 
 @functools.lru_cache(maxsize=1)
@@ -105,7 +92,6 @@ def deep_select_topk(
     Returns:
         The (num_rows, topk) indices tensor.
     """
-    assert DEEP_SELECT_AVAILABLE, "DeepSelect extension is not available"
     assert input.dim() == 2 and input.stride(1) == 1
     assert (
         input.stride(0) * input.element_size() % get_deep_select_stride_requirement()[0]
@@ -143,22 +129,21 @@ def deep_select_topk(
 # ---------------------------------------------------------------------------
 
 
-class SparseIndexerTopk:
-    """The sparse indexer's decode top-k stage: selects among the available
-    top-k kernels and runs the chosen one.
+class SparseIndexerTopk(torch.nn.Module):
+    """The sparse indexer's decode top-k stage.
 
-    "auto" applies the heuristic chain deep_select -> cooperative ->
-    persistent -> per_row. Explicit backend values are validated against
-    their constraints and raise RuntimeError when unmet; the 32-row threshold
-    of "auto" is a performance heuristic and does not apply to the forced
-    "deep_select".
+    Selects among the available top-k kernels (see
+    kernel_config.sparse_indexer_topk_backend) and runs the chosen one.
     """
 
     def __init__(self) -> None:
+        super().__init__()
         kernel_config = get_current_vllm_config().kernel_config
         self._backend = kernel_config.sparse_indexer_topk_backend
         self._is_cuda = current_platform.is_cuda()
-        self._has_deep_select = self._is_cuda and DEEP_SELECT_AVAILABLE
+        self._has_deep_select = self._is_cuda and (
+            current_platform.is_device_capability_family(100)
+        )
         self._has_flashinfer_topk = _fi_top_k_ragged_transform is not None
         self._cooperative_capable = self._is_cuda and (
             current_platform.has_device_capability(90)
@@ -197,9 +182,7 @@ class SparseIndexerTopk:
             if not self._is_cuda:
                 failures.append("requires a CUDA platform")
             elif not self._has_deep_select:
-                failures.append(
-                    "the DeepSelect extension (vllm._deepselect_C) is not available"
-                )
+                failures.append("requires SM100a/SM103a (10.x device family)")
             elif not is_deep_select_supported(logits, topk_tokens):
                 failures.append(
                     f"inputs violate DeepSelect's constraints: dtype={logits.dtype},"
@@ -307,9 +290,8 @@ class SparseIndexerTopk:
             offsets = torch.zeros(
                 logits.shape[0], dtype=torch.int32, device=logits.device
             )
-            # Restricts each row to [0, row_ends[i]) and returns int32
-            # indices with -1 fill past the row length; write into the
-            # int32 buffer.
+            # top_k_ragged_transform selects within [0, row_ends[i]) per
+            # row and -1-fills past the row length.
             indices = _fi_top_k_ragged_transform(logits, offsets, row_ends, topk_tokens)
             topk_indices.copy_(indices)
         elif backend == "torch":
@@ -337,15 +319,3 @@ class SparseIndexerTopk:
                 logits.stride(1),
                 topk_tokens,
             )
-
-
-_sparse_indexer_topk: SparseIndexerTopk | None = None
-
-
-def get_sparse_indexer_topk() -> SparseIndexerTopk:
-    """Process-wide singleton: the backend config is fixed at engine init,
-    so availability probing is cached at first use."""
-    global _sparse_indexer_topk
-    if _sparse_indexer_topk is None:
-        _sparse_indexer_topk = SparseIndexerTopk()
-    return _sparse_indexer_topk
