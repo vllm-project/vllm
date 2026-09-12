@@ -183,9 +183,11 @@ __global__ void reshape_and_cache_nvfp4_kernel(
     const int64_t data_block_stride,         // data cache stride for dim 0
     const int64_t data_head_stride,          // data cache stride for heads
     const int64_t data_block_offset_stride,  // data cache stride for tokens
-    const int64_t scale_block_stride,        // scale cache stride for dim 0
-    const int64_t scale_head_stride,         // scale cache stride for heads
-    const int64_t scale_block_offset_stride  // scale cache stride for tokens
+    const int64_t scale_block_stride,         // scale cache stride for dim 0
+    const int64_t scale_head_stride,          // scale cache stride for heads
+    const int64_t scale_block_offset_stride,  // scale cache stride for tokens
+    const bool swizzle_v_sf  // V scale layout: true = SM100 trtllm-gen 4-token
+                             // swizzle; false = linear (FlashInfer FA2 sm12x)
 ) {
   using CudaType = typename CUDATypeConverter<scalar_t>::Type;
   using PVec = PackedVec<CudaType, CVT_FP4_PACK16>;
@@ -280,12 +282,14 @@ __global__ void reshape_and_cache_nvfp4_kernel(
 #endif
 
       // Write block scale to scale cache.
-      // K (kv==0): linear layout (no swizzle).
-      // V (kv==1): swizzled layout for SM100 trtllm-gen MHA kernel.
+      // K (kv==0): always linear layout (no swizzle).
+      // V (kv==1): swizzled layout for the SM100 trtllm-gen MHA kernel when
+      //   swizzle_v_sf is true; linear (same as K) when false, which the
+      //   FlashInfer FA2 paged nvfp4 reader on sm120/sm121 requires.
       if (sf_out_ptr != nullptr) {
         int scale_idx = group_in_head;
         uint8_t* __restrict__ scale_dst;
-        if (kv == 0) {
+        if (kv == 0 || !swizzle_v_sf) {
           scale_dst = scale_block + head * scale_head_stride +
                       block_offset * scale_block_offset_stride + scale_idx;
         } else {
@@ -332,9 +336,18 @@ void reshape_and_cache_nvfp4_dispatch(
 
   STD_TORCH_CHECK(head_size % 16 == 0,
                   "head_size must be divisible by 16 for NVFP4 KV cache");
-  STD_TORCH_CHECK(block_size % 4 == 0,
-                  "block_size must be divisible by 4 for NVFP4 KV cache "
-                  "swizzle");
+
+  // SM120/SM121 (consumer Blackwell) serve NVFP4 KV via the FlashInfer FA2
+  // paged reader, which takes the scale-factor strides from the SF tensor
+  // itself and reads V scales linearly; the SM100 trtllm-gen reader keeps
+  // its 4-token V scale swizzle. Both consume the same per-page
+  // [K_data | K_scale | V_data | V_scale] layout, so only the V-scale
+  // swizzle is arch-conditional.
+  const bool swizzle_v_sf = get_device_prop()->major < 12;
+
+  STD_TORCH_CHECK(!swizzle_v_sf || block_size % 4 == 0,
+                  "block_size must be divisible by 4 for NVFP4 KV cache V "
+                  "scale-factor swizzle (SM100 trtllm-gen path)");
 
   // Detect physical layout from strides (based on full_dim).
   // HND: head stride > block_offset stride.
@@ -400,7 +413,7 @@ void reshape_and_cache_nvfp4_dispatch(
                   num_heads, head_size, block_size, data_block_stride,
                   data_head_stride, data_block_offset_stride,
                   scale_block_stride, scale_head_stride,
-                  scale_block_offset_stride);
+                  scale_block_offset_stride, swizzle_v_sf);
         } else if (kv_cache_dtype == "nvfp4_4over6") {
           vllm::reshape_and_cache_nvfp4_kernel<
               scalar_t, vllm::NVFP4KVScaleSearch::FOUR_OVER_SIX>
@@ -414,7 +427,7 @@ void reshape_and_cache_nvfp4_dispatch(
                   num_heads, head_size, block_size, data_block_stride,
                   data_head_stride, data_block_offset_stride,
                   scale_block_stride, scale_head_stride,
-                  scale_block_offset_stride);
+                  scale_block_offset_stride, swizzle_v_sf);
         } else {
           STD_TORCH_CHECK(false,
                           "Unsupported NVFP4 KV cache dtype: ", kv_cache_dtype);
