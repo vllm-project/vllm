@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
@@ -225,6 +226,51 @@ def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
         )
 
         assert selected_backend == UnquantizedMoeBackend.AITER
+        assert expert_cls is not None
+
+
+@patch(
+    "vllm.utils.flashinfer.has_flashinfer",
+    return_value=False,
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.rocm_aiter_ops."
+    "is_fused_moe_enabled",
+    return_value=True,
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.oracle.unquantized.rocm_aiter_ops."
+    "is_rdna_aiter_enabled",
+    return_value=False,
+)
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="ROCm-specific backend selection test"
+)
+def test_select_rocm_aiter_backend_non_gated_activation_falls_back(
+    mock_rdna_disabled, mock_aiter_enabled, mock_has_flashinfer, monkeypatch
+):
+    """Test ROCm backend selection falls back (not raises) for non-gated MoE."""
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+
+    with patch(
+        "vllm.model_executor.layers.fused_moe.oracle.unquantized.current_platform"
+    ) as mock_platform:
+        mock_platform.is_cuda.return_value = False
+        mock_platform.is_rocm.return_value = True
+        mock_platform.is_cpu.return_value = False
+        mock_platform.is_xpu.return_value = False
+        mock_platform.is_tpu.return_value = False
+        mock_platform.is_out_of_tree.return_value = False
+
+        moe_config = make_dummy_moe_config(activation=MoEActivation.SILU_NO_MUL)
+        assert moe_config.is_act_and_mul is False
+
+        selected_backend, expert_cls = select_unquantized_moe_backend(
+            moe_config=moe_config,
+        )
+
+        assert selected_backend != UnquantizedMoeBackend.AITER
         assert expert_cls is not None
 
 

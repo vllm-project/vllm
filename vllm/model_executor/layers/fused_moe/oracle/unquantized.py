@@ -308,7 +308,26 @@ def select_unquantized_moe_backend(
                 AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
         else:
             backend = UnquantizedMoeBackend.AITER
-            return _return_or_raise(backend, moe_config, activation_format)
+            reason = None
+            for k_cls in backend_to_kernel_cls(backend):
+                supported, reason = k_cls.is_supported_config(
+                    k_cls, moe_config, None, None, activation_format
+                )
+                if supported:
+                    logger.info_once(_make_log_backend(backend))
+                    return backend, k_cls
+            # AITER was explicitly requested but does not support this
+            # deployment configuration (e.g. a non-gated MoE activation,
+            # which AiterExperts._supports_no_act_and_mul() rejects
+            # unconditionally). Rather than hard-crashing at engine init,
+            # warn and fall back to the remaining backends in priority
+            # order below.
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_MOE=1 was requested, but %s",
+                _make_log_unsupported(backend, reason),
+            )
+            if UnquantizedMoeBackend.AITER in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.AITER)
 
     for backend in AVAILABLE_BACKENDS:
         for k_cls in backend_to_kernel_cls(backend):
