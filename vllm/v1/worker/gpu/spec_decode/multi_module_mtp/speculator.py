@@ -9,7 +9,6 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.warmup.jit_warmup import WarmupChoices
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
@@ -75,10 +74,6 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
 
         self.cudagraph_manager: SpeculatorCudaGraphManager | None = None
 
-        _pad_trailing_draft_slots.register_warmup(
-            slot_mappings_stride0=self.max_num_tokens
-        )
-        _cache_inputs.register_warmup(speculator=self)
         _shift_input_ids.register_warmup()
         _shift_input_embeds.register_warmup(speculator=self)
 
@@ -839,37 +834,6 @@ def _pad_trailing_draft_slots_kernel(
         tl.store(base + offs, PAD_ID, mask=mask)
 
 
-def _pad_trailing_draft_slots_warmup_inputs(
-    *, slot_mappings_stride0: int
-) -> dict[str, Any]:
-    return dict(
-        slot_mappings=TritonWarmupTensor(
-            torch.int64, shape=(1, 1), strides=(slot_mappings_stride0, 1)
-        ),
-        query_start_loc=TritonWarmupTensor(torch.int32),
-        last_token_indices=TritonWarmupTensor(torch.int64),
-        num_groups=1,
-        num_reqs=1,
-    )
-
-
-@triton_kernel_dispatcher_with_warmup(
-    kernel=_pad_trailing_draft_slots_kernel,
-    warmup_inputs=_pad_trailing_draft_slots_warmup_inputs,
-)
-def _pad_trailing_draft_slots(
-    slot_mappings: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    last_token_indices: torch.Tensor,
-    num_groups: int,
-    num_reqs: int,
-) -> DispatchSpec:
-    return (num_groups, num_reqs), dict(
-        PAD_ID=PAD_SLOT_ID,
-        BLOCK_SIZE=256,
-    )
-
-
 def pad_trailing_draft_slots(
     # [num_groups, num_tokens_padded]
     slot_mappings: torch.Tensor,
@@ -880,12 +844,13 @@ def pad_trailing_draft_slots(
     num_reqs: int,
 ) -> None:
     num_groups = slot_mappings.shape[0]
-    _pad_trailing_draft_slots(
+    _pad_trailing_draft_slots_kernel[(num_groups, num_reqs)](
         slot_mappings,
+        slot_mappings.stride(0),
         query_start_loc,
         last_token_indices,
-        num_groups=num_groups,
-        num_reqs=num_reqs,
+        PAD_SLOT_ID,
+        BLOCK_SIZE=256,
     )
 
 
@@ -969,75 +934,6 @@ def _cache_inputs_kernel(
         )
 
 
-def _cache_inputs_warmup_inputs(
-    *, speculator: MultiModuleMTPSpeculator
-) -> dict[str, Any]:
-    hidden = TritonWarmupTensor(
-        speculator.dtype,
-        shape=(1, speculator.hidden_size),
-        strides=(speculator.hidden_size, 1),
-    )
-    steps = speculator.num_speculative_steps
-    cached = TritonWarmupTensor(
-        speculator.dtype,
-        shape=(1, steps - 1, speculator.hidden_size),
-        strides=((steps - 1) * speculator.hidden_size, speculator.hidden_size, 1),
-    )
-    use_embeds = WarmupChoices(False, True)
-    return dict(
-        draft_input_ids=TritonWarmupTensor(torch.int32),
-        draft_input_embeds=hidden if use_embeds else None,
-        draft_input_hidden_states=hidden,
-        cached_draft_input_ids=TritonWarmupTensor(
-            torch.int64, shape=(1, steps - 1), strides=(steps - 1, 1)
-        ),
-        cached_draft_input_embeds=cached if use_embeds else None,
-        cached_target_hidden_states=cached,
-        idx_mapping=TritonWarmupTensor(torch.int32),
-        last_token_indices=TritonWarmupTensor(torch.int64),
-        query_start_loc=TritonWarmupTensor(torch.int32),
-        num_speculative_steps=steps,
-        num_reqs=1,
-        use_input_embeds=use_embeds,
-    )
-
-
-@triton_kernel_dispatcher_with_warmup(
-    kernel=_cache_inputs_kernel, warmup_inputs=_cache_inputs_warmup_inputs
-)
-def _cache_inputs(
-    draft_input_ids: torch.Tensor,
-    draft_input_embeds: torch.Tensor | None,
-    draft_input_hidden_states: torch.Tensor,
-    cached_draft_input_ids: torch.Tensor,
-    cached_draft_input_embeds: torch.Tensor | None,
-    cached_target_hidden_states: torch.Tensor,
-    idx_mapping: torch.Tensor,
-    last_token_indices: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    num_speculative_steps: int,
-    num_reqs: int,
-    use_input_embeds: bool,
-) -> DispatchSpec:
-    hidden_size = draft_input_hidden_states.shape[-1]
-    draft_embeds_ptr = (
-        draft_input_embeds
-        if draft_input_embeds is not None
-        else draft_input_hidden_states
-    )
-    cached_embeds_ptr = (
-        cached_draft_input_embeds
-        if cached_draft_input_embeds is not None
-        else cached_target_hidden_states
-    )
-    return (num_reqs, triton.cdiv(hidden_size, 1024)), dict(
-        draft_input_embeds_ptr=draft_embeds_ptr,
-        cached_draft_input_embeds_ptr=cached_embeds_ptr,
-        hidden_size=hidden_size,
-        BLOCK_SIZE=1024,
-    )
-
-
 def cache_inputs(
     input_buffers: InputBuffers,
     # [num_tokens, hidden_size]
@@ -1058,19 +954,33 @@ def cache_inputs(
     num_speculative_steps: int,
     use_input_embeds: bool,
 ) -> None:
-    _cache_inputs(
+    hidden_size = draft_input_hidden_states.shape[-1]
+    hidden_block_size = 1024
+    _cache_inputs_kernel[(num_reqs, triton.cdiv(hidden_size, hidden_block_size))](
         input_buffers.input_ids,
         draft_input_embeds,
+        draft_input_embeds.stride(0) if draft_input_embeds is not None else 0,
         draft_input_hidden_states,
+        draft_input_hidden_states.stride(0),
         cached_draft_input_ids,
+        cached_draft_input_ids.stride(0),
         cached_draft_input_embeds,
+        cached_draft_input_embeds.stride(0)
+        if cached_draft_input_embeds is not None
+        else 0,
+        cached_draft_input_embeds.stride(1)
+        if cached_draft_input_embeds is not None
+        else 0,
         cached_target_hidden_states,
+        cached_target_hidden_states.stride(0),
+        cached_target_hidden_states.stride(1),
         idx_mapping,
         last_token_indices,
         input_buffers.query_start_loc,
-        num_reqs=num_reqs,
-        num_speculative_steps=num_speculative_steps,
-        use_input_embeds=use_input_embeds,
+        num_speculative_steps,
+        hidden_size,
+        BLOCK_SIZE=hidden_block_size,
+        USE_INPUT_EMBEDS=use_input_embeds,
     )
 
 

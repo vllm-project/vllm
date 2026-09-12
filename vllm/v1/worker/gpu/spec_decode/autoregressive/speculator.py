@@ -9,11 +9,6 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    DispatchSpec,
-    TritonWarmupTensor,
-    triton_kernel_dispatcher_with_warmup,
-)
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -51,9 +46,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         self.prefill_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: SpeculatorCudaGraphManager | None = None
         self.use_fused_multi_step_decode = False
-
-        if self.num_speculative_steps > 1:
-            _update_draft_inputs.register_warmup(speculator=self)
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
@@ -979,62 +971,6 @@ def _update_draft_inputs_kernel(
         tl.store(seq_lens_ptr + req_idx, seq_len)
 
 
-def _update_draft_inputs_warmup_inputs(
-    *, speculator: AutoRegressiveSpeculator
-) -> dict[str, Any]:
-    hidden = TritonWarmupTensor(
-        speculator.dtype,
-        shape=(1, speculator.hidden_size),
-        strides=(speculator.hidden_size, 1),
-    )
-    steps = speculator.num_speculative_steps
-    return dict(
-        output_draft_tokens=TritonWarmupTensor(
-            speculator.draft_tokens.dtype,
-            shape=(1, steps),
-            strides=tuple(speculator.draft_tokens.stride()),
-        ),
-        next_input_hidden_states=hidden,
-        input_ids=TritonWarmupTensor(torch.int32),
-        positions=TritonWarmupTensor(torch.int64),
-        sample_src_positions=TritonWarmupTensor(torch.int64),
-        seq_lens=TritonWarmupTensor(torch.int32),
-        draft_tokens=TritonWarmupTensor(speculator.draft_tokens.dtype),
-        current_draft_step=TritonWarmupTensor(torch.int64),
-        hidden_states=hidden,
-        max_model_len=speculator.max_model_len,
-        num_speculative_steps=steps,
-        num_reqs=1,
-        advance_draft_positions=speculator.advance_draft_positions,
-    )
-
-
-@triton_kernel_dispatcher_with_warmup(
-    kernel=_update_draft_inputs_kernel,
-    warmup_inputs=_update_draft_inputs_warmup_inputs,
-)
-def _update_draft_inputs(
-    output_draft_tokens: torch.Tensor,
-    next_input_hidden_states: torch.Tensor,
-    input_ids: torch.Tensor,
-    positions: torch.Tensor,
-    sample_src_positions: torch.Tensor,
-    seq_lens: torch.Tensor,
-    draft_tokens: torch.Tensor,
-    current_draft_step: torch.Tensor,
-    hidden_states: torch.Tensor,
-    max_model_len: int,
-    num_speculative_steps: int,
-    num_reqs: int,
-    advance_draft_positions: bool,
-) -> DispatchSpec:
-    hidden_size = hidden_states.shape[-1]
-    return (num_reqs,), dict(
-        hidden_size=hidden_size,
-        BLOCK_SIZE=1024,
-    )
-
-
 def update_draft_inputs(
     draft_tokens: torch.Tensor,
     current_draft_step: torch.Tensor,
@@ -1048,9 +984,12 @@ def update_draft_inputs(
     num_speculative_steps: int,
     advance_draft_positions: bool = True,
 ):
-    _update_draft_inputs(
+    _, hidden_size = hidden_states.shape
+    _update_draft_inputs_kernel[(num_reqs,)](
         output_draft_tokens,
+        output_draft_tokens.stride(0),
         next_input_hidden_states,
+        next_input_hidden_states.stride(0),
         input_buffers.input_ids,
         input_buffers.positions,
         sample_src_positions,
@@ -1058,8 +997,10 @@ def update_draft_inputs(
         draft_tokens,
         current_draft_step,
         hidden_states,
+        hidden_states.stride(0),
+        hidden_size,
         max_model_len,
         num_speculative_steps,
-        num_reqs=num_reqs,
-        advance_draft_positions=advance_draft_positions,
+        BLOCK_SIZE=1024,
+        ADVANCE_DRAFT_POSITIONS=advance_draft_positions,
     )
