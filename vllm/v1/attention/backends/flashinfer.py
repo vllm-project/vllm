@@ -674,18 +674,20 @@ class FlashInferBackend(AttentionBackend):
 
         The mask-owning variant runs on the fa2 prefill kernels, because those
         are the only ones that evaluate a custom ``LogitsMask`` on every KV
-        tile. The constraint on NVFP4 is a kernel-capability one rather than an
-        architectural one: stock fa2/fa3 cannot read an NVFP4 cache, which is
-        why this backend pins the wrapper to ``trtllm-gen`` whenever the cache
-        is NVFP4 -- and trtllm-gen in turn cannot run a custom variant. The two
-        requirements exclude each other wherever an NVFP4 cache is selectable
-        at all, which upstream means SM100. The store-time scale-search
-        variants (e.g. ``nvfp4_4over6``) additionally exist only in the
-        trtllm-gen store kernel.
+        tile. The variant itself handles a packed NVFP4 cache: it declares the
+        per-block scale factors as additional tensors and the forward path
+        hands them over as ``kv_cache_sf``, which a conditional GPU test
+        exercises directly.
 
-        A FlashInfer build whose fa2 kernels can read a packed NVFP4 cache
-        would lift this; the check would then become a capability probe rather
-        than a device-capability test. That combination is not validated here.
+        What is not available is a selectable end-to-end NVFP4 configuration.
+        Upstream, the NVFP4 cache dtype validates only on SM100, where it is
+        served by the trtllm-gen kernels, and those cannot run a custom
+        attention variant. The combination of this variant with the upstream
+        SM100 KV update and cache layout has not been validated, so the gate
+        stays conservative and rejects it rather than advertising a path no
+        test covers. The store-time scale-search variants
+        (e.g. ``nvfp4_4over6``) are a separate matter: their scale search
+        exists only in the trtllm-gen store kernel.
         """
         if cache_dtype is None or cache_dtype in ("auto", "float16", "bfloat16"):
             return None
@@ -705,9 +707,9 @@ class FlashInferBackend(AttentionBackend):
             if is_sm100:
                 return (
                     "mm_prefix is not supported with an NVFP4 KV cache on "
-                    "SM100: stock fa2 cannot read an NVFP4 cache, so the "
-                    "wrapper is pinned to the trtllm-gen kernels, which "
-                    "cannot run the mm-prefix attention variant"
+                    "SM100: the validated upstream NVFP4 path uses the "
+                    "trtllm-gen kernels, which cannot run the mm-prefix "
+                    "attention variant"
                 )
             return None
         return (
