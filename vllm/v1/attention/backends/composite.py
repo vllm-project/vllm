@@ -155,14 +155,10 @@ def create_composite_attention_backend(
     head_sizes: tuple[int, ...] = (),
     kernel_block_sizes: tuple[int, ...] = (),
     device_major: int | None = None,
-    kv_cache_update_variant: int = 0,
 ) -> type[AttentionBackend]:
     """Compose two backends with shared storage and an explicit routing policy."""
     if general_backend.full_cls_name() == causal_backend.full_cls_name():
         return general_backend
-    if kv_cache_update_variant not in (0, 1):
-        raise ValueError("KV cache update variant must be 0 or 1")
-
     general_impl_cls = general_backend.get_impl_cls()
     causal_impl_cls = causal_backend.get_impl_cls()
     general_builder_cls = general_backend.get_builder_cls()
@@ -268,8 +264,7 @@ def create_composite_attention_backend(
             return method(*args, **kwargs)
 
         def do_kv_cache_update(self, *args, **kwargs):
-            impl = self.get_impl_variants()[kv_cache_update_variant]
-            method = impl.do_kv_cache_update  # type: ignore[attr-defined]
+            method = self.general_impl.do_kv_cache_update  # type: ignore[attr-defined]
             return method(*args, **kwargs)
 
     class CompositeAttentionMetadataBuilder(AttentionMetadataBuilder):
