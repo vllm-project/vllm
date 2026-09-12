@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.compressed_tensors import (
@@ -16,6 +17,7 @@ from vllm.models.deepseek_v4.nvidia.model import (
     DeepGemmMegaMoEExperts,
     make_deepseek_v4_expert_params_mapping,
 )
+from vllm.platforms import current_platform
 
 
 class _FakeNvfp4QuantConfig:
@@ -724,6 +726,44 @@ def test_mxfp4_source_weights_are_loaded_for_fp8_fp4_mega_moe(monkeypatch):
     assert torch.all(l1[0][0, :512] == 0x11)
     assert torch.all(l1[0][0, 512:] == 0x22)
     assert torch.all(l2[0][0] == 0x33)
+    assert experts.w13_weight_packed is None
+    assert experts.w2_weight_packed is None
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.is_device_capability_family(100),
+    reason="DeepGEMM MegaMoE requires CUDA SM100",
+)
+def test_mxfp4_source_weights_finalize_with_deep_gemm():
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    experts = DeepGemmMegaMoEExperts(
+        vllm_config,
+        num_experts=1,
+        num_local_experts=1,
+        experts_start_idx=0,
+        top_k=1,
+        hidden_size=128,
+        intermediate_size=512,
+        mma_type="fp8xfp4",
+        source_mxfp4=True,
+    ).cuda()
+    assert experts.w13_weight_packed is not None
+    assert experts.w13_weight_scale is not None
+    assert experts.w2_weight_packed is not None
+    assert experts.w2_weight_scale is not None
+    experts.w13_weight_packed.data.fill_(0x11)
+    experts.w13_weight_scale.data.fill_(127)
+    experts.w2_weight_packed.data.fill_(0x11)
+    experts.w2_weight_scale.data.fill_(127)
+
+    experts.finalize_weights()
+
+    assert experts._transformed_l1_weights is not None
+    assert experts._transformed_l2_weights is not None
     assert experts.w13_weight_packed is None
     assert experts.w2_weight_packed is None
 
