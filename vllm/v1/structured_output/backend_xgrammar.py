@@ -92,6 +92,10 @@ class XgrammarBackend(StructuredOutputBackend):
             )
         elif request_type == StructuredOutputOptions.GRAMMAR:
             ctx = self.compiler.compile_grammar(grammar_spec)
+        elif request_type == StructuredOutputOptions.CHOICE:
+            ctx = self.compiler.compile_grammar(
+                choice_as_grammar(json.loads(grammar_spec))
+            )
         elif request_type == StructuredOutputOptions.REGEX:
             ctx = compile_regex_with_timeout(
                 self.compiler.compile_regex,
@@ -334,8 +338,6 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             raise VLLMValidationError(
                 f"Failed to transform choices into a grammar: {err}"
             ) from err
-        so_params.choice = None
-        so_params.grammar = choice_grammar
         return
 
     if so_params.json:
