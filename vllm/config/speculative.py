@@ -61,6 +61,7 @@ MTPModelTypes = Literal[
     "hy_v4_mtp",
     "gemma4_mtp",
     "inkling_mtp",
+    "glm5_next_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
@@ -619,16 +620,15 @@ class SpeculativeConfig:
         )
         factors.append(uses_aux_hidden_states)
 
-        if uses_aux_hidden_states and self.draft_model_config is not None:
+        if self.draft_model_config is not None:
             factors.append(self.draft_model_config.compute_hash())
-
             # The specific layers used also affect the computation graph.
             layer_ids = getattr(
                 self.draft_model_config.hf_config,
                 "eagle_aux_hidden_state_layer_ids",
                 None,
             )
-            if layer_ids is not None:
+            if layer_ids is not None and uses_aux_hidden_states:
                 # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
 
@@ -679,12 +679,18 @@ class SpeculativeConfig:
                     ],
                 }
             )
-        if hf_config.model_type == "deepseek_v4":
+        if hf_config.model_type in ("deepseek_v4", "deepseek_v41"):
+            # V4.1 has no classic-MTP draft: its checkpoints ship DSpark stages
+            # under ``mtp.*``, so only V4 gets an MTP architecture here. The
+            # DSpark path rewrites ``architectures`` itself and needs only
+            # ``n_predict``; ``method="mtp"`` on V4.1 is rejected below.
+            is_v41 = hf_config.model_type == "deepseek_v41"
             hf_config.model_type = "deepseek_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
-            hf_config.update(
-                {"n_predict": n_predict, "architectures": ["DeepSeekV4MTPModel"]}
-            )
+            overrides = {"n_predict": n_predict}
+            if not is_v41:
+                overrides["architectures"] = ["DeepSeekV4MTPModel"]
+            hf_config.update(overrides)
         if hf_config.model_type in ("pangu_ultra_moe"):
             hf_config.model_type = "pangu_ultra_moe_mtp"
         if hf_config.model_type == "pangu_ultra_moe_mtp":
@@ -796,6 +802,13 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
             )
 
+        if hf_config.architectures[0] in (
+            "NemotronH_Super_Omni_Reasoning_V3",
+            "NemotronH_Omni_Reasoning_V3",
+        ):
+            # Promote VLM's text_config so MTP detection below fires correctly
+            hf_config = hf_config.text_config
+
         if (
             hf_config.model_type in {"nemotron_h", "nemotron_h_puzzle"}
             and hasattr(hf_config, "num_nextn_predict_layers")
@@ -839,7 +852,18 @@ class SpeculativeConfig:
             )
 
         architectures = getattr(hf_config, "architectures", []) or []
-        if initial_architecture == "BailingMoeV3ForCausalLM":
+        if initial_architecture == "BailingMoeV3VLForConditionalGeneration":
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = copy.deepcopy(hf_config.text_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.quantization_config = copy.deepcopy(quantization_config)
+        if initial_architecture in (
+            "BailingMoeV3ForCausalLM",
+            "BailingMoeV3VLForConditionalGeneration",
+        ):
             hf_config.model_type = "bailing_hybrid_v3_mtp"
         elif (
             hf_config.model_type == "bailing_hybrid"
@@ -889,6 +913,9 @@ class SpeculativeConfig:
             is_moe = hf_config.model_type in ("qwen3_5_moe", "qwen3_5_moe_text")
             hf_config.model_type = "qwen3_5_mtp"
             n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
+            if n_predict is None:
+                text_config = get_hf_text_config(hf_config)
+                n_predict = getattr(text_config, "mtp_num_hidden_layers", None)
             hf_config.update(
                 {
                     "n_predict": n_predict,
@@ -1015,6 +1042,12 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_mtp_modules", 1)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["MiniMaxM3MTP"]}
+            )
+        if hf_config.model_type == "glm5_next":
+            hf_config.model_type = "glm5_next_mtp"
+            n_predict = hf_config.num_nextn_predict_layers
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["Glm5NextMTPModel"]}
             )
 
         return hf_config
@@ -1309,6 +1342,18 @@ class SpeculativeConfig:
                 ):
                     self.method = "mtp"
                     if (
+                        self.target_model_config is not None
+                        and self.target_model_config.hf_config.model_type
+                        == "deepseek_v41"
+                    ):
+                        raise ValueError(
+                            "DeepSeek V4.1 has no classic-MTP draft: its "
+                            "checkpoints ship DSpark stages under mtp.* "
+                            "(main_proj/markov_head/confidence_head) and carry "
+                            "no e_proj/h_proj/enorm/hnorm/hc_head weights. Use "
+                            "speculative method 'dspark' instead of 'mtp'."
+                        )
+                    if (
                         self.num_speculative_tokens > 1
                         and self.draft_model_config.hf_config.model_type
                         not in ("step3p5_mtp", "inkling_mtp")
@@ -1371,12 +1416,26 @@ class SpeculativeConfig:
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
                     and "K3DSparkModel" not in self.draft_model_config.architectures
                 ):
-                    # DeepSeek-V4 DSpark reuses the full DeepSeek-V4 config
+                    # DeepSeek-V4(.1) DSpark reuses the full target config
                     # and its weights ship in the target checkpoint.
-                    self.draft_model_config.hf_config.model_type = "deepseek_v4"
-                    self.draft_model_config.hf_config.architectures = [
-                        "DSparkDraftModel"
+                    is_v41 = (
+                        self.target_model_config.hf_config.model_type == "deepseek_v41"
+                    )
+                    draft_hf_config = self.draft_model_config.hf_config
+                    draft_hf_config.model_type = (
+                        "deepseek_v41" if is_v41 else "deepseek_v4"
+                    )
+                    draft_hf_config.architectures = [
+                        "DSparkV41DraftModel" if is_v41 else "DSparkDraftModel"
                     ]
+                    if is_v41:
+                        # hf_config_override set n_predict to the number of
+                        # MTP stages (3), but one DSpark round drafts
+                        # dspark_block_size tokens; num_speculative_tokens
+                        # divisibility is checked against n_predict below.
+                        draft_hf_config.n_predict = getattr(
+                            draft_hf_config, "dspark_block_size", None
+                        ) or getattr(draft_hf_config, "n_predict", None)
                     self.draft_model_config.quantization = (
                         self.target_model_config.quantization
                     )
@@ -1685,7 +1744,7 @@ class SpeculativeConfig:
         This is mostly a copy of the target parallel config, except the tp_size.
         """
         draft_parallel_config = ParallelConfig(
-            pipeline_parallel_size=target_parallel_config.pipeline_parallel_size,
+            pipeline_parallel_size=1,
             tensor_parallel_size=speculative_draft_tensor_parallel_size,
             distributed_executor_backend=target_parallel_config.distributed_executor_backend,
             max_parallel_loading_workers=target_parallel_config.max_parallel_loading_workers,

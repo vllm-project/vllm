@@ -18,7 +18,7 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
 )
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
 from vllm.models.deepseek_v4.common.ops.save_partial_states import (
-    save_partial_states,
+    _SAVE_PARTIAL_STATES_KERNEL,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
@@ -43,10 +43,12 @@ def _prefer_two_stage_compressor() -> bool:
 
 
 def _get_c128_boundary(metadata: CommonAttentionMetadata) -> bool | None:
-    starts = metadata._num_computed_tokens_cpu
-    if starts is None:
+    seq_lens_cpu = metadata.seq_lens_cpu_upper_bound
+    if seq_lens_cpu is None:
         return None
 
+    query_lens = metadata.query_start_loc_cpu[1:] - metadata.query_start_loc_cpu[:-1]
+    starts = seq_lens_cpu - query_lens
     starts_list = starts.tolist()
     query_start_loc = metadata.query_start_loc_cpu.tolist()
     return any(
@@ -116,6 +118,10 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             _, _, num_decode_tokens, _ = split_decodes_and_prefills(
                 common_attn_metadata, decode_threshold=1
             )
+        async_spec_decode = (
+            self.vllm_config.scheduler_config.async_scheduling
+            and self.vllm_config.speculative_config is not None
+        )
         return CompressorMetadata(
             block_table=common_attn_metadata.block_table_tensor.clamp_(min=0),
             slot_mapping=common_attn_metadata.slot_mapping,
@@ -124,7 +130,7 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             num_decode_tokens=num_decode_tokens,
             c128_boundary=(
                 _get_c128_boundary(common_attn_metadata)
-                if self.block_size == 8
+                if self.block_size == 8 and not async_spec_decode
                 else None
             ),
         )
@@ -306,6 +312,18 @@ class DeepseekCompressor(nn.Module):
                 f"Unsupported head_dim for fused quant+cache: {self.head_dim}"
             )
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            _SAVE_PARTIAL_STATES_KERNEL.register_warmup(
+                head_dim=self.head_dim,
+                compress_ratio=self.compress_ratio,
+            )
+            if self.head_dim != 512:
+                from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (  # noqa: E501
+                    _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL,
+                )
+
+                _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL.register_warmup()
+
     def forward(
         self,
         # [num_tokens, 2 * self.coff * self.head_dim]
@@ -351,7 +369,7 @@ class DeepseekCompressor(nn.Module):
         # GEMM; state_cache from this kernel) but neither emits/waits on PDL
         # grid dependency primitives, so launch_pdl=True caused a
         # read-after-write race and non-deterministic output.
-        save_partial_states(
+        _SAVE_PARTIAL_STATES_KERNEL(
             kv=kv,
             score=score,
             ape=self.ape,

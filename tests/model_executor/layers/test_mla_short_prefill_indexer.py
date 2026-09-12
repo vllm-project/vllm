@@ -290,3 +290,113 @@ def test_deepseek_v32_dispatches_selected_mha(
             expected_args[1:],
         )
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_select_candidate_blocks_tolerates_empty_rows():
+    """Full-cudagraph decode pads the batch with seq_len-0 rows. The newest
+    block pin must not index -1 for them (device-side assert); they select
+    no candidate blocks and real rows still pin their newest block."""
+    block_size, topk_blocks = 8, 3
+    logits = torch.zeros(3, 64, device="cuda")
+    logits[0, 3] = 5.0  # block 0 scores highest for row 0
+    logits[2, 9] = 5.0  # block 1 scores highest for row 2
+    row_ks = torch.zeros(3, dtype=torch.int64, device="cuda")
+    row_ke = torch.tensor([40, 0, 17], device="cuda")
+    out = torch.empty(3, topk_blocks, dtype=torch.int32, device="cuda")
+
+    sparse_indexer._select_candidate_blocks(
+        logits, row_ks, row_ke, topk_blocks, block_size, out
+    )
+
+    assert out[1].tolist() == [-1, -1, -1]
+    assert out[0, 0].item() == 4 and 0 in out[0].tolist()  # newest block pinned
+    assert out[2, 0].item() == 2 and 1 in out[2].tolist()
+    assert (out[0] >= 0).all() and (out[2, :2] >= 0).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "width,block_size,k,decode",
+    [
+        (73, 8, 16, False),
+        (97, 3, 7, False),
+        (32768, 8, 2048, False),
+        (32768, 8, 2048, True),
+    ],
+)
+def test_candidate_kernels_preserve_packed_bounds_and_padding(
+    width, block_size, k, decode
+):
+    """Preserve top-k ties, newest blocks, empty rows and candidate clamping."""
+    from vllm.model_executor.kernels.attention.dsa.candidate_blocks import (
+        apply_candidate_mask,
+        select_candidate_blocks,
+    )
+
+    torch.manual_seed(42)
+    rows = 6
+    logits = torch.randn(rows, width * 2, device="cuda")[:, ::2]
+    logits[0, :16] = 0
+    logits[2, 5] = float("nan")
+    starts = torch.tensor([0, 5, 3, 0, 7, 1], device="cuda", dtype=torch.int32)
+    ends = torch.tensor([0, width, width - 1, 1, 11, width], device="cuda")
+    repeat = 1
+    if decode:
+        starts = None
+        ends = torch.tensor([0, 1, width], device="cuda", dtype=torch.int32)
+        repeat = 2
+    ks = torch.zeros(rows, device="cuda", dtype=torch.int64) if decode else starts
+    ke = ends.repeat_interleave(repeat)
+    cols = torch.arange(width, device="cuda")
+    valid = (cols >= ks[:, None]) & (cols < ke[:, None])
+    scores = logits.masked_fill(~valid, -torch.inf)
+    blocks = ((cols - ks[:, None]) // block_size).clamp(min=0).long()
+    nblocks = (width + block_size - 1) // block_size
+    reduced = logits.new_full((rows, nblocks), -torch.inf)
+    reduced.scatter_reduce_(1, blocks, scores, reduce="amax", include_self=True)
+    lengths = ke - ks
+    last = ((lengths - 1) // block_size).clamp(min=0).long()
+    reduced.scatter_(
+        1, last[:, None], torch.where(lengths > 0, torch.inf, -torch.inf)[:, None]
+    )
+    top = reduced.topk(min(k, nblocks), dim=-1)
+    expected = torch.full((rows, k), -1, device="cuda", dtype=torch.int32)
+    expected[:, : top.indices.shape[1]] = torch.where(
+        top.values > -torch.inf, top.indices, -1
+    ).int()
+    actual = torch.empty(rows, k * 2, device="cuda", dtype=torch.int32)[:, ::2]
+    select_candidate_blocks(logits, starts, ends, k, block_size, actual, repeat)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    candidates = actual.clone()
+    candidates[:, 0] = nblocks + 10
+    candidates[:, 1] = 0
+    candidates[:, 2] = 0
+    positions = ks[:, None, None] + candidates.long()[:, :, None] * block_size
+    positions = positions + torch.arange(block_size, device="cuda")
+    keep = torch.zeros(rows, width, device="cuda", dtype=torch.int8)
+    keep.scatter_reduce_(
+        1,
+        positions.clamp(0, width - 1).reshape(rows, -1),
+        (candidates >= 0)[:, :, None]
+        .expand(-1, -1, block_size)
+        .reshape(rows, -1)
+        .to(torch.int8),
+        reduce="amax",
+        include_self=True,
+    )
+    reference = logits.masked_fill((keep == 0) | ~valid, -torch.inf)
+    apply_candidate_mask(logits, starts, ends, candidates, block_size, repeat)
+    torch.testing.assert_close(logits, reference, rtol=0, atol=0, equal_nan=True)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        apply_candidate_mask(logits, starts, ends, candidates, block_size, repeat)
+    for block in (1, -1):
+        candidates.fill_(-1)
+        candidates[:, 0] = block
+        logits.fill_(3.0)
+        graph.replay()
+        keep = valid & (block >= 0) & ((cols - ks[:, None]) // block_size == block)
+        reference = torch.where(keep, 3.0, -torch.inf)
+        torch.testing.assert_close(logits, reference, rtol=0, atol=0)

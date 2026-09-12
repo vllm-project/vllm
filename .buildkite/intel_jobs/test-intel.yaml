@@ -15,6 +15,7 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
   - label: "XPU example Test"
+    key: xpu-example-test
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 50
@@ -50,6 +51,7 @@ steps:
         python3 examples/basic/offline_inference/generate.py --model INCModel/Qwen3-30B-A3B-Instruct-2507-MXFP4-LLMC --enforce-eager -tp 2 --max-model-len 8192
         '
   - label: "XPU W8A8 FP8 Linear Examples"
+    key: xpu-w8a8-fp8-linear-examples
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 60
@@ -77,6 +79,7 @@ steps:
         python3 examples/basic/offline_inference/generate.py --linear-backend torch --model meta-llama/Llama-3.2-1B-Instruct --quantization fp8 --enforce-eager --max-model-len 4096
         '
   - label: "XPU V1 test"
+    key: xpu-v1-test
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 70
@@ -107,6 +110,7 @@ steps:
         pytest -v -s v1/kv_connector/unit --ignore=v1/kv_connector/unit/test_lmcache_integration.py --ignore=v1/kv_connector/unit/test_hf3fs_client.py --ignore=v1/kv_connector/unit/test_hf3fs_connector.py --ignore=v1/kv_connector/unit/test_hf3fs_metadata_server.py --ignore=v1/kv_connector/unit/test_offloading_connector.py'
     parallelism: 2
   - label: "XPU server test"
+    key: xpu-server-test
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 45
@@ -130,6 +134,7 @@ steps:
         pytest -v -s entrypoints/multimodal/openai/chat_completion/test_audio_in_video.py &&
         pytest -v -s benchmarks/test_serve_cli.py'
   - label: "XPU quantization test"
+    key: xpu-quantization-test
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 30
@@ -145,13 +150,20 @@ steps:
     source_file_dependencies:
       - vllm/
       - .buildkite/intel_jobs/test-intel.yaml 
+    # TODO: XPU fused MoE + model runner V2 currently hangs on some
+    # pre-quantized models, e.g.
+    # quantization/test_online.py::test_online_quantization_loads_real_weights[nm-testing/tinysmokeqwen3moe-W4A16-first-only-CTstable]
+    # Remove the VLLM_USE_V2_MODEL_RUNNER=0 override below once the hang is
+    # root-caused and fixed.
     commands:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'cd tests &&
+        export VLLM_USE_V2_MODEL_RUNNER=0 &&
         pytest -v -s quantization/test_auto_round.py &&
         pytest -v -s quantization/test_online.py'
   - label: "XPU compressed tensors FP8 test"
+    key: xpu-compressed-tensors-fp8-test
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 60
@@ -176,6 +188,7 @@ steps:
         pytest -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_fp8 &&
         pytest -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_fp8_block_enabled'
   - label: "XPU Graph"
+    key: xpu-graph
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 60
