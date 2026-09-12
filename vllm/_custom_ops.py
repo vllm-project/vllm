@@ -2828,6 +2828,8 @@ def concat_and_cache_mla_grouped(
     block_size: int,
     block_stride: int,
     entry_stride: int,
+    kv_scales: torch.Tensor | None = None,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     torch.ops._C_cache_ops.concat_and_cache_mla_grouped(
         kv_c,
@@ -2837,6 +2839,8 @@ def concat_and_cache_mla_grouped(
         block_size,
         block_stride,
         entry_stride,
+        kv_scales,
+        kv_cache_dtype,
     )
 
 
@@ -3004,6 +3008,9 @@ def cp_gather_and_upconvert_fp8_kv_cache(
     workspace_starts: torch.Tensor,
     batch_size: int,
     seq_starts: torch.Tensor | None = None,
+    host_cache: torch.Tensor | None = None,
+    host_row_ids: torch.Tensor | None = None,
+    device_row_ids: torch.Tensor | None = None,
 ) -> None:
     """Gather and upconvert FP8 KV cache to BF16 workspace.
 
@@ -3014,9 +3021,20 @@ def cp_gather_and_upconvert_fp8_kv_cache(
         workspace_starts: Workspace start offsets [num_reqs]
         batch_size: Number of requests
         seq_starts: Optional source sequence offsets [num_reqs]
+        host_cache: Optional pinned host rows used for non-resident entries
+        host_row_ids: Host source row for each remapped cache row
+        device_row_ids: Device source row, or -1, for each remapped cache row
     """
     torch.ops._C_cache_ops.cp_gather_and_upconvert_fp8_kv_cache(
-        src_cache, dst, block_table, workspace_starts, batch_size, seq_starts
+        src_cache,
+        dst,
+        block_table,
+        workspace_starts,
+        batch_size,
+        seq_starts,
+        host_cache,
+        host_row_ids,
+        device_row_ids,
     )
 
 
