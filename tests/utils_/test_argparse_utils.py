@@ -468,6 +468,30 @@ def test_compilation_mode_string_values(parser):
     args = parser.parse_args(["-cc.mode=none"])
     assert args.compilation_config == {"mode": "none"}
 
+
+def test_help_keyword_does_not_leak_between_parse_calls(parser, capsys):
+    """A `--help=<keyword>` on one parse_args() call must not affect a
+    later plain `--help` (or `--help=<other keyword>`) call, whether on
+    the same parser instance or a different one."""
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help=image-input-type"])
+    filtered_help = capsys.readouterr().out
+    assert "--image-input-type" in filtered_help
+    assert "--batch-size" not in filtered_help
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help"])
+    full_help = capsys.readouterr().out
+    assert "--image-input-type" in full_help
+    assert "--batch-size" in full_help
+
+    other_parser = FlexibleArgumentParser()
+    other_parser.add_argument("--unrelated-flag", action="store_true")
+    with pytest.raises(SystemExit):
+        other_parser.parse_args(["--help"])
+    other_help = capsys.readouterr().out
+    assert "--unrelated-flag" in other_help
+
     args = parser.parse_args(["-cc.mode=vllm_compile"])
     assert args.compilation_config == {"mode": "vllm_compile"}
 
