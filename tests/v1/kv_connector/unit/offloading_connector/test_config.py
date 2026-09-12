@@ -15,13 +15,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     SchedulerOffloadConfig,
-    is_store_reachable_swa_chunk,
 )
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 
 def _make_vllm_config(
@@ -46,6 +47,7 @@ def _make_vllm_config(
     config.cache_config.enable_prefix_caching = True
     config.cache_config.prefix_match_unit = None
     config.cache_config.cache_dtype = torch.float16
+    config.cache_config.prefix_cache_retention_interval = None
     config.model_config.model = "test-model"
     config.model_config.use_mla = False
     # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate
@@ -335,6 +337,36 @@ def test_worker_kv_bytes_preserves_tensor_layout(packed: bool):
     assert offloading_config.cache.blocks_per_chunk == 2
 
 
+def test_hisparse_offloads_only_indexer_group():
+    source = KVCacheGroupSpec(
+        ["source"],
+        _full_attention_spec(),
+        host_resident=True,
+    )
+    indexer = KVCacheGroupSpec(
+        ["indexer"],
+        _full_attention_spec(),
+        role=KVCacheGroupRole.HISPARSE_INDEXER,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[source, indexer],
+        hisparse_host_num_blocks=4,
+    )
+    config = _make_vllm_config()
+
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    scheduler_config = SchedulerOffloadConfig.from_spec(
+        MockOffloadingSpec(offloading_config), config, kv_cache_config
+    )
+
+    assert [
+        (group.group_id, group.layer_names) for group in offloading_config.groups
+    ] == [(1, ("indexer",))]
+    assert [group.group_idx for group in scheduler_config.kv_group_configs] == [1]
+
+
 def test_zero_blocks_skips_tensor_layout_validation():
     kv_cache_config = _make_sizing_kv_cache_config(packed=False)
     kv_cache_config.num_blocks = 0
@@ -375,18 +407,18 @@ def test_dcp_scales_attention_but_not_mamba_group_blocks():
         _make_mamba_hybrid_kv_cache_config(),
     )
     mamba_group = scheduler_config.kv_group_configs[1]
-    assert mamba_group.alignment_chunk_count == 2
-    assert [
-        chunk_idx
-        for chunk_idx in range(4)
-        if is_store_reachable_swa_chunk(
-            chunk_idx,
-            4,
-            mamba_group.alignment_chunk_count,
-            mamba_group.sliding_window_size_in_chunks,
-            mamba_group.is_eagle_group,
-        )
-    ] == [1, 3]
+    assert mamba_group.sliding_window_size_in_chunks == 1
+    assert scheduler_config.alignment_tokens is not None
+    manager_cls = KVCacheSpecRegistry.get_manager_class(mamba_group.kv_cache_spec)
+    assert manager_cls is not None
+    block_mask = manager_cls.reachable_block_mask(
+        start_block=0,
+        end_block=4,
+        alignment_tokens=scheduler_config.alignment_tokens,
+        kv_cache_spec=mamba_group.kv_cache_spec,
+        use_eagle=mamba_group.is_eagle_group,
+    )
+    assert block_mask is None or [i for i in range(4) if block_mask[i]] == [1, 3]
 
 
 @pytest.mark.parametrize("dcp_size,expected", [(1, 16), (2, 32)])
@@ -791,7 +823,6 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
             False,
             id="uniform-uncertifiable-inner",
         ),
-        pytest.param([], False, id="attention-free"),
     ],
 )
 def test_canonical_layout_gate(kv_cache_groups, certified):

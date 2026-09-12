@@ -147,13 +147,13 @@ firewall configuration instructions.
 
 ### Overview
 
-The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentication for vLLM's HTTP server, but **only for OpenAI-compatible API endpoints under the `/v1` path prefix**, and other similar `/v2`, `/inference` path prefix**. Many other sensitive endpoints are exposed on the same HTTP server without any authentication enforcement.
+The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentication for vLLM's HTTP server, but **only for endpoints under the `/v1`, `/v2`, `/inference`, and `/cohere` path prefixes**. Many other sensitive endpoints are exposed on the same HTTP server without any authentication enforcement.
 
 **Important:** Do not rely exclusively on `--api-key` for securing access to vLLM. Additional security measures are required for production deployments.
 
 ### Protected Endpoints (Require API Key)
 
-When `--api-key` is configured, the following `/v1` endpoints require Bearer token authentication:
+When `--api-key` is configured, the following endpoints require Bearer token authentication:
 
 - `/v1/models` - List available models
 - `/v1/chat/completions` - Chat completions
@@ -170,6 +170,7 @@ When `--api-key` is configured, the following `/v1` endpoints require Bearer tok
 - `/v1/messages/render` - Render Anthropic-compatible messages (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
 - `/v1/messages/count_tokens` - Count tokens for Anthropic messages
 - `/v1/responses` - Create a response
+- `/v1/responses/render` - Render a self-contained response request (available on `vllm serve` only when `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1`, or on `vllm launch render` unless explicitly disabled)
 - `/v1/responses/{response_id}` - Retrieve a response
 - `/v1/responses/{response_id}/cancel` - Cancel a response
 - `/v1/score` - Scoring API
@@ -248,7 +249,7 @@ These endpoints are only available when profiling is enabled and should only be 
 
 An attacker who can reach the vLLM HTTP server can:
 
-1. **Bypass authentication** by using non-`/v1` endpoints like `/invocations`, `/inference/v1/generate`, `/generative_scoring`, `/pooling`, `/classify`, `/score`, or `/rerank` to run arbitrary inference without credentials
+1. **Bypass authentication** by using endpoints outside the protected path prefixes, such as `/invocations`, `/generative_scoring`, `/pooling`, `/classify`, `/score`, or `/rerank`, to run arbitrary inference without credentials
 2. **Cause denial of service** by calling `/pause`, `/scale_elastic_ep`, or `/abort_requests` without a token
 3. **Access operational controls** to manipulate server state (e.g., pausing generation, updating model weights via `/update_weights`)
 4. **If `--enable-tokenizer-info-endpoint` is set:** Access sensitive tokenizer configuration including chat templates, which may reveal prompt engineering strategies or other implementation details
@@ -345,7 +346,7 @@ vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` en
 
 1. **Only allowlist plugins you trust.** Set `VLLM_PLUGINS` to the exact plugin names you intend to run and never wildcard or copy an allowlist between deployments without reviewing what each named plugin does.
 2. **Audit routes before deploying.** A plugin's `attach_router` can add routes under any path, including ones that duplicate existing `/v1/*` paths. There is currently no route conflict enforcement (tracked as a follow-up to RFC [#46565](https://github.com/vllm-project/vllm/issues/46565)), so a malicious or buggy plugin can **shadow a core route** and silently replace its behavior. Prefer plugins that namespace their routes under a distinct prefix (e.g. `/plugins/<plugin-name>/...`) instead of reusing `/v1/...` and review `app.routes` after startup if you need certainty about what is actually being served.
-3. **Treat plugin routes like any other unauthenticated by default surface.** `--api-key` only protects the `/v1`, `/v2`, and `/inference` path prefixes (see [API Key Authentication Limitations](#api-key-authentication-limitations)). A plugin route outside those prefixes is unauthenticated unless the plugin implements its own authentication. Deploy behind a reverse proxy that allowlists only the plugin routes you intend to expose externally.
+3. **Treat plugin routes like any other unauthenticated by default surface.** `--api-key` only protects the `/v1`, `/v2`, `/inference`, and `/cohere` path prefixes (see [API Key Authentication Limitations](#api-key-authentication-limitations)). A plugin route outside those prefixes is unauthenticated unless the plugin implements its own authentication. Deploy behind a reverse proxy that allowlists only the plugin routes you intend to expose externally.
 4. **Remember the `vllm.general_plugins` pairing.** A plugin that also needs new engine side behavior ships that half separately via `vllm.general_plugins` which loads in every worker process under the default (load all unless restricted) posture. Allowlisting the endpoint plugin does not by itself restrict its paired engine side plugin. Need to review both.
 
 ## gRPC Interface

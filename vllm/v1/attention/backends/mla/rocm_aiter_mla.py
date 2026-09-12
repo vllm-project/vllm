@@ -22,6 +22,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, largest_power_of_2_divisor
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -796,7 +797,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # build) keeps it off the per-layer forward path where a sync would
         # break CUDA Graph capture.  Using the device-side reduce_indptr is
         # acceptable since build is allowed to incur an occasional sync.
-        num_partial_tiles = int(self.fp8_ps_reduce_indptr[-1].item())
+        with gpu_sync_allowed():
+            num_partial_tiles = int(self.fp8_ps_reduce_indptr[-1].item())
 
         # Attach PS metadata to the metadata object so forward_mha can read it.
         metadata.fp8_prefill_qo_indptr = qo_indptr
@@ -881,7 +883,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         rows. A DCP rank holds ``1/dcp_world_size`` of the sequence, so the
         request's block table is always wider than the pages a row can reach.
         """
-        pages_per_block = self.kernel_block_size // self._segmented_page_size
+        kernel_block_size = self.kernel_block_size
+        page_size = self._segmented_page_size
+        assert kernel_block_size is not None
+        assert page_size is not None
+        pages_per_block = kernel_block_size // page_size
         max_local_pages = row_block_table.shape[1]
         max_local_blocks = cdiv(max_local_pages, pages_per_block)
         assert max_local_blocks <= block_table.shape[1], (
@@ -1417,6 +1423,7 @@ class AiterMLAHelper:
 class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     # DCP decode paths return natural-log softmax LSE for the cross-rank merge.
     can_return_lse_for_decode: bool = True
+    supports_dcp: bool = True
     # Measured on gfx950: aiter.mla.mla_decode_fwd(return_lse=True) matches
     # logsumexp to fp32 exactly, and merge_mla_segments_triton converts AITER's
     # base-2 segment statistics with LOGE2. Stated rather than inherited because
