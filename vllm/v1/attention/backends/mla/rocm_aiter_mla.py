@@ -186,6 +186,30 @@ def _segmented_mla_decode_supported() -> bool:
     return True
 
 
+def _uniform_causal(causal: "bool | torch.Tensor") -> bool:
+    """Reduce ``CommonAttentionMetadata.causal`` to a single bool.
+
+    The field is ``bool | torch.Tensor``, a tensor carrying one flag per
+    request, and it cannot simply be tested: a tensor of all-false is truthy,
+    and ``bool()`` on a multi-element one raises.
+
+    A per-request flag has nowhere to go here -- causality is a property of the
+    work metadata, which is built once per step -- and the shared MLA builder
+    already collapses the field with ``causal is False``, so a tensor never
+    selects its non-causal route. This agrees with that, so the backend and the
+    layer cannot disagree about which route is live, and refuses a tensor that
+    actually asks for non-causal attention instead of quietly masking it.
+    """
+    if not isinstance(causal, torch.Tensor):
+        return bool(causal)
+    if causal.numel() and not bool(causal.all()):
+        raise NotImplementedError(
+            "AITER MLA does not support per-request causality; "
+            "CommonAttentionMetadata.causal must be a scalar bool."
+        )
+    return True
+
+
 def _segmented_dcp_verify_supported(dcp_world_size: int, cp_interleave: int) -> bool:
     """Whether this configuration can serve DCP verify on segmented MLA.
 
@@ -260,6 +284,15 @@ class AiterMLABackend(MLACommonBackend):
     def get_builder_cls() -> type["AiterMLAMetadataBuilder"]:
         return AiterMLAMetadataBuilder
 
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        # A non-causal multi-token block is issued as one qseqlen=1 decode per
+        # query position, each over the request's whole KV range. At qseqlen=1
+        # there is no intra-block masking left to apply, so the result is
+        # non-causal by construction rather than by asking the kernel for it.
+        # See _forward_decode_non_causal.
+        return True
+
 
 @dataclass
 class AiterMLADCPVerifyMetadata:
@@ -311,6 +344,15 @@ class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     use_gluon_verify: bool = False
     # Whether persistent MLA metadata was computed
     has_persistent_metadata: bool = False
+    # This step's causality, reduced to a scalar by _uniform_causal in build()
+    # so the forward paths never re-test a tensor (which would sync per layer).
+    causal: bool = True
+    # Set when the block is non-causal and max_qo_len > 1, in which case the
+    # metadata above is sized for qseqlen=1 and the decode runs once per query
+    # position over the whole KV range. See _forward_decode_non_causal.
+    non_causal_verify: bool = False
+    # qo_indptr for one query token per row, i.e. the identity indptr.
+    row_qo_indptr: torch.Tensor | None = None
 
 
 @dataclass
@@ -347,6 +389,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     #  https://github.com/vllm-project/vllm/issues/22945
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
+    supports_non_causal_multi_token_decode: ClassVar[bool] = True
 
     @staticmethod
     def _uniform_padded_mtp_qo_len(
@@ -422,6 +465,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # persistent gate below and makes aiter raise a KeyError mid-run.
         self._mtp_decode_qlen = self.reorder_batch_threshold or 1
 
+        # Causality belongs to the batch, not the KV cache group
+        # (MLAAttentionSpec.merge ORs the group flag over every layer in it),
+        # so build() records the step's value here for _build_decode.
+        self._build_causal = True
+
         # Store the kernel block size from the spec. When kernel_block_size=1
         # (no spec-dec), behavior is identical to the original. When > 1
         # (e.g. 16 with Eagle3), we expand block-level indices into per-token
@@ -446,6 +494,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # once and reuse slices in both eager and cudagraph modes.
         self.paged_kv_last_page_len = torch.ones(
             max_num_reqs, dtype=torch.int32, device=device
+        )
+
+        # qo_indptr for the non-causal route, where every row is one query
+        # token: row i owns exactly q[i], so the indptr is the identity.
+        self.row_qo_indptr = torch.arange(
+            max_num_reqs + 1, dtype=torch.int32, device=device
         )
 
         # Persistent buffer for paged_kv_indices to avoid blocking boolean mask
@@ -975,6 +1029,42 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._supports_segmented_dcp_verify and max_qo_len > 1
         )
 
+        # A non-causal multi-token block is re-expressed as qlen=1 rows, one
+        # per query position, each reading the request's whole KV range. Only
+        # the plain ASM decode can do that: the Gluon verify entry and the
+        # segmented DCP verify both bound each query position in-kernel, and
+        # neither has a way to express the untruncated range, so a non-causal
+        # block reaching them would come back causally masked.
+        non_causal_verify = not self._build_causal and max_qo_len > 1
+        if non_causal_verify:
+            if use_gluon_verify:
+                raise NotImplementedError(
+                    "AITER MLA small-head Gluon verify applies its causal "
+                    "bound in-kernel and cannot serve a non-causal block. It "
+                    "needs an FP8 KV cache or >= 16 query heads to reach the "
+                    "ASM decode instead."
+                )
+            if use_segmented_dcp_verify:
+                raise NotImplementedError(
+                    "AITER MLA segmented DCP verify builds causally bounded "
+                    "rows and cannot serve a non-causal block."
+                )
+            # The replay slices query positions with a uniform stride, so every
+            # request has to contribute exactly max_qo_len rows. Checking the
+            # row total alone is not enough: a mixed batch of, say, lengths
+            # (4, 4, 2, 2) still divides by a stride of 4, and would then read
+            # rows belonging to the wrong request without failing. Done on the
+            # CPU copy of query_start_loc so the hot path stays sync-free.
+            # Zero-length entries are the full-CG dummy requests, which
+            # _uniform_padded_mtp_qo_len has already forced to one qlen.
+            uneven_qo_len = qo_len[qo_len > 0] if pad_uniform_mtp else qo_len
+            if not bool(torch.all(uneven_qo_len == max_qo_len)):
+                raise NotImplementedError(
+                    "AITER MLA non-causal multi-token decode requires every "
+                    f"request in the block to have {max_qo_len} query rows, "
+                    f"got {qo_len.tolist()}."
+                )
+
         # Segmented DCP verify carries its own per-row subpage table, so the
         # flat per-token view is dead work for it. Leave the buffer alone and
         # hand the metadata None, so a future reader cannot pick up whatever
@@ -1040,6 +1130,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # running the same asm kernels. The predicates are disjoint -- decode
         # is qlen==1, verify is qlen>1 -- and cover both Gluon entries plus the
         # segmented DCP verify.
+        # The non-causal route issues one qseqlen=1 decode per query position,
+        # so both the kernel choice and the work metadata are sized for a
+        # single query token even though the block carries max_qo_len of them.
+        kernel_qo_len = 1 if non_causal_verify else max_qo_len
+        kernel_qo_indptr = (
+            self.row_qo_indptr[: num_kernel_reqs + 1]
+            if non_causal_verify
+            else qo_indptr
+        )
+
         use_persistent_metadata = (
             not use_gluon_decode
             and not use_gluon_verify
@@ -1049,24 +1149,33 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             # keeps the schedule -- its fold rejects non-persistent outright.
             and (
                 self._decode_num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
-                or max_qo_len <= AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN
+                or kernel_qo_len <= AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN
                 or is_quantized_kv_cache(self._kv_cache_dtype_str)
             )
-            and max_qo_len >= 1
-            and max_qo_len <= self._mtp_decode_qlen
+            and kernel_qo_len >= 1
+            and kernel_qo_len <= self._mtp_decode_qlen
         )
         if use_persistent_metadata:
             from aiter import get_mla_metadata_v1
 
             uni_qo_len = (
-                max_qo_len if pad_uniform_mtp or torch.all(qo_len == max_qo_len) else -1
+                kernel_qo_len
+                if non_causal_verify
+                or pad_uniform_mtp
+                or torch.all(qo_len == max_qo_len)
+                else -1
             )
             get_mla_metadata_v1(
-                qo_indptr,
+                kernel_qo_indptr,
                 paged_kv_indptr,
                 paged_kv_last_page_len,
                 self._num_attention_heads,
                 1,
+                # is_causal, left True unconditionally: the decode kernel masks
+                # causally whatever this says, so it cannot be used to request
+                # non-causal attention. Non-causal blocks get their semantics
+                # from being split into qseqlen=1 rows above, where there is no
+                # intra-block position to mask.
                 True,
                 self._mla_work_meta_data,
                 self._mla_work_info_set,
@@ -1076,7 +1185,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 self._mla_reduce_partial_map,
                 page_size=1,
                 kv_granularity=16,
-                max_seqlen_qo=max_qo_len,
+                max_seqlen_qo=kernel_qo_len,
                 uni_seqlen_qo=uni_qo_len,
                 fast_mode=True,
                 dtype_q=self._mla_q_dtype,
@@ -1127,6 +1236,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             use_gluon_verify=use_gluon_verify,
             attn_out_dtype=self.decode_attn_out_dtype,
             has_persistent_metadata=has_persistent_metadata,
+            causal=self._build_causal,
+            non_causal_verify=non_causal_verify,
+            row_qo_indptr=kernel_qo_indptr if non_causal_verify else None,
         )
 
         return attn_metadata
@@ -1137,6 +1249,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> AiterMLAMetadata:
+        # Set before super().build(), which is what calls _build_decode.
+        self._build_causal = _uniform_causal(common_attn_metadata.causal)
         attn_metadata = super().build(
             common_prefix_len, common_attn_metadata, fast_build
         )
@@ -1832,9 +1946,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 device=q_nope.device,
             )
             kv_buffer = kv_c_and_k_pe_cache.reshape(-1, kv_c_and_k_pe_cache.shape[-1])
-            assert attn_metadata.causal, (
-                "AITER MLA small-head verify MTP is causal-only"
-            )
+            if not decode.causal:
+                raise NotImplementedError(
+                    "AITER MLA small-head Gluon verify applies its causal "
+                    "bound in-kernel and cannot serve a non-causal block."
+                )
             # Hand mla_gluon its 4-D MTP entry instead of an expanded
             # per-verify-token paged-KV view. The flat query layout is already
             # row-major (r * qlen + t), so unflatten is a free view. mla_gluon
@@ -1870,6 +1986,15 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         verify = decode.dcp_verify
         if verify is not None:
+            # The row view this path consumes is built with each query
+            # position's range truncated to context + q_pos + 1, and the
+            # segmented kernel is called with causal=True, so a non-causal
+            # block would come back silently masked rather than rejected.
+            if not decode.causal:
+                raise NotImplementedError(
+                    "AITER MLA segmented DCP verify builds causally bounded "
+                    "rows and cannot serve a non-causal block."
+                )
             if type(q) is tuple:
                 q_nope, q_pe = q
             else:
@@ -1941,6 +2066,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 reduce_partial_map=attn_metadata.reduce_partial_map,
             )
 
+        if decode.non_causal_verify:
+            return self._forward_decode_non_causal(
+                mla_padded_q, kv_buffer, o, decode, mla_kwargs
+            )
+
         lse = None
         if self.dcp_world_size > 1:
             # The vLLM custom-op wrapper exposes only the in-place output and
@@ -1981,3 +2111,74 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         if lse is not None:
             lse = AiterMLAHelper.get_mla_unpadded_lse(self._decode_num_heads, lse)
         return output, lse
+
+    def _forward_decode_non_causal(
+        self,
+        mla_padded_q: torch.Tensor,
+        kv_buffer: torch.Tensor,
+        o: torch.Tensor,
+        decode: AiterMLADecodeMetadata,
+        mla_kwargs: dict,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Serve a non-causal multi-token block on the ASM decode.
+
+        Every row of a request must see that request's whole KV range, and
+        seq_lens already spans the block, so the ordinary per-request paged-KV
+        view *is* that range. Issuing one qseqlen=1 decode per query position
+        therefore hands each row the untruncated range, and at qseqlen=1 there
+        is no intra-block position left for the kernel to mask, so causality
+        never enters the result.
+
+        Going through qseqlen=1 is what makes this correct rather than
+        cosmetic: the persistent decode kernel masks causally whatever
+        is_causal get_mla_metadata_v1 was given, so asking for is_causal=False
+        on a qseqlen>1 block still returns causally masked output.
+        tests/kernels/attention/test_rocm_aiter_mla_non_causal.py pins both
+        halves of that.
+
+        The cost is one pass over the KV range per query position instead of
+        one for the whole block -- the same KV traffic a per-row expanded page
+        list would move, without needing a qlen-fold page-index buffer.
+        """
+        if self.dcp_world_size > 1:
+            raise NotImplementedError(
+                "AITER MLA non-causal multi-token decode is not implemented "
+                "for decode context parallelism."
+            )
+        qlen = int(decode.max_qo_len or 1)
+        num_rows = mla_padded_q.shape[0]
+        num_reqs = num_rows // qlen
+        if num_reqs * qlen != num_rows:
+            raise ValueError(
+                f"non-causal block of {num_rows} rows is not a multiple of qlen {qlen}"
+            )
+        # Use the indptr the work metadata was built against rather than
+        # re-slicing it, so a cudagraph-padded batch stays consistent with the
+        # rest of the decode path.
+        row_qo_indptr = decode.row_qo_indptr
+        assert row_qo_indptr is not None
+
+        for pos in range(qlen):
+            # The block is row-major (r * qlen + t), so one query position is
+            # a strided slice; the contiguous copy is num_reqs rows, not the
+            # whole block. mla_decode_fwd writes its output in place, so the
+            # destination has to be contiguous too.
+            q_pos = mla_padded_q[pos::qlen].contiguous()
+            o_pos = torch.empty(
+                num_reqs, o.shape[1], o.shape[2], dtype=o.dtype, device=o.device
+            )
+            rocm_aiter_ops.mla_decode_fwd(
+                q_pos,
+                kv_buffer,
+                o_pos,
+                self.scale,
+                row_qo_indptr,
+                1,
+                decode.paged_kv_indptr,
+                decode.paged_kv_indices,
+                decode.paged_kv_last_page_len,
+                **mla_kwargs,
+            )
+            o[pos::qlen] = o_pos
+
+        return AiterMLAHelper.get_mla_unpadded_o(self._decode_num_heads, o), None
