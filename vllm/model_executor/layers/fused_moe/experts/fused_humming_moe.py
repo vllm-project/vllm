@@ -21,6 +21,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.fused_globalize_align_block_size import (
+    fused_globalize_align_block_size,
+)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
@@ -769,6 +772,10 @@ class HummingIndexedExperts(HummingExpertsBase):
 
         return HummingGemmType.INDEXED
 
+    @staticmethod
+    def fuses_recv_globalize() -> bool:
+        return envs.VLLM_USE_FUSED_GLOBALIZE_ALIGN
+
     def prepare_humming_moe_kwargs(
         self,
         topk_ids: torch.Tensor,
@@ -790,13 +797,37 @@ class HummingIndexedExperts(HummingExpertsBase):
             )
             moe_block_size = 64
 
-        sorted_ids, expert_ids, num_tokens_padded = moe_align_block_size(
-            topk_ids=topk_ids,
-            block_size=moe_block_size,
-            num_experts=self.global_num_experts,
-            expert_map=expert_map,
-            ignore_invalid_experts=True,
+        # When DeepEP-v2 deferred globalization, fuse globalize + align + sort
+        # into one launch (topk_ids globalized in place); else align only.
+        rank_expert_offset = (
+            expert_tokens_meta.rank_expert_offset
+            if expert_tokens_meta is not None
+            else None
         )
+        psum = (
+            expert_tokens_meta.psum_recv_per_rank
+            if expert_tokens_meta is not None
+            else None
+        )
+        if rank_expert_offset is not None and psum is not None:
+            _, sorted_ids, expert_ids, num_tokens_padded = (
+                fused_globalize_align_block_size(
+                    recv_topk_idx=topk_ids,
+                    psum_recv_per_rank=psum,
+                    rank_expert_offset=rank_expert_offset,
+                    global_num_experts=self.global_num_experts,
+                    local_num_experts=self.num_experts,
+                    block_size=moe_block_size,
+                )
+            )
+        else:
+            sorted_ids, expert_ids, num_tokens_padded = moe_align_block_size(
+                topk_ids=topk_ids,
+                block_size=moe_block_size,
+                num_experts=self.global_num_experts,
+                expert_map=expert_map,
+                ignore_invalid_experts=True,
+            )
 
         moe_common_kwargs = {
             "sorted_ids": sorted_ids,
