@@ -4,6 +4,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm.config import set_current_vllm_config
@@ -12,8 +13,12 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils import flashinfer as fi_utils
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseSM120Backend,
+)
+from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
+    FlashInferMLASparseSM120Impl,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -62,6 +67,42 @@ def test_v32_glm_sm120_backend_accepts_glm_block_size(
         )
 
     assert invalid_reasons == []
+
+
+def _make_sm120_impl(
+    monkeypatch,
+    *,
+    model_type: str = "deepseek_v32",
+    num_heads: int = 8,
+) -> FlashInferMLASparseSM120Impl:
+    monkeypatch.setattr(fi_utils, "has_flashinfer_sparse_mla_sm120", lambda: True)
+    topk = torch.zeros((4, 2048), dtype=torch.int32)
+    with set_current_vllm_config(_fake_vllm_config(model_type)):
+        return FlashInferMLASparseSM120Impl(
+            num_heads=num_heads,
+            head_size=576,
+            scale=1.0,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="fp8_ds_mla",
+            logits_soft_cap=None,
+            attn_type=AttentionType.DECODER,
+            kv_sharing_target_layer_name=None,
+            indexer=None,
+            kv_lora_rank=512,
+            qk_nope_head_dim=192,
+            qk_rope_head_dim=64,
+            topk_indices_buffer=topk,
+        )
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v32", "glm4_moe", "hy_v4"])
+def test_sm120_impl_reads_fp8_ds_mla_scales_as_arbitrary_fp32(
+    monkeypatch, model_type: str
+) -> None:
+    impl = _make_sm120_impl(monkeypatch, model_type=model_type)
+    assert impl.kv_scale_format == "arbitrary_fp32"
 
 
 def test_sm120_dsv4_capability_checks_exact_dispatch_shape(monkeypatch) -> None:
