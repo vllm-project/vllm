@@ -185,9 +185,20 @@ class BaseThinkingReasoningParser(ReasoningParser):
 
         Uses a depth counter so nested spans are handled safely and stray end
         tokens do not drive the counter negative.
+
+        Some models (e.g. DeepSeek-R1) use a chat template that emits the
+        opening start token into the prompt rather than into the generated
+        output. In that case the output begins directly with reasoning and
+        only contains the end token, so the reasoning span is opened
+        implicitly at the beginning to match ``extract_reasoning``.
         """
         count = 0
         depth = 0
+        # Handle models that begin reasoning without emitting a start token:
+        # when an end token is present but no start token is, the leading
+        # tokens up to the first end token are reasoning content.
+        if self.start_token_id not in token_ids and self.end_token_id in token_ids:
+            depth = 1
         for token_id in token_ids:
             if token_id == self.start_token_id:
                 depth += 1

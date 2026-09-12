@@ -184,6 +184,21 @@ class TestBaseThinkingReasoningParserMethods:
         # Tokens 1,2,3 are inside reasoning (depth>0) => 3 tokens
         assert parser.count_reasoning_tokens(token_ids) == 3
 
+    def test_count_reasoning_tokens_without_start_token(self, test_tokenizer):
+        """Count leading reasoning tokens when the start token is absent.
+
+        Some models (e.g. DeepSeek-R1) use a chat template that emits the
+        opening think token into the prompt, so the generated output starts
+        with reasoning and only contains the end token. The tokens before the
+        end token are reasoning content (matching ``extract_reasoning``) and
+        must be counted.
+        """
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        end = parser.end_token_id
+        # No start token id anywhere; reasoning is the leading run before `end`.
+        token_ids = [11, 12, end, 99]
+        assert parser.count_reasoning_tokens(token_ids) == 2
+
     def test_extract_content_ids(self, test_tokenizer):
         """Test the extract_content_ids method."""
         parser = TestThinkingReasoningParser(test_tokenizer)
