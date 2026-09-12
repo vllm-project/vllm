@@ -377,14 +377,6 @@ class NcclEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             if self.physical_to_global is None
             else self.physical_to_global[physical_topk_ids]
         )
-        local_ids = recv_topk_ids[valid]
-        counts = torch.bincount(
-            local_ids, minlength=self.state.num_local_experts
-        ).tolist()
-        expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
-            counts, device=expert_x.device
-        )
-
         if expert_x_scale is None and not defer_input_quant and expert_x.numel():
             q_dtype = quant_config.quant_dtype
             if q_dtype == "nvfp4":
@@ -400,7 +392,7 @@ class NcclEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         return (
             expert_x,
             expert_x_scale,
-            expert_tokens_meta,
+            None,
             global_topk_ids,
             recv_topk_weights,
         )
@@ -440,7 +432,11 @@ class NcclEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         stream = torch.cuda.current_stream(a1.device)
         dbo_yield_and_switch_from_compute_to_comm()
         dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids).contiguous()
-        layout_info = nccl_ep.LayoutInfo(recv_topk_idx_kind=nccl_ep.ExpertIdKind.LOCAL)
+        recv_total_counter = torch.empty(1, dtype=torch.int32, device=a1.device)
+        layout_info = nccl_ep.LayoutInfo(
+            recv_total_counter=nccl_ep.Tensor(recv_total_counter),
+            recv_topk_idx_kind=nccl_ep.ExpertIdKind.LOCAL,
+        )
         handle = self.state.group.create_handle(
             nccl_ep.Layout.FLAT,
             nccl_ep.Tensor(dispatch_topk_ids),
@@ -450,23 +446,29 @@ class NcclEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         a2a_idx = dbo_current_ubatch_id()
         assert self.handles[a2a_idx] is None
 
-        max_recv = self.state.max_recv_tokens_per_rank
+        max_recv = int(recv_total_counter.item())
+        max_recv_upper_bound = self.state.max_tokens_per_rank * self.num_dispatchers_
+        if not 0 <= max_recv <= max_recv_upper_bound:
+            handle.destroy()
+            raise RuntimeError(
+                "NCCL EP returned an invalid receive-token count: "
+                f"{max_recv} is outside [0, {max_recv_upper_bound}]."
+            )
         recv_tokens = torch.empty(
             (max_recv, tokens.size(1)), dtype=tokens.dtype, device=tokens.device
         )
-        recv_topk_ids = torch.full(
+        recv_topk_ids = torch.empty(
             (max_recv, topk_ids.size(1)),
-            -1,
             dtype=torch.int64,
             device=topk_ids.device,
         )
-        recv_topk_weights = torch.zeros(
+        recv_topk_weights = torch.empty(
             (max_recv, topk_weights.size(1)),
             dtype=torch.float32,
             device=topk_weights.device,
         )
         recv_scales = (
-            torch.zeros(
+            torch.empty(
                 (max_recv, token_scales.size(1)),
                 dtype=token_scales.dtype,
                 device=token_scales.device,
@@ -500,6 +502,7 @@ class NcclEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.handles[a2a_idx] = (
             handle,
             dispatch_topk_ids,
+            recv_total_counter,
             layout_info,
             dispatch_inputs,
             dispatch_outputs,

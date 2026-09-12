@@ -646,11 +646,7 @@ class NcclEPAll2AllManager(All2AllManagerBase):
             if self.all2all_backend == "nccl_ep_low_latency"
             else nccl_ep.Algorithm.HIGH_THROUGHPUT
         )
-        max_recv_tokens = (
-            0
-            if algorithm == nccl_ep.Algorithm.LOW_LATENCY
-            else max_tokens * self.world_size
-        )
+        max_recv_tokens = 0
         key = (
             algorithm,
             max_tokens,
