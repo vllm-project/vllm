@@ -31,7 +31,7 @@ from vllm.v1.worker.gpu.states import RequestState
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .longcat_flash import FlashConfig, FlashModel
-from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
+from .utils import AutoWeightsLoader, PPMissingLayer, WeightsMapper, maybe_prefix
 
 
 def uses_ngram_embedding(config: FlashConfig) -> bool:
@@ -178,6 +178,7 @@ class FlashNgramModel(FlashModel):
         if num_layers is not None and hf.num_hidden_layers != num_layers:
             hf.num_hidden_layers = num_layers
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.ngram_embeddings: NgramEmbedding | None
         if get_pp_group().is_first_rank and uses_ngram_embedding(self.config):
             self.ngram_embeddings = NgramEmbedding(self.config, self.embed_tokens)
         else:
@@ -203,6 +204,9 @@ class FlashNgramModel(FlashModel):
 
 class LongcatFlashNgramForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     """LongCat-Flash-Lite for causal LM (MRV2-only, n-gram embedding)."""
+
+    # MTP weights are not part of this model.
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.mtp.": None})
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -266,13 +270,15 @@ class LongcatFlashNgramForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # AutoWeightsLoader routes ``model.*`` to FlashNgramModel.load_weights
-        # (which handles the ngram split) and ``lm_head.*`` to the head. MTP
-        # weights are not part of this model.
-        loader = AutoWeightsLoader(self, skip_prefixes=["model.mtp."])
-        return loader.load_weights(weights)
+        # (which handles the ngram split) and ``lm_head.*`` to the head.
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class LongcatNgramModelState(DefaultModelState):
+    # prepare_inputs builds its own inputs_embeds from n-gram token embeddings.
+    supports_prompt_embeds = False
+
     """Per-request n-gram token history for LongCat-Flash-Lite.
 
     Maintains a small CPU-side per-slot context (last ``n-1`` processed tokens)

@@ -22,6 +22,10 @@ flowchart LR
     CPU <--> SN["..."]
 ```
 
+## Terminology: Chunks
+
+The unit of operation is a **chunk** — a fixed-size piece of KV data covering a group of tokens. By default, a chunk maps to a single accelerator block. A configurable `blocks_per_chunk` parameter allows larger chunks, yielding larger I/Os to the host and secondary tiers.
+
 ## Single-Tier Setup (CPU Only)
 
 ```bash
@@ -113,9 +117,9 @@ Then set `"eviction_policy": "my_policy"` in `kv_connector_extra_config`, the sa
 
 Each entry in `secondary_tiers` is a dict with a required `type` field plus tier-specific fields.
 
-The filesystem and object-store tiers can publish hash-only `BlockStored` KV events for blocks they successfully store, tagged with a stable per-tier `medium` (`FS` for the filesystem tier, `OBJ` for the object-store tier). Set `enable_kv_events: true` in the tier's entry to opt in; events are published only when KV cache events are also enabled globally via `--kv-events-config`.
+The filesystem and object-store tiers can publish hash-only `BlockStored` KV events for blocks they successfully store. Both tiers use the coarse-grained wire medium value `STORAGE`; the medium does not distinguish filesystem from object-store storage. To recover location semantics, set the optional `locality` field (`LOCAL` / `REMOTE`) on the tier entry — that field, not the medium, tells consumers whether the tier's blocks are local to the publishing vLLM instance. Set `enable_kv_events: true` in the tier's entry to opt in; events are published only when KV cache events are also enabled globally via `--kv-events-config`.
 
-Set the optional `locality` tier field to `LOCAL` or `REMOTE` to describe the tier's storage location relative to the publishing vLLM instance. `LOCAL` marks storage local to that instance, while `REMOTE` marks storage that is not local to it. When the setting is omitted, locality is unspecified. vLLM does not infer it from the tier type, so an OBJ tier is not implicitly `REMOTE`. A KV event includes `locality` only when the tier explicitly configures it. This metadata describes the tier property without implying that a consumer can already route requests to its blocks.
+Set the optional `locality` tier field to `LOCAL` or `REMOTE` to describe the tier's storage location relative to the publishing vLLM instance. `LOCAL` marks storage local to that instance, while `REMOTE` marks storage that is not local to it. When the setting is omitted, locality is unspecified. vLLM does not infer it from the tier type, so an `obj` tier is not implicitly `REMOTE`. A KV event includes `locality` only when the tier explicitly configures it. This metadata describes the tier property without implying that a consumer can already route requests to its blocks.
 
 ### Filesystem (FS)
 
@@ -127,7 +131,7 @@ The filesystem tier (`type: "fs"`) writes blocks to a filesystem directory.
 | `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
 | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
-| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `FS`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
+| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 | `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
 
 Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
@@ -152,10 +156,12 @@ Inside that subdirectory, blocks are sharded across hash-prefix subdirectories t
 
 #### Cross-Process Sharing
 
-To enable KV cache sharing between multiple vLLM instances using the same `root_dir` (e.g., via a shared PVC), the `PYTHONHASHSEED` environment variable must be set to the same fixed value (e.g., `"0"`) on every instance. Without this, each process initializes `NONE_HASH` (the chain-hash seed for block content hashes) with random bytes, producing different block filenames for identical token content.
+KV cache sharing between multiple vLLM instances using the same `root_dir` (e.g., via a shared PVC) works by default: `NONE_HASH` (the chain-hash seed for block content hashes) is derived from a fixed default seed, so identical token content produces identical block filenames across instances. To use a custom shared seed instead, set the `PYTHONHASHSEED` environment variable to the same value on every instance.
+
+The exception is the non-cryptographic `xxhash` and `xxhash_cbor` values of `--prefix-caching-hash-algo`, which seed `NONE_HASH` randomly per process so the seed stays unpredictable. Sharing a cache across instances with those algorithms requires setting the same `PYTHONHASHSEED` on every instance.
 
 ```bash
-PYTHONHASHSEED=0 vllm serve ...
+PYTHONHASHSEED=<shared-value> vllm serve ...
 ```
 
 ### Object Store (OBJ)
@@ -168,8 +174,8 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `store_config` | yes | — | Object store connection parameters (see below). |
 | `prefix` | no | `""` | Key prefix prepended to all object keys. |
 | `io_threads` | no | `4` | Number of NIXL OBJ backend I/O threads. |
-| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `OBJ`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
-| `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured; OBJ does not imply `REMOTE`. |
+| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
+| `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
 
 `store_config` fields:
 
@@ -182,13 +188,13 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `region` | no | `""` | Bucket region, if the endpoint requires one. |
 | `ca_bundle` | no | `""` | CA bundle path for TLS verification. |
 
-Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) requirement (`PYTHONHASHSEED`) applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
+Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) behavior applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content; set a shared `PYTHONHASHSEED` if you want a custom seed. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
 
 ### P2P (Including P/D)
 
 The P2P tier (`type: "p2p"`) shares completed KV blocks between vLLM instances over RDMA via NIXL. Each instance binds a control socket on `host:port` and exchanges blocks directly with peers — no shared filesystem required.
 
-The `PYTHONHASHSEED` environment variable must be set to the same fixed value (e.g. `"0"`) on all nodes so that block content hashes match across instances (see [Cross-Process Sharing](#cross-process-sharing)). This is enforced: a P2P instance started without `PYTHONHASHSEED` set fails at startup, and each peer's value is verified during the connect handshake — a peer advertising a different `PYTHONHASHSEED` is rejected.
+Block content hashes must match across instances for peers to exchange blocks (see [Cross-Process Sharing](#cross-process-sharing)). This works by default via the deterministic `NONE_HASH` seed, so setting `PYTHONHASHSEED` is optional. If you do set it, it must be the same value on all nodes. Each peer's effective seed is verified during the connect handshake — a peer advertising a different seed is rejected. With the `xxhash`/`xxhash_cbor` algorithms the seed is random per process, so `PYTHONHASHSEED` must be set on every peer or the handshake rejects them.
 
 | Key | Required | Default | Notes |
 | --- | --- | --- | --- |

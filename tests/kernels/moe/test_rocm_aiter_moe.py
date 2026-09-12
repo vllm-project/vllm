@@ -651,7 +651,7 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
         activation=MoEActivation.SWIGLUOAI,
         quant_config=case.quant_config,
         moe_config=case.moe_config,
-        expert_map=None,
+        expert_mask=None,
     )
 
     assert out.shape == case.hidden_states.shape
@@ -695,7 +695,7 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
             activation=MoEActivation.SWIGLUOAI,
             quant_config=case.quant_config,
             moe_config=case.moe_config,
-            expert_map=None,
+            expert_mask=None,
         )
 
     _assert_deterministic(run_mxfp4_moe, n_runs=4)

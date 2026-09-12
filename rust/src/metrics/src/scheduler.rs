@@ -29,6 +29,58 @@ fn kv_block_reuse_gap_histogram() -> Histogram {
     Histogram::new(KV_CACHE_RESIDENCY_BUCKETS.iter().copied())
 }
 
+// Buckets copied verbatim from the Python `MooncakeStorePromMetrics` /
+// `NixlPromMetrics` classes so dashboards built against either frontend are
+// interchangeable.
+const MOONCAKE_OPERATION_TIME_BUCKETS: [f64; 15] = [
+    1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 2e-1, 3e-1, 4e-1, 5e-1, 7.5e-1, 1.0, 1.5, 2.0, 3.0, 4.0,
+];
+const NIXL_XFER_TIME_BUCKETS: [f64; 12] = [
+    0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 5.0,
+];
+const NIXL_POST_TIME_BUCKETS: [f64; 13] = [
+    0.001, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 5.0,
+];
+// Uniform 2KB to 8GB range: 2**(10+i) for i in range(1, 25, 2).
+const NIXL_BYTES_TRANSFERRED_BUCKETS: [f64; 12] = [
+    2048.0,
+    8192.0,
+    32768.0,
+    131072.0,
+    524288.0,
+    2097152.0,
+    8388608.0,
+    33554432.0,
+    134217728.0,
+    536870912.0,
+    2147483648.0,
+    8589934592.0,
+];
+const NIXL_NUM_DESCRIPTORS_BUCKETS: [f64; 14] = [
+    10.0, 20.0, 30.0, 50.0, 75.0, 100.0, 200.0, 400.0, 1000.0, 2000.0, 4000.0, 10000.0, 20000.0,
+    50000.0,
+];
+
+fn mooncake_operation_time_histogram() -> Histogram {
+    Histogram::new(MOONCAKE_OPERATION_TIME_BUCKETS.iter().copied())
+}
+
+fn nixl_xfer_time_histogram() -> Histogram {
+    Histogram::new(NIXL_XFER_TIME_BUCKETS.iter().copied())
+}
+
+fn nixl_post_time_histogram() -> Histogram {
+    Histogram::new(NIXL_POST_TIME_BUCKETS.iter().copied())
+}
+
+fn nixl_bytes_transferred_histogram() -> Histogram {
+    Histogram::new(NIXL_BYTES_TRANSFERRED_BUCKETS.iter().copied())
+}
+
+fn nixl_num_descriptors_histogram() -> Histogram {
+    Histogram::new(NIXL_NUM_DESCRIPTORS_BUCKETS.iter().copied())
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct EngineLabels {
     pub model_name: String,
@@ -48,6 +100,24 @@ pub struct WaitingReasonLabels {
     pub engine: u32,
     pub reason: &'static str,
 }
+
+/// Labels for per-operation Mooncake store connector telemetry. `operation`
+/// and `status` are dynamic (not known ahead of time), unlike the other
+/// fixed-label families in this module.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct MooncakeOperationLabels {
+    pub model_name: String,
+    pub engine: u32,
+    pub operation: String,
+    pub status: String,
+}
+
+/// Family type aliases for the Mooncake connector telemetry, exposed so
+/// `engine-core-client` can hold onto the `Family` directly (rather than a
+/// pre-resolved handle) since `operation`/`status` vary per record.
+pub type MooncakeOperationHistogramFamily =
+    Family<MooncakeOperationLabels, Histogram, fn() -> Histogram>;
+pub type MooncakeOperationCounterFamily = Family<MooncakeOperationLabels, U64Counter>;
 
 /// Adapter names encoded as a deterministic comma-joined Prometheus label value.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -183,6 +253,22 @@ pub struct SchedulerMetrics {
     pub kv_block_lifetime_seconds: HistogramFamily,
     pub kv_block_idle_before_evict_seconds: HistogramFamily,
     pub kv_block_reuse_gap_seconds: HistogramFamily,
+
+    // Mooncake store connector telemetry. Mirrors `MooncakeStorePromMetrics`.
+    pub mooncake_operation_time_seconds: MooncakeOperationHistogramFamily,
+    pub mooncake_operation_total: MooncakeOperationCounterFamily,
+    pub mooncake_operation_keys_total: MooncakeOperationCounterFamily,
+    pub mooncake_operation_bytes_total: MooncakeOperationCounterFamily,
+    pub mooncake_operation_failed_keys_total: MooncakeOperationCounterFamily,
+
+    // NIXL connector telemetry. Mirrors `NixlPromMetrics`.
+    pub nixl_xfer_time_seconds: HistogramFamily,
+    pub nixl_post_time_seconds: HistogramFamily,
+    pub nixl_bytes_transferred: HistogramFamily,
+    pub nixl_num_descriptors: HistogramFamily,
+    pub nixl_num_failed_transfers: Family<EngineLabels, U64Counter>,
+    pub nixl_num_failed_notifications: Family<EngineLabels, U64Counter>,
+    pub nixl_num_kv_expired_reqs: Family<EngineLabels, U64Counter>,
 
     /// Non-Prometheus interval accumulators for periodic text-log helpers.
     pub log_stats: Family<EngineLabels, SchedulerLogStatsAccumulator>,
@@ -336,6 +422,103 @@ impl SchedulerMetrics {
             kv_block_reuse_gap_seconds.clone(),
         );
 
+        // Mooncake store connector telemetry.
+        let mooncake_operation_time_seconds =
+            Family::new_with_constructor(mooncake_operation_time_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:mooncake_store_operation_time_seconds",
+            "Histogram of Mooncake store communication time.",
+            mooncake_operation_time_seconds.clone(),
+        );
+
+        // NOTE: registration names below omit the `_total` suffix that the
+        // Python metric names carry (e.g. `vllm:mooncake_store_operation_total`)
+        // because this crate's `prometheus-client` (unlike Python's, which
+        // strips a user-supplied `_total` before re-adding it) appends
+        // `_total` unconditionally for counters; see the note in `lib.rs`.
+        let mooncake_operation_total = Family::default();
+        registry.register(
+            "vllm:mooncake_store_operation",
+            "Number of Mooncake store communication operations.",
+            mooncake_operation_total.clone(),
+        );
+
+        let mooncake_operation_keys_total = Family::default();
+        registry.register(
+            "vllm:mooncake_store_operation_keys",
+            "Number of Mooncake store keys touched by operations.",
+            mooncake_operation_keys_total.clone(),
+        );
+
+        let mooncake_operation_bytes_total = Family::default();
+        registry.register(
+            "vllm:mooncake_store_operation_bytes",
+            "Number of bytes transferred by Mooncake store operations.",
+            mooncake_operation_bytes_total.clone(),
+        );
+
+        let mooncake_operation_failed_keys_total = Family::default();
+        registry.register(
+            "vllm:mooncake_store_operation_failed_keys",
+            "Number of Mooncake store keys that failed in operations.",
+            mooncake_operation_failed_keys_total.clone(),
+        );
+
+        // NIXL connector telemetry.
+        let nixl_xfer_time_seconds =
+            Family::new_with_constructor(nixl_xfer_time_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:nixl_xfer_time_seconds",
+            "Histogram of transfer duration for NIXL KV Cache transfers.",
+            nixl_xfer_time_seconds.clone(),
+        );
+
+        let nixl_post_time_seconds =
+            Family::new_with_constructor(nixl_post_time_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:nixl_post_time_seconds",
+            "Histogram of transfer post time for NIXL KV Cache transfers.",
+            nixl_post_time_seconds.clone(),
+        );
+
+        let nixl_bytes_transferred =
+            Family::new_with_constructor(nixl_bytes_transferred_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:nixl_bytes_transferred",
+            "Histogram of bytes transferred per NIXL KV Cache transfers.",
+            nixl_bytes_transferred.clone(),
+        );
+
+        let nixl_num_descriptors =
+            Family::new_with_constructor(nixl_num_descriptors_histogram as fn() -> Histogram);
+        registry.register(
+            "vllm:nixl_num_descriptors",
+            "Histogram of number of descriptors per NIXL KV Cache transfers.",
+            nixl_num_descriptors.clone(),
+        );
+
+        let nixl_num_failed_transfers = Family::default();
+        registry.register(
+            "vllm:nixl_num_failed_transfers",
+            "Number of failed NIXL KV Cache transfers.",
+            nixl_num_failed_transfers.clone(),
+        );
+
+        let nixl_num_failed_notifications = Family::default();
+        registry.register(
+            "vllm:nixl_num_failed_notifications",
+            "Number of failed NIXL KV Cache notifications.",
+            nixl_num_failed_notifications.clone(),
+        );
+
+        let nixl_num_kv_expired_reqs = Family::default();
+        registry.register(
+            "vllm:nixl_num_kv_expired_reqs",
+            "Number of requests that had their KV expire. \
+             NOTE: This metric is tracked on the P instance.",
+            nixl_num_kv_expired_reqs.clone(),
+        );
+
         Self {
             scheduler_running,
             scheduler_waiting,
@@ -356,6 +539,18 @@ impl SchedulerMetrics {
             kv_block_lifetime_seconds,
             kv_block_idle_before_evict_seconds,
             kv_block_reuse_gap_seconds,
+            mooncake_operation_time_seconds,
+            mooncake_operation_total,
+            mooncake_operation_keys_total,
+            mooncake_operation_bytes_total,
+            mooncake_operation_failed_keys_total,
+            nixl_xfer_time_seconds,
+            nixl_post_time_seconds,
+            nixl_bytes_transferred,
+            nixl_num_descriptors,
+            nixl_num_failed_transfers,
+            nixl_num_failed_notifications,
+            nixl_num_kv_expired_reqs,
             log_stats: Family::default(),
         }
     }

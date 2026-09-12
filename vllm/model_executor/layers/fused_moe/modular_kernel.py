@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
     SharedExpertsOrder,
@@ -33,6 +34,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
     dbo_maybe_run_recv_hook,
@@ -99,15 +101,19 @@ class ExpertTokensMetadata:
     Metadata regarding expert-token routing.
     """
 
-    expert_num_tokens: torch.Tensor
+    expert_num_tokens: torch.Tensor | None
     expert_num_tokens_cpu: torch.Tensor | None
+    psum_recv_per_rank: torch.Tensor | None = None
 
     @staticmethod
     def make_from_list(
         expert_num_tokens_list: list[int], device: str
     ) -> "ExpertTokensMetadata":
         expert_num_tokens_cpu = torch.tensor(
-            expert_num_tokens_list, device="cpu", dtype=torch.int32
+            expert_num_tokens_list,
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=PIN_MEMORY,
         )
         return ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens_cpu.to(device, non_blocking=True),
@@ -245,13 +251,6 @@ class FusedMoEPrepareAndFinalize(ABC):
         finalize_async.
         """
         return False
-
-    def on_commit(self) -> None:
-        """
-        Runs after this prepare/finalize has been committed to the active
-        MoE kernel.
-        """
-        return
 
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
@@ -425,6 +424,9 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
     described above for the monolithic case.
     """
 
+    def supports_deferred_moe_finalize(self) -> bool:
+        return False
+
     @abstractmethod
     def prepare(
         self,
@@ -470,6 +472,12 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
 
 # TODO: add supported activations method (return string)
 class FusedMoEExperts(ABC):
+    # ROCm AITER kernels consume a 0/1 local-expert mask (with a trailing
+    # sentinel slot); every other backend consumes the canonical -1/local-slot
+    # expert_map. RoutedExperts.expert_map reads this flag to pick which to hand
+    # the active experts kernel.
+    consumes_expert_mask: bool = False
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -891,6 +899,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         *,
         topk_ids: torch.Tensor | None = None,
         expert_map: torch.Tensor | None = None,
+        valid_token_counts: torch.Tensor | None = None,
     ) -> None:
         apply_moe_activation(
             activation,
@@ -899,6 +908,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
             activation_config=self.activation_config,
             topk_ids=topk_ids,
             expert_map=expert_map,
+            valid_token_counts=valid_token_counts,
         )
 
     @abstractmethod
@@ -1017,8 +1027,15 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         if capture_fn is None:
             self._routing_replay_buffer = None
             return
+        # Allocate for per-rank batches gathered across the DP or EP group.
+        dispatch_group_size = (
+            self.moe_config.ep_size
+            if self.moe_config.use_ep
+            else self.moe_config.dp_size
+        )
+        max_num_replay_tokens = self.moe_config.max_num_tokens * dispatch_group_size
         self._routing_replay_buffer = torch.empty(
-            (self.moe_config.max_num_tokens, self.moe_config.experts_per_token),
+            (max_num_replay_tokens, self.moe_config.experts_per_token),
             dtype=torch.int16,
             device=self.moe_config.device,
         )
@@ -1065,7 +1082,7 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         """
         Same as apply(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is useful for kernels
@@ -1151,6 +1168,24 @@ class FusedMoEKernelModularImpl:
         # time we need cache3, we're done with cache1.
         # Reuse workspace13 for the output since there is only one chunk.
         max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
+
+        if current_platform.is_cpu():
+            # Every CPU FusedMoEExpertsModular kernel reports zero-sized
+            # workspace13/workspace2 (it manages its own scratch space
+            # internally) and just needs the output buffer, so skip the
+            # workspace manager entirely here -- it's the one part of this
+            # call graph Dynamo can't trace (ContextVar-based lane lookup),
+            # and CPU never actually needs its cross-chunk memory reuse.
+            common_workspace = torch.empty(
+                (max_shape_size,), dtype=workspace_dtype, device=device
+            )
+            workspace2 = torch.empty(
+                workspace2_shape, dtype=workspace_dtype, device=device
+            )
+            workspace13 = _resize_cache(common_workspace, workspace13_shape)
+            fused_out = _resize_cache(common_workspace, fused_out_shape)
+            return workspace13, workspace2, fused_out
+
         common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
             ((max_shape_size,), workspace_dtype),
             (workspace2_shape, workspace_dtype),
@@ -1535,7 +1570,7 @@ class FusedMoEKernelMonolithicImpl:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         """
         Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
@@ -1566,9 +1601,14 @@ class FusedMoEKernelMonolithicImpl:
             topk_group=topk_group,
         )
 
-        output = self.prepare_finalize.finalize(fused_out)
-
-        return output
+        if isinstance(fused_out, UnfinalizedMoEOutput):
+            if not self.prepare_finalize.supports_deferred_moe_finalize():
+                raise RuntimeError(
+                    f"{type(self.prepare_finalize).__name__} cannot pass through "
+                    "a deferred MoE output."
+                )
+            return fused_out
+        return self.prepare_finalize.finalize(fused_out)
 
 
 @final
@@ -1651,6 +1691,12 @@ class FusedMoEKernel:
         """
         return self.prepare_finalize.output_is_reduced()
 
+    def supports_deferred_moe_finalize(self) -> bool:
+        return (
+            isinstance(self.prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic)
+            and self.prepare_finalize.supports_deferred_moe_finalize()
+        )
+
     def apply_monolithic(
         self,
         hidden_states: torch.Tensor,
@@ -1666,7 +1712,7 @@ class FusedMoEKernel:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
             hidden_states=hidden_states,

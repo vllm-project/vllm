@@ -4,11 +4,20 @@
 
 from typing import TYPE_CHECKING
 
-from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+from vllm.utils.math_utils import round_up
+from vllm.v1.core.kv_cache_utils import (
+    resolve_dcp_kv_block_size,
+    resolve_kv_cache_block_sizes,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     FullAttentionSpec,
+    KVCacheGroupRole,
+    KVCacheSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
+    SlidingWindowSpec,
+    iter_layer_specs,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -20,12 +29,17 @@ from vllm.v1.kv_offload.config import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
-def is_kv_cache_tensor_packed(kv_cache_tensor: "KVCacheTensor") -> bool:
-    """Return whether a KV cache tensor uses a packed block stride."""
-    return bool(kv_cache_tensor.block_stride)
+def get_offloading_group_ids(kv_cache_config: "KVCacheConfig") -> tuple[int, ...]:
+    if kv_cache_config.hisparse_host_num_blocks is None:
+        return tuple(range(len(kv_cache_config.kv_cache_groups)))
+    return tuple(
+        group_id
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+        if group.role is KVCacheGroupRole.HISPARSE_INDEXER
+    )
 
 
 def build_offloading_config(
@@ -40,19 +54,22 @@ def build_offloading_config(
     engine_id = kv_transfer_config.engine_id
 
     parallel_config = vllm_config.parallel_config
+    selected_groups = tuple(
+        (group_id, kv_cache_config.kv_cache_groups[group_id])
+        for group_id in get_offloading_group_ids(kv_cache_config)
+    )
+    if not selected_groups:
+        raise ValueError("KV offloading found no eligible cache groups.")
     groups = tuple(
         OffloadingGroupConfig(
-            tokens_per_block=(
-                group.kv_cache_spec.block_size
-                * (
-                    parallel_config.decode_context_parallel_size
-                    if isinstance(group.kv_cache_spec, AttentionSpec)
-                    else 1
-                )
+            group_id=group_id,
+            tokens_per_block=resolve_dcp_kv_block_size(
+                group.kv_cache_spec,
+                parallel_config.decode_context_parallel_size,
             ),
             layer_names=tuple(group.layer_names),
         )
-        for group in kv_cache_config.kv_cache_groups
+        for group_id, group in selected_groups
     )
 
     _, tokens_per_hash = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
@@ -92,23 +109,32 @@ def build_offloading_config(
         )
 
         tokens_per_block = unique_tokens_per_block.pop()
-        assert tokens_per_chunk_int % tokens_per_block == 0
-        blocks_per_chunk = tokens_per_chunk_int // tokens_per_block
+        if tokens_per_chunk_int % tokens_per_block == 0:
+            blocks_per_chunk = tokens_per_chunk_int // tokens_per_block
+        else:
+            raise ValueError(
+                f"'block_size'={tokens_per_chunk_int} in kv_connector_extra_config "
+                f"must be a multiple of the GPU KV cache block size "
+                f"({tokens_per_block} tokens). Use "
+                f"{round_up(tokens_per_chunk_int, tokens_per_block)} instead, or set "
+                f"'blocks_per_chunk' to express the chunk size in blocks."
+            )
 
     worker_kv_bytes_per_block = 0
-    if kv_cache_config.num_blocks > 0:
-        packed_tensors = tuple(
-            is_kv_cache_tensor_packed(tensor)
-            for tensor in kv_cache_config.kv_cache_tensors
-        )
-        is_packed = any(packed_tensors)
-        assert not is_packed or all(packed_tensors)
-        total_gpu_kv_bytes = (
-            kv_cache_config.kv_cache_tensors[0].size
-            if is_packed
-            else sum(tensor.size for tensor in kv_cache_config.kv_cache_tensors)
-        )
+    all_groups_selected = len(selected_groups) == len(kv_cache_config.kv_cache_groups)
+    if (
+        all_groups_selected
+        and kv_cache_config.num_blocks > 0
+        and kv_cache_config.kv_cache_tensors
+    ):
+        # Every KVCacheTensor describes placement within the same backing allocation,
+        # so its size is the total, not a per-tensor share.
+        total_gpu_kv_bytes = kv_cache_config.kv_cache_tensors[0].size
         worker_kv_bytes_per_block = total_gpu_kv_bytes // kv_cache_config.num_blocks
+    elif kv_cache_config.num_blocks > 0:
+        worker_kv_bytes_per_block = sum(
+            group.kv_cache_spec.page_size_bytes for _, group in selected_groups
+        )
 
     single_group_spec = (
         kv_cache_config.kv_cache_groups[0].kv_cache_spec
@@ -152,35 +178,46 @@ def build_offloading_config(
         and parallel_config.decode_context_parallel_size == 1
         and parallel_config.prefill_context_parallel_size == 1
     )
-    # Canonical pages are topology-free by construction, so the canonical
-    # layout widens the gate to every config whose mappings derive portable:
-    # exactly-sharded or replicated GQA heads (writer rotation) and the
-    # TP-replicated MLA latent (one canonical copy for all replicas). The
-    # model-runner version is irrelevant here — certification happens per
-    # layer against live tensor strides at registration, and create_worker
-    # fails closed against this flag if any layer cannot be certified.
+    # Canonical pages are topology-free, so the gate widens to every config
+    # whose mappings derive portable, group by group; certification happens
+    # per layer at registration and create_worker fails closed on this flag.
     if canonical_layout and not is_parallelism_agnostic:
         tp_size = parallel_config.tensor_parallel_size
-        if isinstance(single_group_spec, FullAttentionSpec):
-            if type(single_group_spec) is MLAAttentionSpec:
-                spec_certifiable = (
-                    single_group_spec.compress_ratio == 1
-                    and single_group_spec.real_page_size_bytes
-                    % single_group_spec.block_size
-                    == 0
+        total_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+
+        def spec_certifiable(spec: KVCacheSpec) -> bool:
+            """Conservative static mirror of _layer_mapping's per-layer checks."""
+            if not isinstance(spec, AttentionSpec):
+                return False
+            if spec.kv_quant_mode.is_per_token_head:
+                return False
+            if type(spec) is MLAAttentionSpec:
+                return (
+                    spec.tokens_per_state == 1
+                    and spec.real_page_size_bytes % spec.block_size == 0
                 )
-            else:
-                total_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
-                spec_certifiable = (
-                    total_kv_heads % tp_size == 0 or tp_size % total_kv_heads == 0
-                )
-            is_parallelism_agnostic = (
-                spec_certifiable
-                and not single_group_spec.kv_quant_mode.is_per_token_head
-                and parallel_config.decode_context_parallel_size == 1
-                and parallel_config.prefill_context_parallel_size == 1
-                and parallel_config.world_size == tp_size
-            )
+            if isinstance(spec, (SlidingWindowMLASpec, MLAAttentionSpec)):
+                return False
+            if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+                return False
+            return (
+                total_kv_heads % tp_size == 0 or tp_size % total_kv_heads == 0
+            ) and spec.num_kv_heads == max(1, total_kv_heads // tp_size)
+
+        # UniformTypeKVCacheSpecs groups (e.g. MLA plus its DSA indexer) hold
+        # one spec per layer; certify per layer, as the mapping derivation does.
+        layer_specs = [
+            spec
+            for group in kv_cache_config.kv_cache_groups
+            for spec in iter_layer_specs(group.kv_cache_spec)
+        ]
+        is_parallelism_agnostic = (
+            len(layer_specs) > 0
+            and all(spec_certifiable(spec) for spec in layer_specs)
+            and parallel_config.decode_context_parallel_size == 1
+            and parallel_config.prefill_context_parallel_size == 1
+            and parallel_config.world_size == tp_size
+        )
 
     kv_events_config = vllm_config.kv_events_config
     cache_dtype = (
@@ -213,8 +250,11 @@ def build_offloading_config(
             pcp_size=parallel_config.prefill_context_parallel_size,
             dcp_size=parallel_config.decode_context_parallel_size,
             data_parallel_index=parallel_config.data_parallel_index,
+            data_parallel_size=parallel_config.data_parallel_size,
+            data_parallel_rank_local=parallel_config.data_parallel_rank_local,
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
+        kv_cache_layout=vllm_config.cache_config.kv_cache_layout,
     )

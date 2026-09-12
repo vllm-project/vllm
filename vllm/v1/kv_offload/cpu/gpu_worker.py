@@ -248,7 +248,6 @@ class SingleDirectionOffloadingHandler:
         blocks_per_chunk: int,
         layer_refs_per_group: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
-        mmap_region: SharedOffloadRegion | None = None,
         canonical_layout: bool = False,
     ):
         """
@@ -258,7 +257,7 @@ class SingleDirectionOffloadingHandler:
             gpu_tensors: list of GPU KV cache tensors.
                 Each of shape (num_gpu_blocks, gpu_page_size_bytes) with dtype int8.
             cpu_tensors: list of CPU KV cache tensors.
-                Each of shape (num_cpu_blocks, cpu_page_size_bytes) with dtype int8.
+                Each of shape (num_cpu_chunks, cpu_page_size_bytes) with dtype int8.
                 Order should match gpu_tensors.
             layer_refs_per_group: list of CanonicalKVCacheRef per group.
             gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
@@ -326,8 +325,6 @@ class SingleDirectionOffloadingHandler:
         self._scratch_bases_src = np.empty(num_scratch_blocks, dtype=np.uint64)
         self._scratch_bases_dst = np.empty(num_scratch_blocks, dtype=np.uint64)
 
-        # mmap_region to clean up on shutdown (gpu_to_cpu handler owns it)
-        self._mmap_region = mmap_region
         # job_id -> event
         self._transfer_events: dict[int, torch.Event] = {}
         # queue of transfers (job_id, stream, event)
@@ -530,20 +527,20 @@ class SingleDirectionOffloadingHandler:
         # 1. GPU -> CPU
         # 2. CPU -> GPU
         #
-        # transfers are also to CPU blocks, EXCEPT MAYBE for the first and last block.
-        # i.e. the first and last CPU blocks in src_blocks can match against
+        # transfers are also to CPU chunks, EXCEPT MAYBE for the first and last chunk.
+        # i.e. the first and last CPU chunks in src_blocks can match against
         # a smaller (byte-wise) set of GPU blocks in dst_blocks.
         # In such cases, we may need to skip some gpu-sized sub-blocks,
-        # and start reading/writing from the middle of the first CPU block.
+        # and start reading/writing from the middle of the first CPU chunk.
         # If we have multiple KV cache groups (when using HMA with hybrid models),
-        # we may have a partial first/last CPU block per each group.
+        # we may have a partial first/last CPU chunk per each group.
         # The group_sizes parameter encodes the size of each group of blocks
         # in the GPU dst_blocks.
         # If group_sizes is None, we assume all blocks belong to a single group.
         # The logical_offset parameter maps each group of blocks to its logical
         # offset inside the request, counting in GPU blocks.
         # This allows us to find the correct starting position
-        # in the matching first CPU block.
+        # in the matching first CPU chunk.
 
         # extract group_sizes from the GPU spec
         gpu_spec = src_spec if self.gpu_to_cpu else dst_spec
@@ -637,9 +634,13 @@ class SingleDirectionOffloadingHandler:
             else torch.Event(enable_timing=True)
         )
 
-        if self.gpu_to_cpu:
-            # wait for model computation to finish before offloading
-            stream.wait_stream(current_platform.current_stream())
+        # Stores must wait for the model to finish writing the KV they read.
+        # Loads must wait for pending writes (including zeroing) to their
+        # destination blocks: the scheduler's _skip_zero_block_ids only edits
+        # the step being scheduled and cannot retract zeroing shipped in an
+        # earlier step for a since-reallocated block; with async scheduling
+        # nothing else orders that zeroing against this copy.
+        stream.wait_stream(current_platform.current_stream())
         if self._transfers:
             last_transfer: Transfer = self._transfers[-1]
             last_event = last_transfer.end_event
@@ -711,18 +712,31 @@ class SingleDirectionOffloadingHandler:
                 event.synchronize()
 
     def shutdown(self) -> None:
+        """Drain this direction and release its transfer-side resources."""
+        sync_error: Exception | None = None
         while self._transfers:
-            transfer = self._transfers.popleft()
-            transfer.end_event.synchronize()
+            transfer = self._transfers[0]
+            try:
+                transfer.end_event.synchronize()
+            except Exception as e:
+                logger.exception(
+                    "Failed to synchronize transfer end event; "
+                    "skipping %d remaining transfers",
+                    len(self._transfers) - 1,
+                )
+                self._transfers.clear()
+                sync_error = e
+                break
+            self._transfers.popleft()
+
         self._transfer_events.clear()
         self._stream_pool.clear()
         self._event_pool.clear()
         self._buffer_pool.clear()
         self.src_tensors.clear()
         self.dst_tensors.clear()
-        if self._mmap_region is not None:
-            self._mmap_region.cleanup()
-            self._mmap_region = None
+        if sync_error is not None:
+            raise sync_error
 
 
 class CPUOffloadingWorker(OffloadingWorker):
@@ -737,11 +751,15 @@ class CPUOffloadingWorker(OffloadingWorker):
         self,
         kv_caches: CanonicalKVCaches,
         blocks_per_chunk: int,
-        num_cpu_blocks: int,
+        num_cpu_chunks: int,
         mmap_region: SharedOffloadRegion | None = None,
         canonical_layout: bool = False,
     ):
         assert not canonical_layout or mmap_region is not None
+        # The caller owns mmap_region until this constructor returns. After a
+        # successful construction, the worker is the sole owner and releases
+        # it after both transfer directions have stopped.
+        self._mmap_region = mmap_region
         pin_memory = PIN_MEMORY
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         if mmap_region is not None and pin_memory:
@@ -772,16 +790,16 @@ class CPUOffloadingWorker(OffloadingWorker):
             else:
                 t0 = time.monotonic()
                 cpu_tensor = torch.zeros(
-                    (num_cpu_blocks, cpu_page_size_bytes),
+                    (num_cpu_chunks, cpu_page_size_bytes),
                     dtype=torch.int8,
                     device="cpu",
                     pin_memory=pin_memory,
                 )
                 logger.debug(
                     "torch.zeros pinned tensor %d×%d (%.2f GB): %.3f s",
-                    num_cpu_blocks,
+                    num_cpu_chunks,
                     cpu_page_size_bytes,
-                    num_cpu_blocks * cpu_page_size_bytes / 1e9,
+                    num_cpu_chunks * cpu_page_size_bytes / 1e9,
                     time.monotonic() - t0,
                 )
 
@@ -794,7 +812,6 @@ class CPUOffloadingWorker(OffloadingWorker):
             blocks_per_chunk=blocks_per_chunk,
             layer_refs_per_group=kv_caches.group_data_refs,
             gpu_to_cpu=True,
-            mmap_region=mmap_region,
             canonical_layout=canonical_layout,
         )
 
@@ -827,5 +844,28 @@ class CPUOffloadingWorker(OffloadingWorker):
         self._load_handler.wait(job_ids)
 
     def shutdown(self) -> None:
-        self._store_handler.shutdown()
-        self._load_handler.shutdown()
+        handler_failed = False
+        try:
+            self._store_handler.shutdown()
+        except Exception:
+            logger.exception("Failed to shut down store offloading handler")
+            handler_failed = True
+
+        try:
+            self._load_handler.shutdown()
+        except Exception:
+            logger.exception("Failed to shut down load offloading handler")
+            handler_failed = True
+
+        if self._mmap_region is not None:
+            if handler_failed:
+                try:
+                    torch.accelerator.synchronize()
+                except Exception:
+                    logger.warning(
+                        "Device sync before mmap cleanup failed; "
+                        "proceeding with cleanup anyway",
+                        exc_info=True,
+                    )
+            self._mmap_region.cleanup()
+            self._mmap_region = None
