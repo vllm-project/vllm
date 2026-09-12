@@ -126,6 +126,7 @@ fn build_sampling_params(
     let temperature = temperature.or(Some(0.0));
     let mut params = SamplingParams {
         temperature,
+        max_tokens: Some(20),
         ..SamplingParams::default()
     };
 
@@ -544,6 +545,36 @@ mod tests {
             .expect("convert ok");
         // The gRPC API defaults to greedy (0.0) when temperature is not specified.
         assert_eq!(text.sampling_params.temperature, Some(0.0));
+    }
+
+    #[test]
+    fn absent_stopping_defaults_max_new_tokens_to_twenty() {
+        let text = to_text_request(base_request(), false, &["test-model".to_string()])
+            .expect("convert ok");
+        assert_eq!(text.sampling_params.max_tokens, Some(20));
+    }
+
+    #[test]
+    fn zero_max_new_tokens_defaults_to_twenty() {
+        let req = pb::GenerateRequest {
+            stopping: Some(pb::StoppingCriteria::default()),
+            ..base_request()
+        };
+        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        assert_eq!(text.sampling_params.max_tokens, Some(20));
+    }
+
+    #[test]
+    fn positive_max_new_tokens_is_preserved() {
+        let req = pb::GenerateRequest {
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 42,
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+        assert_eq!(text.sampling_params.max_tokens, Some(42));
     }
 
     #[test]
