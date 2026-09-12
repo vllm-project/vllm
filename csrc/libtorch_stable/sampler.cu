@@ -849,7 +849,11 @@ void top_k_per_row_prefill(const torch::stable::Tensor& logits,
                            torch::stable::Tensor& indices, int64_t numRows,
                            int64_t stride0, int64_t stride1, int64_t topK) {
   constexpr int kSortingAlgorithmThreshold = 12288;
-  constexpr int kNumThreadsPerBlock = 512;
+  // The histogram and the final-sort buffer are both 2048 entries, so 1024
+  // threads halve the number of rounds per block (2 instead of 4) and the
+  // per-thread items in the final radix sort. Measured faster across topK
+  // 512/1024/2048 on gfx950; see the PR description for the numbers.
+  constexpr int kNumThreadsPerBlock = 1024;
   const torch::stable::accelerator::DeviceGuard device_guard(
       logits.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
