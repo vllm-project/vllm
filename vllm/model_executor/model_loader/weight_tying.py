@@ -54,7 +54,8 @@ def _get_untied_lm_head(model: nn.Module) -> _UntiedLMHead | None:
     for name, module in model.named_modules():
         if not isinstance(module, VocabParallelEmbedding):
             continue
-        if not isinstance(module.quant_method, UnquantizedEmbeddingMethod):
+        quant_method = getattr(module.quant_method, "fallback", module.quant_method)
+        if not isinstance(quant_method, UnquantizedEmbeddingMethod):
             continue
         if isinstance(module, ParallelLMHead):
             heads.append((name, module))

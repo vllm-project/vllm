@@ -12,6 +12,9 @@ import pytest
 import torch
 
 from vllm import LLM, SamplingParams
+from vllm.model_executor.kernels.linear.unquantized.packed_bf16_lm_head import (
+    LosslessPackedLMHeadMethod,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -135,6 +138,20 @@ def test_fp32_head_rejects_quantized_lm_head(default_vllm_config):
 
     with pytest.raises(ValueError, match="unquantized"):
         lp._get_logits(torch.randn(4, 16, dtype=torch.bfloat16), lm_head, None)
+
+
+def test_fp32_head_accepts_lossless_packed_wrapper(default_vllm_config):
+    """The lossless decorator retains the fallback's unquantized contract."""
+    lp = _build_processor(64)
+    lp.head_dtype = torch.float32
+    lm_head = _FakeLmHead(torch.randn(64, 16, dtype=torch.bfloat16))
+    lm_head.quant_method = LosslessPackedLMHeadMethod(lm_head.quant_method)
+
+    hidden_states = torch.randn(4, 16, dtype=torch.bfloat16)
+    logits = lp._get_logits(hidden_states, lm_head, None)
+
+    expected = torch.nn.functional.linear(hidden_states.float(), lm_head.weight.float())
+    torch.testing.assert_close(logits, expected)
 
 
 def test_replicated_lm_head_skips_tp_communication_and_preserves_processing(
