@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Greedy Uno parity with the original Qwen3-8B adapter on one NVIDIA GPU."""
 
+import os
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path
@@ -540,6 +541,18 @@ def test_uno_continuous_batching_survivor_matches_solo(
         f"prompt_tokens={prompt_tokens}, max_tokens={max_tokens}"
     )
 
+    # The pool is pinned by `num_gpu_blocks_override`, so the memory fraction
+    # the engine requests cannot change this test's geometry -- only whether it
+    # can start beside another tenant. A box sharing its GPU exports
+    # VLLM_UNO_SURVIVOR_GPU_MEMORY_UTILIZATION rather than patching this file.
+    memory_override = os.environ.get("VLLM_UNO_SURVIVOR_GPU_MEMORY_UTILIZATION")
+    memory_options = (
+        {}
+        if memory_override is None
+        else {"gpu_memory_utilization": float(memory_override)}
+    )
+    print(f"survivor gpu_memory_utilization override: {memory_override}")
+
     common = dict(
         revision=MODEL_REVISION,
         dtype="bfloat16",
@@ -550,6 +563,7 @@ def test_uno_continuous_batching_survivor_matches_solo(
         attention_config={"backend": "FLASH_ATTN", "flash_attn_version": 2},
         max_model_len=max_model_len,
         max_num_seqs=4,
+        **memory_options,
         max_num_batched_tokens=256,
         enable_chunked_prefill=True,
         block_size=BLOCK_SIZE,
