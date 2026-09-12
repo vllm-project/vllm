@@ -115,7 +115,8 @@ def test_local_descriptors_follow_each_region_pool_capacity():
 
     descriptors = worker._build_fa_local([100, 1000], block_size_ratio=1)
 
-    assert descriptors[:, 0].tolist() == [100, 116, 1000, 1016, 1032]
+    # One (addr, len, dev, stride, count) run per region, sized to its pool.
+    assert descriptors.tolist() == [[100, 16, 0, 16, 2], [1000, 16, 0, 16, 3]]
 
 
 @pytest.mark.cpu_test
@@ -233,7 +234,8 @@ def test_overlaid_transfer_groups_share_region_geometry():
     expected_addrs = [
         backing.data_ptr() + block * block_stride for block in range(num_blocks)
     ]
-    assert worker.src_blocks_data[:, 0].tolist() == expected_addrs
+    local_descs = worker._expand_stride_descs(worker.src_blocks_data)
+    assert local_descs[:, 0].tolist() == expected_addrs
 
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes,
@@ -512,7 +514,9 @@ def test_register_compressed_indexer_uses_virtual_transfer_pages(
     assert worker._region_is_mla == [True]
     assert worker.kv_caches_base_addr[worker.engine_id][0] == [raw.data_ptr()]
     assert worker._registered_descs[0] == [(raw.data_ptr(), raw.nbytes, 0, "")]
-    np.testing.assert_array_equal(worker.src_blocks_data, expected_descs)
+    np.testing.assert_array_equal(
+        worker._expand_stride_descs(worker.src_blocks_data), expected_descs
+    )
     assert expected_descs[-1, 0] + expected_descs[-1, 1] == (
         raw.data_ptr() + raw.nbytes
     )
@@ -1182,10 +1186,11 @@ def test_csa_linear_ple_descriptor_is_not_split():
     bases = [0x10000, 0x20000, 0x30000, 0x40000]
     attention = worker._build_fa_local(bases, block_size_ratio=1)
     mamba = worker._build_mamba_local(bases)
-    assert attention.shape == (8, 3)
-    assert mamba.shape == (10, 3)
-    assert mamba[-2:, 0].tolist() == [0x10000, 0x10100]
-    assert mamba[-2:, 1].tolist() == [256, 256]
+    # One (addr, len, dev, stride, count) run per region / sub-region.
+    assert attention.shape == (4, 5)
+    assert mamba.shape == (5, 5)
+    # PLE run: 2 whole 256-byte pages at 0x10000, 0x10100.
+    assert mamba[-1].tolist() == [0x10000, 256, 0, 256, 2]
 
     mapping = TPMapping(
         source_ranks_per_group=((0,), (0,), (0, 1), (0, 1)),
@@ -1197,14 +1202,15 @@ def test_csa_linear_ple_descriptor_is_not_split():
         worker._build_local_splits_from_plan(
             mapping,
             np.concatenate([attention, mamba]),
-            num_fa_descs=len(attention),
+            num_fa_descs=int(attention[:, 4].sum()),
         )
     )
     assert len(splits) == 2
-    assert [row[1] for row in splits[0][-2:]] == [256, 256]
-    assert [row[1] for row in splits[1][-2:]] == [256, 256]
-    assert splits[0][-3][1] * 2 == mamba[-3, 1]
-    assert splits[1][-3][1] * 2 == mamba[-3, 1]
+    for split in splits:
+        # The PLE run is copied whole to every source rank, while the sharded
+        # SSM run right before it is halved per source.
+        assert split[-1].tolist() == mamba[-1].tolist()
+        assert split[-2, 1] * 2 == mamba[-2, 1]
 
 
 @pytest.mark.cpu_test
@@ -1240,9 +1246,9 @@ def test_csa_linear_remote_ple_is_copied_whole():
         tp_ratio=-2,
         transfer_info=SimpleNamespace(remote_physical_blocks_per_logical=1),
     )
-    assert descriptors.shape == (10, 3)
-    assert descriptors[-2:, 0].tolist() == [0x10000, 0x10100]
-    assert descriptors[-2:, 1].tolist() == [256, 256]
+    assert descriptors.shape == (5, 5)
+    # PLE run: 2 whole 256-byte pages at 0x10000, 0x10100.
+    assert descriptors[-1].tolist() == [0x10000, 256, 0, 256, 2]
 
     metadata.block_lens[0] = 128
     with pytest.raises(ValueError, match="PLE pages require identical"):
