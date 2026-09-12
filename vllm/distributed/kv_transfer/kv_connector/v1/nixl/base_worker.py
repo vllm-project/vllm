@@ -460,11 +460,13 @@ class NixlBaseConnectorWorker:
                     for spec in iter_layer_specs(group.kv_cache_spec)
                 )
             ]
-            if len(ple_groups) != 1 or len(ple_groups[0][1].layer_names) != 1:
+            if len(ple_groups) > 1 or any(
+                len(group.layer_names) != 1 for _, group in ple_groups
+            ):
                 raise ValueError(
-                    "CSA-linear NIXL requires exactly one PLE cache owner."
+                    "CSA-linear NIXL requires at most one PLE cache owner."
                 )
-            self._ple_group_index = ple_groups[0][0]
+            self._ple_group_index = ple_groups[0][0] if ple_groups else None
 
         if self._has_mamba:
             assert self._is_hma_required
@@ -3141,7 +3143,9 @@ class NixlBaseConnectorWorker:
         to be "optimal" until a new handshake is performed.
 
         Engines with active transfers or pending handshakes cannot be stale:
-        - Active transfers touch _engine_last_active in start_load_kv.
+        - Reads stamp _engine_last_active when they are issued, and engines a
+          transfer is still reading from are held back explicitly, since the
+          stamp is not refreshed while the read runs.
         - Pending handshakes don't have an _engine_last_active entry yet
         """
         # NOTE (NickLucche): This does NOT currently prevent OOMing if a huge number
@@ -3152,9 +3156,24 @@ class NixlBaseConnectorWorker:
             return
 
         now = time.perf_counter()
+        busy = self._engines_with_inflight_transfers()
         for eid, last_active in list(self._engine_last_active.items()):
-            if now - last_active > self._engine_ttl:
+            if now - last_active > self._engine_ttl and eid not in busy:
                 self._cleanup_remote_engine(eid)
+
+    def _engines_with_inflight_transfers(self) -> set[EngineId]:
+        """Remote engines a transfer is still reading from.
+
+        The timestamp is stamped when a read is issued and not refreshed while
+        it runs, so a transfer that outlives the TTL leaves its engine looking
+        idle. A peer that has lost its NIC holds one indefinitely.
+        """
+        return {
+            meta.remote.engine_id
+            for req_id in self._recving_transfers
+            if (meta := self._recving_metadata.get(req_id)) is not None
+            and meta.remote is not None
+        }
 
     def _cleanup_remote_engine(
         self, engine_id: EngineId, *, log_eviction: bool = True

@@ -7,26 +7,70 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import create_vllm_config
+from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
+from vllm.models.deepseek_v4_1.sparse_mla import (
+    DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
+)
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.compressor_utils import (
     CompressedSlotMappingKernel,
 )
 from vllm.v1.attention.backends.mla.indexer import (
     BuildPrefillChunkMetadataKernel,
+    DeepseekV4IndexerBackend,
     DeepseekV32IndexerMetadataBuilder,
+    DeepseekV41IndexerBackend,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     ConvertReqIndexToGlobalIndexKernel,
 )
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    MLAAttentionSpec,
+    compute_layer_kv_cache_shape_bytes,
+)
 from vllm.v1.worker.block_table import get_block_table_width
+from vllm.v1.worker.utils import select_common_block_size
+
+
+def test_indexer_shares_uncompressed_block_size_with_deepseek_v4_mla():
+    """Packed MLA/indexer groups must retain 64 compressed rows per page."""
+    kernel_block_size = select_common_block_size(
+        256, [DeepseekV4SparseMLABackend, DeepseekV4IndexerBackend]
+    )
+    spec = MLAAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=132,
+        dtype=torch.uint8,
+        tokens_per_state=4,
+    )
+    assert compute_layer_kv_cache_shape_bytes(spec, 2, kernel_block_size) == (
+        2,
+        1,
+        64,
+        132,
+    )
+
+
+def test_indexer_preserves_deepseek_v41_mla_block_size():
+    """V4.1 retains its smaller pages independently of V4's C4 indexer."""
+    block_size = DeepseekV41SparseMLABackend.get_supported_kernel_block_sizes()[0]
+    assert isinstance(block_size, int)
+    assert (
+        select_common_block_size(
+            block_size, [DeepseekV41SparseMLABackend, DeepseekV41IndexerBackend]
+        )
+        == block_size
+    )
 
 
 def test_indexer_warmup_normalizes_zero_compress_ratios():
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
         model_config=SimpleNamespace(
-            hf_config=SimpleNamespace(compress_ratios=[0, 0, 4, 128, 0], index_kpool=32)
+            hf_text_config=SimpleNamespace(
+                compress_ratios=[0, 0, 4, 128, 0], index_kpool=32
+            )
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
@@ -47,7 +91,7 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
 def test_compressed_slot_mapping_warmup_includes_index_kpool():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=256),
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_kpool=32)),
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_kpool=32)),
     )
 
     keys = CompressedSlotMappingKernel().get_warmup_keys(config)
@@ -59,7 +103,7 @@ def test_index_conversion_warmup_uses_physical_block_stride():
         cache_config=SimpleNamespace(block_size=64),
         model_config=SimpleNamespace(
             max_model_len=1024,
-            hf_config=SimpleNamespace(index_topk=2048),
+            hf_text_config=SimpleNamespace(index_topk=2048),
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
