@@ -6,14 +6,13 @@ from abc import abstractmethod
 from collections.abc import Callable, Hashable, Iterable, Mapping
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field
-from functools import cache, cached_property, update_wrapper, wraps
+from functools import cache, cached_property, update_wrapper
 from typing import Any, Generic, ParamSpec, Protocol, TypeVar, cast, overload
 
 from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
     get_ast_full_name,
     get_function_source_node,
-    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
