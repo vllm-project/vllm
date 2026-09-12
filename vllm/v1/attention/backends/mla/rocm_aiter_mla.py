@@ -323,7 +323,7 @@ class AiterMLABackend(MLACommonBackend):
         )
         # Arch/signature cannot express this: the backend still advertises
         # fp16, so a DSpark draft with kv_cache_dtype="auto" would select
-        # AITER and abort with `unsupport Q dtype:fp16`. Causal fp16 is fine.
+        # AITER and abort on fp16 query. Causal fp16 is fine.
         if (
             use_non_causal
             and dtype == torch.float16
