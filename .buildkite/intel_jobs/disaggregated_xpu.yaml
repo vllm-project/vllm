@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (L4) Distributed NixlConnector PD accuracy'
+  key: distributed-nixlconnector-pd-accuracy-4-gpus
   device: intel_gpu
   timeout_in_minutes: 55
   num_devices: 4
@@ -29,6 +30,7 @@ steps:
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh || true'
 - label: ':nvidia: (L4) Distributed FlashInfer NixlConnector PD accuracy'
+  key: distributed-flashinfer-nixlconnector-pd-accuracy-4-gpus
   device: intel_gpu
   timeout_in_minutes: 55
   num_devices: 4
@@ -55,6 +57,7 @@ steps:
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     FLASHINFER=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh || true'
 - label: ':nvidia: (L4) Push NixlConnector PP prefill PD accuracy'
+  key: push-nixlconnector-pp-prefill-pd-accuracy-4-gpus
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 4
@@ -82,6 +85,7 @@ steps:
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_push_integration/config_sweep_accuracy_test.sh || true'
 - label: ':nvidia: (L4) DP EP Distributed NixlConnector PD accuracy'
+  key: dp-ep-distributed-nixlconnector-pd-accuracy-tests-4-gpus
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 4
@@ -108,6 +112,7 @@ steps:
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh || true'
 - label: ':nvidia: (L4) CrossLayer KV layout Distributed NixlConnector PD accuracy'
+  key: crosslayer-kv-layout-distributed-nixlconnector-pd-accuracy-tests-4-gpus
   device: intel_gpu
   timeout_in_minutes: 55
   num_devices: 4
@@ -134,6 +139,7 @@ steps:
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh || true'
 - label: ':nvidia: (L4) Hybrid SSM NixlConnector PD accuracy'
+  key: hybrid-ssm-nixlconnector-pd-accuracy-tests-4-gpus
   device: intel_gpu
   timeout_in_minutes: 60
   num_devices: 4
@@ -160,6 +166,7 @@ steps:
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh || true'
 - label: ':nvidia: (L4) NixlConnector PD edge case'
+  key: nixlconnector-pd-edge-cases-2-gpus
   device: intel_gpu
   timeout_in_minutes: 40
   num_devices: 2
@@ -187,6 +194,7 @@ steps:
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_integration/run_edge_case_test.sh || true'
 - label: ':nvidia: (L4) Hybrid SSM NixlConnector PD prefix cache'
+  key: hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 2
@@ -215,6 +223,7 @@ steps:
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh || true'
 - label: ':nvidia: (L4) MultiConnector (Nixl+Offloading) PD accuracy'
+  key: multiconnector-nixl-offloading-pd-accuracy-2-gpus
   device: intel_gpu
   timeout_in_minutes: 40
   num_devices: 2
@@ -244,6 +253,7 @@ steps:
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh || true'
 - label: ':nvidia: (A100) NixlConnector PD + Spec Decode acceptance'
+  key: nixlconnector-pd-spec-decode-acceptance-2-gpus
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 2
@@ -271,6 +281,7 @@ steps:
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh || true'
 - label: ':nvidia: (L4) MultiConnector (Nixl+Offloading) PD edge cases'
+  key: multiconnector-nixl-offloading-pd-edge-cases-2-gpus
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 2
@@ -300,6 +311,7 @@ steps:
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh || true'
 - label: ':nvidia: (H200) Kimi-Linear-48B-A3B Disaggregated DP EP'
+  key: kimi-linear-disaggregated
   device: intel_gpu
   timeout_in_minutes: 60
   num_devices: 4

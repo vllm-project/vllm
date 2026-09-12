@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: PyTorch Compilation Unit Tests (Parallel)
+  key: pytorch-compilation-unit-tests-parallel
   device: intel_gpu
   timeout_in_minutes: 150
   parallelism: 4
@@ -50,6 +51,7 @@ steps:
     'cd tests && 
     pytest -s -v compile/test_dynamic_shapes_compilation.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT  || true'
 - label: PyTorch Compilation Unit Tests
+  key: pytorch-compilation-unit-tests
   device: intel_gpu
   timeout_in_minutes: 150
   working_dir: .
@@ -97,6 +99,7 @@ steps:
     'cd tests && 
     find compile/ -maxdepth 1 -name '\''test_*.py'\'' -not -name '\''test_dynamic_shapes_compilation.py'\'' -print0 | xargs -0 -I{} pytest -s -v '\''{}'\'' || true'
 - label: ':nvidia: (H200 MIG 18GB) PyTorch Compilation H100 Cases'
+  key: pytorch-compilation-unit-tests-h100
   device: intel_gpu
   timeout_in_minutes: 30
   working_dir: .
@@ -144,6 +147,7 @@ steps:
     'cd tests &&
     find compile/h100/ -name '\''test_*.py'\'' -print0 | xargs -0 -I{} pytest -s -v '\''{}'\'' || true'
 - label: ':nvidia: (L4) PyTorch Compilation Passes'
+  key: pytorch-compilation-passes-unit-tests
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 1
@@ -192,6 +196,7 @@ steps:
     'cd tests &&
     pytest -s -v compile/passes --ignore compile/passes/distributed || true'
 - label: ':nvidia: (H200 MIG 35GB) PyTorch Fullgraph'
+  key: pytorch-fullgraph-test
   device: intel_gpu
   timeout_in_minutes: 90
   working_dir: .
@@ -239,6 +244,7 @@ steps:
     'cd tests &&
     find compile/fullgraph/ -name '\''test_*.py'\'' -not -name '\''test_full_cudagraph.py'\'' -print0 | xargs -0 -I{} pytest -s -v '\''{}'\'' || true'
 - label: ':nvidia: (L4) PyTorch Fullgraph CUDAGraph Compatibility'
+  key: pytorch-fullgraph-cudagraph-l4-compatibility
   device: intel_gpu
   timeout_in_minutes: 60
   num_devices: 1
@@ -287,6 +293,7 @@ steps:
     'cd tests &&
     pytest -s -v compile/fullgraph/test_full_cudagraph.py || true'
 - label: ':nvidia: (H200 MIG 18GB) PyTorch Nightly Dependency Override Check'
+  key: pytorch-nightly-dependency-override-check
   device: intel_gpu
   soft_fail: true
   working_dir: .
