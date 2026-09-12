@@ -128,8 +128,20 @@ class PrefixCacheStats(BaseCacheStats):
     preempted_hits: int = 0
     """The `hits` number for preempted requests."""
 
-    def record(self, num_tokens: int, num_hits: int, preempted: bool) -> None:
+    sparse_retention_misses: int = 0
+    """Tokens of a shared prefix that some group matched but which could not be
+    reused because a sparse-retention group (Mamba / sliding window) held no
+    checkpoint there. Counted for preempted and new requests alike."""
+
+    def record(
+        self,
+        num_tokens: int,
+        num_hits: int,
+        preempted: bool,
+        sparse_retention_misses: int = 0,
+    ) -> None:
         """Aggregate request information into the stats."""
+        self.sparse_retention_misses += sparse_retention_misses
         if preempted:
             # Previously preempted request
             self.preempted_requests += 1
