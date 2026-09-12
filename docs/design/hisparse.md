@@ -60,6 +60,18 @@ sees only device pools.
 The source group has `block_pool_id=None`; device-pool consumers must narrow it
 before indexing, so host ownership cannot masquerade as a numeric GPU pool.
 
+For single-node MP tensor parallelism, every TP worker maps the same pinned host
+pool and uses the same block and layer offsets. MLA source KV is replicated
+across TP ranks, so this stores one physical copy instead of one copy per rank.
+TP rank 0 submits the Host mirror DMA, while the other ranks observe completion
+through shared CUDA IPC events. Other executor and parallel layouts retain
+private per-rank pools.
+
+The shared layout backs the per-replica logical capacity with one physical pool;
+the private layout allocates one physical pool per rank. Physical pool size
+includes block-stride alignment. `num_gpu_blocks_override`, when set, overrides
+the planned Host block count and can exceed the configured budget.
+
 ## Code boundary
 
 ```text

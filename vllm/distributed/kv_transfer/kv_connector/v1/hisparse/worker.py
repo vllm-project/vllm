@@ -141,6 +141,12 @@ def _select_written_row_mirrors(
     )
 
 
+def _is_hisparse_host_writer(
+    shared_host_region: SharedOffloadRegion | None,
+) -> bool:
+    return shared_host_region is None or get_tensor_model_parallel_rank() == 0
+
+
 def _create_hisparse_host_events(
     shared_host_region: SharedOffloadRegion | None,
     is_host_writer: bool,
@@ -194,15 +200,26 @@ class HiSparseConnectorWorker:
             raise RuntimeError("HiSparse connector found no hot-cache handles.")
         hot_backings: dict[int, torch.Tensor] = {}
         registered_host_pools: dict[int, torch.Tensor] = {}
+        shared_host_regions: dict[int, SharedOffloadRegion] = {}
         for cache in cache_handles:
             hot_backing = cache.runtime.hot_backing
             hot_backings[hot_backing.untyped_storage().data_ptr()] = hot_backing
             registered_pool = cache.runtime.registered_host_pool
             registered_host_pools[registered_pool.data_ptr()] = registered_pool
+            if (region := cache.runtime.shared_host_region) is not None:
+                shared_host_regions[id(region)] = region
         if len(hot_backings) != 1:
             raise RuntimeError("HiSparse hot tensors must share one GPU backing.")
         hot_backing = next(iter(hot_backings.values()))
-        pinned_host_pools = list(registered_host_pools.values())
+        if len(shared_host_regions) > 1:
+            raise RuntimeError("HiSparse caches must share one host region.")
+        shared_host_region = next(iter(shared_host_regions.values()), None)
+        pinned_host_pools = (
+            []
+            if shared_host_region is not None
+            else list(registered_host_pools.values())
+        )
+        is_host_writer = _is_hisparse_host_writer(shared_host_region)
 
         resident = cache_handles[0].view
         assert resident is not None
@@ -217,11 +234,14 @@ class HiSparseConnectorWorker:
                 host_num_blocks,
                 hot_backing.device,
                 pinned_host_pools,
+                shared_host_region=shared_host_region,
+                is_host_writer=is_host_writer,
             )
         except Exception:
             release_pinned_state(
                 [cache.runtime for cache in cache_handles],
                 pinned_host_pools,
+                shared_host_region,
             )
             raise
 
@@ -827,6 +847,8 @@ class HiSparseConnectorWorker:
         if self.dma_stream is not None:
             self.dma_stream.synchronize()
         release_pinned_state(
-            [cache.runtime for cache in self.cache_handles], self.pinned_host_pools
+            [cache.runtime for cache in self.cache_handles],
+            self.pinned_host_pools,
+            self.shared_host_region,
         )
         self._initialized = False
