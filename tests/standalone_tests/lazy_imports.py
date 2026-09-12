@@ -11,7 +11,9 @@ import sys
 # too many processes before we set the number of compiler threads.
 # Lazy import `cv2` to avoid bothering users who only use text models.
 # `cv2` can easily mess up the environment.
-module_names = ["torch._inductor.async_compile", "cv2"]
+# Lazy import `xgrammar` because it has no wheels for some platforms
+# (e.g. s390x) and is only needed once structured output is requested.
+module_names = ["torch._inductor.async_compile", "cv2", "xgrammar"]
 
 # set all modules in `module_names` to be None.
 # if we import any modules during `import vllm`, there would be a
