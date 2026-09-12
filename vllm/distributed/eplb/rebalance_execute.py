@@ -387,7 +387,7 @@ def move_to_buffer(
         recv_dst_rows=recv_dst_rows,
     )
 
-    # Batching is opt-in; by default, submit all transfers in one step.
+    # Migration batching is disabled by default and must be explicitly enabled.
     if enable_migration_batching:
         _execute_migration_batches(
             num_local_experts=num_local_experts,
