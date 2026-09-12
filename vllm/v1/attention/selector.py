@@ -18,6 +18,14 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheSpecKind
 
 
+_SELECTOR_CACHE: dict = {}
+
+
+def _make_cache_key(head_size: int, dtype, block_size) -> tuple:
+    """Build a hashable cache key for attention backend selection."""
+    return (head_size, str(dtype), block_size)
+
+
 class AttentionSelectorConfig(NamedTuple):
     head_size: int
     dtype: torch.dtype
