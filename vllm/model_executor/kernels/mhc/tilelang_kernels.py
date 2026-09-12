@@ -275,6 +275,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
     norm_weight,
     pre_mix_in,
     pre_mix_out,
+    aux_out,
     hidden_size: int,
     rms_eps: float,
     hc_pre_eps: float,
@@ -288,6 +289,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
     use_pre_mix_in: bool = False,
     save_pre_mix: bool = False,
     rms_numel: int = 0,
+    write_aux: bool = False,
 ):
     num_tokens = T.dynamic("num_tokens")
     hc_mult3 = hc_mult * (2 + hc_mult)
@@ -309,6 +311,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
 
     pre_mix_in: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
     pre_mix_out: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
+    aux_out: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
 
     with T.Kernel(num_tokens, threads=96) as i:
         rms = T.alloc_fragment(1, T.float32)
@@ -404,11 +407,24 @@ def mhc_pre_big_fuse_with_norm_tilelang(
 
                 ol = T.alloc_fragment(hidden_block, T.float32)
                 T.clear(ol)
+                if write_aux:
+                    # Aux consumers (draft models) take the plain stream mean
+                    # of the same residual this collapse reads.
+                    aux = T.alloc_fragment(hidden_block, T.float32)
+                    T.clear(aux)
 
                 for i_hc in T.serial(hc_mult):
                     pre = pre_mix_shared[i_hc]
                     for i1_h in T.Parallel(hidden_block):
                         ol[i1_h] += pre * xl[i_hc, i1_h]
+                        if write_aux:
+                            aux[i1_h] += xl[i_hc, i1_h]
+
+                if write_aux:
+                    for i1_h in T.Parallel(hidden_block):
+                        aux_out[i, i0_h * hidden_block + i1_h] = T.bfloat16(
+                            aux[i1_h] / hc_mult
+                        )
 
                 if save_pre_mix:
                     # Keep the BF16 boundary before the delayed input RMSNorm.
@@ -1270,7 +1286,15 @@ class MhcPreBigFuseTileLangKernel(
             middle_args = (residual_out, *output_args, norm_weight)
         elif compile_key.use_norm_weight:
             assert norm_weight is not None
-            middle_args = (*output_args, norm_weight, post_mix, post_mix)
+            # layer_input stands in for the aux buffer: same shape and dtype,
+            # and write_aux is off on this path so it is never written.
+            middle_args = (
+                *output_args,
+                norm_weight,
+                post_mix,
+                post_mix,
+                layer_input,
+            )
         else:
             middle_args = (*output_args, post_mix, post_mix)
         norm_eps_args = (compile_key.norm_eps,) if compile_key.use_norm_weight else ()

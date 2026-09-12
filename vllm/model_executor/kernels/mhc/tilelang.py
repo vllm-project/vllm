@@ -197,6 +197,7 @@ def mhc_pre_delayed_tilelang(
             norm_weight,
             pre_mix if pre_mix is not None else post,
             next_pre_mix,
+            layer_input,
             hidden_size=hidden_size,
             rms_eps=rms_eps,
             hc_pre_eps=hc_pre_eps,
@@ -282,7 +283,10 @@ def mhc_fused_post_pre_delayed_tilelang(
     pre_mix: torch.Tensor | None = None,
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    capture_aux: bool = False,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
     """Run one mHC post block followed by the next delayed mHC pre block.
 
     Within the fused kernel's token range the post mapping is folded into the
@@ -307,12 +311,17 @@ def mhc_fused_post_pre_delayed_tilelang(
             select residual stream zero.
         norm_weight: Optional BF16 RMSNorm weight for the collapsed input.
         norm_eps: RMSNorm epsilon for the collapsed input.
+        capture_aux: Also return the mean over the post-mapped streams, which
+            draft models consume as the target's hidden state. It is folded
+            into the collapse, which already reads those streams.
 
     Returns:
         The post-mapped residual streams, the post and residual coefficients,
-        the optionally normalized BF16 layer input, and the next FP32 pre-mix,
-        with shapes (tokens, hc_mult, hidden_size), (tokens, hc_mult, 1),
-        (tokens, hc_mult, hc_mult), (tokens, hidden_size), (tokens, hc_mult).
+        the optionally normalized BF16 layer input, the next FP32 pre-mix, and
+        the BF16 stream mean (empty unless capture_aux), with shapes
+        (tokens, hc_mult, hidden_size), (tokens, hc_mult, 1),
+        (tokens, hc_mult, hc_mult), (tokens, hidden_size), (tokens, hc_mult),
+        and (tokens, hidden_size).
     """
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         _HC_PRENORM_GEMM_TILELANG_KERNEL,
@@ -357,6 +366,12 @@ def mhc_fused_post_pre_delayed_tilelang(
     layer_input = torch.empty(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
     )
+    aux = torch.empty(
+        num_tokens if capture_aux else 0,
+        hidden_size,
+        dtype=torch.bfloat16,
+        device=residual.device,
+    )
     if num_tokens == 0:
         return (
             torch.empty_like(residual),
@@ -364,6 +379,7 @@ def mhc_fused_post_pre_delayed_tilelang(
             comb.view(num_tokens, hc_mult, hc_mult),
             layer_input,
             next_pre_mix,
+            aux,
         )
 
     fused_config = mhc_fused_post_pre_split_config(num_tokens, hidden_size, hc_mult)
@@ -420,6 +436,7 @@ def mhc_fused_post_pre_delayed_tilelang(
         comb.view(num_tokens, hc_mult, hc_mult),
         layer_input,
         next_pre_mix,
+        aux,
     )
     if norm_weight is not None:
         assert norm_weight.shape == (hidden_size,)
@@ -436,6 +453,7 @@ def mhc_fused_post_pre_delayed_tilelang(
             norm_weight,
             pre_mix if pre_mix is not None else post,
             next_pre_mix,
+            aux if capture_aux else layer_input,
             hidden_size=hidden_size,
             rms_eps=rms_eps,
             hc_pre_eps=hc_pre_eps,
@@ -447,6 +465,7 @@ def mhc_fused_post_pre_delayed_tilelang(
             use_pre_mix_in=pre_mix is not None,
             save_pre_mix=True,
             rms_numel=input_size,
+            write_aux=capture_aux,
         )
         return outputs
     mhc_pre_big_fuse_tilelang(
@@ -472,6 +491,9 @@ def mhc_fused_post_pre_delayed_tilelang(
         save_pre_mix=True,
         rms_numel=input_size,
     )
+    if capture_aux:
+        # The unnormalized epilogue has no fused aux path.
+        aux.copy_(residual_cur.mean(dim=1))
     return outputs
 
 
@@ -491,7 +513,10 @@ def _mhc_fused_post_pre_delayed_tilelang_fake(
     pre_mix: torch.Tensor | None = None,
     norm_weight: torch.Tensor | None = None,
     norm_eps: float = 1e-6,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    capture_aux: bool = False,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
     num_tokens, hc_mult, hidden_size = residual.shape
     return (
         torch.empty_like(residual),
@@ -505,6 +530,12 @@ def _mhc_fused_post_pre_delayed_tilelang_fake(
             num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
         ),
         torch.empty(num_tokens, hc_mult, dtype=torch.float32, device=residual.device),
+        torch.empty(
+            num_tokens if capture_aux else 0,
+            hidden_size,
+            dtype=torch.bfloat16,
+            device=residual.device,
+        ),
     )
 
 
