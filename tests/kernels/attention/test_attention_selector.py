@@ -10,6 +10,7 @@ import torch
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
+    DeviceConfig,
     ParallelConfig,
     VllmConfig,
     set_current_vllm_config,
