@@ -531,7 +531,7 @@ class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
                 self.kernel, *kernel_args, grid=grid, **kwargs
             )
             inputs.pop("grid")
-            return self.launch(grid, (), (), **inputs)
+            return self.launch((grid, inputs), {})
         spec = self._dispatch_fn(*args, **kwargs)
         input_values = args
         if len(args) != len(self._dispatch_arg_names):
@@ -539,11 +539,10 @@ class _DecoratedTritonJitKernel(_AutomaticTritonJitKernel):
                 kwargs[name] if name in kwargs else self._dispatch_defaults[name]
                 for name in self._dispatch_arg_names[len(args) :]
             )
-        grid, launch_kwargs = spec[:2]
-        result = self.launch(
-            grid, self._dispatch_arg_names, input_values, **launch_kwargs
+        return self.launch(
+            spec,
+            dict(zip(self._dispatch_arg_names, input_values)),
         )
-        return spec[2] if len(spec) == 3 else result
 
     def __getitem__(self, grid: tuple[int, ...]) -> Callable[..., Any]:
         return cast(Callable[..., Any], self.kernel[grid])
