@@ -4,6 +4,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import product
+import os
 from typing import Any, NamedTuple, Protocol
 
 import torch
@@ -33,11 +34,52 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers, set_dummy_context
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
+
+
+def _b2_ceil_div(a: int, b: int) -> int:
+    return (a + b - 1) // b
+
+
+def _b2_full_dummy_descriptor_valid(
+    *,
+    num_tokens: int,
+    num_reqs: int | None,
+    max_query_len: int | None,
+) -> bool:
+    if max_query_len is None or num_reqs is None:
+        return True
+    if num_reqs <= 0:
+        return False
+    return _b2_ceil_div(num_tokens, num_reqs) <= max_query_len
+
+
+def _b2_apply_full_capture_capacity_hint(
+    *,
+    input_batch: InputBatch,
+    block_tables: BlockTables,
+    kv_cache_config: KVCacheConfig,
+    max_model_len: int | None,
+) -> None:
+    if max_model_len is None:
+        return
+
+    query_len = input_batch.max_query_len or int(input_batch.num_scheduled_tokens.max())
+    capture_context_len = max(int(max_model_len) - int(query_len), 0)
+    if not capture_context_len:
+        return
+
+    set_dummy_context(
+        input_batch,
+        block_tables,
+        capture_context_len,
+        kv_cache_config.num_blocks,
+        int(max_model_len),
+    )
 
 
 class AttentionState(NamedTuple):
@@ -270,12 +312,21 @@ class CudaGraphManager:
                 # from the forward context; in-graph kernels handle the token padding
                 # themselves from the padded slot_mapping (rows with slot == -1).
                 num_reqs = None
+                max_query_len = None
                 if mixed_mode == CUDAGraphMode.FULL:
                     num_reqs = min(num_tokens, self.max_num_reqs)
+                    max_query_len = self.decode_query_len
+                    if not _b2_full_dummy_descriptor_valid(
+                        num_tokens=num_tokens,
+                        num_reqs=num_reqs,
+                        max_query_len=max_query_len,
+                    ):
+                        continue
                 desc = BatchExecutionDescriptor(
                     cg_mode=mixed_mode,
                     num_tokens=num_tokens,
                     num_reqs=num_reqs,
+                    max_query_len=max_query_len,
                     num_active_loras=num_active_loras,
                 )
                 descs_by_mode[mixed_mode].append(desc)
@@ -340,6 +391,15 @@ class CudaGraphManager:
                     logger.debug(
                         "CG Capture: mode=%s, batch_desc=%s", desc.cg_mode.name, desc
                     )
+                    # PHASE13B prewarm hook: surgical insertion only.
+                    if (
+                        os.environ.get("AITER_GFX1151_MQA_GRAPH_STABLE_PREWARM_KEYS_JSON", "").strip()
+                        or os.environ.get("AITER_GFX1151_MQA_GRAPH_STABLE_PREWARM_KEYS_JSON_PATH", "").strip()
+                    ):
+                        from aiter.ops.triton.attention.fp8_mqa_logits import (
+                            prewarm_fp8_mqa_graph_out_cache_from_env,
+                        )
+                        prewarm_fp8_mqa_graph_out_cache_from_env(self.device)
                     if (
                         desc.cg_mode == CUDAGraphMode.PIECEWISE
                         and not self.use_breakable_cg
@@ -358,6 +418,16 @@ class CudaGraphManager:
                         # Sync offloader's copy stream before capture.
                         # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()
+
+                        # PHASE13B prewarm hook: surgical insertion only.
+                        if (
+                            os.environ.get("AITER_GFX1151_MQA_GRAPH_STABLE_PREWARM_KEYS_JSON", "").strip()
+                            or os.environ.get("AITER_GFX1151_MQA_GRAPH_STABLE_PREWARM_KEYS_JSON_PATH", "").strip()
+                        ):
+                            from aiter.ops.triton.attention.fp8_mqa_logits import (
+                                prewarm_fp8_mqa_graph_out_cache_from_env,
+                            )
+                            prewarm_fp8_mqa_graph_out_cache_from_env(self.device)
                         if self.pool is not None:
                             set_graph_pool_id(self.pool)
                         else:
@@ -521,6 +591,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
                 max_query_len=desc.max_query_len,
+                max_model_len=self.vllm_config.model_config.max_model_len,
             )
 
             # Capture with dummy rows marked as padding.
@@ -613,11 +684,19 @@ def prepare_inputs_to_capture(
     kv_cache_config: KVCacheConfig,
     full_cudagraph: bool,
     max_query_len: int | None = None,
+    max_model_len: int | None = None,
 ) -> AttentionState:
     input_batch = InputBatch.make_dummy(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
+    if full_cudagraph:
+        _b2_apply_full_capture_capacity_hint(
+            input_batch=input_batch,
+            block_tables=block_tables,
+            kv_cache_config=kv_cache_config,
+            max_model_len=max_model_len,
+        )
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
