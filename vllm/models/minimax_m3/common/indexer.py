@@ -500,7 +500,7 @@ def select_indexer_impl_cls(
     On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
     ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
     used for both bf16 and fp8 index caches. Everything else falls back to the
-    Triton indexer (bf16 only).
+    Triton indexer: bf16 everywhere, or fp8 on CUDA devices with FP8 support.
     """
     if indexer_kv_dtype in ("mxfp4", "nvfp4"):
         raise NotImplementedError(
@@ -528,7 +528,11 @@ def select_indexer_impl_cls(
             indexer_kv_dtype,
         )
         return MiniMaxM3IndexerMSAImpl
-    if indexer_kv_dtype != "bf16":
+    if indexer_kv_dtype != "bf16" and not (
+        indexer_kv_dtype in ("fp8", "fp8_e4m3")
+        and current_platform.is_cuda()
+        and current_platform.supports_fp8()
+    ):
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
             "Triton indexer impl."

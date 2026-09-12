@@ -1348,19 +1348,20 @@ def test_amd_decode_index_topk_end_to_end(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_device_capability_family(100),
-    reason="fp8 e4m3 indexer cache is the SM100 (MSA) path.",
+    not (current_platform.is_cuda() and current_platform.supports_fp8()),
+    reason="FP8 E4M3 Triton indexer requires CUDA with FP8 support.",
 )
 @pytest.mark.parametrize("num_idx_heads", [1, 4])
-def test_decode_index_topk_fp8(num_idx_heads: int):
-    """The standalone Triton path must score FP8 inputs in FP32 so its top-k
-    matches a reference computed from the dequantized FP8 values."""
+@pytest.mark.parametrize("query_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("query_len", [1, 4])
+@pytest.mark.parametrize("stage", ["decode", "prefill"])
+def test_index_topk_fp8(num_idx_heads: int, query_dtype, query_len: int, stage: str):
+    """FP8 Q/K and mixed Q/K must select the reference's causal blocks."""
     torch.manual_seed(0)
     topk, init_blocks, local_blocks, head_dim = 8, 0, 1, 128
-    decode_query_len = 1
     active_seq_lens = torch.tensor((129, 1025, 4097), device="cuda", dtype=torch.int32)
-    q_lens = torch.full_like(active_seq_lens, decode_query_len)
-    prefix_lens = active_seq_lens - decode_query_len
+    q_lens = torch.full_like(active_seq_lens, query_len)
+    prefix_lens = active_seq_lens - query_len
     batch = active_seq_lens.numel()
     max_seq_len = int(active_seq_lens.max())
     max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
@@ -1368,29 +1369,46 @@ def test_decode_index_topk_fp8(num_idx_heads: int):
     block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(
         batch, max_blocks
     )
-    idx_q = torch.randn(
-        batch * decode_query_len, num_idx_heads, head_dim, device="cuda"
-    ).to(torch.float8_e4m3fn)
+    idx_q = torch.randn(batch * query_len, num_idx_heads, head_dim, device="cuda").to(
+        query_dtype
+    )
     index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda").to(
         torch.float8_e4m3fn
     )
 
-    actual = minimax_m3_index_decode(
-        idx_q,
-        index_kv_cache,
-        block_table,
-        active_seq_lens,
-        max_seq_len=max_seq_len,
-        topk=topk,
-        init_blocks=init_blocks,
-        local_blocks=local_blocks,
-        num_kv_heads=num_idx_heads,
-        decode_query_len=decode_query_len,
-        max_decode_query_len=decode_query_len,
-    )
-    # Reference from the DEQUANTIZED fp8 values (the kernel computes the fp8 QK
-    # in fp32 with no scaling, so it must match an unscaled fp32 matmul of the
-    # same e4m3 values).
+    if stage == "decode":
+        actual = minimax_m3_index_decode(
+            idx_q,
+            index_kv_cache,
+            block_table,
+            active_seq_lens,
+            max_seq_len=max_seq_len,
+            topk=topk,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+            num_kv_heads=num_idx_heads,
+            decode_query_len=query_len,
+            max_decode_query_len=query_len,
+        )
+    else:
+        cu_seqlens_q = torch.arange(
+            0, (batch + 1) * query_len, query_len, device="cuda", dtype=torch.int32
+        )
+        score = minimax_m3_index_score(
+            idx_q,
+            index_kv_cache,
+            block_table,
+            cu_seqlens_q,
+            active_seq_lens,
+            prefix_lens,
+            query_len,
+            max_seq_len,
+            num_idx_heads,
+        )
+        actual = minimax_m3_index_topk(
+            score, cu_seqlens_q, prefix_lens, query_len, topk, init_blocks, local_blocks
+        )
+    # Compare against the stored values, separately from quantization error.
     expected = _reference_index_topk(
         idx_q.float(),
         index_kv_cache.float(),
