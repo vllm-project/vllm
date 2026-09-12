@@ -38,6 +38,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
+    DeepseekV32IndexerPrefillChunkMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
@@ -298,6 +299,89 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+def reserve_indexer_workspaces(
+    total_seq_lens: int, head_dim: int, use_fp4_cache: bool, device: torch.device
+) -> None:
+    """Profiling run: claim the prefill K-gather and top-k workspaces and the
+    peak dense-logits allocation so the memory estimate covers them."""
+    values_spec, scales_spec = _gather_workspace_shapes(
+        total_seq_lens, head_dim, current_platform.fp8_dtype(), use_fp4_cache
+    )
+    current_workspace_manager().get_simultaneous(
+        values_spec,
+        scales_spec,
+        ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+    )
+    # FP8 elements so elements == bytes.
+    max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    torch.empty(max_logits_elems, dtype=torch.uint8, device=device)
+
+
+def get_prefill_k_workspaces(
+    total_seq_lens: int,
+    head_dim: int,
+    use_fp4_cache: bool,
+    with_topk_workspace: bool = False,
+) -> tuple[torch.Tensor, ...]:
+    """Shared K-gather workspace ``(values, scales[, topk])``. The layout
+    switches between FP8 (head_dim bytes + 4-byte fp32 scale) and MXFP4
+    (head_dim/2 packed bytes + head_dim/MXFP4_BLOCK_SIZE ue8m0 scales)."""
+    values_spec, scales_spec = _gather_workspace_shapes(
+        total_seq_lens, head_dim, current_platform.fp8_dtype(), use_fp4_cache
+    )
+    specs: list[tuple] = [values_spec, scales_spec]
+    if with_topk_workspace:
+        specs.append(((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8))
+    return tuple(current_workspace_manager().get_simultaneous(*specs))
+
+
+def gather_prefill_chunk_k(
+    kv_cache: torch.Tensor,
+    k_quant_full: torch.Tensor,
+    k_scale_full: torch.Tensor,
+    chunk: DeepseekV32IndexerPrefillChunkMetadata,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather one prefill chunk's paged K into the packed workspace."""
+    assert chunk.local_cu_seq_lens is not None
+    k_quant = k_quant_full[: chunk.max_local_total_seq_lens]
+    k_scale = k_scale_full[: chunk.max_local_total_seq_lens]
+    if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
+        ops.cp_gather_indexer_k_quant_cache(
+            kv_cache,
+            k_quant,
+            k_scale,
+            chunk.block_table,
+            chunk.local_cu_seq_lens,
+        )
+    return k_quant, k_scale
+
+
+def dense_mha_skips_topk(
+    forward_context,
+    attn_metadata: dict,
+    dense_mha_metadata_layer_name: LayerNameType,
+) -> bool:
+    """Whether the main MLA runs dense MHA for this batch and will not read
+    the top-k indices, so the indexer can leave its buffer untouched.
+
+    The indexer and main MLA may classify the same short extend differently
+    because they use independent decode thresholds; only the main MLA route
+    knows whether the indices are consumed.
+    """
+    if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        return False
+    dense_mha_layer = _resolve_layer_name(dense_mha_metadata_layer_name)
+    if not dense_mha_layer:
+        return False
+    mla_metadata = attn_metadata.get(dense_mha_layer)
+    prefill_metadata = getattr(mla_metadata, "prefill", None)
+    return (
+        getattr(prefill_metadata, "use_dense_mha", False)
+        and getattr(mla_metadata, "num_decode_tokens", -1) == 0
+        and not torch.cuda.is_current_stream_capturing()
+    )
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -329,7 +413,6 @@ def sparse_attn_indexer(
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
     if candidate_blocks is not None:
@@ -342,23 +425,9 @@ def sparse_attn_indexer(
 
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
-        # Reserve workspace for indexer during profiling run
-        values_spec, scales_spec = _gather_workspace_shapes(
-            total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
+        reserve_indexer_workspaces(
+            total_seq_lens, head_dim, use_fp4_cache, hidden_states.device
         )
-        current_workspace_manager().get_simultaneous(
-            values_spec,
-            scales_spec,
-            ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
-        )
-
-        # Dummy allocation to simulate for peak logits tensor memory during inference.
-        # FP8 elements so elements == bytes
-        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-        _ = torch.empty(
-            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
-        )
-
         return sparse_attn_indexer_fake(
             hidden_states,
             k_cache_prefix,
@@ -425,23 +494,10 @@ def sparse_attn_indexer(
             quant_block_size,
             scale_fmt,
         )
-    # The indexer and main MLA may classify the same short extend differently
-    # because they use independent decode thresholds. Only the main MLA route
-    # can determine whether the top-k indices will be consumed.
-    if forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL:
-        dense_mha_layer = _resolve_layer_name(dense_mha_metadata_layer_name)
-        if dense_mha_layer:
-            mla_metadata = attn_metadata.get(dense_mha_layer)
-            prefill_metadata = getattr(mla_metadata, "prefill", None)
-            if (
-                getattr(prefill_metadata, "use_dense_mha", False)
-                and getattr(mla_metadata, "num_decode_tokens", -1) == 0
-                and not torch.cuda.is_current_stream_capturing()
-            ):
-                # Deliberately leave the buffer untouched. Dense MHA does not
-                # consume top-k indices for this batch; clearing it would be
-                # unnecessary work.
-                return topk_indices_buffer
+    if dense_mha_skips_topk(
+        forward_context, attn_metadata, dense_mha_metadata_layer_name
+    ):
+        return topk_indices_buffer
 
     # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
     # top-k kernels scatter valid indices into it. On the fused deepseek_v32
@@ -454,32 +510,15 @@ def sparse_attn_indexer(
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
 
-        # Get the full shared workspace buffers once (will allocate on first use).
-        # Layout switches between FP8 (head_dim bytes + 4-byte fp32 scale) and
-        # MXFP4 (head_dim/2 bytes packed + head_dim/MXFP4_BLOCK_SIZE ue8m0
-        # scales) based on use_fp4_cache.
-        workspace_manager = current_workspace_manager()
-        values_spec, scales_spec = _gather_workspace_shapes(
-            total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
-        )
-        k_quant_full, k_scale_full = workspace_manager.get_simultaneous(
-            values_spec,
-            scales_spec,
+        k_quant_full, k_scale_full = get_prefill_k_workspaces(
+            total_seq_lens, head_dim, use_fp4_cache
         )
         for chunk in prefill_metadata.chunks:
             cu_seqlen_ks = chunk.cu_seqlen_ks
             cu_seqlen_ke = chunk.cu_seqlen_ke
-            assert chunk.local_cu_seq_lens is not None
-            k_quant = k_quant_full[: chunk.max_local_total_seq_lens]
-            k_scale = k_scale_full[: chunk.max_local_total_seq_lens]
-            if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
-                ops.cp_gather_indexer_k_quant_cache(
-                    kv_cache,
-                    k_quant,
-                    k_scale,
-                    chunk.block_table,
-                    chunk.local_cu_seq_lens,
-                )
+            k_quant, k_scale = gather_prefill_chunk_k(
+                kv_cache, k_quant_full, k_scale_full, chunk
+            )
 
             q_slice = q_quant[chunk.token_start : chunk.token_end]
             q_scale_slice = (
