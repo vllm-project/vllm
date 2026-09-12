@@ -4,7 +4,6 @@
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.models.minimax_m3.nvidia.model import MiniMaxM3SparseAttention
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
 
@@ -13,9 +12,26 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_MINIMAX_M3_ARCHITECTURES = frozenset(
+    {
+        "MiniMaxM3MTP",
+        "MiniMaxM3SparseForCausalLM",
+        "MiniMaxM3SparseForConditionalGeneration",
+    }
+)
+
 
 @instrument(span_name="MiniMax M3 MSA warmup")
 def minimax_m3_msa_warmup(worker: "Worker") -> None:
+    if worker.vllm_config.model_config.architecture not in _MINIMAX_M3_ARCHITECTURES:
+        return
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    ):
+        return
+
+    from vllm.models.minimax_m3.nvidia.model import MiniMaxM3SparseAttention
+
     sparse_module = next(
         (
             module
@@ -25,10 +41,6 @@ def minimax_m3_msa_warmup(worker: "Worker") -> None:
         None,
     )
     if sparse_module is None:
-        return
-    if not (
-        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
-    ):
         return
 
     logger.info("Warming up MiniMax M3 MSA kernels.")
