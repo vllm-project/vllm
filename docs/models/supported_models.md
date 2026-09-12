@@ -538,6 +538,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `AriaForConditionalGeneration` | Aria | T + I<sup>+</sup> | `rhymes-ai/Aria` | | |
 | `AudioFlamingo3ForConditionalGeneration` | AudioFlamingo3 | T + A | `nvidia/audio-flamingo-3-hf`, `nvidia/music-flamingo-hf` | ✅︎ | ✅︎ |
 | `BagelForConditionalGeneration` | BAGEL | T + I<sup>+</sup> | `ByteDance-Seed/BAGEL-7B-MoT` | ✅︎ | ✅︎ |
+| `BailingMoeV3VLForConditionalGeneration` | Ling 3.0 Flash VL | T + I<sup>E+</sup> | `inclusionAI/Ling-3.0-flash-VL` | | ✅︎ |
 | `BeeForConditionalGeneration` | Bee-8B | T + I<sup>E+</sup> | `Open-Bee/Bee-8B-RL`, `Open-Bee/Bee-8B-SFT` | | ✅︎ |
 | `Blip2ForConditionalGeneration` | BLIP-2 | T + I<sup>E</sup> | `Salesforce/blip2-opt-2.7b`, `Salesforce/blip2-opt-6.7b`, etc. | ✅︎ | ✅︎ |
 | `Cohere2VisionForConditionalGeneration` | Command A Vision, Command-A+ | T + I<sup>+</sup> | `CohereLabs/command-a-vision-07-2025`, `CohereLabs/command-a-plus-05-2026`, etc. | | ✅︎ |
@@ -711,7 +712,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
 | `CohereAsrForConditionalGeneration` | Cohere-Transcribe | `CohereLabs/cohere-transcribe-03-2026` | | |
 | `FireRedASR2ForConditionalGeneration` | FireRedASR2 | `allendou/FireRedASR2-LLM-vllm`, etc. | | |
-| `FunASRForConditionalGeneration` | FunASR | `allendou/Fun-ASR-Nano-2512-vllm`, etc. | | |
+| `FunASRForConditionalGeneration` | FunASR | `FunAudioLLM/Fun-ASR-Nano-2512-vllm`, etc. | | |
 | `Gemma3nForConditionalGeneration` | Gemma3n | `google/gemma-3n-E2B-it`, `google/gemma-3n-E4B-it`, etc. | | |
 | `GlmAsrForConditionalGeneration` | GLM-ASR | `zai-org/GLM-ASR-Nano-2512` | ✅︎ | ✅︎ |
 | `GraniteSpeechForConditionalGeneration` | Granite Speech | `ibm-granite/granite-4.0-1b-speech`, `ibm-granite/granite-speech-3.3-2b`, etc. | ✅︎ | ✅︎ |

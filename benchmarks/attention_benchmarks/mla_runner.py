@@ -409,10 +409,6 @@ def _build_attention_metadata(
     seq_lens_cpu = torch.tensor(kv_lens, dtype=torch.int32)
     seq_lens_gpu = seq_lens_cpu.to(device)
 
-    # Build num_computed_tokens (context length for each request)
-    context_lens = [kv_len - q_len for q_len, kv_len in zip(q_lens, kv_lens)]
-    num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
-
     # Build block table
     num_blocks_per_req = [(kv + block_size - 1) // block_size for kv in kv_lens]
     max_num_blocks = max(num_blocks_per_req)
@@ -454,8 +450,6 @@ def _build_attention_metadata(
         query_start_loc_cpu=q_start_cpu,
         seq_lens=seq_lens_gpu,
         seq_lens_cpu_upper_bound=seq_lens_cpu,
-        _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=num_computed_tokens_cpu,
         slot_mapping=slot_mapping,
         block_table_tensor=block_table_gpu,
         dcp_local_seq_lens=None,
