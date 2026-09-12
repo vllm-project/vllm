@@ -197,9 +197,12 @@ jobs:
               deepseek: {
                 keywords: [{ term: "DeepSeek", searchIn: "title" }],
               },
+              // DSv4 and DSv4.1 are distinct architectures; these keep them exclusive.
               DSv4: {
-                keywords: [{ term: "DSv4", searchIn: "title" }],
-                substrings: [{ term: "deepseek-v4", searchIn: "title" }],
+                regexPatterns: [{ pattern: "(?:\\bDSv4\\b|deepseek[-\\s_]?v4)(?![._]?1)", flags: "gi", searchIn: "title" }],
+              },
+              "DSv4.1": {
+                regexPatterns: [{ pattern: "(?:\\bDSv4[._]?1\\b|deepseek[-\\s_]?v4[._]?1)", flags: "gi", searchIn: "title" }],
               },
               llama: {
                 keywords: [{ term: "Llama", searchIn: "title" }],
