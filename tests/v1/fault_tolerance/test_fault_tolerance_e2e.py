@@ -15,6 +15,7 @@ from typing import Any
 import psutil
 import pytest
 import requests
+from prometheus_client.parser import text_string_to_metric_families
 
 from tests.utils import RemoteOpenAIServer, multi_gpu_test
 from vllm.utils.import_utils import has_nixl_ep
@@ -168,12 +169,29 @@ def _get_ft_status(server) -> dict:
     return resp.json()
 
 
+def _assert_health_metric(server, rank: int, healthy: bool) -> None:
+    resp = requests.get(server.url_for("metrics"), timeout=10)
+    resp.raise_for_status()
+    samples = [
+        sample
+        for family in text_string_to_metric_families(resp.text)
+        if family.name == "vllm:engine_healthy"
+        for sample in family.samples
+    ]
+    assert len(samples) == 1, samples
+    assert samples[0].labels == {"engine": str(rank)}
+    assert samples[0].value == int(healthy)
+
+
 def _assert_serving_and_healthy(servers) -> None:
     """Wait until every engine is healthy, then serve one request per server."""
     healthy = _wait_for_engines(
         list(servers), match_key="status", match_values={"healthy"}
     )
     assert all(healthy), healthy
+    for server, status in zip(servers, healthy):
+        assert status is not None
+        _assert_health_metric(server, status["id"], True)
     _in_parallel(lambda s: _complete(s.get_client()), servers)
 
 
@@ -306,6 +324,8 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
         # The rank that raised carries the fault info from its own exception.
         assert faulted[1] is not None
         assert faulted[1].get("fault_info"), faulted[1]
+        _assert_health_metric(rank0, 0, False)
+        _assert_health_metric(rank1, 1, False)
 
         # 3. retry both engines.
         for server in (rank0, rank1):
@@ -364,6 +384,8 @@ def test_worker_kill_survivor_unhealthy_and_dead_rejects_retry():
             f"{FAULT_DETECTION_DEADLINE_S}s"
         )
         assert victim_faulted["status"] == "dead", victim_faulted
+        _assert_health_metric(survivor, 0, False)
+        _assert_health_metric(victim, 1, False)
 
         # 4. retry is accepted at the HTTP layer (202 = background dispatch)...
         request_id = _apply_ft(victim, "retry")["request_id"]
