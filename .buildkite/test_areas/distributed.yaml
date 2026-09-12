@@ -105,6 +105,26 @@ steps:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/test_wrapper.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Distributed Compile + RPC"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 65
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/compilation/
+      - vllm/distributed/
+      - "!vllm/distributed/kv_transfer/"
+      - vllm/engine/
+      - vllm/executor/
+      - vllm/worker/worker_base.py
+      - vllm/v1/engine/
+      - vllm/v1/worker/
+      - tests/compile/test_wrapper.py
+      - tests/entrypoints/llm/test_collective_rpc.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (L4) Distributed Torchrun + Shutdown"
   key: distributed-torchrun-shutdown-tests-2-gpus
@@ -335,6 +355,25 @@ steps:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
   - pytest -v -s v1/distributed/test_pp_dp_v2.py
+  mirror:
+    amd:
+      label: ":amd: (MI250) Pipeline + Context Parallelism"
+      device: mi250_4
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/
+      - "!vllm/distributed/kv_transfer/"
+      - vllm/engine/
+      - vllm/executor/
+      - vllm/model_executor/models/
+      - vllm/model_executor/layers/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - tests/distributed/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (L4) RayExecutorV2"
   key: rayexecutorv2-4-gpus
