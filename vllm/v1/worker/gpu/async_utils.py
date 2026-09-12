@@ -17,6 +17,7 @@ from vllm.v1.outputs import (
     PoolerOutput,
     RoutedExpertsTensors,
 )
+from vllm.v1.worker.gpu.event_utils import wait_for_gpu_event
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.utils import raise_if_nan_logits
 
@@ -130,7 +131,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.routed_experts = routed_experts
-        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+        # Preserve the efficient blocking fallback when the timeout is disabled.
         self.copy_event = torch.cuda.Event(blocking=True)
         self._has_fault: torch.Tensor | None = None
 
@@ -165,7 +166,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
-        self.copy_event.synchronize()
+        wait_for_gpu_event(self.copy_event, "V2 generation output copy")
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
@@ -217,7 +218,7 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
     ):
         self.model_runner_output = model_runner_output
         self.pooler_output = pooler_output
-        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+        # Preserve the efficient blocking fallback when the timeout is disabled.
         self.copy_event = torch.cuda.Event(blocking=True)
 
         with stream(copy_stream, main_stream):
@@ -245,7 +246,7 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
             pooler_output = list(self.pooler_output_cpu.unbind(dim=0))
         else:
             pooler_output = self.pooler_output_cpu
-        self.copy_event.synchronize()
+        wait_for_gpu_event(self.copy_event, "V2 pooling output copy")
         self.model_runner_output.pooler_output = pooler_output
         return self.model_runner_output
 
