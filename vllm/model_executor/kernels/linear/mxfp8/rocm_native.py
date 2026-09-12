@@ -194,6 +194,9 @@ def _select_cfg(M, N, K):
     return (128, 128, 256, 8, 2) if K % 256 == 0 else (128, 256, 128, 8, 3)
 
 
+_DOT_SCALED_K_ALIGN = 128
+
+
 class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
     """Native CDNA4 (gfx950) MXFP8 linear via Triton ``tl.dot_scaled``."""
 
@@ -219,6 +222,8 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
         N, K = weight.shape
         scale_k = K // MXFP8_BLOCK_SIZE
         weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
+        if K % _DOT_SCALED_K_ALIGN != 0:
+            weight = dequant_mxfp8_to_bf16(weight.contiguous(), weight_scale)
         layer.weight = Parameter(weight.contiguous(), requires_grad=False)
         layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
@@ -235,12 +240,10 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
             )
         out_shape = (*x.shape[:-1], layer.weight.shape[0])
         x2d = x.reshape(-1, x.shape[-1])
-        if x2d.shape[-1] % 128 == 0:
-            out = _mxfp8_dot_scaled_linear(x2d, layer.weight, layer.weight_scale)
+        if layer.weight.element_size() >= 2:
+            out = torch.nn.functional.linear(x2d, layer.weight.to(x.dtype))
         else:
-            # dot_scaled tiling needs K % 128 == 0; dequantize fallback otherwise.
-            w_bf16 = dequant_mxfp8_to_bf16(layer.weight, layer.weight_scale)
-            out = torch.nn.functional.linear(x2d, w_bf16).to(x.dtype)
+            out = _mxfp8_dot_scaled_linear(x2d, layer.weight, layer.weight_scale)
         out = out.reshape(out_shape)
         if bias is not None:
             out = out + bias
