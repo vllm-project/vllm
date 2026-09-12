@@ -88,11 +88,12 @@ class TestBuildCommand:
         assert "--warmup-request-count" not in cmd
         assert "--warmup-request-count" in build_aiperf_command(workload, sweep, 1)
 
-    def test_warmup_is_flat_across_concurrency(self, workload):
+    def test_warmup_covers_one_full_wave(self, workload):
         sweep = SweepConfig(warmup_requests=16)
-        for concurrency in (4, 48):
-            cmd = build_aiperf_command(workload, sweep, concurrency)
-            assert flag_value(cmd, "--warmup-request-count") == "16"
+        cmd = build_aiperf_command(workload, sweep, 4)
+        assert flag_value(cmd, "--warmup-request-count") == "16"
+        cmd = build_aiperf_command(workload, sweep, 448)
+        assert flag_value(cmd, "--warmup-request-count") == "448"
 
     def test_benchmark_duration_optional(self, workload, sweep):
         assert "--benchmark-duration" not in build_aiperf_command(workload, sweep, 1)

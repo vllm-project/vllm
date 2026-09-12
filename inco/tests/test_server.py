@@ -6,6 +6,7 @@ import pytest
 from bench import server as server_mod
 from bench.server import (
     ServerNotReady,
+    _cudagraphs_disabled,
     _dig,
     _first_gpu_model,
     _get_status,
@@ -333,3 +334,28 @@ class TestGpuModel:
             | {"system_env": {"nvidia_gpu_models": "GPU 0: NVIDIA H100 NVL"}}
         )
         assert audit.gpu_model == "NVIDIA H100 NVL"
+
+
+class TestCudagraphDetection:
+    """cudagraph_mode arrives as the enum's *value*: an int for NONE/PIECEWISE/
+    FULL (0/1/2) or a pair for composites (FULL_AND_PIECEWISE -> [2, 1]). A
+    string comparison never matches a disabled server, so the gate would pass
+    a server running eager."""
+
+    @pytest.mark.parametrize("mode", ["NONE", "none", "0", 0, [0, 0], (0, 0)])
+    def test_disabled_forms_are_caught(self, mode):
+        assert _cudagraphs_disabled(mode) is True
+
+    @pytest.mark.parametrize(
+        "mode", [None, 1, 2, [2, 1], [2, 0], [0, 1], [], "FULL_AND_PIECEWISE"]
+    )
+    def test_enabled_or_unknown_forms_pass(self, mode):
+        assert _cudagraphs_disabled(mode) is False
+
+    def test_audit_flags_the_real_json_none_form(self):
+        audit = audit_perf_features(server_info(compilation={"cudagraph_mode": 0}))
+        assert any("no CUDA graphs" in w for w in audit.problems())
+
+    def test_audit_accepts_the_real_json_full_and_piecewise_form(self):
+        audit = audit_perf_features(server_info(compilation={"cudagraph_mode": [2, 1]}))
+        assert audit.problems() == []

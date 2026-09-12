@@ -164,11 +164,17 @@ class TestRunManifest:
 
 
 class TestWarmupCount:
-    """Warmup is a flat count, not scaled by concurrency."""
+    """Warmup must cover one full wave at the target width: it runs *at* the
+    concurrency it warms, so a smaller count warms a narrower CUDA graph and
+    leaves the target width's first-touch cost in the measurement."""
 
-    def test_is_flat_across_concurrency(self):
+    def test_scales_to_one_full_wave(self):
         sweep = SweepConfig(warmup_requests=16)
-        assert [sweep.warmup_count(c) for c in (1, 16, 48, 96)] == [16, 16, 16, 16]
+        assert [sweep.warmup_count(c) for c in (32, 96, 448)] == [32, 96, 448]
+
+    def test_configured_value_is_a_floor(self):
+        sweep = SweepConfig(warmup_requests=16)
+        assert [sweep.warmup_count(c) for c in (1, 8, 16)] == [16, 16, 16]
 
     def test_zero_disables_warmup_entirely(self):
         assert SweepConfig(warmup_requests=0).warmup_count(48) == 0

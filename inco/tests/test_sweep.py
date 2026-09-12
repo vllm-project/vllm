@@ -178,3 +178,20 @@ class TestKvCapacityReport:
     def test_unreported_capacity_is_silent(self, audit_against, capsys):
         audit_against(make_server_info(cache={"kv_cache_size_tokens": None}))
         assert "KV cache holds" not in capsys.readouterr().out
+
+
+class TestIntegrityWarningsAreSurfaced:
+    def test_impossible_ordering_is_logged_to_stderr(
+        self, tmp_path, run_tree, export_factory, capsys
+    ):
+        """A curve where tokens/s/user rises with concurrency must not pass
+        silently; it invalidates the run rather than merely adding noise."""
+        args = parse(["--artifact-root", str(tmp_path), "--label", "bad"])
+        workload, sweep = sweep_mod.configs_from_args(args)
+        for concurrency, per_user in ((320, 37.6), (336, 38.5)):
+            write_export(
+                sweep.artifact_dir(workload, concurrency),
+                export_factory(total_tps=per_user * concurrency, per_user=per_user),
+            )
+        sweep_mod.render_report(workload, sweep)
+        assert "impossible" in capsys.readouterr().err

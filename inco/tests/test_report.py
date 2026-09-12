@@ -8,6 +8,7 @@ import csv
 import pytest
 from bench.report import (
     CSV_COLUMNS,
+    integrity_warnings,
     interactivity_at_load,
     markdown_table,
     pareto_frontier,
@@ -152,3 +153,40 @@ class TestPlot:
 
         monkeypatch.setattr(builtins, "__import__", fail_matplotlib)
         assert plot_pareto({"baseline": curve}, tmp_path / "none.png") is None
+
+
+class TestIntegrityWarnings:
+    """Two defects that invalidate a curve rather than just adding noise, both
+    seen in a real run: tokens/s/user rising with concurrency (impossible), and
+    too few waves through the batch to dilute the fill/drain transient."""
+
+    def test_clean_curve_has_no_warnings(self, curve):
+        assert integrity_warnings(curve) == []
+
+    def test_rising_interactivity_is_flagged_as_impossible(self):
+        points = [
+            point(320, 37.6, 12032, request_count=2560.0),
+            point(336, 38.5, 12936, request_count=2688.0),
+        ]
+        problems = integrity_warnings(points)
+        assert any("impossible" in p for p in problems)
+
+    def test_too_few_waves_is_flagged(self):
+        points = [point(400, 33.0, 13200, request_count=1024.0)]
+        problems = integrity_warnings(points)
+        assert any("only 2.6 waves" in p for p in problems)
+
+    def test_wave_threshold_is_configurable(self):
+        points = [point(100, 50.0, 5000, request_count=500.0)]
+        assert integrity_warnings(points, min_waves=4.0) == []
+        assert integrity_warnings(points, min_waves=8.0)
+
+    def test_missing_request_count_is_not_flagged(self):
+        assert integrity_warnings([point(64, 50.0, 3200)]) == []
+
+    def test_warnings_appear_in_summary(self):
+        points = [
+            point(320, 37.6, 12032, request_count=1024.0),
+            point(336, 38.5, 12936, request_count=1024.0),
+        ]
+        assert "Measurement integrity warnings" in summarize(points)
