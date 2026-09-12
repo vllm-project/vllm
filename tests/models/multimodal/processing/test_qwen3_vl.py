@@ -13,6 +13,7 @@ import pytest
 
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import build_model_context
@@ -191,45 +192,59 @@ def test_processor_kwargs_videos_kwargs_does_not_leak_into_image_budget(
     "hf_mm_kwargs",
     [{"num_frames": [8, 16]}, {"fps": [2.0, 4.0]}],
 )
+@pytest.mark.parametrize("model_kwargs", [False, True])
+@pytest.mark.parametrize("use_uuids", [False, True])
+@pytest.mark.skip_global_cleanup
 def test_processor_multi_video_list_kwargs(
     model_id: str,
     hf_mm_kwargs: dict[str, Any],
+    model_kwargs: bool,
+    use_uuids: bool,
 ) -> None:
-    """Regression test: a multi-video request with list-valued per-video
-    ``mm_processor_kwargs`` (one ``fps``/``num_frames`` per video) must not
-    crash.
-
-    Before the fix, ``_apply_hf_processor_main`` copied the whole kwargs to every
-    video without slicing, so ``_get_video_second_idx`` received the list
-    where a scalar was expected and raised ``TypeError``.
-    """
+    """Per-video options must survive duplicate items and partial cache hits."""
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt={"image": 0, "video": 2},
+        mm_processor_kwargs=hf_mm_kwargs if model_kwargs else None,
+        mm_processor_cache_gb=1,
     )
-    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    baseline = MULTIMODAL_REGISTRY.create_processor(ctx.model_config, cache=None)
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ctx.model_config, cache=MultiModalProcessorOnlyCache(ctx.model_config)
+    )
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>" * 2
+    videos = [
+        _build_video_mm_data(num_frames=32, original_fps=8.0)["video"][0]
+        for _ in range(3)
+    ]
+    for i, (frames, _) in enumerate(videos):
+        frames.fill(i)
 
-    prompt = (
-        "<|vision_start|><|video_pad|><|vision_end|>"
-        "<|vision_start|><|video_pad|><|vision_end|>"
-    )
-    mm_data = {
-        "video": [
-            _build_video_mm_data(num_frames=16)["video"][0],
-            _build_video_mm_data(num_frames=32)["video"][0],
-        ]
-    }
+    def run(proc, indices, *, cached_only=False):
+        return proc(
+            prompt,
+            mm_items=proc.info.parse_mm_data(
+                {"video": [None if cached_only else videos[i] for i in indices]}
+            ),
+            mm_uuid_items=(
+                {"video": [f"video-{i}" for i in indices]} if use_uuids else None
+            ),
+            hf_processor_mm_kwargs={} if model_kwargs else hf_mm_kwargs,
+        )
 
-    processed = processor(
-        prompt,
-        mm_items=processor.info.parse_mm_data(mm_data),
-        hf_processor_mm_kwargs=hf_mm_kwargs,
-    )
+    for indices in ([0, 0], [0, 1], [0, 2], [2, 0]):
+        expected = run(baseline, indices)
+        actual = run(processor, indices)
+        assert actual["prompt_token_ids"] == expected["prompt_token_ids"]
+        assert actual["mm_placeholders"] == expected["mm_placeholders"]
+        assert actual["mm_kwargs"] == expected["mm_kwargs"]
+        assert actual["mm_hashes"] == expected["mm_hashes"]
+        assert len(set(actual["mm_hashes"]["video"])) == 2
 
-    video_phs = processed["mm_placeholders"].get("video", [])
-    assert len(video_phs) == 2, (
-        f"Expected exactly 2 video placeholders, got {len(video_phs)}"
-    )
+    if use_uuids:
+        cached_only = run(processor, [2, 0], cached_only=True)
+        assert cached_only["prompt_token_ids"] == actual["prompt_token_ids"]
+        assert cached_only["mm_kwargs"] == actual["mm_kwargs"]
 
 
 def _build_video_embeds_mm_data(
