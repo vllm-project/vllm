@@ -40,6 +40,18 @@ def resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
     return output_dir / "autotune_configs.json"
 
 
+def resolve_flashinfer_autotune_v2_root() -> Path | None:
+    """Placement root for FlashInfer's managed autotune store.
+
+    Unlike :func:`resolve_flashinfer_autotune_file`, no vLLM-side identity
+    (config hash, flashinfer version, arch) is folded into the path: the
+    managed store keys entries per op and hashes the software/hardware
+    environment itself. ``None`` selects FlashInfer's default root.
+    """
+    override_dir = envs.VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
+    return Path(override_dir).expanduser() if override_dir else None
+
+
 def write_flashinfer_autotune_cache(cache_path: Path, contents: bytes) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(

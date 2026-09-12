@@ -22,6 +22,7 @@ from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
 )
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
+    resolve_flashinfer_autotune_v2_root,
     write_flashinfer_autotune_cache,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
@@ -409,6 +410,10 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         )
         autotune_kwargs["skip_ops"] = skip_ops
 
+    if fi_utils.has_flashinfer_autotune_v2():
+        _flashinfer_autotune_v2(runner, autotune_kwargs)
+        return
+
     cache_path = resolve_flashinfer_autotune_file(runner)
     if is_leader:
         logger.info_once("Using FlashInfer autotune cache file: %s", cache_path)
@@ -453,3 +458,44 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         world.barrier()
     if is_leader:
         tuner.save_configs(str(cache_path))
+
+
+def _flashinfer_autotune_v2(runner: "GPUModelRunner", autotune_kwargs: dict) -> None:
+    """Autotune through FlashInfer's managed per-entry store.
+
+    Every rank tunes and publishes into one shared, environment-hashed store
+    (per-entry atomic publish, so concurrent ranks and warm restarts are
+    safe); entries already on disk skip re-profiling. Per-tactic timings are
+    still synchronized over the world CPU group, and the finalize step after
+    the barrier makes all ranks serve the store's final state.
+    """
+    from flashinfer import autotune_v2, autotune_v2_reload
+    from flashinfer.autotuner import set_autotune_process_group
+
+    from vllm.distributed.parallel_state import get_world_group
+
+    world = get_world_group()
+    cache_root = resolve_flashinfer_autotune_v2_root()
+    if world.rank_in_group == 0:
+        logger.info_once(
+            "Using FlashInfer managed autotune cache (root=%s)",
+            cache_root if cache_root is not None else "flashinfer default",
+        )
+
+    group = world.cpu_group if world.world_size > 1 else None
+    set_autotune_process_group(group)
+    try:
+        with (
+            torch.inference_mode(),
+            autotune_v2(mode="tune", cache_root=cache_root, **autotune_kwargs),
+        ):
+            _run_flashinfer_autotune_dummy_runs(runner)
+            replayssm_autotune_warmup(runner)
+            _autotune_kimi_k3_kda_qkvg(runner.get_model())
+    finally:
+        set_autotune_process_group(None)
+
+    if world.world_size > 1:
+        world.barrier()
+        autotune_v2_reload()
+        world.barrier()
