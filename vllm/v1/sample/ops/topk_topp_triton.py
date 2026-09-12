@@ -877,12 +877,9 @@ def _topk_topp_kernel(
 
 
 def _max_sampler_batch_size(vllm_config: Any) -> int:
-    rows_per_req = (
-        vllm_config.uniform_decode_query_len
-        if vllm_config.use_v2_model_runner
-        else max(1, vllm_config.num_speculative_tokens)
+    return vllm_config.scheduler_config.max_num_seqs * (
+        vllm_config.num_speculative_tokens + 1
     )
-    return vllm_config.scheduler_config.max_num_seqs * rows_per_req
 
 
 def _topk_topp_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
