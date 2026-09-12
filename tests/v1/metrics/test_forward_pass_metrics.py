@@ -13,6 +13,7 @@ import zmq
 import vllm.v1.metrics.forward_pass_metrics as fpm_module
 from vllm.config import DeviceConfig, ObservabilityConfig, VllmConfig
 from vllm.utils.network_utils import get_open_port
+from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     NewRequestData,
@@ -209,9 +210,6 @@ class _FakeScheduler:
         }
         self.waiting = []
         self.skipped_waiting = []
-
-    def get_forward_pass_metrics_request_state(self):
-        return self.requests, self.waiting, self.skipped_waiting
 
 
 def _make_scheduler_output(
@@ -527,6 +525,46 @@ def test_shutdown_timing_grace_is_bounded(monkeypatch):
     )
     core_module.EngineCore._flush_forward_pass_metrics(core)
     assert len(polls) == 2
+
+
+@pytest.mark.parametrize("missing", ["requests", "waiting", "skipped_waiting", None])
+def test_fpm_checks_optional_scheduler_state_before_starting_publisher(
+    missing, monkeypatch
+):
+    scheduler = _FakeScheduler()
+    scheduler.requests.clear()
+    if missing is not None:
+        setattr(scheduler, missing, getattr(SchedulerInterface, missing))
+    publishers = []
+
+    def make_publisher(**kwargs):
+        publisher = _FakeMetricsPublisher()
+        publishers.append(publisher)
+        return publisher
+
+    monkeypatch.setattr(fpm_module, "ZmqForwardPassMetricsPublisher", make_publisher)
+    config = SimpleNamespace(
+        observability_config=ObservabilityConfig(forward_pass_metrics_port=0)
+    )
+    # A disabled feature must neither inspect optional state nor start ZMQ.
+    assert ForwardPassMetricsEmitter.from_vllm_config(config, scheduler) is None
+    assert not publishers
+
+    config.observability_config.forward_pass_metrics_port = 20380
+    if missing is not None:
+        with pytest.raises(AssertionError, match=f"FPM requires scheduler.{missing}"):
+            ForwardPassMetricsEmitter.from_vllm_config(config, scheduler)
+        assert not publishers
+    else:
+        # Empty state is valid; only None means unavailable.
+        config.parallel_config = SimpleNamespace(data_parallel_rank=0)
+        config.instance_id = "worker"
+        config.max_concurrent_batches = 1
+        config.scheduler_config = SimpleNamespace(async_scheduling=False)
+        emitter = ForwardPassMetricsEmitter.from_vllm_config(config, scheduler)
+        assert emitter is not None
+        emitter.shutdown()
+        assert len(publishers) == 1
 
 
 def test_fpm_requires_model_config():

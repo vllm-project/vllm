@@ -201,9 +201,9 @@ class Scheduler(SchedulerInterface):
                 f"Unknown scheduling policy: {self.scheduler_config.policy}"
             ) from e
         # Priority queues for requests.
-        self.waiting = create_request_queue(self.policy)
+        self.waiting: RequestQueue = create_request_queue(self.policy)
         # requests skipped in waiting flow due async deps or constraints.
-        self.skipped_waiting = create_request_queue(self.policy)
+        self.skipped_waiting: RequestQueue = create_request_queue(self.policy)
         self.running: list[Request] = []
 
         # The request IDs that are finished in between the previous and the
@@ -2474,11 +2474,6 @@ class Scheduler(SchedulerInterface):
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return self.kv_cache_manager.usage
-
-    def get_forward_pass_metrics_request_state(
-        self,
-    ) -> tuple[dict[str, Request], RequestQueue, RequestQueue]:
-        return self.requests, self.waiting, self.skipped_waiting
 
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)

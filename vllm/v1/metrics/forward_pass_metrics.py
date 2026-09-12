@@ -429,9 +429,11 @@ class ForwardPassMetricsEmitter:
         config = vllm_config.observability_config
         if config.forward_pass_metrics_port <= 0:
             return None
-        # Fail at startup for custom schedulers that do not provide the state
-        # contract required to compute FPM snapshots.
-        scheduler.get_forward_pass_metrics_request_state()
+        assert scheduler.requests is not None, "FPM requires scheduler.requests"
+        assert scheduler.waiting is not None, "FPM requires scheduler.waiting"
+        assert scheduler.skipped_waiting is not None, (
+            "FPM requires scheduler.skipped_waiting"
+        )
 
         dp_rank = getattr(vllm_config.parallel_config, "data_parallel_index", None)
         if dp_rank is None:
@@ -467,7 +469,8 @@ class ForwardPassMetricsEmitter:
     ) -> None:
         generations = None
         if self._correct_async_spec_lengths:
-            requests, _, _ = scheduler.get_forward_pass_metrics_request_state()
+            requests = scheduler.requests
+            assert requests is not None
             generations = {
                 rid: (request, request.num_preemptions)
                 for rid in scheduler_output.num_scheduled_tokens
@@ -670,7 +673,10 @@ def _extract_queued_metrics(scheduler: SchedulerInterface) -> QueuedRequestMetri
     prefill = WelfordAccumulator()
     decode_kv = WelfordAccumulator()
 
-    _, waiting, skipped_waiting = scheduler.get_forward_pass_metrics_request_state()
+    waiting = scheduler.waiting
+    skipped_waiting = scheduler.skipped_waiting
+    assert waiting is not None
+    assert skipped_waiting is not None
     for request in waiting:
         if request.status == RequestStatus.PREEMPTED:
             decode_kv.add(request.num_computed_tokens)

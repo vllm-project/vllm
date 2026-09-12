@@ -36,6 +36,11 @@ class PauseState(enum.IntEnum):
 
 
 class SchedulerInterface(ABC):
+    # Optional request state; None means the scheduler does not expose it.
+    requests: Mapping[str, "Request"] | None = None
+    waiting: Iterable["Request"] | None = None
+    skipped_waiting: Iterable["Request"] | None = None
+
     @abstractmethod
     def __init__(
         self,
@@ -238,26 +243,6 @@ class SchedulerInterface(ABC):
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return 0.0
-
-    def get_forward_pass_metrics_request_state(
-        self,
-    ) -> tuple[
-        Mapping[str, "Request"],
-        Iterable["Request"],
-        Iterable["Request"],
-    ]:
-        """Return request lookup, waiting, and skipped-waiting state for FPM.
-
-        Custom schedulers must implement this method when native forward-pass
-        metrics are enabled. Keeping this as an explicit interface avoids
-        coupling the metrics implementation to scheduler-private attributes.
-        """
-
-        raise NotImplementedError(
-            f"{type(self).__name__} must implement "
-            "get_forward_pass_metrics_request_state() when forward-pass "
-            "metrics are enabled"
-        )
 
     @abstractmethod
     def make_stats(self) -> "SchedulerStats | None":
