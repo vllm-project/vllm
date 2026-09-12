@@ -25,6 +25,7 @@ from copy import deepcopy
 from typing import Any, NamedTuple
 
 import numpy as np
+import probe
 import torch
 import torch.nn as nn
 
@@ -307,6 +308,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         self.step_timing = StepTimingCollector()
+        # Correctness checkpoints of the first real steps, recorded when PROBE=1;
+        # a no-op otherwise.
+        self._probe_step = 0
+        self._probe_real_step = False
 
         # General request states.
         self.req_states = RequestState(
@@ -570,6 +575,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        if not is_profiling:
+            probe.record("kv_num_blocks", int(kv_cache_config.num_blocks))
 
         block_table_max_model_len = self.max_model_len
         if self.is_encoder_decoder:
@@ -1492,6 +1499,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             sample_hidden_states = hidden_states[input_batch.logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
+        if probe.enabled() and self._probe_step < 5 and self._probe_real_step:
+            self._probe_real_step = False
+            k = self._probe_step
+            self._probe_step += 1
+            lf = logits.float()
+            probe.record(f"logits_absmean_step{k}", lf.abs().mean(), rtol=1e-3)
+            probe.record(f"logits_argmax_sum_step{k}", lf.argmax(dim=-1).sum())
+            probe.record(f"num_logits_rows_step{k}", int(logits.shape[0]))
+            if k == 4:
+                probe.flush()
 
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
@@ -1897,6 +1914,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 assert isinstance(model_output, torch.Tensor)
                 hidden_states = model_output
                 aux_hidden_states = None
+            if (
+                probe.enabled()
+                and not dummy_run
+                and self._probe_step < 5
+                and not any(
+                    rid.endswith(("_decode_", "_prefill_"))  # engine warm-up requests
+                    for rid in scheduler_output.num_scheduled_tokens
+                )
+            ):
+                self._probe_real_step = True
+                k = self._probe_step
+                h = hidden_states[: input_batch.num_tokens].float()
+                probe.record(f"hidden_absmean_step{k}", h.abs().mean(), rtol=1e-3)
+                probe.record(f"hidden_absmax_step{k}", h.abs().max(), rtol=1e-3)
+                probe.record(f"num_tokens_step{k}", int(input_batch.num_tokens))
+                probe.record(f"num_reqs_step{k}", int(input_batch.num_reqs))
             output_intermediate_tensors = None
         else:
             assert isinstance(model_output, IntermediateTensors)
