@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import hashlib
+import struct
 import uuid
 from io import BytesIO
 from pathlib import Path
@@ -197,6 +199,35 @@ def test_hash_image_exif_id():
     assert hasher.hash_kwargs("blake3", image=image2) == hasher.hash_kwargs(
         "blake3", image=image2a
     )
+
+
+def test_hash_image_malformed_exif():
+    # Test that images with malformed EXIF headers (e.g. invalid TIFF header)
+    # do not raise an unhandled exception during hashing and fall back to image data.
+    from PIL import ImageOps
+
+    buf = BytesIO()
+    Image.new("RGB", (64, 48)).save(buf, "JPEG")
+    jpg = buf.getvalue()
+    rest = jpg[2:]
+    rest = rest[2 + struct.unpack(">H", rest[2:4])[0] :]
+    payload = b"Exif\x00\x00XXXX\x00\x00\x00\x08" + bytes(32)
+    data = b"\xff\xd8\xff\xe1" + struct.pack(">H", len(payload) + 2) + payload + rest
+
+    image = Image.open(BytesIO(data))
+    with contextlib.suppress(Exception):
+        image = ImageOps.exif_transpose(image)
+    image.load()
+
+    hasher = MultiModalHasher
+    # Should hash without raising SyntaxError or any other exception
+    hash_val = hasher.hash_kwargs("blake3", image=image)
+    assert isinstance(hash_val, str) and len(hash_val) > 0
+
+    # Also verify MediaWithBytes wrapping the image with malformed EXIF
+    media_item = MediaWithBytes(image, data)
+    hash_media = hasher.hash_kwargs("blake3", image=media_item)
+    assert isinstance(hash_media, str) and len(hash_media) > 0
 
 
 def _rgba_png_bytes() -> bytes:
