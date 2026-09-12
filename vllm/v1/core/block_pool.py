@@ -270,7 +270,7 @@ class BlockPool:
             request.block_hashes, self.hash_block_size, block_size
         )
 
-        new_block_hashes = block_hashes[num_cached_blocks:]
+        new_block_hashes = block_hashes[num_cached_blocks:num_full_blocks]
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
