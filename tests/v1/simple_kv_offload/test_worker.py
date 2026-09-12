@@ -115,6 +115,46 @@ def test_no_forward_step_completes_cpu_store(monkeypatch):
         backend.shutdown()
 
 
+def test_deferred_store_waits_for_draft_forward(monkeypatch):
+    """Target completion must not submit the store before draft finalization."""
+    backend, gpu, cpu = _make_backend()
+    worker = SimpleCPUOffloadWorker(None, None, cpu_capacity_bytes=0)
+    worker._backend = backend
+    connector = SimpleCPUOffloadConnector.__new__(SimpleCPUOffloadConnector)
+    connector.worker_handler = worker
+    output = _make_empty_scheduler_output()
+    output.kv_connector_metadata = SimpleCPUOffloadMetadata(
+        store_event=0, store_gpu_blocks=[0], store_cpu_blocks=[0]
+    )
+    module = "vllm.v1.worker.kv_connector_model_runner_mixin"
+    monkeypatch.setattr(f"{module}.get_kv_transfer_group", lambda: connector)
+    monkeypatch.setattr(f"{module}.has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(f"{module}.get_forward_context", lambda: None)
+    launch = MagicMock(wraps=backend.launch_copy)
+    monkeypatch.setattr(backend, "launch_copy", launch)
+    try:
+        with KVConnectorModelRunnerMixin._get_kv_connector_output(
+            output, defer_finalize=True
+        ):
+            gpu.fill_(17)
+        launch.assert_not_called()
+        gpu.fill_(91)
+        KVConnectorModelRunnerMixin.finalize_kv_connector()
+        assert launch.call_count == 1
+        completion = None
+        deadline = time.monotonic() + 5
+        while completion is None and time.monotonic() < deadline:
+            connector.get_finished(set())
+            completion = connector.build_connector_worker_meta()
+            time.sleep(0.001)
+        assert completion is not None
+        assert completion.completed_store_events == {0: 1}
+        assert torch.equal(cpu[0], gpu[0].cpu())
+        assert launch.call_count == 1
+    finally:
+        backend.shutdown()
+
+
 def _drive_store(
     backend: DmaCopyBackend,
     gpu: torch.Tensor,
