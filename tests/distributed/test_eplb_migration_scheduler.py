@@ -10,6 +10,7 @@ from vllm.distributed.eplb.eplb_communicator import EplbCommunicator
 from vllm.distributed.eplb.migration_scheduler import (
     MigrationFlow,
     schedule_migration_batches,
+    schedule_migration_batches_for_layers,
 )
 from vllm.distributed.eplb.rebalance_execute import move_from_buffer, move_to_buffer
 
@@ -38,9 +39,22 @@ class _MockEplbCommunicator(EplbCommunicator):
         self.execute_count += 1
 
 
-def test_migration_batching_is_enabled_by_default_and_can_be_disabled() -> None:
-    assert EPLBConfig().enable_migration_batching
-    assert not EPLBConfig(enable_migration_batching=False).enable_migration_batching
+def test_migration_batching_is_disabled_by_default_and_can_be_enabled() -> None:
+    assert not EPLBConfig().enable_migration_batching
+    assert EPLBConfig(enable_migration_batching=True).enable_migration_batching
+
+
+def test_migration_batching_only_applies_to_async_eplb() -> None:
+    assert not EPLBConfig(use_async=True).migration_batching_enabled
+    assert EPLBConfig(
+        use_async=True, enable_migration_batching=True
+    ).migration_batching_enabled
+    assert not EPLBConfig(
+        use_async=True, enable_migration_batching=False
+    ).migration_batching_enabled
+    assert not EPLBConfig(
+        use_async=False, enable_migration_batching=True
+    ).migration_batching_enabled
 
 
 def test_schedule_migration_batches_is_deterministic() -> None:
@@ -139,10 +153,26 @@ def test_schedule_migration_batches_balances_replicas() -> None:
     }
 
 
-def test_move_to_buffer_uses_multiple_batches() -> None:
+def test_schedule_migration_batches_for_layers_matches_individual_calls() -> None:
+    old_indices = np.array([[0, 1, 2, 3], [3, 2, 1, 0]], dtype=np.int64)
+    new_indices = np.array([[1, 2, 3, 0], [0, 3, 2, 1]], dtype=np.int64)
+
+    assert schedule_migration_batches_for_layers(1, old_indices, new_indices) == [
+        schedule_migration_batches(1, old_indices[0], new_indices[0]),
+        schedule_migration_batches(1, old_indices[1], new_indices[1]),
+    ]
+
+
+@pytest.mark.parametrize("use_precomputed", [False, True])
+def test_move_to_buffer_uses_multiple_batches(use_precomputed: bool) -> None:
     old_indices = np.array([0, 1, 2, 3], dtype=np.int64)
     new_indices = np.array([1, 2, 3, 0], dtype=np.int64)
     communicator = _MockEplbCommunicator()
+    migration_batches = (
+        schedule_migration_batches(1, old_indices, new_indices)
+        if use_precomputed
+        else None
+    )
 
     move_to_buffer(
         num_local_experts=1,
@@ -155,6 +185,7 @@ def test_move_to_buffer_uses_multiple_batches() -> None:
         communicator=communicator,
         layer_idx=7,
         enable_migration_batching=True,
+        migration_batches=migration_batches,
     )
 
     assert communicator.context_calls == 2
