@@ -360,15 +360,19 @@ async def test_stream_error_with_empty_delta():
 
 
 @pytest.mark.asyncio
-async def test_stream_skips_empty_token_output():
-    """Outputs with empty token_ids are skipped (no chunk emitted)."""
+@pytest.mark.parametrize("terminal_empty", [False, True])
+async def test_stream_skips_empty_token_output(terminal_empty):
+    """Skip empty nonterminal outputs, but retain the terminal finish reason."""
     engine = _mock_engine()
 
     async def mock_generate(*args, **kwargs):
         yield _make_request_output("req-1", token_ids=[10])
         yield _make_request_output("req-1", token_ids=[])
         yield _make_request_output(
-            "req-1", token_ids=[20], finish_reason="stop", finished=True
+            "req-1",
+            token_ids=[] if terminal_empty else [20],
+            finish_reason="stop",
+            finished=True,
         )
 
     engine.generate = MagicMock(side_effect=mock_generate)
@@ -393,7 +397,8 @@ async def test_stream_skips_empty_token_output():
     # Only 2 data chunks — the empty one is skipped
     assert len(data_chunks) == 2
     assert data_chunks[0]["choices"][0]["token_ids"] == [10]
-    assert data_chunks[1]["choices"][0]["token_ids"] == [20]
+    assert data_chunks[1]["choices"][0]["token_ids"] == ([] if terminal_empty else [20])
+    assert data_chunks[1]["choices"][0]["finish_reason"] == "stop"
 
 
 @pytest.mark.asyncio
@@ -603,3 +608,46 @@ async def test_stream_prompt_tokens_details_zero_cached():
     # Zero cached tokens must be present, not omitted
     assert usage_chunk["usage"]["prompt_tokens_details"] is not None
     assert usage_chunk["usage"]["prompt_tokens_details"]["cached_tokens"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_mask", [False, True])
+async def test_stream_sampling_mask_matches_each_token_chunk(with_mask):
+    from vllm.outputs import SamplingMask
+
+    engine = _mock_engine()
+
+    async def generate(*args, **kwargs):
+        for position, tokens in enumerate(([10], [20, 30])):
+            result = _make_request_output(
+                "req-mask",
+                token_ids=list(tokens),
+                finish_reason="length" if position else None,
+                finished=bool(position),
+            )
+            if with_mask:
+                result.outputs[0].sampling_mask = SamplingMask(
+                    [[token, token + 1] for token in tokens]
+                )
+            yield result
+
+    engine.generate = MagicMock(side_effect=generate)
+    serving = _build_serving_tokens(engine)
+    response = await serving.serve_tokens(
+        GenerateRequest(
+            model=MODEL_NAME, token_ids=[1, 2, 3], sampling_params={}, stream=True
+        )
+    )
+    chunks = _parse_sse_chunks([chunk async for chunk in response])
+    choices = [
+        choice
+        for chunk in chunks
+        if isinstance(chunk, dict)
+        for choice in chunk.get("choices", [])
+    ]
+    assert [choice["token_ids"] for choice in choices] == [[10], [20, 30]]
+    for choice in choices:
+        expected = (
+            [[token, token + 1] for token in choice["token_ids"]] if with_mask else None
+        )
+        assert choice["sampling_mask"] == expected

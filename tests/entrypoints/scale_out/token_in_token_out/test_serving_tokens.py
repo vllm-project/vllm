@@ -125,8 +125,8 @@ async def test_generate_endpoint(client):
     [["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"]],
     indirect=True,
 )
-async def test_generate_sampling_mask(client):
-    top_k = 5
+@pytest.mark.parametrize("top_k", [5, -1])
+async def test_generate_sampling_mask(client, top_k):
     payload = {
         "model": MODEL_NAME,
         "token_ids": [1, 2, 3],
@@ -137,7 +137,7 @@ async def test_generate_sampling_mask(client):
             "top_p": 0.9,
             "ignore_eos": True,
             "seed": 0,
-            "logprobs": top_k,
+            "logprobs": 5,
         },
         "stream": False,
     }
