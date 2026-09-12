@@ -2011,3 +2011,79 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
         "w_mxfp4_a_mxfp6_e3m2 output is bit-identical to weight-only w_mxfp4:"
         " the emulation never fake-quantized the activations"
     )
+
+
+# (backend, activation, hidden_in, inter_in, hidden_out, inter_out)
+#
+# The AITER_MXFP4_MXFP4 (W4A4) rows are the ones this table exists for: the
+# per-partition intermediate is aligned to 128, not 256, so a model whose native
+# shard is already 128-aligned is allocated at its real width instead of being
+# padded up. `hidden_size` deliberately stays on 256 -- the gfx950 stage-1 mxfp4
+# kernels are generated with tile_k 256 only, and stage-1 reduces over model_dim.
+#
+# The remaining rows pin the neighbouring branches so a future edit to this
+# function cannot silently move a backend between them.
+ROCM_MXFP4_ROUNDUP_CASES = [
+    # W4A4: 3072 / TP8 = 384 stays 384. This is the case the alignment change is
+    # for; the generic 256 round-up would allocate 512.
+    ("AITER_MXFP4_MXFP4", "SILU", 6144, 384, 6144, 384),
+    # W4A4, already 256-aligned (e.g. moe_intermediate 2048 at TP8): identity in
+    # both the old and the new form, so such models are provably untouched.
+    ("AITER_MXFP4_MXFP4", "SILU", 6144, 256, 6144, 256),
+    # W4A4, 1024 / TP8 = 128: the most aggressive case, halved rather than trimmed.
+    ("AITER_MXFP4_MXFP4", "SILU", 4096, 128, 4096, 128),
+    # W4A4 ignores the activation -- the branch does not read it.
+    ("AITER_MXFP4_MXFP4", None, 6144, 384, 6144, 384),
+    ("AITER_MXFP4_MXFP4", "SWIGLUOAI", 6144, 384, 6144, 384),
+    # W4A4 hidden_size is still rounded to 256, unlike the intermediate.
+    ("AITER_MXFP4_MXFP4", "SILU", 384, 384, 512, 384),
+    # W4A16 CK + SiTU/SILU keeps its own 128/128 carve-out.
+    ("AITER_MXFP4_BF16", "SITU", 384, 384, 384, 384),
+    ("AITER_MXFP4_BF16", "SILU", 384, 384, 384, 384),
+    # ... but only for those activations; anything else takes the generic ROCm arm.
+    ("AITER_MXFP4_BF16", "SWIGLUOAI", 384, 384, 512, 512),
+    # Backends that stay on the generic ROCm 256/256 round-up.
+    ("AITER_MXFP4_FP8", "SILU", 384, 384, 512, 512),
+    ("AITER_TRITON_MXFP4_BF16", "SILU", 384, 384, 512, 512),
+    ("TRITON", "SWIGLUOAI", 384, 384, 512, 512),
+]
+
+
+@pytest.mark.parametrize(
+    "backend_name,activation_name,hidden_in,inter_in,hidden_out,inter_out",
+    ROCM_MXFP4_ROUNDUP_CASES,
+)
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm is required for this test")
+def test_rocm_mxfp4_round_up_hidden_and_intermediate(
+    backend_name: str,
+    activation_name: str | None,
+    hidden_in: int,
+    inter_in: int,
+    hidden_out: int,
+    inter_out: int,
+):
+    """Pin the ROCm arm of mxfp4_round_up_hidden_size_and_intermediate_size.
+
+    The allocation this function returns is what every MXFP4 MoE weight buffer,
+    scale buffer and aiter tuned-config lookup is sized from, so a change here is
+    invisible locally and expensive everywhere else. Asserting the table keeps
+    each backend on the alignment its kernels actually require.
+    """
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        mxfp4_round_up_hidden_size_and_intermediate_size,
+    )
+
+    backend = Mxfp4MoeBackend[backend_name]
+    activation = MoEActivation[activation_name] if activation_name else None
+
+    hidden, intermediate = mxfp4_round_up_hidden_size_and_intermediate_size(
+        backend, hidden_in, inter_in, activation
+    )
+
+    assert (hidden, intermediate) == (hidden_out, inter_out), (
+        f"{backend_name} / {activation_name}: "
+        f"hidden {hidden_in}->{hidden} (expected {hidden_out}), "
+        f"intermediate {inter_in}->{intermediate} (expected {inter_out})"
+    )
