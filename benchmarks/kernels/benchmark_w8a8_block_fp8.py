@@ -23,9 +23,11 @@ from vllm.utils.platform_utils import get_device_name_as_file_name
 
 mp.set_start_method("spawn", force=True)
 
-assert current_platform.is_cuda() or current_platform.is_rocm(), (
-    "Only support tune w8a8 block fp8 kernel on CUDA/ROCm device."
-)
+assert (
+    current_platform.is_cuda()
+    or current_platform.is_rocm()
+    or current_platform.is_xpu()
+), "Only support tune w8a8 block fp8 kernel on CUDA/ROCm/XPU device."
 
 DTYPE_MAP = {
     "float32": torch.float32,
@@ -136,6 +138,29 @@ def get_configs_compute_bound():
     return configs
 
 
+def get_xpu_tuning_space():
+    # NOTE: curated subset of get_configs_compute_bound(); the full grid is
+    # too slow to tune on XPU due to per-config Triton JIT compile time.
+    configs = []
+    for num_stages in [2, 3]:
+        for block_m in [32, 64, 128]:
+            for block_k in [64, 128]:
+                for block_n in [128, 256]:
+                    for num_warps in [4, 8]:
+                        for group_size in [1, 32]:
+                            configs.append(
+                                {
+                                    "BLOCK_SIZE_M": block_m,
+                                    "BLOCK_SIZE_N": block_n,
+                                    "BLOCK_SIZE_K": block_k,
+                                    "GROUP_SIZE_M": group_size,
+                                    "num_warps": num_warps,
+                                    "num_stages": num_stages,
+                                }
+                            )
+    return configs
+
+
 def get_weight_shapes(tp_size):
     # NOTE(HandH1998): The weight shapes only works for DeepSeek-V3.
     # Modify them, if you tune for another different model.
@@ -206,13 +231,14 @@ def tune(M, N, K, block_size, out_dtype, search_space, input_type):
         fp8_info = torch.finfo(torch.float8_e4m3fn)
         fp8_max, fp8_min = fp8_info.max, fp8_info.min
 
+        device = current_platform.device_type
         A_fp32 = (
-            (torch.rand(M, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp8_max
+            (torch.rand(M, K, dtype=torch.float32, device=device) - 0.5) * 2 * fp8_max
         )
         A = A_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
 
         B_fp32 = (
-            (torch.rand(N, K, dtype=torch.float32, device="cuda") - 0.5) * 2 * fp8_max
+            (torch.rand(N, K, dtype=torch.float32, device=device) - 0.5) * 2 * fp8_max
         )
         B = B_fp32.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
     else:
@@ -222,9 +248,9 @@ def tune(M, N, K, block_size, out_dtype, search_space, input_type):
     n_tiles = (N + block_n - 1) // block_n
     k_tiles = (K + block_k - 1) // block_k
 
-    As = torch.rand(M, k_tiles, dtype=torch.float32, device="cuda") * factor_for_scale
+    As = torch.rand(M, k_tiles, dtype=torch.float32, device=device) * factor_for_scale
     Bs = (
-        torch.rand(n_tiles, k_tiles, dtype=torch.float32, device="cuda")
+        torch.rand(n_tiles, k_tiles, dtype=torch.float32, device=device)
         * factor_for_scale
     )
 
@@ -295,7 +321,11 @@ def tune_on_gpu(args_dict):
     save_path = args.save_path
     input_type = args.input_type
 
-    search_space = get_configs_compute_bound()
+    search_space = (
+        get_xpu_tuning_space()
+        if current_platform.is_xpu()
+        else get_configs_compute_bound()
+    )
     search_space = [
         config for config in search_space if block_k % config["BLOCK_SIZE_K"] == 0
     ]
@@ -340,7 +370,8 @@ def main(args):
         raise RuntimeError("No GPU available for tuning")
     print(f"Found {num_gpus} GPUs for parallel tuning")
 
-    torch.cuda.init()
+    if current_platform.is_cuda_alike():
+        torch.cuda.init()
 
     if args.batch_size is None:
         batch_sizes = [
