@@ -483,20 +483,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     )
                     self.sampler, self.rejection_sampler = custom
                 elif self.speculative_config is not None:
-                    model_dtype = self.model_config.dtype
-                    assert isinstance(model_dtype, torch.dtype)
-                    draft_dtype = (
-                        self.speculator.draft_logits.dtype
-                        if self.speculator is not None
-                        and self.speculator.draft_logits is not None
-                        else self.model_config.head_dtype
-                    )
                     self.rejection_sampler = RejectionSampler(
                         self.sampler,
                         self.speculative_config,
                         self.device,
-                        model_dtype,
-                        draft_dtype,
                     )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
@@ -915,6 +905,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # during actual execution.
         assert self.sampler is not None
         self.sampler(logits, dummy_input_batch)
+        if self.rejection_sampler is not None:
+            # Warm head-dtype logits; scheduler warmup covers processed FP32 logits.
+            assert self.speculator is not None
+            self.rejection_sampler(
+                logits, dummy_input_batch, self.speculator.draft_logits
+            )
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:

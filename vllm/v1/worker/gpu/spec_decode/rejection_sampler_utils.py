@@ -1,15 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
-
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import WarmupChoices, _when
-from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    TritonWarmupTensor,
-    triton_kernel_dispatcher_with_warmup,
-    triton_warmup_inputs,
-)
 from vllm.triton_utils import tl, tldevice, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand32
 
@@ -929,411 +921,6 @@ def _insert_resampled_kernel(
     )
 
 
-def _logits_warmup_variant(
-    target_dtype: torch.dtype,
-    draft_dtype: torch.dtype,
-    vocab_size: int,
-    num_speculative_steps: int,
-    has_draft: bool,
-) -> dict[str, Any]:
-    return dict(
-        target=TritonWarmupTensor(target_dtype),
-        draft=TritonWarmupTensor(draft_dtype) if has_draft else None,
-        draft_stride_0=num_speculative_steps * vocab_size if has_draft else 0,
-        draft_stride_1=vocab_size if has_draft else 0,
-        has_draft=has_draft,
-    )
-
-
-def _warmup_pointer_groups(
-    *groups: tuple[torch.dtype, tuple[str, ...]],
-) -> list[tuple[torch.dtype, tuple[str, ...]]]:
-    return [(dtype, names) for dtype, names in groups if names]
-
-
-def _compute_local_logits_stats_warmup_inputs(
-    *,
-    model_dtype: torch.dtype,
-    draft_dtype: torch.dtype,
-    vocab_size: int,
-    num_speculative_steps: int,
-) -> dict[str, Any]:
-    stride = triton.cdiv(vocab_size, 8192)
-    target_dtype: Any = WarmupChoices(
-        *(
-            (model_dtype,)
-            if model_dtype == torch.float32
-            else (model_dtype, torch.float32)
-        )
-    )
-    has_draft: Any = WarmupChoices(False, True)
-    variant = _logits_warmup_variant(
-        target_dtype,
-        draft_dtype,
-        vocab_size,
-        num_speculative_steps,
-        has_draft,
-    )
-    pointer_dtypes = _warmup_pointer_groups(
-        (torch.int64, ("target_local_argmax_ptr", "expanded_idx_mapping_ptr")),
-        (
-            torch.float32,
-            (
-                "target_local_max_ptr",
-                "target_local_sumexp_ptr",
-                "draft_local_max_ptr",
-                "draft_local_sumexp_ptr",
-                "temp_ptr",
-            ),
-        ),
-        (torch.int32, ("expanded_local_pos_ptr",)),
-    )
-    return triton_warmup_inputs(
-        _compute_local_logits_stats_kernel,
-        target_logits_ptr=variant["target"],
-        draft_logits_ptr=variant["draft"],
-        target_local_argmax_stride=stride,
-        target_local_max_stride=stride,
-        target_local_sumexp_stride=stride,
-        draft_local_max_stride=stride,
-        draft_local_sumexp_stride=stride,
-        target_logits_stride=vocab_size,
-        draft_logits_stride_0=variant["draft_stride_0"],
-        draft_logits_stride_1=variant["draft_stride_1"],
-        vocab_size=vocab_size,
-        num_speculative_steps=num_speculative_steps,
-        BLOCK_SIZE=8192,
-        HAS_DRAFT_LOGITS=variant["has_draft"],
-        grid=(1, 1),
-        pointer_dtypes=pointer_dtypes,
-    )
-
-
-def _compute_cumulative_log_p_warmup_inputs(
-    *,
-    model_dtype: torch.dtype,
-    draft_dtype: torch.dtype,
-    vocab_size: int,
-    num_speculative_steps: int,
-) -> dict[str, Any]:
-    vocab_num_blocks = triton.cdiv(vocab_size, 8192)
-    target_dtype: Any = WarmupChoices(
-        *(
-            (model_dtype,)
-            if model_dtype == torch.float32
-            else (model_dtype, torch.float32)
-        )
-    )
-    has_draft: Any = WarmupChoices(False, True)
-    variant = _logits_warmup_variant(
-        target_dtype,
-        draft_dtype,
-        vocab_size,
-        num_speculative_steps,
-        has_draft,
-    )
-    pointer_dtypes = _warmup_pointer_groups(
-        (
-            torch.float32,
-            (
-                "cumulative_log_p_ptr",
-                "target_local_max_ptr",
-                "target_local_sumexp_ptr",
-                "draft_local_max_ptr",
-                "draft_local_sumexp_ptr",
-                "temp_ptr",
-            ),
-        ),
-        (torch.int32, ("draft_sampled_ptr", "cu_num_logits_ptr")),
-        (torch.int64, ("idx_mapping_ptr",)),
-    )
-    return triton_warmup_inputs(
-        _compute_cumulative_log_p_kernel,
-        target_logits_ptr=variant["target"],
-        draft_logits_ptr=variant["draft"],
-        target_logits_stride=vocab_size,
-        target_local_max_stride=vocab_num_blocks,
-        target_local_sumexp_stride=vocab_num_blocks,
-        draft_logits_stride_0=variant["draft_stride_0"],
-        draft_logits_stride_1=variant["draft_stride_1"],
-        draft_local_max_stride=vocab_num_blocks,
-        draft_local_sumexp_stride=vocab_num_blocks,
-        vocab_num_blocks=vocab_num_blocks,
-        PADDED_VOCAB_NUM_BLOCKS=triton.next_power_of_2(vocab_num_blocks),
-        HAS_DRAFT_LOGITS=variant["has_draft"],
-        grid=(1,),
-        num_warps=1,
-        pointer_dtypes=pointer_dtypes,
-    )
-
-
-def _compute_local_residual_mass_warmup_inputs(
-    *,
-    model_dtype: torch.dtype,
-    draft_dtype: torch.dtype,
-    vocab_size: int,
-    num_speculative_steps: int,
-) -> dict[str, Any]:
-    vocab_num_blocks = triton.cdiv(vocab_size, 8192)
-    target_dtype: Any = WarmupChoices(
-        *(
-            (model_dtype,)
-            if model_dtype == torch.float32
-            else (model_dtype, torch.float32)
-        )
-    )
-    has_draft: Any = WarmupChoices(False, True)
-    variant = _logits_warmup_variant(
-        target_dtype,
-        draft_dtype,
-        vocab_size,
-        num_speculative_steps,
-        has_draft,
-    )
-    _when(has_draft)
-    pointer_dtypes = _warmup_pointer_groups(
-        (
-            torch.float32,
-            (
-                "local_residual_mass_ptr",
-                "cumulative_log_p_ptr",
-                "target_local_max_ptr",
-                "target_local_sumexp_ptr",
-                "draft_local_max_ptr",
-                "draft_local_sumexp_ptr",
-                "temp_ptr",
-            ),
-        ),
-        (torch.int32, ("draft_sampled_ptr",)),
-        (torch.int64, ("expanded_idx_mapping_ptr",)),
-        (torch.int32, ("expanded_local_pos_ptr",)),
-    )
-    return triton_warmup_inputs(
-        _compute_local_residual_mass_kernel,
-        target_logits_ptr=variant["target"],
-        draft_logits_ptr=variant["draft"],
-        local_residual_mass_stride=vocab_num_blocks,
-        target_logits_stride=vocab_size,
-        target_local_max_stride=vocab_num_blocks,
-        target_local_sumexp_stride=vocab_num_blocks,
-        draft_logits_stride_0=variant["draft_stride_0"],
-        draft_logits_stride_1=variant["draft_stride_1"],
-        draft_local_max_stride=vocab_num_blocks,
-        draft_local_sumexp_stride=vocab_num_blocks,
-        vocab_size=vocab_size,
-        num_speculative_steps=num_speculative_steps,
-        vocab_num_blocks=vocab_num_blocks,
-        BLOCK_SIZE=8192,
-        PADDED_VOCAB_NUM_BLOCKS=triton.next_power_of_2(vocab_num_blocks),
-        grid=(1, 1),
-        pointer_dtypes=pointer_dtypes,
-    )
-
-
-def _rejection_warmup_inputs(
-    *,
-    model_dtype: torch.dtype,
-    draft_dtype: torch.dtype,
-    vocab_size: int,
-    num_speculative_steps: int,
-    synthetic_mode: bool,
-    use_block_verification: bool,
-) -> dict[str, Any]:
-    vocab_num_blocks = triton.cdiv(vocab_size, 8192)
-    padded_vocab_num_blocks = triton.next_power_of_2(vocab_num_blocks)
-    local_residual_mass_stride = vocab_num_blocks if use_block_verification else 0
-    target_dtype: Any = WarmupChoices(
-        *(
-            (model_dtype,)
-            if model_dtype == torch.float32
-            else (model_dtype, torch.float32)
-        )
-    )
-    has_draft: Any = WarmupChoices(False, True)
-    variant = _logits_warmup_variant(
-        target_dtype,
-        draft_dtype,
-        vocab_size,
-        num_speculative_steps,
-        has_draft,
-    )
-    pointer_dtypes = _warmup_pointer_groups(
-        (
-            torch.int64,
-            (
-                "sampled_ptr",
-                "target_local_argmax_ptr",
-                "idx_mapping_ptr",
-                "seed_ptr",
-                "pos_ptr",
-            ),
-        ),
-        (torch.int32, ("rejected_steps_ptr", "draft_sampled_ptr", "cu_num_logits_ptr")),
-        (
-            torch.float32,
-            (
-                "target_rejected_logsumexp_ptr",
-                "draft_rejected_logsumexp_ptr",
-                "target_local_max_ptr",
-                "target_local_sumexp_ptr",
-                "draft_local_max_ptr",
-                "draft_local_sumexp_ptr",
-                "temp_ptr",
-            ),
-        ),
-    )
-    return triton_warmup_inputs(
-        _rejection_kernel,
-        target_logits_ptr=variant["target"],
-        draft_logits_ptr=variant["draft"],
-        synthetic_conditional_rates_ptr=TritonWarmupTensor(torch.float32)
-        if synthetic_mode
-        else None,
-        cumulative_log_p_ptr=TritonWarmupTensor(torch.float32)
-        if use_block_verification
-        else None,
-        local_residual_mass_ptr=TritonWarmupTensor(torch.float32)
-        if use_block_verification and variant["has_draft"]
-        else None,
-        sampled_stride=num_speculative_steps + 1,
-        target_logits_stride=vocab_size,
-        target_local_argmax_stride=vocab_num_blocks,
-        target_local_max_stride=vocab_num_blocks,
-        target_local_sumexp_stride=vocab_num_blocks,
-        draft_logits_stride_0=variant["draft_stride_0"],
-        draft_logits_stride_1=variant["draft_stride_1"],
-        draft_local_max_stride=vocab_num_blocks,
-        draft_local_sumexp_stride=vocab_num_blocks,
-        local_residual_mass_stride=local_residual_mass_stride,
-        vocab_num_blocks=vocab_num_blocks,
-        PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
-        HAS_DRAFT_LOGITS=variant["has_draft"],
-        SYNTHETIC_MODE=synthetic_mode,
-        USE_BLOCK_VERIFICATION=use_block_verification,
-        grid=(1,),
-        num_warps=1,
-        pointer_dtypes=pointer_dtypes,
-    )
-
-
-def _resample_warmup_inputs(
-    *,
-    model_dtype: torch.dtype,
-    draft_dtype: torch.dtype,
-    vocab_size: int,
-    num_speculative_steps: int,
-    use_fp64: bool,
-    use_block_verification: bool,
-) -> dict[str, Any]:
-    resampled_stride = triton.cdiv(vocab_size, 1024)
-    resampled_dtype = torch.float64 if use_fp64 else torch.float32
-    target_dtype: Any = WarmupChoices(
-        *(
-            (model_dtype,)
-            if model_dtype == torch.float32
-            else (model_dtype, torch.float32)
-        )
-    )
-    has_draft: Any = WarmupChoices(False, True)
-    variant = _logits_warmup_variant(
-        target_dtype,
-        draft_dtype,
-        vocab_size,
-        num_speculative_steps,
-        has_draft,
-    )
-    pointer_dtypes = _warmup_pointer_groups(
-        (
-            torch.int64,
-            (
-                "resampled_local_argmax_ptr",
-                "expanded_idx_mapping_ptr",
-                "seed_ptr",
-                "pos_ptr",
-            ),
-        ),
-        (resampled_dtype, ("resampled_local_max_ptr",)),
-        (
-            torch.float32,
-            (
-                "target_rejected_logsumexp_ptr",
-                "draft_rejected_logsumexp_ptr",
-                "temp_ptr",
-            ),
-        ),
-        (torch.int32, ("rejected_step_ptr", "cu_num_logits_ptr", "draft_sampled_ptr")),
-    )
-    return triton_warmup_inputs(
-        _resample_kernel,
-        target_logits_ptr=variant["target"],
-        draft_logits_ptr=variant["draft"],
-        cumulative_log_p_ptr=TritonWarmupTensor(torch.float32)
-        if use_block_verification
-        else None,
-        resampled_local_argmax_stride=resampled_stride,
-        resampled_local_max_stride=resampled_stride,
-        target_logits_stride=vocab_size,
-        draft_logits_stride_0=variant["draft_stride_0"],
-        draft_logits_stride_1=variant["draft_stride_1"],
-        vocab_size=vocab_size,
-        BLOCK_SIZE=1024,
-        HAS_DRAFT_LOGITS=variant["has_draft"],
-        USE_FP64=use_fp64,
-        USE_BLOCK_VERIFICATION=use_block_verification,
-        grid=(1, 1),
-        pointer_dtypes=pointer_dtypes,
-    )
-
-
-def _insert_resampled_warmup_inputs(
-    *, num_speculative_steps: int, vocab_size: int, use_fp64: bool
-) -> dict[str, Any]:
-    resample_num_blocks = triton.cdiv(vocab_size, 1024)
-    resampled_dtype = torch.float64 if use_fp64 else torch.float32
-    return triton_warmup_inputs(
-        _insert_resampled_kernel,
-        sampled_stride=num_speculative_steps + 1,
-        resampled_local_argmax_stride=resample_num_blocks,
-        resample_num_blocks=resample_num_blocks,
-        resampled_local_max_stride=resample_num_blocks,
-        PADDED_RESAMPLE_NUM_BLOCKS=triton.next_power_of_2(resample_num_blocks),
-        grid=(1,),
-        pointer_dtypes=_warmup_pointer_groups(
-            (
-                torch.int64,
-                (
-                    "sampled_ptr",
-                    "resampled_local_argmax_ptr",
-                    "expanded_idx_mapping_ptr",
-                ),
-            ),
-            (torch.int32, ("num_sampled_ptr", "cu_num_logits_ptr")),
-            (resampled_dtype, ("resampled_local_max_ptr",)),
-            (torch.float32, ("temp_ptr",)),
-        ),
-    )
-
-
-_COMPUTE_LOCAL_LOGITS_STATS_KERNEL = triton_kernel_dispatcher_with_warmup(
-    warmup_inputs=_compute_local_logits_stats_warmup_inputs
-)(_compute_local_logits_stats_kernel)
-_COMPUTE_CUMULATIVE_LOG_P_KERNEL = triton_kernel_dispatcher_with_warmup(
-    warmup_inputs=_compute_cumulative_log_p_warmup_inputs
-)(_compute_cumulative_log_p_kernel)
-_COMPUTE_LOCAL_RESIDUAL_MASS_KERNEL = triton_kernel_dispatcher_with_warmup(
-    warmup_inputs=_compute_local_residual_mass_warmup_inputs
-)(_compute_local_residual_mass_kernel)
-_REJECTION_KERNEL = triton_kernel_dispatcher_with_warmup(
-    warmup_inputs=_rejection_warmup_inputs
-)(_rejection_kernel)
-_RESAMPLE_KERNEL = triton_kernel_dispatcher_with_warmup(
-    warmup_inputs=_resample_warmup_inputs
-)(_resample_kernel)
-_INSERT_RESAMPLED_KERNEL = triton_kernel_dispatcher_with_warmup(
-    warmup_inputs=_insert_resampled_warmup_inputs
-)(_insert_resampled_kernel)
-
-
 def rejection_sample(
     # [num_logits, V]
     target_logits: torch.Tensor,
@@ -1397,7 +984,7 @@ def rejection_sample(
     draft_local_sumexp = target_logits.new_empty(
         num_logits, vocab_num_blocks, dtype=torch.float32
     )
-    _COMPUTE_LOCAL_LOGITS_STATS_KERNEL[(num_logits, vocab_num_blocks)](
+    _compute_local_logits_stats_kernel[(num_logits, vocab_num_blocks)](
         target_local_argmax,
         target_local_argmax.stride(0),
         target_local_max,
@@ -1433,7 +1020,7 @@ def rejection_sample(
         # cumulative_log_p[start + i] = log(p_{i+1}), the cumulative ratio after
         # the (i+1)-th draft token.
         cumulative_log_p = target_logits.new_empty(num_logits, dtype=torch.float32)
-        _COMPUTE_CUMULATIVE_LOG_P_KERNEL[(num_reqs,)](
+        _compute_cumulative_log_p_kernel[(num_reqs,)](
             cumulative_log_p,
             target_logits,
             target_logits.stride(0),
@@ -1466,7 +1053,7 @@ def rejection_sample(
             local_residual_mass = target_logits.new_empty(
                 num_logits, vocab_num_blocks, dtype=torch.float32
             )
-            _COMPUTE_LOCAL_RESIDUAL_MASS_KERNEL[(num_logits, vocab_num_blocks)](
+            _compute_local_residual_mass_kernel[(num_logits, vocab_num_blocks)](
                 local_residual_mass,
                 local_residual_mass.stride(0),
                 cumulative_log_p,
@@ -1507,7 +1094,7 @@ def rejection_sample(
     num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
     target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
-    _REJECTION_KERNEL[(num_reqs,)](
+    _rejection_kernel[(num_reqs,)](
         sampled,
         sampled.stride(0),
         num_sampled,
@@ -1558,7 +1145,7 @@ def rejection_sample(
         resample_num_blocks,
         dtype=torch.float64 if use_fp64 else torch.float32,
     )
-    _RESAMPLE_KERNEL[(num_reqs, resample_num_blocks)](
+    _resample_kernel[(num_reqs, resample_num_blocks)](
         resampled_local_argmax,
         resampled_local_argmax.stride(0),
         resampled_local_max,
@@ -1586,7 +1173,7 @@ def rejection_sample(
     )
 
     # Insert the resampled tokens into the output sampled.
-    _INSERT_RESAMPLED_KERNEL[(num_reqs,)](
+    _insert_resampled_kernel[(num_reqs,)](
         sampled,
         sampled.stride(0),
         num_sampled,
