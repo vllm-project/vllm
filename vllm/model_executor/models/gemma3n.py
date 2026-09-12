@@ -59,6 +59,7 @@ from .utils import (
 logger = init_logger(__name__)
 
 EPS = torch.tensor(torch.finfo().min)
+_ALTUP_BADDBMM_MAX_TOKENS = 32
 
 
 class Gemma3nAltUp(nn.Module):
@@ -151,8 +152,13 @@ class Gemma3nAltUp(nn.Module):
         ).permute(0, 2, 1)
 
         # hidden_states to [num_tokens, hidden_size, altup_num_inputs]
-        predictions = torch.matmul(hidden_states.permute(1, 2, 0), all_coefs_T)
-        # [altup_num_inputs, num_tokens, hidden_size]
+        hidden_states_t = hidden_states.permute(1, 2, 0)
+        if hidden_states_t.shape[0] <= _ALTUP_BADDBMM_MAX_TOKENS:
+            predictions = torch.baddbmm(hidden_states_t, hidden_states_t, all_coefs_T)
+            # [altup_num_inputs, num_tokens, hidden_size]
+            return predictions.permute(2, 0, 1).contiguous()
+
+        predictions = torch.matmul(hidden_states_t, all_coefs_T)
         predictions = predictions.permute(2, 0, 1)
         predictions += hidden_states
         return predictions.contiguous()
