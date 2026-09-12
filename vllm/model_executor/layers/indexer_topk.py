@@ -63,6 +63,7 @@ def is_deep_select_supported(input: torch.Tensor, topk: int) -> bool:
     """Whether the kernel accepts this input (dtype/stride/topk constraints)."""
     return (
         topk <= 4096
+        and input.shape[1] < 2**23
         and input.dtype in (torch.float32, torch.bfloat16)
         and input.stride(1) == 1
         and input.stride(0)
@@ -122,6 +123,7 @@ def deep_select_topk(
         )
     else:
         assert output_idx.dtype == indices_dtype
+        assert output_idx.shape[0] >= num_rows and output_idx.shape[1] >= topk
 
     torch.ops.deep_select.topk(
         input,
@@ -201,6 +203,11 @@ class SparseIndexerTopk(torch.nn.Module):
             if not self._has_flashinfer_topk:
                 failures.append(
                     "flashinfer.topk.top_k_ragged_transform is not importable"
+                )
+            if logits.dtype != torch.float32 or logits.stride(1) != 1:
+                failures.append(
+                    f"requires fp32 logits with stride(1) == 1, got "
+                    f"dtype={logits.dtype}, stride={logits.stride()}"
                 )
         if failures:
             raise RuntimeError(
@@ -287,8 +294,10 @@ class SparseIndexerTopk(torch.nn.Module):
             next_n_offsets = torch.arange(
                 next_n, dtype=torch.int32, device=seq_lens.device
             )
-            row_ends = (seq_lens.reshape(-1, 1) - next_n + 1 + next_n_offsets).reshape(
-                -1
+            row_ends = (
+                (seq_lens.reshape(-1, 1) - next_n + 1 + next_n_offsets)
+                .clamp_(min=0)
+                .reshape(-1)
             )
         assert row_ends.dtype == torch.int32
         return row_ends

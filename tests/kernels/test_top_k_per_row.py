@@ -1360,10 +1360,11 @@ def test_deep_select_topk(
     # Force one short row to exercise the -1 out-of-bounds fill.
     row_ends[0] = min(top_k - 1, vocab_size)
     logits = torch.randn(batch_size, vocab_size, dtype=dtype, device="cuda")
-    # Values beyond each row's end must be ignored by the kernel; make them
-    # large so a wrong read is caught by the set comparison below.
+    # Values beyond each row's end must never be read by the kernel: fill
+    # them with NaN (production tails are uninitialized; DeepSelect traps on
+    # NaN with abort_when_nan_found=True, so a wrong read fails loudly).
     col_idx = torch.arange(vocab_size, device="cuda")
-    logits[col_idx[None, :] >= row_ends[:, None]] = 1e30
+    logits[col_idx[None, :] >= row_ends[:, None]] = float("nan")
 
     indices = indexer_topk.deep_select_topk(logits, top_k, end=row_ends)
     torch.accelerator.synchronize()
@@ -1522,6 +1523,61 @@ def test_sparse_indexer_decode_topk_explicit_backends(
     assert compare_top_k_results(
         logits, indices, torch_indices, row_starts, row_ends, top_k
     ), f"{backend} results don't match torch.topk"
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "torch",
+        pytest.param(
+            "per_row",
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="requires CUDA"
+            ),
+        ),
+        pytest.param(
+            "flashinfer",
+            marks=pytest.mark.skipif(
+                not _has_flashinfer_topk(), reason="requires flashinfer top-k"
+            ),
+        ),
+        pytest.param("deep_select", marks=requires_sm100),
+    ],
+)
+@torch.inference_mode()
+def test_sparse_indexer_decode_topk_short_seq_lens(
+    backend: str, workspace_init
+) -> None:
+    """seq_len < next_n: derived per-row ends must clamp at 0 (the reference
+    kernels do max(0, ...)); negative ends are OOB for the ragged kernels."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.indexer_topk import SparseIndexerTopk
+
+    set_random_seed(0)
+    next_n = 4
+    top_k = 512
+    vocab = 8192  # 1024B-aligned rows for DeepSelect
+    # 1D (B,) seq_lens: rows of a request share its len and each kernel
+    # derives per-row ends (with clamping) itself.
+    seq_lens = torch.tensor([2, 6], dtype=torch.int32, device="cuda")
+    num_rows = 2 * next_n
+    logits = torch.randn(num_rows, vocab, dtype=torch.float32, device="cuda")
+    indices = torch.full((num_rows, top_k), -2, dtype=torch.int32, device="cuda")
+
+    cfg = VllmConfig(kernel_config={"sparse_indexer_topk_backend": backend})
+    with set_current_vllm_config(cfg):
+        SparseIndexerTopk()(logits, seq_lens, next_n, indices, top_k, vocab)
+    torch.accelerator.synchronize()
+
+    # Derived ends: [2,6] - next_n + 1 + arange(next_n) -> [-1,0,1,2] and
+    # [3,4,5,6], clamped to [0,0,1,2] and [3,4,5,6].
+    for row, end in enumerate([0, 0, 1, 2, 3, 4, 5, 6]):
+        k_i = min(top_k, end)
+        assert torch.all(indices[row, k_i:] == -1), f"{backend}: row {row}"
+        if k_i:
+            ref = logits[row, :end].topk(k_i).indices.sort().values
+            got = indices[row, :k_i].sort().values
+            assert torch.equal(got, ref), f"{backend}: row {row}"
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
