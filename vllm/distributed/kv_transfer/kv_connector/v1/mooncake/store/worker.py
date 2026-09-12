@@ -730,10 +730,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         boundary: the normal save floors to ``lcm_block_size``, so a
         smaller-block group's full blocks in that gap are never persisted
         elsewhere, and the consumer's lookup needs every group at every probed
-        boundary. Eagle attention whose peek margin is one hash unit includes
-        the block that lookup drops; mamba remains keyed at the reusable
-        boundary. A mamba "align" group contributes only its boundary block,
-        from the core-provided CoW block.
+        boundary. Eagle attention includes the completed margin that lookup
+        drops; mamba remains keyed at the reusable boundary. A mamba "align"
+        group contributes only its boundary block, from the core-provided CoW
+        block.
         """
         boundaries = {boundary for _, _, boundary in entries}
         if len(boundaries) != 1:
@@ -756,7 +756,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             group_boundary = boundary
             eagle_margin = self.coord.eagle_peek_margin_by_group.get(g_idx)
             if (
-                eagle_margin == hash_block_size
+                eagle_margin is not None
                 and boundary + eagle_margin <= req_meta.completed_token_len
             ):
                 group_boundary += eagle_margin
@@ -832,10 +832,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 (group_id, block_id, boundary)
             )
 
-        hash_unit_peek = any(
-            margin == self.coord.hash_block_size
-            for margin in self.coord.eagle_peek_margin_by_group.values()
-        )
         puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
         for boundary, entries in entries_by_boundary.items():
             snapshots = [
@@ -844,10 +840,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 if boundary % self.token_databases[entry[0]].block_size == 0
             ]
             has_sub_block = len(snapshots) != len(entries)
-            can_write_proof = (
-                hash_unit_peek
-                and boundary + self.coord.hash_block_size
-                <= req_meta.completed_token_len
+            can_write_proof = any(
+                boundary + margin <= req_meta.completed_token_len
+                for margin in self.coord.eagle_peek_margin_by_group.values()
             )
             if self.coord.enable_partial_hash_hits and (
                 has_sub_block or can_write_proof
