@@ -638,17 +638,101 @@ class RandomDataset(BenchmarkDataset):
 
         requests: list[SampleRequest] = []
         token_mismatch_total = 0
+
+        # When --dataset-path is provided, sample token IDs from the
+        # file instead of using purely random integers. The file format
+        # is auto-detected from the extension:
+        #   .json  -> ShareGPT format (conversations array)
+        #   .jsonl -> one JSON object per line with a "prompt" field
+        #   .txt   -> plain text, one line per entry
+        source_token_pool: list[int] = []
+        if self.dataset_path:
+            ext = Path(self.dataset_path).suffix.lower()
+            # Collect all candidate text entries first, then shuffle once with
+            # the class-isolated RNG (self._rng). Never touch global random /
+            # np.random state -- see the RNG-isolation note in __init__.
+            source_texts: list[str] = []
+            if ext == ".json":
+                with open(self.dataset_path, encoding="utf-8") as f:
+                    raw = json.load(f)
+                for d in raw:
+                    conv = d.get("conversations", d.get("conversation", []))
+                    if len(conv) < 2:
+                        continue
+                    text = conv[0].get("value", "")
+                    if text:
+                        source_texts.append(text)
+            elif ext == ".jsonl":
+                with open(self.dataset_path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        obj = json.loads(line)
+                        text = obj.get("prompt", "")
+                        if text:
+                            source_texts.append(text)
+            elif ext == ".txt":
+                with open(self.dataset_path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            source_texts.append(line)
+            else:
+                raise ValueError(
+                    f"Unsupported dataset file extension: {ext}. "
+                    "Supported formats: .json (ShareGPT), "
+                    ".jsonl (custom), .txt (plain text)."
+                )
+
+            # Shuffle the full candidate set (not just the file head) so the
+            # token pool is a random sample of the dataset, using the isolated
+            # generator for reproducibility without disturbing global RNG.
+            self._rng.shuffle(source_texts)
+            for text in source_texts:
+                source_token_pool.extend(tokenizer.encode(text))
+                if len(source_token_pool) >= max(input_lens) * 2:
+                    break
+
+            if not source_token_pool:
+                raise ValueError(
+                    f"No valid data found in {self.dataset_path}."
+                )
+
         for i in range(num_requests):
-            prompt, total_input_len, token_mismatch = self.generate_token_sequence(  # noqa: E501
-                tokenizer=tokenizer,
-                prefix_token_ids=prefix_token_ids,
-                prefix_len=prefix_len,
-                vocab_size=vocab_size,
-                input_len=int(input_lens[i]),
-                offset=int(offsets[i]),
-                index=i,
-                allowed_tokens=allowed_tokens,
-            )
+            if self.dataset_path and source_token_pool:
+                # Truncate or repeat real tokens to fill input_len
+                needed = int(input_lens[i])
+                pool_len = len(source_token_pool)
+                if pool_len >= needed:
+                    start = int(offsets[i]) % max(
+                        pool_len - needed + 1, 1)
+                    sampled = source_token_pool[start:start + needed]
+                else:
+                    ratio = (needed + pool_len - 1) // pool_len
+                    sampled = (source_token_pool * ratio)[:needed]
+                token_sequence = prefix_token_ids + sampled
+                prompt, adjusted_tokens, token_mismatch = (
+                    gen_prompt_decode_to_target_len(
+                        tokenizer=tokenizer,
+                        token_sequence=token_sequence,
+                        target_token_len=prefix_len + needed,
+                        add_special_tokens=False,
+                        rng=self._rng,
+                    )
+                )
+                total_input_len = len(adjusted_tokens)
+            else:
+                prompt, total_input_len, token_mismatch = self.generate_token_sequence(  # noqa: E501
+                    tokenizer=tokenizer,
+                    prefix_token_ids=prefix_token_ids,
+                    prefix_len=prefix_len,
+                    vocab_size=vocab_size,
+                    input_len=int(input_lens[i]),
+                    offset=int(offsets[i]),
+                    index=i,
+                    allowed_tokens=allowed_tokens,
+                )
             token_mismatch_total += token_mismatch
             lora_req = self.get_lora_request(
                 index=i,
