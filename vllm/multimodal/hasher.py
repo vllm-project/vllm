@@ -60,11 +60,14 @@ class MultiModalHasher:
             return (np.array(obj).tobytes(),)
 
         if isinstance(obj, Image.Image):
-            exif = obj.getexif()
-            if Image.ExifTags.Base.ImageID in exif and isinstance(
-                exif[Image.ExifTags.Base.ImageID], uuid.UUID
-            ):
-                return (exif[Image.ExifTags.Base.ImageID].bytes,)
+            try:
+                exif = obj.getexif()
+                if Image.ExifTags.Base.ImageID in exif and isinstance(
+                    exif[Image.ExifTags.Base.ImageID], uuid.UUID
+                ):
+                    return (exif[Image.ExifTags.Base.ImageID].bytes,)
+            except Exception:
+                pass
 
             data = {"mode": obj.mode, "data": np.asarray(obj)}
             palette = obj.palette
@@ -76,11 +79,14 @@ class MultiModalHasher:
             return cls.iter_item_to_bytes("image", data)
 
         if isinstance(obj, MediaWithBytes) and isinstance(obj.media, Image.Image):
-            exif = obj.media.getexif()
-            if Image.ExifTags.Base.ImageID in exif and isinstance(
-                exif[Image.ExifTags.Base.ImageID], uuid.UUID
-            ):
-                return (exif[Image.ExifTags.Base.ImageID].bytes,)
+            try:
+                exif = obj.media.getexif()
+                if Image.ExifTags.Base.ImageID in exif and isinstance(
+                    exif[Image.ExifTags.Base.ImageID], uuid.UUID
+                ):
+                    return (exif[Image.ExifTags.Base.ImageID].bytes,)
+            except Exception:
+                pass
 
             if obj.io_config:
                 return cls.iter_item_to_bytes(
