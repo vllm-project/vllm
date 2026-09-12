@@ -141,6 +141,7 @@ MoEBackend = Literal[
     "flydsl",
     "hpc",
     "emulation",
+    "rdna3",
 ]
 
 # Backends that run the mega-MoE model path through the flashinfer moe_ep
@@ -165,6 +166,7 @@ FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
     {
         "DeepseekV4ForCausalLM",
         "DeepSeekV4MTPModel",
+        "DeepseekV41ForCausalLM",
     }
 )
 
@@ -230,9 +232,6 @@ class KernelConfig:
     enable_jit_warmup: bool = True
     """If True, run JIT compile warmup during kernel warmup."""
 
-    enable_bf16x3_router_gemm: bool = False
-    """If True, use the experimental SM100 BF16x3 CuteDSL router GEMM."""
-
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
@@ -264,6 +263,7 @@ class KernelConfig:
     - "aiter_triton_mxfp4_bf16": Use the AITER Triton MXFP4 W4A16
       (moe_gemm_a16w4) MoE kernel (ROCm gfx942/gfx950/gfx1250)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
+    - "rdna3": Use the fused RDNA3 W4A16 HIP kernel (ROCm gfx1100 only)
     - "hpc": Use HPC kernels (FP8 and Hopper only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
