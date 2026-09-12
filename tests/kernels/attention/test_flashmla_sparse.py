@@ -4,6 +4,85 @@ import pytest
 import torch
 
 
+def test_compute_global_topk_indices_and_lens_rejects_oob_block_table_axes():
+    from vllm.models.deepseek_v4.common.ops.cache_utils import (
+        compute_global_topk_indices_and_lens,
+    )
+
+    device = torch.device("cuda")
+    block_size = 4
+
+    # Keep a wider backing allocation so the logical column-bound regression
+    # proves shape[1], not row stride, is the validity boundary.
+    block_table_backing = torch.tensor([[10, 11, 12]], dtype=torch.int32, device=device)
+    block_table = block_table_backing[:, :2]
+    assert block_table.shape == (1, 2)
+    assert block_table.stride(0) == 3
+
+    topk_indices = torch.tensor(
+        [
+            [0, 5],  # valid row + valid columns
+            [0, 5],  # invalid request row (req_idx=1)
+            [8, -1],  # valid request row, invalid logical block column 2
+            [8, 5],  # invalid column before valid entry; survivor must pack left
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    token_to_req_indices = torch.tensor([0, 1, 0, 0], dtype=torch.int32, device=device)
+    is_valid_token = torch.tensor([True, True, True, True], device=device)
+
+    actual_indices, actual_lens = compute_global_topk_indices_and_lens(
+        topk_indices,
+        token_to_req_indices,
+        block_table,
+        block_size,
+        is_valid_token,
+    )
+    torch.accelerator.synchronize()
+
+    expected_indices = torch.tensor(
+        [
+            [40, 45],
+            [-1, -1],
+            [-1, -1],
+            [45, -1],
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    expected_lens = torch.tensor([2, 0, 0, 1], dtype=torch.int32, device=device)
+
+    torch.testing.assert_close(actual_indices, expected_indices)
+    torch.testing.assert_close(actual_lens, expected_lens)
+
+
+def test_compute_global_topk_indices_and_lens_masks_invalid_tokens_before_gather():
+    from vllm.models.deepseek_v4.common.ops.cache_utils import (
+        compute_global_topk_indices_and_lens,
+    )
+
+    device = torch.device("cuda")
+    block_table = torch.tensor([[10, 11]], dtype=torch.int32, device=device)
+    topk_indices = torch.tensor([[0, 5]], dtype=torch.int32, device=device)
+
+    # Deliberately invalid req_idx. A padding token must not dereference it.
+    token_to_req_indices = torch.tensor([7], dtype=torch.int32, device=device)
+    is_valid_token = torch.tensor([False], device=device)
+
+    actual_indices, actual_lens = compute_global_topk_indices_and_lens(
+        topk_indices,
+        token_to_req_indices,
+        block_table,
+        4,
+        is_valid_token,
+    )
+    torch.accelerator.synchronize()
+
+    assert actual_indices.cpu().tolist() == [[-1, -1]]
+    assert actual_lens.cpu().tolist() == [0]
+
+
 @pytest.mark.parametrize("sm120", [False, True])
 def test_deepseek_v4_c128a_adaptive_width_has_capture_stable_stride(
     monkeypatch: pytest.MonkeyPatch,
