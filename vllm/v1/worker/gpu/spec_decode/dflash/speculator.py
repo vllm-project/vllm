@@ -256,6 +256,8 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_tokens_across_dp=num_tokens_across_dp,
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
+            is_padding=self.input_buffers.is_padding[:num_tokens],
+            force_generic_moe_router=True,
         ):
             last_hidden_states = self.model(
                 input_ids=self.input_buffers.input_ids[:num_tokens],
@@ -487,6 +489,7 @@ def _prepare_dflash_inputs_kernel(
     # Outputs
     out_input_ids_ptr,
     out_query_positions_ptr,
+    out_is_padding_ptr,
     out_query_start_loc_ptr,
     out_seq_lens_ptr,
     out_query_slot_mapping_ptr,
@@ -619,6 +622,7 @@ def _prepare_dflash_inputs_kernel(
     tl.store(out_input_ids_ptr + query_idx, input_id, mask=is_query)
     clamped_query_pos = tl.minimum(query_pos, max_model_len - 1)
     tl.store(out_query_positions_ptr + query_idx, clamped_query_pos, mask=is_query)
+    tl.store(out_is_padding_ptr + query_idx, False, mask=is_query)
     tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=is_query)
 
     # --- Sample indices / positions / idx_mapping ---
@@ -679,6 +683,9 @@ def _prepare_dflash_inputs_kernel(
             for i in range(q_pad_start, max_num_tokens, BLOCK_SIZE):
                 block = i + tl.arange(0, BLOCK_SIZE)
                 mask = block < max_num_tokens
+                tl.store(out_input_ids_ptr + block, 0, mask=mask)
+                tl.store(out_query_positions_ptr + block, 0, mask=mask)
+                tl.store(out_is_padding_ptr + block, True, mask=mask)
                 tl.store(out_query_slot_mapping_ptr + block, PAD_SLOT_ID, mask=mask)
 
 
@@ -730,6 +737,7 @@ def prepare_dflash_inputs(
     _prepare_dflash_inputs_kernel[(num_reqs, num_blocks)](
         input_buffers.input_ids,
         input_buffers.positions,
+        input_buffers.is_padding,
         input_buffers.query_start_loc,
         input_buffers.seq_lens,
         query_slot_mapping,
