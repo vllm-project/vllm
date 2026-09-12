@@ -228,9 +228,10 @@ __global__ void awq_marlin_repack_kernel(
 torch::stable::Tensor awq_marlin_repack(torch::stable::Tensor& b_q_weight,
                                         int64_t size_k, int64_t size_n,
                                         int64_t num_bits, bool is_a_8bit) {
-  // Verify compatibility with marlin tile of 16x64
-  STD_TORCH_CHECK(size_k % marlin::tile_k_size == 0, "size_k = ", size_k,
-                  " is not divisible by tile_k_size = ", marlin::tile_k_size);
+  // Verify compatibility with Marlin tiles
+  int64_t const target_tile_k_size = marlin::tile_k_size * (is_a_8bit ? 2 : 1);
+  STD_TORCH_CHECK(size_k % target_tile_k_size == 0, "size_k = ", size_k,
+                  " is not divisible by tile_k_size = ", target_tile_k_size);
   STD_TORCH_CHECK(size_n % marlin::tile_n_size == 0, "size_n = ", size_n,
                   " is not divisible by tile_n_size = ", marlin::tile_n_size);
 
