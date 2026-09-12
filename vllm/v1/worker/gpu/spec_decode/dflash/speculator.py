@@ -297,6 +297,10 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs, self.num_speculative_steps
         )
 
+    def _context_rows(self, input_batch: InputBatch) -> torch.Tensor | None:
+        """Target rows whose context KV this drafter can still read; None for all."""
+        return None
+
     @torch.inference_mode()
     def propose(
         self,
@@ -411,8 +415,11 @@ class DFlashSpeculator(DraftModelSpeculator):
         # because the context shape varies per step. During dummy runs the block tables
         # are placeholders, so we skip the cache write to avoid clobbering real entries.
         # Each layer uses the context slots of its own kv-cache group.
+        context_hidden = self.hidden_states[:num_target_tokens]
+        context_positions = self.context_positions[:num_target_tokens]
+        context_slots: torch.Tensor | list[torch.Tensor | None] | None
         if dummy_run:
-            context_slots: torch.Tensor | list[torch.Tensor | None] | None = None
+            context_slots = None
         elif self._layer_group_idx is not None:
             context_slots = [
                 self._context_slot_mappings[gidx][:num_target_tokens]
@@ -420,10 +427,19 @@ class DFlashSpeculator(DraftModelSpeculator):
             ]
         else:
             context_slots = self._context_slot_mappings[0][:num_target_tokens]
+        rows = self._context_rows(input_batch)
+        if rows is not None:
+            context_hidden = context_hidden.index_select(0, rows)
+            context_positions = context_positions.index_select(0, rows)
+            if isinstance(context_slots, list):
+                context_slots = [
+                    None if t is None else t.index_select(0, rows)
+                    for t in context_slots
+                ]
+            elif context_slots is not None:
+                context_slots = context_slots.index_select(0, rows)
         self.model.precompute_and_store_context_kv(
-            self.hidden_states[:num_target_tokens],
-            self.context_positions[:num_target_tokens],
-            context_slots,
+            context_hidden, context_positions, context_slots
         )
 
         batch_sync, num_batch_tokens = (
