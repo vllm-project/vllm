@@ -28,6 +28,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -324,6 +325,7 @@ class SarvamMLAMoE(nn.Module):
 
         self.score_function = getattr(config, "score_function", "sigmoid")
         self.num_shared_experts = getattr(config, "num_shared_experts", 1)
+        self.shared_experts: SarvamMLAMLP | None
         if self.num_shared_experts > 0:
             if hasattr(config, "moe_shared_expert_intermediate_size"):
                 shared_int = config.moe_shared_expert_intermediate_size
@@ -448,6 +450,16 @@ class SarvamMLABlock(nn.Module):
         return hidden_states, residual
 
 
+# PEP 563 stringifies annotations in this module, so the decorator cannot infer
+# these; they are the set DeepSeek-V2 infers for the same forward signature.
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": 0,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    }
+)
 class SarvamMLAModel(nn.Module, EagleModelMixin):
     """Sarvam MLA backbone with stage-local EAGLE3 auxiliary capture."""
 
@@ -579,6 +591,9 @@ class SarvamMLAModel(nn.Module, EagleModelMixin):
 
 
 class SarvamMixtureOfExperts(MixtureOfExperts):
+    moe_layers: list[MoERunner]
+    moe_mlp_layers: list[SarvamMLAMoE]
+
     def extract_moe_parameters(self, example_moe: SarvamMLAMoE | None) -> None:
         if example_moe is None:
             raise RuntimeError("No SarvamMLAMoE layer found in model.layers.")
@@ -614,12 +629,6 @@ class SarvamMixtureOfExperts(MixtureOfExperts):
                 fused.n_redundant_experts = self.num_redundant_experts
             if hasattr(fused, "update_expert_map"):
                 fused.update_expert_map()
-
-    def set_eplb_state(self, eplb_state) -> None:
-        self.eplb_state = eplb_state
-        for moe in self.moe_layers:
-            if hasattr(moe, "set_eplb_state"):
-                moe.set_eplb_state(eplb_state)
 
 
 class SarvamMLAForCausalLM(
