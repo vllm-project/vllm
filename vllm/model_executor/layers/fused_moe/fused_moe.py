@@ -295,7 +295,9 @@ def fused_moe_kernel_gptq_awq(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-@triton.jit
+# These values vary with runtime token routing. Alignment specialization would
+# compile new kernel variants when an unseen routing shape reaches inference.
+@triton.jit(do_not_specialize_on_alignment=["EM", "num_valid_tokens"])
 def fused_moe_kernel(
     # Pointers to matrices
     a_ptr,
