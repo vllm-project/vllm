@@ -3,13 +3,20 @@
 
 import functools
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
+from vllm.v1.attention.backends.zentorch_sdpa import (
+    should_use_zentorch_sdpa,
+    zentorch_sdpa_attn,
+)
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
@@ -47,6 +54,24 @@ _FP8_RTOL = 0.1
 ENCODER_SEQ_LENS = [
     [1, 678, 2367, 145, 4162, 36, 7812],
 ]
+# Uniform (dense zentorch_sdpa call) and ragged (per-sequence loop).
+ZEN_ENCODER_SEQ_LENS = [
+    [128, 128, 128],
+    [1, 67, 233, 5],
+]
+_skip_no_zentorch_sdpa = pytest.mark.skipif(
+    not current_platform.is_zen_cpu() or not has_zentorch_op(["zentorch_sdpa"]),
+    reason="zentorch_sdpa requires a Zen CPU with the op registered",
+)
+# should_use_zentorch_sdpa additionally gates each dtype on its ISA.
+_skip_no_avx512_bf16 = pytest.mark.skipif(
+    not torch.cpu._is_avx512_bf16_supported(),
+    reason="zentorch_sdpa bfloat16 requires AVX512-BF16",
+)
+_skip_no_avx512 = pytest.mark.skipif(
+    not torch.cpu._is_avx512_supported(),
+    reason="zentorch_sdpa float32 requires AVX512",
+)
 
 
 def get_attn_isa(
@@ -205,6 +230,7 @@ def ref_varlen_encoder_attn(
     seq_lens: list[int],
     scale: float,
     sliding_window: int | None = None,
+    alibi_slopes: torch.Tensor | None = None,
 ) -> torch.Tensor:
     num_seqs = len(seq_lens)
     dtype = query.dtype
@@ -231,6 +257,11 @@ def ref_varlen_encoder_attn(
             ).logical_not()
         else:
             mask = empty_mask.logical_not()
+
+        if alibi_slopes is not None:
+            q_pos = torch.arange(0, seq_len)[None, :, None]
+            kv_pos = torch.arange(0, seq_len)[None, None, :]
+            attn += -alibi_slopes[:, None, None].float() * (q_pos - kv_pos)
 
         attn.masked_fill_(mask, float("-inf"))
         attn = torch.softmax(attn, dim=-1)
@@ -769,6 +800,116 @@ def test_varlen_encoder_attention_amx(
         block_size=block_size,
         isa=isa,
     )
+
+
+@torch.inference_mode()
+def varlen_encoder_zentorch_sdpa(
+    seq_lens: list[int],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    use_alibi: bool,
+) -> None:
+    set_random_seed(0)
+    num_query_heads, num_kv_heads = num_heads
+    assert num_query_heads % num_kv_heads == 0
+    scale = head_size**-0.5
+    token_num = sum(seq_lens)
+
+    query = tensor_cache(
+        token_num * num_query_heads * head_size, dtype, tag="query"
+    ).view(token_num, num_query_heads, head_size)
+    key_value = tensor_cache(
+        2 * token_num * num_kv_heads * head_size, dtype, tag="kv"
+    ).view(2, token_num, num_kv_heads, head_size)
+    key, value = key_value.unbind(0)
+
+    query_start_loc = torch.zeros(len(seq_lens) + 1, dtype=torch.int32)
+    torch.cumsum(torch.tensor(seq_lens, dtype=torch.int32), 0, out=query_start_loc[1:])
+    alibi_slopes = _get_alibi_slopes(num_query_heads) if use_alibi else None
+    output = torch.empty_like(query)
+
+    zentorch_sdpa_attn(
+        query,
+        key,
+        value,
+        output,
+        SimpleNamespace(query_start_loc=query_start_loc),
+        scale,
+        sliding_window if sliding_window is not None else -1,
+        alibi_slopes,
+    )
+    ref_output = ref_varlen_encoder_attn(
+        query=query,
+        key=key,
+        value=value,
+        seq_lens=seq_lens,
+        scale=scale,
+        sliding_window=sliding_window,
+        alibi_slopes=alibi_slopes,
+    )
+    torch.testing.assert_close(output, ref_output, atol=1.5e-2, rtol=1e-2)
+
+
+_ZENTORCH_SDPA_DTYPES = [
+    pytest.param(torch.bfloat16, marks=_skip_no_avx512_bf16),
+    pytest.param(torch.float32, marks=_skip_no_avx512),
+]
+
+
+@_skip_no_zentorch_sdpa
+@pytest.mark.parametrize("seq_lens", ZEN_ENCODER_SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", _ZENTORCH_SDPA_DTYPES)
+@pytest.mark.parametrize("use_alibi", [False, True])
+def test_zentorch_sdpa_attn(
+    seq_lens: list[int],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    use_alibi: bool,
+) -> None:
+    varlen_encoder_zentorch_sdpa(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        use_alibi=use_alibi,
+    )
+
+
+@_skip_no_zentorch_sdpa
+@pytest.mark.parametrize(
+    "attn_type", [AttentionType.ENCODER_ONLY, AttentionType.ENCODER]
+)
+@pytest.mark.parametrize("use_alibi", [False, True])
+@pytest.mark.parametrize("sliding_window", [None, -1, 256])
+@pytest.mark.parametrize("dtype", _ZENTORCH_SDPA_DTYPES)
+def test_should_use_zentorch_sdpa(
+    attn_type: str,
+    use_alibi: bool,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+) -> None:
+    alibi_slopes = torch.tensor([1.0]) if use_alibi else None
+    assert should_use_zentorch_sdpa(attn_type, alibi_slopes, sliding_window, dtype)
+
+
+@_skip_no_zentorch_sdpa
+@pytest.mark.parametrize(
+    "attn_type,dtype",
+    [
+        (AttentionType.DECODER, torch.bfloat16),
+        (AttentionType.ENCODER_ONLY, torch.float16),
+    ],
+)
+def test_should_not_use_zentorch_sdpa(attn_type: str, dtype: torch.dtype) -> None:
+    assert not should_use_zentorch_sdpa(attn_type, None, -1, dtype)
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "fp8_e5m2"])
