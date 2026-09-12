@@ -68,6 +68,17 @@ def test_watermark_config_cli():
 
 
 @pytest.mark.parametrize(
+    "option",
+    ["--gpu-memory-utilization", "--cpu-memory-utilization"],
+)
+def test_memory_utilization_cli_aliases(option):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args([option, "0.8"]))
+
+    assert args.gpu_memory_utilization == 0.8
+
+
+@pytest.mark.parametrize(
     "options",
     [
         ["--engram-config", '{"cpu_offload": false, "embedding_across_dp": true}'],
