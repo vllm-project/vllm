@@ -46,6 +46,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlHandshakePayload,
     NixlKVConnectorStats,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
+    HostWriteStager,
+    _ReqState,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     compute_nixl_compatibility_hash,
 )
@@ -1830,6 +1834,157 @@ class RequestIdMapper:
         return self.req_id_mapping[external_req_id]
 
 
+@pytest.mark.cpu_test
+def test_host_stager_read_failure_reaches_terminal_state():
+    """A terminal NIXL error must fail even when another chunk was queued."""
+    pool = SimpleNamespace(free_slots=[])
+    slot = SimpleNamespace(pool=pool)
+    state = _ReqState(
+        queued=[(np.array([2]), np.array([0]), 7, 16)],
+        reading=[(1, slot, np.array([0]))],
+    )
+    stager = object.__new__(HostWriteStager)
+    stager._reqs = {"request": state}
+    stager.nixl_wrapper = MagicMock()
+    stager.nixl_wrapper.check_xfer_state.return_value = "ERR"
+
+    assert stager.get_finished() == (set(), {"request"})
+    assert pool.free_slots == [slot]
+
+
+@pytest.mark.cpu_test
+def test_host_stager_abort_drains_read_before_reusing_slot():
+    """Aborting a posted read must not return its slot while NIXL says PROC."""
+    pool = SimpleNamespace(free_slots=[])
+    slot = SimpleNamespace(pool=pool)
+    state = _ReqState(reading=[(1, slot, np.array([0]))])
+    stager = object.__new__(HostWriteStager)
+    stager._reqs = {"request": state}
+    stager.nixl_wrapper = MagicMock()
+    stager.nixl_wrapper.check_xfer_state.side_effect = ["PROC", "DONE"]
+
+    stager.abort("request")
+    assert stager.get_finished() == (set(), set())
+    assert pool.free_slots == []
+    assert stager.get_finished() == (set(), set())
+    assert pool.free_slots == [slot]
+
+
+@pytest.mark.cpu_test
+def test_host_stager_copy_failure_waits_for_recorded_event():
+    """A partial CUDA enqueue failure must keep its slot until the stream drains."""
+    pool = SimpleNamespace(free_slots=[])
+    event = MagicMock()
+    event.query.side_effect = [False, True]
+    slot = SimpleNamespace(pool=pool, event=event)
+    state = _ReqState(reading=[(1, slot, np.array([0]))])
+    stager = object.__new__(HostWriteStager)
+    stager._reqs = {"request": state}
+    stager.nixl_wrapper = MagicMock()
+    stager.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    stager._start_copy = MagicMock(side_effect=RuntimeError("copy failed"))
+
+    assert stager.get_finished() == (set(), set())
+    assert pool.free_slots == []
+    assert stager.get_finished() == (set(), {"request"})
+    assert pool.free_slots == [slot]
+
+
+@pytest.mark.cpu_test
+def test_host_stager_is_only_initialized_for_same_host_reads(monkeypatch):
+    """A remote-host read must retain NIXL's direct transfer path."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker._host_stager = None
+    worker._host_stager_init_attempted = False
+    worker.use_host_buffer = True
+    worker.src_blocks_data = np.array([[1_000, 16, 0]], dtype=np.uint64)
+    worker.host_xfer_buffers = {"layer": torch.empty(16, dtype=torch.uint8)}
+    worker.device_id = 0
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_memory_type = "VRAM"
+    worker.nixl_backends = ["UCX"]
+    stager = MagicMock()
+
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker."
+        "envs.VLLM_NIXL_SIDE_CHANNEL_HOST",
+        "local-host",
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.HostWriteStager",
+        return_value=stager,
+    ) as stager_factory:
+        monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+        assert worker._maybe_init_host_stager("remote-host") is None
+        stager_factory.assert_not_called()
+        monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+        assert worker._maybe_init_host_stager("local-host") is None
+        stager_factory.assert_not_called()
+        monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+        assert worker._maybe_init_host_stager("local-host") is stager
+        stager_factory.assert_called_once()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("staging_finishes_first", [False, True])
+def test_mixed_host_staging_waits_for_both_receive_parts(staging_finishes_first):
+    """A mixed host/device receive completes only after both paths finish."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker._recving_metadata = {"request": MagicMock()}
+    worker._recving_transfers = {"request": [7]}
+    worker._failed_recv_pending = set()
+    worker._pending_recv_notifs = {"request": [("agent", b"notification")]}
+    worker._send_pending_recv_notifs = MagicMock()
+    worker._report_failed_recv = MagicMock()
+    worker.xfer_stats = MagicMock()
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+
+    stager = MagicMock()
+    stager.active_req_ids = {"request"}
+
+    def finish_staging():
+        stager.active_req_ids = set()
+        return {"request"}, set()
+
+    stager.get_finished.side_effect = finish_staging
+    worker._host_stager = stager
+
+    if staging_finishes_first:
+        assert worker._get_finished_host_staging() == set()
+        assert worker._pop_done_transfers(worker._recving_transfers, is_recv=True) == {
+            "request"
+        }
+    else:
+        assert (
+            worker._pop_done_transfers(worker._recving_transfers, is_recv=True) == set()
+        )
+        assert worker._get_finished_host_staging() == {"request"}
+
+    worker._send_pending_recv_notifs.assert_called_once_with("request")
+
+
+@pytest.mark.cpu_test
+def test_mixed_host_staging_does_not_report_failure_twice_after_drain():
+    worker = object.__new__(NixlConnectorWorker)
+    worker._recving_metadata = {"request": MagicMock()}
+    worker._recving_transfers = {}
+    worker._failed_recv_pending = {"request"}
+    worker._pending_recv_notifs = {}
+    worker._report_failed_recv = MagicMock()
+
+    stager = MagicMock()
+    stager.active_req_ids = set()
+    stager.get_finished.return_value = set(), set()
+    worker._host_stager = stager
+
+    assert worker._get_finished_host_staging() == set()
+    assert worker._failed_recv_pending == set()
+    worker._report_failed_recv.assert_called_once_with("request")
+    assert worker._get_finished_host_staging() == set()
+    worker._report_failed_recv.assert_called_once_with("request")
+
+
 def _run_abort_timeout_test(llm: LLM, timeout: int):
     """Helper function to run the abort timeout test logic."""
     remote_prefill_opts = {
@@ -1935,7 +2090,8 @@ def test_mixed_memory_read_notifies_after_both_transfers_finish():
     worker._recving_metadata = {"request": MagicMock()}
     worker._recving_transfers = defaultdict(list)
     worker._pending_recv_notifs = {}
-    worker._failed_inflight_recvs = set()
+    worker._failed_recv_pending = set()
+    worker._host_stager = None
     worker.xfer_stats = MagicMock()
     worker.nixl_wrapper = MagicMock()
     worker.nixl_wrapper.make_prepped_xfer.side_effect = [101, 102]
@@ -1964,7 +2120,9 @@ def test_mixed_memory_read_notifies_after_both_transfers_finish():
     np.testing.assert_array_equal(device_read.args[4], [7])
     worker.nixl_wrapper.send_notif.assert_not_called()
 
-    assert worker._pop_done_transfers(worker._recving_transfers) == {"request"}
+    assert worker._pop_done_transfers(worker._recving_transfers, is_recv=True) == {
+        "request"
+    }
     worker.nixl_wrapper.send_notif.assert_called_once_with(
         "prefill", notif_msg=b"request:1"
     )
@@ -1979,12 +2137,14 @@ def test_mixed_memory_read_failure_does_not_notify_producer():
     worker._failed_inflight_recvs = set()
     worker._is_hma_required = True
     worker._failed_recv_reqs = MagicMock()
+    worker._failed_recv_pending = set()
+    worker._host_stager = None
     worker._log_failure = MagicMock()  # type: ignore[method-assign]
     worker.xfer_stats = MagicMock()
     worker.nixl_wrapper = MagicMock()
     worker.nixl_wrapper.check_xfer_state.side_effect = ["ERR", "DONE"]
 
-    worker._pop_done_transfers(worker._recving_transfers)
+    worker._pop_done_transfers(worker._recving_transfers, is_recv=True)
 
     assert "request" not in worker._pending_recv_notifs
     worker.nixl_wrapper.send_notif.assert_not_called()

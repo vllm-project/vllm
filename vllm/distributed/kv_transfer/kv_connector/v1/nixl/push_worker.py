@@ -148,7 +148,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             self._push_writer_thread.start()
             logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
 
-    def shutdown(self) -> None:
+    def shutdown(self):
         self._push_writer_stop.set()
         # Unblock the writer if it's waiting in the no-active-state branch.
         self._push_writer_wake.set()
