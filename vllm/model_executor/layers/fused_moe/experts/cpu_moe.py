@@ -947,6 +947,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
 # INT8 W8A8 MoE
 # ===========================================================================
 
+
 def prepare_int8_moe_layer_for_cpu(
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -968,6 +969,7 @@ def prepare_int8_moe_layer_for_cpu(
     packed_w13 = torch.ops._C.convert_weight_packed(w13)
     packed_w2 = torch.ops._C.convert_weight_packed(w2)
     return packed_w13, packed_w2
+
 
 class CPUExpertsInt8(mk.FusedMoEExpertsModular):
     """CPU INT8 W8A8 per-channel weight / dynamic per-token activation
@@ -1302,7 +1304,8 @@ class ArmCPUExpertsInt8(mk.FusedMoEExpertsModular):
             skip_weighted=apply_router_weight_on_input,
         )
 
-class PowerCPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
+
+class PowerCPUExpertsInt8(mk.FusedMoEExpertsModular):
     """POWER VSX INT8 MoE with per-token activation and channelwise weight quant."""
 
     @property
@@ -1321,7 +1324,7 @@ class PowerCPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[bool, str | None]:
-        supported, reason = mk.FusedMoEExperts.is_supported_config(
+        supported, reason = mk.FusedMoEExpertsModular.is_supported_config(
             cls,
             moe_config,
             weight_key,
@@ -1330,12 +1333,8 @@ class PowerCPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
         )
         if not supported:
             return supported, reason
-        if moe_config.in_dtype not in (
-            torch.float32,
-            torch.float16,
-            torch.bfloat16,
-        ):
-            return False, "kernel requires float32, float16, or bfloat16 activations"
+        if moe_config.in_dtype not in (torch.float32, torch.bfloat16):
+            return False, "kernel requires float32 or bfloat16 activations"
         if moe_config.hidden_dim % 16 != 0:
             return False, "kernel requires hidden dim divisible by 16"
         if moe_config.intermediate_size_per_partition % 16 != 0:
@@ -1404,52 +1403,47 @@ class PowerCPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)
 
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # cpu_fused_moe_int8 manages its own scratch space.
+        return (0,), (0,), (M, K)
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        return TopKWeightAndReduceNoOP()
+
     def apply(
         self,
+        output: torch.Tensor,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
         activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-        num_expert_group: int | None = None,
-        e_score_correction_bias: torch.Tensor | None = None,
-        routed_scaling_factor: float | None = None,
-        topk_group: int | None = None,
-    ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe.cpu_fused_moe import (
-            select_experts,
-        )
-
-        topk_weights, topk_ids = select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            use_grouped_topk=num_expert_group is not None,
-            top_k=self.moe_config.experts_per_token,
-            renormalize=self.moe_config.routing_method
-            in (
-                RoutingMethodType.Renormalize,
-                RoutingMethodType.RenormalizeNaive,
-            ),
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            scoring_func="softmax",
-            routed_scaling_factor=(
-                routed_scaling_factor if routed_scaling_factor is not None else 1.0
-            ),
-            e_score_correction_bias=e_score_correction_bias,
-        )
-
-        if apply_router_weight_on_input:
-            assert topk_ids.size(1) == 1
-            hidden_states.mul_(topk_weights.to(hidden_states.dtype))
-
+    ) -> None:
+        # The modular prepare step applies router weights to the input when
+        # apply_router_weight_on_input is enabled.
         assert self.w1_scale is not None
         assert self.w2_scale is not None
-        return cpu_fused_moe_int8(
+        cpu_fused_moe_int8(
+            output,
             hidden_states,
             w1,
             w2,
@@ -1463,6 +1457,7 @@ class PowerCPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
             "vsx",
             skip_weighted=apply_router_weight_on_input,
         )
+
 
 class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
     """AMD Zen INT8 MoE with per-token activation and channelwise weight
@@ -1512,37 +1507,9 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
-    def is_supported_config(
-        cls: type[mk.FusedMoEExperts],
-        moe_config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[bool, str | None]:
-        supported, reason = mk.FusedMoEExperts.is_supported_config(
-            cls,
-            moe_config,
-            weight_key,
-            activation_key,
-            activation_format,
-        )
-        if not supported:
-            return supported, reason
-        if moe_config.in_dtype not in (
-            torch.float32,
-            torch.float16,
-            torch.bfloat16,
-        ):
-            return False, "kernel requires float32, float16, or bfloat16 activations"
-        if moe_config.hidden_dim % 32 != 0:
-            return False, "kernel requires hidden dim divisible by 32"
-        if moe_config.intermediate_size_per_partition % 32 != 0:
-            return False, "kernel requires intermediate dim divisible by 32"
-        return True, None
-
-    @staticmethod
     def _supports_current_device() -> bool:
         return has_zentorch_op(["zentorch_fused_moe"])
+
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
         return False
@@ -1550,6 +1517,7 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         return str(activation.value).lower() in _ZENTORCH_MOE_ACTIVATIONS
+
     @staticmethod
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
