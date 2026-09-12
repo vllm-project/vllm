@@ -866,6 +866,21 @@ def test_exact_token_verdict_contains_divergences_per_prompt(
         assert "reproduced exactly" in reason
 
 
+def test_exact_token_verdict_refuses_match_counts():
+    """Counts must not reach the verdict from any call site.
+
+    Both matrix call sites -- the Uno comparison and the adapter-disabled arm --
+    pass divergence lists, and this is the structural guard that keeps it that
+    way: the count shape the verdict used to take now raises rather than
+    silently answering the wrong question, so a call site that regressed would
+    fail loudly on the first card that ran it.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    with pytest.raises(TypeError):
+        budget.exact_token_verdict(3, 3, 4)
+
+
 def test_survivor_receipt_renders_before_the_engine_exists(tmp_path, monkeypatch):
     """The receipt must render from an empty phase, which is the failure path.
 
