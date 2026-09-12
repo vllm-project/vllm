@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 from vllm.utils.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
@@ -645,6 +646,16 @@ def sparse_attn_indexer(
                 max_model_len,
             )
         else:
+            # Size the logits by the batch's longest context, not max_model_len:
+            # the kernel only uses it as the output width, and every consumer
+            # (candidate-block kernels, top-k) reads [0, seq_len) per row. For a
+            # 1M-context model the full width is a [rows, 1M] fp32 buffer per
+            # layer, which thrashes the allocator and makes the candidate kernels
+            # sweep 1M columns per row. Under CUDA graph capture max_seq_len is
+            # already the worst case (max_model_len), so replays stay valid.
+            logits_len = min(
+                max_model_len, round_up(attn_metadata_narrowed.max_seq_len, 128)
+            )
             logits = fp8_fp4_paged_mqa_logits(
                 (padded_q_quant_cast, padded_q_scale),
                 kv_cache,
@@ -652,7 +663,7 @@ def sparse_attn_indexer(
                 seq_lens,
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
-                max_model_len=max_model_len,
+                max_model_len=logits_len,
                 clean_logits=False,
                 indices=decode_metadata.indices,
             )
