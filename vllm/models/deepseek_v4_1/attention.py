@@ -446,6 +446,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self._uses_fp8_ds_mla_layout(), cache_config.cache_dtype, cache_config
         )
 
+        swa_bounded_replay = envs.VLLM_DEEPSEEK_V41_SWA_BOUNDED_REPLAY
+        if swa_bounded_replay and not vllm_config.use_v2_model_runner:
+            logger.warning_once(
+                "SWA bounded replay needs model runner V2 (only it skips the "
+                "paged-KV writes of replayed tokens); the sliding-window cache "
+                "takes part in prefix caching instead."
+            )
+            swa_bounded_replay = False
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -454,6 +462,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             cache_config=cache_config,
             backend_cls=self.swa_backend_cls,
             block_size=32,
+            bounded_replay=swa_bounded_replay,
         )
 
         # The attention layer itself was already registered with the

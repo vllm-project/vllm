@@ -201,6 +201,14 @@ class Request:
         # in the (sparse) prefix cache; 0 means none. Set at admission for
         # hybrid/Mamba models when a shared prefix is detected (Marconi-style).
         self.shared_prefix_boundary = 0
+        # SWA bounded replay: positions in [replay_start, replay_end) are
+        # recomputed after a prefix hit ending at replay_end to rebuild the
+        # non-cacheable sliding-window groups. Their KV in prefix-cacheable
+        # groups is already cached and not rewritten, and sliding-window
+        # attention never reads positions below replay_start. Fixed at
+        # admission; the worker learns them from NewRequestData only.
+        self.replay_start = 0
+        self.replay_end = 0
 
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted

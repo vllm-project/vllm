@@ -162,6 +162,15 @@ class KVCacheSpec:
         return True
 
     @property
+    def prefix_replay_tokens(self) -> int:
+        """Trailing tokens of a prefix hit the scheduler recomputes so this
+        group holds valid state for them. Non-zero only for groups that opt
+        out of prefix caching and can be rebuilt by replaying a bounded window
+        (SWA bounded replay); the recomputed tokens keep their cached KV in
+        every prefix-cacheable group."""
+        return 0
+
+    @property
     def num_heads(self) -> int:
         raise NotImplementedError
 
@@ -795,12 +804,20 @@ class CircularBufferSpec(AttentionSpec):
 
 @dataclass(frozen=True, kw_only=True)
 class SlidingWindowMLASpec(SlidingWindowSpec):
-    """Sliding window attention with MLA cache format."""
+    """Sliding window attention with MLA cache format.
+
+    With ``bounded_replay`` the cache stays out of prefix caching and KV
+    connectors; after a hit the scheduler recomputes the hit's last
+    ``sliding_window`` tokens to rebuild it (SWA bounded replay). Those tokens
+    keep their cached KV in the other groups and their window attention
+    ignores positions before the replay start.
+    """
 
     cache_dtype_str: str | None = None
     # DeepseekV4-only: see MLAAttentionSpec.model_version.
     alignment: int | None = None  # Default to None for no padding.
     model_version: str | None = None
+    bounded_replay: bool = False
 
     # MLA stores a single latent vector per state; there is no separate V.
     head_size_v: int = 0
@@ -811,6 +828,14 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         )
         super().__post_init__()
         _apply_alignment_padding(self)
+
+    @property
+    def prefix_cacheable(self) -> bool:
+        return not self.bounded_replay
+
+    @property
+    def prefix_replay_tokens(self) -> int:
+        return self.sliding_window if self.bounded_replay else 0
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
@@ -823,16 +848,18 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
         extra_retained_set = set(spec.extra_retained_tokens for spec in specs)
+        bounded_replay_set = set(spec.bounded_replay for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(tokens_per_state_set) == 1
             and len(model_version_set) == 1
             and len(sliding_window_set) == 1
             and len(extra_retained_set) == 1
+            and len(bounded_replay_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, model version, sliding "
-            "window size, and retained token count."
+            "window size, retained token count, and replay policy."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -847,6 +874,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
+            bounded_replay=bounded_replay_set.pop(),
         )
 
     def is_uniform_with_collection(
@@ -855,6 +883,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         return all(
             isinstance(spec, SlidingWindowMLASpec)
             and spec.sliding_window == self.sliding_window
+            and spec.bounded_replay == self.bounded_replay
             for spec in kv_cache_specs.values()
         )
 
@@ -1083,6 +1112,10 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     @property
     def prefix_cacheable(self) -> bool:
         return all(spec.prefix_cacheable for spec in self.kv_cache_specs.values())
+
+    @property
+    def prefix_replay_tokens(self) -> int:
+        return max(spec.prefix_replay_tokens for spec in self.kv_cache_specs.values())
 
     @property
     def first_spec(self) -> KVCacheSpec:

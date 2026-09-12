@@ -453,12 +453,17 @@ class KVCacheManager:
         Returns:
             A list of new allocated blocks.
         """
-        # When loading KV data asynchronously, we may have zero new tokens to
-        # compute while still allocating slots for externally computed tokens.
-        if num_new_tokens == 0 and num_external_computed_tokens == 0:
+        # A step may need no slots of its own while still adopting computed
+        # tokens: an async KV load, or a chunk that ends inside the replayed
+        # range of a hit (SWA bounded replay).
+        if (
+            num_new_tokens == 0
+            and num_external_computed_tokens == 0
+            and num_new_computed_tokens == 0
+        ):
             raise ValueError(
                 "num_new_tokens must be greater than 0 when there are no "
-                "external computed tokens"
+                "computed tokens to adopt"
             )
 
         if new_computed_blocks is not None:

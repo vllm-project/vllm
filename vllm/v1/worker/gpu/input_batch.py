@@ -109,6 +109,8 @@ class InputBatch:
     # a query length this batch's own split does not reach, so attention metadata
     # stays valid for every replay the graph serves.
     max_query_len: int | None = None
+    # SWA bounded replay: [num_reqs_padded] per-batch replay_start, or None.
+    replay_start: torch.Tensor | None = None
 
     # Arms the KV-sharing fast prefill path for this step. Absent for dummy
     # (cudagraph capture) batches, which run the KV-sharing layers in full.

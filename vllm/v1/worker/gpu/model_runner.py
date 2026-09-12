@@ -584,9 +584,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         block_sizes = []
         max_num_blocks_per_group = []
         slot_mapping_enabled = []
+        prefix_cacheable = []
+        has_prefix_replay = False
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
+            prefix_cacheable.append(spec.prefix_cacheable)
+            has_prefix_replay |= spec.prefix_replay_tokens > 0
             layer_spec = (
                 spec.first_spec if isinstance(spec, UniformTypeKVCacheSpecs) else spec
             )
@@ -650,6 +654,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             kernel_block_sizes=self.kernel_block_sizes,
             slot_mapping_enabled=slot_mapping_enabled,
+            prefix_cacheable=prefix_cacheable,
+            has_prefix_replay=has_prefix_replay,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
@@ -1120,6 +1126,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.block_tables.append_block_ids(
                 req_index, new_req_data.block_ids, overwrite=True
             )
+            self.block_tables.set_prefix_replay(
+                req_index, new_req_data.replay_start, new_req_data.replay_end
+            )
             self.lora_state.add_request(req_id, req_index, new_req_data.lora_request)
 
             if self.is_last_pp_rank and new_req_data.sampling_params is not None:
@@ -1432,6 +1441,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def prepare_attn(
         self, input_batch: InputBatch
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        input_batch.replay_start = self.block_tables.gather_replay_start(
+            input_batch.idx_mapping, input_batch.num_reqs_after_padding
+        )
         if self.pcp_manager is not None:
             return self.pcp_manager.prepare_attn(input_batch)
 
@@ -1454,6 +1466,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self, input_batch: InputBatch, valid_state_slots: bool = False
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
+        input_batch.replay_start = self.block_tables.get_dummy_replay_start(
+            input_batch.num_reqs
+        )
         if valid_state_slots:
             state_slots = torch.arange(
                 1,

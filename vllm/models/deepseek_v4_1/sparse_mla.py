@@ -202,6 +202,11 @@ class DeepseekV4SparseMLAMetadataBuilder(
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
             )
+            # Keep the runner's write mask (SWA bounded replay pads the slots of
+            # recomputed tokens whose KV is already cached). Hits end on a
+            # main-cache block, a multiple of the compress ratio, so no
+            # compressed state straddles the mask boundary.
+            slot_mapping.masked_fill_(cm.slot_mapping[: cm.num_actual_tokens] < 0, -1)
 
         return DeepseekV4FlashMLAMetadata(
             num_reqs=cm.num_reqs,

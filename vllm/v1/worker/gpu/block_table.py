@@ -27,6 +27,8 @@ class BlockTables:
         cp_rank: int = 0,
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
+        prefix_cacheable: list[bool] | None = None,
+        has_prefix_replay: bool = False,
     ):
         self.block_sizes = block_sizes
         self.kernel_block_sizes = kernel_block_sizes
@@ -44,6 +46,22 @@ class BlockTables:
             slot_mapping_enabled = [True] * self.num_kv_cache_groups
         assert len(slot_mapping_enabled) == self.num_kv_cache_groups
         self._slot_mapping_enabled = slot_mapping_enabled
+        # SWA bounded replay (see Request.replay_start): positions below a
+        # request's replay_end already hold KV in the prefix-cacheable groups,
+        # so their slots are padded there; windowed attention in the other
+        # groups never reads below replay_start.
+        if prefix_cacheable is None:
+            prefix_cacheable = [True] * self.num_kv_cache_groups
+        assert len(prefix_cacheable) == self.num_kv_cache_groups
+        self._prefix_cacheable = prefix_cacheable
+        self.has_prefix_replay = has_prefix_replay
+        self.replay_start = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
+        self.replay_end = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
+        # replay_start in batch order for the current forward pass; persistent
+        # so CUDA graphs can read it.
+        self.input_replay_start = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=device
+        )
 
         self.blocks_per_kv_block = [
             bs // kbs for bs, kbs in zip(block_sizes, kernel_block_sizes)
@@ -108,6 +126,9 @@ class BlockTables:
         self.slot_mapping_enabled = torch.tensor(
             self._slot_mapping_enabled, dtype=torch.bool, device=self.device
         )
+        self.prefix_cacheable = torch.tensor(
+            self._prefix_cacheable, dtype=torch.bool, device=self.device
+        )
         self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
     def append_block_ids(
@@ -132,6 +153,12 @@ class BlockTables:
             self.block_tables[i].stage_write(req_index, start, block_ids)
             self.num_blocks.np[i, req_index] = end
 
+    def set_prefix_replay(
+        self, req_index: int, replay_start: int, replay_end: int
+    ) -> None:
+        self.replay_start.np[req_index] = replay_start
+        self.replay_end.np[req_index] = replay_end
+
     def apply_staged_writes(self) -> None:
         if self.num_kv_cache_groups == 0:
             return
@@ -145,6 +172,8 @@ class BlockTables:
                 self.block_tables, self.block_table_ptrs, self.block_table_strides
             )
         self.num_blocks.copy_to_uva()
+        self.replay_start.copy_to_uva()
+        self.replay_end.copy_to_uva()
 
     def gather_block_tables(
         self,
@@ -174,6 +203,30 @@ class BlockTables:
             BLOCK_SIZE=1024,  # type: ignore
         )
         return tuple(bt[:num_reqs_padded] for bt in out)
+
+    def gather_replay_start(
+        self, idx_mapping: torch.Tensor, num_reqs_padded: int
+    ) -> torch.Tensor | None:
+        if not self.has_prefix_replay:
+            return None
+        num_reqs = idx_mapping.shape[0]
+        out = self.input_replay_start[:num_reqs_padded]
+        torch.index_select(self.replay_start.gpu, 0, idx_mapping, out=out[:num_reqs])
+        out[num_reqs:].zero_()
+        return out
+
+    def current_replay_start(self, num_reqs_padded: int) -> torch.Tensor | None:
+        """The replay_start gathered for the current batch, for a second pass
+        over the same requests (e.g. the drafter)."""
+        if not self.has_prefix_replay:
+            return None
+        return self.input_replay_start[:num_reqs_padded]
+
+    def get_dummy_replay_start(self, num_reqs: int) -> torch.Tensor | None:
+        # Same persistent buffer as gather_replay_start (CUDA graph capture).
+        if not self.has_prefix_replay:
+            return None
+        return self.input_replay_start[:num_reqs].zero_()
 
     def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
         # NOTE(woosuk): The output may be used for CUDA graph capture.
@@ -211,6 +264,8 @@ class BlockTables:
             self.block_sizes_tensor,
             self.kernel_block_sizes_tensor,
             self.slot_mapping_enabled,
+            self.replay_end.gpu,
+            self.prefix_cacheable,
             slot_mappings,
             slot_mappings.stride(0),
             self.cp_rank,
@@ -284,6 +339,8 @@ def _compute_slot_mappings_kernel(
     block_sizes,  # [num_kv_cache_groups]
     kernel_block_sizes,  # [num_kv_cache_groups]
     slot_mapping_enabled,  # [num_kv_cache_groups]
+    replay_end,  # [max_num_reqs]
+    prefix_cacheable,  # [num_kv_cache_groups]
     slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
     slot_mappings_stride,
     cp_rank,
@@ -315,6 +372,13 @@ def _compute_slot_mappings_kernel(
     mapping_enabled = tl.load(slot_mapping_enabled + group_id)
 
     req_state_idx = tl.load(idx_mapping + batch_idx)
+    # Replayed positions (below replay_end) already hold KV in the
+    # prefix-cacheable groups and are not rewritten.
+    write_start = tl.where(
+        tl.load(prefix_cacheable + group_id),
+        tl.load(replay_end + req_state_idx),
+        0,
+    )
     start_idx = tl.load(query_start_loc + batch_idx)
     end_idx = tl.load(query_start_loc + batch_idx + 1)
     for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
@@ -349,5 +413,7 @@ def _compute_slot_mappings_kernel(
         if CP_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 
-        slot_ids = tl.where(mapping_enabled, slot_ids, PAD_ID)
+        slot_ids = tl.where(
+            mapping_enabled & (positions >= write_start), slot_ids, PAD_ID
+        )
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)

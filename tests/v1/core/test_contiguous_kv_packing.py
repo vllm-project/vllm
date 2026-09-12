@@ -24,6 +24,7 @@ from vllm.v1.core.kv_cache_utils import (
     generate_scheduler_kv_cache_config,
     get_kv_cache_config_from_groups,
     get_kv_cache_groups,
+    is_kv_cache_spec_uniform,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import (
@@ -650,3 +651,74 @@ class TestCompressorRingGroup:
             scheduler_block_size=128,
         )
         assert len(manager.coordinator.single_type_managers) == len(groups)
+
+
+class TestSWABoundedReplayGrouping:
+    def test_non_cacheable_swa_leaves_hits_to_the_paged_group(self):
+        """Under SWA bounded replay only the paged MLA group hashes (hash
+        block = its block) and the coordinator probes one spec group."""
+        config = _shared_layout_config()
+        config.cache_config.enable_prefix_caching = True
+        specs: dict[str, KVCacheSpec] = {
+            "layers.2.attn": MLAAttentionSpec(
+                block_size=128,
+                num_kv_heads=1,
+                head_size=584,
+                dtype=torch.uint8,
+                tokens_per_state=2,
+                alignment=576,
+            ),
+        }
+        swa = SlidingWindowMLASpec(
+            block_size=32,
+            num_kv_heads=1,
+            head_size=584,
+            dtype=torch.uint8,
+            sliding_window=128,
+            alignment=576,
+            bounded_replay=True,
+        )
+        assert not swa.prefix_cacheable
+        assert not SlidingWindowMLASpec.merge([swa, replace(swa)]).prefix_cacheable
+        # The uniformity probe merges heterogeneous specs starting from
+        # whichever layer comes first; a foreign spec must fail the type
+        # assertion, not a field lookup.
+        assert not is_kv_cache_spec_uniform({"swa": swa, "mla": specs["layers.2.attn"]})
+        for layer in range(4):
+            specs[f"layers.{layer}.attn.swa_cache"] = swa
+
+        groups = get_kv_cache_groups(config, specs)
+        # The worker reads the replay window off the (packed) group specs to
+        # arm the window clamp; the wrapper must forward it like cacheability.
+        assert sorted(
+            (g.kv_cache_spec.prefix_cacheable, g.kv_cache_spec.prefix_replay_tokens)
+            for g in groups
+        ) == [(False, 128)] * 4 + [(True, 0)]
+        kv_cache_config = get_kv_cache_config_from_groups(
+            config, groups, available_memory=64 * _get_kv_cache_bytes_per_block(groups)
+        )
+        assert resolve_kv_cache_block_sizes(kv_cache_config, config) == (128, 128)
+        manager = KVCacheManager(
+            generate_scheduler_kv_cache_config([kv_cache_config]),
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=128,
+            scheduler_block_size=128,
+        )
+        assert len(manager.coordinator.attention_groups) == 1
+        assert isinstance(
+            manager.coordinator.attention_groups[0].spec, MLAAttentionSpec
+        )
+
+        # Allocating and caching a request goes through every group's manager;
+        # the 32-token SWA group must skip hashing rather than assert on the
+        # 128-token hash block.
+        from tests.v1.core.utils import create_requests
+
+        request = create_requests(num_requests=1, num_tokens=256, block_size=128)[0]
+        assert manager.allocate_slots(request, 256) is not None
+        request.num_computed_tokens = 256
+        manager.cache_blocks(request, 256)
+        for single in manager.coordinator.single_type_managers:
+            cached = single.num_cached_block.get(request.request_id, 0)
+            assert cached == (2 if single.kv_cache_spec.prefix_cacheable else 0)

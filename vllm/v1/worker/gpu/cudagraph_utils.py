@@ -691,6 +691,7 @@ def prepare_inputs_to_capture(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
+    input_batch.replay_start = block_tables.get_dummy_replay_start(num_reqs)
     slot_mapping_provider: BlockTables | PCPManager = block_tables
     if pcp_manager is not None:
         slot_mapping_provider = pcp_manager

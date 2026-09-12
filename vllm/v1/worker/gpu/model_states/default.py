@@ -227,5 +227,6 @@ class DefaultModelState(ModelState):
             rswa_prefix_lens=input_batch.prompt_lens,
             ubatch_idx=ubatch_idx,
             fast_prefill=input_batch.fast_prefill,
+            replay_start=input_batch.replay_start,
         )
         return attn_metadata
