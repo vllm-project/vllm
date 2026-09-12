@@ -27,6 +27,7 @@ class BlockTables:
         cp_rank: int = 0,
         cp_interleave: int = 1,
         slot_mapping_enabled: list[bool] | None = None,
+        prefix_cacheable: list[bool] | None = None,
     ):
         self.block_sizes = block_sizes
         self.kernel_block_sizes = kernel_block_sizes
@@ -44,6 +45,13 @@ class BlockTables:
             slot_mapping_enabled = [True] * self.num_kv_cache_groups
         assert len(slot_mapping_enabled) == self.num_kv_cache_groups
         self._slot_mapping_enabled = slot_mapping_enabled
+        # SWA bounded replay: slots below a request's kv_write_start are padded
+        # in prefix-cacheable groups only.
+        if prefix_cacheable is None:
+            prefix_cacheable = [True] * self.num_kv_cache_groups
+        assert len(prefix_cacheable) == self.num_kv_cache_groups
+        self._prefix_cacheable = prefix_cacheable
+        self.kv_write_start = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
 
         self.blocks_per_kv_block = [
             bs // kbs for bs, kbs in zip(block_sizes, kernel_block_sizes)
@@ -108,6 +116,9 @@ class BlockTables:
         self.slot_mapping_enabled = torch.tensor(
             self._slot_mapping_enabled, dtype=torch.bool, device=self.device
         )
+        self.prefix_cacheable = torch.tensor(
+            self._prefix_cacheable, dtype=torch.bool, device=self.device
+        )
         self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
     def append_block_ids(
@@ -132,6 +143,10 @@ class BlockTables:
             self.block_tables[i].stage_write(req_index, start, block_ids)
             self.num_blocks.np[i, req_index] = end
 
+    def set_kv_write_start(self, req_index: int, kv_write_start: int) -> None:
+        """Positions below this are not written to prefix-cacheable groups."""
+        self.kv_write_start.np[req_index] = kv_write_start
+
     def apply_staged_writes(self) -> None:
         if self.num_kv_cache_groups == 0:
             return
@@ -145,6 +160,7 @@ class BlockTables:
                 self.block_tables, self.block_table_ptrs, self.block_table_strides
             )
         self.num_blocks.copy_to_uva()
+        self.kv_write_start.copy_to_uva()
 
     def gather_block_tables(
         self,
@@ -211,6 +227,8 @@ class BlockTables:
             self.block_sizes_tensor,
             self.kernel_block_sizes_tensor,
             self.slot_mapping_enabled,
+            self.kv_write_start.gpu,
+            self.prefix_cacheable,
             slot_mappings,
             slot_mappings.stride(0),
             self.cp_rank,
@@ -284,6 +302,8 @@ def _compute_slot_mappings_kernel(
     block_sizes,  # [num_kv_cache_groups]
     kernel_block_sizes,  # [num_kv_cache_groups]
     slot_mapping_enabled,  # [num_kv_cache_groups]
+    kv_write_start,  # [max_num_reqs]
+    prefix_cacheable,  # [num_kv_cache_groups]
     slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
     slot_mappings_stride,
     cp_rank,
@@ -315,6 +335,11 @@ def _compute_slot_mappings_kernel(
     mapping_enabled = tl.load(slot_mapping_enabled + group_id)
 
     req_state_idx = tl.load(idx_mapping + batch_idx)
+    write_start = tl.where(
+        tl.load(prefix_cacheable + group_id),
+        tl.load(kv_write_start + req_state_idx),
+        0,
+    )
     start_idx = tl.load(query_start_loc + batch_idx)
     end_idx = tl.load(query_start_loc + batch_idx + 1)
     for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
@@ -349,5 +374,7 @@ def _compute_slot_mappings_kernel(
         if CP_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 
-        slot_ids = tl.where(mapping_enabled, slot_ids, PAD_ID)
+        slot_ids = tl.where(
+            mapping_enabled & (positions >= write_start), slot_ids, PAD_ID
+        )
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)

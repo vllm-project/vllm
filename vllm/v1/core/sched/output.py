@@ -48,6 +48,8 @@ class NewRequestData:
 
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
+    # Paged KV below this position already exists; see Request.kv_write_start.
+    kv_write_start: int = 0
 
     @classmethod
     def from_request(
@@ -73,6 +75,7 @@ class NewRequestData:
             prompt_embeds=request.prompt_embeds,
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
+            kv_write_start=request.kv_write_start,
         )
 
     @property
