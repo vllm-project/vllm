@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from typing import Any
 
-import model_hosting_container_standards.sagemaker as sagemaker_standards
 import pydantic
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
@@ -27,11 +27,55 @@ GetHandlerFn = Callable[[Request], BaseServing | None]
 EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
 
 
+def _snapshot_handler_levels() -> list[tuple[logging.Handler, int]]:
+    """Snapshot handler levels for loggers that may be affected by third-party
+    logging configuration side effects (e.g. model_hosting_container_standards
+    calling configure_root_logger() at import time)."""
+    loggers = [logging.getLogger(), logging.getLogger("vllm")]
+    seen: set[int] = set()
+    snapshot: list[tuple[logging.Handler, int]] = []
+    for logger in loggers:
+        for handler in logger.handlers:
+            if id(handler) not in seen:
+                seen.add(id(handler))
+                snapshot.append((handler, handler.level))
+    return snapshot
+
+
+def _restore_handler_levels(
+    snapshot: list[tuple[logging.Handler, int]],
+) -> None:
+    """Restore handler levels from a snapshot."""
+    for handler, level in snapshot:
+        handler.setLevel(level)
+
+
 def attach_router(
     app: FastAPI,
     supported_tasks: tuple["SupportedTask", ...],
     model_config: ModelConfig | None = None,
 ):
+    """Attach the SageMaker hosting endpoints to the API server.
+
+    Handler levels are snapshotted and restored because importing
+    model_hosting_container_standards may reconfigure root logging.
+    """
+    snapshot = _snapshot_handler_levels()
+    try:
+        _attach_router(app, supported_tasks, model_config)
+    finally:
+        _restore_handler_levels(snapshot)
+
+
+def _attach_router(
+    app: FastAPI,
+    supported_tasks: tuple["SupportedTask", ...],
+    model_config: ModelConfig | None = None,
+):
+    """Register the SageMaker hosting routes (/ping, /invocations) on the
+    app."""
+    import model_hosting_container_standards.sagemaker as sagemaker_standards
+
     router = APIRouter()
 
     # NOTE: Construct the TypeAdapters only once
@@ -99,4 +143,17 @@ def attach_router(
 
 
 def sagemaker_standards_bootstrap(app: FastAPI) -> FastAPI:
-    return sagemaker_standards.bootstrap(app)
+    """Bootstrap the app with the SageMaker hosting standards.
+
+    Handler levels are restored right after the import because importing
+    model_hosting_container_standards may reconfigure root logging, and
+    bootstrap must run with the original levels.
+    """
+    snapshot = _snapshot_handler_levels()
+    try:
+        import model_hosting_container_standards.sagemaker as sagemaker_standards
+
+        app = sagemaker_standards.bootstrap(app)
+    finally:
+        _restore_handler_levels(snapshot)
+    return app
