@@ -878,6 +878,12 @@ def safetensors_weights_iterator(
     this rank are skipped **before** reading from disk, which drastically
     reduces storage I/O for MoE models under EP.
     """
+    # See VLLM_ROCM_CLONE_MMAP_WEIGHTS in vllm/envs.py. On ROCm the
+    # host-to-device copy out of safetensors' writable mapping breaks
+    # copy-on-write on every resident page, and materialising each tensor into
+    # anonymous memory first avoids it.
+    clone_mmap = envs.VLLM_ROCM_CLONE_MMAP_WEIGHTS and current_platform.is_rocm()
+
     loading_desc = "Loading safetensors checkpoint shards"
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
@@ -997,6 +1003,8 @@ def safetensors_weights_iterator(
                     if should_skip_weight(name, local_expert_ids):
                         continue
                     param = f.get_tensor(name)
+                    if clone_mmap:
+                        param = param.clone()
                     yield name, param
 
 
