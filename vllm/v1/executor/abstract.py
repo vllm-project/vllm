@@ -33,6 +33,7 @@ logger = init_logger(__name__)
 _R = TypeVar("_R")
 
 FailureCallback = Callable[[], None]
+ForwardPassTimingPoll = Callable[[], tuple[tuple[int, float], ...] | None]
 
 
 class Executor(ABC):
@@ -262,6 +263,23 @@ class Executor(ABC):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
+
+    def start_forward_pass_timing_poll(self) -> ForwardPassTimingPoll | None:
+        """Start one nonblocking timing query; return a nonblocking result poller.
+
+        Executors with lazy futures must override this to advance their response
+        transport without waiting. None means submission should be retried later.
+        """
+        future: Future[list[tuple[tuple[int, float], ...]]] = self.collective_rpc(
+            "poll_forward_pass_timing", non_block=True
+        )
+
+        def poll() -> tuple[tuple[int, float], ...] | None:
+            if not future.done():
+                return None
+            return tuple(sample for samples in future.result() for sample in samples)
+
+        return poll
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.collective_rpc("profile", args=(is_start, profile_prefix))

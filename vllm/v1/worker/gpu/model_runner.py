@@ -22,7 +22,7 @@ import gc
 import time
 from contextlib import AbstractContextManager
 from copy import deepcopy
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
@@ -182,6 +182,9 @@ from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 
 logger = init_logger(__name__)
 
+if TYPE_CHECKING:
+    from vllm.v1.metrics.forward_pass_metrics import ForwardPassMetricsTimer
+
 
 class GPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -199,6 +202,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.observability_config = vllm_config.observability_config
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
+        # Initialized by GPUWorker only on the model-output rank.
+        self.forward_pass_metrics_timer: ForwardPassMetricsTimer | None = None
 
         self.device = device
         self.dtype = self.model_config.dtype
@@ -2043,6 +2048,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             copy_stream=self.output_copy_stream,
             check_ep_fault=self.check_ep_fault,
             routed_experts=routed_experts,
+            forward_pass_metrics_timer=self.forward_pass_metrics_timer,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
