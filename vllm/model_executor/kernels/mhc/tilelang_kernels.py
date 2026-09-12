@@ -229,7 +229,11 @@ def mhc_pre_big_fuse_with_norm_tilelang(
     use_pre_mix_in: bool = False,
     save_pre_mix: bool = False,
     rms_numel: int = 0,
+    split_mode: str = "fused",
 ):
+    # Split modes require shifted mHC: input collapse uses a carried pre-mix.
+    assert split_mode in ("fused", "stats", "input")
+    assert split_mode == "fused" or save_pre_mix
     num_tokens = T.dynamic("num_tokens")
     hc_mult3 = hc_mult * (2 + hc_mult)
     if gemm_last_dim < 0:
@@ -252,26 +256,26 @@ def mhc_pre_big_fuse_with_norm_tilelang(
     pre_mix_out: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
 
     with T.Kernel(num_tokens, threads=96) as i:
-        rms = T.alloc_fragment(1, T.float32)
-        mixes = T.alloc_fragment(hc_mult3, T.float32)
-        T.clear(mixes)
-        rms[0] = 0
-
         if ENABLE_PDL:
             T.pdl_sync()
-
-        for i_split in T.serial(n_splits):
-            rms[0] += gemm_out_sqrsum[i_split, i]
-        rms[0] = T.rsqrt(rms[0] / rms_numel + rms_eps)
-        for j in T.Parallel(hc_mult3):
-            mixes[j] = 0
-            for i_split in T.serial(n_splits):
-                mixes[j] += gemm_out_mul[i_split, i, j]
-            mixes[j] *= rms[0]
         mixes_shared = T.alloc_shared(hc_mult3, T.float32)
-        T.copy(mixes, mixes_shared)
+        if split_mode != "input":
+            rms = T.alloc_fragment(1, T.float32)
+            mixes = T.alloc_fragment(hc_mult3, T.float32)
+            T.clear(mixes)
+            rms[0] = 0
 
-        if T.get_thread_binding() < 32:
+            for i_split in T.serial(n_splits):
+                rms[0] += gemm_out_sqrsum[i_split, i]
+            rms[0] = T.rsqrt(rms[0] / rms_numel + rms_eps)
+            for j in T.Parallel(hc_mult3):
+                mixes[j] = 0
+                for i_split in T.serial(n_splits):
+                    mixes[j] += gemm_out_mul[i_split, i, j]
+                mixes[j] *= rms[0]
+            T.copy(mixes, mixes_shared)
+
+        if split_mode != "input" and T.get_thread_binding() < 32:
             cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
             for j in T.Parallel(hc_mult):
                 if save_pre_mix:
@@ -317,7 +321,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
 
             for j, k in T.Parallel(hc_mult, hc_mult):
                 comb_mix[i, j * hc_mult + k] = cm[j, k]
-        else:
+        elif split_mode != "stats" and T.get_thread_binding() >= 32:
             pre_mix_shared = T.alloc_shared(hc_mult, T.float32)
             for j in T.Parallel(hc_mult):
                 if use_pre_mix_in:

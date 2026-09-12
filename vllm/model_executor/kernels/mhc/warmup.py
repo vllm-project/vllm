@@ -35,6 +35,7 @@ class MHCPreNormKernel(VllmJitKernel["MHCPreNormKernel.CompileKey"]):
         use_pre_mix_in: bool
         rms_numel: int
         save_pre_mix: bool = True
+        split_mode: str = "fused"
 
     kernel: Any = staticmethod(mhc_pre_big_fuse_with_norm_tilelang)
 
