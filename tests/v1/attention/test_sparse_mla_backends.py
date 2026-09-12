@@ -3363,6 +3363,7 @@ def test_flashmla_fp8_paths_accept_decode_subset(monkeypatch, use_mixed_batch: b
         index_group=None,
         index_group_index=0,
         dcp_world_size=1,
+        pcp_dcp_kv_gather=False,
         need_to_return_lse_for_decode=False,
         _fp8_flash_mla_kernel=run_kernel,
         _convert_logical_to_physical_topk=(

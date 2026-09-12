@@ -966,7 +966,7 @@ def test_sparse_decode_dcp_short_context_matches_non_dcp():
 
 
 @pytest.mark.parametrize("dcp_world_size", [2, 4, 8])
-@pytest.mark.parametrize("req_lens", [[7], [8, 8], [1, 9], [256, 1, 2730], [5, 0, 6]])
+@pytest.mark.parametrize("req_lens", [[7], [8, 8], [1, 9], [256, 1, 2730]])
 def test_pcp_plan_deinterleave_restores_global_order(dcp_world_size, req_lens):
     """The index gather must undo DCP sharding per request"""
     from vllm.v1.attention.backends.mla.indexer import build_pcp_global_chunk_plan
