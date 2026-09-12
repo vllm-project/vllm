@@ -25,6 +25,7 @@ from vllm.model_executor.layers.mhc import (
     HAS_AITER_MHC_PRE_NORM,
     HAS_TILELANG_MHC,
     MHCFusedPostPreOp,
+    MHCPreDelayedOp,
     MHCPreOp,
 )
 from vllm.models.deepseek_v4.nvidia.model import (
@@ -704,6 +705,100 @@ def test_mhc_fused_rocm_fallback_applies_norm(monkeypatch):
     torch.testing.assert_close(out[1], pre_ref[0])
     torch.testing.assert_close(out[2], pre_ref[1])
     torch.testing.assert_close(out[3], expected_layer_input)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_rocm() and HAS_AITER_MHC),
+    reason="AITER mHC required",
+)
+@pytest.mark.parametrize("num_tokens", [1, 2, 7, 128, 1024])
+@pytest.mark.parametrize("carried", [False, True])
+def test_mhc_pre_delayed_rocm_aiter(num_tokens, carried):
+    """AITER must reproduce the delayed reference on both seam variants.
+
+    ``num_tokens`` spans the split-k choices AITER makes for the projection,
+    since the pre-mix is recovered from that unreduced output.
+    """
+    set_random_seed(0)
+    hc_mult, hidden_size = 4, 5120
+    residual, fn, hc_scale, hc_base, _ = _rocm_mhc_inputs(
+        num_tokens=num_tokens, hidden_size=hidden_size, hc_mult=hc_mult
+    )
+    pre_mix = (
+        torch.rand(num_tokens, hc_mult, dtype=torch.float32, device=DEVICE) + 0.5
+        if carried
+        else None
+    )
+    rms_eps = hc_pre_eps = hc_sinkhorn_eps = 1e-6
+    args = (
+        residual,
+        fn,
+        hc_scale,
+        hc_base,
+        rms_eps,
+        hc_pre_eps,
+        hc_sinkhorn_eps,
+        1.0,
+        20,
+    )
+
+    expected = mhc_pre_delayed_torch(*args, pre_mix=pre_mix)
+    actual = object.__new__(MHCPreDelayedOp).forward_hip(*args, pre_mix=pre_mix)
+
+    for i in (0, 1, 3):
+        torch.testing.assert_close(actual[i], expected[i], atol=1e-4, rtol=1e-3)
+    # The collapse is the same FP32 multiply-and-sum in both paths.
+    torch.testing.assert_close(actual[2], expected[2], atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_rocm() and HAS_AITER_MHC),
+    reason="AITER mHC required",
+)
+def test_mhc_pre_delayed_rocm_aiter_declines_unsupported(monkeypatch):
+    """The broadcast seam and a fused norm must not take the AITER path.
+
+    Neither is expressible with AITER's pre kernels: the broadcast projects a
+    narrower ``x``, and ``mhc_pre_gemm_sqrsum`` folds no RMSNorm. What is
+    asserted here is the routing decision, which is what this gate owns; the
+    numerics of whichever fallback it lands on are covered by
+    ``test_deepseek_v41_mhc_pre_delayed``.
+    """
+    set_random_seed(0)
+    hc_mult, hidden_size = 4, 5120
+    residual, fn, hc_scale, hc_base, norm_weight = _rocm_mhc_inputs(
+        num_tokens=4, hidden_size=hidden_size, hc_mult=hc_mult
+    )
+    args = (residual, fn, hc_scale, hc_base, 1e-6, 1e-6, 1e-6, 1.0, 20)
+    op = object.__new__(MHCPreDelayedOp)
+
+    aiter_op = torch.ops.vllm.mhc_pre_delayed_aiter
+    took_aiter = False
+
+    def spy(*spy_args, **spy_kwargs):
+        nonlocal took_aiter
+        took_aiter = True
+        return aiter_op(*spy_args, **spy_kwargs)
+
+    monkeypatch.setattr(torch.ops.vllm, "mhc_pre_delayed_aiter", spy)
+
+    x = residual[:, 0].contiguous()
+    broadcast_fn = fn.view(-1, hc_mult, hidden_size).sum(1)
+    broadcast_residual = x.unsqueeze(1).expand(-1, hc_mult, -1).contiguous()
+    expected = mhc_pre_delayed_torch(broadcast_residual, broadcast_fn, *args[2:], x=x)
+    actual = op.forward_hip(broadcast_residual, broadcast_fn, *args[2:], x=x)
+    assert not took_aiter, "the broadcast seam must not reach AITER"
+    for i in range(4):
+        torch.testing.assert_close(actual[i], expected[i], atol=1e-4, rtol=1e-3)
+
+    op.forward_hip(*args, norm_weight=norm_weight, norm_eps=1e-6)
+    assert not took_aiter, "a fused norm must not reach AITER"
+
+    # Positive control: the same inputs without a norm do take the AITER path,
+    # so the two declines above are the gate discriminating rather than the
+    # path being unavailable in this environment.
+    op.forward_hip(*args)
+    assert took_aiter
 
 
 @pytest.mark.skipif(
