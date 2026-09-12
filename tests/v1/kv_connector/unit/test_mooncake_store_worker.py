@@ -844,6 +844,7 @@ def _make_partial_tail_send_thread(
         hash_block_size=4,
         lcm_block_size=16,
         mamba_group_ids={1},
+        eagle_peek_margin_by_group={},
     )
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0),
@@ -867,6 +868,40 @@ def _make_partial_tail_send_thread(
         replicate_config=replicate_config,
         enable_group_semantics=enable_group_semantics,
         supports_group_ids=supports_group_ids,
+    )
+
+
+def _make_eagle_boundary_send_thread(store):
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [KVCacheGroupSpec(["full"], full), KVCacheGroupSpec(["mamba"], mamba)],
+        scheduler_block_size=16,
+        hash_block_size=4,
+        use_eagle=True,
+    )
+
+    def make_db(group_id: int, base_addr: int):
+        db = ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
+            block_size=16,
+            hash_block_size=4,
+        )
+        db.set_kv_caches_base_addr([base_addr])
+        db.set_block_len([256])
+        return db
+
+    return _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[make_db(0, 0x1000), make_db(1, 0x2000)],
     )
 
 
@@ -1177,6 +1212,95 @@ def test_block_aligned_snapshot_offload_uses_provided_block():
     # block_ids[1] and with no FA gap coverage.
     assert keys == [thread.token_databases[1].key_for(BlockHash(hs[7]))]
     assert addrs == [[0x2000 + 7 * 256]]
+
+
+@pytest.mark.parametrize(
+    ("completed_token_len", "writes_attention_proof"),
+    [(35, False), (36, True)],
+)
+def test_eagle_aligned_boundary_writes_only_completed_attention_proof(
+    completed_token_len: int, writes_attention_proof: bool
+):
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    thread = _make_eagle_boundary_send_thread(store)
+    thread._saved_offset["req-a"] = 32
+
+    hs = [bytes([i + 1]) * 4 for i in range(9)]
+    req = ReqMeta(
+        req_id="req-a",
+        token_len_chunk=0,
+        block_ids=([1, 2, 3], [5]),
+        block_hashes=hs,
+        can_save=True,
+        completed_token_len=completed_token_len,
+        boundary_state_offloads=[(1, 7, 32)],
+    )
+    assert thread._maybe_offload_boundary_states(req)
+
+    keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
+    db_full, db_mamba = thread.token_databases
+    mamba_put = (db_mamba.key_for(BlockHash(hs[7])), [0x2000 + 7 * 256])
+    if writes_attention_proof:
+        assert list(zip(keys, addrs, strict=True)) == [
+            (db_full.key_for(BlockHash(hs[8])), [0x1000 + 3 * 256]),
+            mamba_put,
+        ]
+    else:
+        assert list(zip(keys, addrs, strict=True)) == [mamba_put]
+
+
+def test_eagle_sub_block_boundary_writes_attention_at_next_hash_unit():
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    thread = _make_eagle_boundary_send_thread(store)
+    thread._saved_offset["req-a"] = 16
+
+    hs = [bytes([i + 1]) * 4 for i in range(8)]
+    req = ReqMeta(
+        req_id="req-a",
+        token_len_chunk=0,
+        block_ids=([1, 2], [5]),
+        block_hashes=hs,
+        can_save=True,
+        completed_token_len=32,
+        boundary_state_offloads=[(1, 7, 28)],
+    )
+    assert thread._maybe_offload_boundary_states(req)
+
+    keys, addrs, _sizes, _ = store.batch_put_from_multi_buffers.call_args.args
+    db_full, db_mamba = thread.token_databases
+    assert list(zip(keys, addrs, strict=True)) == [
+        (db_full.key_for(BlockHash(hs[7])), [0x1000 + 2 * 256]),
+        (db_mamba.key_for(BlockHash(hs[6])), [0x2000 + 7 * 256]),
+    ]
+
+
+def test_multiple_eagle_boundaries_deduplicate_attention_puts():
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    thread = _make_eagle_boundary_send_thread(store)
+
+    hs = [bytes([i + 1]) * 4 for i in range(10)]
+    req = ReqMeta(
+        req_id="req-a",
+        token_len_chunk=0,
+        block_ids=([1, 2, 3], [5]),
+        block_hashes=hs,
+        can_save=True,
+        completed_token_len=40,
+        boundary_state_offloads=[(1, 9, 32), (1, 7, 36)],
+    )
+    assert thread._maybe_offload_boundary_states(req)
+
+    keys = store.batch_is_exist.call_args.args[0]
+    assert len(keys) == len(set(keys))
+    db_full = thread.token_databases[0]
+    assert keys.count(db_full.key_for(BlockHash(hs[3]))) == 1
+    assert keys.count(db_full.key_for(BlockHash(hs[7]))) == 1
 
 
 def test_mixed_snapshot_and_sub_block_offloads():

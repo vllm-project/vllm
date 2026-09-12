@@ -721,24 +721,24 @@ class KVCacheStoreSendingThread(KVTransferThread):
             )
         return puts
 
-    def _sub_block_tail_puts(
+    def _boundary_tail_puts(
         self, req_meta: ReqMeta, entries: list[tuple[int, int, int]]
     ) -> list[tuple[str, list[int], list[int], KeyMetadata]]:
-        """Puts for the request's sub-block partial tail (its last prompt hash
-        boundary), so a later request can hit the sub-block prefix.
+        """Puts for a boundary and its safely completed attention tail.
 
         Covers every group's blocks from the normal save's lcm floor to the
         boundary: the normal save floors to ``lcm_block_size``, so a
         smaller-block group's full blocks in that gap are never persisted
         elsewhere, and the consumer's lookup needs every group at every probed
-        boundary. Full blocks are keyed by their block-end hash and the partial
-        boundary block by the boundary sub-hash; a mamba "align" group
-        contributes only its boundary block, from the core-provided CoW block.
+        boundary. Eagle attention whose peek margin is one hash unit includes
+        the block that lookup drops; mamba remains keyed at the reusable
+        boundary. A mamba "align" group contributes only its boundary block,
+        from the core-provided CoW block.
         """
         boundaries = {boundary for _, _, boundary in entries}
         if len(boundaries) != 1:
             raise ValueError(
-                "Sub-block partial-tail offloads for one request must share a boundary"
+                "Boundary-tail offloads in one batch must share a boundary"
             )
         boundary = boundaries.pop()
         hash_block_size = self.coord.hash_block_size
@@ -753,19 +753,28 @@ class KVCacheStoreSendingThread(KVTransferThread):
         for g_idx, db in enumerate(self.token_databases):
             if not self.group_participates[g_idx]:
                 continue
+            group_boundary = boundary
+            eagle_margin = self.coord.eagle_peek_margin_by_group.get(g_idx)
+            if (
+                eagle_margin == hash_block_size
+                and boundary + eagle_margin <= req_meta.completed_token_len
+            ):
+                group_boundary += eagle_margin
+            if group_boundary // hash_block_size - 1 >= len(req_meta.block_hashes):
+                continue
             group_blocks = req_meta.block_ids[g_idx]
             # Distribute across ranks by the same rule as normal chunks.
             put_step = self.group_put_steps[g_idx]
             put_step_rank = (self.tp_rank + g_idx) % put_step
             # Always include the boundary block: its sub-hash key is written
             # only here, even if normal saves already advanced past it.
-            last_block = cdiv(boundary, db.block_size) - 1
+            last_block = cdiv(group_boundary, db.block_size) - 1
             for block_idx in range(
                 min(saved // db.block_size, last_block), last_block + 1
             ):
                 if block_idx % put_step != put_step_rank:
                     continue
-                valid_end = min((block_idx + 1) * db.block_size, boundary)
+                valid_end = min((block_idx + 1) * db.block_size, group_boundary)
                 key_hash = req_meta.block_hashes[valid_end // hash_block_size - 1]
                 if g_idx in mamba_offloads:
                     if valid_end != boundary:
@@ -802,11 +811,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
         mamba groups from the positional normal save, aligned boundaries
         included (see :meth:`_boundary_snapshot_puts`).
 
-        The two entry kinds are keyed and sourced differently, so they are
-        prepared separately and put in one batch:
+        The two entry kinds use different Mamba sources:
 
         - block-aligned for its group: a committed boundary-state snapshot,
-          the handed-off block itself;
+          the handed-off block itself; its attention proof is included only
+          when the completed prefix covers the required EAGLE peek margin;
         - not block-aligned: the sub-block CoW partial tail, which also has to
           cover the other groups' blocks in the normal save's lcm gap.
 
@@ -817,18 +826,40 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if not offloads or not req_meta.block_hashes:
             return True
 
-        snapshots: list[tuple[int, int, int]] = []
-        sub_block: list[tuple[int, int, int]] = []
+        entries_by_boundary: dict[int, list[tuple[int, int, int]]] = {}
         for group_id, block_id, boundary in offloads:
-            entry = (group_id, block_id, boundary)
-            if boundary % self.token_databases[group_id].block_size == 0:
-                snapshots.append(entry)
-            else:
-                sub_block.append(entry)
+            entries_by_boundary.setdefault(boundary, []).append(
+                (group_id, block_id, boundary)
+            )
 
-        puts = self._boundary_snapshot_puts(req_meta, snapshots)
-        if sub_block and self.coord.enable_partial_hash_hits:
-            puts.extend(self._sub_block_tail_puts(req_meta, sub_block))
+        hash_unit_peek = any(
+            margin == self.coord.hash_block_size
+            for margin in self.coord.eagle_peek_margin_by_group.values()
+        )
+        puts: list[tuple[str, list[int], list[int], KeyMetadata]] = []
+        for boundary, entries in entries_by_boundary.items():
+            snapshots = [
+                entry
+                for entry in entries
+                if boundary % self.token_databases[entry[0]].block_size == 0
+            ]
+            has_sub_block = len(snapshots) != len(entries)
+            can_write_proof = (
+                hash_unit_peek
+                and boundary + self.coord.hash_block_size
+                <= req_meta.completed_token_len
+            )
+            if self.coord.enable_partial_hash_hits and (
+                has_sub_block or can_write_proof
+            ):
+                puts.extend(self._boundary_tail_puts(req_meta, entries))
+            else:
+                puts.extend(self._boundary_snapshot_puts(req_meta, snapshots))
+
+        unique_puts: dict[str, tuple[str, list[int], list[int], KeyMetadata]] = {}
+        for put in puts:
+            unique_puts.setdefault(put[0], put)
+        puts = list(unique_puts.values())
 
         if not puts:
             return True
