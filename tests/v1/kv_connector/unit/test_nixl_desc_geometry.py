@@ -12,6 +12,7 @@ mid-decode (silent corruption of an unrelated request).
 """
 
 from collections import defaultdict
+from threading import Event, Lock
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -112,6 +113,7 @@ def test_local_descriptors_follow_each_region_pool_capacity():
     worker.block_len_per_layer = [16, 16]
     worker.block_stride_per_layer = [16, 16]
     worker.region_num_blocks = [2, 3]
+    worker._transfer_layer_region_indices = ()
 
     descriptors = worker._build_fa_local([100, 1000], block_size_ratio=1)
 
@@ -119,13 +121,17 @@ def test_local_descriptors_follow_each_region_pool_capacity():
 
 
 @pytest.mark.cpu_test
-def test_overlaid_transfer_groups_share_region_geometry():
+@pytest.mark.parametrize("push_pp", [False, True])
+def test_overlaid_transfer_groups_share_region_geometry(push_pp):
     """Groups overlaid on one allocation share its transfer region."""
     import msgspec
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlAgentMetadata,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
+        NixlPushConnectorWorker,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
@@ -153,7 +159,14 @@ def test_overlaid_transfer_groups_share_region_geometry():
     }
     groups = [KVCacheGroupSpec([layer_name], spec) for layer_name in caches]
 
-    worker = object.__new__(NixlConnectorWorker)
+    worker_cls = NixlPushConnectorWorker if push_pp else NixlConnectorWorker
+    worker = object.__new__(worker_cls)
+    if push_pp:
+        worker._push_writer_stop = Event()
+        worker._push_writer_wake = Event()
+        worker._push_writer_thread = MagicMock()
+        worker._sending_transfers_lock = Lock()
+        worker._sending_transfers = defaultdict(list)
     worker.tp_rank = 0
     worker.world_size = 1
     worker.block_size = 4
@@ -191,6 +204,9 @@ def test_overlaid_transfer_groups_share_region_geometry():
     worker._mixed_mem_types = False
     worker.region_names = []
     worker.region_num_blocks = []
+    worker._transfer_layer_names = ()
+    worker._transfer_layer_region_indices = ()
+    worker._transfer_layer_group_ids = ()
     worker._region_is_mla = []
     worker.block_len_per_layer = []
     worker.block_stride_per_layer = []
@@ -198,7 +214,8 @@ def test_overlaid_transfer_groups_share_region_geometry():
     worker.use_host_buffer = False
     worker.host_xfer_buffers = {}
     worker.device_kv_caches = {}
-    worker.pp_size = 1
+    worker.pp_size = 2 if push_pp else 1
+    worker._is_hma_required = True
     worker.dcp_size = 1
     worker.pcp_size = 1
     worker.kv_buffer_device = "cuda"
@@ -233,7 +250,13 @@ def test_overlaid_transfer_groups_share_region_geometry():
     expected_addrs = [
         backing.data_ptr() + block * block_stride for block in range(num_blocks)
     ]
-    assert worker.src_blocks_data[:, 0].tolist() == expected_addrs
+    num_desc_regions = 2 if push_pp else 1
+    assert worker.src_blocks_data[:, 0].tolist() == expected_addrs * num_desc_regions
+    assert worker.num_descs == num_blocks * num_desc_regions
+    assert (
+        worker.dst_region_num_blocks[worker.engine_id]
+        == [num_blocks] * num_desc_regions
+    )
 
     metadata = msgspec.msgpack.decode(
         worker.xfer_handshake_metadata.agent_metadata_bytes,
@@ -241,6 +264,7 @@ def test_overlaid_transfer_groups_share_region_geometry():
     )
     assert metadata.region_group_ids == [-1]
     assert metadata.region_num_blocks == [num_blocks]
+    assert metadata.region_members == ([["layer.0", "layer.1"]] if push_pp else [])
     assert worker._block_ids_by_region(([0], [2]), worker.region_group_ids) == [[0, 2]]
 
 

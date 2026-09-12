@@ -862,6 +862,7 @@ def _make_mock_worker_for_desc_ids(
     worker = MagicMock(spec=NixlConnectorWorker)
     worker.num_regions = num_regions
     worker._uses_region_group_mapping = False
+    worker._transfer_layer_group_ids = ()
     worker._has_mamba = has_mamba
     worker._group_spec_types = group_spec_types
     worker.block_len_per_layer = block_len_per_layer or [100]
