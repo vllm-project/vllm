@@ -300,6 +300,13 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+# SparseIndexerTopk reads the vLLM config at construction, so it cannot be
+# created inside the registered op (forward time, no config context). It is
+# stateless (backend-selection flags only), so one process-wide instance is
+# created by SparseAttnIndexer.__init__ during model construction and reused.
+_indexer_topk: "SparseIndexerTopk | None" = None
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -688,7 +695,12 @@ def sparse_attn_indexer(
                 )
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        SparseIndexerTopk()(
+        topk_module = _indexer_topk
+        if topk_module is None:
+            # Direct op invocation without a SparseAttnIndexer layer (e.g.
+            # kernel tests under a config-fixture context).
+            topk_module = SparseIndexerTopk()
+        topk_module(
             logits,
             seq_lens,
             next_n,
@@ -813,6 +825,9 @@ class SparseAttnIndexer(CustomOp):
         # than threading them through per-step metadata.
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
+        global _indexer_topk
+        if _indexer_topk is None:
+            _indexer_topk = SparseIndexerTopk()
         self._parallel_config = parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0

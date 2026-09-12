@@ -143,7 +143,9 @@ def deep_select_topk(
         IDX_OOB_FILL_VALUE,
         float("-inf"),  # value_oob_fill_value
         False,  # return_value
-        True,  # abort_when_nan_found
+        False,  # abort_when_nan_found: dummy/capture passes can feed NaN
+        # logits from uninitialized KV cache; the reference topk kernels do
+        # not trap on NaN, and trapping would abort CUDA graph capture.
     )
     return output_idx
 
