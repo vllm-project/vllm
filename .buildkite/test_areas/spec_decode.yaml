@@ -111,6 +111,7 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode/speculators/
     - pytest -v -s v1/e2e/spec_decode/mtp/
+    - pytest -v -s v1/e2e/spec_decode/test_uno.py
   mirror:
     amd:
       label: ":amd: (MI300) Spec Decode Speculators + MTP"
