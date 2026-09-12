@@ -75,17 +75,28 @@ def get_hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int:
 
 def _partition_hisparse_specs(
     groups: list[KVCacheGroupSpec],
-) -> tuple[dict[str, MLAAttentionSpec], dict[str, MLAAttentionSpec]]:
+) -> tuple[
+    dict[str, MLAAttentionSpec], dict[str, MLAAttentionSpec], dict[str, KVCacheSpec]
+]:
     group_spec = groups[0].kv_cache_spec
     if not isinstance(group_spec, UniformTypeKVCacheSpecs):
         raise ValueError("HiSparse requires uniform sparse-MLA cache specs.")
 
-    specs = group_spec.kv_cache_specs
+    all_specs = group_spec.kv_cache_specs
+    specs = all_specs
     if any(
         isinstance(spec, MLAAttentionSpec) and spec.model_version == "deepseek_v4"
         for spec in specs.values()
     ):
-        raise ValueError("HiSparse does not support DeepSeek V4.")
+        specs = {
+            name: spec
+            for name, spec in all_specs.items()
+            if isinstance(spec, MLAAttentionSpec) and spec.tokens_per_state == 4
+        }
+        if not specs:
+            raise ValueError(
+                "HiSparse requires DeepSeek V4 to expose C4 MLA cache layers."
+            )
     if not all(isinstance(spec, MLAAttentionSpec) for spec in specs.values()):
         raise ValueError("HiSparse requires its first cache group to contain MLA only.")
 
@@ -103,16 +114,20 @@ def _partition_hisparse_specs(
     }
     if not source_specs or not indexer_specs:
         raise ValueError("HiSparse requires sparse-MLA and indexer cache specs.")
-    return source_specs, indexer_specs
+    remaining_specs = {
+        name: spec for name, spec in all_specs.items() if name not in specs
+    }
+    return source_specs, indexer_specs, remaining_specs
 
 
 def get_hisparse_gpu_memory_usage(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
-    _, indexer_specs = _partition_hisparse_specs(kv_cache_groups)
+    _, indexer_specs, remaining_specs = _partition_hisparse_specs(kv_cache_groups)
     return sum(
-        spec.max_memory_usage_bytes(vllm_config) for spec in indexer_specs.values()
+        spec.max_memory_usage_bytes(vllm_config)
+        for spec in (*indexer_specs.values(), *remaining_specs.values())
     ) + sum(
         group.kv_cache_spec.max_memory_usage_bytes(vllm_config)
         for group in kv_cache_groups[1:]
@@ -124,7 +139,7 @@ def create_hisparse_layout(
     groups: list[KVCacheGroupSpec],
     host_budget: int,
 ) -> HiSparseLayout:
-    source_specs, indexer_specs = _partition_hisparse_specs(groups)
+    source_specs, indexer_specs, remaining_specs = _partition_hisparse_specs(groups)
     block_sizes = {
         spec.block_size for spec in (*source_specs.values(), *indexer_specs.values())
     }
@@ -150,7 +165,12 @@ def create_hisparse_layout(
     )
 
     indexer_page = sum(spec.page_size_bytes for spec in indexer_specs.values())
-    hot_blocks_per_request = cdiv(config.device_buffer_size, gpu_block_size)
+    storage_block_sizes = {spec.num_states for spec in indexer_specs.values()}
+    if len(storage_block_sizes) != 1:
+        raise ValueError(
+            "HiSparse indexer layers require one physical cache block size."
+        )
+    hot_blocks_per_request = cdiv(config.device_buffer_size, storage_block_sizes.pop())
     hot_units: list[list[tuple[str, MLAAttentionSpec]]] = []
     for layer_name, layer_spec in source_specs.items():
         if layer_spec.is_index_group_leader or not hot_units:
@@ -218,7 +238,18 @@ def create_hisparse_layout(
         host_resident=True,
         enable_kv_transfer=False,
     )
-    regular_groups = groups[1:]
+    regular_groups = list(groups[1:])
+    if remaining_specs:
+        remaining_spec = UniformTypeKVCacheSpecs.from_specs(remaining_specs)
+        assert remaining_spec is not None
+        regular_groups.insert(
+            0,
+            KVCacheGroupSpec(
+                list(remaining_specs),
+                remaining_spec,
+                is_eagle_group=groups[0].is_eagle_group,
+            ),
+        )
     gpu_groups = [indexer_group, *resident_groups, *hot_groups, *regular_groups]
 
     host_num_blocks = host_budget // sum(
