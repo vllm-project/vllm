@@ -327,7 +327,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         )
 
     @torch.inference_mode()
-    def _propose(
+    def propose(
         self,
         input_batch: InputBatch,
         attn_metadata: dict[str, Any],

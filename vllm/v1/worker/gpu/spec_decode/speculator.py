@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, final
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -163,13 +163,8 @@ class DraftModelSpeculator(BaseSpeculator):
         self.enable_adaptive_verification = (
             self.speculative_config.enable_adaptive_verification
         )
+        self.use_acceptance_estimator = self.enable_adaptive_verification
         self.acceptance_estimator: OnlineAcceptanceEstimator | None = None
-        if self.enable_adaptive_verification:
-            self.acceptance_estimator = OnlineAcceptanceEstimator(
-                self.max_num_reqs,
-                self.num_speculative_steps,
-                device,
-            )
 
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
@@ -227,6 +222,20 @@ class DraftModelSpeculator(BaseSpeculator):
                 "Embeddings from the target model will not be passed to the "
                 "drafter; using text-only draft inputs instead.",
                 type(self.model).__name__,
+            )
+
+        if self.use_acceptance_estimator:
+            if self.use_local_argmax_reduction:
+                raise ValueError(
+                    "Adaptive verification without a confidence head estimates "
+                    "per-position acceptance from the draft logits, which "
+                    "use_local_argmax_reduction never materializes. Disable one "
+                    "of them."
+                )
+            self.acceptance_estimator = OnlineAcceptanceEstimator(
+                self.max_num_reqs,
+                self.num_speculative_steps,
+                self.device,
             )
 
     def set_eplb_state(self, eplb_state: EplbState) -> None:
@@ -378,19 +387,6 @@ class DraftModelSpeculator(BaseSpeculator):
             "(communication: O(2*tp_size) vs O(vocab_size))."
         )
 
-    def _greedy_sample(
-        self,
-        hidden_states: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        draft_step: torch.Tensor,
-    ) -> torch.Tensor:
-        if self.use_local_argmax_reduction:
-            return self.model.get_top_tokens(hidden_states)
-        logits = self.model.compute_logits(hidden_states)
-        draft_tokens = logits.argmax(dim=-1)
-        self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
-        return draft_tokens
-
     def sample_draft(
         self,
         hidden_states: torch.Tensor,
@@ -415,9 +411,13 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
-            self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
-            return draft_tokens
-        return self._greedy_sample(hidden_states, idx_mapping, draft_step)
+        elif self.use_local_argmax_reduction:
+            return self.model.get_top_tokens(hidden_states)
+        else:
+            logits = self.model.compute_logits(hidden_states)
+            draft_tokens = logits.argmax(dim=-1)
+        self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
+        return draft_tokens
 
     def _maybe_predict_acceptance(
         self,
@@ -434,73 +434,19 @@ class DraftModelSpeculator(BaseSpeculator):
                 self.temperature,
             )
 
-    @final
-    def propose(
+    def observe_verification(
         self,
-        input_batch: InputBatch,
-        attn_metadata: dict[str, Any],
-        slot_mappings: dict[str, torch.Tensor],
-        last_hidden_states: torch.Tensor,
-        aux_hidden_states: list[torch.Tensor] | None,
+        idx_mapping: torch.Tensor,
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
-        last_sampled: torch.Tensor,
-        next_prefill_tokens: torch.Tensor,
-        temperature: torch.Tensor,
-        seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
-        dummy_run: bool = False,
-        skip_attn_for_dummy_run: bool = False,
-        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        is_profile: bool = False,
-    ) -> torch.Tensor:
-        if not dummy_run and not is_profile and self.acceptance_estimator is not None:
-            self.acceptance_estimator.step(
-                input_batch.idx_mapping,
-                num_sampled,
-                num_rejected,
-            )
+    ) -> None:
+        """Fold the target's verdict on the last drafts into the estimator.
 
-        return self._propose(
-            input_batch,
-            attn_metadata,
-            slot_mappings,
-            last_hidden_states,
-            aux_hidden_states,
-            num_sampled,
-            num_rejected,
-            last_sampled,
-            next_prefill_tokens,
-            temperature,
-            seeds,
-            dp_sync=dp_sync,
-            dummy_run=dummy_run,
-            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-            mm_inputs=mm_inputs,
-            is_profile=is_profile,
-        )
-
-    @abstractmethod
-    def _propose(
-        self,
-        input_batch: InputBatch,
-        attn_metadata: dict[str, Any],
-        slot_mappings: dict[str, torch.Tensor],
-        last_hidden_states: torch.Tensor,
-        aux_hidden_states: list[torch.Tensor] | None,
-        num_sampled: torch.Tensor,
-        num_rejected: torch.Tensor,
-        last_sampled: torch.Tensor,
-        next_prefill_tokens: torch.Tensor,
-        temperature: torch.Tensor,
-        seeds: torch.Tensor,
-        dp_sync: DPSyncState | None = None,
-        dummy_run: bool = False,
-        skip_attn_for_dummy_run: bool = False,
-        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        is_profile: bool = False,
-    ) -> torch.Tensor:
-        raise NotImplementedError
+        Must run before the next `propose`, which overwrites the per-slot
+        features the verdict grades.
+        """
+        if self.acceptance_estimator is not None:
+            self.acceptance_estimator.step(idx_mapping, num_sampled, num_rejected)
 
     def _copy_request_inputs(
         self,

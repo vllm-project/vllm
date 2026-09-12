@@ -110,14 +110,7 @@ class DSparkSpeculator(DFlashSpeculator):
         if self.use_confidence_head:
             # The acceptance estimator is not needed when a trained confidence head
             # is available.
-            self.acceptance_estimator = None
-        if self.acceptance_estimator is not None and self.use_local_argmax_reduction:
-            raise ValueError(
-                "Adaptive verification without a confidence head estimates "
-                "per-position acceptance from the draft logits, which "
-                "use_local_argmax_reduction never materializes. Disable one of them."
-            )
-
+            self.use_acceptance_estimator = False
         return model
 
     def _sample_logits(
@@ -127,10 +120,9 @@ class DSparkSpeculator(DFlashSpeculator):
         sample_pos: torch.Tensor,
         step: int,
     ) -> torch.Tensor:
+        self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
         if self.draft_logits is None:
             draft_ids = logits.argmax(dim=-1)
-            if not self.use_confidence_head:
-                self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
             return self.model.map_draft_to_target(draft_ids)
 
         # Probabilistic sampling and rejection operate in target-vocabulary
@@ -143,7 +135,7 @@ class DSparkSpeculator(DFlashSpeculator):
 
         # sample_pos is the predicted token's position P. Sampling keys a draw
         # by the position before the sampled token, P-1.
-        draft_ids = gumbel_sample(
+        return gumbel_sample(
             logits,
             idx_map,
             self.temperature,
@@ -155,9 +147,6 @@ class DSparkSpeculator(DFlashSpeculator):
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,
         )
-        if not self.use_confidence_head:
-            self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
-        return draft_ids
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         if self._draft_topk is not None:
