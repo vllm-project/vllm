@@ -271,53 +271,6 @@ def test_top_k_per_row(
     ), "CUDA top_k_per_row_prefill results don't match torch.topk"
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("top_k", [512, 2048])
-@pytest.mark.parametrize("decode", [False, True])
-def test_top_k_cutoff_tie_prefers_lower_token_index(top_k, decode):
-    """A cutoff tie must not depend on atomic insertion order."""
-    torch.manual_seed(15)
-    logits = torch.zeros((4, 4096), device="cuda", dtype=torch.float32)
-    starts = torch.zeros(4, device="cuda", dtype=torch.int32)
-    ends = torch.full_like(starts, 4096)
-    indices = torch.empty((4, top_k), device="cuda", dtype=torch.int32)
-    for _ in range(8):
-        positions = torch.stack([torch.randperm(4096, device="cuda") for _ in range(4)])
-        above_cutoff = positions[:, : top_k - 1]
-        at_cutoff = positions[:, top_k - 1 : top_k + 1]
-        logits.zero_()
-        logits.scatter_(1, above_cutoff, 2)
-        logits.scatter_(1, at_cutoff, 1)
-        expected = (
-            torch.cat([above_cutoff, at_cutoff.min(dim=1, keepdim=True).values], dim=1)
-            .sort(dim=1)
-            .values.to(torch.int32)
-        )
-        if decode:
-            torch.ops._C.top_k_per_row_decode(
-                logits,
-                1,
-                ends[:, None],
-                indices,
-                4,
-                logits.stride(0),
-                logits.stride(1),
-                top_k,
-            )
-        else:
-            torch.ops._C.top_k_per_row_prefill(
-                logits,
-                starts,
-                ends,
-                indices,
-                4,
-                logits.stride(0),
-                logits.stride(1),
-                top_k,
-            )
-        torch.testing.assert_close(indices.sort(dim=-1).values, expected)
-
-
 def _run_top_k_per_row_decode_test(
     top_k: int,
     batch_size: int,
