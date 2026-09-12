@@ -71,6 +71,18 @@ def fused_grouped_topk(
     return topk_values, topk_indices
 
 
+def _deterministic_topk_indices(x: torch.Tensor, k: int) -> torch.Tensor:
+    """Top-k indices under a total order: value descending, index ascending.
+
+    `torch.topk` guarantees no tie-break, and on some backends is
+    nondeterministic on exact ties; with `sorted=False` it additionally
+    permutes the returned order run-to-run. Both make expert selection
+    irreproducible. A stable descending sort gives the same ordering the fused
+    kernel uses (value desc, then lower index first).
+    """
+    return x.sort(dim=-1, descending=True, stable=True).indices[..., :k]
+
+
 # This is used by the Deepseek-V2 and Deepseek-V3 model
 @torch.compile(
     dynamic=True,
@@ -130,11 +142,8 @@ def grouped_topk(
             scores.view(num_token, num_expert_group, -1).max(dim=-1).values
         )  # [n, n_group]
 
-    # For batch invariance, use sorted=True to ensure deterministic expert selection
-    use_sorted = envs.VLLM_BATCH_INVARIANT
-    group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=use_sorted)[
-        1
-    ]  # [n, top_k_group]
+    # [n, top_k_group]
+    group_idx = _deterministic_topk_indices(group_scores, topk_group)
     group_mask = torch.zeros_like(group_scores)  # [n, n_group]
     group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
     score_mask = (
@@ -145,13 +154,12 @@ def grouped_topk(
     tmp_scores = scores.masked_fill(~score_mask.bool(), float("-inf"))  # [n, e]
 
     if e_score_correction_bias is not None:
-        topk_ids = torch.topk(tmp_scores, k=topk, dim=-1, sorted=use_sorted)[1]
+        topk_ids = _deterministic_topk_indices(tmp_scores, topk)
         # Use original unbiased scores for the routing weights
         topk_weights = original_scores.gather(1, topk_ids)
     else:
-        topk_weights, topk_ids = torch.topk(
-            tmp_scores, k=topk, dim=-1, sorted=use_sorted
-        )
+        topk_ids = _deterministic_topk_indices(tmp_scores, topk)
+        topk_weights = tmp_scores.gather(1, topk_ids)
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
