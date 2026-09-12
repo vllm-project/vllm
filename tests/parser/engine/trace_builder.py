@@ -28,6 +28,7 @@ from tests.parser.engine.replay_harness import (
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
+from vllm.parser import plamo3
 from vllm.parser.engine.registered_adapters import (
     DeepSeekV4Parser,
     DeepSeekV32Parser,
@@ -38,6 +39,7 @@ from vllm.parser.engine.registered_adapters import (
     KimiK2Parser,
     MinimaxM2Parser,
     NemotronV3Parser,
+    Plamo3Parser,
     Qwen3Parser,
     SeedOssParser,
 )
@@ -1042,6 +1044,70 @@ def _build_inkling(scenario: Scenario, validate: bool = True) -> Sample:
     return sample
 
 
+# ── PLaMo3 (literal nested tool-request wrappers) ───────────────────
+
+_PLAMO3_MARKERS = (
+    plamo3.BEGIN_THINK,
+    plamo3.END_THINK,
+    plamo3.BEGIN_TOOL_REQUESTS,
+    plamo3.END_TOOL_REQUESTS,
+    plamo3.BEGIN_TOOL_REQUEST,
+    plamo3.END_TOOL_REQUEST,
+    plamo3.BEGIN_TOOL_NAME,
+    plamo3.END_TOOL_NAME,
+    plamo3.BEGIN_TOOL_ARGUMENTS,
+    plamo3.END_TOOL_ARGUMENTS,
+    plamo3.EOT,
+)
+_PLAMO3_VOCAB = {marker: 300 + i for i, marker in enumerate(_PLAMO3_MARKERS)}
+
+
+def _plamo3_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
+    args = json.dumps(tc.arguments, ensure_ascii=False, separators=(",", ":"))
+    return [
+        (plamo3.BEGIN_TOOL_REQUEST, True),
+        (plamo3.BEGIN_TOOL_NAME, True),
+        (tc.name, False),
+        (plamo3.END_TOOL_NAME, True),
+        (plamo3.BEGIN_TOOL_ARGUMENTS, True),
+        (args, False),
+        (plamo3.END_TOOL_ARGUMENTS, True),
+        (plamo3.END_TOOL_REQUEST, True),
+    ]
+
+
+def _plamo3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = [
+        (plamo3.BEGIN_THINK, True),
+        (scenario.reasoning or "", False),
+        (plamo3.END_THINK, True),
+    ]
+    if scenario.content is not None:
+        segs.append((scenario.content, False))
+    if scenario.tool_calls is not None:
+        segs.append((plamo3.BEGIN_TOOL_REQUESTS, True))
+        for tool_call in scenario.tool_calls:
+            segs.extend(_plamo3_tool_segments(tool_call))
+        segs.append((plamo3.END_TOOL_REQUESTS, True))
+    return segs
+
+
+def _build_plamo3(scenario: Scenario, validate: bool = True) -> Sample:
+    sample = _make_sample(
+        sample_id=f"plamo3-{scenario.id}",
+        description=scenario.description,
+        vocab=_PLAMO3_VOCAB,
+        segments=_plamo3_segments(scenario),
+        expected_reasoning=scenario.reasoning or "",
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, Plamo3Parser)
+    return sample
+
+
 # ── Registry and public API ──────────────────────────────────────────
 
 _BUILDERS: dict[str, Any] = {
@@ -1056,6 +1122,7 @@ _BUILDERS: dict[str, Any] = {
     "kimi_k2": _build_kimi_k2,
     "qwen3": _build_qwen3,
     "inkling": _build_inkling,
+    "plamo3": _build_plamo3,
 }
 
 
