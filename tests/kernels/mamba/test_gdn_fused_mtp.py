@@ -193,6 +193,7 @@ def test_fused_decode_falls_back_without_kernel_image() -> None:
         gqa_interleaved_layout=False,
         head_k_dim=K,
         head_v_dim=V,
+        A_log=torch.empty(1, dtype=torch.float32, device="cuda"),
         norm=types.SimpleNamespace(activation="silu"),
         get_state_dtype=lambda: (torch.bfloat16, torch.float32),
     )
@@ -200,11 +201,12 @@ def test_fused_decode_falls_back_without_kernel_image() -> None:
         qwen_gdn_linear_attn.ops,
         "fused_gdn_decode_kernel_available",
         return_value=False,
-    ):
+    ) as kernel_available:
         reason = QwenGatedDeltaNetAttention._fused_gdn_decode_unsupported_reason(
             cast(QwenGatedDeltaNetAttention, layer), vllm_config
         )
 
+    kernel_available.assert_called_once_with(layer.A_log)
     assert reason == "fused GDN decode kernel has no image for the current device"
 
 

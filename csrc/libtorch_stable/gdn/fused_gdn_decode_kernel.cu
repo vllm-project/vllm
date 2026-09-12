@@ -419,7 +419,10 @@ void launch_gdn_decode_post_conv_mtp(
 
 }  // namespace
 
-bool fused_gdn_decode_kernel_available() {
+bool fused_gdn_decode_kernel_available(
+    torch::stable::Tensor const& device_tensor) {
+  torch::stable::accelerator::DeviceGuard const device_guard(
+      device_tensor.get_device_index());
   cudaFuncAttributes attributes;
   const cudaError_t error = cudaFuncGetAttributes(
       &attributes, gdn_decode_post_conv_mtp_kernel<float, 1, false>);

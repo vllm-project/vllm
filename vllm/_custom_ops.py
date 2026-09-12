@@ -2807,9 +2807,9 @@ def fused_gdn_decode_post_conv_mtp(
     return out
 
 
-def fused_gdn_decode_kernel_available() -> bool:
+def fused_gdn_decode_kernel_available(device_tensor: torch.Tensor) -> bool:
     op = getattr(torch.ops._C, "fused_gdn_decode_kernel_available", None)
-    return op is not None and bool(op())
+    return op is not None and bool(op(device_tensor))
 
 
 def concat_and_cache_mla(

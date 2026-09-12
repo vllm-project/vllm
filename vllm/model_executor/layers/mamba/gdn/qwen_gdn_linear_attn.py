@@ -554,7 +554,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
             return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
-        if not ops.fused_gdn_decode_kernel_available():
+        if not ops.fused_gdn_decode_kernel_available(self.A_log):
             return "fused GDN decode kernel has no image for the current device"
         return None
 

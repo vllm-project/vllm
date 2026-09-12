@@ -528,7 +528,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 #endif
 
 #ifdef VLLM_ENABLE_FUSED_GDN_DECODE
-  ops.def("fused_gdn_decode_kernel_available() -> bool");
+  ops.def("fused_gdn_decode_kernel_available(Tensor device_tensor) -> bool");
   ops.def(
       "fused_gdn_decode_post_conv_mtp("
       "Tensor mixed_qkv, Tensor a, Tensor b, Tensor A_log, Tensor dt_bias, "
