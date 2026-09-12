@@ -1,0 +1,29 @@
+{
+  "steps": [
+    {
+      "label": "GPU telemetry idle/load and overhead canary",
+      "key": "gpu-telemetry-canary",
+      "agents": {
+        "queue": "gpu_4_queue"
+      },
+      "timeout_in_minutes": 20,
+      "command": "bash /workdir/.buildkite/gpu-canary/run.sh",
+      "plugins": [
+        {
+          "docker#v5.2.0": {
+            "image": "public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:988d9b6777d077f843cd2164a222ac8535d36ed2",
+            "always-pull": true,
+            "propagate-environment": true,
+            "mount-buildkite-agent": true,
+            "mount-checkout": true,
+            "workdir": "/workdir",
+            "gpus": "all",
+            "volumes": [
+              "/dev/shm:/dev/shm"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

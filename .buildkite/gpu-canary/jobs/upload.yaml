@@ -1,0 +1,18 @@
+{
+  "steps": [
+    {
+      "label": "Upload controlled GPU canary",
+      "key": "upload-gpu-canary",
+      "device": "cpu",
+      "agent_tags": {
+        "queue": "small_cpu_queue_premerge"
+      },
+      "no_plugin": true,
+      "depends_on": [],
+      "timeout_in_minutes": 5,
+      "commands": [
+        "buildkite-agent pipeline upload .buildkite/gpu-canary/pipeline.json"
+      ]
+    }
+  ]
+}
