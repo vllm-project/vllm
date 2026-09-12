@@ -98,6 +98,18 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
     tool_calls = chat_msg.get("tool_calls")
     if role == "assistant" and tool_calls:
         msgs: list[Message] = []
+        content = flatten_input_text_content(chat_msg.get("content"))
+        if content:
+            commentary_msg = Message.from_role_and_content(Role.ASSISTANT, content)
+            commentary_msg = commentary_msg.with_channel("commentary")
+            msgs.append(commentary_msg)
+
+        reasoning = chat_msg.get("reasoning")
+        if reasoning:
+            analysis_msg = Message.from_role_and_content(Role.ASSISTANT, reasoning)
+            analysis_msg = analysis_msg.with_channel("analysis")
+            msgs.append(analysis_msg)
+
         for call in tool_calls:
             func = call.get("function", {})
             name = func.get("name", "")
@@ -133,7 +145,30 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
             return [msg]
         return []
 
-    # Default: user/assistant messages
+    # Assistant without tool calls: reasoning → analysis, content → final
+    if role == "assistant":
+        msgs: list[Message] = []
+        reasoning = chat_msg.get("reasoning")
+        if reasoning:
+            analysis_msg = Message.from_role_and_content(Role.ASSISTANT, reasoning)
+            analysis_msg = analysis_msg.with_channel("analysis")
+            msgs.append(analysis_msg)
+
+        content = chat_msg.get("content")
+        if isinstance(content, str):
+            contents = [TextContent(text=content)]
+        elif content:
+            contents = [TextContent(text=text_from_content_part(c)) for c in content]
+        else:
+            contents = []
+
+        if contents and contents[0].text:
+            msg = Message.from_role_and_contents(role, contents)
+            msg = msg.with_channel("final")
+            msgs.append(msg)
+        return msgs
+
+    # Default: user messages
     content = chat_msg.get("content", "")
     if isinstance(content, str):
         contents = [TextContent(text=content)]
