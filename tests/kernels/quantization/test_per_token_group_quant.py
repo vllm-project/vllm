@@ -80,6 +80,11 @@ def test_per_token_group_quant_fp8(
         # Larger shapes with padding
         (127, 7168, 128),
         (253, 640, 128),
+        (1, 32, 32),
+        (3, 64, 32),
+        (7, 160, 32),
+        (32, 512, 32),
+        (127, 4096, 32),
     ],
 )
 @pytest.mark.parametrize("poisoned_scales", [False, True])
@@ -408,9 +413,12 @@ def test_per_token_group_quant_fp8_packed_large_mn():
 
 @pytest.mark.parametrize("shape", [(32, 128), (64, 256), (16, 512)])
 @pytest.mark.parametrize("group_size", [64, 128])
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Only test on CUDA/ROCm/XPU.",
+)
 def test_per_token_group_quant_int8(shape, group_size: int):
-    device = "cuda"
+    device = current_platform.device_type
 
     torch.manual_seed(42)
     num_tokens, hidden_dim = shape
