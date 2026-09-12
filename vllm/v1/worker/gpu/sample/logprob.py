@@ -19,27 +19,33 @@ def _topk_log_softmax_kernel(
     logits_ptr,
     logits_stride,
     topk_ids_ptr,
+    temperatures_ptr,
     topk,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     TOPK_BLOCK_SIZE: tl.constexpr,
+    APPLY_TEMPERATURE: tl.constexpr,
 ):
     req_idx = tl.program_id(0).to(tl.int64)
     row_ptr = logits_ptr + req_idx * logits_stride
+    temperature = 1.0
+    if APPLY_TEMPERATURE:
+        temperature = tl.load(temperatures_ptr + req_idx).to(tl.float32)
+        temperature = tl.where(temperature == 0.0, 1.0, temperature)
 
     max_val = float("-inf")
     for i in range(0, vocab_size, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
         logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
+        logits = logits.to(tl.float32) / temperature
         max_val = tl.max(tl.maximum(logits, max_val))
-    max_val = max_val.to(tl.float32)  # type: ignore
 
     se = 0.0
     for i in range(0, vocab_size, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
         logits = tl.load(row_ptr + block, mask=block < vocab_size, other=0.0)
         # NOTE(woosuk): Make sure that logits and all following operations use FP32.
-        logits = logits.to(tl.float32)
+        logits = logits.to(tl.float32) / temperature
         e = tl.exp(logits - max_val)
         e = tl.where(block < vocab_size, e, 0.0)
         se += tl.sum(e)
@@ -52,7 +58,7 @@ def _topk_log_softmax_kernel(
             topk_ids_ptr + req_idx * topk + k_offset, mask=k_mask, other=0
         )
         logits = tl.load(row_ptr + topk_ids, mask=k_mask)
-        logits = logits.to(tl.float32)
+        logits = logits.to(tl.float32) / temperature
         o = logits - max_val - lse
         tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
 
@@ -81,7 +87,9 @@ def _ranks_kernel(
 
 
 def compute_token_logprobs(
-    logits: torch.Tensor, token_ids: torch.Tensor
+    logits: torch.Tensor,
+    token_ids: torch.Tensor,
+    temperatures: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # NOTE(woosuk): To save GPU memory, we do not materialize the full
     # [batch_size, vocab_size] logprobs tensor. The kernel computes
@@ -93,15 +101,19 @@ def compute_token_logprobs(
     # Cap the kernel's per-iteration width so very large num_logprobs requests
     # stream the gather in bounded-size chunks, avoiding excessive mem use.
     topk_block_size = min(triton.next_power_of_2(num_logprobs), _MAX_TOPK_BLOCK)
+    # Dummy pointer when no temperature is applied (won't be read).
+    temperatures_ptr = temperatures if temperatures is not None else logits
     _topk_log_softmax_kernel[(batch_size,)](
         logprobs,
         logits,
         logits.stride(0),
         token_ids,
+        temperatures_ptr,
         num_logprobs,
         vocab_size,
         BLOCK_SIZE=1024,  # type: ignore
         TOPK_BLOCK_SIZE=topk_block_size,
+        APPLY_TEMPERATURE=temperatures is not None,
     )
     return logprobs
 
@@ -115,6 +127,7 @@ def compute_topk_scores(
     expanded_idx_mapping: torch.Tensor | None = None,
     max_per_req_token_ids: int = 0,
     logits_mode: bool = False,
+    temperatures: torch.Tensor | None = None,
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
@@ -125,10 +138,6 @@ def compute_topk_scores(
         if num_logprobs > 0:
             topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
             logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
-        if logits_mode:
-            scores = logits.gather(-1, logprob_token_ids).to(torch.float32)
-        else:
-            scores = compute_token_logprobs(logits, logprob_token_ids)
     else:
         # Some requests specified logprob_token_ids. Build the [batch_size,
         # 1 + max_cols] token_ids matrix and validity mask on the GPU via a
@@ -162,10 +171,14 @@ def compute_topk_scores(
             NUM_TOPK=num_logprobs,
             PADDED_COLS=triton.next_power_of_2(num_cols),
         )
-        if logits_mode:
-            scores = logits.gather(-1, logprob_token_ids).to(torch.float32)
-        else:
-            scores = compute_token_logprobs(logits, logprob_token_ids)
+    if logits_mode:
+        scores = logits.gather(-1, logprob_token_ids).to(torch.float32)
+        if temperatures is not None:
+            effective_temperatures = torch.where(temperatures == 0.0, 1.0, temperatures)
+            scores.div_(effective_temperatures.unsqueeze(1))
+    else:
+        scores = compute_token_logprobs(logits, logprob_token_ids, temperatures)
+    if max_per_req_token_ids > 0:
         scores = scores.masked_fill(~valid_mask, float("-inf"))
 
     token_ranks = torch.empty(batch_size, dtype=torch.int64, device=logits.device)

@@ -57,6 +57,7 @@ def _compute_global_residual_mass(
     target_local_sumexp_stride,
     draft_token,
     logit_idx,
+    temp,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
@@ -83,9 +84,12 @@ def _compute_global_residual_mass(
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS,
         )
-        target_logit = tl.load(
-            target_logits_ptr + logit_idx * target_logits_stride + draft_token,
-        ).to(tl.float32)
+        target_logit = (
+            tl.load(
+                target_logits_ptr + logit_idx * target_logits_stride + draft_token,
+            ).to(tl.float32)
+            / temp
+        )
         m_b = tl.exp(target_logit - target_lse)
         return prefix_joint_ratio * (1.0 - m_b)
 
@@ -144,11 +148,14 @@ def _compute_global_logprobs_and_logsumexp(
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
-    target_logit = tl.load(
-        target_logits_ptr + logit_idx * target_logits_stride + token,
-        mask=mask,
-        other=float("-inf"),
-    ).to(tl.float32)
+    target_logit = (
+        tl.load(
+            target_logits_ptr + logit_idx * target_logits_stride + token,
+            mask=mask,
+            other=float("-inf"),
+        ).to(tl.float32)
+        / temp
+    )
     target_lse = _compute_global_logsumexp(
         target_local_max_ptr,
         target_local_max_stride,
@@ -259,11 +266,14 @@ def _compute_local_logits_stats_kernel(
         )
     else:
         # Get local target max and summed exponentials.
-        target_logits = tl.load(
-            target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
-            mask=mask,
-            other=float("-inf"),
-        ).to(tl.float32)
+        target_logits = (
+            tl.load(
+                target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
+                mask=mask,
+                other=float("-inf"),
+            ).to(tl.float32)
+            / temp
+        )
         target_max, target_sumexp = _compute_max_and_sumexp(target_logits)
         tl.store(
             target_local_max_ptr + logit_idx * target_local_max_stride + block_idx,
@@ -615,6 +625,7 @@ def _rejection_kernel(
                         target_local_sumexp_stride,
                         next_draft_token,
                         logit_idx + 1,
+                        temp,
                         vocab_num_blocks,
                         PADDED_VOCAB_NUM_BLOCKS,
                         HAS_DRAFT_LOGITS,
@@ -762,6 +773,8 @@ def _resample_kernel(
         mask=mask,
         other=float("-inf"),
     ).to(tl.float32)
+    if temp != 0.0:
+        target_logits = target_logits / temp
 
     # Compute the residual logits to resample the rejected token from.
     if is_bonus or not is_valid_rejected_draft:
