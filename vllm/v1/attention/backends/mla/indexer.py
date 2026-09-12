@@ -606,7 +606,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
-
         # See: DeepGMM/csrc/apis/attention.hpp. Sized for one slot per SM;
         # build() narrows it to whatever the kernel actually schedules.
         self.scheduler_metadata_buffer = torch.empty(

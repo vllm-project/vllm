@@ -25,6 +25,49 @@ else:
     _ON_GFX950 = False
 
 
+_C2_PAGED_MQA_INPUT_CACHE: dict[
+    tuple[tuple[int, ...], tuple[int, ...], str, tuple[int, ...], tuple[int, ...], str, int],
+    tuple[torch.Tensor, torch.Tensor],
+] = {}
+
+
+def _c2_get_persistent_paged_mqa_inputs(
+    *,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    key = (
+        tuple(int(x) for x in context_lens.shape),
+        tuple(int(x) for x in context_lens.stride()),
+        str(context_lens.dtype),
+        tuple(int(x) for x in block_tables.shape),
+        tuple(int(x) for x in block_tables.stride()),
+        str(block_tables.dtype),
+        torch.cuda.current_device(),
+    )
+
+    cached_pair = _C2_PAGED_MQA_INPUT_CACHE.get(key)
+    if cached_pair is None:
+        staged_context_lens = torch.empty_strided(
+            size=tuple(int(x) for x in context_lens.shape),
+            stride=tuple(int(x) for x in context_lens.stride()),
+            dtype=context_lens.dtype,
+            device=context_lens.device,
+        )
+        staged_block_tables = torch.empty_strided(
+            size=tuple(int(x) for x in block_tables.shape),
+            stride=tuple(int(x) for x in block_tables.stride()),
+            dtype=block_tables.dtype,
+            device=block_tables.device,
+        )
+        cached_pair = (staged_context_lens, staged_block_tables)
+        _C2_PAGED_MQA_INPUT_CACHE[key] = cached_pair
+
+    staged_context_lens, staged_block_tables = cached_pair
+    staged_context_lens.copy_(context_lens)
+    staged_block_tables.copy_(block_tables)
+    return staged_context_lens, staged_block_tables
+
 @triton.jit
 def _indexer_k_quant_and_cache_kernel(
     k_ptr,  # [num_tokens, head_dim]
@@ -869,12 +912,16 @@ def rocm_aiter_sparse_attn_indexer(
         assert batch_size == decode_metadata.seq_lens.shape[0]
         num_padded_tokens = batch_size * next_n
 
+        paged_mqa_seq_lens, paged_mqa_block_table = _c2_get_persistent_paged_mqa_inputs(
+            context_lens=decode_metadata.seq_lens,
+            block_tables=decode_metadata.block_table,
+        )
         logits = rocm_fp8_paged_mqa_logits(
             padded_q_fp8_decode_tokens,
             kv_cache,
             weights[:num_padded_tokens],
-            decode_metadata.seq_lens,
-            decode_metadata.block_table,
+            paged_mqa_seq_lens,
+            paged_mqa_block_table,
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
         )
