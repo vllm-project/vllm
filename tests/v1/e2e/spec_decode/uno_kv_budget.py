@@ -251,71 +251,79 @@ def mixed_growth_blocks(
 def token_agreement(
     reference: Sequence[Sequence[int]],
     candidate: Sequence[Sequence[int]],
-) -> tuple[int, list[str]]:
+) -> tuple[int, list[tuple[int, int]]]:
     """Per-prompt exact-token agreement, plus where each disagreement starts.
 
     Returns ``(matched, divergences)`` where ``matched`` counts the prompts
-    whose token ids are identical and each divergence reads ``p<i>/t<j>``: the
-    prompt index and the first 0-based token position that differs (or the
-    length, when one output is a prefix of the other). That is the same
-    coordinate the Ampere control receipts use, so a test failure and a lane
-    receipt can be compared by eye.
+    whose token ids are identical and each divergence is
+    ``(prompt_index, first differing token index)`` -- the length of the shorter
+    output when one is a prefix of the other. ``format_divergences`` renders
+    them as ``p<i>/t<j>``, the coordinate the GPU lane receipts use, so a test
+    failure and a lane receipt can be compared by eye.
     """
     assert len(reference) == len(candidate), (
         f"output counts differ: {len(reference)} vs {len(candidate)}"
     )
     matched = 0
-    divergences: list[str] = []
+    divergences: list[tuple[int, int]] = []
     for index, (left, right) in enumerate(zip(reference, candidate)):
         left_ids = list(left)
         right_ids = list(right)
         if left_ids == right_ids:
             matched += 1
             continue
-        position = len(left_ids)
+        position = min(len(left_ids), len(right_ids))
         for token_index, (left_id, right_id) in enumerate(zip(left_ids, right_ids)):
             if left_id != right_id:
                 position = token_index
                 break
-        else:
-            position = min(len(left_ids), len(right_ids))
-        divergences.append(f"p{index}/t{position}")
+        divergences.append((index, position))
     return matched, divergences
 
 
+def format_divergences(divergences: Sequence[tuple[int, int]]) -> list[str]:
+    """Render divergences as the ``p<prompt>/t<token>`` coordinates."""
+    return [f"p{prompt}/t{token}" for prompt, token in divergences]
+
+
 def exact_token_verdict(
-    control_matched: int,
-    candidate_matched: int,
+    control_divergences: Sequence[tuple[int, int]],
+    candidate_divergences: Sequence[tuple[int, int]],
     total: int,
 ) -> tuple[bool, str]:
     """Judge an exact-token comparison against the instrument's own noise floor.
 
     Greedy exact-token equality is only an instrument where the plain engine
-    agrees with itself. On an RTX 3090 (sm_86) in graph mode it does not: two
+    reproduces itself. On an RTX 3090 (sm_86) in graph mode it does not: two
     fresh plain engines on the same config and prompts agreed on 3 of 4 prompts,
-    diverging at prompt 2 token 31, and the Uno arms diverged at the same
-    prompt and token. A test that demands 4 of 4 from Uno there cannot tell an
-    Uno defect from the baseline's own spread.
+    diverging at prompt 2 token 31, and the Uno arms diverged at the same prompt
+    and token. A test that demands 4 of 4 from Uno there cannot tell an Uno
+    defect from the baseline's own spread.
 
-    So: when the control is perfect the candidate must be perfect too, and
-    otherwise the candidate must be no worse than the control. A candidate that
-    is worse is a real finding; a candidate that matches the control's
-    imperfection is the card, and the authoritative correctness claim for that
-    regime belongs to a sampled gate, not to this one.
+    The judgment is per prompt, not per count: every prompt the candidate
+    diverges at must be a prompt the control also diverged at. Comparing counts
+    would pass a candidate that broke a prompt the control reproduced exactly
+    whenever the control happened to diverge somewhere else -- control {p2},
+    candidate {p0}, three matches each. Containment also covers the
+    deterministic regime without a special case: an empty control admits only an
+    empty candidate.
     """
-    if control_matched == total:
-        ok = candidate_matched == total
+    control_prompts = {prompt for prompt, _ in control_divergences}
+    candidate_prompts = {prompt for prompt, _ in candidate_divergences}
+    extra = sorted(candidate_prompts - control_prompts)
+    ok = not extra
+    control_text = format_divergences(sorted(control_divergences)) or "none"
+    candidate_text = format_divergences(sorted(candidate_divergences)) or "none"
+    if ok:
         reason = (
-            f"control is exact ({control_matched}/{total}), so the candidate "
-            f"must be too; it matched {candidate_matched}/{total}"
+            f"candidate divergences {candidate_text} are contained in the "
+            f"plain control's {control_text} over {total} prompts"
         )
     else:
-        ok = candidate_matched >= control_matched
         reason = (
-            f"control is not exact ({control_matched}/{total}), so exact-token "
-            "equality is not an instrument in this regime; the candidate must "
-            f"at least match the control and it matched {candidate_matched}/"
-            f"{total}"
+            f"candidate diverges at prompts {extra} that the plain control "
+            f"reproduced exactly: candidate {candidate_text} against control "
+            f"{control_text} over {total} prompts"
         )
     return ok, reason
 

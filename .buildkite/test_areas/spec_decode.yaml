@@ -111,6 +111,18 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode/speculators/
     - pytest -v -s v1/e2e/spec_decode/mtp/
+    # test_uno.py's greedy matrix measures the plain engine's own
+    # reproducibility before judging Uno against it, because exact-token
+    # equality is not an instrument on a card that does not reproduce itself
+    # (measured: an RTX 3090 in graph mode agreed with itself on 3 of 4
+    # prompts). Two of the control arms are extra passes through the reference
+    # engine and cost seconds; the third builds a separate plain engine and
+    # costs one model load per case it runs on. It runs on one representative
+    # case by default, which measured ~1,514 s for the 7-case matrix on an RTX
+    # 3090 plus roughly 80 s for that engine. Set
+    # VLLM_UNO_GREEDY_CONTROL_ENGINES=2 to run it on every case (about +50% on
+    # the matrix, which does not fit this step's 50-minute budget beside the
+    # two suites above); the GPU lease lanes set it, CI does not.
     - pytest -v -s v1/e2e/spec_decode/test_uno.py
   mirror:
     amd:

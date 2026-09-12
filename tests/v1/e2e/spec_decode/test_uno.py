@@ -52,6 +52,7 @@ from .uno_kv_budget import (
     allocatable_blocks,
     engine_minimum_kv_bytes,
     exact_token_verdict,
+    format_divergences,
     kv_bytes_per_block,
     mid_generation_preemption_counts,
     mixed_admission_blocks,
@@ -90,6 +91,9 @@ _TRACE_FREE_BLOCK_THRESHOLD = 2
 # beside another model, and the one that asks for the receipt as a file.
 _GPU_MEMORY_ENV = "VLLM_UNO_SURVIVOR_GPU_MEMORY_UTILIZATION"
 _RECEIPT_ENV = "VLLM_UNO_SURVIVOR_RECEIPT"
+# Set to "2" to run the greedy matrix's separate-plain-engine control on every
+# case instead of only the representative one; see the matrix case's comment.
+_CONTROL_ENGINES_ENV = "VLLM_UNO_GREEDY_CONTROL_ENGINES"
 
 
 def _gpu_memory_utilization_from_env(
@@ -212,7 +216,6 @@ def _render_receipt(mixed: "_MixedPhase", geometry: str, metrics: str) -> str:
         f"final_lengths={mixed.final_lengths}",
         f"preempted_while_active={mixed.preempted_while_active}, "
         f"preemption_events={mixed.preemption_events}",
-        f"peer_preemptions_final={mixed.peer_preemptions_final}, "
         f"polled_preemptions={mixed.polled_preemptions}, "
         f"peer_statuses_seen={mixed.peer_statuses_seen}",
         f"internal_request_ids={mixed.internal_request_ids}",
@@ -410,8 +413,6 @@ class _MixedPhase:
     # the counter poll missed the step it happened on.
     scheduler_request_ids_last: tuple[str, ...] = ()
     peer_statuses_seen: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    # Final `num_preemptions` per finish peer, read once at the end.
-    peer_preemptions_final: dict[str, int] = field(default_factory=dict)
     # Bounded per-step trace: the steps around the fullest pool and the last
     # steps of the run, which is where a non-firing crossing has to be read.
     trace: list[str] = field(default_factory=list)
@@ -483,8 +484,13 @@ def _run_survivor_with_peers(
     def _record_preemption(request, timestamp, drop_stale_output=False):
         generated = len(request.output_token_ids)
         external = external_of.get(request.request_id)
+        # The hook runs inside `engine.step()`, before the loop below counts
+        # that step, so the step being executed is `phase.steps + 1`. Labelling
+        # it `phase.steps` put every hook line one step behind the trace line
+        # for the same step.
+        step = phase.steps + 1
         phase.all_preemptions.append(
-            f"step {phase.steps}: {request.request_id} "
+            f"step {step}: {request.request_id} "
             f"(external={external}) preempted at {generated} generated tokens, "
             f"status={request.status.name}, "
             f"free={block_pool.get_num_free_blocks()}, "
@@ -498,9 +504,6 @@ def _run_survivor_with_peers(
             # mid-generation question.
             phase.preempted_while_active[external] = (
                 phase.preempted_while_active.get(external, 0) + 1
-            )
-            phase.peer_preemptions_final[external] = (
-                phase.peer_preemptions_final.get(external, 0) + 1
             )
             if len(notable_trace) < _TRACE_NOTABLE_STEPS:
                 notable_trace.append(phase.all_preemptions[-1])
@@ -669,9 +672,12 @@ def _drive_mixed_phase(
             engine.abort_request([abort_id])
             aborted = True
 
-        # The hook records the events; this poll only cross-checks that the
-        # counter it can still see agrees with what the hook captured, so a
-        # future engine that stops calling `_preempt_request` is visible.
+        # The hook records the events; this poll re-reads `num_preemptions` on
+        # the same requests. Both it and `vllm:num_preemptions` are incremented
+        # inside `_preempt_request`, so this is NOT an independent channel: it
+        # catches this driver's own wiring breaking (a hook that stopped firing
+        # while the counter still moved), not an engine that preempts by some
+        # other path. Nothing here would see that.
         for request_id in finish_ids:
             request = peers[request_id]
             if request is None:
@@ -1214,6 +1220,10 @@ def test_uno_greedy_matches_base_model(
     # A captured decode graph exists only when some capture size fits the
     # max_num_seqs * k draft rows; --enforce-eager removes every capture size.
     expect_graphs = (not enforce_eager) and min(capture_sizes) <= max_num_seqs * k
+    # One case carries the expensive control by default: K=8 with graphs and no
+    # dual stream, which is the regime the sm_86 evidence found nondeterministic
+    # and the one the production path uses.
+    representative_case = k == 8 and not enforce_eager and not dual_stream
     common = dict(
         revision=MODEL_REVISION,
         dtype="bfloat16",
@@ -1242,58 +1252,57 @@ def test_uno_greedy_matches_base_model(
     )
 
     # Keep the same LoRA infrastructure in the reference without a target adapter.
-    # Sequential runner contexts release the first engine before loading the second.
+    # Sequential runner contexts release the first engine before loading the next.
+    #
+    # The instrument's own noise floor is measured, not assumed. Greedy
+    # exact-token equality is only evidence where the plain engine reproduces
+    # itself, and on an RTX 3090 (sm_86) in graph mode it does not: two plain
+    # engines on the same config and prompts agreed on 3 of 4 prompts, diverging
+    # at prompt 2 token 31, which is where the Uno arms diverged too. Two cheap
+    # in-engine repeats run on every case; the expensive arm -- a separate plain
+    # engine, which is the comparison Uno is actually subject to -- runs on the
+    # representative K=8 graph case, and on every case when
+    # VLLM_UNO_GREEDY_CONTROL_ENGINES=2 asks for it.
+    second_control_engine = (
+        os.environ.get(_CONTROL_ENGINES_ENV) == "2" or representative_case
+    )
     with vllm_runner("Qwen/Qwen3-8B", **common) as reference:
         ref_outputs = [reference.llm.chat(batch, **chat_kwargs) for batch in batches]
+        # Two further passes through the SAME engine: no build cost, and they
+        # catch a plain engine that cannot reproduce itself within one process.
+        repeat_outputs = [
+            [reference.llm.chat(batch, **chat_kwargs) for batch in batches]
+            for _ in range(2)
+        ]
     prompt_lengths = [len(output.prompt_token_ids) for output in ref_outputs[0]]
     assert len(set(prompt_lengths)) > 1
     assert max(prompt_lengths) > prefill_budget
 
-    # The instrument's own noise floor, measured the same way the Uno
-    # comparison is measured: a second plain engine, same config, same prompts,
-    # same process, built after the first was released. Greedy exact-token
-    # equality is only evidence where this control is perfect. On an RTX 3090
-    # (sm_86) in graph mode it is not -- two plain engines agreed on 3 of 4
-    # prompts, diverging at prompt 2 token 31, which is the same coordinate the
-    # Uno arms diverged at -- so the comparison below is judged against it
-    # rather than against an assumption.
-    with vllm_runner("Qwen/Qwen3-8B", **common) as plain_repeat:
-        repeat_outputs = [
-            plain_repeat.llm.chat(batch, **chat_kwargs) for batch in batches
-        ]
-    control_matches: list[int] = []
-    control_divergences: list[list[str]] = []
-    for ref_batch, repeat_batch in zip(ref_outputs, repeat_outputs):
-        matched, divergences = token_agreement(
-            [list(output.outputs[0].token_ids) for output in ref_batch],
-            [list(output.outputs[0].token_ids) for output in repeat_batch],
-        )
-        control_matches.append(matched)
-        control_divergences.append(divergences)
+    def _ids(batch_outputs):
+        return [list(output.outputs[0].token_ids) for output in batch_outputs]
+
+    control_arms: list[str] = ["repeat_1", "repeat_2"]
+    control_divergences: list[set[tuple[int, int]]] = [set() for _ in batches]
+    for arm_outputs in repeat_outputs:
+        for batch_index, (ref_batch, arm_batch) in enumerate(
+            zip(ref_outputs, arm_outputs)
+        ):
+            _matched, divergences = token_agreement(_ids(ref_batch), _ids(arm_batch))
+            control_divergences[batch_index].update(divergences)
+
     device_name = torch.cuda.get_device_name(0)
     capability = torch.cuda.get_device_capability(0)
-    instrument_receipt = (
-        f"uno greedy instrument: K={k}, card={device_name}, "
-        f"sm_{capability[0]}{capability[1]}, enforce_eager={enforce_eager}, "
-        f"graphs_expected={expect_graphs}, "
-        f"prefix_cache={enable_prefix_caching}, "
-        f"plain_control="
-        f"{[f'{m}/{len(batch)}' for m, batch in zip(control_matches, ref_outputs)]}, "
-        f"control_divergences={control_divergences}"
-    )
-    print(instrument_receipt)
-    if any(
-        matched < len(batch) for matched, batch in zip(control_matches, ref_outputs)
-    ):
-        # Not a skip: the rest of this case (acceptance, graphs, the LoRA plan
-        # cache, the adapter-disabled control) is still valid evidence, and the
-        # exact-token comparison is still run -- it just cannot demand more of
-        # Uno than the plain engine demands of itself.
-        print(
-            "uno greedy instrument: exact-token equality is NOT an instrument "
-            "in this regime; the plain engine does not agree with itself. The "
-            "authoritative correctness claim for this card and mode belongs to "
-            "a sampled gate (see the module docstring), not to this case."
+
+    def instrument_receipt() -> str:
+        """What this comparison could and could not measure, as one line."""
+        return (
+            f"uno greedy instrument: K={k}, card={device_name}, "
+            f"sm_{capability[0]}{capability[1]}, enforce_eager={enforce_eager}, "
+            f"graphs_expected={expect_graphs}, "
+            f"prefix_cache={enable_prefix_caching}, control_arms={control_arms}, "
+            "control_divergences="
+            f"{[format_divergences(sorted(batch)) for batch in control_divergences]}"
+            f", prompts_per_batch={[len(batch) for batch in ref_outputs]}"
         )
 
     with vllm_runner(
@@ -1349,24 +1358,24 @@ def test_uno_greedy_matches_base_model(
                 assert abs(adapter_off_acceptance - trained_acceptance[-1]) < 0.5
             # Judged against the same noise floor as the Uno comparison: the
             # adapter-disabled arm is still an engine-to-engine comparison.
-            adapter_off_matched, adapter_off_divergences = token_agreement(
-                [list(output.outputs[0].token_ids) for output in ref_outputs[-1]],
-                [list(output.outputs[0].token_ids) for output in adapter_off_outputs],
+            adapter_off_control = sorted(control_divergences[-1])
+            _matched, adapter_off_divergences = token_agreement(
+                _ids(ref_outputs[-1]), _ids(adapter_off_outputs)
             )
             assert_request_outputs_match(
                 ref_outputs[-1],
                 adapter_off_outputs,
-                required_matches=min(control_matches[-1], len(adapter_off_outputs)),
+                required_matches=len(ref_outputs[-1]) - len(adapter_off_control),
                 context="adapter-disabled",
             )
             ok, reason = exact_token_verdict(
-                control_matches[-1], adapter_off_matched, len(ref_outputs[-1])
+                adapter_off_control, adapter_off_divergences, len(ref_outputs[-1])
             )
-            assert ok, (
-                f"adapter-disabled: {reason}. Divergences "
-                f"{adapter_off_divergences} against plain-control "
-                f"{control_divergences[-1]}.\n{instrument_receipt}"
+            print(
+                "adapter-disabled: divergences "
+                f"{format_divergences(adapter_off_divergences)}; {reason}"
             )
+            assert ok, f"adapter-disabled: {reason}.\n{instrument_receipt()}"
         states = speculative.llm.llm_engine.collective_rpc(_uno_execution_state)
         assert all(state["shared_model"] for state in states)
         assert all(
@@ -1396,33 +1405,61 @@ def test_uno_greedy_matches_base_model(
             assert all(state["draft_eager_proposals"] > 0 for state in states), states
         print(f"Uno execution state: {states}")
 
+    if second_control_engine:
+        # Built AFTER the Uno engine on purpose. In round 13 the plain control
+        # was engine 2 and Uno engine 3, so whatever build-order state exists in
+        # a process was charged to Uno alone; here Uno is engine 2 and the plain
+        # control engine 3, so the asymmetry runs the other way. The in-engine
+        # repeats above carry no build-order component at all.
+        with vllm_runner("Qwen/Qwen3-8B", **common) as plain_second:
+            second_outputs = [
+                plain_second.llm.chat(batch, **chat_kwargs) for batch in batches
+            ]
+        control_arms.append("second_engine_after_uno")
+        for batch_index, (ref_batch, second_batch) in enumerate(
+            zip(ref_outputs, second_outputs)
+        ):
+            _matched, divergences = token_agreement(_ids(ref_batch), _ids(second_batch))
+            control_divergences[batch_index].update(divergences)
+
+    print(instrument_receipt())
+    if any(control_divergences):
+        # Not a skip: acceptance, graph state, the LoRA plan cache and the
+        # adapter-disabled arm are still evidence. Only the exact-token
+        # comparison is bounded, and it is still run.
+        print(
+            "uno greedy instrument: the plain engine does not reproduce itself "
+            "on these prompts, so exact-token equality is NOT an instrument in "
+            "this regime; Uno is held to containment within the control's "
+            "divergences, and the authoritative correctness claim for this card "
+            "and mode belongs to a sampled gate (see the module docstring)."
+        )
+
     for batch_index, (ref_batch, spec_batch) in enumerate(
         zip(ref_outputs, spec_outputs)
     ):
         context = (
             f"Uno K={k}, prefix_cache={enable_prefix_caching}, batch={batch_index}"
         )
-        control_matched = control_matches[batch_index]
+        control_batch = sorted(control_divergences[batch_index])
         uno_matched, uno_divergences = token_agreement(
-            [list(output.outputs[0].token_ids) for output in ref_batch],
-            [list(output.outputs[0].token_ids) for output in spec_batch],
+            _ids(ref_batch), _ids(spec_batch)
         )
         # Text matches are held to the same floor: where the plain engine does
         # not reproduce itself, neither comparison can demand more of Uno.
         assert_request_outputs_match(
             ref_batch,
             spec_batch,
-            required_matches=min(control_matched, len(ref_batch)),
+            required_matches=len(ref_batch) - len(control_batch),
             context=context,
         )
-        ok, reason = exact_token_verdict(control_matched, uno_matched, len(ref_batch))
-        assert ok, (
-            f"{context}: {reason}. Uno divergences {uno_divergences} against "
-            f"plain-control divergences {control_divergences[batch_index]} "
-            f"(p is the prompt index, t the first differing token).\n"
-            f"{instrument_receipt}"
-        )
+        ok, reason = exact_token_verdict(control_batch, uno_divergences, len(ref_batch))
+        # Printed on the passing path too: a green run must still say where Uno
+        # diverged and what the floor was, or the next reader cannot tell a
+        # clean card from a bounded one.
         print(
-            f"{context}: exact tokens uno={uno_matched}/{len(ref_batch)} "
-            f"control={control_matched}/{len(ref_batch)}; {reason}"
+            f"{context}: exact tokens uno={uno_matched}/{len(ref_batch)}, "
+            f"uno_divergences={format_divergences(uno_divergences)}, "
+            f"control_divergences={format_divergences(control_batch)}; {reason}"
         )
+        assert ok, f"{context}: {reason}.\n{instrument_receipt()}"

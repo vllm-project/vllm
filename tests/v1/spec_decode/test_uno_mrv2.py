@@ -810,45 +810,51 @@ def test_token_agreement_counts_prompts_and_locates_the_first_divergence():
     candidate = [list(row) for row in reference]
     candidate[2][31] = 7
     matched, divergences = budget.token_agreement(reference, candidate)
-    assert (matched, divergences) == (3, ["p2/t31"])
+    assert (matched, divergences) == (3, [(2, 31)])
+    assert budget.format_divergences(divergences) == ["p2/t31"]
 
     # A truncated output diverges at the length of the shorter sequence.
     matched, divergences = budget.token_agreement([[1, 2, 3]], [[1, 2]])
-    assert (matched, divergences) == (0, ["p0/t2"])
+    assert (matched, divergences) == (0, [(0, 2)])
 
     with pytest.raises(AssertionError):
         budget.token_agreement([[1]], [[1], [2]])
 
 
 @pytest.mark.parametrize(
-    ("control", "candidate", "total", "expected"),
+    ("control", "candidate", "expected"),
     [
-        # Deterministic regime: the control is exact, so Uno must be exact.
-        (4, 4, 4, True),
-        (4, 3, 4, False),
-        # Non-deterministic regime (sm_86 graph mode): the control is 3/4, so
-        # Uno may be 3/4 but not 2/4, and 4/4 is better than the floor.
-        (3, 3, 4, True),
-        (3, 4, 4, True),
-        (3, 2, 4, False),
-        (0, 0, 4, True),
+        # Deterministic regime: an empty control admits only an empty candidate.
+        ([], [], True),
+        ([], [(0, 5)], False),
+        # Non-deterministic regime (sm_86 graph mode): the control diverges at
+        # prompt 2, so Uno may diverge there (at any token) and nowhere else.
+        ([(2, 31)], [(2, 31)], True),
+        ([(2, 31)], [(2, 55)], True),
+        ([(2, 31)], [], True),
+        ([(2, 31)], [(0, 12)], False),
+        # The count comparison this replaced passed exactly this row: three
+        # matches each, but Uno broke a prompt the control reproduced.
+        ([(2, 31)], [(0, 12), (2, 31)], False),
     ],
 )
-def test_exact_token_verdict_is_judged_against_the_control(
-    control, candidate, total, expected
+def test_exact_token_verdict_contains_divergences_per_prompt(
+    control, candidate, expected
 ):
-    """Exact-token equality is only demanded where the plain engine is exact.
+    """Uno may only diverge where the plain engine already diverges.
 
-    The inverted rows are the ones that matter: a candidate worse than the
-    control fails in either regime, and a perfect control still demands a
-    perfect candidate, so the relaxation cannot hide a real regression.
+    Comparing counts let a candidate that broke a prompt the control reproduced
+    pass whenever the control happened to diverge somewhere else; containment is
+    per prompt, so that row now fails while a candidate that merely reproduces
+    the control's own unreliability still passes.
     """
     from tests.v1.e2e.spec_decode import uno_kv_budget as budget
 
-    ok, reason = budget.exact_token_verdict(control, candidate, total)
+    ok, reason = budget.exact_token_verdict(control, candidate, 4)
     assert ok is expected, reason
-    assert f"{candidate}/{total}" in reason
-    assert ("control is exact" in reason) is (control == total)
+    assert "4 prompts" in reason
+    if not ok:
+        assert "reproduced exactly" in reason
 
 
 def test_survivor_receipt_renders_before_the_engine_exists(tmp_path, monkeypatch):
