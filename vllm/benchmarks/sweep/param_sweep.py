@@ -131,26 +131,31 @@ class ParameterSweepItem(dict[str, object]):
             if isinstance(v, dict):
                 v = json.dumps(v)
 
-            for k_candidate in self._iter_cmd_key_candidates(k):
-                try:
-                    k_idx = cmd.index(k_candidate)
+            candidates = set(self._iter_cmd_key_candidates(k))
+            is_flag = isinstance(v, bool) and "." not in k
+            if is_flag:
+                candidates.update(self._iter_cmd_key_candidates("no-" + k))
 
-                    # Replace existing parameter
-                    normalized = self._normalize_cmd_kv_pair(k, v)
-                    if len(normalized) == 1:
-                        # Boolean flag
-                        cmd[k_idx] = normalized[0]
-                    else:
-                        # Key-value pair
-                        cmd[k_idx] = normalized[0]
-                        cmd[k_idx + 1] = normalized[1]
-
-                    break
-                except ValueError:
+            normalized = self._normalize_cmd_kv_pair(k, v)
+            updated_cmd: list[str] = []
+            replaced = False
+            args = iter(cmd)
+            for arg in args:
+                key, separator, _ = arg.partition("=")
+                if key not in candidates:
+                    updated_cmd.append(arg)
                     continue
-            else:
-                # Add new parameter
-                cmd.extend(self._normalize_cmd_kv_pair(k, v))
+
+                # Dotted booleans consume a value, unlike top-level flags.
+                if not separator and not is_flag:
+                    next(args)
+                if not replaced:
+                    updated_cmd.extend(normalized)
+                    replaced = True
+
+            if not replaced:
+                updated_cmd.extend(normalized)
+            cmd = updated_cmd
 
         return cmd
 
