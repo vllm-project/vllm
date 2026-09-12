@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -276,6 +277,13 @@ class Scheduler(SchedulerInterface):
             f"Prefix replay windows must agree: {sorted(replay_windows)}"
         )
         self.prefix_replay_spec = replay_specs[0] if replay_specs else None
+        # A KV load failure rewinds a request to its first invalid block. Only
+        # a single KV cache group maps positions to blocks directly enough to
+        # resume there in place; hybrid groups (sliding windows, replay,
+        # recurrent states) start the request over from the prefix cache.
+        self.kv_load_failure_rewinds_in_place = (
+            len(kv_cache_config.kv_cache_groups) == 1
+        )
         # Positions past the computed tokens that the drafter reads mid-prefill.
         # Eagle-family drafters read 1 ahead, but multi-module MTP reads
         # num_spec_tokens ahead at chunked-prefill boundaries. Determines the
@@ -2983,6 +2991,7 @@ class Scheduler(SchedulerInterface):
             if request.num_computed_tokens:
                 # Cache any valid computed tokens.
                 self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
+            if request.num_computed_tokens and self.kv_load_failure_rewinds_in_place:
                 if self.needs_kv_cache_zeroing:
                     # The failed load left the blocks beyond the valid
                     # prefix unwritten and their zeroing was skipped; zero
@@ -2991,11 +3000,13 @@ class Scheduler(SchedulerInterface):
                         request.request_id, request.num_computed_tokens
                     )
             else:
-                # No valid computed tokens, release allocated blocks.
-                # There may be a local cache hit on retry.
+                # Release the blocks and start over: the prefix-cache lookup
+                # re-adopts the prefix cached above (hybrid groups cannot
+                # resume mid-prompt) or hits locally on retry.
                 # (Freed blocks are re-recorded for zeroing when
                 # reallocated, so the skipped blocks need no handling.)
                 self.kv_cache_manager.free(request)
+                request.num_computed_tokens = 0
 
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
@@ -3118,68 +3129,54 @@ class Scheduler(SchedulerInterface):
         # these requests must be rescheduled, but only the first will recompute
         # it. This set tracks blocks already marked for recomputation.
         marked_invalid_block_ids: set[int] = set()
+        kv_cache_groups = self.kv_cache_config.kv_cache_groups
         for request in requests:
-            is_affected = False
-            marked_invalid_block = False
             req_id = request.request_id
-            # TODO (davidb): add support for hybrid memory allocator
-            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
             # We iterate only over blocks that may contain externally computed
-            # tokens
+            # tokens. A replayed hit (SWA bounded replay) recomputes its tail
+            # without rewriting the loaded KV, so those blocks stay in scope.
             req_num_computed_tokens = (
                 request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0)
             )
+            num_loaded_tokens = max(req_num_computed_tokens, request.replay_end)
+            block_ids_per_group = self.kv_cache_manager.get_block_ids(req_id)
+            is_affected = False
+            # The request resumes before its earliest invalid block, whichever
+            # group holds it.
+            num_valid_tokens = req_num_computed_tokens
+            for group, block_ids in zip(kv_cache_groups, block_ids_per_group):
+                block_size = group.kv_cache_spec.block_size
+                num_loaded_blocks = cdiv(num_loaded_tokens, block_size)
+                for idx, block_id in enumerate(block_ids[:num_loaded_blocks]):
+                    if block_id not in invalid_block_ids:
+                        continue
+                    is_affected = True
+                    if block_id in marked_invalid_block_ids:
+                        # This invalid block is shared with a previous request
+                        # and was already marked for recomputation.
+                        # This means this request can still consider this block
+                        # as computed when rescheduled.
+                        # Currently this only applies to sync loading; Async
+                        # loading does not yet support block sharing
+                        continue
+                    marked_invalid_block_ids.add(block_id)
+                    num_valid_tokens = min(num_valid_tokens, idx * block_size)
+            if not is_affected:
+                continue
 
-            req_num_computed_blocks = (
-                req_num_computed_tokens + self.block_size - 1
-            ) // self.block_size
-            for idx, block_id in zip(range(req_num_computed_blocks), req_block_ids):
-                if block_id not in invalid_block_ids:
-                    continue
-
-                is_affected = True
-
-                if block_id in marked_invalid_block_ids:
-                    # This invalid block is shared with a previous request
-                    # and was already marked for recomputation.
-                    # This means this request can still consider this block
-                    # as computed when rescheduled.
-                    # Currently this only applies to sync loading; Async
-                    # loading does not yet support block sharing
-                    continue
-
-                marked_invalid_block_ids.add(block_id)
-
-                if marked_invalid_block:
-                    # This request has already marked an invalid block for
-                    # recomputation and updated its num_computed_tokens.
-                    continue
-
-                marked_invalid_block = True
-                # Truncate the computed tokens at the first failed block
-                request.num_computed_tokens = idx * self.block_size
-                num_affected_tokens = (
-                    req_num_computed_tokens - request.num_computed_tokens
-                )
-                total_affected_tokens += num_affected_tokens
-
-                # collect invalid block and all downstream dependent blocks
-                if evict_blocks:
-                    blocks_to_evict.update(req_block_ids[idx:])
-
-            if is_affected:
-                if not marked_invalid_block:
-                    # All invalid blocks of this request are shared with
-                    # previous requests and will be recomputed by them.
-                    # Revert to considering only cached tokens as computed.
-                    # Currently this only applies to sync loading; Async
-                    # loading does not yet support block sharing
-                    total_affected_tokens += (
-                        request.num_computed_tokens - req_num_computed_tokens
-                    )
-                    request.num_computed_tokens = req_num_computed_tokens
-
-                affected_req_ids.add(request.request_id)
+            if evict_blocks:
+                # The invalid blocks and everything downstream of them, in
+                # every group (full blocks past the loaded range are cached
+                # at admission too).
+                for group, block_ids in zip(kv_cache_groups, block_ids_per_group):
+                    first = num_valid_tokens // group.kv_cache_spec.block_size
+                    blocks_to_evict.update(block_ids[first:])
+            # A request whose invalid blocks are all recomputed by earlier
+            # requests only drops this step's tokens (num_valid_tokens ==
+            # req_num_computed_tokens).
+            total_affected_tokens += request.num_computed_tokens - num_valid_tokens
+            request.num_computed_tokens = num_valid_tokens
+            affected_req_ids.add(req_id)
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
 
@@ -3225,10 +3222,12 @@ class Scheduler(SchedulerInterface):
         if not total_failed_requests:
             return set()
 
-        # evict invalid blocks and downstream dependent blocks from cache
-        # only when not using recompute policy (where blocks will be recomputed
-        # and reused by other requests sharing them)
-        if sync_blocks_to_evict and not self.recompute_kv_load_failures:
+        # Evict the invalid blocks and everything downstream of them, unless
+        # the affected requests rewrite them in place (other requests sharing
+        # them then wait for the rewrite).
+        if sync_blocks_to_evict and (
+            should_fail or not self.kv_load_failure_rewinds_in_place
+        ):
             self.kv_cache_manager.evict_blocks(sync_blocks_to_evict)
 
         if should_fail:
@@ -3248,6 +3247,18 @@ class Scheduler(SchedulerInterface):
             total_failed_requests,
             total_failed_tokens,
         )
+
+        if not self.kv_load_failure_rewinds_in_place:
+            # Start the affected running requests over; their valid prefix is
+            # still cached, so the prefix-cache lookup re-adopts it. Preempt in
+            # reverse so the waiting queue keeps their order.
+            timestamp = time.monotonic()
+            for request in reversed(self.running):
+                if request.request_id in sync_failed_req_ids:
+                    self._preempt_request(request, timestamp, drop_stale_output=True)
+            self.running = [
+                req for req in self.running if req.request_id not in sync_failed_req_ids
+            ]
 
         # Mark async requests with KV load failures for retry once loading completes
         self.failed_recving_kv_req_ids |= async_failed_req_ids

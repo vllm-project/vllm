@@ -294,3 +294,83 @@ def test_chunk_ending_at_the_hit_allocates_nothing():
 def test_replay_windows_must_agree():
     with pytest.raises(AssertionError, match="replay windows"):
         _replay_scheduler(windows=(WINDOW, WINDOW // 2))
+
+
+def _failed_block(scheduler: Scheduler, request, block_idx: int) -> int:
+    """Block id of one of the request's loaded full-attention blocks."""
+    blocks = scheduler.kv_cache_manager.get_blocks(request.request_id).blocks[FULL]
+    return blocks[block_idx].block_id
+
+
+def test_sync_kv_load_failure_readmits_the_request():
+    """A failed sync load cannot rewind a hybrid request in place (the window
+    group holds no blocks below the replayed range), so the request starts
+    over and its next admission hits the prefix that did load."""
+    matched = 64
+    scheduler = _replay_scheduler(
+        use_kv_connector=MockKVConfig(matched_tokens=matched, is_async=False)
+    )
+    scheduler.recompute_kv_load_failures = True
+    request = create_requests(
+        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
+    )[0]
+    scheduler.add_request(request)
+    out = scheduler.schedule()
+    assert _new_req_data(out, request).replay_end == matched
+
+    # The block holding positions [32, 48) failed to load.
+    failed = _failed_block(scheduler, request, 2)
+    scheduler.update_from_output(
+        out, create_model_runner_output([request], invalid_block_ids={failed})
+    )
+    assert request.status == RequestStatus.PREEMPTED
+    assert request.num_computed_tokens == 0
+    assert not scheduler.running
+
+    out = scheduler.schedule()
+    new_req = _new_req_data(out, request)
+    # [0, 32) stayed cached and is hit again (the failed block was evicted);
+    # the connector offers `matched` more, and the hit replays its last window.
+    hit = 2 * BLOCK_SIZE + matched
+    assert new_req.num_computed_tokens == hit - WINDOW
+    assert (new_req.replay_start, new_req.replay_end) == (hit - WINDOW, hit)
+    assert out.num_scheduled_tokens[request.request_id] == NUM_PROMPT_TOKENS - (
+        hit - WINDOW
+    )
+
+
+def test_async_kv_load_failure_readmits_the_request():
+    """A partially failed async load keeps its valid prefix in the cache and
+    re-admits the request through the prefix-cache lookup."""
+    matched = 64
+    scheduler = _replay_scheduler(
+        use_kv_connector=MockKVConfig(matched_tokens=matched, is_async=True)
+    )
+    scheduler.recompute_kv_load_failures = True
+    request = create_requests(
+        num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
+    )[0]
+    scheduler.add_request(request)
+    out = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    failed = _failed_block(scheduler, request, 2)
+    scheduler.update_from_output(
+        out,
+        create_model_runner_output(
+            [], finished_recving={request.request_id}, invalid_block_ids={failed}
+        ),
+    )
+    assert request.num_computed_tokens == 2 * BLOCK_SIZE
+
+    # Re-admission: the valid prefix is hit locally, the rest is loaded again.
+    out = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.update_from_output(
+        out, create_model_runner_output([], finished_recving={request.request_id})
+    )
+    out = scheduler.schedule()
+    new_req = _new_req_data(out, request)
+    hit = 2 * BLOCK_SIZE + matched
+    assert new_req.num_computed_tokens == hit - WINDOW
+    assert (new_req.replay_start, new_req.replay_end) == (hit - WINDOW, hit)
