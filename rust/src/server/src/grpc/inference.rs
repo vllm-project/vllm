@@ -35,6 +35,65 @@ struct PreparedGrpcRequest {
     started_at: Instant,
 }
 
+/// Keep producer metadata for matching EC items; leave unmatched inputs intact.
+fn apply_encoder_cache_placeholders(text_request: &mut TextRequest) {
+    let is_decode_kv_consumer = text_request
+        .sampling_params
+        .vllm_xargs
+        .as_ref()
+        .and_then(|args| args.get("kv_transfer_params"))
+        .and_then(|params| params.get("do_remote_prefill"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let ec_items = text_request
+        .sampling_params
+        .vllm_xargs
+        .as_ref()
+        .and_then(|args| args.get("ec_transfer_params"))
+        .and_then(|params| params.get("ec_items"))
+        .and_then(serde_json::Value::as_array)
+        .cloned();
+
+    // Decode uses EC metadata only to prepare the prompt; EngineCore consumes KV.
+    if is_decode_kv_consumer && let Some(args) = text_request.sampling_params.vllm_xargs.as_mut() {
+        args.remove("ec_transfer_params");
+    }
+
+    let Some(ec_items) = ec_items else {
+        return;
+    };
+    let Some(features) = text_request.mm_features.as_mut() else {
+        return;
+    };
+    let ec_items_by_hash: std::collections::HashMap<_, _> = ec_items
+        .iter()
+        .filter_map(serde_json::Value::as_object)
+        .filter_map(|item| {
+            item.get("mm_hash")
+                .and_then(serde_json::Value::as_str)
+                .map(|mm_hash| (mm_hash, item))
+        })
+        .collect();
+
+    for feature in features.iter_mut() {
+        let Some(item) = ec_items_by_hash.get(feature.identifier.as_str()) else {
+            continue;
+        };
+        let Some(data) = feature.data.as_mut() else {
+            continue;
+        };
+        let metadata_keys: Vec<_> = data
+            .keys()
+            .filter(|key| key.as_str() != "mm_hash" && item.contains_key(key.as_str()))
+            .cloned()
+            .collect();
+        if metadata_keys.is_empty() {
+            continue;
+        }
+        data.retain(|key, _| metadata_keys.contains(key));
+    }
+}
+
 impl InferenceServiceImpl {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
@@ -90,22 +149,27 @@ impl InferenceServiceImpl {
                 })?);
             }
 
-            let media = convert::media_parts_from_request(media)?;
+            let media = super::media::from_proto(media)?;
             if !media.is_empty() {
                 let Prompt::TokenIds(mut token_ids) = text_request.prompt else {
                     return Err(Status::invalid_argument(
                         "multimodal gRPC requests must provide token_ids input",
                     ));
                 };
-                let mm_features = self
-                    .state
-                    .chat
-                    .prepare_media(media, &mut token_ids)
-                    .await
-                    .map_err(|error| Status::internal(error.to_report_string()))?;
+                let mm_features =
+                    self.state.chat.prepare_media(media, &mut token_ids).await.map_err(
+                        |error| {
+                            if error.is_request_validation_error() {
+                                Status::invalid_argument(error.to_report_string())
+                            } else {
+                                Status::internal(error.to_report_string())
+                            }
+                        },
+                    )?;
                 text_request.prompt = Prompt::TokenIds(token_ids);
                 text_request.mm_features = mm_features;
             }
+            apply_encoder_cache_placeholders(&mut text_request);
 
             Ok(text_request)
         }
@@ -181,12 +245,6 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             .instrument(request_span.clone())
             .await
             .map_err(|error| log_text_error(&request_span, started_at, "collection", error))?;
-        info!(
-            parent: &request_span,
-            elapsed_ms = started_at.elapsed().as_millis() as u64,
-            "gRPC inference request completed"
-        );
-
         // Build the single aggregated response.
         let prompt_info = convert::to_prompt_info(
             &collected.prompt_token_ids,
@@ -207,6 +265,11 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
             collected.logprobs.as_ref(),
             Some(&finish_info),
             &response_opts,
+        )?;
+        info!(
+            parent: &request_span,
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            "gRPC inference request completed"
         );
 
         Ok(Response::new(pb::GenerateResponse {
@@ -271,19 +334,21 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
                                     logprobs,
                                 },
                             finished,
-                        }) => Ok(pb::GenerateResponse {
+                        }) => convert::to_sequence_output(
+                            &decoded.text,
+                            &token_ids,
+                            logprobs.as_ref(),
+                            finished.as_deref(),
+                            &response_opts,
+                        )
+                        .map(|outputs| pb::GenerateResponse {
                             prompt_info: None,
-                            outputs: Some(convert::to_sequence_output(
-                                &decoded.text,
-                                &token_ids,
-                                logprobs.as_ref(),
-                                finished.as_deref(),
-                                &response_opts,
-                            )),
+                            outputs: Some(outputs),
                         }),
                     };
 
-                    if tx.send(response).await.is_err() {
+                    let failed = response.is_err();
+                    if tx.send(response).await.is_err() || failed {
                         break;
                     }
                 }

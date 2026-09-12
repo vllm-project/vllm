@@ -181,12 +181,12 @@ def test_token_budget_stall_restores_fcfs_order(
 ):
     scheduler = make_scheduler(
         max_num_seqs=4,
-        max_num_batched_tokens=1,
-        max_model_len=8192,
+        max_num_batched_tokens=4,
+        max_model_len=2048,
     )
     requests = add_requests(scheduler, ["blocker", "cold", "warm", "tail"])
     first_output = scheduler.schedule()
-    assert requests[0].request_id in first_output.num_scheduled_tokens
+    assert first_output.num_scheduled_tokens == {requests[0].request_id: 4}
     assert waiting_ids(scheduler) == ["1", "2", "3"]
 
     now = time.time()
@@ -199,5 +199,5 @@ def test_token_budget_stall_restores_fcfs_order(
 
     second_output = scheduler.schedule()
 
-    assert requests[2].request_id not in second_output.num_scheduled_tokens
+    assert second_output.num_scheduled_tokens == {requests[0].request_id: 4}
     assert waiting_ids(scheduler) == ["1", "2", "3"]

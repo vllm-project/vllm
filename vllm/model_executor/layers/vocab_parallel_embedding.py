@@ -11,6 +11,7 @@ from torch.nn.parameter import Parameter
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed import (
+    GroupCoordinator,
     divide,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -24,6 +25,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
     method_has_implemented_embedding,
+    resolve_quant_method,
 )
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.parameter import BasevLLMParameter
@@ -35,6 +37,8 @@ DEFAULT_VOCAB_PADDING_SIZE = 64
 
 class UnquantizedEmbeddingMethod(QuantizeMethodBase):
     """Unquantized method for embeddings."""
+
+    supports_pre_processed_weights = True
 
     def create_weights(
         self,
@@ -237,6 +241,7 @@ class VocabParallelEmbedding(PluggableLayer):
         prefix: full name of the layer in the state dict
         disable_tp: If true, tensor parallelism will be disabled for this layer.
         quant_method: Preselected quantization method for model-specific layers.
+        parallel_group: Process group used to shard and reduce the embedding.
     """  # noqa: E501
 
     # --8<-- [end:vocab_parallel_embedding]
@@ -253,13 +258,18 @@ class VocabParallelEmbedding(PluggableLayer):
         *,
         disable_tp: bool = False,
         quant_method: QuantizeMethodBase | None = None,
+        parallel_group: GroupCoordinator | None = None,
     ):
         super().__init__()
 
         # Keep the input dimensions.
         self.disable_tp = disable_tp
+        self.parallel_group = parallel_group
         if disable_tp:
             tp_rank, self.tp_size = 0, 1
+        elif parallel_group is not None:
+            tp_rank = parallel_group.rank_in_group
+            self.tp_size = parallel_group.world_size
         else:
             tp_rank = get_tensor_model_parallel_rank()
             self.tp_size = get_tensor_model_parallel_world_size()
@@ -289,7 +299,7 @@ class VocabParallelEmbedding(PluggableLayer):
         # Avoid overriding a preselected model-specific method with generic
         # config-based dispatch.
         if quant_method is None and quant_config is not None:
-            quant_method = quant_config.get_quant_method(self, prefix=prefix)
+            quant_method = resolve_quant_method(quant_config, self, prefix=prefix)
         if quant_method is None:
             quant_method = UnquantizedEmbeddingMethod()
 
@@ -460,8 +470,7 @@ class VocabParallelEmbedding(PluggableLayer):
         output_dim = getattr(param, "output_dim", None)
         packed_dim = getattr(param, "packed_dim", None)
 
-        # If parameter does not have output dim, then it should
-        # be copied onto all gpus (e.g. g_idx for act_order gptq).
+        # Parameters without an output dimension are copied onto all GPUs.
         if output_dim is None:
             if (
                 loaded_weight.ndim == 0
@@ -533,10 +542,16 @@ class VocabParallelEmbedding(PluggableLayer):
                 # Each vocab token has one owner, so FP8 bytes can use int8 SUM.
                 comm_output = output_parallel.view(torch.int8)
                 comm_output.masked_fill_(input_mask.unsqueeze(-1), 0)
-                output = tensor_model_parallel_all_reduce(comm_output)
+                output = (
+                    self.parallel_group.all_reduce(comm_output)
+                    if self.parallel_group is not None
+                    else tensor_model_parallel_all_reduce(comm_output)
+                )
                 return output.view(output_parallel.dtype)
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
         # Reduce across all the model parallel GPUs.
+        if self.parallel_group is not None:
+            return self.parallel_group.all_reduce(output_parallel)
         return tensor_model_parallel_all_reduce(output_parallel)
 
     def extra_repr(self) -> str:
