@@ -19,6 +19,7 @@ Limitations:
 
 __all__ = [
     "record_metadata_for_reloading",
+    "make_deferred_module_factory",
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
@@ -30,6 +31,7 @@ from .layerwise import (
     finalize_layerwise_processing,
     finalize_layerwise_reload,
     initialize_layerwise_reload,
+    make_deferred_module_factory,
     record_metadata_for_reloading,
 )
 from .torchao_decorator import (

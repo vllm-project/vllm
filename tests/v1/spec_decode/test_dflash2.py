@@ -5,7 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from torch import nn
 
+from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
+from vllm.model_executor.models import qwen3_dflash
+from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
@@ -231,3 +235,85 @@ def test_dflash2_model_decoder_layer_cls(monkeypatch):
     # 4. Assert that the layers are DFlash2Qwen3DecoderLayer (the subclass)
     assert len(model.layers) == 2
     assert isinstance(model.layers[0], DFlash2Qwen3DecoderLayer)
+
+
+class _VocabModule(nn.Module):
+    def __init__(self, vocab_size: int, hidden_size: int, **_kwargs):
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(vocab_size, hidden_size))
+
+
+def _dflash_vocab_test_config(default_vllm_config):
+    hf_config = SimpleNamespace(
+        vocab_size=8,
+        draft_vocab_size=8,
+        hidden_size=4,
+        num_hidden_layers=0,
+        rms_norm_eps=1e-6,
+        eagle_config={"use_aux_hidden_state": False},
+    )
+    return SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            draft_model_config=SimpleNamespace(hf_config=hf_config)
+        ),
+        model_config=SimpleNamespace(
+            dtype=torch.float32,
+            get_num_layers=lambda _: 0,
+            get_vocab_size=lambda: 8,
+        ),
+        parallel_config=SimpleNamespace(),
+        compilation_config=default_vllm_config.compilation_config,
+    )
+
+
+def _patch_dflash_vocab_modules(monkeypatch):
+    monkeypatch.setattr(qwen3_dflash, "get_draft_quant_config", lambda _: None)
+    monkeypatch.setattr(qwen3_dflash, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(qwen3_dflash, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(qwen3_dflash, "VocabParallelEmbedding", _VocabModule)
+    monkeypatch.setattr(qwen3_dflash, "ParallelLMHead", _VocabModule)
+
+
+@pytest.mark.parametrize(
+    ("has_embed_tokens", "has_lm_head"),
+    [(False, False), (True, False), (False, True), (True, True)],
+)
+def test_dflash_initializes_only_checkpoint_owned_vocab_modules(
+    monkeypatch,
+    default_vllm_config,
+    has_embed_tokens: bool,
+    has_lm_head: bool,
+):
+    _patch_dflash_vocab_modules(monkeypatch)
+    vllm_config = _dflash_vocab_test_config(default_vllm_config)
+    model = DFlashQwen3ForCausalLM(vllm_config=vllm_config)
+    model.model._build_fused_kv_buffers = lambda: None
+
+    assert model.model.embed_tokens is None
+    assert model.lm_head is None
+    assert not model.has_own_embed_tokens
+    assert not model.has_own_lm_head
+
+    weights = []
+    if has_embed_tokens:
+        weights.append(("embed_tokens.weight", torch.full((8, 4), 2.0)))
+    if has_lm_head:
+        weights.append(("lm_head.weight", torch.full((8, 4), 3.0)))
+
+    with torch.device("meta"):
+        model.load_weights(weights)
+
+    assert model.has_own_embed_tokens is has_embed_tokens
+    assert model.has_own_lm_head is has_lm_head
+    assert (model.model.embed_tokens is not None) is has_embed_tokens
+    assert (model.lm_head is not None) is has_lm_head
+    if model.model.embed_tokens is not None:
+        assert (
+            "weight" in get_layerwise_info(model.model.embed_tokens).restore_metadata[0]
+        )
+        torch.testing.assert_close(
+            model.model.embed_tokens.weight, torch.full((8, 4), 2.0)
+        )
+    if model.lm_head is not None:
+        assert "weight" in get_layerwise_info(model.lm_head).restore_metadata[0]
+        torch.testing.assert_close(model.lm_head.weight, torch.full((8, 4), 3.0))
