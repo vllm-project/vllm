@@ -435,9 +435,9 @@ def _sample_recovered_tokens_kernel_impl(
     USE_FP64_GUMBEL=False,
 ):
     # USE_FP64_GUMBEL only controls the gumbel-noise precision, which the caller
-    # has already applied to `inv_q` (fp64 vs fp32). The CPU kernel consumes
-    # `inv_q` directly, so the flag is accepted for interface parity and the
-    # value is read at its existing dtype.
+    # has already applied to `inv_q` (fp64 vs fp32). The C++ kernel dispatches on
+    # that dtype, so `inv_q` is passed through unchanged to keep fp64 noise at
+    # full precision through the argmax, matching the Triton kernel.
     # C++ reads integer tensors as int64_t*; ensure correct dtype.
     orig_dtype = output_token_ids.dtype
     output_i64 = _ensure_int64(output_token_ids)
@@ -447,8 +447,7 @@ def _sample_recovered_tokens_kernel_impl(
         _ensure_int64(draft_token_ids),
         draft_probs,
         target_probs,
-        # C++ kernel reads inv_q as float32.
-        inv_q.to(torch.float32),
+        inv_q,
         vocab_size,
         NO_DRAFT_PROBS,
     )
