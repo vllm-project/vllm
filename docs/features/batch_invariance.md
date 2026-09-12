@@ -149,6 +149,28 @@ When batch invariance is enabled, vLLM:
 !!! note
     Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
 
+## Cross-Mode Numerical Variance
+
+Batch invariance makes the output deterministic inside one execution configuration. It does not make different configurations agree. Eager execution, `torch.compile` without CUDA graphs, and the default path with CUDA graphs use different kernels. Their outputs differ by a small amount for the same input.
+
+Three configurations matter:
+
+- `--enforce-eager`: turns off `torch.compile` and CUDA graphs.
+- `compilation_config=CompilationConfig(cudagraph_mode="NONE")`: keeps `torch.compile`, turns off CUDA graphs.
+- default: `torch.compile` with CUDA graphs.
+
+Each configuration gives the same output when you run it again. But two configurations do not give the same output as each other. For BF16 models, the top-1 logprob differs by about 0.1 to 0.5 between configurations. Tokens far down the list can differ more.
+
+### Greedy sampling at a near tie
+
+Sometimes the two best tokens are almost equal. The gap between them is then very small. A small cross-mode difference can change the selected token. If this happens at the sampled position, greedy decoding returns a different token in each configuration. This is normal variance between valid kernels. It is not a kernel bug. See [#55238](https://github.com/vllm-project/vllm/issues/55238) for a measured example.
+
+When you debug a report about different outputs across configurations:
+
+- Compare the top-1 logprob and the gap between the top two tokens at each position. Do not use the largest difference over the top-k logprobs. Tokens far down the list make that number large without any effect on the output.
+- Set the configuration explicitly on both sides of the comparison. Use `--enforce-eager` or `-cc.cudagraph_mode=NONE`. See [debugging vLLM compile](../design/debug_vllm_compile.md) for the exact flags.
+- `VLLM_BATCH_INVARIANT=1` removes variance from the batch shape. It does not make eager and compiled kernels agree.
+
 ## Future Improvements
 
 The batch invariance feature is under active development. Planned improvements include:
