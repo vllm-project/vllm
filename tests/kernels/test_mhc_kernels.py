@@ -119,9 +119,9 @@ def test_v41_dspark_head_collapses_with_last_ffn_mix(num_tokens, monkeypatch):
     carried_mixes = []
 
     def make_layer(mix):
-        def forward(hidden, positions, ids, pre, post, res, residual):
+        def forward(hidden, positions, ids, pre, post, res, residual, **kwargs):
             carried_mixes.append(pre)
-            return hidden, None, None, None, mix
+            return hidden, None, None, None, mix, None
 
         return forward
 
@@ -448,8 +448,70 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         fused_reference,
     )
     expected = decoder(x, positions, None, **kwargs)
-    for result, ref in zip(actual, expected, strict=True):
+    assert actual[-1] is None and expected[-1] is None
+    for result, ref in zip(actual[:-1], expected[:-1], strict=True):
         torch.testing.assert_close(result, ref, atol=2e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("entry", ["fused", "engram"])
+def test_deepseek_v41_capture_previous_aux(entry, monkeypatch, default_vllm_config):
+    """Read the aux hidden state back out of the seam that already computed it.
+
+    The draft model's input is the mean over hc streams of the previous
+    layer's post. That post now runs inside this layer's fused pre, so the
+    captured value must equal a standalone ``mhc_post_tilelang`` on the same
+    inputs -- and Engram must not be folded into it, since the injection
+    happens after the aux consumers read the stream.
+    """
+    set_random_seed(0)
+    decoder = DeepseekV41DecoderLayer.__new__(DeepseekV41DecoderLayer)
+    nn.Module.__init__(decoder)
+    decoder.hc_mult = 4
+    decoder.hc_sinkhorn_iters = 20
+    decoder.hc_eps = 1e-6
+    decoder.rms_norm_eps = 1e-6
+    decoder.hc_post_alpha = 2.0
+    decoder.use_sequence_parallel = False
+    decoder.engram = None
+    from vllm.model_executor.layers.layernorm import RMSNorm
+
+    decoder.attn_norm = decoder.ffn_norm = RMSNorm(5120, 1e-6).to(
+        device=DEVICE, dtype=torch.bfloat16
+    )
+    decoder.attn = lambda positions, x, _: x * 0.5
+    decoder.ffn = lambda x, input_ids: x * 0.25
+    with torch.device(DEVICE):
+        decoder.hc_attn_fn = torch.randn(24, 20480) * 0.02
+        decoder.hc_ffn_fn = torch.randn(24, 20480) * 0.02
+        decoder.hc_attn_scale = decoder.hc_ffn_scale = torch.ones(3)
+        decoder.hc_attn_base = torch.randn(24)
+        decoder.hc_ffn_base = torch.randn(24)
+        x = torch.randn(3, 5120, dtype=torch.bfloat16)
+        kwargs = dict(
+            pre_mix=torch.rand(3, 4),
+            residual=torch.randn(3, 4, 5120, dtype=torch.bfloat16),
+            post_mix=torch.rand(3, 4, 1),
+            res_mix=torch.rand(3, 4, 4),
+        )
+        if entry == "engram":
+
+            class FakeEngram(nn.Module):
+                layer_hash_index = 0
+
+                def forward(self, residual, hashes, mask):
+                    return residual + 0.125
+
+            decoder.engram = FakeEngram()
+            kwargs["engram_hashes"] = torch.zeros(3, 1, 1, dtype=torch.int32)
+        positions = torch.arange(3)
+
+    expected = torch.ops.vllm.mhc_post_tilelang(
+        x, kwargs["residual"], kwargs["post_mix"], kwargs["res_mix"]
+    ).mean(dim=1)
+    previous_aux = decoder(x, positions, None, **kwargs, capture_previous_aux=True)[-1]
+    torch.testing.assert_close(previous_aux, expected, atol=0, rtol=0)
+    assert decoder(x, positions, None, **kwargs)[-1] is None
 
 
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
