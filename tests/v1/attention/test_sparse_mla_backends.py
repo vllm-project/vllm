@@ -1080,6 +1080,7 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
         _convert_logical_to_physical_topk=_convert_topk,
         index_group=None,
         index_group_index=0,
+        pcp_dcp_kv_gather=False,
     )
 
     out, _ = FlashMLASparseImpl._forward_bf16_kv(
@@ -3257,6 +3258,7 @@ def test_flashmla_fp8_metadata_excludes_zero_token_decode_padding(monkeypatch):
         device=torch.device(DEVICE_TYPE),
         dummy_block_table=torch.zeros(7, 1, device=DEVICE_TYPE),
         max_model_len_tensor=torch.zeros(7, device=DEVICE_TYPE),
+        pcp_dcp_kv_gather=False,
     )
     query_start_loc_cpu = torch.tensor([0, 110, 220, 330, 440, 550, 660, 660])
     common_metadata = SimpleNamespace(
