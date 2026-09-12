@@ -28,6 +28,7 @@ _update_state_after_alloc = MoRIIOConnectorScheduler.update_state_after_alloc
 
 def _sched():
     return SimpleNamespace(
+        mode=MoRIIOMode.WRITE,
         transfer_id_to_request_id={},
         request_id_to_transfer_id={},
     )
@@ -106,6 +107,23 @@ def test_colliding_unmap_does_not_clear_live_owner():
     assert s.request_id_to_transfer_id == {"rid-a": "tid-shared"}
 
 
+def test_prefixed_colliding_unmap_does_not_clear_live_owner():
+    """A colliding request id that only starts with the owner id is not
+    the input_processor ``-{8 hex}`` suffix and must not unmap the owner."""
+    s = _sched()
+    assert _map(s, "cmpl-owner", "tid-shared") is True
+    assert _map(s, "cmpl-owner-attacker-12345678", "tid-shared") is False
+
+    _unmap(
+        s,
+        "cmpl-owner-attacker-12345678",
+        transfer_id="tid-shared",
+    )
+
+    assert s.transfer_id_to_request_id == {"tid-shared": "cmpl-owner"}
+    assert s.request_id_to_transfer_id == {"cmpl-owner": "tid-shared"}
+
+
 def test_colliding_alloc_does_not_stage_producer_save():
     s = _sched()
     s._reqs_need_save = {}
@@ -169,7 +187,7 @@ def test_unique_transfer_id_still_stages_producer_save():
     _update_state_after_alloc(s, request, blocks, 0)
 
     assert s.transfer_id_to_request_id == {"tid-a": "rid-a"}
-    assert s._reqs_need_save["rid-a"][1] == [7, 8]
+    assert s._reqs_need_save["rid-a"][1] == [[7, 8]]
     assert s._req_kv_params["rid-a"]["transfer_id"] == "tid-a"
 
 
