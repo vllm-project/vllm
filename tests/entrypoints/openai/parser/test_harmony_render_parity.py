@@ -62,7 +62,7 @@ class TestResponseInputToHarmonyRenderParity:
                     "role": "developer",
                     "content": "Be concise.",
                 },
-                prev_responses=[],
+                function_calls_by_id={},
             )
         ]
 
@@ -85,7 +85,7 @@ class TestResponseInputToHarmonyRenderParity:
                     "role": "user",
                     "content": "What's the weather in Paris?",
                 },
-                prev_responses=[],
+                function_calls_by_id={},
             )
         ]
 
@@ -108,7 +108,7 @@ class TestResponseInputToHarmonyRenderParity:
                     "role": "assistant",
                     "content": "It is 18°C in Paris.",
                 },
-                prev_responses=[],
+                function_calls_by_id={},
             )
         ]
 
@@ -139,7 +139,7 @@ class TestResponseInputToHarmonyRenderParity:
                         {"type": "reasoning_text", "text": "I should call get_weather."}
                     ],
                 },
-                prev_responses=[],
+                function_calls_by_id={},
             )
         ]
 
@@ -179,7 +179,7 @@ class TestResponseInputToHarmonyRenderParity:
                     "name": "get_weather",
                     "arguments": '{"location": "Paris"}',
                 },
-                prev_responses=[],
+                function_calls_by_id={},
             )
         ]
 
@@ -219,7 +219,7 @@ class TestResponseInputToHarmonyRenderParity:
                     "call_id": "call_1",
                     "output": "18°C, clear skies.",
                 },
-                prev_responses=[prev_call],
+                function_calls_by_id={"call_1": prev_call},
             )
         ]
 
@@ -273,7 +273,7 @@ class TestResponseInputToHarmonyRenderParity:
                         }
                     ],
                 },
-                prev_responses=[],
+                function_calls_by_id={},
             ),
             response_input_to_harmony(
                 {
@@ -281,7 +281,7 @@ class TestResponseInputToHarmonyRenderParity:
                     "name": "get_weather",
                     "arguments": '{"location": "Paris"}',
                 },
-                prev_responses=[],
+                function_calls_by_id={},
             ),
         ]
 
@@ -386,7 +386,7 @@ class TestResponseInputToHarmonyRenderParity:
             },
         ]
         resp_msgs = [
-            response_input_to_harmony(item, prev_responses=[prev_call])
+            response_input_to_harmony(item, function_calls_by_id={"call_1": prev_call})
             for item in resp_input
         ]
 
@@ -469,7 +469,7 @@ class TestResponseInputToHarmonyRenderParity:
         )
 
         # --- Responses API path ---
-        prev_responses = [prev_call_1, prev_call_2]
+        function_calls_by_id = {"call_1": prev_call_1, "call_2": prev_call_2}
         resp_input = [
             {
                 "type": "message",
@@ -513,7 +513,7 @@ class TestResponseInputToHarmonyRenderParity:
             },
         ]
         resp_msgs = [
-            response_input_to_harmony(item, prev_responses=prev_responses)
+            response_input_to_harmony(item, function_calls_by_id=function_calls_by_id)
             for item in resp_input
         ]
 
