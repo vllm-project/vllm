@@ -16,7 +16,10 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.lora.layers import MergedColumnParallelLinearWithLoRA
+from vllm.lora.layers import (
+    MergedColumnParallelLinearWithLoRA,
+    MergedQKVParallelLinearWithLoRA,
+)
 from vllm.lora.layers.column_parallel_linear import (
     MergedColumnParallelLinearVariableSliceWithLoRA,
 )
@@ -26,6 +29,7 @@ from vllm.lora.model_manager import LoRAModelManager, LRUCacheLoRAModelManager
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
+    QKVParallelLinear,
     ReplicatedLinear,
 )
 from vllm.model_executor.models.deepseek_v2 import DeepSeekV2FusedQkvAProjLinear
@@ -37,6 +41,7 @@ pytestmark = pytest.mark.skip_global_cleanup
 class LocalAdapterTestModel(torch.nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "three_proj": ["first_proj", "second_proj", "third_proj"],
     }
 
@@ -45,6 +50,9 @@ class LocalAdapterTestModel(torch.nn.Module, SupportsLoRA):
         self.config = SimpleNamespace(architectures=["GlmMoeDsaForCausalLM"])
         self.o_proj = ReplicatedLinear(16, 24, bias=False, disable_tp=True)
         self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(16, [24, 16])
+        self.qkv_proj = QKVParallelLinear(
+            16, 4, 4, total_num_kv_heads=2, bias=False, disable_tp=True
+        )
         self.three_proj = MergedColumnParallelLinear(
             16, [8, 16, 24], bias=False, disable_tp=True
         )
@@ -133,6 +141,23 @@ def test_native_mla_and_variable_slice_plan_uses_actual_wrapper_metadata(manager
     assert variable.global_output_sizes == (8, 16, 24)
     assert variable.output_shard_ids == (0, 0, 0)
     assert variable.factor_shapes[-1] == ((4, 16), (24, 4))
+
+
+def test_native_merged_qkv_plan_uses_distinct_qkv_slices(manager):
+    plan, _ = make_payload(manager, ["q_proj", "k_proj", "v_proj"])
+
+    assert len(plan.modules) == 1
+    qkv = plan.modules[0]
+    assert type(manager.modules["qkv_proj"]) is MergedQKVParallelLinearWithLoRA
+    assert qkv.source_layout == "merged"
+    assert qkv.source_names == (("q_proj",), ("k_proj",), ("v_proj",))
+    assert qkv.global_output_sizes == (16, 8, 8)
+    assert qkv.output_shard_ids == (0, 0, 0)
+    assert qkv.factor_shapes == (
+        ((4, 16), (16, 4)),
+        ((4, 16), (8, 4)),
+        ((4, 16), (8, 4)),
+    )
 
 
 def test_local_registration_owns_values_scales_once_and_preserves_slot_lifecycle(
