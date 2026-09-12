@@ -49,6 +49,9 @@ class SchedulerConfig:
     max_num_batched_tokens: int = Field(default=DEFAULT_MAX_NUM_BATCHED_TOKENS, ge=1)
     """Maximum number of tokens that can be processed in a single iteration.
 
+    Note: This parameter also determines the size of the CUDA-graph memory pool. 
+    Reducing this value shrinks the pool and frees up VRAM for the KV cache.
+
     The default value here is mainly for convenience when testing.
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
