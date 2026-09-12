@@ -4,6 +4,7 @@
 # Adapted from https://github.com/sgl-project/sglang/pull/2575
 import itertools
 import types
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -14,14 +15,28 @@ from tests.kernels.quant_utils import (
 )
 from tests.kernels.utils import fp8_ulp_distance
 from vllm.config import VllmConfig
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    cutlass as cutlass_kernel_module,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
     B12xFp8BlockScaledMMKernel,
     _run_b12x_fp8_block_scaled_mm,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
+    cutlass_scaled_mm,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+    FP8ScaledMMLinearLayerConfig,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    _upcast_e8m0_to_fp32,
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    create_fp8_quant_key,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -203,6 +218,114 @@ def test_w8a8_block_fp8_cutlass_matmul():
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
     ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.001
+
+
+def test_upcast_e8m0_to_fp32():
+    raw_scale = torch.tensor(
+        [0, 1, 127, 128, 254, 255], dtype=torch.uint8, device="cpu"
+    )
+    expected = torch.tensor(
+        [2**-127, 2**-126, 1.0, 2.0, 2**127],
+        dtype=torch.float32,
+        device="cpu",
+    )
+
+    for scale in (raw_scale, raw_scale.view(torch.float8_e8m0fnu)):
+        upcast = _upcast_e8m0_to_fp32(scale)
+        assert upcast.shape == raw_scale.shape
+        assert upcast.device == raw_scale.device
+        assert torch.equal(upcast[:-1], expected)
+        assert torch.isnan(upcast[-1])
+
+
+def _block_fp8_linear_config(n: int, k: int) -> FP8ScaledMMLinearLayerConfig:
+    return FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=create_fp8_quant_key(
+            static=True, group_shape=GroupShape(128, 128)
+        ),
+        activation_quant_key=create_fp8_quant_key(
+            static=False, group_shape=GroupShape(1, 128)
+        ),
+        input_dtype=torch.bfloat16,
+        out_dtype=torch.bfloat16,
+        weight_shape=(n, k),
+    )
+
+
+def test_cutlass_block_fp8_sm12x_declines_unaligned_n():
+    with patch.object(
+        cutlass_kernel_module.current_platform,
+        "is_device_capability_family",
+        new=lambda family: family == 120,
+    ):
+        ok, _ = CutlassFp8BlockScaledMMKernel.can_implement(
+            _block_fp8_linear_config(512, 7168)
+        )
+        assert ok
+        ok, reason = CutlassFp8BlockScaledMMKernel.can_implement(
+            _block_fp8_linear_config(576, 7168)
+        )
+        assert not ok
+        assert "divisible by 128" in reason
+
+    with patch.object(
+        cutlass_kernel_module.current_platform,
+        "is_device_capability_family",
+        new=lambda family: False,
+    ):
+        ok, _ = CutlassFp8BlockScaledMMKernel.can_implement(
+            _block_fp8_linear_config(576, 7168)
+        )
+        assert ok
+
+
+@pytest.mark.parametrize("scale_attr", ["weight_scale", "weight_scale_inv"])
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(120)
+    ),
+    reason="CUTLASS E8M0 regression only applies to SM120.",
+)
+@torch.inference_mode()
+def test_cutlass_block_fp8_e8m0_weight_scale_upcast(scale_attr, default_vllm_config):
+    is_supported, reason = CutlassFp8BlockScaledMMKernel.is_supported()
+    if not is_supported:
+        pytest.skip(reason)
+
+    M, N, K = 32, 512, 7168
+    config = _block_fp8_linear_config(N, K)
+    kernel = CutlassFp8BlockScaledMMKernel(config)
+    weight = torch.ones((N, K), dtype=torch.float8_e4m3fn, device="cuda")
+    e8m0_scale = torch.zeros(
+        (N // 128, K // 128), dtype=torch.uint8, device="cuda"
+    ).view(torch.float8_e8m0fnu)
+    native_scale = e8m0_scale.to(torch.float32)
+
+    def make_layer(weight_scale: torch.Tensor) -> torch.nn.Module:
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(weight.clone(), requires_grad=False)
+        setattr(
+            layer,
+            scale_attr,
+            torch.nn.Parameter(weight_scale.clone(), requires_grad=False),
+        )
+        kernel.process_weights_after_loading(layer)
+        return layer
+
+    e8m0_layer = make_layer(e8m0_scale)
+    native_layer = make_layer(native_scale)
+    converted_scale = getattr(e8m0_layer, scale_attr)
+    assert converted_scale.dtype == torch.float32
+    assert torch.equal(converted_scale, native_scale)
+
+    A = torch.ones((M, K), dtype=torch.float8_e4m3fn, device="cuda")
+    As = torch.full((K // 128, M), 2.0**120, dtype=torch.float32, device="cuda").t()
+    out = kernel.apply_block_scaled_mm(A, e8m0_layer.weight, As, converted_scale)
+    ref_out = kernel.apply_block_scaled_mm(
+        A, native_layer.weight, As, getattr(native_layer, scale_attr)
+    )
+    assert torch.equal(out, ref_out)
+    assert torch.all(ref_out != 0)
 
 
 @pytest.mark.skipif(
