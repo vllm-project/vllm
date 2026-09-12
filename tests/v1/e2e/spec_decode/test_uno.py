@@ -1,6 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Greedy Uno parity with the original Qwen3-8B adapter on one NVIDIA GPU."""
+"""Greedy Uno parity with the original Qwen3-8B adapter on one NVIDIA GPU.
+
+Exact-token equality against a plain engine is this module's main instrument,
+and it is only valid where the plain engine reproduces itself. It does not
+everywhere: on a rented RTX 3090 (sm_86) in graph mode, two plain engines built
+from the same config and given the same prompts agreed on 3 of 4 prompts,
+diverging at prompt 2 token 31 -- the same coordinate at which the Uno arms
+diverged -- while the eager and reordered arms were 4 of 4. The matrix case
+therefore measures that noise floor in the same process, on the same config and
+prompts, and holds Uno to it: exact when the control is exact, no worse than the
+control otherwise.
+
+Where the control is not exact, this module makes no authoritative correctness
+claim for that card and mode; it only rules out Uno being worse than the
+baseline's own spread. Closing that gap needs a sampled gate this module does
+not have: fixed seeds, N independent samples per arm at a temperature above
+zero, and a distributional comparison (per position, plain-vs-plain as the null)
+rather than a token-by-token identity. The fork carries such a gate outside the
+test suite; bringing it in is what would let a non-deterministic card produce a
+positive result rather than a bounded one.
+"""
 
 import os
 from collections import deque
@@ -31,6 +51,7 @@ from .uno_kv_budget import (
     SURVIVOR_PROMPT_TOKENS,
     allocatable_blocks,
     engine_minimum_kv_bytes,
+    exact_token_verdict,
     kv_bytes_per_block,
     mid_generation_preemption_counts,
     mixed_admission_blocks,
@@ -40,6 +61,7 @@ from .uno_kv_budget import (
     qwen3_geometry,
     resolve_internal_request_ids,
     survivor_kv_budget,
+    token_agreement,
     usage_with_free_blocks,
     worst_case_crossing_tokens,
 )
@@ -1227,6 +1249,53 @@ def test_uno_greedy_matches_base_model(
     assert len(set(prompt_lengths)) > 1
     assert max(prompt_lengths) > prefill_budget
 
+    # The instrument's own noise floor, measured the same way the Uno
+    # comparison is measured: a second plain engine, same config, same prompts,
+    # same process, built after the first was released. Greedy exact-token
+    # equality is only evidence where this control is perfect. On an RTX 3090
+    # (sm_86) in graph mode it is not -- two plain engines agreed on 3 of 4
+    # prompts, diverging at prompt 2 token 31, which is the same coordinate the
+    # Uno arms diverged at -- so the comparison below is judged against it
+    # rather than against an assumption.
+    with vllm_runner("Qwen/Qwen3-8B", **common) as plain_repeat:
+        repeat_outputs = [
+            plain_repeat.llm.chat(batch, **chat_kwargs) for batch in batches
+        ]
+    control_matches: list[int] = []
+    control_divergences: list[list[str]] = []
+    for ref_batch, repeat_batch in zip(ref_outputs, repeat_outputs):
+        matched, divergences = token_agreement(
+            [list(output.outputs[0].token_ids) for output in ref_batch],
+            [list(output.outputs[0].token_ids) for output in repeat_batch],
+        )
+        control_matches.append(matched)
+        control_divergences.append(divergences)
+    device_name = torch.cuda.get_device_name(0)
+    capability = torch.cuda.get_device_capability(0)
+    instrument_receipt = (
+        f"uno greedy instrument: K={k}, card={device_name}, "
+        f"sm_{capability[0]}{capability[1]}, enforce_eager={enforce_eager}, "
+        f"graphs_expected={expect_graphs}, "
+        f"prefix_cache={enable_prefix_caching}, "
+        f"plain_control="
+        f"{[f'{m}/{len(batch)}' for m, batch in zip(control_matches, ref_outputs)]}, "
+        f"control_divergences={control_divergences}"
+    )
+    print(instrument_receipt)
+    if any(
+        matched < len(batch) for matched, batch in zip(control_matches, ref_outputs)
+    ):
+        # Not a skip: the rest of this case (acceptance, graphs, the LoRA plan
+        # cache, the adapter-disabled control) is still valid evidence, and the
+        # exact-token comparison is still run -- it just cannot demand more of
+        # Uno than the plain engine demands of itself.
+        print(
+            "uno greedy instrument: exact-token equality is NOT an instrument "
+            "in this regime; the plain engine does not agree with itself. The "
+            "authoritative correctness claim for this card and mode belongs to "
+            "a sampled gate (see the module docstring), not to this case."
+        )
+
     with vllm_runner(
         "Qwen/Qwen3-8B",
         **common,
@@ -1268,25 +1337,36 @@ def test_uno_greedy_matches_base_model(
         # control is expected to stay equivalent.
         if enforce_eager:
             speculative.llm.llm_engine.collective_rpc(_disable_uno_adapter_for_control)
-            control_outputs = speculative.llm.chat(batches[-1], **chat_kwargs)
-            control_metrics = speculative.llm.get_metrics()
-            control_acceptance = compute_acceptance_len(
-                control_metrics, previous_metrics
+            adapter_off_outputs = speculative.llm.chat(batches[-1], **chat_kwargs)
+            adapter_off_metrics = speculative.llm.get_metrics()
+            adapter_off_acceptance = compute_acceptance_len(
+                adapter_off_metrics, previous_metrics
             )
-            print(f"Uno K={k} adapter-disabled acceptance={control_acceptance:.3f}")
+            print(f"Uno K={k} adapter-disabled acceptance={adapter_off_acceptance:.3f}")
             if k == 8:
-                assert control_acceptance < min(trained_acceptance) - 1.0
+                assert adapter_off_acceptance < min(trained_acceptance) - 1.0
             else:
-                assert abs(control_acceptance - trained_acceptance[-1]) < 0.5
+                assert abs(adapter_off_acceptance - trained_acceptance[-1]) < 0.5
+            # Judged against the same noise floor as the Uno comparison: the
+            # adapter-disabled arm is still an engine-to-engine comparison.
+            adapter_off_matched, adapter_off_divergences = token_agreement(
+                [list(output.outputs[0].token_ids) for output in ref_outputs[-1]],
+                [list(output.outputs[0].token_ids) for output in adapter_off_outputs],
+            )
             assert_request_outputs_match(
                 ref_outputs[-1],
-                control_outputs,
-                required_matches=len(control_outputs),
+                adapter_off_outputs,
+                required_matches=min(control_matches[-1], len(adapter_off_outputs)),
                 context="adapter-disabled",
             )
-            assert [
-                list(output.outputs[0].token_ids) for output in control_outputs
-            ] == [list(output.outputs[0].token_ids) for output in ref_outputs[-1]]
+            ok, reason = exact_token_verdict(
+                control_matches[-1], adapter_off_matched, len(ref_outputs[-1])
+            )
+            assert ok, (
+                f"adapter-disabled: {reason}. Divergences "
+                f"{adapter_off_divergences} against plain-control "
+                f"{control_divergences[-1]}.\n{instrument_receipt}"
+            )
         states = speculative.llm.llm_engine.collective_rpc(_uno_execution_state)
         assert all(state["shared_model"] for state in states)
         assert all(
@@ -1322,16 +1402,27 @@ def test_uno_greedy_matches_base_model(
         context = (
             f"Uno K={k}, prefix_cache={enable_prefix_caching}, batch={batch_index}"
         )
+        control_matched = control_matches[batch_index]
+        uno_matched, uno_divergences = token_agreement(
+            [list(output.outputs[0].token_ids) for output in ref_batch],
+            [list(output.outputs[0].token_ids) for output in spec_batch],
+        )
+        # Text matches are held to the same floor: where the plain engine does
+        # not reproduce itself, neither comparison can demand more of Uno.
         assert_request_outputs_match(
             ref_batch,
             spec_batch,
-            required_matches=len(ref_batch),
+            required_matches=min(control_matched, len(ref_batch)),
             context=context,
         )
-        for index, (ref_output, spec_output) in enumerate(zip(ref_batch, spec_batch)):
-            ref_ids = list(ref_output.outputs[0].token_ids)
-            spec_ids = list(spec_output.outputs[0].token_ids)
-            assert ref_ids == spec_ids, (
-                f"{context}, request={index}: reference tokens={ref_ids}, "
-                f"Uno tokens={spec_ids}"
-            )
+        ok, reason = exact_token_verdict(control_matched, uno_matched, len(ref_batch))
+        assert ok, (
+            f"{context}: {reason}. Uno divergences {uno_divergences} against "
+            f"plain-control divergences {control_divergences[batch_index]} "
+            f"(p is the prompt index, t the first differing token).\n"
+            f"{instrument_receipt}"
+        )
+        print(
+            f"{context}: exact tokens uno={uno_matched}/{len(ref_batch)} "
+            f"control={control_matched}/{len(ref_batch)}; {reason}"
+        )
