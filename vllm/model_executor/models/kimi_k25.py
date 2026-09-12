@@ -6,7 +6,7 @@ Kimi-K2.5 Model Implementation for vLLM.
 Kimi-K2.5 extends Kimi-K2 with vision support.
 """
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
@@ -257,17 +257,6 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
             ),
             grid_thws=MultiModalFieldConfig.batched("vision_chunk", keep_on_cpu=True),
         )
-
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Override to use the text path instead of token path because vision chunk
-        # is not considered
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
 
     def _get_prompt_updates(
         self,
@@ -605,6 +594,7 @@ class KimiK25ForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ) -> "EncoderCudaGraphCaptureInputs":
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphCaptureInputs
 

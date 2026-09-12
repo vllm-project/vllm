@@ -78,32 +78,37 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
 }
 
 // Core single-block load: dst/size are raw pointer + byte count. Returns 0
-// on success, or the errno of the failing step on failure. On failure,
-// the source file is removed since a partially-read block should not be reused.
+// on success, or the errno of the failing step on failure. Removes the source
+// file ONLY on a provable short read (the read completed but returned fewer
+// bytes than requested): stores are atomic, so a too-short file is genuine
+// corruption. Open failures and read errors (bytes_read < 0) are
+// transient/ambiguous and leave the file untouched; a close failure after a
+// full read is harmless and does not fail the load.
 inline int _load_block(const char* source_path, char* dst, size_t size,
                        bool use_o_direct) {
   const int o_direct_flag = use_o_direct ? kODirectFlag : 0;
   const int fd = open(source_path, O_RDONLY | o_direct_flag, 0);
   if (fd < 0) {
-    const int err = errno;
-    unlink(source_path);
-    return err;
+    return errno;
   }
 
   const ssize_t bytes_read = read(fd, dst, size);
-  if (bytes_read < 0 || static_cast<size_t>(bytes_read) != size) {
-    const int err = bytes_read < 0 ? errno : EIO;
+  if (bytes_read < 0) {
+    // Transient read error: leave the file untouched.
+    const int err = errno;
+    close(fd);
+    return err;
+  }
+  if (static_cast<size_t>(bytes_read) < size) {
+    // Provable short read: the block is genuinely corrupt, so remove it.
     close(fd);
     unlink(source_path);
-    return err;
+    return EIO;
   }
 
-  if (close(fd) != 0) {
-    const int err = errno;
-    unlink(source_path);
-    return err;
-  }
-
+  // A close error after a successful full read is harmless: the data is
+  // already in the destination buffer, so the load succeeds.
+  close(fd);
   return 0;
 }
 
@@ -312,8 +317,21 @@ static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
   if (failed_index >= 0) {
     // PyErr_SetFromErrnoWithFilename() reads the errno to format exception.
     errno = failure_errno;
-    return PyErr_SetFromErrnoWithFilename(PyExc_OSError,
-                                          source_paths[failed_index]);
+    PyErr_SetFromErrnoWithFilename(PyExc_OSError, source_paths[failed_index]);
+    // Attach the number of blocks that loaded before the failure so the tier
+    // can keep them (partial success). failed_index == count of blocks read OK.
+    PyObject *etype, *evalue, *etb;
+    PyErr_Fetch(&etype, &evalue, &etb);
+    PyErr_NormalizeException(&etype, &evalue, &etb);
+    if (evalue != nullptr) {
+      PyObject* num = PyLong_FromSsize_t(failed_index);
+      if (num != nullptr) {
+        PyObject_SetAttrString(evalue, "num_succeeded", num);
+        Py_DECREF(num);
+      }
+    }
+    PyErr_Restore(etype, evalue, etb);
+    return nullptr;
   }
 
   Py_RETURN_NONE;

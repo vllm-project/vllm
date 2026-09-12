@@ -136,7 +136,7 @@ def test_use_audio_in_video_without_audio_track(model_id: str) -> None:
     # no audio track" case. (The audio limit above is 1, not 0, so that
     # `mm_counts["audio"]` is still declared for this request; a 0 limit
     # would make vLLM omit the "audio" key from `mm_counts` entirely, which
-    # trips an unrelated assertion in `_apply_hf_processor_mm_only`.)
+    # trips an unrelated assertion in `_apply_hf_processor_main`.)
     mm_data = {"video": [video]}
 
     with pytest.raises(ValueError, match="doesn't have audio track"):

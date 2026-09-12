@@ -10,7 +10,7 @@ from vllm.config.utils import config
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-IndexerKVDType = Literal["bf16", "fp8", "mxfp4", "nvfp4"]
+IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
 
 
@@ -39,10 +39,6 @@ class AttentionConfig:
     """Force vllm to use a specific flash-attention version (2, 3, or 4).
     Only valid when using the flash-attention backend."""
 
-    use_prefill_decode_attention: bool = False
-    """Use separate prefill and decode kernels for attention instead of
-    the unified triton kernel."""
-
     flash_attn_max_num_splits_for_cuda_graph: int = 32
     """Flash Attention max number splits for cuda graph decode."""
 
@@ -65,12 +61,11 @@ class AttentionConfig:
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
 
-    use_fp4_indexer_cache: bool = False
-    """If set, use fp4 indexer cache for dsv32 family model (not support yet)"""
-
-    indexer_kv_dtype: IndexerKVDType = "bf16"
-    """Data type for the sparse-attention indexer K cache. Quantized formats
-    (fp8, mxfp4, nvfp4) require indexer kernel support in the backend."""
+    indexer_kv_dtype: IndexerKVDType = "auto"
+    """Data type for the sparse-attention indexer K cache. "auto" picks the
+    model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
+    indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
+    support in the backend."""
 
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
@@ -114,6 +109,12 @@ class AttentionConfig:
             # layers still use the platform's normal automatic backend.
             self.backend = None
 
+    def resolve_indexer_kv_dtype(self, default: IndexerKVDType) -> IndexerKVDType:
+        """Resolve `indexer_kv_dtype`, substituting `default` for "auto"."""
+        if self.indexer_kv_dtype == "auto":
+            return default
+        return self.indexer_kv_dtype
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs
@@ -124,8 +125,7 @@ class AttentionConfig:
         """
         from vllm.config.utils import get_hash_factors, hash_factors
 
-        ignored_factors: set[str] = set()
-        factors = get_hash_factors(self, ignored_factors)
+        factors = get_hash_factors(self, set())
         return hash_factors(factors)
 
     @field_validator("backend", mode="before")

@@ -20,6 +20,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
     MLACommonPrefillMetadata,
     accumulate_mla_context_chunk,
+    align_mla_chunked_context_workspace_size,
     build_mla_chunked_context_metadata,
     get_mla_dims,
     init_mla_context_partial,
@@ -27,10 +28,15 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
-from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
+from vllm.utils.torch_utils import (
+    PIN_MEMORY,
+    is_quantized_kv_cache,
+    np_to_pinned_tensor,
+)
 from vllm.v1.attention.backend import AttentionMetadata, AttentionMetadataBuilder
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 
 if TYPE_CHECKING:
@@ -56,6 +62,7 @@ def _topk_mask_shape(
     tile_m = 128 if max_query_len <= 128 else 256
     padded_q_len = triton.cdiv(max_query_len, tile_m) * tile_m
     num_words = triton.cdiv(max_key_len, 32) + int(reserve_key_starts_word)
+    num_words = triton.cdiv(num_words, 4) * 4
     return batch_size, padded_q_len, num_words
 
 
@@ -85,16 +92,27 @@ def _is_masked_mha_available(
     """Check if masked MHA can ever fire for this model configuration."""
     if not current_platform.is_device_capability_family(100):
         return False
-    if (
-        num_heads_total != 128
-        or kv_lora_rank != 512
-        or qk_nope_head_dim != 128
-        or qk_rope_head_dim != 64
-        or v_head_dim != 128
+    model_dims = (
+        num_heads_total,
+        kv_lora_rank,
+        qk_nope_head_dim,
+        qk_rope_head_dim,
+        v_head_dim,
+    )
+    if model_dims not in (
+        (128, 512, 128, 64, 128),
+        (64, 512, 192, 64, 256),
     ):
         return False
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-    fa_version = get_flash_attn_version(head_size=qk_head_dim, head_size_v=v_head_dim)
+    if qk_head_dim == 256 and v_head_dim == 256:
+        # This path uses contiguous K/V, so it does not need the paged-KV
+        # features that keep head-dim 256 disabled in the general FA selector.
+        fa_version = get_flash_attn_version()
+    else:
+        fa_version = get_flash_attn_version(
+            head_size=qk_head_dim, head_size_v=v_head_dim
+        )
     return fa_version == 4 and not is_quantized_kv_cache(kv_cache_dtype)
 
 
@@ -114,7 +132,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self.device = device
         self.model_config = vllm_config.model_config
         self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens: int = vllm_config.model_config.hf_config.index_topk
+        self.topk_tokens: int = vllm_config.model_config.hf_text_config.index_topk
         self.req_id_per_token_buffer = torch.empty(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -162,9 +180,19 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 dtype=torch.int32,
                 device=device,
             )
-        layer_prefill_backend = vllm_config.compilation_config.static_forward_context[
+        attention_layer = vllm_config.compilation_config.static_forward_context[
             layer_names[0]
-        ].prefill_backend
+        ]
+        layer_prefill_backend = attention_layer.prefill_backend
+        self.dcp_manager: MLADCPManager | None = None
+        if self.dcp_world_size > 1:
+            self.dcp_manager = getattr(attention_layer, "dcp_manager", None)
+            assert isinstance(self.dcp_manager, MLADCPManager)
+            if layer_prefill_backend is not None:
+                self.dcp_manager.init_kv_gather(
+                    self.chunked_prefill_workspace,
+                    self.chunked_prefill_workspace_size,
+                )
         self._prefill_backend = (
             layer_prefill_backend.clone() if layer_prefill_backend is not None else None
         )
@@ -174,7 +202,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         scheduler_config = vllm_config.scheduler_config
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
-        topk_tokens = model_config.hf_config.index_topk
+        topk_tokens = model_config.hf_text_config.index_topk
 
         workspace_size = min(
             max(
@@ -184,7 +212,10 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             64 * 1024,
             scheduler_config.max_num_seqs * topk_tokens,
         )
-        return max(workspace_size, cache_config.block_size)
+        workspace_size = max(workspace_size, cache_config.block_size)
+        if vllm_config.parallel_config.decode_context_parallel_size > 1:
+            return align_mla_chunked_context_workspace_size(vllm_config, workspace_size)
+        return workspace_size
 
     def _build_req_id_per_token(
         self,
@@ -214,9 +245,13 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
 
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         assert seq_lens_cpu is not None
-        context_lens_cpu = (
-            seq_lens_cpu[num_decodes : num_decodes + num_prefills]
-            - prefill_query_lens_cpu
+        context_lens_cpu = torch.empty(
+            num_prefills, dtype=seq_lens_cpu.dtype, pin_memory=PIN_MEMORY
+        )
+        torch.subtract(
+            seq_lens_cpu[num_decodes : num_decodes + num_prefills],
+            prefill_query_lens_cpu,
+            out=context_lens_cpu,
         )
         qsl_cpu = common_attn_metadata.query_start_loc_cpu
         prefill_query_start_loc_cpu = qsl_cpu[num_decodes:] - qsl_cpu[num_decodes]
@@ -232,6 +267,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dcp_world_size=self.dcp_world_size,
             dcp_local_block_size=self.dcp_local_block_size,
             dcp_virtual_block_size=self.dcp_virtual_block_size,
+            dcp_manager=self.dcp_manager,
         )
 
     def build(
@@ -416,12 +452,12 @@ def _build_topk_mask(
     max_seq_len: int,
     out: torch.Tensor,
 ) -> torch.Tensor:
-    """Build a bit-packed top-k mask into ``out[:B, :max_Q, :num_words]``."""
+    """Build a bit-packed top-k mask while preserving padded row storage."""
     batch_size = len(q_lens)
     num_words = (max_seq_len + 31) // 32
     total_rows = batch_size * max_q_len
     if total_rows == 0:
-        return out[:batch_size, :max_q_len, :num_words]
+        return out[:batch_size, :max_q_len]
 
     total_q = sum(q_lens)
     mask_row_stride = out.stride(-2)
@@ -441,7 +477,7 @@ def _build_topk_mask(
             BLOCK_TOPK=triton.next_power_of_2(num_topk),
             BLOCK_WORDS=block_words,
         )
-        return out[:1, :max_q_len, :num_words]
+        return out[:1, :max_q_len]
 
     topk_packed = torch.cat(topk_indices_per_req, dim=0)
     num_topk = topk_packed.shape[1]
@@ -462,10 +498,43 @@ def _build_topk_mask(
         BLOCK_TOPK=triton.next_power_of_2(num_topk),
         BLOCK_WORDS=block_words,
     )
-    return out[:batch_size, :max_q_len, :num_words]
+    return out[:batch_size, :max_q_len]
 
 
-class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
+class SharedTopkIndicesBuffer:
+    """Resolves the shared top-k index buffer for sparse MLA implementations.
+
+    The indexer owns the buffer, but `LLMBaseProposer.load_model` repoints the
+    draft's indexers at the target's buffer after the impls are constructed, so
+    it must be resolved per read rather than snapshotted. Backbone skip-topk
+    layers have no indexer and pass the buffer explicitly.
+    """
+
+    _indexer: object | None = None
+    _topk_indices_buffer: torch.Tensor | None = None
+
+    def init_topk_indices_buffer(
+        self,
+        indexer: object | None,
+        topk_indices_buffer: torch.Tensor | None,
+    ) -> None:
+        self._indexer = indexer
+        self._topk_indices_buffer = topk_indices_buffer
+
+    @property
+    def topk_indices_buffer(self) -> torch.Tensor | None:
+        if self._indexer is not None:
+            return self._indexer.topk_indices_buffer  # type: ignore[attr-defined]
+        return self._topk_indices_buffer
+
+    @topk_indices_buffer.setter
+    def topk_indices_buffer(self, buffer: torch.Tensor | None) -> None:
+        # An explicit assignment supersedes the indexer.
+        self._indexer = None
+        self._topk_indices_buffer = buffer
+
+
+class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic[T]):
     """Sparse MLA base with dense and masked-MHA prefill paths."""
 
     is_sparse = True
@@ -507,14 +576,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             kv_b_proj,
         )
 
-        # The indexer carries the shared buffer for normal layers and tests;
-        # the explicitly-passed buffer covers backbone skip layers, whose
-        # indexer is not constructed (see deepseek_v2.py).
-        self.topk_indices_buffer: torch.Tensor | None = (
-            indexer.topk_indices_buffer  # type: ignore[attr-defined]
-            if indexer is not None
-            else topk_indices_buffer
-        )
+        self.init_topk_indices_buffer(indexer, topk_indices_buffer)
         self._use_flashinfer_concat_mla_k = (
             has_flashinfer()
             and which("ninja") is not None
