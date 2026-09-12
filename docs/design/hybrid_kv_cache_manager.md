@@ -1,8 +1,5 @@
 # Hybrid KV Cache Manager
 
-!!! warning
-    This document was written based on commit [458e74](https://github.com/vllm-project/vllm/commit/458e74eb907f96069e6d8a4f3c9f457001fef2ea). This feature is still in its early stage and things may change.
-
 ## What is a hybrid model?
 
 Many recent "hybrid" LLMs combine multiple attention types within one model. For example:
@@ -198,13 +195,13 @@ The first problem is how to find the cache hit prefix. We need to "intersect" th
 
 It can be ensured that the resulting cache hit of sliding window attention layers is also a cache hit of full attention layers. This is more efficient than finding all possible prefixes of each group and doing the intersection, because our approach can exit early if there is no cache hit.
 
-The algorithm applies to models with exactly two attention types full attention + X, where X can be an arbitrary efficient attention algorithm like sliding window, llama 4 local attention, and mamba. It doesn't support models without full attention layers, and models with more than 2 types of attention. This is enough for most hybrid models at the moment of writing this doc.
+The two-step description above is the simple case (one full attention group + one other group), fast-pathed as `is_simple_hybrid`. The general case supports an arbitrary number of KV cache groups via an iterative fixed-point search in `HybridKVCacheCoordinator.find_longest_cache_hit`: each group either accepts the current candidate hit length or shrinks it, restarting the check across all groups whenever any group shrinks it, until the length converges (bounded below by 0, so this always terminates). Models without a full-attention layer are supported as long as at least one group is cacheable.
 
 The second question is the cache eviction policy. For now, we use one LRU queue for all kv cache groups. The blocks are added to the LRU queue when freed, either because the request is finished or the block is out of the sliding window.
 
 ### Case 3: mamba models
 
-The prefix caching support of the mamba model is work in progress. Once implemented, models with mamba layer + full attention layer can be supported via the full attention + X algorithm in case 2.
+Prefix caching for Mamba is implemented via `MambaManager` (in `single_type_kv_cache_manager.py`), combined with a full attention layer via the general algorithm in case 2. In `mamba_cache_mode="align"`, Mamba blocks can also be looked up with fine-grained (sub-block) hash hits, matched against the other groups' `hash_block_size`.
 
 ## Implementation
 
@@ -218,8 +215,8 @@ The `KVCacheManager` is organized into 3 layers:
 - **[KVCacheCoordinator][vllm.v1.core.kv_cache_coordinator.KVCacheCoordinator]**: coordinate per-group SingleTypeKVCacheManagers to generate the allocation result of a request. Depending on the model's configuration, one of these coordinators is chosen:
     - **[KVCacheCoordinatorNoPrefixCache][vllm.v1.core.kv_cache_coordinator.KVCacheCoordinatorNoPrefixCache]**: Used when prefix caching is disabled.
     - **[UnitaryKVCacheCoordinator][vllm.v1.core.kv_cache_coordinator.UnitaryKVCacheCoordinator]**: If only one KV cache group. The prefix caching logic is simplified as no intersection is needed.
-    - **[HybridKVCacheCoordinator][vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator]**: Handles exactly two KV cache groups (must include one full‑attention group plus one other efficient‑attention group). Other cases are not implemented. You can disable prefix caching to use the KVCacheCoordinatorNoPrefixCache.
-- **[SingleTypeKVCacheManager][vllm.v1.core.single_type_kv_cache_manager.SingleTypeKVCacheManager]**: Each instance manages allocation and prefix caching for one KV cache group, implementing the attention‑type–specific logic (e.g., full attention, sliding window, Mamba).
+    - **[HybridKVCacheCoordinator][vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator]**: Handles hybrid models with multiple KV cache groups. The common case (one full-attention group + one other group) is fast-pathed; the general case supports an arbitrary number of attention-type groups via an iterative fixed-point cache-hit search (see "Prefix caching" above). You can disable prefix caching to use the KVCacheCoordinatorNoPrefixCache.
+- **[SingleTypeKVCacheManager][vllm.v1.core.single_type_kv_cache_manager.SingleTypeKVCacheManager]**: Each instance manages allocation and prefix caching for one KV cache group, implementing the attention‑type–specific logic: full attention, sliding window, Mamba, RSWA, circular-buffer, chunked-local, cross-attention, and attention-sink variants (`FullAttentionManager`, `SlidingWindowManager`, `MambaManager`, `RSWAManager`, `CircularBufferManager`, `ChunkedLocalAttentionManager`, `CrossAttentionManager`, `SinkFullAttentionManager`).
 
 The blue box in the above figure shows the case with 10 full attention layers and 20 sliding window attention layers, thus:
 
