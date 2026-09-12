@@ -33,17 +33,16 @@ def _dflash2_grouped_conv_kernel(
     delta_stride_tap,
     base_stride_tap,
     output_stride_row,
-    num_elements,
     NUM_CHANNELS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     TAPS: tl.constexpr,
     ELEMENT_BLOCK: tl.constexpr,
 ) -> None:
-    offsets = tl.program_id(0) * ELEMENT_BLOCK + tl.arange(0, ELEMENT_BLOCK)
-    mask = offsets < num_elements
-    row = offsets // NUM_CHANNELS
-    channels = offsets % NUM_CHANNELS
+    row = tl.program_id(0) // triton.cdiv(NUM_CHANNELS, ELEMENT_BLOCK)
+    col_block = tl.program_id(0) % triton.cdiv(NUM_CHANNELS, ELEMENT_BLOCK)
+    channels = col_block * ELEMENT_BLOCK + tl.arange(0, ELEMENT_BLOCK)
+    mask = channels < NUM_CHANNELS
     groups = channels // GROUP_SIZE
     position = row % BLOCK_SIZE
 
@@ -92,9 +91,9 @@ def dflash2_grouped_conv_impl(
     if num_rows == 0:
         return output
 
-    num_elements = num_rows * num_channels
-    element_block = 512
-    _dflash2_grouped_conv_kernel[(triton.cdiv(num_elements, element_block),)](
+    element_block = 1024 if num_rows >= 128 and num_channels % 1024 == 0 else 512
+    grid = (num_rows * triton.cdiv(num_channels, element_block),)
+    _dflash2_grouped_conv_kernel[grid](
         x,
         delta,
         base,
@@ -104,7 +103,6 @@ def dflash2_grouped_conv_impl(
         delta.stride(1),
         base.stride(0),
         output.stride(0),
-        num_elements,
         NUM_CHANNELS=num_channels,
         BLOCK_SIZE=block_size,
         GROUP_SIZE=group_size,

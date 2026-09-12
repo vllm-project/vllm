@@ -37,11 +37,11 @@ QWEN3_DFLASH = DFlashCorrectnessConfig(
     expected_acceptance_len=3.5,
 )
 
-QWEN3_8_DFLASH2 = DFlashCorrectnessConfig(
-    model="Qwen/Qwen3.8-27B",
+QWEN3_8_DFLASH2_NVFP4 = DFlashCorrectnessConfig(
+    model="nvidia/Qwen3.8-27B-NVFP4",
     draft_model="z-lab/Qwen3.8-27B-DFlash2",
     expected_accuracy=0.90,
-    expected_acceptance_len=6.19 * 0.95,
+    expected_acceptance_len=6.14 * 0.95,
     num_speculative_tokens=7,
     max_num_seqs=32,
     use_chat_completions=True,
@@ -119,9 +119,9 @@ def test_dflash_reference_acceptance_lengths(
             id="laguna-nvfp4-mrv2",
         ),
         pytest.param(
-            QWEN3_8_DFLASH2,
+            QWEN3_8_DFLASH2_NVFP4,
             True,
-            id="qwen3.8-dflash2-mrv2",
+            id="qwen3.8-dflash2-nvfp4-mrv2",
         ),
     ],
 )

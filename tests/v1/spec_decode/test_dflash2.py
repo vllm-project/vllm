@@ -38,12 +38,25 @@ def test_grouped_conv_matches_reference(block_size: int):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("block_size,taps", [(5, 1), (5, 3), (8, 2)])
+@pytest.mark.parametrize(
+    "batch,num_groups,group_size,block_size,taps",
+    [
+        (7, 13, 11, 5, 1),
+        (7, 13, 11, 5, 3),
+        (7, 13, 11, 8, 2),
+        (16, 64, 16, 8, 2),
+        (16, 160, 16, 8, 2),
+    ],
+)
 def test_grouped_conv_triton_matches_reference(
-    dtype: torch.dtype, block_size: int, taps: int
+    dtype: torch.dtype,
+    batch: int,
+    num_groups: int,
+    group_size: int,
+    block_size: int,
+    taps: int,
 ):
     torch.manual_seed(0)
-    batch, num_groups, group_size = 7, 13, 11
     rows = batch * block_size
     hidden = torch.randn(rows, num_groups * group_size, device="cuda", dtype=dtype)
     base = torch.randn(taps, num_groups * group_size, device="cuda", dtype=dtype)
