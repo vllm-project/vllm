@@ -8,19 +8,27 @@
 
 import torch
 
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.model_executor.layers.mamba.ops.triton_helpers import (
+    batch_invariant_autotune_configs,
+    fast_exp,
+)
 from vllm.triton_utils import tl, triton
+
+_BATCH_INVARIANT_CONFIG = triton.Config({"BLOCK_SIZE": 256})
 
 
 @triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE": 64}),
-        triton.Config({"BLOCK_SIZE": 128}),
-        triton.Config({"BLOCK_SIZE": 256}),
-        triton.Config({"BLOCK_SIZE": 512}),
-        triton.Config({"BLOCK_SIZE": 1024}),
-        triton.Config({"BLOCK_SIZE": 2048}),
-    ],
+    configs=batch_invariant_autotune_configs(
+        [
+            triton.Config({"BLOCK_SIZE": 64}),
+            triton.Config({"BLOCK_SIZE": 128}),
+            _BATCH_INVARIANT_CONFIG,
+            triton.Config({"BLOCK_SIZE": 512}),
+            triton.Config({"BLOCK_SIZE": 1024}),
+            triton.Config({"BLOCK_SIZE": 2048}),
+        ],
+        pinned=_BATCH_INVARIANT_CONFIG,
+    ),
     key=["dim"],
 )
 @triton.jit
@@ -91,7 +99,9 @@ def _state_passing_fwd_kernel(
     for _ in range(nchunks_this_seq):
         new_states = tl.load(states_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
         dA_cs = tl.load(dA_cs_ptr).to(tl.float32)
-        states = fast_exp(dA_cs) * states + new_states
+        # Explicit fused multiply-add: the batch-invariant decode path folds
+        # completed chunks with the same update and must round identically.
+        states = tl.fma(fast_exp(dA_cs), states, new_states)
         tl.store(out_ptrs, states, mask=offs_m < dim)
 
         states_ptrs += stride_states_chunk
