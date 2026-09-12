@@ -469,7 +469,11 @@ class OutputProcessor:
         return len(self.request_states)
 
     def has_request(self, request_id: str) -> bool:
-        return request_id in self.request_states
+        return (
+            request_id in self.request_states
+            or request_id in self.external_req_ids
+            or request_id in self.parent_requests
+        )
 
     def get_num_queued_tokens(self) -> int:
         """Total prompt tokens of requests currently in the prefill phase.
@@ -517,12 +521,24 @@ class OutputProcessor:
                 if req_state := self.request_states.get(request_id):
                     external_req_id = req_state.external_req_id
                     internal_ids = self.external_req_ids[external_req_id]
-                    internal_ids.remove(request_id)
+                    if request_id in internal_ids:
+                        internal_ids.remove(request_id)
                     if not internal_ids:
                         del self.external_req_ids[external_req_id]
             elif internal_ids := self.external_req_ids.pop(request_id, []):
                 # External ID - abort all requests in the external->internal mapping
                 internal_req_ids.extend(internal_ids)
+            elif request_id in self.request_states:
+                # Internal ID fallback when caller didn't pass internal=True
+                internal_req_ids.append(request_id)
+                if req_state := self.request_states.get(request_id):
+                    external_req_id = req_state.external_req_id
+                    if external_req_id in self.external_req_ids:
+                        internal_ids = self.external_req_ids[external_req_id]
+                        if request_id in internal_ids:
+                            internal_ids.remove(request_id)
+                        if not internal_ids:
+                            del self.external_req_ids[external_req_id]
 
         request_ids_to_abort = []
         for request_id in internal_req_ids:

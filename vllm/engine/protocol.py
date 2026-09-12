@@ -118,12 +118,15 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def abort(self, request_id: str | Iterable[str]) -> None:
+    async def abort(
+        self, request_id: str | Iterable[str], internal: bool = False
+    ) -> list[str] | None:
         """Abort a request.
 
         Args:
             request_id: The unique id of the request,
                         or an iterable of such ids.
+            internal: Whether the request id is an internal engine id.
         """
         ...
 
