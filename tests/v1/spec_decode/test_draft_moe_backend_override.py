@@ -8,11 +8,13 @@ target is typically unquantized, and quantized-only backends reject it, so the
 server fails to start rather than falling back.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from vllm.config import LoadConfig
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
 
@@ -39,6 +41,7 @@ class _VllmConfig:
     kernel_config: _KernelConfig
     cache_config: _CacheConfig
     speculative_config: _SpeculativeConfig
+    load_config: LoadConfig = field(default_factory=LoadConfig)
 
 
 def _config(target_moe: str, draft_moe: str | None) -> _VllmConfig:
@@ -62,6 +65,10 @@ def _capture_draft_config(cfg):
 
     with (
         patch("vllm.v1.worker.gpu.spec_decode.eagle.utils.get_model", _fake_get_model),
+        patch(
+            "vllm.v1.worker.gpu.spec_decode.utils.get_pp_group",
+            return_value=SimpleNamespace(world_size=1),
+        ),
         pytest.raises(_Captured) as exc,
     ):
         load_eagle_model(object(), cfg)
