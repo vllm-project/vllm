@@ -134,6 +134,10 @@ class LoRAModelManager:
         )
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
         self.lora_index_to_id: list[int | None] = [None] * self.lora_slots
+        # Local transport writes directly into these receiver-owned slots.
+        # A reserved slot remains invisible to request mappings until activation.
+        self._local_adapter_slots: dict[int, int] = {}
+        self._staged_local_adapters: set[int] = set()
         self.vocab_size = vocab_size
 
         self.is_pooling_model = is_pooling_model(self.model)
@@ -520,7 +524,7 @@ class LoRAModelManager:
         plan: LocalLoRAPlan,
         factors: dict[str, tuple[list[torch.Tensor], list[torch.Tensor]]],
     ) -> bool:
-        """Own and scale unscaled local factors without packing or eviction."""
+        """Copy local factors directly into a reserved receiver-owned slot."""
         self._validate_local_factors(plan, factors)
         if lora_id <= 0:
             raise ValueError("Local adapter IDs must be positive")
@@ -528,22 +532,45 @@ class LoRAModelManager:
             raise ValueError(f"Adapter ID {lora_id} is already registered")
         if len(self._registered_adapters) >= self.capacity:
             raise RuntimeError("No free local adapter cache slots")
-        loras: dict[str, LoRALayerWeights] = {}
-        for name, (lora_a, lora_b) in factors.items():
-            owned_a = [tensor.detach().clone() for tensor in lora_a]
-            owned_b = [tensor.detach().clone() for tensor in lora_b]
-            weights = PackedLoRALayerWeights(
-                name,
-                plan.rank,
-                [plan.lora_alpha] * len(owned_a),
-                owned_a,
-                owned_b,
+
+        local_slots = self._local_adapter_slots
+        staged = self._staged_local_adapters
+        occupied = set(local_slots.values())
+        try:
+            index = next(
+                slot
+                for slot, active_id in enumerate(self.lora_index_to_id)
+                if active_id is None and slot not in occupied
             )
-            weights.optimize()
-            loras[name] = weights
+        except StopIteration:
+            raise RuntimeError("No free local adapter GPU slots") from None
+
+        scale = plan.lora_alpha / plan.rank
+        try:
+            for name, module in self.modules.items():
+                if name not in factors:
+                    module.reset_lora(index)
+                    continue
+                lora_a, lora_b = factors[name]
+                module.set_lora_shard(index, plan.rank, lora_a, lora_b)
+                if scale != 1:
+                    for _, b_buffer in module._get_lora_shard_buffers(index):
+                        b_buffer[..., : plan.rank].mul_(scale)
+        except (RuntimeError, ValueError, NotImplementedError):
+            for module in self.modules.values():
+                module.reset_lora(index)
+            raise
+
         self._registered_adapters[lora_id] = LoRAModel(
-            lora_id, plan.rank, loras, local_plan=plan
+            lora_id,
+            plan.rank,
+            {},
+            local_plan=plan,
         )
+        local_slots[lora_id] = index
+        staged.add(lora_id)
+        self._local_adapter_slots = local_slots
+        self._staged_local_adapters = staged
         return True
 
     def _validate_local_factors(
@@ -574,6 +601,17 @@ class LoRAModelManager:
         assert plan is not None
         if lora.rank != plan.rank:
             raise ValueError("Local adapter rank does not match its plan")
+        local_slots = self._local_adapter_slots
+        if lora.id in local_slots:
+            if len(self._active_adapters) >= self.lora_slots:
+                raise RuntimeError("No free local adapter GPU slots")
+            index = local_slots[lora.id]
+            if self.lora_index_to_id[index] is not None:
+                raise RuntimeError("Reserved local adapter GPU slot is occupied")
+            self._active_adapters[lora.id] = None
+            self.lora_index_to_id[index] = lora.id
+            self._staged_local_adapters.discard(lora.id)
+            return True
         factors = {
             name: (weights.lora_a, weights.lora_b)
             for name, weights in lora.loras.items()
@@ -611,11 +649,12 @@ class LoRAModelManager:
         cached = self._registered_adapters.cache.get(lora_id)
         if cached is not None and cached.tensor_extent == "local":
             return self._activate_local_adapter(cached)
+        reserved_slots = set(self._local_adapter_slots.values())
         first_free_slot = next(
             (
                 (i, lora_id)
                 for i, lora_id in enumerate(self.lora_index_to_id)
-                if lora_id is None
+                if lora_id is None and i not in reserved_slots
             ),
             None,
         )
@@ -710,6 +749,11 @@ class LoRAModelManager:
 
     def remove_all_adapters(self):
         """Remove all LoRAModels from the manager."""
+        for index in set(self._local_adapter_slots.values()):
+            for module in self.modules.values():
+                module.reset_lora(index)
+        self._local_adapter_slots.clear()
+        self._staged_local_adapters.clear()
         self._registered_adapters.clear()
         self.lora_index_to_id = [None] * self.lora_slots
         self._active_adapters.clear()
@@ -1589,6 +1633,12 @@ class LoRAModelManager:
 
     def remove_adapter(self, adapter_id: int) -> bool:
         self.deactivate_adapter(adapter_id)
+        local_slots = self._local_adapter_slots
+        index = local_slots.pop(adapter_id, None)
+        if index is not None:
+            for module in self.modules.values():
+                module.reset_lora(index)
+            self._staged_local_adapters.discard(adapter_id)
         if adapter_id not in self._registered_adapters:
             return False
         self._registered_adapters.pop(adapter_id, None)

@@ -192,6 +192,20 @@ def test_local_registration_owns_values_scales_once_and_preserves_slot_lifecycle
     assert manager.list_adapters() == {}
 
 
+def test_local_registration_does_not_clone_factors(manager, monkeypatch):
+    plan, factors = make_payload(manager)
+
+    def fail_clone(*_args, **_kwargs):
+        raise AssertionError("local registration must not clone factor tensors")
+
+    monkeypatch.setattr(torch.Tensor, "clone", fail_clone)
+    assert manager.add_local_adapter(1, plan, factors)
+    assert manager.lora_index_to_id == [None, None]
+    assert manager._staged_local_adapters == {1}
+    assert manager.activate_adapter(1)
+    assert manager.lora_index_to_id == [1, None]
+
+
 @pytest.mark.parametrize(
     "failure", ["layout", "tp_rank", "missing", "extra", "shape", "dtype", "rank"]
 )
@@ -237,14 +251,10 @@ def test_local_cache_and_gpu_capacity_never_evict_active_generation(manager):
     for adapter_id in (1, 2):
         manager.add_local_adapter(adapter_id, plan, factors)
         manager.activate_adapter(adapter_id)
-    manager.add_local_adapter(3, plan, factors)
-    with pytest.raises(RuntimeError, match="cache slots"):
-        manager.add_local_adapter(4, plan, factors)
-    assert manager.lora_index_to_id == [1, 2]
-    assert set(manager.list_adapters()) == {1, 2, 3}
     with pytest.raises(RuntimeError, match="GPU slots"):
-        manager.activate_adapter(3)
+        manager.add_local_adapter(3, plan, factors)
     assert manager.lora_index_to_id == [1, 2]
+    assert set(manager.list_adapters()) == {1, 2}
 
 
 def test_global_adapter_keeps_existing_scaling_and_loading_path(manager):
@@ -273,7 +283,6 @@ def test_failed_local_copy_keeps_previous_adapter_and_slot_map(manager, monkeypa
     plan, factors = make_payload(manager)
     manager.add_local_adapter(1, plan, factors)
     manager.activate_adapter(1)
-    manager.add_local_adapter(2, plan, factors)
     before = [
         (a.clone(), b.clone())
         for module in manager.modules.values()
@@ -286,7 +295,7 @@ def test_failed_local_copy_keeps_previous_adapter_and_slot_map(manager, monkeypa
     with monkeypatch.context() as stage:
         stage.setattr(manager.modules["fused_qkv_a_proj"], "set_lora_shard", fail_copy)
         with pytest.raises(RuntimeError, match="injected"):
-            manager.activate_adapter(2)
+            manager.add_local_adapter(2, plan, factors)
     assert manager.lora_index_to_id == [1, None]
     after = [
         (a, b)
@@ -302,6 +311,7 @@ def test_failed_local_copy_keeps_previous_adapter_and_slot_map(manager, monkeypa
         for module in manager.modules.values()
         for a, b in module._get_lora_shard_buffers(1)
     )
+    manager.add_local_adapter(2, plan, factors)
     assert manager.activate_adapter(2)
     assert manager.lora_index_to_id == [1, 2]
 
@@ -378,7 +388,7 @@ def test_local_replacement_updates_existing_mapping_invalidation(manager, monkey
     manager.deactivate_adapter(1)
     manager.activate_adapter(2)
     manager.set_adapter_mapping(mapping)
-    assert observed == [(1, None), (2, None)]
+    assert observed == [(1, None), (None, 2)]
 
 
 @pytest.mark.parametrize(
