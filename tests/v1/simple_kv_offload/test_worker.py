@@ -48,7 +48,6 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
     CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
     build_params,
-    pin_tensor,
 )
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
@@ -67,8 +66,11 @@ SLEEP_CYCLES = 50_000_000
 
 def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
     gpu = {"k": torch.zeros((NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cuda")}
-    cpu = {"k": torch.zeros((NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cpu")}
-    pin_tensor(cpu["k"])
+    cpu = {
+        "k": torch.zeros(
+            (NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cpu", pin_memory=True
+        )
+    }
     low_pri, _ = torch.cuda.Stream.priority_range()
     backend = DmaCopyBackend()
     backend.init(
