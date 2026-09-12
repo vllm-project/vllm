@@ -15,7 +15,6 @@ import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
