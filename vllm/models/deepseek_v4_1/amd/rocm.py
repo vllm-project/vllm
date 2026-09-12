@@ -109,9 +109,11 @@ def _combine_topk_swa_indices_kernel(
     gather_lens_ptr,
     M,
     N,
+    num_tokens,
     TOP_K: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     WINDOW_SIZE: tl.constexpr,
+    PADDED_WINDOW: tl.constexpr,
     TOPK_WIDTH: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
 ):
@@ -121,7 +123,11 @@ def _combine_topk_swa_indices_kernel(
 
     base = tl.load(query_start_loc_ptr)
     query_start = tl.load(query_start_loc_ptr + batch_idx) - base
-    query_end = tl.load(query_start_loc_ptr + batch_idx + 1) - base
+    # V4.1's mixed prefill metadata can make query_start_loc claim more tokens
+    # than topk_indices has rows; without this the strided loop reads past the end.
+    query_end = tl.minimum(
+        tl.load(query_start_loc_ptr + batch_idx + 1) - base, num_tokens
+    )
     query_len = query_end - query_start
     seq_len = tl.load(seq_lens_ptr + batch_idx)
     gather_len = tl.load(gather_lens_ptr + batch_idx)
@@ -131,8 +137,10 @@ def _combine_topk_swa_indices_kernel(
     for token_idx in range(query_start + worker_id, query_end, num_workers):
         token_idx_in_query = token_idx - query_start
         pos = start_pos + token_idx_in_query
-        topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
-        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+        # The warmup batch gives pos < 0; the combined_lens store below is
+        # unmasked, so a negative length would reach it.
+        topk_len = tl.maximum(tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K), 0)
+        swa_len = tl.maximum(tl.minimum(pos + 1, WINDOW_SIZE), 0)
 
         topk_offset = tl.arange(0, PADDED_TOP_K)
         topk_mask = topk_offset < topk_len
@@ -150,7 +158,8 @@ def _combine_topk_swa_indices_kernel(
             mask=topk_mask,
         )
 
-        swa_offset = tl.arange(0, WINDOW_SIZE)
+        # tl.arange needs a power of two; swa_len masks the padding off.
+        swa_offset = tl.arange(0, PADDED_WINDOW)
         tl.store(
             combined_indices_ptr
             + token_idx * combined_indices_stride
@@ -174,17 +183,10 @@ def combine_topk_swa_indices(
     M: int,
     N: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Combine compressed-attention and sliding-window indices with Torch.
-
-    The Triton implementation inherited from DeepSeek V4 launches a
-    two-dimensional grid with 128 workers per request.  On gfx950 it can issue
-    an out-of-bounds access for V4.1's mixed prefill metadata (including the
-    synthetic mixed-token warmup).  This path is prefill-only and the tensors
-    are small, so use ordinary Torch indexing until a gfx950-safe fused kernel
-    is available.
-    """
+    """Combine compressed-attention and sliding-window indices."""
     topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
     num_tokens = topk_indices.shape[0]
+    num_reqs = seq_lens.shape[0]
     combined_topk = (
         (topk + window_size + _SPARSE_PREFILL_TOPK_ALIGNMENT - 1)
         // _SPARSE_PREFILL_TOPK_ALIGNMENT
@@ -199,55 +201,32 @@ def combine_topk_swa_indices(
     combined_lens = torch.empty(
         num_tokens, dtype=torch.int32, device=topk_indices.device
     )
+    if num_tokens == 0 or num_reqs == 0:
+        return combined_indices, combined_lens
 
-    # query_start_loc may have a non-zero base for a narrowed mixed batch.
-    query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    req_ids = torch.repeat_interleave(
-        torch.arange(seq_lens.shape[0], device=seq_lens.device), query_lens
+    _combine_topk_swa_indices_kernel[(num_reqs, 128)](
+        combined_indices,
+        combined_indices.stride(0),
+        combined_lens,
+        topk_indices,
+        topk_indices.stride(0),
+        query_start_loc,
+        seq_lens,
+        gather_lens,
+        M,
+        N,
+        num_tokens,
+        # 0 on the layers that pass compress_ratio == 0, which would otherwise
+        # fold to a // 0 at JIT time; TOPK_WIDTH bounds the logical width.
+        TOP_K=(
+            0 if compress_ratio <= 0 or topk <= 0 else min(topk, topk_indices.shape[-1])
+        ),
+        COMPRESS_RATIO=max(int(compress_ratio), 1),
+        WINDOW_SIZE=window_size,
+        PADDED_WINDOW=triton.next_power_of_2(window_size),
+        TOPK_WIDTH=topk_indices.shape[-1],
+        PADDED_TOP_K=triton.next_power_of_2(topk_indices.shape[-1]),
     )
-    query_starts = query_start_loc[:-1] - query_start_loc[0]
-    token_offsets = torch.arange(num_tokens, device=seq_lens.device) - (
-        torch.repeat_interleave(query_starts, query_lens)
-    )
-    positions = seq_lens[req_ids] - query_lens[req_ids] + token_offsets
-
-    logical_topk_width = min(topk, topk_indices.shape[1])
-    topk_lens = torch.minimum(
-        (positions + 1) // compress_ratio,
-        torch.full_like(positions, logical_topk_width),
-    ).clamp_min(0)
-    topk_offsets = torch.arange(logical_topk_width, device=seq_lens.device)
-    topk_mask = topk_offsets[None, :] < topk_lens[:, None]
-    topk_values = topk_indices[:, :logical_topk_width].to(torch.int32)
-    topk_valid = topk_mask & (topk_values >= 0) & (topk_values < N)
-    combined_indices[:, :logical_topk_width] = torch.where(
-        topk_valid,
-        topk_values + (M * req_ids).to(torch.int32)[:, None],
-        -1,
-    )
-
-    swa_lens = torch.minimum(
-        positions + 1, torch.full_like(positions, window_size)
-    ).clamp_min(0)
-    swa_offsets = torch.arange(window_size, device=seq_lens.device)
-    swa_mask = swa_offsets[None, :] < swa_lens[:, None]
-    swa_columns = topk_lens[:, None] + swa_offsets[None, :]
-    gather_starts = seq_lens - gather_lens
-    swa_values = (
-        M * req_ids[:, None]
-        + N
-        + swa_offsets[None, :]
-        + positions[:, None]
-        - swa_lens[:, None]
-        + 1
-        - gather_starts[req_ids, None]
-    ).to(torch.int32)
-    rows = torch.arange(num_tokens, device=seq_lens.device)[:, None].expand_as(
-        swa_columns
-    )
-    flat_dst = rows[swa_mask] * combined_topk + swa_columns[swa_mask]
-    combined_indices.view(-1).index_copy_(0, flat_dst, swa_values[swa_mask])
-    combined_lens.copy_((topk_lens + swa_lens).to(torch.int32))
     return combined_indices, combined_lens
 
 
