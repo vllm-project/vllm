@@ -674,7 +674,7 @@ def test_spec_forward_prepares_native_conv_metadata(
         conv_buf=torch.empty(0),
         ssm_state=torch.empty(0),
         width=CONV_KERNEL,
-        state_len=0,
+        state_len=CONV_KERNEL - 1 + 4,
     )
 
     expected = (
@@ -840,8 +840,98 @@ def test_spec_forward_zero_acceptance_never_reaches_native_conv(
         assert (call["num_accepted_tokens"] > 0).all()
 
 
-@pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
 @torch.inference_mode()
+@torch.inference_mode()
+def test_spec_forward_over_reported_acceptance_is_clamped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vllm#56419 retest: constrained decoding can shrink a step below the
+    reported num_accepted, and the C++ kernel rejects num_accepted > seqlen.
+    The batch must take the fallback loop, which clamps to the produced
+    tokens instead of crashing or fabricating history.
+    """
+    dim = 96
+    num_spec = 3
+    state_len = CONV_KERNEL - 1 + num_spec
+    torch.manual_seed(0)
+
+    stored = torch.randn(1, dim, state_len)
+    x_seq = torch.randn(num_spec, dim)
+    weight = torch.randn(dim, 1, CONV_KERNEL)
+    bias = torch.randn(dim)
+
+    captured = {}
+
+    def grab_rearrange(conv_out):
+        captured["conv_out"] = conv_out.clone()
+        return tuple(conv_out.unsqueeze(0).chunk(3, dim=-1)[i] for i in range(3))
+
+    layer = types.SimpleNamespace(
+        activation="silu",
+        conv1d=types.SimpleNamespace(weight=weight, bias=bias),
+        A_log=None,
+        dt_bias=None,
+        rearrange_mixed_qkv=grab_rearrange,
+    )
+    metadata = GDNAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=1,
+        num_spec_decode_tokens=num_spec,
+        num_actual_tokens=num_spec,
+        spec_state_indices_tensor=torch.zeros(1, num_spec, dtype=torch.int32),
+        spec_query_start_loc=torch.tensor([0, num_spec], dtype=torch.int32),
+        # over-reported: two more than the step actually produced
+        num_accepted_tokens=torch.tensor([num_spec + 2], dtype=torch.int32),
+    )
+
+    conv_buf = stored.clone()
+    monkeypatch.setattr(
+        gdn_attention.ops,
+        "fused_sigmoid_gating_delta_rule_update_spec_cpu",
+        lambda **kwargs: kwargs["q"],
+    )
+
+    def _native_forbidden(**kwargs):
+        raise AssertionError(
+            "out-of-contract num_accepted reached the native conv kernel"
+        )
+
+    monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
+    monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
+    monkeypatch.setattr(
+        gdn_attention.ops, "causal_conv1d_update_cpu", _native_forbidden
+    )
+    gdn_attention._spec_forward(
+        layer=layer,
+        attn_metadata_i=metadata,
+        mixed_qkv_spec=x_seq.clone(),
+        b_spec=torch.randn(num_spec, dim),
+        a_spec=torch.randn(num_spec, dim),
+        conv_buf=conv_buf,
+        ssm_state=torch.zeros(1, 2, 2, 2),
+        width=CONV_KERNEL,
+        state_len=state_len,
+    )
+
+    # Clamped to a fully-accepted step: the buffer tail is exactly the
+    # produced sequence, prefixed by what remains of the stored history.
+    expected_buf = torch.cat(
+        [stored[0:1, :, num_spec:], x_seq.transpose(0, 1).unsqueeze(0)], dim=-1
+    )
+    torch.testing.assert_close(conv_buf, expected_buf, atol=0, rtol=0)
+
+    # The draft outputs use the history window at the clamped offset
+    # (acc_eff - 1 == num_spec - 1).
+    prior = stored[0, :, num_spec - 1 : num_spec + CONV_KERNEL - 2]
+    ref_in = torch.cat([prior, x_seq.transpose(0, 1)], dim=-1).unsqueeze(0)
+    ref = F.silu(F.conv1d(ref_in, weight, bias, groups=dim))[0].transpose(0, 1)
+    torch.testing.assert_close(captured["conv_out"], ref, atol=1e-4, rtol=1e-4)
+
+
+@pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)
 def test_causal_conv1d_torch_two_call_split(total_tokens: int, split: int) -> None:
     """Non-AMX conv-state handoff: a two-call split (the second seeded via
     ``has_initial_state=True`` from the conv_states the first wrote back) must
