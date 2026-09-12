@@ -2526,6 +2526,12 @@ class GPUModelRunner(
             )
 
             extra_attn_metadata_args = {}
+            if envs.VLLM_BATCH_INVARIANT and isinstance(
+                builder, Mamba2AttentionMetadataBuilder
+            ):
+                extra_attn_metadata_args["mamba_prompt_lens_cpu"] = (
+                    num_prompt_tokens_cpu
+                )
             if use_spec_decode and isinstance(
                 builder,
                 (
