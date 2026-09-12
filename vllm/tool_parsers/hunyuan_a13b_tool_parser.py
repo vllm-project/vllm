@@ -51,7 +51,12 @@ class HunyuanA13BToolParser(ToolParser):
             r"<tool_calls>([\s\S]*?)</tool_calls>", re.DOTALL
         )
 
-        self.tool_name_reg = re.compile(r'"name"\s*:\s*"([^"]+)"')
+        # Anchored on the following "arguments" key so this only matches a
+        # tool's own name field, not an argument literally called "name"
+        # (e.g. {"name": "create_user", "arguments": {"name": "Alice"}}).
+        self.tool_name_reg = re.compile(
+            r'"name"\s*:\s*"([^"]+)"(?=\s*,\s*"arguments"\s*:)'
+        )
 
         self.tool_empty_arg_reg = re.compile(
             r'"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{\s*\}'
