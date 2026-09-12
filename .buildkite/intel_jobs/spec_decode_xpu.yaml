@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (H200 MIG 35GB) V1 Spec Decode'
+  key: v1-spec-decode
   device: intel_gpu
   timeout_in_minutes: 40
   working_dir: .
@@ -38,6 +39,7 @@ steps:
     cd tests &&
     pytest -v -s -m not slow_test v1/spec_decode || true'
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode Eagle 1: DeepSeek + Qwen'
+  key: spec-decode-eagle-1-deepseek-qwen
   device: intel_gpu
   timeout_in_minutes: 25
   working_dir: .
@@ -62,6 +64,7 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/eagle/ -k deepseek_eagle or qwen3_eagle3 || true'
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode Eagle 2: Llama 3 + Qwen VL + Other'
+  key: spec-decode-eagle-2-llama3-qwen-vl-other
   device: intel_gpu
   timeout_in_minutes: 25
   working_dir: .
@@ -86,6 +89,7 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/eagle/ -k not deepseek_eagle and not qwen3_eagle3 || true'
 - label: ':nvidia: (B200) Spec Decode Eagle Nightly'
+  key: spec-decode-eagle-nightly-b200
   device: intel_gpu
   timeout_in_minutes: 25
   optional: false
@@ -111,6 +115,7 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/eagle/ || true'
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode Speculators + MTP'
+  key: spec-decode-speculators-mtp
   device: intel_gpu
   timeout_in_minutes: 50
   working_dir: .
@@ -139,6 +144,7 @@ steps:
     pytest -v -s v1/e2e/spec_decode/speculators/ || true &&
     pytest -v -s v1/e2e/spec_decode/mtp/ || true'
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode N-Gram + Suffix'
+  key: spec-decode-ngram-suffix
   device: intel_gpu
   timeout_in_minutes: 20
   working_dir: .
@@ -166,6 +172,7 @@ steps:
     pytest -v -s v1/e2e/spec_decode/ngram_suffix/ || true &&
     python3 spec_decode/test_custom_proposer.py || true'
 - label: ':nvidia: (H200 MIG 18GB) Spec Decode Draft Model'
+  key: spec-decode-draft-model
   device: intel_gpu
   timeout_in_minutes: 45
   working_dir: .
@@ -190,6 +197,7 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/draft_model/ || true'
 - label: ':nvidia: (H100) Speculators Correctness Nightly'
+  key: speculators-correctness
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 1
@@ -219,6 +227,7 @@ steps:
     cd tests &&
     pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test || true'
 - label: ':nvidia: (B200) Spec Decode DeepSeek MTP Parallel Load'
+  key: spec-decode-deepseek-mtp-parallel-load-2xb200-2xmi300
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 2
@@ -248,6 +257,7 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/test_mtp_parallel_load.py || true'
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode AL DFlash Nightly'
+  key: spec-decode-dflash-nightly
   device: intel_gpu
   timeout_in_minutes: 90
   optional: false
@@ -275,6 +285,7 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/acceptance_rates/dflash/ || true'
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode AL DSpark Nightly'
+  key: spec-decode-dspark-nightly
   device: intel_gpu
   timeout_in_minutes: 60
   optional: false
@@ -302,6 +313,7 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/acceptance_rates/dspark/ || true'
 - label: ':nvidia: (H200 MIG 35GB) Spec Decode AL MTP + Other Acceptance Nightly'
+  key: spec-decode-mtp-other-acceptance-nightly
   device: intel_gpu
   timeout_in_minutes: 35
   parallelism: 3

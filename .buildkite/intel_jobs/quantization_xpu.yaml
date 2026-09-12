@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (H200 MIG 35GB) Quantization Shard %N'
+  key: quantization-2
   device: intel_gpu
   timeout_in_minutes: 40
   parallelism: 4
@@ -32,6 +33,7 @@ steps:
     cd tests &&
     VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py -k not test_compressed_tensors_w4a8_fp8 --ignore quantization/test_quark.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT || true'
 - label: ':nvidia: (H200 MIG 35GB) Quantized Fusions'
+  key: quantized-fusions
   device: intel_gpu
   timeout_in_minutes: 20
   working_dir: .
@@ -58,6 +60,7 @@ steps:
     'cd tests &&
     pytest -v -s fusion/ || true'
 - label: ':nvidia: (B200) Quantized MoE'
+  key: quantized-moe-test-b200
   device: intel_gpu
   timeout_in_minutes: 120
   working_dir: .
@@ -87,6 +90,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -s -v tests/quantization/test_blackwell_moe.py || true'
 - label: ':nvidia: (H200 MIG 35GB) Quantized Models'
+  key: quantized-models-test
   device: intel_gpu
   timeout_in_minutes: 65
   working_dir: .

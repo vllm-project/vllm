@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (H200 MIG 35GB) Model Executor'
+  key: model-executor
   device: intel_gpu
   timeout_in_minutes: 60
   working_dir: .

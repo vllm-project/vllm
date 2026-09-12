@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (H200 MIG 18GB) Engine Core'
+  key: engine-2
   device: intel_gpu
   timeout_in_minutes: 30
   working_dir: .
@@ -42,6 +43,7 @@ steps:
     'cd tests &&
     VLLM_XPU_ENABLE_XPU_GRAPH=1 pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py || true'
 - label: ':nvidia: (L4) V1 Engine'
+  key: engine-1-gpu-2
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 1
@@ -71,6 +73,7 @@ steps:
     pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py || true &&
     pytest -v -s v1/test_tensor_ipc_queue.py || true'
 - label: ':nvidia: (H200 MIG 18GB) E2E Scheduling'
+  key: e2e-scheduling-1-gpu
   device: intel_gpu
   timeout_in_minutes: 53
   working_dir: .
@@ -94,6 +97,7 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/general/test_async_scheduling.py || true'
 - label: ':nvidia: (H200 MIG 35GB) E2E Core'
+  key: e2e-core-1-gpu
   device: intel_gpu
   timeout_in_minutes: 50
   working_dir: .
@@ -117,6 +121,7 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py || true'
 - label: ':nvidia: (L4) V1 E2E'
+  key: v1-e2e-2-gpus-2
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 2
@@ -159,6 +164,7 @@ steps:
     'cd tests &&
     pytest -v -s v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism || true'
 - label: ':nvidia: (B200) V1 E2E Hybrid Chunked Prefill'
+  key: v1-e2e-hybrid-chunked-prefill-b200
   device: intel_gpu
   timeout_in_minutes: 35
   num_devices: 1
