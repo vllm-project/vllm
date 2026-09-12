@@ -30,6 +30,8 @@ RDNAHybridW4A16LinearKernel = hybrid_module.RDNAHybridW4A16LinearKernel
 pack_int4_exllama_shuffle = hybrid_module.pack_int4_exllama_shuffle
 SUPPORTED_GROUP_SIZES = hybrid_module.SUPPORTED_GROUP_SIZES
 MAX_SKINNY_BATCH_SIZE = hybrid_module.MAX_SKINNY_BATCH_SIZE
+triton_w4a16_skinny_fmt_gemm = hybrid_module.triton_w4a16_skinny_fmt_gemm
+select_skinny_gfx1151_config = hybrid_module._select_skinny_gfx1151_config
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +173,78 @@ def test_rdna_hybrid_w4a16_apply_with_bias(dtype, M):
     ref = _rdna_hybrid_w4a16_reference(x_mk, w_int4_nk, scales_nkg, None, G, bias=bias)
 
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
+
+
+# ---------------------------------------------------------------------------
+# Triton prefill path
+# ---------------------------------------------------------------------------
+
+
+def _make_prefill_case(M, K, N, G, dtype, has_zp):
+    """Random [M,K] activations + skinny [N,K//8] weights and their metadata."""
+    x = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
+    w_int4 = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
+    b_q = pack_int4_exllama_shuffle(w_int4)
+    scales = (0.05 * torch.rand((N, K // G), device=device, dtype=torch.float32)).to(
+        dtype
+    )
+    zp = (
+        torch.randint(0, 16, (N, K // G), device=device, dtype=torch.int32).to(dtype)
+        if has_zp
+        else None
+    )
+    return x, w_int4, b_q, scales, zp
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("has_zp", [False, True])
+@pytest.mark.parametrize(
+    "M,K,N,G",
+    [(17, 256, 512, 32), (32, 512, 256, 64), (33, 512, 512, 128), (64, 1024, 256, 128)],
+)
+def test_triton_prefill_gemm_matches_reference(dtype, has_zp, M, K, N, G):
+    """Prefill GEMM against a float32 oracle, over both unpacks and both the
+    asymmetric and symmetric dequants."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+    set_random_seed(0)
+
+    x, w_int4, b_q, scales, zp = _make_prefill_case(M, K, N, G, dtype, has_zp)
+    out = triton_w4a16_skinny_fmt_gemm(a=x, b_q=b_q, scales=scales, group_size=G, zp=zp)
+    ref = _rdna_hybrid_w4a16_reference(x, w_int4, scales, zp, G, bias=None)
+    torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_gfx1151_tile_table_never_straddles_a_quant_group(dtype):
+    """BLOCK_K > group_size would give a tile's tail the wrong scale.
+
+    The kernel loads one scale per BLOCK_K tile, so this is a correctness
+    invariant of the table, not a tuning preference. Checked in Python so it
+    holds for shapes no test has hardware for.
+    """
+    for group_size in SUPPORTED_GROUP_SIZES:
+        for M in (1, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096):
+            for N, K in [
+                (512, 2048),
+                (4096, 4096),
+                (24576, 4096),
+                (4096, 12288),
+                (32768, 2048),
+                (1024, 8192),
+            ]:
+                _, _, block_k, _, _ = select_skinny_gfx1151_config(
+                    M, N, K, group_size, dtype
+                )
+                assert block_k <= group_size, (
+                    f"BLOCK_K={block_k} > group_size={group_size} "
+                    f"at M={M} N={N} K={K} dtype={dtype}"
+                )
+                assert block_k % 8 == 0, (
+                    f"BLOCK_K={block_k} must be a multiple of 8 "
+                    f"(8 nibbles per packed int32)"
+                )
 
 
 # ---------------------------------------------------------------------------
