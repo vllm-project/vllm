@@ -210,6 +210,9 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         w13_bias: torch.Tensor | None,
         w2_bias: torch.Tensor | None,
     ) -> None:
+        if self.mxfp4_backend == Mxfp4MoeBackend.HUMMING:
+            self._stage_humming_quantized_weights(layer, w13, w2, w13_scale, w2_scale)
+
         w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
             convert_weight_to_mxfp4_moe_kernel_format(
                 mxfp4_backend=self.mxfp4_backend,
