@@ -73,7 +73,9 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import (
     MemoryProfilingResult,
     MemorySnapshot,
+    allocator_ceiling_bytes,
     format_gib,
+    limit_torch_allocator_to_budget,
     memory_profiling,
 )
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
@@ -521,6 +523,31 @@ class Worker(WorkerBase):
         with set_current_vllm_config(self.vllm_config):
             self.model_runner.reload_weights(*args, **kwargs)
 
+    def _profile_run_guarded(self) -> None:
+        """Run the profiling forward pass, turning an integrated-GPU OOM into a
+        clear, actionable error instead of a host wedge.
+
+        On unified-memory GPUs the torch allocator is capped to the memory
+        budget before profiling, so an over-large profiling transient raises
+        ``torch.OutOfMemoryError`` here rather than exhausting the shared pool.
+        """
+        try:
+            self.model_runner.profile_run()
+        except torch.OutOfMemoryError as e:
+            assert self.device is not None
+            device_index = self.device.index if self.device.index is not None else 0
+            if not current_platform.is_integrated_gpu(device_index):
+                raise
+            raise torch.OutOfMemoryError(
+                "Ran out of memory during startup profiling on an integrated "
+                "(unified-memory) GPU. The profiling batch exceeded the memory "
+                "budget (gpu_memory_utilization, capped to the memory available "
+                "to the process), which is enforced up front so profiling "
+                "cannot wedge the host. Reduce max_num_batched_tokens, "
+                "max_num_seqs or max_model_len, or raise gpu_memory_utilization "
+                "if the host has the headroom, and retry."
+            ) from e
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -536,10 +563,34 @@ class Worker(WorkerBase):
         """
         maybe_apply_startup_plan(self)
 
+        # On integrated (unified-memory) GPUs, cap the torch allocator to the
+        # memory budget before profiling. `self.requested_memory` is
+        # `util * total`, capped by `cap_unified_memory_budget` to the memory
+        # actually available minus a host reserve, so on a busy host the cap
+        # tracks what is available rather than the pool size. Without it the
+        # profiling transient can exhaust the pool shared with the OS and
+        # hard-wedge the host instead of failing cleanly (issue #46307).
+        # Weights, the profiling transient and the KV cache are all sized to fit
+        # inside this budget, so the cap only stops a transient that would have
+        # failed the budget check anyway. No-op on discrete GPUs.
+        # `kv_cache_memory_bytes` opts out of `gpu_memory_utilization`, so the
+        # ceiling must not be derived from it -- see allocator_ceiling_bytes().
+        allocator_ceiling = allocator_ceiling_bytes(
+            self.requested_memory,
+            self.init_snapshot.free_memory,
+            self.init_snapshot.total_memory,
+            self.cache_config.kv_cache_memory_bytes,
+        )
+        limit_torch_allocator_to_budget(
+            self.device,
+            allocator_ceiling,
+            self.init_snapshot.total_memory,
+        )
+
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
-            self.model_runner.profile_run()
+            self._profile_run_guarded()
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -566,7 +617,7 @@ class Worker(WorkerBase):
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
-            self.model_runner.profile_run()
+            self._profile_run_guarded()
 
         # Profile CUDA graph memory if graphs will be captured.
         # ROCm is included: #44825 moved the profiler to
