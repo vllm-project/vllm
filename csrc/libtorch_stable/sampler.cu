@@ -512,7 +512,9 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
         auto logit = smemFinal.items.logits[i];
         for (int j = 0; j < smemFinalDstIdx[0]; j++) {
           auto otherLogit = smemFinal.items.logits[j];
-          if (logit < otherLogit || (logit == otherLogit && i < j)) {
+          if (logit < otherLogit ||
+              (logit == otherLogit &&
+               smemFinal.items.indices[i] > smemFinal.items.indices[j])) {
             outIndex++;
           }
         }
