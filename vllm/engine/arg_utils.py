@@ -487,7 +487,7 @@ class EngineArgs:
     dcp_comm_backend: DCPCommBackend | None = ParallelConfig.dcp_comm_backend
     dcp_q_replicate: bool | None = ParallelConfig.dcp_q_replicate
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
-    cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
+    cp_kv_cache_interleave_size: int | None = None
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: int | None = None
     data_parallel_start_rank: int | None = None
@@ -507,6 +507,7 @@ class EngineArgs:
     linear_backend: LinearBackend = KernelConfig.linear_backend
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
+    elastic_ep_max_dp_size: int = ParallelConfig.elastic_ep_max_dp_size
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
@@ -1104,7 +1105,10 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--cp-kv-cache-interleave-size",
-            **parallel_kwargs["cp_kv_cache_interleave_size"],
+            **{
+                **parallel_kwargs["cp_kv_cache_interleave_size"],
+                "default": None,
+            },
         )
         parallel_group.add_argument(
             "--prefill-context-parallel-size",
@@ -1197,6 +1201,10 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--enable-elastic-ep", **parallel_kwargs["enable_elastic_ep"]
+        )
+        parallel_group.add_argument(
+            "--elastic-ep-max-dp-size",
+            **parallel_kwargs["elastic_ep_max_dp_size"],
         )
         parallel_group.add_argument(
             "--dbo-decode-token-threshold",
@@ -2342,6 +2350,7 @@ class EngineArgs:
             enable_ep_weight_filter=self.enable_ep_weight_filter,
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,
+            elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
             enable_dbo=self.enable_dbo,
             ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
@@ -2363,7 +2372,14 @@ class EngineArgs:
             dcp_comm_backend=self.dcp_comm_backend,
             dcp_q_replicate=self.dcp_q_replicate,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
-            cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+            cp_kv_cache_interleave_size=(
+                self.cp_kv_cache_interleave_size
+                if self.cp_kv_cache_interleave_size is not None
+                else ParallelConfig.cp_kv_cache_interleave_size
+            ),
+            _allow_auto_resolve_cp_interleave_size=(
+                self.cp_kv_cache_interleave_size is None
+            ),
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
             assigned_physical_gpu_ids=self._resolve_device_ids(),

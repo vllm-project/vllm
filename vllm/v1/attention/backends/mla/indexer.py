@@ -9,12 +9,12 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonPointerInputVariant,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
@@ -245,7 +245,18 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # Block sizes count uncompressed tokens: C4 indexer pages hold 64 rows.
         return [256]
+
+
+class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "DEEPSEEK_V41_INDEXER"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [64 if current_platform.is_device_capability_family(90) else 128]
 
 
 @dataclass
@@ -385,7 +396,7 @@ class BuildPrefillChunkMetadataKernel(
 
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
         max_tokens = max(1, min(vllm_config.scheduler_config.max_num_batched_tokens, 8))
-        hf_config = vllm_config.model_config.hf_config
+        hf_text_config = vllm_config.model_config.hf_text_config
         parallel_config = vllm_config.parallel_config
         dcp_world = parallel_config.decode_context_parallel_size
         dcp_interleave = parallel_config.cp_kv_cache_interleave_size
@@ -394,12 +405,12 @@ class BuildPrefillChunkMetadataKernel(
             dict.fromkeys(
                 max(1, int(ratio))
                 for ratio in (
-                    *(getattr(hf_config, "compress_ratios", None) or (1,)),
-                    getattr(hf_config, "index_kpool", 1) or 1,
+                    *(getattr(hf_text_config, "compress_ratios", None) or (1,)),
+                    getattr(hf_text_config, "index_kpool", 1) or 1,
                 )
             )
         )
-        index_kpool = getattr(hf_config, "index_kpool", None)
+        index_kpool = getattr(hf_text_config, "index_kpool", None)
         if index_kpool and index_kpool > 1 and index_kpool not in compress_ratios:
             compress_ratios = compress_ratios + (index_kpool,)
         return self._trace_dispatch(self.dispatch)(
@@ -684,7 +695,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if self.vllm_config.speculative_config
             else 0
         )
-        self.use_fp4_indexer_cache = dsa_indexer_uses_fp4(self.vllm_config)
+        self.indexer_uses_fp4 = dsa_indexer_uses_fp4(self.vllm_config)
 
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
@@ -697,7 +708,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             self.use_flattening,
             self.supports_varlen,
             next_n,
-            self.use_fp4_indexer_cache,
+            self.indexer_uses_fp4,
         )
 
         sm_count = num_compute_units(self.device.index)
@@ -949,28 +960,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.global_decode_seq_lens_buffer[actual_expanded:num_decode_tokens] = 0
         return self.global_decode_seq_lens_buffer[:num_decode_tokens]
 
-    def _build_varlen_decode_indices(
-        self,
-        decode_lens: torch.Tensor,
-        decode_lens_cpu: torch.Tensor,
-        num_decode_tokens: int,
-    ) -> torch.Tensor:
-        """Build request ids for flattened SM100 varlen rows."""
-        indices = self.decode_indices_buffer[:num_decode_tokens]
-        actual_expanded = int(decode_lens_cpu.sum().item())
-        num_decodes = decode_lens.shape[0]
-        indices[:actual_expanded] = torch.repeat_interleave(
-            self.arange_buffer[:num_decodes],
-            decode_lens,
-            output_size=actual_expanded,
-        )
-        if actual_expanded < num_decode_tokens:
-            pad = num_decode_tokens - actual_expanded
-            indices[actual_expanded:num_decode_tokens] = (
-                num_decodes + self.arange_buffer[:pad]
-            )
-        return indices
-
     @staticmethod
     def _split_indexer_prefill_chunks(
         compressed_seq_lens_cpu: torch.Tensor,
@@ -1145,12 +1134,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         decode_metadata = None
         if num_decodes > 0:
-            torch.diff(
-                common_attn_metadata.query_start_loc[: num_decodes + 1],
-                out=self.decode_lens_buffer[:num_decodes],
-            )
+            if not self.supports_varlen:
+                torch.diff(
+                    common_attn_metadata.query_start_loc[: num_decodes + 1],
+                    out=self.decode_lens_buffer[:num_decodes],
+                )
+                self.per_req_decode_lens_buffer[:num_decodes].copy_(
+                    self.decode_lens_buffer[:num_decodes]
+                )
             decode_lens = self.decode_lens_buffer[:num_decodes]
-            self.per_req_decode_lens_buffer[:num_decodes].copy_(decode_lens)
             decode_lens_cpu = torch.diff(
                 common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
             )
@@ -1185,38 +1177,74 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 and step_next_n_ok
             )
 
-            global_seq_lens_for_decode = self._prepare_global_decode_seq_lens(
-                global_seq_lens=global_seq_lens_for_decode,
-                decode_lens=decode_lens,
-                decode_lens_cpu=decode_lens_cpu,
-                query_start_loc=common_attn_metadata.query_start_loc[:num_decodes],
-                num_decode_tokens=num_decode_tokens,
-                use_native=use_native,
-                max_decode_len=max_decode_len,
-            )
-
-            decode_indices = None
-            if self.supports_varlen:
-                decode_indices = self._build_varlen_decode_indices(
-                    decode_lens=decode_lens,
-                    decode_lens_cpu=decode_lens_cpu,
-                    num_decode_tokens=num_decode_tokens,
-                )
-
-            seq_lens, block_table, decode_lens, batch_size, requires_padding = (
-                self._prepare_decode_tensors(
-                    seq_lens=seq_lens,
-                    block_table=block_table,
+            if not self.supports_varlen:
+                global_seq_lens_for_decode = self._prepare_global_decode_seq_lens(
+                    global_seq_lens=global_seq_lens_for_decode,
                     decode_lens=decode_lens,
                     decode_lens_cpu=decode_lens_cpu,
                     query_start_loc=common_attn_metadata.query_start_loc[:num_decodes],
-                    num_decodes=num_decodes,
                     num_decode_tokens=num_decode_tokens,
                     use_native=use_native,
-                    next_n=next_n,
                     max_decode_len=max_decode_len,
                 )
-            )
+
+            decode_indices = None
+            if self.supports_varlen:
+                from vllm.v1.attention.ops.metadata import (
+                    _indexer_decode_metadata_kernel,
+                )
+
+                capacity = self.decode_seq_lens_buffer.numel()
+                grid = max(
+                    num_decodes,
+                    num_decode_tokens + triton.cdiv(capacity - num_decode_tokens, 256),
+                )
+                _indexer_decode_metadata_kernel[(grid,)](
+                    query_start_loc,
+                    seq_lens,
+                    block_table,
+                    self.decode_seq_lens_buffer,
+                    self.expanded_block_table_buffer,
+                    self.decode_lens_buffer,
+                    self.decode_indices_buffer,
+                    self.per_req_decode_lens_buffer,
+                    num_decodes,
+                    num_decode_tokens,
+                    capacity,
+                    block_table.stride(0),
+                    self.expanded_block_table_buffer.stride(0),
+                    BLOCK_COLS=block_table.shape[1],
+                    num_warps=4,
+                )
+                seq_lens = self.decode_seq_lens_buffer[:num_decode_tokens]
+                block_table = self.expanded_block_table_buffer[:num_decode_tokens]
+                decode_lens = self.decode_lens_buffer[:num_decode_tokens]
+                decode_indices = self.decode_indices_buffer[:num_decode_tokens]
+                requires_padding = False
+                if global_seq_lens_for_decode is not None and max_decode_len > 1:
+                    self.global_decode_seq_lens_buffer[:num_decode_tokens].copy_(
+                        seq_lens
+                    )
+                    global_seq_lens_for_decode = self.global_decode_seq_lens_buffer[
+                        :num_decode_tokens
+                    ]
+            else:
+                seq_lens, block_table, decode_lens, batch_size, requires_padding = (
+                    self._prepare_decode_tensors(
+                        seq_lens=seq_lens,
+                        block_table=block_table,
+                        decode_lens=decode_lens,
+                        decode_lens_cpu=decode_lens_cpu,
+                        query_start_loc=common_attn_metadata.query_start_loc[
+                            :num_decodes
+                        ],
+                        num_decodes=num_decodes,
+                        num_decode_tokens=num_decode_tokens,
+                        use_native=use_native,
+                        next_n=next_n,
+                        max_decode_len=max_decode_len,
+                    )
+                )
 
             if self.compress_ratio > 1:
                 kernel_block_size = self.kernel_block_size
@@ -1239,9 +1267,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     )
                     block_table = self.indexer_decode_block_table_buffer[:rows, :cols]
 
-            seq_lens_is_buffer_view = (use_native and next_n > 1) or (
-                not use_native and max_decode_len > 1
-            )
+            # Flattening always returns a buffer view, including single-token
+            # batches. Keep its address stable across varlen graph replays.
+            seq_lens_is_buffer_view = not use_native or next_n > 1
 
             # DCP: localize the now-expanded per-token global bounds to this
             # rank's owned KV. Done here (after expansion) so each token's global
