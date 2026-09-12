@@ -394,7 +394,8 @@ def test_tp_sp_nvfp4_generation(num_gpus_available: int):
         "auto",
         SPTestOptions(
             multi_node_only=False,
-            load_format="dummy",
+            # Dummy loading leaves packed integer NVFP4 weights uninitialized.
+            load_format="auto",
             model_info=NVFP4_MODEL_INFO,
         ),
         num_gpus_available,
