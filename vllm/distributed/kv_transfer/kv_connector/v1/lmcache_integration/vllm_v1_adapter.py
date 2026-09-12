@@ -142,6 +142,10 @@ class RequestTracker:
     mm_hashes: list[str] | None = None
     mm_positions: list["PlaceholderRange"] | None = None
 
+    # Extra identity mixed into LMCache token-id keys
+    cache_salt: str | None = None
+    lora_name: str | None = None
+
     # The configs of the request, includes tags and other configs
     request_configs: dict | None = None
 
@@ -196,6 +200,9 @@ class RequestTracker:
             request_configs = None
 
         mm_hashes, mm_positions = extract_mm_features(new_request, modify=True)
+        lora_name = (
+            new_request.lora_request.lora_name if new_request.lora_request else None
+        )
 
         assert new_request.prompt_token_ids is not None
         return RequestTracker(
@@ -207,6 +214,8 @@ class RequestTracker:
             disagg_spec=disagg_spec,
             mm_hashes=mm_hashes,
             mm_positions=mm_positions,
+            cache_salt=new_request.cache_salt,
+            lora_name=lora_name,
             skip_save=skip_save,
             request_configs=request_configs,
         )
@@ -340,14 +349,16 @@ class ReqMeta:
         # Calculate the token ids and slot mappings for load and save
         token_ids = input_token_ids[:num_tokens_to_save]
 
-        # If the request has multimodal hashes, apply them to the token ids
-        if tracker.mm_hashes:
+        # Bind multimodal identity, cache_salt, and LoRA into the token-id key
+        # so store and lookup agree on extra cache dimensions.
+        if tracker.mm_hashes or tracker.cache_salt or tracker.lora_name:
             token_ids_tensor = torch.tensor(token_ids)
-            assert tracker.mm_positions is not None, (
-                "tracker got mm_hashes but no mm_positions"
-            )
             apply_mm_hashes_to_token_ids(
-                token_ids_tensor, tracker.mm_hashes, tracker.mm_positions
+                token_ids_tensor,
+                tracker.mm_hashes or [],
+                tracker.mm_positions or [],
+                cache_salt=tracker.cache_salt,
+                lora_name=tracker.lora_name,
             )
             token_ids = token_ids_tensor.tolist()
 
@@ -1171,12 +1182,18 @@ class LMCacheConnectorV1Impl:
 
         token_ids = request.prompt_token_ids
 
-        # If the request has multimodal hashes, apply them to the token ids
+        # Bind multimodal identity, cache_salt, and LoRA into the token-id key.
         mm_hashes, mm_positions = extract_mm_features(request)
-        if mm_hashes and mm_positions:
-            # TODO(Jiayi): Optimize this
+        lora_name = request.lora_request.lora_name if request.lora_request else None
+        if mm_hashes or request.cache_salt or lora_name:
             token_ids_tensor = torch.tensor(request.prompt_token_ids)
-            apply_mm_hashes_to_token_ids(token_ids_tensor, mm_hashes, mm_positions)
+            apply_mm_hashes_to_token_ids(
+                token_ids_tensor,
+                mm_hashes,
+                mm_positions,
+                cache_salt=request.cache_salt,
+                lora_name=lora_name,
+            )
             token_ids = token_ids_tensor.tolist()
 
         if request.sampling_params:

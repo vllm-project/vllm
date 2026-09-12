@@ -5,9 +5,12 @@ import os
 import threading
 from typing import TYPE_CHECKING, Union
 
-import torch
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig as V1Config
+
+from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_token_keys import (
+    apply_mm_hashes_to_token_ids as apply_mm_hashes_to_token_ids,
+)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -56,32 +59,6 @@ def lmcache_get_or_create_config() -> V1Config:
                     # Update config from environment variables
                     _config_instance.update_config_from_env()
     return _config_instance
-
-
-def hex_hash_to_int16(s: str) -> int:
-    """
-    Convert a hex hash string to a 16-bit integer.
-    """
-    return int(s, 16) & 0xFFFF
-
-
-def apply_mm_hashes_to_token_ids(
-    token_ids: torch.Tensor,
-    mm_hashes: list[str],
-    mm_positions: list["PlaceholderRange"],
-) -> torch.Tensor:
-    """
-    Overwrite token_ids in-place for multimodal placeholders using
-    efficient slice assignments.
-    """
-    n = token_ids.size(0)
-    for hash_str, placeholder in zip(mm_hashes, mm_positions):
-        start, length = placeholder.offset, placeholder.length
-        if start >= n:
-            continue
-        end = min(start + length, n)
-        token_ids[start:end] = hex_hash_to_int16(hash_str)
-    return token_ids
 
 
 def mla_enabled(model_config: "ModelConfig") -> bool:
