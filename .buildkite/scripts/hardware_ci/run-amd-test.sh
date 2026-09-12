@@ -1602,6 +1602,13 @@ fi
 
 echo "Final commands: $commands"
 
+# Match native CPU jobs even when the container can see AMD devices.
+cpu_platform_env=()
+if [[ "${VLLM_CI_EXPECTED_GPU_COUNT:-1}" == "0" \
+  && "$commands" != *python_only_compile.sh* ]]; then
+  cpu_platform_env=(-e "VLLM_TARGET_DEVICE=cpu")
+fi
+
 standalone_merge_base_env=()
 if [[ "$commands" == *python_only_compile.sh* ]]; then
   # The ROCm test image often ships /vllm-workspace without .git. Resolve the
@@ -1759,6 +1766,7 @@ else
     -e "VLLM_CACHE_ROOT=${CONTAINER_CACHE_ROOT}/vllm" \
     -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
+    "${cpu_platform_env[@]}" \
     "${standalone_merge_base_env[@]}" \
     --name "${container_name}" \
     "${image_name}" \

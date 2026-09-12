@@ -49,6 +49,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) CUDAGraph"
+      dind: false
       device: mi250_1
       timeout_in_minutes: 45
       depends_on:

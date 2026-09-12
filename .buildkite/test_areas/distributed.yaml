@@ -358,6 +358,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) Pipeline + Context Parallelism"
+      dind: false
       device: mi250_4
       timeout_in_minutes: 90
       depends_on:
