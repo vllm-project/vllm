@@ -43,7 +43,6 @@ from vllm.config import (
     get_current_vllm_config,
 )
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.platforms import current_platform
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -52,6 +51,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v4_1.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v4_1.compressor import DeepseekCompressor
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
@@ -450,10 +450,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # Determine block_size based on GPU architecture for SM120/121 support.
         # Defaults to 32 if platform info is unavailable (e.g., non-GPU CI).
         try:
-            is_sm120_or_sm121 = (
-                current_platform.is_device_capability_family(120)
-                or current_platform.is_device_capability_family(121)
-            )
+            is_sm120_or_sm121 = current_platform.is_device_capability_family(
+                120
+            ) or current_platform.is_device_capability_family(121)
             swa_block_size = 64 if is_sm120_or_sm121 else 32
         except (AttributeError, RuntimeError):
             # Fallback for non-GPU environments or when platform is unavailable
