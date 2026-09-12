@@ -5,5 +5,5 @@ from vllm.parser.engine.registered_adapters import Plamo3ParserToolAdapter
 
 
 class Plamo3EngineToolParser(Plamo3ParserToolAdapter):  # type: ignore[valid-type, misc]
-    structural_tag_model = None
+    structural_tag_model = "plamo3"
     supports_required_and_named = False
