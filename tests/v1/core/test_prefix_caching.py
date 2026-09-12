@@ -2178,6 +2178,7 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     mock = SimpleNamespace(
         block_size=block_size,
         cache_config=SimpleNamespace(block_size=block_size),
+        mamba_state_block_size=block_size,
         max_num_scheduled_tokens=3 * block_size,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         use_eagle_block_drop=False,
@@ -2192,7 +2193,9 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
         request=req_2,
         num_new_tokens=3 * block_size,
     )
-    assert num_new_tokens_adjusted == 2 * block_size  # adjust to the common prefix
+    # The boundary stop is unconditional, so from num_computed 0 the chunk
+    # ends at the first block boundary covered by the junction (one block).
+    assert num_new_tokens_adjusted == block_size  # stop at the next boundary
 
     manager.allocate_slots(req_2, 3 * block_size, 0, computed_blocks)
     # Cleanup

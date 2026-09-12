@@ -372,6 +372,29 @@ class Scheduler(SchedulerInterface):
             self.mamba_partial_cache_hit
             and self.kv_cache_manager.mamba_fine_grained_prefix_cache
         )
+        # The mamba "align" state grid is the mamba group's own block size.
+        # `cache_config.block_size` is the minimum over all groups and can be
+        # finer than the state grid in heterogeneous layouts (page-size
+        # matching, a drafter or attention group with a smaller block, or an
+        # explicit --block-size; see also #53142 for the worker-side sibling
+        # of this invariant). The worker checkpoints a state only where a
+        # chunk ENDS exactly on `MambaSpec.block_size` (`postprocess_mamba`),
+        # so `_mamba_block_aligned_split` must stop on that grid: on a finer
+        # generic grid the stops never coincide with it below the scheduler
+        # LCM, no state materializes, and the mamba group publishes no (or a
+        # misaligned) prefix hash.
+        mamba_state_block_sizes = {
+            group.kv_cache_spec.block_size
+            for group in kv_cache_config.kv_cache_groups
+            if isinstance(group.kv_cache_spec, MambaSpec)
+        }
+        assert len(mamba_state_block_sizes) <= 1, (
+            "mamba align scheduling requires a single mamba state block size, "
+            f"got {sorted(mamba_state_block_sizes)}"
+        )
+        self.mamba_state_block_size = (
+            next(iter(mamba_state_block_sizes)) if mamba_state_block_sizes else None
+        )
 
         # Counts of non-empty steps scheduled / processed. update_from_output
         # is called once per scheduled step in FIFO order, so these stay in sync.
@@ -437,7 +460,14 @@ class Scheduler(SchedulerInterface):
         if start >= prefill_end:
             return num_new_tokens
 
-        block_size = self.cache_config.block_size
+        # Chunk ends are what the worker checkpoints a mamba state at, so the
+        # stops follow the mamba group's own grid, not the generic group
+        # minimum (see `mamba_state_block_size` in `__init__`).
+        block_size = (
+            self.mamba_state_block_size
+            if self.mamba_state_block_size is not None
+            else self.cache_config.block_size
+        )
         # The last block-aligned position whose state can be cached. With
         # Eagle, FullAttn prunes the last matching block, so back off one
         # block to avoid a Mamba cache miss.
@@ -506,11 +536,17 @@ class Scheduler(SchedulerInterface):
             else block_floored
         )
         stops = (
-            # Same invariant: a chunk starting mid-block stops at the boundary
-            # rather than running past it.
-            next_block_boundary
-            if start % block_size != 0 and not use_internal_checkpoint
-            else 0,
+            # Every crossed block boundary must end a chunk: the allocator
+            # hands out one mamba state column per step, so a chunk spanning
+            # k blocks leaves the k-1 interior state slots permanently null
+            # (a later prefix lookup asking for exactly those boundaries
+            # misses, or worse, a positional hash publishes a truncated
+            # state). Stop unconditionally even when the start is aligned —
+            # reachable whenever the token budget exceeds one block. Exempt:
+            # internal checkpointing (#53614) materializes the interior
+            # states itself and only applies to a chunk that reaches the
+            # checkpoint position, so chunks in that mode may span blocks.
+            0 if use_internal_checkpoint else next_block_boundary,
             # Never run past the last cacheable block boundary mid-chunk.
             last_cache_position,
             # Fine-grained hits: the prompt's partial-tail entry can only be
