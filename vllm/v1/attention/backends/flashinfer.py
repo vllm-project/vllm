@@ -799,12 +799,22 @@ class FlashInferBackend(AttentionBackend):
     ) -> str | None:
         """Why this KV cache dtype cannot serve mm-prefix, or None.
 
-        The mask-owning variant runs on the fa2 prefill kernels. Those read a
-        packed NVFP4 cache through the scale-factor tensors, so plain
-        ``nvfp4`` is fine wherever the fa2 path serves it; NVFP4 on SM100 is
-        served by the trtllm-gen kernels instead, which cannot run a custom
-        attention variant. The store-time scale-search variants
-        (e.g. ``nvfp4_4over6``) exist only in the trtllm-gen kernels.
+        The mask-owning variant runs on the fa2 prefill kernels, because those
+        are the only ones that evaluate a custom ``LogitsMask`` on every KV
+        tile. The variant itself handles a packed NVFP4 cache: it declares the
+        per-block scale factors as additional tensors and the forward path
+        hands them over as ``kv_cache_sf``, which a conditional GPU test
+        exercises directly.
+
+        What is not available is a selectable end-to-end NVFP4 configuration.
+        Upstream, the NVFP4 cache dtype validates only on SM100, where it is
+        served by the trtllm-gen kernels, and those cannot run a custom
+        attention variant. The combination of this variant with the upstream
+        SM100 KV update and cache layout has not been validated, so the gate
+        stays conservative and rejects it rather than advertising a path no
+        test covers. The store-time scale-search variants
+        (e.g. ``nvfp4_4over6``) are a separate matter: their scale search
+        exists only in the trtllm-gen store kernel.
         """
         if cache_dtype is None or cache_dtype in ("auto", "float16", "bfloat16"):
             return None
@@ -824,8 +834,9 @@ class FlashInferBackend(AttentionBackend):
             if is_sm100:
                 return (
                     "mm_prefix is not supported with an NVFP4 KV cache on "
-                    "SM100: NVFP4 is served there by the trtllm-gen kernels, "
-                    "which cannot run the mm-prefix attention variant"
+                    "SM100: the validated upstream NVFP4 path uses the "
+                    "trtllm-gen kernels, which cannot run the mm-prefix "
+                    "attention variant"
                 )
             return None
         return (
