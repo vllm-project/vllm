@@ -30,9 +30,14 @@ def o_proj_padded_num_tokens(num_tokens: int) -> int:
 
 
 def o_proj_warmup_num_tokens(max_num_tokens: int) -> list[int]:
-    """The padded token counts eager steps can present, for warm-up."""
+    """Every token count the o-projection can be asked for, for warm-up.
+
+    Below the bucket every count is possible (a prefill chunk of 324 tokens
+    runs eagerly at 324); above it only the bucket multiples remain.
+    """
+    small = list(range(1, min(max_num_tokens, O_PROJ_EAGER_BUCKET) + 1))
     top = o_proj_padded_num_tokens(max_num_tokens)
-    return list(range(2 * O_PROJ_EAGER_BUCKET, top + 1, O_PROJ_EAGER_BUCKET))
+    return small + list(range(2 * O_PROJ_EAGER_BUCKET, top + 1, O_PROJ_EAGER_BUCKET))
 
 
 def compute_fp8_einsum_recipe(
