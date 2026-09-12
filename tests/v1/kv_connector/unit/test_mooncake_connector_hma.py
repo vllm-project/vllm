@@ -10,6 +10,7 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
@@ -21,9 +22,21 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
 )
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    SlidingWindowSpec,
+)
 
 from .test_mooncake_connector import FakeMooncakeWrapper, patch_worker_dependencies
 from .utils import create_request, create_vllm_config, make_kv_cache_config
+
+
+class _EagleBlockDropConfig:
+
+    def use_eagle_block_drop(self) -> bool:
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +144,96 @@ def test_get_sw_clipped_blocks():
     # SW: clipped to last 9 blocks
     assert clipped[1] == sw_blocks[-9:]
     assert len(clipped[1]) == 9
+
+
+@pytest.mark.cpu_test
+def test_get_sw_clipped_blocks_keeps_eagle_replay_slack():
+    """EAGLE SWA groups keep enough blocks for the previous replay boundary."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_both",
+        block_size=32,
+    )
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    swa_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=16,
+        dtype=torch.float16,
+        sliding_window=64,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["fa"],
+                FullAttentionSpec(
+                    block_size=32,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(["swa0"], swa_spec),
+            KVCacheGroupSpec(["swa1"], swa_spec, is_eagle_group=True),
+        ],
+    )
+
+    scheduler = MooncakeConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=kv_cache_config,
+    )
+    assert scheduler.blocks_per_sw == [0, 7, 7]
+    clipped = scheduler.get_sw_clipped_blocks(
+        (list(range(20)), list(range(100, 120)), list(range(200, 220)))
+    )
+    assert clipped[1] == list(range(100, 120))[-7:]
+    assert clipped[2] == list(range(200, 220))[-7:]
+
+
+@pytest.mark.cpu_test
+def test_get_sw_clipped_blocks_keeps_eagle_replay_slack_without_marked_group():
+    """Mirror core's fallback when EAGLE has no explicitly marked KV group."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_both",
+        block_size=32,
+    )
+    vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    vllm_config.speculative_config = _EagleBlockDropConfig()
+    swa_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=16,
+        dtype=torch.float16,
+        sliding_window=64,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["fa"],
+                FullAttentionSpec(
+                    block_size=32,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(["swa0"], swa_spec),
+            KVCacheGroupSpec(["swa1"], swa_spec),
+        ],
+    )
+
+    scheduler = MooncakeConnectorScheduler(
+        vllm_config=vllm_config,
+        engine_id="test-engine",
+        kv_cache_config=kv_cache_config,
+    )
+    assert scheduler.blocks_per_sw == [0, 7, 7]
 
 
 @pytest.mark.cpu_test

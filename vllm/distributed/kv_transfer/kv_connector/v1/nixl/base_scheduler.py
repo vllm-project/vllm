@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Base scheduler-side logic for the NIXL connector."""
 
+import math
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -36,6 +37,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MambaSpec,
     SlidingWindowSpec,
+    get_eagle_kv_cache_specs,
 )
 
 if TYPE_CHECKING:
@@ -46,6 +48,14 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+def _use_eagle_block_drop(vllm_config: "VllmConfig") -> bool:
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    use_eagle_block_drop = getattr(speculative_config, "use_eagle_block_drop", None)
+    return bool(
+        use_eagle_block_drop is not None and use_eagle_block_drop()
+    )
 
 
 class NixlBaseConnectorScheduler:
@@ -127,19 +137,41 @@ class NixlBaseConnectorScheduler:
         self._heartbeat_req_engine: dict[ReqId, tuple[EngineId, ReqId]] = {}
         self._last_heartbeat_time: float = 0.0
 
+        groups = kv_cache_config.transfer_groups
+        cache_hit_alignment_tokens = math.lcm(
+            *(group.kv_cache_spec.block_size for group in groups)
+        )
+        eagle_kv_cache_specs = get_eagle_kv_cache_specs(
+            groups, _use_eagle_block_drop(vllm_config)
+        )
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
         sw_sizes_tokens: list[tuple[int, int]] = [
             (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
             else (0, self.block_size)
-            for g in kv_cache_config.transfer_groups
+            for g in groups
         ]
         # cdiv(n_tokens, block_size) gives blocks/window; add 1 to conservatively
         # account for boundary overlap eg window isn't fully aligned with blocks.
+        # EAGLE groups need one extra cache-hit alignment of replay slack: when
+        # the prompt ends shortly after an aligned boundary, the EAGLE lookahead
+        # block can be incomplete, so the reusable SWA hit falls back to the
+        # previous aligned boundary.
         self.blocks_per_sw = [
-            cdiv(n_tokens, block_size) + 1 if n_tokens else 0
-            for n_tokens, block_size in sw_sizes_tokens
+            cdiv(
+                n_tokens
+                + (
+                    cache_hit_alignment_tokens
+                    if group.kv_cache_spec in eagle_kv_cache_specs
+                    else 0
+                ),
+                block_size,
+            )
+            + 1
+            if n_tokens
+            else 0
+            for group, (n_tokens, block_size) in zip(groups, sw_sizes_tokens)
         ]
 
         # Trailing scratch slots that mamba managers co-allocate per request

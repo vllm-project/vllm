@@ -714,7 +714,10 @@ class SlidingWindowSpec(AttentionSpec):
     extra_retained_tokens: int = 0
 
     def max_admission_blocks_per_request(
-        self, max_in_flight_tokens: int, max_model_len: int
+        self,
+        max_in_flight_tokens: int,
+        max_model_len: int,
+        prefix_replay_tokens: int = 0,
     ) -> int:
         """Per-request admission cap, in blocks.
 
@@ -731,9 +734,15 @@ class SlidingWindowSpec(AttentionSpec):
         # computed tokens plus the in-flight tokens (frees happen on the
         # processed-token basis); never more than `max_model_len`. An additional
         # `extra_retained_tokens` trailing tokens are kept alive below the
-        # window for multi-module spec decoding, and must be accounted here too.
+        # window for multi-module spec decoding, and EAGLE prefix replay may keep
+        # one more cache-hit alignment below the window. Both must be accounted
+        # here too.
         num_tokens = min(
-            self.sliding_window - 1 + self.extra_retained_tokens + max_in_flight_tokens,
+            self.sliding_window
+            - 1
+            + self.extra_retained_tokens
+            + prefix_replay_tokens
+            + max_in_flight_tokens,
             max_model_len,
         )
         # +1 because the sliding window may not start from the beginning of
@@ -745,9 +754,19 @@ class SlidingWindowSpec(AttentionSpec):
         assert vllm_config.parallel_config.decode_context_parallel_size == 1, (
             "DCP not support sliding window."
         )
+        speculative_config = vllm_config.speculative_config
+        use_eagle_block_drop = getattr(
+            speculative_config, "use_eagle_block_drop", None
+        )
+        prefix_replay_tokens = (
+            vllm_config.cache_config.block_size
+            if use_eagle_block_drop is not None and use_eagle_block_drop()
+            else 0
+        )
         max_blocks = self.max_admission_blocks_per_request(
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             max_model_len=vllm_config.model_config.max_model_len,
+            prefix_replay_tokens=prefix_replay_tokens,
         )
         return max_blocks * self.page_size_bytes
 
@@ -1276,6 +1295,19 @@ class KVCacheGroupSpec:
     is_eagle_group: bool = False
     # Whether this group is part of the externally transferable KV state.
     enable_kv_transfer: bool = True
+
+
+def get_eagle_kv_cache_specs(
+    kv_cache_groups: Sequence[KVCacheGroupSpec],
+    use_eagle: bool,
+) -> list[KVCacheSpec]:
+    """Return specs that should be treated as EAGLE for replay handling."""
+    eagle_specs = [
+        group.kv_cache_spec for group in kv_cache_groups if group.is_eagle_group
+    ]
+    if use_eagle and not eagle_specs:
+        return [group.kv_cache_spec for group in kv_cache_groups]
+    return eagle_specs
 
 
 @dataclass

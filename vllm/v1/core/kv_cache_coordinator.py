@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     SlidingWindowSpec,
+    get_eagle_kv_cache_specs,
 )
 from vllm.v1.request import Request
 
@@ -103,13 +104,16 @@ class KVCacheCoordinator(ABC):
             metrics_collector=metrics_collector,
         )
 
-        # KV cache group indices that get the EAGLE last-block drop.
+        # KV cache group indices that get the EAGLE last-block drop. Groups
+        # sharing a spec are treated consistently, matching `verify_and_split`.
+        eagle_kv_cache_specs = get_eagle_kv_cache_specs(
+            kv_cache_config.kv_cache_groups, use_eagle
+        )
         self.eagle_group_ids: set[int] = {
-            i for i, g in enumerate(kv_cache_config.kv_cache_groups) if g.is_eagle_group
+            i
+            for i, g in enumerate(kv_cache_config.kv_cache_groups)
+            if g.kv_cache_spec in eagle_kv_cache_specs
         }
-        # Conservatively fall back to flag all groups when no group is flagged.
-        if use_eagle and not self.eagle_group_ids:
-            self.eagle_group_ids = set(range(len(kv_cache_config.kv_cache_groups)))
 
         # During chunked prefill with EAGLE, the single next prefill lookahead
         # token past the chunk boundary is combined with the final hidden state
@@ -147,6 +151,7 @@ class KVCacheCoordinator(ABC):
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
                 needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
+                use_eagle=i in self.eagle_group_ids,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )

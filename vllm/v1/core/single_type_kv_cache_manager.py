@@ -1158,15 +1158,30 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         re-prefill the last num_spec_prefill_tokens - 1 tokens from the end
         of the sequence, and thus needs to delay freeing/caching of blocks.
 
+        With EAGLE, prefix-cache lookups need one extra block past the matched
+        boundary and then drop it. If the current prompt tail is not long enough
+        to provide that lookahead block, the lookup falls back to the previous
+        aligned boundary; keep one cache-hit alignment of replay slack so that
+        boundary's SWA window can be cached after a remote KV receive.
+
         Args:
             num_computed_tokens: The number of tokens that have been computed.
 
         Returns:
             The number of tokens that will be skipped for attention computation.
         """
+        prefix_replay_tokens = (
+            self.cache_hit_alignment_tokens
+            if self.enable_caching and self.use_eagle
+            else 0
+        )
         return max(
             0,
-            num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,
+            num_computed_tokens
+            - self.sliding_window
+            + 1
+            - self.extra_retained_tokens
+            - prefix_replay_tokens,
         )
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
@@ -2195,6 +2210,7 @@ def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec,
     max_in_flight_tokens: int,
     max_model_len: int,
+    use_eagle: bool = False,
     **kwargs,
 ) -> SingleTypeKVCacheManager:
     """
@@ -2222,10 +2238,16 @@ def get_manager_for_kv_cache_spec(
     # R-SWA also recycles gap blocks but peak physical KV still fits the
     # full-attention bound (prefix + window <= max_model_len), so it inherits
     # FullAttentionSpec sizing without a separate admission cap.
-    if isinstance(
-        kv_cache_spec,
-        (SlidingWindowSpec, ChunkedLocalAttentionSpec),
-    ):
+    if isinstance(kv_cache_spec, SlidingWindowSpec):
+        prefix_replay_tokens = kwargs["scheduler_block_size"] if use_eagle else 0
+        kwargs["max_admission_blocks_per_request"] = (
+            kv_cache_spec.max_admission_blocks_per_request(
+                max_in_flight_tokens=max_in_flight_tokens,
+                max_model_len=max_model_len,
+                prefix_replay_tokens=prefix_replay_tokens,
+            )
+        )
+    elif isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
         kwargs["max_admission_blocks_per_request"] = (
             kv_cache_spec.max_admission_blocks_per_request(
                 max_in_flight_tokens=max_in_flight_tokens,
