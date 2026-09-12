@@ -715,6 +715,7 @@ def _fused_moe_triton_kernel_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
         USE_TD=resolve_moe_use_td() and not use_fp8 and k % config["BLOCK_SIZE_K"] == 0,
         num_warps=config["num_warps"],
         num_stages=config["num_stages"],
+        waves_per_eu=config.get("waves_per_eu"),
     )
 
 
