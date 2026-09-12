@@ -27,8 +27,19 @@ from vllm.v1.structured_output.utils import (
 
 if TYPE_CHECKING:
     import xgrammar as xgr
+    _GrammarMatcher = xgr.GrammarMatcher
+    _CompiledGrammar = xgr.CompiledGrammar
 else:
-    xgr = LazyLoader("xgr", globals(), "xgrammar")
+    try:
+        import xgrammar as xgr
+        _GrammarMatcher = xgr.GrammarMatcher
+        _CompiledGrammar = xgr.CompiledGrammar
+        HAS_XGRAMMAR = True
+    except ImportError:
+        xgr = None
+        _GrammarMatcher = Any
+        _CompiledGrammar = Any
+        HAS_XGRAMMAR = False
 
 logger = init_logger(__name__)
 
@@ -36,6 +47,9 @@ logger = init_logger(__name__)
 @dataclass
 class XgrammarBackend(StructuredOutputBackend):
     def __post_init__(self):
+        if not HAS_XGRAMMAR:
+            raise RuntimeError("xgrammar is not available on this platform")
+
         self.disable_any_whitespace = (
             self.vllm_config.structured_outputs_config.disable_any_whitespace
         )
@@ -147,8 +161,8 @@ class XgrammarGrammar(StructuredOutputGrammar):
     # for jump-forward decoding
 
     vocab_size: int
-    matcher: xgr.GrammarMatcher = field(hash=False)
-    ctx: xgr.CompiledGrammar = field(hash=False)
+    matcher: _GrammarMatcher = field(hash=False)
+    ctx: _CompiledGrammar = field(hash=False)
     num_processed_tokens: int = field(
         default_factory=lambda: 0, repr=False, hash=False, init=False
     )
@@ -304,6 +318,9 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     """
     if sampling_params.structured_outputs is None:
         return
+
+    if not HAS_XGRAMMAR:
+        raise RuntimeError("xgrammar is not available on this platform")
 
     so_params = sampling_params.structured_outputs
 
