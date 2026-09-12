@@ -538,4 +538,4 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
-    - pytest -v -s kernels/moe/test_cutlass_moe.py::test_cutlass_fp4_moe_padded_routes_do_not_change_valid_output
+    - pytest -v -s kernels/moe/test_cutlass_moe.py -k fp4

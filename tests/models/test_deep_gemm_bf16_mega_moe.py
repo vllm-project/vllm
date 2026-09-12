@@ -22,14 +22,7 @@ from vllm.platforms import current_platform
 
 class _FakeNvfp4QuantConfig:
     quant_format = "nvfp4-pack-quantized"
-    config = {
-        "format": "nvfp4-pack-quantized",
-        "config_groups": {
-            "experts": {
-                "targets": ["Linear"],
-            }
-        },
-    }
+    config = {"format": quant_format}
 
     @staticmethod
     def get_name():
@@ -42,9 +35,105 @@ class _FakeMixedNvfp4QuantConfig(_FakeNvfp4QuantConfig):
     def get_scheme_dict(self, _layer, layer_name):
         if layer_name.startswith("model.layers.78."):
             return None
-        if layer_name.startswith("model.layers.77."):
-            return {"format": "nvfp4-pack-quantized"}
-        return {"format": "float-quantized"}
+        return {
+            "format": "nvfp4-pack-quantized"
+            if layer_name.startswith("model.layers.77.")
+            else "float-quantized"
+        }
+
+
+class _IdentityDeepGemm:
+    @staticmethod
+    def transform_sf_into_required_layout(sf, *_args):
+        return sf
+
+    @staticmethod
+    def transform_weights_for_mega_moe(l1, l2):
+        return l1, l2
+
+
+def _make_experts(
+    *,
+    mma_type: str = "fp8xfp4",
+    intermediate_size: int = 128,
+    source_nvfp4: bool = False,
+    source_mxfp4: bool = False,
+    source_weight_block_size: tuple[int, int] | None = None,
+) -> DeepGemmMegaMoEExperts:
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    return DeepGemmMegaMoEExperts(
+        vllm_config,
+        num_experts=1,
+        num_local_experts=1,
+        experts_start_idx=0,
+        top_k=1,
+        hidden_size=128,
+        intermediate_size=intermediate_size,
+        mma_type=mma_type,
+        source_nvfp4=source_nvfp4,
+        source_mxfp4=source_mxfp4,
+        source_weight_block_size=source_weight_block_size,
+    )
+
+
+def _load(
+    experts: DeepGemmMegaMoEExperts,
+    param_name: str,
+    value: torch.Tensor,
+    shard_id: str,
+) -> None:
+    param = getattr(experts, param_name)
+    assert param is not None
+    assert experts.weight_loader(
+        param,
+        value,
+        f"experts.{param_name}",
+        shard_id=shard_id,
+        expert_id=0,
+        return_success=True,
+    )
+
+
+def _load_nvfp4_weights(experts: DeepGemmMegaMoEExperts) -> None:
+    packed = torch.full((128, 64), 0x11, dtype=torch.uint8)
+    scale = torch.ones(128, 8, dtype=torch.float8_e4m3fn)
+    for param_name, value, shard_id in (
+        ("w13_weight_packed", packed, "w1"),
+        ("w13_weight_packed", packed, "w3"),
+        ("w2_weight_packed", packed, "w2"),
+        ("w13_weight_scale", scale, "w1"),
+        ("w13_weight_scale", scale, "w3"),
+        ("w2_weight_scale", scale, "w2"),
+        ("w13_weight_global_scale", torch.tensor(2.0), "w1"),
+        ("w13_weight_global_scale", torch.tensor(4.0), "w3"),
+        ("w2_weight_global_scale", torch.tensor(6.0), "w2"),
+    ):
+        _load(experts, param_name, value, shard_id)
+
+
+def _load_mxfp4_weights(experts: DeepGemmMegaMoEExperts) -> None:
+    for param_name, shape, value, shard_id in (
+        ("w13_weight_packed", (512, 64), 0x11, "w1"),
+        ("w13_weight_packed", (512, 64), 0x22, "w3"),
+        ("w2_weight_packed", (128, 256), 0x33, "w2"),
+        ("w13_weight_scale", (512, 4), 1, "w1"),
+        ("w13_weight_scale", (512, 4), 2, "w3"),
+        ("w2_weight_scale", (128, 16), 3, "w2"),
+    ):
+        _load(
+            experts,
+            param_name,
+            torch.full(shape, value, dtype=torch.uint8),
+            shard_id,
+        )
+
+
+def _disable_runtime_check(experts, monkeypatch, deep_gemm=_IdentityDeepGemm):
+    monkeypatch.setattr(experts, "_check_runtime_supported", lambda: None)
+    monkeypatch.setattr("vllm.utils.deep_gemm._import_deep_gemm", lambda: deep_gemm)
 
 
 def test_mega_moe_request_applies_to_mtp_model_config():
@@ -55,41 +144,29 @@ def test_mega_moe_request_applies_to_mtp_model_config():
     assert _is_deep_gemm_mega_moe_requested(vllm_config)
 
 
-def test_mega_moe_scales_output_when_reduce_is_deferred():
+@pytest.mark.parametrize(
+    ("is_sequence_parallel", "expected"), [(False, 1.0), (True, 8.0)]
+)
+def test_mega_moe_deferred_reduction_scaling(is_sequence_parallel, expected):
     output = torch.full((2, 4), 8.0)
 
-    scaled = _scale_mega_moe_output_for_deferred_reduce(
+    actual = _scale_mega_moe_output_for_deferred_reduce(
         output,
         tp_size=8,
-        is_sequence_parallel=False,
+        is_sequence_parallel=is_sequence_parallel,
         reduce_results=False,
     )
 
-    assert torch.equal(scaled, torch.ones_like(output))
-
-
-def test_mega_moe_keeps_complete_output_without_deferred_reduce():
-    output = torch.full((2, 4), 8.0)
-
-    scaled = _scale_mega_moe_output_for_deferred_reduce(
-        output,
-        tp_size=8,
-        is_sequence_parallel=True,
-        reduce_results=False,
-    )
-
-    assert torch.equal(scaled, output)
+    assert torch.equal(actual, torch.full_like(output, expected))
 
 
 def test_megamoe_mapping_uses_direct_expert_parameter_prefix():
-    mapping = make_deepseek_v4_expert_params_mapping(
+    assert make_deepseek_v4_expert_params_mapping(
         1,
         ckpt_gate_proj_name="gate_proj",
         ckpt_down_proj_name="down_proj",
         ckpt_up_proj_name="up_proj",
-    )
-
-    assert mapping == [
+    ) == [
         ("experts.w13_", "experts.0.gate_proj.", 0, "w1"),
         ("experts.w2_", "experts.0.down_proj.", 0, "w2"),
         ("experts.w13_", "experts.0.up_proj.", 0, "w3"),
@@ -106,29 +183,39 @@ def test_nvfp4_expert_quantization_is_detected():
     )
 
 
-def test_mixed_precision_nvfp4_expert_quantization_is_detected():
+@pytest.mark.parametrize(
+    ("quant_format", "group_size", "activation_bits"),
+    [
+        ("nvfp4-pack-quantized", 16, 4),
+        ("mxfp4-pack-quantized", 32, 8),
+    ],
+)
+def test_layer_fp4_quantization_is_detected(
+    quant_format: str, group_size: int, activation_bits: int
+):
+    is_nvfp4 = quant_format.startswith("nvfp4")
     quant_config = compressed_tensors.CompressedTensorsConfig.from_config(
         {
             "format": "mixed-precision",
             "config_groups": {
-                "group_1": {
-                    "format": "nvfp4-pack-quantized",
+                "experts": {
+                    "format": quant_format,
                     "targets": [r"re:.*mlp\..*"],
                     "weights": {
                         "num_bits": 4,
                         "type": "float",
-                        "strategy": "tensor_group",
-                        "group_size": 16,
+                        "strategy": "tensor_group" if is_nvfp4 else "group",
+                        "group_size": group_size,
                         "symmetric": True,
                         "dynamic": False,
                     },
                     "input_activations": {
-                        "num_bits": 4,
+                        "num_bits": activation_bits,
                         "type": "float",
-                        "strategy": "tensor_group",
-                        "group_size": 16,
+                        "strategy": "tensor_group" if is_nvfp4 else "group",
+                        "group_size": group_size,
                         "symmetric": True,
-                        "dynamic": "local",
+                        "dynamic": "local" if is_nvfp4 else True,
                     },
                 }
             },
@@ -137,7 +224,7 @@ def test_mixed_precision_nvfp4_expert_quantization_is_detected():
     layer = torch.nn.Identity()
     prefix = "model.layers.3.mlp"
 
-    assert DeepGemmMegaMoEExperts.source_is_nvfp4(quant_config, layer, prefix)
+    assert DeepGemmMegaMoEExperts.source_is_fp4(quant_config, layer, prefix)
     assert (
         DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(
             quant_config, layer, prefix
@@ -146,73 +233,30 @@ def test_mixed_precision_nvfp4_expert_quantization_is_detected():
     )
 
 
-def test_mxfp4_expert_quantization_is_detected():
-    quant_config = compressed_tensors.CompressedTensorsConfig.from_config(
-        {
-            "format": "mxfp4-pack-quantized",
-            "config_groups": {
-                "group_1": {
-                    "format": "mxfp4-pack-quantized",
-                    "targets": ["Linear"],
-                    "weights": {
-                        "num_bits": 4,
-                        "type": "float",
-                        "strategy": "group",
-                        "group_size": 32,
-                        "symmetric": True,
-                        "dynamic": False,
-                        "scale_dtype": "torch.uint8",
-                    },
-                    "input_activations": {
-                        "num_bits": 8,
-                        "type": "float",
-                        "strategy": "group",
-                        "group_size": 32,
-                        "symmetric": True,
-                        "dynamic": True,
-                        "scale_dtype": "torch.uint8",
-                    },
-                }
-            },
-        }
-    )
-    layer = torch.nn.Identity()
-    prefix = "model.layers.3.mlp"
-
-    assert DeepGemmMegaMoEExperts.source_is_mxfp4(quant_config, layer, prefix)
-    assert (
-        DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(
-            quant_config, layer, prefix
-        )
-        is None
-    )
-
-
-def test_ignored_mtp_layer_uses_unquantized_mega_moe_weights():
+@pytest.mark.parametrize(
+    ("prefix", "expected"),
+    [
+        ("model.layers.76.mlp", False),
+        ("model.layers.77.mlp", True),
+        ("model.layers.78.mtp_block.mlp", False),
+    ],
+)
+def test_mixed_format_uses_current_layer_scheme(prefix: str, expected: bool):
     quant_config = _FakeMixedNvfp4QuantConfig()
-    prefix = "model.layers.78.mtp_block.mlp"
 
-    assert not DeepGemmMegaMoEExperts.source_is_nvfp4(
-        quant_config, torch.nn.Identity(), prefix
-    )
     assert (
-        DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(
+        DeepGemmMegaMoEExperts.source_is_nvfp4(
             quant_config, torch.nn.Identity(), prefix
         )
-        is None
+        is expected
     )
-
-
-def test_mixed_format_uses_current_layer_scheme():
-    quant_config = _FakeMixedNvfp4QuantConfig()
-    layer = torch.nn.Identity()
-
-    assert DeepGemmMegaMoEExperts.source_is_nvfp4(
-        quant_config, layer, "model.layers.77.mlp"
-    )
-    assert not DeepGemmMegaMoEExperts.source_is_nvfp4(
-        quant_config, layer, "model.layers.76.mlp"
-    )
+    if "mtp_block" in prefix:
+        assert (
+            DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(
+                quant_config, torch.nn.Identity(), prefix
+            )
+            is None
+        )
 
 
 def test_kimi_ct_nvfp4_mapping_includes_global_scales():
@@ -221,31 +265,20 @@ def test_kimi_ct_nvfp4_mapping_includes_global_scales():
     )
 
     mapping = make_kimi_k3_mega_moe_expert_params_mapping(1, source_nvfp4=True)
-
+    suffixes = (
+        "weight_packed",
+        "weight_scale",
+        "weight_global_scale",
+        "input_global_scale",
+    )
     assert mapping == [
-        (f"experts.w13_{suffix}", f"experts.0.w1.{suffix}", 0, "w1")
-        for suffix in (
-            "weight_packed",
-            "weight_scale",
-            "weight_global_scale",
-            "input_global_scale",
+        (f"experts.{target}_{suffix}", f"experts.0.{source}.{suffix}", 0, shard)
+        for target, source, shard in (
+            ("w13", "w1", "w1"),
+            ("w2", "w2", "w2"),
+            ("w13", "w3", "w3"),
         )
-    ] + [
-        (f"experts.w2_{suffix}", f"experts.0.w2.{suffix}", 0, "w2")
-        for suffix in (
-            "weight_packed",
-            "weight_scale",
-            "weight_global_scale",
-            "input_global_scale",
-        )
-    ] + [
-        (f"experts.w13_{suffix}", f"experts.0.w3.{suffix}", 0, "w3")
-        for suffix in (
-            "weight_packed",
-            "weight_scale",
-            "weight_global_scale",
-            "input_global_scale",
-        )
+        for suffix in suffixes
     ]
 
 
@@ -264,7 +297,6 @@ def test_kimi_mtp_selects_nvfp4_mega_moe_mapping(monkeypatch):
     draft.model = torch.nn.Module()
     draft.model.mtp_start_layer_idx = 0
     draft.model.num_mtp_layers = 0
-
     moe = object.__new__(kimi_model.KimiMoE)
     torch.nn.Module.__init__(moe)
     moe.use_mega_moe = True
@@ -283,9 +315,7 @@ def test_kimi_mtp_selects_nvfp4_mega_moe_mapping(monkeypatch):
         return []
 
     monkeypatch.setattr(
-        kimi_mtp,
-        "make_kimi_k3_mega_moe_expert_params_mapping",
-        make_mapping,
+        kimi_mtp, "make_kimi_k3_mega_moe_expert_params_mapping", make_mapping
     )
     monkeypatch.setattr(kimi_mtp, "get_pp_missing_layer_names", lambda _: set())
 
@@ -303,131 +333,19 @@ def test_kimi_mega_moe_preserves_activation_transform_kwarg():
 
 
 def test_bf16_mega_moe_weights_are_loaded_and_transformed(monkeypatch):
-    vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
-        compilation_config=SimpleNamespace(static_forward_context={}),
-    )
-    experts = DeepGemmMegaMoEExperts(
-        vllm_config,
-        num_experts=2,
-        num_local_experts=1,
-        experts_start_idx=0,
-        top_k=2,
-        hidden_size=128,
-        intermediate_size=128,
-        mma_type="bf16xbf16",
-    )
-
-    assert experts.w13_weight.dtype == torch.bfloat16
-    assert experts.w13_weight.shape == (1, 256, 128)
-    assert experts.w13_weight_scale is None
-    assert experts.w13_weight_scale_inv is None
-    assert experts.w2_weight.dtype == torch.bfloat16
-    assert experts.w2_weight.shape == (1, 128, 128)
-    assert experts.w2_weight_scale is None
-    assert experts.w2_weight_scale_inv is None
-
-    w1 = torch.full((128, 128), 3, dtype=torch.bfloat16)
-    w3 = torch.full((128, 128), 7, dtype=torch.bfloat16)
-    w2 = torch.full((128, 128), 11, dtype=torch.bfloat16)
-    for param, weight, param_name, shard_id in (
-        (experts.w13_weight, w1, "experts.w13_weight", "w1"),
-        (experts.w13_weight, w3, "experts.w13_weight", "w3"),
-        (experts.w2_weight, w2, "experts.w2_weight", "w2"),
+    experts = _make_experts(mma_type="bf16xbf16")
+    for param_name, value, shard_id in (
+        ("w13_weight", 3, "w1"),
+        ("w13_weight", 7, "w3"),
+        ("w2_weight", 11, "w2"),
     ):
-        assert experts.weight_loader(
-            param,
-            weight,
+        _load(
+            experts,
             param_name,
-            shard_id=shard_id,
-            expert_id=0,
-            return_success=True,
+            torch.full((128, 128), value, dtype=torch.bfloat16),
+            shard_id,
         )
-
-    transformed: list[tuple[torch.Tensor, torch.Tensor]] = []
-
-    def transform(l1, l2):
-        transformed.append((l1, l2))
-        return l1.clone(), l2
-
-    monkeypatch.setattr(experts, "_check_runtime_supported", lambda: None)
-    monkeypatch.setattr(
-        "vllm.utils.deep_gemm._import_deep_gemm",
-        lambda: SimpleNamespace(transform_weights_for_mega_moe=transform),
-    )
-
-    experts.finalize_weights()
-
-    assert len(transformed) == 1
-    assert torch.equal(transformed[0][0][0, :128], w1)
-    assert torch.equal(transformed[0][0][0, 128:], w3)
-    assert torch.equal(transformed[0][1][0], w2)
-    assert experts.w13_weight is None
-    assert experts.w2_weight is None
-
-
-def test_block_fp8_source_weights_are_dequantized_for_bf16_mega_moe(monkeypatch):
-    vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
-        compilation_config=SimpleNamespace(static_forward_context={}),
-    )
-    experts = DeepGemmMegaMoEExperts(
-        vllm_config,
-        num_experts=1,
-        num_local_experts=1,
-        experts_start_idx=0,
-        top_k=1,
-        hidden_size=128,
-        intermediate_size=128,
-        mma_type="bf16xbf16",
-        source_weight_block_size=(128, 128),
-    )
-
-    fp8 = torch.float8_e4m3fn
-    one = torch.ones(128, 128).to(fp8)
-    scales = {
-        "w1": torch.full((1, 1), 2.0),
-        "w3": torch.full((1, 1), 3.0),
-        "w2": torch.full((1, 1), 5.0),
-    }
-    for param, value, param_name, shard_id in (
-        (experts.w13_weight, one, "experts.w13_weight", "w1"),
-        (experts.w13_weight, one, "experts.w13_weight", "w3"),
-        (experts.w2_weight, one, "experts.w2_weight", "w2"),
-        (
-            experts.w13_weight_scale_inv,
-            scales["w1"],
-            "experts.w13_weight_scale_inv",
-            "w1",
-        ),
-        (
-            experts.w13_weight_scale_inv,
-            scales["w3"],
-            "experts.w13_weight_scale_inv",
-            "w3",
-        ),
-        (
-            experts.w2_weight_scale_inv,
-            scales["w2"],
-            "experts.w2_weight_scale_inv",
-            "w2",
-        ),
-    ):
-        assert param is not None
-        assert experts.weight_loader(
-            param,
-            value,
-            param_name,
-            shard_id=shard_id,
-            expert_id=0,
-            return_success=True,
-        )
-
-    monkeypatch.setattr(experts, "_check_runtime_supported", lambda: None)
-    monkeypatch.setattr(
-        "vllm.utils.deep_gemm._import_deep_gemm",
-        lambda: SimpleNamespace(),
-    )
+    _disable_runtime_check(experts, monkeypatch)
 
     experts.finalize_weights()
 
@@ -435,77 +353,41 @@ def test_block_fp8_source_weights_are_dequantized_for_bf16_mega_moe(monkeypatch)
     l2 = experts._transformed_l2_weights
     assert isinstance(l1, torch.Tensor)
     assert isinstance(l2, torch.Tensor)
-    assert l1.dtype == torch.bfloat16
-    assert l2.dtype == torch.bfloat16
+    assert torch.all(l1[0, :128] == 3)
+    assert torch.all(l1[0, 128:] == 7)
+    assert torch.all(l2[0] == 11)
+
+
+def test_block_fp8_source_weights_are_dequantized_for_bf16_mega_moe(monkeypatch):
+    experts = _make_experts(mma_type="bf16xbf16", source_weight_block_size=(128, 128))
+    one = torch.ones(128, 128).to(torch.float8_e4m3fn)
+    for param_name, value, shard_id in (
+        ("w13_weight", one, "w1"),
+        ("w13_weight", one, "w3"),
+        ("w2_weight", one, "w2"),
+        ("w13_weight_scale_inv", torch.full((1, 1), 2.0), "w1"),
+        ("w13_weight_scale_inv", torch.full((1, 1), 3.0), "w3"),
+        ("w2_weight_scale_inv", torch.full((1, 1), 5.0), "w2"),
+    ):
+        _load(experts, param_name, value, shard_id)
+    _disable_runtime_check(experts, monkeypatch, SimpleNamespace())
+
+    experts.finalize_weights()
+
+    l1 = experts._transformed_l1_weights
+    l2 = experts._transformed_l2_weights
+    assert isinstance(l1, torch.Tensor)
+    assert isinstance(l2, torch.Tensor)
     interleaved = l1[0].view(-1, 16, 128)
     assert torch.all(interleaved[:, :8] == 2)
     assert torch.all(interleaved[:, 8:] == 3)
     assert torch.all(l2[0] == 5)
-    assert experts.w13_weight_scale_inv is None
-    assert experts.w2_weight_scale_inv is None
 
 
 def test_nvfp4_source_weights_are_dequantized_for_bf16_mega_moe(monkeypatch):
-    vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
-        compilation_config=SimpleNamespace(static_forward_context={}),
-    )
-    experts = DeepGemmMegaMoEExperts(
-        vllm_config,
-        num_experts=1,
-        num_local_experts=1,
-        experts_start_idx=0,
-        top_k=1,
-        hidden_size=128,
-        intermediate_size=128,
-        mma_type="bf16xbf16",
-        source_nvfp4=True,
-    )
-
-    packed = torch.full((128, 64), 0x11, dtype=torch.uint8)
-    group_scales = torch.ones(128, 8, dtype=torch.float8_e4m3fn)
-    values = (
-        (experts.w13_weight_packed, packed, "experts.w13_weight_packed", "w1"),
-        (experts.w13_weight_packed, packed, "experts.w13_weight_packed", "w3"),
-        (experts.w2_weight_packed, packed, "experts.w2_weight_packed", "w2"),
-        (experts.w13_weight_scale, group_scales, "experts.w13_weight_scale", "w1"),
-        (experts.w13_weight_scale, group_scales, "experts.w13_weight_scale", "w3"),
-        (experts.w2_weight_scale, group_scales, "experts.w2_weight_scale", "w2"),
-        (
-            experts.w13_weight_global_scale,
-            torch.tensor(2.0),
-            "experts.w13_weight_global_scale",
-            "w1",
-        ),
-        (
-            experts.w13_weight_global_scale,
-            torch.tensor(4.0),
-            "experts.w13_weight_global_scale",
-            "w3",
-        ),
-        (
-            experts.w2_weight_global_scale,
-            torch.tensor(6.0),
-            "experts.w2_weight_global_scale",
-            "w2",
-        ),
-    )
-    for param, value, param_name, shard_id in values:
-        assert param is not None
-        assert experts.weight_loader(
-            param,
-            value,
-            param_name,
-            shard_id=shard_id,
-            expert_id=0,
-            return_success=True,
-        )
-
-    monkeypatch.setattr(experts, "_check_runtime_supported", lambda: None)
-    monkeypatch.setattr(
-        "vllm.utils.deep_gemm._import_deep_gemm",
-        lambda: SimpleNamespace(),
-    )
+    experts = _make_experts(mma_type="bf16xbf16", source_nvfp4=True)
+    _load_nvfp4_weights(experts)
+    _disable_runtime_check(experts, monkeypatch, SimpleNamespace())
 
     experts.finalize_weights()
 
@@ -513,76 +395,18 @@ def test_nvfp4_source_weights_are_dequantized_for_bf16_mega_moe(monkeypatch):
     l2 = experts._transformed_l2_weights
     assert isinstance(l1, torch.Tensor)
     assert isinstance(l2, torch.Tensor)
-    assert l1.dtype == torch.bfloat16
-    assert l2.dtype == torch.bfloat16
     interleaved = l1[0].view(-1, 16, 128)
     assert torch.all(interleaved[:, :8] == 0.25)
     assert torch.all(interleaved[:, 8:] == 0.125)
     assert torch.allclose(l2[0], torch.full_like(l2[0], 1.0 / 12.0))
-    assert experts.w13_weight_packed is None
-    assert experts.w2_weight_packed is None
 
 
 def test_nvfp4_source_weights_are_requantized_for_fp8_fp4_mega_moe(monkeypatch):
-    vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
-        compilation_config=SimpleNamespace(static_forward_context={}),
-    )
-    experts = DeepGemmMegaMoEExperts(
-        vllm_config,
-        num_experts=1,
-        num_local_experts=1,
-        experts_start_idx=0,
-        top_k=1,
-        hidden_size=128,
-        intermediate_size=128,
-        mma_type="fp8xfp4",
-        source_nvfp4=True,
-    )
+    experts = _make_experts(source_nvfp4=True)
+    _load_nvfp4_weights(experts)
+    quantized_inputs = []
 
-    packed = torch.full((128, 64), 0x11, dtype=torch.uint8)
-    group_scales = torch.ones(128, 8, dtype=torch.float8_e4m3fn)
-    values = (
-        (experts.w13_weight_packed, packed, "experts.w13_weight_packed", "w1"),
-        (experts.w13_weight_packed, packed, "experts.w13_weight_packed", "w3"),
-        (experts.w2_weight_packed, packed, "experts.w2_weight_packed", "w2"),
-        (experts.w13_weight_scale, group_scales, "experts.w13_weight_scale", "w1"),
-        (experts.w13_weight_scale, group_scales, "experts.w13_weight_scale", "w3"),
-        (experts.w2_weight_scale, group_scales, "experts.w2_weight_scale", "w2"),
-        (
-            experts.w13_weight_global_scale,
-            torch.tensor(2.0),
-            "experts.w13_weight_global_scale",
-            "w1",
-        ),
-        (
-            experts.w13_weight_global_scale,
-            torch.tensor(4.0),
-            "experts.w13_weight_global_scale",
-            "w3",
-        ),
-        (
-            experts.w2_weight_global_scale,
-            torch.tensor(6.0),
-            "experts.w2_weight_global_scale",
-            "w2",
-        ),
-    )
-    for param, value, param_name, shard_id in values:
-        assert param is not None
-        assert experts.weight_loader(
-            param,
-            value,
-            param_name,
-            shard_id=shard_id,
-            expert_id=0,
-            return_success=True,
-        )
-
-    quantized_shapes: list[tuple[int, ...]] = []
-    quantized_inputs: list[torch.Tensor] = []
-
-    class FakeDeepGemm:
+    class FakeDeepGemm(_IdentityDeepGemm):
         @staticmethod
         def per_token_cast_to_fp4(x, **kwargs):
             assert kwargs == {
@@ -590,144 +414,38 @@ def test_nvfp4_source_weights_are_requantized_for_fp8_fp4_mega_moe(monkeypatch):
                 "gran_k": 32,
                 "use_packed_ue8m0": False,
             }
-            quantized_shapes.append(tuple(x.shape))
             quantized_inputs.append(x.clone())
             return (
                 torch.zeros(x.shape[0], x.shape[1] // 2, dtype=torch.int8),
                 torch.ones(x.shape[0], x.shape[1] // 32),
             )
 
-        @staticmethod
-        def transform_sf_into_required_layout(sf, *_args):
-            return sf
-
-        @staticmethod
-        def transform_weights_for_mega_moe(l1, l2):
-            return l1, l2
-
-    monkeypatch.setattr(experts, "_check_runtime_supported", lambda: None)
-    monkeypatch.setattr("vllm.utils.deep_gemm._import_deep_gemm", lambda: FakeDeepGemm)
+    _disable_runtime_check(experts, monkeypatch, FakeDeepGemm)
 
     experts.finalize_weights()
 
-    assert quantized_shapes == [(128, 128), (128, 128), (128, 128)]
+    assert [tuple(x.shape) for x in quantized_inputs] == [(128, 128)] * 3
     assert torch.all(quantized_inputs[0] == 0.25)
     assert torch.all(quantized_inputs[1] == 0.125)
     assert torch.allclose(
         quantized_inputs[2], torch.full_like(quantized_inputs[2], 1.0 / 12.0)
     )
-    assert isinstance(experts._transformed_l1_weights, tuple)
-    assert isinstance(experts._transformed_l2_weights, tuple)
-    assert experts._transformed_l1_weights[0].dtype == torch.int8
-    assert experts._transformed_l1_weights[1].shape == (1, 256, 4)
-    assert experts._transformed_l2_weights[0].dtype == torch.int8
-    assert experts._transformed_l2_weights[1].shape == (1, 128, 4)
-    assert experts.w13_weight_packed is None
-    assert experts.w2_weight_packed is None
 
 
 def test_mxfp4_source_weights_are_loaded_for_fp8_fp4_mega_moe(monkeypatch):
-    vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
-        compilation_config=SimpleNamespace(static_forward_context={}),
-    )
-    experts = DeepGemmMegaMoEExperts(
-        vllm_config,
-        num_experts=1,
-        num_local_experts=1,
-        experts_start_idx=0,
-        top_k=1,
-        hidden_size=128,
-        intermediate_size=512,
-        mma_type="fp8xfp4",
-        source_mxfp4=True,
-    )
-
-    assert experts.w13_weight is None
-    assert experts.w13_weight_packed is not None
-    assert experts.w13_weight_packed.shape == (1, 1024, 64)
-    assert experts.w13_weight_scale is not None
-    assert experts.w13_weight_scale.shape == (1, 1024, 4)
-    assert experts.w2_weight is None
-    assert experts.w2_weight_packed is not None
-    assert experts.w2_weight_packed.shape == (1, 128, 256)
-    assert experts.w2_weight_scale is not None
-    assert experts.w2_weight_scale.shape == (1, 128, 16)
-
-    values = (
-        (
-            experts.w13_weight_packed,
-            torch.full((512, 64), 0x11, dtype=torch.uint8),
-            "experts.w13_weight_packed",
-            "w1",
-        ),
-        (
-            experts.w13_weight_packed,
-            torch.full((512, 64), 0x22, dtype=torch.uint8),
-            "experts.w13_weight_packed",
-            "w3",
-        ),
-        (
-            experts.w2_weight_packed,
-            torch.full((128, 256), 0x33, dtype=torch.uint8),
-            "experts.w2_weight_packed",
-            "w2",
-        ),
-        (
-            experts.w13_weight_scale,
-            torch.full((512, 4), 1, dtype=torch.uint8),
-            "experts.w13_weight_scale",
-            "w1",
-        ),
-        (
-            experts.w13_weight_scale,
-            torch.full((512, 4), 2, dtype=torch.uint8),
-            "experts.w13_weight_scale",
-            "w3",
-        ),
-        (
-            experts.w2_weight_scale,
-            torch.full((128, 16), 3, dtype=torch.uint8),
-            "experts.w2_weight_scale",
-            "w2",
-        ),
-    )
-    for param, value, param_name, shard_id in values:
-        assert experts.weight_loader(
-            param,
-            value,
-            param_name,
-            shard_id=shard_id,
-            expert_id=0,
-            return_success=True,
-        )
-
-    transformed: list[tuple[object, object]] = []
-
-    class FakeDeepGemm:
-        @staticmethod
-        def transform_sf_into_required_layout(sf, *_args):
-            return sf
-
-        @staticmethod
-        def transform_weights_for_mega_moe(l1, l2):
-            transformed.append((l1, l2))
-            return l1, l2
-
-    monkeypatch.setattr(experts, "_check_runtime_supported", lambda: None)
-    monkeypatch.setattr("vllm.utils.deep_gemm._import_deep_gemm", lambda: FakeDeepGemm)
+    experts = _make_experts(intermediate_size=512, source_mxfp4=True)
+    _load_mxfp4_weights(experts)
+    _disable_runtime_check(experts, monkeypatch)
 
     experts.finalize_weights()
 
-    assert len(transformed) == 1
-    l1, l2 = transformed[0]
+    l1 = experts._transformed_l1_weights
+    l2 = experts._transformed_l2_weights
     assert isinstance(l1, tuple)
     assert isinstance(l2, tuple)
     assert torch.all(l1[0][0, :512] == 0x11)
     assert torch.all(l1[0][0, 512:] == 0x22)
     assert torch.all(l2[0][0] == 0x33)
-    assert experts.w13_weight_packed is None
-    assert experts.w2_weight_packed is None
 
 
 @pytest.mark.skipif(
@@ -736,21 +454,7 @@ def test_mxfp4_source_weights_are_loaded_for_fp8_fp4_mega_moe(monkeypatch):
     reason="DeepGEMM MegaMoE requires CUDA SM100",
 )
 def test_mxfp4_source_weights_finalize_with_deep_gemm():
-    vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
-        compilation_config=SimpleNamespace(static_forward_context={}),
-    )
-    experts = DeepGemmMegaMoEExperts(
-        vllm_config,
-        num_experts=1,
-        num_local_experts=1,
-        experts_start_idx=0,
-        top_k=1,
-        hidden_size=128,
-        intermediate_size=512,
-        mma_type="fp8xfp4",
-        source_mxfp4=True,
-    ).cuda()
+    experts = _make_experts(intermediate_size=512, source_mxfp4=True).cuda()
     assert experts.w13_weight_packed is not None
     assert experts.w13_weight_scale is not None
     assert experts.w2_weight_packed is not None
@@ -764,48 +468,32 @@ def test_mxfp4_source_weights_finalize_with_deep_gemm():
 
     assert experts._transformed_l1_weights is not None
     assert experts._transformed_l2_weights is not None
-    assert experts.w13_weight_packed is None
-    assert experts.w2_weight_packed is None
 
 
 def test_bf16_mega_moe_stages_inputs_and_selects_bf16_kernel(monkeypatch):
-    vllm_config = SimpleNamespace(
-        scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
-        compilation_config=SimpleNamespace(static_forward_context={}),
-    )
-    experts = DeepGemmMegaMoEExperts(
-        vllm_config,
-        num_experts=2,
-        num_local_experts=1,
-        experts_start_idx=0,
-        top_k=2,
-        hidden_size=128,
-        intermediate_size=128,
-        mma_type="bf16xbf16",
-    )
+    experts = _make_experts(mma_type="bf16xbf16")
     experts._transformed_l1_weights = torch.empty(1, 256, 128)
     experts._transformed_l2_weights = torch.empty(1, 128, 128)
     buffer = SimpleNamespace(
         x=torch.empty(4, 128, dtype=torch.bfloat16),
-        topk_idx=torch.empty(4, 2, dtype=torch.int64),
-        topk_weights=torch.empty(4, 2, dtype=torch.float32),
+        topk_idx=torch.empty(4, 1, dtype=torch.int64),
+        topk_weights=torch.empty(4, 1, dtype=torch.float32),
     )
     experts.get_symm_buffer = lambda: buffer
-
-    called: list[str] = []
+    called = []
 
     def bf16_mega_moe(y, *_args, **_kwargs):
-        called.append("bf16")
+        called.append(True)
         y.zero_()
 
     monkeypatch.setattr(
         "vllm.utils.deep_gemm._import_deep_gemm",
         lambda: SimpleNamespace(bf16_mega_moe=bf16_mega_moe),
     )
-
     hidden_states = torch.randn(2, 128, dtype=torch.bfloat16)
-    topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4]])
-    topk_ids = torch.tensor([[0, 1], [1, 0]])
+    topk_weights = torch.tensor([[0.7], [0.6]])
+    topk_ids = torch.tensor([[0], [0]])
+
     output = experts(
         hidden_states,
         topk_weights,
@@ -813,7 +501,7 @@ def test_bf16_mega_moe_stages_inputs_and_selects_bf16_kernel(monkeypatch):
         activation_clamp=None,
     )
 
-    assert called == ["bf16"]
+    assert called == [True]
     assert torch.equal(buffer.x[:2], hidden_states)
     assert torch.equal(buffer.topk_idx[:2], topk_ids)
     assert torch.equal(buffer.topk_weights[:2], topk_weights)
