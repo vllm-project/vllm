@@ -15,16 +15,54 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
+from vllm.model_executor.model_loader.weight_cache.daemon import (
+    _get_cached_model_configs,
+)
 from vllm.model_executor.model_loader.weight_cache.protocol import get_socket_path
 from vllm.platforms import current_platform
 
 DAEMON_TIMEOUT_S = 600
+
+
+def test_weight_cache_daemon_includes_mtp_draft_model():
+    target_config = object()
+    draft_config = object()
+    vllm_config = SimpleNamespace(
+        model_config=target_config,
+        speculative_config=SimpleNamespace(
+            method="mtp", draft_model_config=draft_config
+        ),
+    )
+
+    assert _get_cached_model_configs(vllm_config) == [target_config, draft_config]
+
+
+def test_weight_cache_daemon_does_not_cache_non_mtp_draft_model():
+    target_config = object()
+    draft_config = object()
+    vllm_config = SimpleNamespace(
+        model_config=target_config,
+        speculative_config=SimpleNamespace(
+            method="eagle3", draft_model_config=draft_config
+        ),
+    )
+
+    assert _get_cached_model_configs(vllm_config) == [target_config]
+
+
+def test_weight_cache_target_and_draft_use_distinct_sockets(tmp_path):
+    target_path = get_socket_path(0, str(tmp_path))
+    draft_path = get_socket_path(0, str(tmp_path), is_draft_model=True)
+
+    assert target_path != draft_path
+    assert draft_path.endswith("gpu0_draft0.sock")
 
 
 class WeightCacheDaemon:
