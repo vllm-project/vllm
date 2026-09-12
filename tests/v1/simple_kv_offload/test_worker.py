@@ -400,6 +400,8 @@ def test_register_mixed_page_sizes_in_one_cache_group(monkeypatch):
     vllm_config.cache_config = CacheConfig()
     vllm_config.cache_config.kv_cache_layout = layout.name
     vllm_config.cache_config.num_gpu_blocks_override = None
+    vllm_config.attention_config.hisparse_config = None
+    vllm_config.kv_transfer_config = None
 
     pages = [spec.page_size_bytes for spec in specs.values()]
     num_blocks = 4
@@ -458,6 +460,8 @@ def test_register_mixed_page_sizes_odd_block_counts(monkeypatch, rank_blocks):
     vllm_config.cache_config = CacheConfig()
     vllm_config.cache_config.kv_cache_layout = layout.name
     vllm_config.cache_config.num_gpu_blocks_override = None
+    vllm_config.attention_config.hisparse_config = None
+    vllm_config.kv_transfer_config = None
 
     pages = [spec.page_size_bytes for spec in specs.values()]
     kv_cache_config = get_kv_cache_config_from_groups(
@@ -507,6 +511,8 @@ def test_mixed_page_byte_placement_is_dcp_invariant():
         vllm_config.cache_config.kv_cache_layout = KVCacheLayout.LBNHC.name
         vllm_config.cache_config.num_gpu_blocks_override = None
         vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+        vllm_config.attention_config.hisparse_config = None
+        vllm_config.kv_transfer_config = None
 
         page_bytes = sum(spec.page_size_bytes for spec in specs.values())
         config = get_kv_cache_config_from_groups(vllm_config, [group], page_bytes * 4)
