@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (H200 MIG 18GB) Language Models (Standard)'
+  key: language-models-tests-standard
   device: intel_gpu
   timeout_in_minutes: 30
   working_dir: .
@@ -28,6 +29,7 @@ steps:
     'cd tests &&
     pytest -v -s models/language -m core_model and (not slow_test) || true'
 - label: ':nvidia: (H200 MIG 35GB) Language Models (Extra Standard) Shard %N'
+  key: language-models-tests-extra-standard
   device: intel_gpu
   timeout_in_minutes: 40
   parallelism: 2
@@ -55,6 +57,7 @@ steps:
     'cd tests &&
     pytest -v -s models/language -m core_model and slow_test --deselect="tests/models/language/generation/test_common.py::test_models[True-False-5-32-bigscience/bloom-560m]" --deselect="tests/models/language/generation/test_common.py::test_models[False-False-5-32-bigscience/bloom-560m]" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (H200 MIG 35GB) Language Models (Hybrid) Shard %N'
+  key: language-models-tests-hybrid
   device: intel_gpu
   timeout_in_minutes: 65
   parallelism: 2
@@ -82,6 +85,7 @@ steps:
     'cd tests &&
     pytest -v -s models/language/generation -m hybrid_model -k not granite-4.0-tiny-preview --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[SD-20-ai21labs/Jamba-tiny-dev]" --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[SD-20-state-spaces/mamba-130m-hf]" --deselect="tests/models/language/generation/test_hybrid.py::test_chunked_prefill_with_parallel_sampling[DS-10-ai21labs/Jamba-tiny-dev]" --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[DS-20-state-spaces/mamba-130m-hf]" --deselect="tests/models/language/generation/test_hybrid.py::test_mamba_cache_cg_padding[DS-20-ai21labs/Jamba-tiny-dev]" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (L4) Granite Language Model Compatibility'
+  key: language-models-tests-granite-l4-compatibility
   device: intel_gpu
   timeout_in_minutes: 65
   num_devices: 1
@@ -109,6 +113,7 @@ steps:
     'cd tests &&
     pytest -v -s models/language/generation -m hybrid_model -k granite-4.0-tiny-preview || true'
 - label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Generation)'
+  key: language-models-test-extended-generation
   device: intel_gpu
   timeout_in_minutes: 80
   optional: false
@@ -136,6 +141,7 @@ steps:
     'cd tests &&
     pytest -v -s models/language/generation -m (not core_model) and (not hybrid_model) || true'
 - label: ':nvidia: (H200 MIG 18GB) Language Models (PPL)'
+  key: language-models-test-ppl
   device: intel_gpu
   timeout_in_minutes: 30
   optional: false
@@ -161,6 +167,7 @@ steps:
     'cd tests &&
     pytest -v -s models/language/generation_ppl_test || true'
 - label: ':nvidia: (H200 MIG 35GB) Language Models (Extended Pooling) Shard %N'
+  key: language-models-test-extended-pooling
   device: intel_gpu
   timeout_in_minutes: 120
   parallelism: 4
@@ -187,6 +194,7 @@ steps:
     'cd tests &&
     pytest -v -s models/language/pooling -m not core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: ':nvidia: (H200 MIG 18GB) Language Models (MTEB)'
+  key: language-models-test-mteb
   device: intel_gpu
   timeout_in_minutes: 68
   optional: false

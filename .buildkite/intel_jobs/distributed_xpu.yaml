@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (L4) Distributed Comm Ops'
+  key: distributed-comm-ops
   device: intel_gpu
   timeout_in_minutes: 25
   num_devices: 2
@@ -34,6 +35,7 @@ steps:
     pytest -v -s distributed/test_shm_buffer.py || true &&
     pytest -v -s distributed/test_shm_storage.py || true'
 - label: ':nvidia: (L4) Sharded RDT Weight Transfer'
+  key: sharded-rdt-weight-transfer
   device: intel_gpu
   timeout_in_minutes: 20
   num_devices: 1
@@ -64,6 +66,7 @@ steps:
     pytest -v -s distributed/test_sharded_rdt_producer.py || true &&
     pytest -v -s distributed/test_sharded_rdt_trainer.py || true'
 - label: ':nvidia: (L4) Distributed DP Basic'
+  key: distributed-dp-tests-2-gpus
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 2
@@ -110,6 +113,7 @@ steps:
     pytest -v -s v1/e2e/general/test_sharded_sampling.py || true &&
     pytest -v -s v1/e2e/spec_decode/test_sharded_sampling.py || true'
 - label: ':nvidia: (L4) Distributed Compile + RPC'
+  key: distributed-compile-rpc-tests-2-gpus
   device: intel_gpu
   timeout_in_minutes: 65
   num_devices: 2
@@ -146,6 +150,7 @@ steps:
     pytest -v -s entrypoints/llm/test_collective_rpc.py || true &&
     pytest -v -s ./compile/test_wrapper.py || true'
 - label: ':nvidia: (L4) Distributed Torchrun + Shutdown'
+  key: distributed-torchrun-shutdown-tests-2-gpus
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 2
@@ -186,6 +191,7 @@ steps:
     CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown || true &&
     pytest -v -s v1/worker/test_worker_memory_snapshot.py || true'
 - label: ':nvidia: (L4) Distributed Torchrun + Examples'
+  key: distributed-torchrun-examples-4-gpus
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 4
@@ -231,6 +237,7 @@ steps:
     TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py || true &&
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true'
 - label: ':nvidia: (L4) Distributed DP Extended'
+  key: distributed-dp-tests-4-gpus
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 4
@@ -274,6 +281,7 @@ steps:
     pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp || true &&
     pytest -v -s distributed/test_utils.py --deselect="tests/distributed/test_utils.py::test_cuda_device_count_stateless" || true'
 - label: ':nvidia: (L4) Distributed Compile + Comm'
+  key: distributed-compile-comm-4-gpus
   device: intel_gpu
   timeout_in_minutes: 70
   num_devices: 4
@@ -310,6 +318,7 @@ steps:
     pytest -v -s distributed/test_symm_mem_allreduce.py || true &&
     pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node || true'
 - label: ':nvidia: (A100) Distributed'
+  key: distributed-tests-4xa100
   device: intel_gpu
   num_devices: 4
   optional: false
@@ -340,6 +349,7 @@ steps:
     TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m distributed(num_gpus=2) || true &&
     pytest -v -s -x lora/test_mixtral.py || true'
 - label: ':nvidia: (H100) Distributed Features'
+  key: distributed-tests-2xh100-2xmi300
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 2
@@ -369,6 +379,7 @@ steps:
     VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py --deselect="tests/distributed/test_weight_transfer.py::test_ipc_weight_transfer_between_processes[ray]" --deselect="tests/distributed/test_weight_transfer.py::test_nccl_sparse_weight_transfer_between_processes" --deselect="tests/distributed/test_weight_transfer.py::test_nccl_weight_transfer_between_processes" --deselect="tests/distributed/test_weight_transfer.py::test_ipc_weight_transfer_between_processes[http]" || true &&
     pytest -v -s tests/distributed/test_packed_tensor.py || true'
 - label: ':nvidia: (B200) Distributed'
+  key: distributed-tests-2xb200
   device: intel_gpu
   num_devices: 2
   optional: false
@@ -397,6 +408,7 @@ steps:
     pytest -v -s tests/v1/distributed/test_dbo.py || true &&
     pytest -v -s tests/distributed/test_mnnvl_alltoall.py || true'
 - label: ':nvidia: (B200) Kimi-K3 GEMM-RS/AR'
+  key: kimi-k3-gemm-rs-ar-2xb200
   device: intel_gpu
   timeout_in_minutes: 20
   num_devices: 2
@@ -420,6 +432,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -v -s tests/kernels/test_kimi_k3_gemm_rs_ar.py || true'
 - label: ':nvidia: (L4) Pipeline + Context Parallelism'
+  key: pipeline-context-parallelism-4-gpus
   device: intel_gpu
   timeout_in_minutes: 55
   num_devices: 4
@@ -453,6 +466,7 @@ steps:
     pytest -v -s distributed/test_pipeline_parallel.py || true &&
     pytest -v -s v1/distributed/test_pp_dp_v2.py || true'
 - label: ':nvidia: (L4) RayExecutorV2'
+  key: rayexecutorv2-4-gpus
   device: intel_gpu
   timeout_in_minutes: 45
   num_devices: 4

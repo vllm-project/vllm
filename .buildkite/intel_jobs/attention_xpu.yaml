@@ -3,6 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: ':nvidia: (H100) V1 Attention Shard %N'
+  key: v1-attention-h100-mi300
   device: intel_gpu
   timeout_in_minutes: 85
   parallelism: 2
