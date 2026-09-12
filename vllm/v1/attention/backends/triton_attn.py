@@ -39,7 +39,11 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
     triton_reshape_and_cache_flash_per_token_head_quant,
 )
-from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+from vllm.v1.attention.ops.triton_unified_attention import (
+    _reduce_segments,
+    _unified_attention,
+    unified_attention,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVQuantMode,
@@ -537,6 +541,31 @@ class TritonAttentionImpl(AttentionImpl):
             self.use_td = current_platform.is_xpu()
         else:
             self.use_td = td_override
+
+        if self._kv_quant_mode != KVQuantMode.INT4_PER_TOKEN_HEAD:
+            from vllm.config import get_current_vllm_config_or_none
+
+            vllm_config = get_current_vllm_config_or_none()
+        else:
+            vllm_config = None
+        if vllm_config is not None:
+            warmup_args = dict(
+                num_query_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                block_size=vllm_config.cache_config.block_size,
+                sliding_window=self.sliding_window[0],
+                dtype=vllm_config.model_config.dtype,
+                kv_quant_mode=self._kv_quant_mode,
+                use_alibi_slopes=self.alibi_slopes is not None,
+                use_alibi_sqrt=self.use_alibi_sqrt,
+                use_sinks=self.sinks is not None,
+                softcap=self.logits_soft_cap,
+                chunk_lookback=self.chunk_lookback,
+                use_td=self.use_td,
+            )
+            _unified_attention.register_warmup(**warmup_args)
+            _reduce_segments.register_warmup(**warmup_args)
 
     def forward(
         self,

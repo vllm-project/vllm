@@ -85,6 +85,38 @@ FA4_DENSE_NUM_BLOCKS = 256
 FA4_DENSE_MAX_SEQLEN_K = 8192
 
 
+def _compile_fa4_split_combine(
+    out_dtype: torch.dtype, head_dim: int, return_lse: bool
+) -> None:
+    """Compile the CuTeDSL combine stage omitted by FA4's forward-only spec API."""
+    from vllm.vllm_flash_attn.cute.interface import (
+        _compile_fwd_combine,
+        _flash_attn_fwd_combine,
+        torch2cute_dtype_map,
+    )
+
+    k_block_size = 64 if head_dim <= 64 else 128
+    tile_m = 8 if k_block_size == 128 else 16
+    # FA4 clamps the split count to at least 32 for the 8-row combine tile.
+    log_max_splits = 5 if tile_m == 8 else 4
+    native_key = (
+        torch2cute_dtype_map[out_dtype],
+        torch2cute_dtype_map[torch.float32],
+        head_dim,
+        tile_m,
+        k_block_size,
+        log_max_splits,
+        True,  # cu_seqlens_q is always supplied by this backend.
+        False,  # seqused_q
+        return_lse,
+        False,  # varlen_batch_idx
+        None,  # output quantization
+    )
+    cache = _flash_attn_fwd_combine.compile_cache
+    if native_key not in cache:
+        cache[native_key] = _compile_fwd_combine(*native_key)
+
+
 class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"]):
     """Own every dense FA4 forward specialization used by this backend."""
 
@@ -112,6 +144,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         mm_prefix_sliding_window: int
         mm_prefix_sliding_window_left: int | None
         fp8_kv_dequant: bool
+        is_single_batch: bool
 
     @staticmethod
     def kernel(*args: Any, **kwargs: Any) -> Any:
@@ -143,6 +176,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         mm_prefix_sliding_window: int,
         mm_prefix_sliding_window_left: int | None,
         fp8_kv_dequant: bool = False,
+        is_single_batch: bool = True,
     ) -> CompileKey:
         return self.CompileKey(
             q_stage=q_stage,
@@ -167,6 +201,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             mm_prefix_sliding_window=mm_prefix_sliding_window,
             mm_prefix_sliding_window_left=mm_prefix_sliding_window_left,
             fp8_kv_dequant=fp8_kv_dequant,
+            is_single_batch=is_single_batch,
         )
 
     def get_warmup_keys(
@@ -214,10 +249,12 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
 
         q_stages = (1, 2) if major in (10, 11) else (1,)
         split_states = (False, True)
+        batch_states = (True,)
         if uses_fa4_hd256_kernel(head_dim):
             if is_paged and page_size != FA4_HD256_PAGE_SIZE:
                 return []
             split_states = (False,)
+            batch_states = (True, False)
 
         runtime_variant = dict(
             window_size=window_size,
@@ -237,6 +274,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             zip_inputs(runtime_variant),
             q_stage=q_stages,
             is_split_kv=split_states,
+            is_single_batch=batch_states,
             q_dtype=q_dtype,
             kv_dtype=kv_dtype,
             out_dtype=out_dtype,
@@ -250,6 +288,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
     def compile(self, compile_key: CompileKey) -> None:
         assert compile_flash_attn_varlen_func_from_specs is not None
         max_seqlen_q = FA4_DENSE_Q_TILE + 1 if compile_key.q_stage == 2 else 1
+        batch_size = 1 if compile_key.is_single_batch else 2
         num_splits = 2 if compile_key.is_split_kv else 1
         kv_shape = (
             FA4_DENSE_NUM_BLOCKS,
@@ -264,7 +303,11 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             1,
         )
         if not compile_key.is_paged:
-            kv_shape = (FA4_DENSE_MAX_SEQLEN_K, 1, compile_key.head_dim)
+            kv_shape = (
+                batch_size * FA4_DENSE_MAX_SEQLEN_K,
+                1,
+                compile_key.head_dim,
+            )
             kv_stride = None
         mask_mod = None
         aux_tensor_shapes = None
@@ -279,7 +322,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             aux_tensor_shapes = [(1,), (1,)]
         compile_flash_attn_varlen_func_from_specs(
             q_shape=(
-                max_seqlen_q,
+                batch_size * max_seqlen_q,
                 compile_key.qhead_per_kvhead,
                 compile_key.head_dim,
             ),
@@ -291,13 +334,15 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             k_dtype=compile_key.kv_dtype,
             v_dtype=compile_key.kv_dtype,
             out_dtype=compile_key.out_dtype,
-            cu_seqlens_q_shape=(2,),
-            cu_seqlens_k_shape=(2,) if compile_key.uses_cu_seqlens_k else None,
-            seqused_k_shape=(1,)
+            cu_seqlens_q_shape=(batch_size + 1,),
+            cu_seqlens_k_shape=(batch_size + 1,)
+            if compile_key.uses_cu_seqlens_k
+            else None,
+            seqused_k_shape=(batch_size,)
             if compile_key.is_paged and not compile_key.uses_cu_seqlens_k
             else None,
             page_table_shape=(
-                1,
+                batch_size,
                 FA4_DENSE_MAX_SEQLEN_K // compile_key.page_size,
             )
             if compile_key.is_paged
@@ -320,6 +365,12 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             aux_tensor_shapes=aux_tensor_shapes,
             fp8_kv_dequant=compile_key.fp8_kv_dequant,
         )
+        if compile_key.is_split_kv:
+            _compile_fa4_split_combine(
+                compile_key.out_dtype,
+                compile_key.head_dim,
+                compile_key.return_lse,
+            )
 
     def __call__(
         self,
@@ -714,7 +765,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         )
         if vllm_config.kernel_config.enable_jit_warmup and fa_version == 4:
             out_dtype = self.model_config.dtype
-            quantized = is_quantized_kv_cache(self.kv_cache_dtype)
+            quantized = is_quantized_kv_cache(self.cache_config.cache_dtype)
             q_dtype = current_platform.fp8_dtype() if quantized else out_dtype
             kv_dtype = q_dtype
             has_descales = quantized

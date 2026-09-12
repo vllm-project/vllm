@@ -13,6 +13,12 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices, _when
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
@@ -804,7 +810,127 @@ def _get_tile_size(
     return 16 if element_size >= 2 else 32
 
 
-def unified_attention(
+def _unified_attention_warmup_inputs(
+    *,
+    num_query_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    block_size: int,
+    sliding_window: int,
+    dtype: torch.dtype,
+    kv_quant_mode: KVQuantMode,
+    use_alibi_slopes: bool,
+    use_alibi_sqrt: bool,
+    use_sinks: bool,
+    softcap: float,
+    chunk_lookback: int,
+    use_td: bool,
+) -> dict[str, Any]:
+    """Compile-only inputs for coupled 2D prefill, 2D decode, and 3D decode."""
+    mode: Any = WarmupChoices((2, False), (1, False), (1, True))
+    block_table_stride: Any = WarmupChoices(8, 16)
+    num_seqs: Any = WarmupChoices(1, 2, 16)
+    clamp: Any = WarmupChoices(False, True)
+    max_query_len = mode[0]
+    is_3d = mode[1]
+    _when(not is_3d or num_seqs != 16)
+    num_tokens = num_seqs * max_query_len
+    segments = 16 if is_3d else None
+    q_shape = (num_tokens, num_query_heads, head_size)
+    kv_dtype = (
+        current_platform.fp8_dtype()
+        if kv_quant_mode in (KVQuantMode.FP8_PER_TENSOR, KVQuantMode.FP8_PER_TOKEN_HEAD)
+        else torch.int8
+        if kv_quant_mode == KVQuantMode.INT8_PER_TOKEN_HEAD
+        else dtype
+    )
+    per_token_scales = kv_quant_mode in (
+        KVQuantMode.INT8_PER_TOKEN_HEAD,
+        KVQuantMode.FP8_PER_TOKEN_HEAD,
+    )
+    cache_strides = (
+        num_kv_heads * block_size * 2 * head_size,
+        num_kv_heads * 2 * head_size,
+        2 * head_size,
+        1,
+    )
+    cache_shape = (1, block_size, num_kv_heads, head_size)
+    f32 = TritonWarmupTensor(torch.float32)
+    segment_output = (
+        TritonWarmupTensor(
+            torch.float32,
+            shape=(
+                num_tokens,
+                num_query_heads,
+                segments,
+                triton.next_power_of_2(head_size),
+            ),
+        )
+        if is_3d
+        else None
+    )
+    segment_scalars = (
+        TritonWarmupTensor(
+            torch.float32,
+            shape=(num_tokens, num_query_heads, segments),
+        )
+        if is_3d
+        else None
+    )
+    return dict(
+        q=TritonWarmupTensor(dtype, shape=q_shape),
+        k=TritonWarmupTensor(kv_dtype, shape=cache_shape, strides=cache_strides),
+        v=TritonWarmupTensor(kv_dtype, shape=cache_shape, strides=cache_strides),
+        out=TritonWarmupTensor(dtype, shape=q_shape),
+        cu_seqlens_q=TritonWarmupTensor(torch.int32, shape=(num_seqs + 1,)),
+        max_seqlen_q=max_query_len,
+        seqused_k=TritonWarmupTensor(torch.int32, shape=(num_seqs,)),
+        max_seqlen_k=128,
+        softmax_scale=1.0,
+        causal=True,
+        window_size=(sliding_window, 0),
+        block_table=TritonWarmupTensor(
+            torch.int32, shape=(num_seqs, block_table_stride)
+        ),
+        softcap=softcap,
+        q_descale=None,
+        k_descale=f32,
+        v_descale=f32,
+        seq_threshold_3D=num_seqs if is_3d else None,
+        num_par_softmax_segments=segments,
+        softmax_segm_output=segment_output,
+        softmax_segm_max=segment_scalars,
+        softmax_segm_expsum=segment_scalars,
+        alibi_slopes=f32 if use_alibi_slopes else None,
+        output_scale=None,
+        qq_bias=None,
+        sinks=f32 if use_sinks else None,
+        mm_prefix_range=None,
+        rswa_prefix_lens=None,
+        rswa_window=None,
+        use_alibi_sqrt=use_alibi_sqrt,
+        kv_quant_mode=kv_quant_mode,
+        k_scale_cache=(
+            TritonWarmupTensor(torch.float32, shape=(1, block_size, num_kv_heads))
+            if per_token_scales
+            else None
+        ),
+        v_scale_cache=(
+            TritonWarmupTensor(torch.float32, shape=(1, block_size, num_kv_heads))
+            if per_token_scales
+            else None
+        ),
+        chunk_lookback=chunk_lookback,
+        use_td=use_td,
+        mm_prefix_clamp_sliding_window=clamp,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=kernel_unified_attention,
+    warmup_inputs=_unified_attention_warmup_inputs,
+)
+def _unified_attention(
     q,
     k,
     v,
@@ -852,53 +978,13 @@ def unified_attention(
     # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window.
     # Default False keeps the original behavior for every other model.
     mm_prefix_clamp_sliding_window: bool = False,
-):
+) -> DispatchSpec:
     # Resolve causal: bool or per-seq tensor.
     use_per_seq_causal = isinstance(causal, torch.Tensor)
     use_causal = bool(causal) if not use_per_seq_causal else True
     per_seq_causal_ptr = causal if use_per_seq_causal else None
 
-    # Sub-byte packed mode (INT4) needs a bespoke kernel (split-dot +
-    # sub-byte unpack); everything else goes through the core kernel below.
-    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
-        assert use_causal and not use_per_seq_causal, (
-            "INT4_PER_TOKEN_HEAD only supports causal attention"
-        )
-        from vllm.v1.attention.ops.int4_per_token_head import (
-            unified_attention_int4,
-        )
-
-        if sinks is not None:
-            assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
-        unified_attention_int4(
-            q=q,
-            k_cache=k,
-            v_cache=v,
-            out=out,
-            cu_seqlens_q=cu_seqlens_q,
-            max_seqlen_q=max_seqlen_q,
-            seqused_k=seqused_k,
-            max_seqlen_k=max_seqlen_k,
-            softmax_scale=softmax_scale,
-            window_size=window_size,
-            block_table=block_table,
-            softcap=softcap,
-            sinks=sinks,
-            alibi_slopes=alibi_slopes,
-            use_alibi_sqrt=use_alibi_sqrt,
-            qq_bias=qq_bias,
-            output_scale=output_scale,
-            mm_prefix_range=mm_prefix_range,
-            k_scale_cache=k_scale_cache,
-            v_scale_cache=v_scale_cache,
-            seq_threshold_3D=seq_threshold_3D,
-            num_par_softmax_segments=num_par_softmax_segments,
-            softmax_segm_output=softmax_segm_output,
-            softmax_segm_max=softmax_segm_max,
-            softmax_segm_expsum=softmax_segm_expsum,
-        )
-        return
-
+    # The INT4 facade handles its own sink validation.
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
 
@@ -1092,103 +1178,320 @@ def unified_attention(
     if launch_num_stages is not None:
         launch_kwargs["num_stages"] = launch_num_stages
 
-    kernel_unified_attention[grid](
-        output_ptr=out,
-        segm_output_ptr=segm_output_ptr,
-        segm_max_ptr=segm_max_ptr,
-        segm_expsum_ptr=segm_expsum_ptr,
-        query_ptr=q,
-        key_cache_ptr=k,
-        value_cache_ptr=v,
-        sink_ptr=sinks,
-        block_tables_ptr=block_table,
-        seq_lens_ptr=seqused_k,
-        alibi_slopes_ptr=alibi_slopes,
-        qq_bias_ptr=qq_bias,
-        k_scale_cache_ptr=k_scale_ptr,
-        v_scale_cache_ptr=v_scale_ptr,
-        scale=softmax_scale,
-        q_scale=q_descale,
-        k_scale=k_descale,
-        v_scale=v_descale,
-        out_scale=1 / output_scale if output_scale is not None else 1.0,
-        softcap=softcap,
-        num_query_heads=num_query_heads,
-        num_queries_per_kv=num_queries_per_kv,
-        block_table_stride=block_table.stride(0),
-        query_stride_0=q.stride(0),
-        query_stride_1=q.stride(1),
-        output_stride_0=out.stride(0),
-        output_stride_1=out.stride(1),
-        qq_bias_stride_0=qq_bias.stride(0) if use_qq_bias else 0,
-        BLOCK_SIZE=block_size,
-        TILE_SIZE=tile_size,
-        HEAD_SIZE=head_size,
-        HEAD_SIZE_PADDED=head_size_padded,
-        USE_ALIBI_SLOPES=use_alibi_slopes,
-        USE_ALIBI_SQRT=use_alibi_sqrt,
-        USE_QQ_BIAS=use_qq_bias,
-        USE_SOFTCAP=(softcap > 0),
-        USE_SINKS=(sinks is not None),
-        SLIDING_WINDOW=(1 + window_size[0]),
-        USE_CAUSAL=use_causal,
-        USE_PER_SEQ_CAUSAL=use_per_seq_causal,
-        per_seq_causal_ptr=per_seq_causal_ptr,
-        USE_MM_PREFIX=use_mm_prefix,
-        MAX_MM_RANGES=max_mm_ranges,
-        mm_prefix_range_ptr=mm_prefix_range,
-        rswa_prefix_lens_ptr=rswa_prefix_lens if use_rswa else seqused_k,
-        R_SWA_WINDOW=rswa_window or 0,
-        USE_R_SWA=use_rswa,
-        stride_k_cache_0=k.stride(0),
-        stride_k_cache_1=k.stride(1),
-        stride_k_cache_2=k.stride(2),
-        stride_k_cache_3=k.stride(3),
-        stride_v_cache_0=v.stride(0),
-        stride_v_cache_1=v.stride(1),
-        stride_v_cache_2=v.stride(2),
-        stride_v_cache_3=v.stride(3),
-        stride_ks_blk=ks_blk,
-        stride_ks_slot=ks_slot,
-        stride_ks_head=ks_head,
-        stride_vs_blk=vs_blk,
-        stride_vs_slot=vs_slot,
-        stride_vs_head=vs_head,
-        query_start_len_ptr=cu_seqlens_q,
-        BLOCK_Q=BLOCK_Q,
-        num_seqs=num_seqs,
-        BLOCK_M=BLOCK_M,
-        NUM_SEGMENTS_PER_SEQ=num_segments,
-        USE_FP8=output_scale is not None,
-        IS_3D=use_3d,
-        KV_QUANT_MODE=kv_quant_mode,
-        Q_IS_FP8=(q.dtype == current_platform.fp8_dtype()),
-        CHUNK_LOOKBACK=chunk_lookback,
-        CHUNK_SIZE=chunk_size,
-        USE_TD=use_td,
-        USE_TD_QO=use_td_qo,
-        MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
-        **launch_kwargs,
-    )
-
+    reduction = None
     if use_3d:
-        reduce_segments[(q.shape[0], num_query_heads)](
+        reduction = dict(
+            q=q,
+            out=out,
+            softmax_segm_output=softmax_segm_output,
+            softmax_segm_max=softmax_segm_max,
+            softmax_segm_expsum=softmax_segm_expsum,
+            seqused_k=seqused_k,
+            block_table=block_table,
+            cu_seqlens_q=cu_seqlens_q,
+            tile_size=TILE_SIZE_DECODE,
+            block_q=BLOCK_Q,
+            num_segments=num_par_softmax_segments,
+            output_scale=output_scale,
+        )
+    return (
+        grid,
+        dict(
             output_ptr=out,
-            segm_output_ptr=softmax_segm_output,
-            segm_max_ptr=softmax_segm_max,
-            segm_expsum_ptr=softmax_segm_expsum,
+            segm_output_ptr=segm_output_ptr,
+            segm_max_ptr=segm_max_ptr,
+            segm_expsum_ptr=segm_expsum_ptr,
+            query_ptr=q,
+            key_cache_ptr=k,
+            value_cache_ptr=v,
+            sink_ptr=sinks,
+            block_tables_ptr=block_table,
             seq_lens_ptr=seqused_k,
-            num_seqs=num_seqs,
+            alibi_slopes_ptr=alibi_slopes,
+            qq_bias_ptr=qq_bias,
+            k_scale_cache_ptr=k_scale_ptr,
+            v_scale_cache_ptr=v_scale_ptr,
+            scale=softmax_scale,
+            q_scale=q_descale,
+            k_scale=k_descale,
+            v_scale=v_descale,
+            out_scale=1 / output_scale if output_scale is not None else 1.0,
+            softcap=softcap,
             num_query_heads=num_query_heads,
-            out_scale_inv=1 / output_scale if output_scale is not None else 1.0,
+            num_queries_per_kv=num_queries_per_kv,
+            block_table_stride=block_table.stride(0),
+            query_stride_0=q.stride(0),
+            query_stride_1=q.stride(1),
             output_stride_0=out.stride(0),
             output_stride_1=out.stride(1),
-            block_table_stride=block_table.stride(0),
-            TILE_SIZE=TILE_SIZE_DECODE,
+            qq_bias_stride_0=qq_bias.stride(0) if use_qq_bias else 0,
+            BLOCK_SIZE=block_size,
+            TILE_SIZE=tile_size,
             HEAD_SIZE=head_size,
             HEAD_SIZE_PADDED=head_size_padded,
+            USE_ALIBI_SLOPES=use_alibi_slopes,
+            USE_ALIBI_SQRT=use_alibi_sqrt,
+            USE_QQ_BIAS=use_qq_bias,
+            USE_SOFTCAP=(softcap > 0),
+            USE_SINKS=(sinks is not None),
+            SLIDING_WINDOW=(1 + window_size[0]),
+            USE_CAUSAL=use_causal,
+            USE_PER_SEQ_CAUSAL=use_per_seq_causal,
+            per_seq_causal_ptr=per_seq_causal_ptr,
+            USE_MM_PREFIX=use_mm_prefix,
+            MAX_MM_RANGES=max_mm_ranges,
+            mm_prefix_range_ptr=mm_prefix_range,
+            rswa_prefix_lens_ptr=rswa_prefix_lens if use_rswa else seqused_k,
+            R_SWA_WINDOW=rswa_window or 0,
+            USE_R_SWA=use_rswa,
+            stride_k_cache_0=k.stride(0),
+            stride_k_cache_1=k.stride(1),
+            stride_k_cache_2=k.stride(2),
+            stride_k_cache_3=k.stride(3),
+            stride_v_cache_0=v.stride(0),
+            stride_v_cache_1=v.stride(1),
+            stride_v_cache_2=v.stride(2),
+            stride_v_cache_3=v.stride(3),
+            stride_ks_blk=ks_blk,
+            stride_ks_slot=ks_slot,
+            stride_ks_head=ks_head,
+            stride_vs_blk=vs_blk,
+            stride_vs_slot=vs_slot,
+            stride_vs_head=vs_head,
             query_start_len_ptr=cu_seqlens_q,
             BLOCK_Q=BLOCK_Q,
-            NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
+            num_seqs=num_seqs,
+            BLOCK_M=BLOCK_M,
+            NUM_SEGMENTS_PER_SEQ=num_segments,
             USE_FP8=output_scale is not None,
+            IS_3D=use_3d,
+            KV_QUANT_MODE=kv_quant_mode,
+            Q_IS_FP8=(q.dtype == current_platform.fp8_dtype()),
+            CHUNK_LOOKBACK=chunk_lookback,
+            CHUNK_SIZE=chunk_size,
+            USE_TD=use_td,
+            USE_TD_QO=use_td_qo,
+            MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
+            **launch_kwargs,
+        ),
+        reduction,
+    )
+
+
+def _reduce_segments_warmup_inputs(
+    *,
+    num_query_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    block_size: int,
+    sliding_window: int,
+    dtype: torch.dtype,
+    use_td: bool,
+    **_: Any,
+) -> dict[str, Any]:
+    """Warm scalar classes reachable by the 3D reduction stage."""
+    block_table_stride: Any = WarmupChoices(8, 16)
+    num_seqs: Any = WarmupChoices(1, 2)
+    tile_size = _get_tile_size(
+        head_size, sliding_window + 1, torch.finfo(dtype).bits // 8, False
+    )
+    tile_size = min(tile_size, block_size) if use_td else tile_size
+    num_queries_per_kv = num_query_heads // num_kv_heads
+    block_m = (
+        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
+    )
+    q_shape = (num_seqs, num_query_heads, head_size)
+    f32 = TritonWarmupTensor(torch.float32)
+    i32 = TritonWarmupTensor(torch.int32)
+    return dict(
+        q=TritonWarmupTensor(dtype, shape=q_shape),
+        out=TritonWarmupTensor(dtype, shape=q_shape),
+        softmax_segm_output=f32,
+        softmax_segm_max=f32,
+        softmax_segm_expsum=f32,
+        seqused_k=TritonWarmupTensor(torch.int32, shape=(num_seqs,)),
+        block_table=TritonWarmupTensor(
+            torch.int32, shape=(num_seqs, block_table_stride)
+        ),
+        cu_seqlens_q=i32,
+        tile_size=tile_size,
+        block_q=block_m // num_queries_per_kv,
+        num_segments=16,
+        output_scale=None,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=reduce_segments,
+    warmup_inputs=_reduce_segments_warmup_inputs,
+)
+def _reduce_segments(
+    q: torch.Tensor,
+    out: torch.Tensor,
+    softmax_segm_output: torch.Tensor,
+    softmax_segm_max: torch.Tensor,
+    softmax_segm_expsum: torch.Tensor,
+    seqused_k: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    tile_size: int,
+    block_q: int,
+    num_segments: int,
+    output_scale: torch.Tensor | None,
+) -> DispatchSpec:
+    head_size = q.shape[2]
+    return (q.shape[0], q.shape[1]), dict(
+        output_ptr=out,
+        segm_output_ptr=softmax_segm_output,
+        segm_max_ptr=softmax_segm_max,
+        segm_expsum_ptr=softmax_segm_expsum,
+        seq_lens_ptr=seqused_k,
+        num_seqs=len(seqused_k),
+        num_query_heads=q.shape[1],
+        out_scale_inv=1 / output_scale if output_scale is not None else 1.0,
+        output_stride_0=out.stride(0),
+        output_stride_1=out.stride(1),
+        block_table_stride=block_table.stride(0),
+        TILE_SIZE=tile_size,
+        HEAD_SIZE=head_size,
+        HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
+        query_start_len_ptr=cu_seqlens_q,
+        BLOCK_Q=block_q,
+        NUM_SEGMENTS_PER_SEQ=num_segments,
+        USE_FP8=output_scale is not None,
+    )
+
+
+def unified_attention(
+    q,
+    k,
+    v,
+    out,
+    cu_seqlens_q,
+    max_seqlen_q,
+    seqused_k,
+    max_seqlen_k,
+    softmax_scale,
+    causal,
+    window_size,
+    block_table,
+    softcap,
+    q_descale,
+    k_descale,
+    v_descale,
+    seq_threshold_3D=None,
+    num_par_softmax_segments=None,
+    softmax_segm_output=None,
+    softmax_segm_max=None,
+    softmax_segm_expsum=None,
+    alibi_slopes=None,
+    output_scale=None,
+    qq_bias=None,
+    # Optional tensor for sinks
+    sinks=None,
+    # Optional tensor for prefix lengths (PrefixLM support)
+    mm_prefix_range=None,
+    # R-SWA support: prefix tokens stay globally visible, generated tokens use
+    # a fixed sliding window.
+    rswa_prefix_lens=None,
+    rswa_window: int | None = None,
+    use_alibi_sqrt=False,
+    # KV cache quantization mode and per-token-head scale caches.
+    kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
+    k_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
+    v_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
+    # Chunked attention: restrict attention to aligned blocks with lookback.
+    chunk_lookback=-1,
+    # Tensor-descriptor mode: use ``tl.make_tensor_descriptor`` for Q/K/V
+    # loads and output stores.  Enables HW 2D block reads on Intel Xe2/Xe3.
+    # The non-TD branch is dead-code-eliminated at Triton compile time so
+    # disabling this flag costs nothing.
+    use_td: bool = False,
+    # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window.
+    # Default False keeps the original behavior for every other model.
+    mm_prefix_clamp_sliding_window: bool = False,
+):
+    # Resolve causal: bool or per-seq tensor.
+    use_per_seq_causal = isinstance(causal, torch.Tensor)
+    use_causal = bool(causal) if not use_per_seq_causal else True
+
+    # Sub-byte packed mode (INT4) needs a bespoke kernel (split-dot +
+    # sub-byte unpack); everything else goes through the core kernel below.
+    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+        assert use_causal and not use_per_seq_causal, (
+            "INT4_PER_TOKEN_HEAD only supports causal attention"
         )
+        from vllm.v1.attention.ops.int4_per_token_head import (
+            unified_attention_int4,
+        )
+
+        if sinks is not None:
+            assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
+        unified_attention_int4(
+            q=q,
+            k_cache=k,
+            v_cache=v,
+            out=out,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=seqused_k,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=softmax_scale,
+            window_size=window_size,
+            block_table=block_table,
+            softcap=softcap,
+            sinks=sinks,
+            alibi_slopes=alibi_slopes,
+            use_alibi_sqrt=use_alibi_sqrt,
+            qq_bias=qq_bias,
+            output_scale=output_scale,
+            mm_prefix_range=mm_prefix_range,
+            k_scale_cache=k_scale_cache,
+            v_scale_cache=v_scale_cache,
+            seq_threshold_3D=seq_threshold_3D,
+            num_par_softmax_segments=num_par_softmax_segments,
+            softmax_segm_output=softmax_segm_output,
+            softmax_segm_max=softmax_segm_max,
+            softmax_segm_expsum=softmax_segm_expsum,
+        )
+        return
+
+    reduction = _unified_attention(
+        q=q,
+        k=k,
+        v=v,
+        out=out,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=max_seqlen_q,
+        seqused_k=seqused_k,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        window_size=window_size,
+        block_table=block_table,
+        softcap=softcap,
+        q_descale=q_descale,
+        k_descale=k_descale,
+        v_descale=v_descale,
+        seq_threshold_3D=seq_threshold_3D,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=softmax_segm_output,
+        softmax_segm_max=softmax_segm_max,
+        softmax_segm_expsum=softmax_segm_expsum,
+        alibi_slopes=alibi_slopes,
+        output_scale=output_scale,
+        qq_bias=qq_bias,
+        sinks=sinks,
+        mm_prefix_range=mm_prefix_range,
+        rswa_prefix_lens=rswa_prefix_lens,
+        rswa_window=rswa_window,
+        use_alibi_sqrt=use_alibi_sqrt,
+        kv_quant_mode=kv_quant_mode,
+        k_scale_cache=k_scale_cache,
+        v_scale_cache=v_scale_cache,
+        chunk_lookback=chunk_lookback,
+        use_td=use_td,
+        mm_prefix_clamp_sliding_window=mm_prefix_clamp_sliding_window,
+    )
+    if reduction is not None:
+        _reduce_segments(**reduction)
