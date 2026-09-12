@@ -468,7 +468,9 @@ class NanoNemotronVLMultiModalProcessor(
             if isinstance(local_image_num_patches, (list, tuple)) and item_idx < len(
                 local_image_num_patches
             ):
-                num_patches = int(local_image_num_patches[item_idx])
+                local_num_patches = local_image_num_patches[item_idx]
+                if local_num_patches is not None:
+                    num_patches = int(local_num_patches)
 
             return hf_processor.get_image_repl(feature_size, num_patches)
 
