@@ -201,6 +201,15 @@ pub struct BenchConfig {
     pub hf_subset: Option<String>,
     pub hf_output_len: Option<usize>,
     pub hf_text_column: Option<String>,
+    /// Fire each request at its trace-recorded timestamp instead of a
+    /// synthetic --request-rate schedule. Only timed_trace can set this.
+    pub self_timed: bool,
+    pub timed_trace_chunk_hash_size: usize,
+    pub timed_trace_sec_multiplier: f64,
+    pub timed_trace_label_timestamp: String,
+    pub timed_trace_label_input_length: String,
+    pub timed_trace_label_output_length: String,
+    pub timed_trace_label_hash_ids: String,
     pub reset_prefix_cache: bool,
     pub prompt_token_ids: bool,
     // --- Random multimodal dataset ---
@@ -371,6 +380,34 @@ impl BenchConfig {
         let mut multi_turn_min_turns = args.multi_turn_num_turns;
         let mut multi_turn_max_turns = args.multi_turn_num_turns;
 
+        // timed_trace argument rules: completions
+        // backends only (prompts go as pre-tokenized list[int]), self_timed
+        // defaults on, and --self-timed/--no-self-timed is rejected elsewhere.
+        let self_timed = if args.dataset_name == DatasetName::TimedTrace {
+            if !matches!(args.backend, BackendKind::Vllm | BackendKind::Openai) {
+                return Err(BenchError::Config(
+                    "timed_trace passes pre-tokenized prompts (list[int]) and requires \
+                     a completions backend ('vllm' or 'openai')"
+                        .into(),
+                ));
+            }
+            if args.dataset_path.is_none() {
+                return Err(BenchError::Config(
+                    "--dataset-path is required for --dataset-name timed_trace".into(),
+                ));
+            }
+            !args.no_self_timed
+        } else {
+            if args.self_timed || args.no_self_timed {
+                return Err(BenchError::Config(
+                    "--self-timed/--no-self-timed is only supported with \
+                     --dataset-name timed_trace"
+                        .into(),
+                ));
+            }
+            false
+        };
+
         // For random datasets with openai-compatible backends, default to ignore_eos.
         // Exception: multi-turn mode, where ignore_eos causes unbounded context growth
         // across turns. Multi-turn uses min_tokens instead for output length control.
@@ -379,6 +416,8 @@ impl BenchConfig {
             false
         } else {
             args.ignore_eos
+                // timed_trace: generation must run to the trace's output_length
+                || args.dataset_name == DatasetName::TimedTrace
                 || ((args.dataset_name == DatasetName::Random
                     || args.dataset_name == DatasetName::RandomMm)
                     && args.backend.is_openai_compatible()
@@ -742,6 +781,13 @@ impl BenchConfig {
             hf_subset: args.hf_subset.clone(),
             hf_output_len: args.hf_output_len,
             hf_text_column: args.hf_text_column.clone(),
+            self_timed,
+            timed_trace_chunk_hash_size: args.timed_trace_chunk_hash_size,
+            timed_trace_sec_multiplier: args.timed_trace_sec_multiplier,
+            timed_trace_label_timestamp: args.timed_trace_label_timestamp.clone(),
+            timed_trace_label_input_length: args.timed_trace_label_input_length.clone(),
+            timed_trace_label_output_length: args.timed_trace_label_output_length.clone(),
+            timed_trace_label_hash_ids: args.timed_trace_label_hash_ids.clone(),
             reset_prefix_cache: args.reset_prefix_cache,
             prompt_token_ids: args.prompt_token_ids,
             random_mm_base_items_per_request: args.random_mm_base_items_per_request,

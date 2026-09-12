@@ -12,6 +12,7 @@ pub mod random_rerank;
 pub mod sharegpt;
 pub mod sonnet;
 pub mod speed_bench;
+pub mod timed_trace;
 
 use std::sync::Arc;
 
@@ -55,6 +56,10 @@ pub struct SampleRequest {
     /// rerank sends `[0]` as the query and `[1..]` as documents (random-rerank).
     /// Mirrors Python's list-valued `SampleRequest.prompt`.
     pub prompt_list: Option<Arc<[Arc<str>]>>,
+    /// Arrival time in seconds relative to benchmark start (timed_trace only).
+    /// With --self-timed the scheduler fires the request at this offset
+    /// instead of a synthetic --request-rate schedule.
+    pub timestamp: Option<f64>,
 }
 
 impl Default for SampleRequest {
@@ -70,6 +75,7 @@ impl Default for SampleRequest {
             multi_modal_content: None,
             chat_messages_json: None,
             prompt_list: None,
+            timestamp: None,
         }
     }
 }
