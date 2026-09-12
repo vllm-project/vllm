@@ -610,14 +610,31 @@ def _reference_decode_index_score(
     return out
 
 
-def test_prefill_index_topk_correctness():
+@pytest.mark.parametrize("num_idx_heads", [1, 2, 4])
+@pytest.mark.parametrize(
+    ("query_lengths", "prefix_lengths"),
+    [
+        pytest.param((4, 3), (0, 1024), id="short"),
+        pytest.param((0, 65, 129), (128, 127, 0), id="ragged-page-boundaries"),
+        pytest.param((17, 3), (131071, 1024), id="resumed-128k"),
+        pytest.param((3,), (1048573,), id="resumed-1m"),
+        pytest.param((2048,), (0,), id="true-prefill"),
+        pytest.param((1536,), (8193,), id="24-query-tiles"),
+        pytest.param((1537,), (8193,), id="25-query-tiles"),
+    ],
+)
+def test_prefill_index_topk_correctness(
+    query_lengths: tuple[int, ...],
+    prefix_lengths: tuple[int, ...],
+    num_idx_heads: int,
+):
+    """Check scores and selection across K splits and TP-local head counts."""
     topk = 6
     init_blocks = 0
     local_blocks = 1
-    num_idx_heads = 2
-    head_dim = 16
-    q_lens = torch.tensor((4, 3), device="cuda", dtype=torch.int32)
-    prefix_lens = torch.tensor((0, 1024), device="cuda", dtype=torch.int32)
+    head_dim = 128
+    q_lens = torch.tensor(query_lengths, device="cuda", dtype=torch.int32)
+    prefix_lens = torch.tensor(prefix_lengths, device="cuda", dtype=torch.int32)
     seq_lens = prefix_lens + q_lens
     batch = q_lens.numel()
     max_seq_len = seq_lens.max().item()
@@ -629,12 +646,27 @@ def test_prefill_index_topk_correctness():
     block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(
         batch, max_blocks
     )
-    idx_q = torch.ones(q_lens.sum().item(), num_idx_heads, head_dim, device="cuda")
-    index_kv_cache = torch.empty(num_pages, BLOCK_SIZE, head_dim, device="cuda")
-    for req_id in range(batch):
-        for block_id in range(max_blocks):
-            page = block_table[req_id, block_id]
-            index_kv_cache[page].fill_(block_id + 1)
+    idx_q = torch.zeros(
+        q_lens.sum().item(),
+        num_idx_heads,
+        head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    head_scale = torch.arange(1, num_idx_heads + 1, device="cuda")
+    idx_q[:, :, 0] = 128 * head_scale
+    idx_q[:, :, 1:3] = head_scale[:, None]
+    index_kv_cache = torch.zeros(
+        num_pages, BLOCK_SIZE, head_dim, device="cuda", dtype=torch.bfloat16
+    )
+    # Encode distinct block scores exactly in BF16, including at 1M context.
+    blocks = torch.arange(max_blocks, device="cuda").repeat(batch)
+    pages = block_table.flatten()
+    index_kv_cache[pages, :, 0] = (blocks // 128)[:, None].to(torch.bfloat16)
+    index_kv_cache[pages, :, 1] = (blocks % 128 + 1)[:, None].to(torch.bfloat16)
+    index_kv_cache[pages, :, 2] = (
+        torch.arange(BLOCK_SIZE, device="cuda") / BLOCK_SIZE
+    ).to(torch.bfloat16)
 
     score = minimax_m3_index_score(
         idx_q,
@@ -647,6 +679,20 @@ def test_prefill_index_topk_correctness():
         max_seq_len=max_seq_len,
         num_kv_heads=num_idx_heads,
     )
+    for req_id, (q_len, prefix_len) in enumerate(zip(query_lengths, prefix_lengths)):
+        q_pos = prefix_len + torch.arange(q_len, device="cuda")
+        block_ids = torch.arange(max_blocks, device="cuda")
+        visible = block_ids[None, :] <= q_pos[:, None] // BLOCK_SIZE
+        last_pos = (q_pos[:, None] - block_ids[None, :] * BLOCK_SIZE).clamp_max(
+            BLOCK_SIZE - 1
+        )
+        expected_scores = (block_ids + 1 + last_pos / BLOCK_SIZE)[None, :, :]
+        expected_scores = expected_scores * head_scale[:, None, None]
+        req_scores = score[:, cu_seqlens[req_id] : cu_seqlens[req_id + 1], :max_blocks]
+        mask = visible.expand(num_idx_heads, -1, -1)
+        torch.testing.assert_close(
+            req_scores[mask], expected_scores[mask], rtol=0, atol=0
+        )
     actual = minimax_m3_index_topk(
         score,
         cu_seqlens,
