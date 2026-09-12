@@ -315,7 +315,17 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        *,
+        capture_previous_aux: bool = False,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+    ]:
+        previous_aux: torch.Tensor | None = None
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
         # for the first layer), the FFN uses this layer's attention pre-mix.
@@ -360,8 +370,11 @@ class DeepseekV4DecoderLayer(nn.Module):
             # and this block's pre, on the full hc stream, so the mix
             # coefficients see the injected stream. The injection also keeps
             # the post out of the pre-norm GEMM's fused prologue.
+            previous_post = mhc_post_tilelang(x, residual, post_mix, res_mix)
+            if capture_previous_aux:
+                previous_aux = previous_post.mean(dim=1)
             residual = self.engram(
-                mhc_post_tilelang(x, residual, post_mix, res_mix),
+                previous_post,
                 engram_hashes[:, self.engram.layer_hash_index],
                 engram_mask,
             )
@@ -399,6 +412,10 @@ class DeepseekV4DecoderLayer(nn.Module):
                     norm_eps=self.attn_norm.variance_epsilon,
                 )
             )
+            if capture_previous_aux:
+                # The fused call already applied the previous sublayer's post;
+                # aux consumers only need its mean over the hc streams.
+                previous_aux = residual.mean(dim=1)
 
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
@@ -425,7 +442,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_eps=self.ffn_norm.variance_epsilon,
         )
         x = self.ffn(x, input_ids)
-        return x, residual, post_mix, res_mix, ffn_pre
+        return x, residual, post_mix, res_mix, ffn_pre, previous_aux
 
 
 class DeepseekV4Model(nn.Module, EagleModelMixin):
@@ -660,13 +677,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if not get_pp_group().is_first_rank:
             assert intermediate_tensors is not None
             pre_mix = intermediate_tensors["pre_mix"]
-        aux_hidden_states: list[torch.Tensor] = []
-        final_aux_recon: torch.Tensor | None = None  # avoid duplicate mhc_post call
+        # Every layer's post runs inside the next layer's fused pre, so aux
+        # hidden states are read back from there instead of recomputed.
+        aux_hidden_by_layer: dict[int, torch.Tensor] = {}
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            hidden_states, residual, post_mix, res_mix, pre_mix = layer(
+            hidden_states, residual, post_mix, res_mix, pre_mix, previous_aux = layer(
                 hidden_states,
                 positions,
                 input_ids,
@@ -676,25 +694,29 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 residual,
                 engram_hashes,
                 engram_mask,
+                capture_previous_aux=idx in self.aux_hidden_state_layers,
             )
-            if idx + 1 in self.aux_hidden_state_layers:
-                # Reconstruct the aux hidden state for draft models
-                aux_recon = mhc_post_tilelang(
-                    hidden_states, residual, post_mix, res_mix
-                )
-                aux_hidden_state = aux_recon.mean(dim=1)
+            if previous_aux is not None:
+                # idx is the one-based id of the layer whose post this is.
                 if self.use_sequence_parallel:
-                    aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
-                aux_hidden_states.append(aux_hidden_state)
-                final_aux_recon = aux_recon
+                    previous_aux = sp_all_gather(previous_aux)[:full_num_tokens]
+                aux_hidden_by_layer[idx] = previous_aux
         if layer is not None:
-            # Reuse if the last layer was captured as an aux hidden state
+            # The last layer has no successor to fold its post into.
+            hidden_states = mhc_post_tilelang(
+                hidden_states, residual, post_mix, res_mix
+            )
             if self.end_layer in self.aux_hidden_state_layers:
-                hidden_states = final_aux_recon
-            else:
-                hidden_states = mhc_post_tilelang(
-                    hidden_states, residual, post_mix, res_mix
-                )
+                final_aux = hidden_states.mean(dim=1)
+                if self.use_sequence_parallel:
+                    final_aux = sp_all_gather(final_aux)[:full_num_tokens]
+                aux_hidden_by_layer[self.end_layer] = final_aux
+
+        aux_hidden_states = [
+            aux_hidden_by_layer[layer_id]
+            for layer_id in self.aux_hidden_state_layers
+            if layer_id in aux_hidden_by_layer
+        ]
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
