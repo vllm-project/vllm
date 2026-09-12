@@ -501,8 +501,9 @@ class MoRIIOConnectorScheduler:
 
         token_ids = request.prompt_token_ids or []
         if self.mode == MoRIIOMode.WRITE:
-            # MoriiO in write mode, no remote prefill
-
+            params = request.kv_transfer_params or {}
+            if not params.get("do_remote_prefill"):
+                return 0, False
             return len(token_ids) - num_computed_tokens, True
 
         return len(token_ids) - 1 - num_computed_tokens, False
