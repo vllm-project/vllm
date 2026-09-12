@@ -197,6 +197,15 @@ class KVConnectorBase_V1(ABC):
         return False
 
     @property
+    def supports_divergent_local_swa_hits(self) -> bool:
+        """Whether remote prefill restores missing SWA windows per group.
+
+        The connector must transfer each group's missing suffix independently,
+        including the entire SWA window when only full attention hits locally.
+        """
+        return False
+
+    @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
 

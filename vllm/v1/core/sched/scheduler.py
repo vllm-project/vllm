@@ -532,6 +532,10 @@ class Scheduler(SchedulerInterface):
         connector = self.connector
         if connector is not None and connector.supports_divergent_local_hybrid_hits:
             return self.kv_cache_manager.get_computed_blocks_for_connector(request)
+        if connector is not None and connector.supports_divergent_local_swa_hits:
+            return self.kv_cache_manager.get_computed_blocks_for_connector(
+                request, allow_swa=True
+            )
 
         blocks, num_local, shared_prefix_boundary = (
             self.kv_cache_manager.get_computed_blocks(request)
