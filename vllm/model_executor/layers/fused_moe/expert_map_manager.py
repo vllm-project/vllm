@@ -113,42 +113,6 @@ def determine_expert_map(
     return (local_num_experts, expert_map, expert_mask)
 
 
-def determine_expert_placement_strategy(
-    expert_placement_strategy: ExpertPlacementStrategy,
-    moe_parallel_config: FusedMoEParallelConfig,
-    num_expert_group: int | None,
-    num_redundant_experts: int,
-    enable_eplb: bool,
-) -> ExpertPlacementStrategy:
-    if expert_placement_strategy == "round_robin":
-        round_robin_supported = (
-            (num_expert_group is not None and num_expert_group > 1)
-            and num_redundant_experts == 0
-            and not enable_eplb
-        )
-
-        if not round_robin_supported:
-            logger.warning(
-                "Round-robin expert placement is only supported for "
-                "models with multiple expert groups and no redundant "
-                "experts. Falling back to linear expert placement."
-            )
-            return "linear"
-        if (
-            moe_parallel_config.use_all2all_kernels
-            and not moe_parallel_config.needs_round_robin_routing_tables
-        ):
-            logger.warning(
-                "Round-robin expert placement currently only supports "
-                "the DeepEP low-latency or NIXL EP backend, but '%s' was configured. "
-                "Falling back to linear expert placement.",
-                moe_parallel_config.all2all_backend,
-            )
-            return "linear"
-
-    return expert_placement_strategy
-
-
 class ExpertMapManager:
     """
     Manages expert ID mappings and placement for Expert Parallelism.
@@ -210,20 +174,11 @@ class ExpertMapManager:
         self.rocm_aiter_enabled = rocm_aiter_enabled
         self.top_k = top_k
         self.max_num_batched_tokens = max_num_batched_tokens
-
-        if moe_parallel_config.use_ep:
-            # Determine expert placement strategy before creating manager
-            placement_strategy = determine_expert_placement_strategy(
-                expert_placement_strategy=placement_strategy,
-                moe_parallel_config=moe_parallel_config,
-                num_expert_group=num_expert_group,
-                num_redundant_experts=num_redundant_experts,
-                enable_eplb=enable_eplb,
-            )
-
-        # Determine effective placement strategy
-        self._placement_strategy = self._determine_placement_strategy(
-            placement_strategy
+        self._placement_strategy = self._resolve_placement_strategy(
+            requested_strategy=placement_strategy,
+            num_expert_group=num_expert_group,
+            num_redundant_experts=num_redundant_experts,
+            enable_eplb=enable_eplb,
         )
 
         # Calculate expert mappings
@@ -414,8 +369,12 @@ class ExpertMapManager:
 
     # Private methods
 
-    def _determine_placement_strategy(
-        self, requested_strategy: ExpertPlacementStrategy
+    def _resolve_placement_strategy(
+        self,
+        requested_strategy: ExpertPlacementStrategy,
+        num_expert_group: int | None,
+        num_redundant_experts: int,
+        enable_eplb: bool,
     ) -> ExpertPlacementStrategy:
         """Determine effective placement strategy based on config."""
         if requested_strategy != "round_robin":
@@ -425,13 +384,30 @@ class ExpertMapManager:
         if self.ep_size == 1:
             return "linear"
 
+        round_robin_supported = (
+            num_expert_group is not None
+            and num_expert_group > 1
+            and num_redundant_experts == 0
+            and not enable_eplb
+        )
+        if not round_robin_supported:
+            logger.warning(
+                "Round-robin expert placement is only supported for "
+                "models with multiple expert groups and no redundant "
+                "experts. Falling back to linear expert placement."
+            )
+            return "linear"
+
         if (
             self.moe_parallel_config.use_all2all_kernels
             and not self.moe_parallel_config.needs_round_robin_routing_tables
         ):
             logger.warning(
-                "Round-robin placement requires DeepEP-ll or NIXL backend. "
-                "Falling back to linear."
+                "Round-robin expert placement currently only supports "
+                "the DeepEP low-latency or NIXL EP backend, but '%s' was "
+                "configured. "
+                "Falling back to linear expert placement.",
+                self.moe_parallel_config.all2all_backend,
             )
             return "linear"
 
