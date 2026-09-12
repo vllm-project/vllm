@@ -124,7 +124,10 @@ class SharedOffloadRegion:
                 # land on a 0-byte stub and spin in _wait_for_file_size
                 # for the full 30 s timeout.
                 try:
-                    check_shm_free_space(self.total_size_bytes)
+                    check_shm_free_space(
+                        self.total_size_bytes,
+                        allocation_name="CPU KV offload shared region in /dev/shm",
+                    )
                     os.ftruncate(self.fd, self.total_size_bytes)
                 except (RuntimeError, OSError):
                     os.unlink(self.mmap_path)

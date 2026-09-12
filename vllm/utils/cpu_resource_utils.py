@@ -12,7 +12,11 @@ from functools import cache
 import psutil
 import regex as re
 
+from vllm.logger import init_logger
+
 DEVICE_CONTROL_ENV_VAR = "CPU_VISIBLE_MEMORY_NODES"
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -62,7 +66,6 @@ def _read_int_file(path: str) -> int | None:
         return None
 
 
-@cache
 def get_cgroup_memory_limit() -> tuple[int | None, int | None]:
     """Return (limit, usage) in bytes from cgroup, or (None, None).
 
@@ -90,6 +93,48 @@ def get_cgroup_memory_limit() -> tuple[int | None, int | None]:
         return v1_limit, v1_usage
 
     return None, None
+
+
+def check_cgroup_memory_available(
+    required_bytes: int,
+    allocation_name: str,
+) -> None:
+    """Log cgroup memory headroom for an upcoming allocation.
+
+    Args:
+        required_bytes: Bytes required by the allocation.
+        allocation_name: Human-readable name used in log messages.
+
+    Low headroom logs a warning, but does not reject the allocation because
+    cgroup usage can include reclaimable memory. If the cgroup limit or usage
+    cannot be read, the check is skipped.
+    """
+    cgroup_limit, cgroup_usage = get_cgroup_memory_limit()
+    if cgroup_limit is None or cgroup_usage is None:
+        return
+
+    cgroup_available = max(0, cgroup_limit - cgroup_usage)
+    mib = 1 << 20
+    remaining_bytes = cgroup_available - required_bytes
+    log_fn = logger.info if remaining_bytes >= 0 else logger.warning
+    status = (
+        "current headroom meets the requested allocation"
+        if remaining_bytes >= 0
+        else "current headroom is below the requested allocation; allocation "
+        "will still be attempted because cgroup usage may be reclaimable"
+    )
+    log_fn(
+        "Cgroup memory preflight for %s: %.0f MiB required, %.0f MiB current "
+        "usage, %.0f MiB available under %.0f MiB limit, %.0f MiB remaining "
+        "after allocation based on current usage; %s.",
+        allocation_name,
+        required_bytes / mib,
+        cgroup_usage / mib,
+        cgroup_available / mib,
+        cgroup_limit / mib,
+        remaining_bytes / mib,
+        status,
+    )
 
 
 def get_memory_affinity(pid: int = 0) -> list[int]:
