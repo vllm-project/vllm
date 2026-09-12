@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, call, patch
 from uuid import UUID
 
 import pytest
+import torch
 from pydantic import ValidationError
 
 from vllm.config import (
@@ -17,6 +18,8 @@ from vllm.config import (
 )
 from vllm.config.profiler import _is_uri_path
 from vllm.platforms import current_platform
+from vllm.profiler import graph_capture
+from vllm.profiler.graph_capture import graph_capture_profiler, graph_capture_step
 from vllm.profiler.wrapper import ProtonProfilerWrapper, WorkerProfiler
 from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -347,6 +350,108 @@ def test_profiler_entered_during_capture():
 
     mock_profiler.__enter__.assert_called_once()
     mock_profiler.__exit__.assert_called_once()
+
+
+@contextmanager
+def bound_graph_capture(label_prefix=None):
+    """Enter a graph-capture binding backed by a mock profiler."""
+    profiler = MagicMock()
+    with (
+        patch.object(graph_capture, "_make_profiler", return_value=profiler),
+        graph_capture_profiler(MagicMock(), label_prefix=label_prefix),
+    ):
+        yield profiler
+
+
+class TestGraphCaptureProfiler:
+    """V2 binds one profiler per subsystem; capture loops only call
+    graph_capture_step and inherit whichever binding is active."""
+
+    @pytest.fixture
+    def annotation(self):
+        with patch.object(torch.profiler, "record_function") as record_function:
+            yield record_function
+
+    def test_step_is_noop_without_binding(self, annotation):
+        with graph_capture_step(32, "FULL"):
+            pass
+
+        annotation.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "label_prefix,num_tokens,mode,expected",
+        [
+            (None, 512, "PIECEWISE", "capture_512_PIECEWISE"),
+            ("draft", 32, "FULL", "capture_32_draft_FULL"),
+            ("encoder", 1024, "default", "capture_1024_encoder_default"),
+        ],
+    )
+    def test_annotation_label(
+        self, annotation, label_prefix, num_tokens, mode, expected
+    ):
+        with bound_graph_capture(label_prefix) as profiler:
+            with graph_capture_step(num_tokens, mode):
+                pass
+
+        annotation.assert_called_once_with(expected)
+        profiler.__enter__.assert_called_once()
+        profiler.__exit__.assert_called_once()
+
+    def test_profiler_cycles_once_per_shape(self, annotation):
+        """Each shape re-enters the profiler, which is what splits capture
+        into one trace file per shape."""
+        with bound_graph_capture() as profiler:
+            for num_tokens in (32, 64, 128):
+                with graph_capture_step(num_tokens, "FULL"):
+                    pass
+
+        assert profiler.__enter__.call_count == 3
+        assert profiler.__exit__.call_count == 3
+        assert annotation.call_count == 3
+
+    def test_binding_cleared_when_capture_raises(self):
+        with pytest.raises(RuntimeError):
+            with bound_graph_capture():
+                raise RuntimeError("capture failed")
+
+        assert graph_capture._active_binding.get() is None
+
+    @pytest.mark.parametrize(
+        "subsystem,expected",
+        [
+            (None, "graph_capture_rank_0"),
+            ("encoder", "graph_capture_rank_0_encoder"),
+            ("speculator", "graph_capture_rank_0_speculator"),
+        ],
+    )
+    def test_trace_file_name_per_subsystem(self, subsystem, expected):
+        config = MagicMock()
+        config.profiler_config.capture_torch_profiler = True
+        config.profiler_config.torch_profiler_dir = "/traces"
+
+        with (
+            patch.object(
+                graph_capture, "get_world_group", return_value=MagicMock(local_rank=0)
+            ),
+            patch.object(torch.profiler, "profile"),
+            patch.object(torch.profiler, "tensorboard_trace_handler") as handler,
+        ):
+            graph_capture._make_profiler(config, subsystem)
+
+        assert handler.call_args.args == ("/traces/capture_traces",)
+        assert handler.call_args.kwargs["worker_name"] == expected
+
+    @pytest.mark.parametrize("local_rank,enabled", [(0, False), (1, True)])
+    def test_no_profiler_when_disabled_or_off_rank(self, local_rank, enabled):
+        config = MagicMock()
+        config.profiler_config.capture_torch_profiler = enabled
+
+        with patch.object(
+            graph_capture,
+            "get_world_group",
+            return_value=MagicMock(local_rank=local_rank),
+        ):
+            assert isinstance(graph_capture._make_profiler(config, None), nullcontext)
 
 
 def make_proton(session_id: int | None = 7):
