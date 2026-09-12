@@ -209,12 +209,34 @@ class Glm47MoeParser(ParserEngine):
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         if not self.thinking_enabled:
             return True
-        return super().is_reasoning_end(input_ids)
+        if super().is_reasoning_end(input_ids):
+            return True
+        tool_start_id = self.vocab.get(TOOL_CALL_START)
+        if tool_start_id is not None:
+            boundary_ids = self._turn_boundary_token_ids
+            start_id = self._reasoning_start_token_id
+            for i in range(len(input_ids) - 1, -1, -1):
+                token_id = input_ids[i]
+                if token_id == tool_start_id:
+                    return True
+                if start_id is not None and token_id == start_id:
+                    return False
+                if token_id in boundary_ids:
+                    return self.parser_engine_config.initial_state != ParserState.REASONING
+        return False
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self.thinking_enabled:
             return input_ids
-        return super().extract_content_ids(input_ids)
+        end_id = self._reasoning_end_token_id
+        tool_start_id = self.vocab.get(TOOL_CALL_START)
+        for i in range(len(input_ids) - 1, -1, -1):
+            token_id = input_ids[i]
+            if end_id is not None and token_id == end_id:
+                return input_ids[i + 1 :]
+            if tool_start_id is not None and token_id == tool_start_id:
+                return input_ids[i :]
+        return input_ids
 
     def extract_reasoning(
         self,
