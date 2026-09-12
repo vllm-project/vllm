@@ -808,3 +808,100 @@ def test_fa4_hd256_impl_selection(attn_type, sliding_window, expected):
         )
     assert impl.vllm_flash_attn_version == expected
     assert impl.fa4_hd256 == (expected == 4)
+
+
+@pytest.fixture
+def blackwell_selection():
+    with (
+        patch.object(
+            type(current_platform),
+            "get_device_capability",
+            return_value=DeviceCapability(10, 0),
+        ),
+        patch(
+            "vllm.v1.attention.backends.fa_utils.is_fa_version_supported",
+            return_value=True,
+        ),
+    ):
+        yield
+
+
+@blackwell_only
+@pytest.mark.parametrize("use_mm_prefix", [False, True])
+@pytest.mark.parametrize("kv_cache_dtype", [None, "fp8_e4m3"])
+def test_mm_prefix_selects_composite_without_changing_causal_default(
+    use_mm_prefix, kv_cache_dtype, blackwell_selection
+):
+    """The image-mask requirement must reach CUDA's automatic backend priority."""
+    from vllm.engine.arg_utils import EngineArgs
+
+    config = EngineArgs(
+        model="google/gemma-4-31B-it", dtype="bfloat16"
+    ).create_engine_config()
+    with set_current_vllm_config(config):
+        backend = get_attn_backend(
+            256, torch.bfloat16, kv_cache_dtype, use_mm_prefix=use_mm_prefix
+        )
+    expected = "TRITON_FLASHINFER" if use_mm_prefix else "FLASHINFER"
+    assert backend.get_name() == expected
+
+
+@blackwell_only
+@pytest.mark.parametrize(
+    "feature_kwargs,reason",
+    [
+        ({"use_rswa": True}, "R-SWA not supported"),
+        ({"kv_cache_dtype": "int8_per_token_head"}, "kv_cache_dtype not supported"),
+        ({"block_size": 16}, "block_size not supported"),
+        ({"use_dcp": True}, "DCP not supported"),
+        ({"use_pcp": True}, "PCP not supported"),
+        ({"use_adaptive_verification": True}, "device-cpu query lens mismatch"),
+    ],
+)
+def test_composite_rejects_features_not_shared_by_both_routes(feature_kwargs, reason):
+    """Automatic selection must not admit features only one child can execute."""
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.v1.attention.backends.triton_flashinfer import TritonFlashInferBackend
+
+    config = EngineArgs(
+        model="google/gemma-4-31B-it", dtype="bfloat16"
+    ).create_engine_config()
+    args = dict(
+        head_size=256,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="auto",
+        block_size=128,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=True,
+        use_per_head_quant_scales=False,
+        device_capability=DeviceCapability(10, 0),
+        attn_type=AttentionType.DECODER,
+    )
+    args.update(feature_kwargs)
+    with set_current_vllm_config(config):
+        reasons = TritonFlashInferBackend.validate_configuration(**args)
+    assert any(reason in message for message in reasons), reasons
+
+
+@blackwell_only
+def test_rswa_selection_does_not_reuse_causal_result(blackwell_selection):
+    """An R-SWA requirement must invalidate a previously cached causal selection."""
+    from vllm.engine.arg_utils import EngineArgs
+
+    config = EngineArgs(
+        model="google/gemma-4-31B-it",
+        dtype="bfloat16",
+        attention_config={"backend": "TRITON_FLASHINFER"},
+    ).create_engine_config()
+    with set_current_vllm_config(config):
+        assert (
+            get_attn_backend(256, torch.bfloat16, None).get_name()
+            == "TRITON_FLASHINFER"
+        )
+        config.model_config.model_arch_config.rswa_window = 128
+        with pytest.raises(ValueError, match="R-SWA"):
+            get_attn_backend(256, torch.bfloat16, None)
+        config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+        assert get_attn_backend(256, torch.bfloat16, None).get_name() == "TRITON_ATTN"

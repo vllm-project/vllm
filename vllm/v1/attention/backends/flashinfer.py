@@ -1795,6 +1795,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 class FlashInferImpl(AttentionImpl):
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
+    trtllm_decode_enable_pdl: ClassVar[bool | None] = None
 
     def __init__(
         self,
@@ -2569,6 +2570,7 @@ class FlashInferImpl(AttentionImpl):
                     ),
                     lse=lse,
                     return_lse=self.need_to_return_lse_for_decode,
+                    enable_pdl=self.trtllm_decode_enable_pdl,
                 )
 
                 if use_dcp:
