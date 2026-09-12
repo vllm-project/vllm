@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from threading import Thread
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import torch
@@ -41,7 +41,7 @@ from vllm.v1.engine.core_client import (
     MPClient,
     SyncMPClient,
 )
-from vllm.v1.engine.utils import CoreEngineProcManager
+from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.pool.late_interaction import (
     LATE_INTERACTION_MODE_CACHE_QUERY,
@@ -437,6 +437,155 @@ def test_apply_ready_response_syncs_mamba_block_size():
     )
     client._apply_ready_response(payload)
     assert client.vllm_config.cache_config.mamba_block_size == 1056
+
+
+def _kv_event_ready_response_payload(
+    data_parallel_rank: int, kv_events_config=None
+) -> bytes:
+    import msgspec
+
+    return msgspec.msgpack.encode(
+        EngineCoreReadyResponse(
+            max_model_len=8192,
+            num_gpu_blocks=100,
+            block_size=16,
+            dp_stats_address=None,
+            dtype="bfloat16",
+            vllm_version="test",
+            world_size=1,
+            data_parallel_size=1,
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            decode_context_parallel_size=1,
+            data_parallel_rank=data_parallel_rank,
+            max_num_seqs=256,
+            max_num_batched_tokens=8192,
+            instance_id="test-instance",
+            supports_lora=False,
+            max_loras=0,
+            kv_events_config=kv_events_config,
+        )
+    )
+
+
+def _new_mp_client_for_ready_response() -> MPClient:
+    client = object.__new__(MPClient)
+    client.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
+        model_config=SimpleNamespace(max_model_len=8192),
+    )
+    client.stats_update_address = None
+    client._kv_event_sources = {}
+    return client
+
+
+def test_kv_event_sources_retained_per_rank_and_ordered():
+    """Ready responses from different DP ranks are retained independently
+    (not overwritten by each other) and reported back sorted by rank."""
+    from vllm.config.kv_events import KVEventsConfig
+
+    client = _new_mp_client_for_ready_response()
+
+    config_1 = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint="tcp://*:5558",
+        topic="rank1",
+    )
+    config_0 = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint="tcp://*:5557",
+        topic="rank0",
+    )
+
+    # Apply rank 1 before rank 0 to prove ordering doesn't depend on
+    # arrival order, and that neither response clobbers the other.
+    client._apply_ready_response(_kv_event_ready_response_payload(1, config_1))
+    client._apply_ready_response(_kv_event_ready_response_payload(0, config_0))
+
+    sources = client.get_kv_event_sources()
+    assert [s["data_parallel_rank"] for s in sources] == [0, 1]
+    assert sources[0] == {
+        "data_parallel_rank": 0,
+        "endpoint": "tcp://*:5557",
+        "replay_endpoint": None,
+        "topic": "rank0",
+    }
+    assert sources[1]["topic"] == "rank1"
+
+
+def test_kv_event_sources_excludes_disabled_and_none():
+    """Disabled or missing KV-event configs are not exposed as sources."""
+    from vllm.config.kv_events import KVEventsConfig
+
+    client = _new_mp_client_for_ready_response()
+
+    disabled_config = KVEventsConfig(
+        enable_kv_cache_events=False,
+        publisher="zmq",
+        endpoint="tcp://*:5557",
+    )
+    client._apply_ready_response(_kv_event_ready_response_payload(0, disabled_config))
+    client._apply_ready_response(_kv_event_ready_response_payload(1, None))
+
+    assert client.get_kv_event_sources() == []
+
+
+@pytest.mark.asyncio
+async def test_scale_down_purges_stale_kv_event_sources():
+    """After a successful elastic-EP scale-down, discovery entries for
+    ranks that no longer exist must be dropped, while entries for ranks
+    that remain must be preserved untouched."""
+    from vllm.config.kv_events import KVEventsConfig
+
+    client = object.__new__(DPLBAsyncMPClient)
+    client.client_count = 1
+    client.reqs_in_flight = {}
+    client.engine_inflight = Counter()
+    client.core_engines = [bytes([i, 0]) for i in range(3)]
+    client.lb_engines = [[0, 0, 0.0] for _ in range(3)]
+    client.eng_start_index = 0
+    client.eep_scaling_cache = None
+    client.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_size=3)
+    )
+    client.resources = SimpleNamespace(
+        engine_manager=MagicMock(spec=CoreEngineActorManager)
+    )
+    client.first_req_send_socket = AsyncMock()
+    client._call_utility_async = AsyncMock(return_value=None)
+    client._ensure_stats_update_task = MagicMock()
+    client.resume_scheduler_async = AsyncMock()
+    client._make_reconfig_request = MagicMock(return_value=object())
+
+    completed_future = asyncio.get_running_loop().create_future()
+    completed_future.set_result(None)
+    client._eep_wait_for_setup_switch_complete = MagicMock(
+        return_value=completed_future
+    )
+
+    def make_config(topic: str) -> KVEventsConfig:
+        return KVEventsConfig(
+            enable_kv_cache_events=True,
+            publisher="zmq",
+            endpoint="tcp://*:5557",
+            topic=topic,
+        )
+
+    client._kv_event_sources = {
+        0: make_config("rank0"),
+        1: make_config("rank1"),
+        2: make_config("rank2"),
+    }
+
+    # Scale down from 3 ranks to 2: rank 2 goes away.
+    await DPLBAsyncMPClient._commit_scale_down_elastic_ep(client, 2)
+
+    sources = client.get_kv_event_sources()
+    assert [s["data_parallel_rank"] for s in sources] == [0, 1]
+    assert sources[0]["topic"] == "rank0"
+    assert sources[1]["topic"] == "rank1"
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):

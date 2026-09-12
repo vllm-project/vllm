@@ -22,7 +22,8 @@ import zmq
 import zmq.asyncio
 
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import KVEventsConfig, VllmConfig
+from vllm.distributed.kv_events import describe_kv_event_source
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -207,6 +208,11 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     def get_weight_version(self) -> str:
+        raise NotImplementedError
+
+    def get_kv_event_sources(self) -> list[dict[str, Any]]:
+        """Discovery info for enabled ZMQ KV-cache event publishers,
+        ordered deterministically by data_parallel_rank."""
         raise NotImplementedError
 
     async def execute_dummy_batch_async(self) -> None:
@@ -414,6 +420,12 @@ class InprocClient(EngineCoreClient):
     def get_weight_version(self) -> str:
         return self.engine_core.get_weight_version()
 
+    def get_kv_event_sources(self) -> list[dict[str, Any]]:
+        """Return KV-event discovery information for the in-process engine."""
+        config = self.engine_core.scheduler.get_kv_event_publisher_config()
+        source = describe_kv_event_source(self.engine_core.engine_index, config)
+        return [source] if source is not None else []
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.engine_core.add_lora(lora_request)
 
@@ -576,6 +588,9 @@ class MPClient(EngineCoreClient):
         # exception is raised mid-construction.
         self.resources = BackgroundResources(ctx=sync_ctx)
         self._finalizer = weakref.finalize(self, self.resources)
+        # KV-event publisher config reported by each engine's ready response,
+        # keyed by data_parallel_rank.
+        self._kv_event_sources: dict[int, KVEventsConfig | None] = {}
         success = False
         try:
             # State used for data parallel.
@@ -842,6 +857,22 @@ class MPClient(EngineCoreClient):
                 self.stats_update_address = response.dp_stats_address
             else:
                 assert response.dp_stats_address == self.stats_update_address
+
+        # Retain per-rank KV-event publisher discovery info. Keyed by rank
+        # so repeated ready responses (e.g. elastic EP) don't clobber other
+        # ranks' entries.
+        self._kv_event_sources[response.data_parallel_rank] = response.kv_events_config
+
+    def get_kv_event_sources(self) -> list[dict[str, Any]]:
+        """Return enabled KV-event sources ordered by data-parallel rank."""
+        sources = (
+            describe_kv_event_source(rank, config)
+            for rank, config in self._kv_event_sources.items()
+        )
+        return sorted(
+            (source for source in sources if source is not None),
+            key=lambda source: source["data_parallel_rank"],
+        )
 
 
 def _process_utility_output(
@@ -1962,6 +1993,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         except Exception:
             wait_future.cancel()
             raise
+
+        # Scale-down has committed successfully: ranks beyond the new size
+        # are gone, so drop their now-stale KV-event discovery entries.
+        for stale_rank in range(new_data_parallel_size, cur_data_parallel_size):
+            self._kv_event_sources.pop(stale_rank, None)
 
         logger.info(
             "[Elastic EP] Scale down completed, new data parallel size: %s",

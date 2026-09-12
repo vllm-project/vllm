@@ -10,6 +10,7 @@ from vllm.distributed.kv_events import (
     EventBatch,
     EventPublisherFactory,
     NullEventPublisher,
+    ZmqEventPublisher,
 )
 
 DP_RANK = 0
@@ -336,3 +337,132 @@ def test_event_publisher_factory(random_port):
     publisher = EventPublisherFactory.create(config, DP_RANK)
     assert isinstance(publisher, ZmqEventPublisher)
     publisher.shutdown()
+
+
+def test_offset_endpoint_port_ephemeral_tcp():
+    """A configured port of 0 (ephemeral) is never offset: every DP rank
+    must bind independently and let the OS pick a port."""
+    assert ZmqEventPublisher.offset_endpoint_port("tcp://*:0", 0) == "tcp://*:0"
+    assert ZmqEventPublisher.offset_endpoint_port("tcp://*:0", 1) == "tcp://*:0"
+    assert ZmqEventPublisher.offset_endpoint_port("tcp://*:0", 3) == "tcp://*:0"
+
+
+def test_offset_endpoint_port_explicit_tcp_backward_compat():
+    """Explicit non-zero ports keep the base_port + dp_rank behavior."""
+    assert ZmqEventPublisher.offset_endpoint_port("tcp://*:5557", 0) == "tcp://*:5557"
+    assert ZmqEventPublisher.offset_endpoint_port("tcp://*:5557", 1) == "tcp://*:5558"
+    assert ZmqEventPublisher.offset_endpoint_port("tcp://*:5557", 3) == "tcp://*:5560"
+
+
+def test_ephemeral_publisher_resolves_real_port():
+    """A publisher bound to tcp://*:0 reports the actual bound port on a
+    real, dialable host (not the wildcard "*" it was bound with), and the
+    config passed in by the caller is left untouched."""
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.utils.network_utils import get_ip, split_host_port
+
+    config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint="tcp://*:0",
+    )
+    publisher = EventPublisherFactory.create(config, DP_RANK)
+    try:
+        assert isinstance(publisher, ZmqEventPublisher)
+        resolved = publisher.get_publisher_config()
+        assert resolved.endpoint.startswith("tcp://")
+        assert "*" not in resolved.endpoint
+
+        host, port = split_host_port(resolved.endpoint.removeprefix("tcp://"))
+        assert host == get_ip()
+        assert port != 0
+
+        # Original input config must not be mutated.
+        assert config.endpoint == "tcp://*:0"
+    finally:
+        publisher.shutdown()
+
+
+def test_multiple_ephemeral_publishers_get_distinct_ports():
+    """Two DP ranks both requesting tcp://*:0 must resolve to different
+    real, dialable hosts:ports, since ephemeral ports are no longer
+    rank-offset."""
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.utils.network_utils import get_ip, split_host_port
+
+    config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint="tcp://*:0",
+    )
+    pub_0 = EventPublisherFactory.create(config, DP_RANK)
+    pub_1 = EventPublisherFactory.create(config, DP_RANK + 1)
+    try:
+        assert isinstance(pub_0, ZmqEventPublisher)
+        assert isinstance(pub_1, ZmqEventPublisher)
+        endpoint_0 = pub_0.get_publisher_config().endpoint
+        endpoint_1 = pub_1.get_publisher_config().endpoint
+        assert endpoint_0 != "tcp://*:0"
+        assert endpoint_1 != "tcp://*:0"
+        assert endpoint_0 != endpoint_1
+
+        host_0, _ = split_host_port(endpoint_0.removeprefix("tcp://"))
+        host_1, _ = split_host_port(endpoint_1.removeprefix("tcp://"))
+        assert host_0 == host_1 == get_ip()
+    finally:
+        pub_0.shutdown()
+        pub_1.shutdown()
+
+
+def test_ephemeral_replay_endpoint_resolves_real_port():
+    """replay_endpoint="tcp://*:0" also resolves to a real, dialable host
+    and non-zero port, without mutating the caller's original config."""
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.utils.network_utils import get_ip, split_host_port
+
+    config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint="tcp://*:0",
+        replay_endpoint="tcp://*:0",
+    )
+    publisher = EventPublisherFactory.create(config, DP_RANK)
+    try:
+        assert isinstance(publisher, ZmqEventPublisher)
+        resolved = publisher.get_publisher_config()
+        assert resolved.replay_endpoint is not None
+        assert resolved.replay_endpoint.startswith("tcp://")
+        assert "*" not in resolved.replay_endpoint
+
+        host, port = split_host_port(resolved.replay_endpoint.removeprefix("tcp://"))
+        assert host == get_ip()
+        assert port != 0
+
+        # Original input config must not be mutated.
+        assert config.replay_endpoint == "tcp://*:0"
+    finally:
+        publisher.shutdown()
+
+
+def test_ephemeral_publisher_binds_for_0_0_0_0():
+    """A 0.0.0.0 wildcard endpoint must bind and resolve its ephemeral port."""
+    from vllm.config.kv_events import KVEventsConfig
+    from vllm.utils.network_utils import get_ip, split_host_port
+
+    wildcard_endpoint = "tcp://0.0.0.0:0"
+    config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint=wildcard_endpoint,
+    )
+    publisher = EventPublisherFactory.create(config, DP_RANK)
+    try:
+        assert isinstance(publisher, ZmqEventPublisher)
+        resolved = publisher.get_publisher_config()
+        assert resolved.endpoint != wildcard_endpoint
+
+        host, port = split_host_port(resolved.endpoint.removeprefix("tcp://"))
+        assert host == get_ip()
+        assert port != 0
+    finally:
+        publisher.shutdown()

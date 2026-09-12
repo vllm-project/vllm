@@ -17,6 +17,7 @@ import zmq
 
 from vllm.config.kv_events import KVEventsConfig
 from vllm.logger import init_logger
+from vllm.utils.network_utils import get_ip, join_host_port
 from vllm.v1.core.kv_cache_utils import ExternalBlockHash
 
 logger = init_logger(__name__)
@@ -327,6 +328,7 @@ class ZmqEventPublisher(EventPublisher):
 
     SHUTDOWN_TIMEOUT: float = 1.0
     END_SEQ = (-1).to_bytes(8, "big", signed=True)
+    _WILDCARD_HOSTS = {"*", "0.0.0.0", "::", "[::]"}
 
     def __init__(
         self,
@@ -428,15 +430,15 @@ class ZmqEventPublisher(EventPublisher):
         if self._pub is None:
             self._pub = self._ctx.socket(zmq.PUB)
             self._pub.set_hwm(self._hwm)
-            # Heuristic: bind if wildcard / * present, else connect.
-            # bind stable, connect volatile convention
-            if self._endpoint is not None and (
-                "*" in self._endpoint
-                or "::" in self._endpoint
-                or self._endpoint.startswith("ipc://")
-                or self._endpoint.startswith("inproc://")
+            # bind stable, connect volatile convention: bind for wildcard
+            # hosts (see _WILDCARD_HOSTS) and ipc/inproc, else connect.
+            if self._endpoint is not None and self._is_wildcard_bind_endpoint(
+                self._endpoint
             ):
                 self._pub.bind(self._endpoint)
+                self._endpoint = self._resolve_bound_tcp_endpoint(
+                    self._pub, self._endpoint
+                )
             elif self._endpoint is not None:
                 self._pub.connect(self._endpoint)
 
@@ -447,6 +449,17 @@ class ZmqEventPublisher(EventPublisher):
         if self._replay_endpoint is not None:
             self._replay = self._ctx.socket(zmq.ROUTER)
             self._replay.bind(self._replay_endpoint)
+            self._replay_endpoint = self._resolve_bound_tcp_endpoint(
+                self._replay, self._replay_endpoint
+            )
+
+        # Reflect the actual bound ephemeral port(s), if any, in the
+        # publisher's resolved runtime config so get_publisher_config()
+        # reports a real, connectable endpoint.
+        if self._endpoint != self._publisher_config.endpoint:
+            self._publisher_config.endpoint = self._endpoint
+        if self._replay_endpoint != self._publisher_config.replay_endpoint:
+            self._publisher_config.replay_endpoint = self._replay_endpoint
 
     def _publisher_thread(self) -> None:
         """Background thread that processes the event queue."""
@@ -506,6 +519,44 @@ class ZmqEventPublisher(EventPublisher):
         self._replay.send_multipart((client_id, b"", b"", self.END_SEQ, b""))
 
     @staticmethod
+    def _is_wildcard_bind_endpoint(endpoint: str) -> bool:
+        """True if `endpoint` should be bound rather than connected: ipc/
+        inproc transports, or a TCP endpoint whose host is a recognized
+        wildcard (see _WILDCARD_HOSTS)."""
+        if endpoint.startswith("ipc://") or endpoint.startswith("inproc://"):
+            return True
+        if not endpoint.startswith("tcp://"):
+            return False
+        host = endpoint[len("tcp://") :]
+        if host.startswith("["):
+            host = host[: host.index("]") + 1]
+        else:
+            host = host.rsplit(":", 1)[0]
+        return host in ZmqEventPublisher._WILDCARD_HOSTS
+
+    @staticmethod
+    def _resolve_bound_tcp_endpoint(sock: zmq.Socket, endpoint: str) -> str:
+        """Recover the real, dialable address of an ephemeral (":0") TCP
+        bind.
+
+        zmq.LAST_ENDPOINT reports the OS-assigned port, but a wildcard bind
+        host (e.g. "*" or "0.0.0.0") is not itself a usable remote
+        destination, so it is additionally replaced with this node's
+        reachable IP via `get_ip()`, matching the convention used for
+        ephemeral binds in shm_broadcast.py. A non-wildcard (explicit) host
+        is left untouched.
+        """
+        if not endpoint.startswith("tcp://") or not endpoint.endswith(":0"):
+            return endpoint
+        last_endpoint = sock.getsockopt(zmq.LAST_ENDPOINT)
+        assert isinstance(last_endpoint, bytes)
+        actual_port = int(last_endpoint.decode().rsplit(":", 1)[1])
+        host = endpoint[len("tcp://") : -len(":0")]
+        if host in ZmqEventPublisher._WILDCARD_HOSTS:
+            host = get_ip()
+        return f"tcp://{join_host_port(host, actual_port)}"
+
+    @staticmethod
     def offset_endpoint_port(
         endpoint: str | None, data_parallel_rank: int
     ) -> str | None:
@@ -533,10 +584,34 @@ class ZmqEventPublisher(EventPublisher):
                 last_colon_idx = endpoint.rfind(":")
                 base_addr = endpoint[:last_colon_idx]
                 base_port = int(endpoint[last_colon_idx + 1 :])
+                if base_port == 0:
+                    # Port 0 means "OS-assigned ephemeral port". Offsetting
+                    # it by rank (as below) would turn :0 into :1, :2, ...
+                    # -- a made-up fixed port, not an ephemeral one. Leave
+                    # it as :0 so every rank binds independently and gets
+                    # its own OS-assigned port.
+                    return endpoint
                 new_port = base_port + data_parallel_rank
                 return f"{base_addr}:{new_port}"
             return endpoint
         raise ValueError("Invalid endpoint: must contain 'inproc' or 'tcp'")
+
+
+def describe_kv_event_source(
+    data_parallel_rank: int, config: KVEventsConfig | None
+) -> dict[str, Any] | None:
+    """Build the public discovery representation of a KV-event publisher.
+
+    Returns None unless `config` is a valid, enabled ZMQ publisher.
+    """
+    if config is None or not config.enable_kv_cache_events or config.publisher != "zmq":
+        return None
+    return {
+        "data_parallel_rank": data_parallel_rank,
+        "endpoint": config.endpoint,
+        "replay_endpoint": config.replay_endpoint,
+        "topic": config.topic,
+    }
 
 
 class EventPublisherFactory:
