@@ -2,12 +2,37 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
     fused_inv_rope_fp8_quant,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_einsum
+from vllm.utils.math_utils import round_up
+
+# DeepGEMM picks the kernel configuration of the fp8 einsum (and of wo_b's
+# GEMM) from the token count and JIT-compiles a new kernel for every
+# configuration it has not seen: ~3 s per compile, paid the first time a
+# batch of that size shows up, in the middle of serving. Token counts up to
+# this value are fixed CUDA graph shapes, compiled at capture; larger batches
+# (eager prefill steps) take every value between two chunk boundaries, so
+# they are padded to a multiple of the bucket size, which bounds the set of
+# configurations to what the warm-up can pre-compile
+# (vllm/model_executor/warmup/deepseek_v4_o_proj_warmup.py).
+O_PROJ_EAGER_BUCKET = 1024
+
+
+def o_proj_padded_num_tokens(num_tokens: int) -> int:
+    if num_tokens <= O_PROJ_EAGER_BUCKET:
+        return num_tokens
+    return round_up(num_tokens, O_PROJ_EAGER_BUCKET)
+
+
+def o_proj_warmup_num_tokens(max_num_tokens: int) -> list[int]:
+    """The padded token counts eager steps can present, for warm-up."""
+    top = o_proj_padded_num_tokens(max_num_tokens)
+    return list(range(2 * O_PROJ_EAGER_BUCKET, top + 1, O_PROJ_EAGER_BUCKET))
 
 
 def compute_fp8_einsum_recipe(
@@ -47,6 +72,14 @@ def deep_gemm_fp8_o_proj(
     layer selects the recipe at initialization.
     """
     use_fp8 = wo_a.weight.dtype == torch.float8_e4m3fn
+    num_tokens = o.shape[0]
+    padded_num_tokens = o_proj_padded_num_tokens(num_tokens)
+    if padded_num_tokens != num_tokens:
+        # Zero rows: their projection is zero and is sliced off below; a
+        # GEMM's rows are independent, so the real rows are unaffected.
+        pad = padded_num_tokens - num_tokens
+        o = F.pad(o, (0, 0, 0, 0, 0, pad))
+        positions = F.pad(positions, (0, pad))
     o_proj_input, o_scale = fused_inv_rope_fp8_quant(
         o,
         positions,
@@ -84,4 +117,7 @@ def deep_gemm_fp8_o_proj(
             grouped_weight.transpose(1, 2),
             out=z.transpose(0, 1),
         )
-    return wo_b(z.flatten(1))
+    out = wo_b(z.flatten(1))
+    if padded_num_tokens != num_tokens:
+        out = out[:num_tokens]
+    return out

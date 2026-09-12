@@ -20,6 +20,9 @@ from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
     deepseek_v4_mhc_warmup,
 )
+from vllm.model_executor.warmup.deepseek_v4_o_proj_warmup import (
+    deepseek_v4_o_proj_warmup,
+)
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     write_flashinfer_autotune_cache,
@@ -200,6 +203,12 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         worker.get_model(),
         max_tokens=worker.scheduler_config.max_num_batched_tokens,
         cudagraph_capture_sizes=cudagraph_capture_sizes,
+    )
+    # DeepGEMM compiles a kernel per o-projection token bucket (~3 s each);
+    # compile them here rather than in the first prefill step of that size.
+    deepseek_v4_o_proj_warmup(
+        worker.get_model(),
+        max_num_tokens=worker.scheduler_config.max_num_batched_tokens,
     )
 
     # Run next so input-prep kernels JIT against pristine runner state.
