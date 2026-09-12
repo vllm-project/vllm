@@ -157,7 +157,7 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(monkeypatch, gpu_block_size):
     assert set(host_specs) == {"model.layers.0.self_attn"}
     assert set(gpu_indexer_specs) == {"model.layers.0.self_attn.indexer"}
     assert indexer_group.kv_cache_spec.prefix_cacheable
-    assert host_group.enable_kv_transfer
+    assert not host_group.enable_kv_transfer
     auxiliary_specs = [group.kv_cache_spec for group in auxiliary_groups]
     assert any(isinstance(spec, HiSparseResidentSpec) for spec in auxiliary_specs)
     assert any(isinstance(spec, HiSparseHotSpec) for spec in auxiliary_specs)
@@ -2597,6 +2597,43 @@ def test_glm5_kpool_tail_does_not_drag_hash_block_size():
     assert kv_cache_utils.resolve_kv_cache_block_sizes(
         kv_cache_config, hash_vllm_config
     ) == (1024, 16)
+
+
+def test_hisparse_derived_groups_do_not_participate_in_hash_alignment():
+    source = FullAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    groups = [
+        KVCacheGroupSpec(["source"], source),
+        KVCacheGroupSpec(
+            ["resident"], HiSparseResidentSpec(block_size=96, page_size=96)
+        ),
+        KVCacheGroupSpec(
+            ["hot"],
+            HiSparseHotSpec(block_size=96, page_size=96, blocks_per_request=1),
+        ),
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=64,
+            enable_prefix_caching=False,
+            prefix_match_unit=None,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        kv_transfer_config=object(),
+    )
+
+    assert kv_cache_utils.resolve_kv_cache_block_sizes(
+        kv_cache_config, vllm_config
+    ) == (192, 64)
 
 
 def test_get_kv_cache_config_mamba_hybrid_sharing_infeasible():
