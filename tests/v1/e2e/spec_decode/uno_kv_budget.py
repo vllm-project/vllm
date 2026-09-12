@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV-cache budgets for the Uno e2e tests, importable without a GPU.
 
-The survivor e2e test sizes ``kv_cache_memory_bytes`` by hand, so it must sit
-above the floor vLLM's admission rule enforces and below what the mixed phase's
-concurrent requests need. Both e2e budgets are derived here from the pinned
-model geometry, and ``tests/v1/spec_decode/test_uno_mrv2.py`` checks them
-against the engine floor on CPU, so a model-pin, block-size or ``max_model_len``
-change fails without a GB10.
+The survivor e2e test pins ``num_gpu_blocks_override`` above the floor vLLM's
+admission rule enforces and below what the mixed phase's concurrent requests
+need. Both e2e budgets are derived here from the pinned model geometry, and
+``tests/v1/spec_decode/test_uno_mrv2.py`` checks them against the engine floor
+on CPU, so a model-pin, block-size or ``max_model_len`` change fails without a
+GB10.
 
 The geometry is pinned as literals so the CPU suite stays hub-free; the e2e
 module, which already requires the model, cross-checks the literals against
@@ -15,6 +15,7 @@ module, which already requires the model, cross-checks the literals against
 """
 
 from collections.abc import Sequence
+from itertools import combinations
 
 from vllm.utils.math_utils import cdiv
 
@@ -29,20 +30,16 @@ QWEN3_NUM_KV_HEADS = 8
 QWEN3_HEAD_DIM = 128
 
 # The survivor engine runs at a shorter context so its admission floor (65
-# blocks) sits well below the mixed phase's unique footprint (~165 blocks). At
-# max_model_len=2048 the floor (129 blocks) nearly equals that footprint.
+# blocks) sits below the mixed phase's no-prefix-sharing footprint (135
+# blocks). At max_model_len=2048 the floor (129 blocks) nearly equals it.
 SURVIVOR_MAX_MODEL_LEN = 1024
 SURVIVOR_HEADROOM = (5, 4)
 
-# The finish peers must keep generating until the resident set -- the warmed
-# shared prefix stored once, plus the survivor and the two finish peers -- grows
-# past the 81-block budget. Counting the prefix once, the set crosses 81 blocks
-# at roughly 420 peer decode tokens, so 512 leaves margin before either peer's
-# natural finish. The abort peer is retired after two tokens and holds only its
-# unique prompt blocks while it runs. An earlier 192-token cap never reached the
-# crossing: with the shared prefix counted once the resident set peaked near 54
-# blocks, so the scheduler never preempted (GB10 contract12/contract13,
-# preemptions=0).
+# Prefix caching is disabled in the survivor test. The finish peers therefore
+# keep generating until their independent resident sets grow past the
+# 81-block budget. The pair crosses at 376 generated tokens, so 512 leaves
+# margin before either peer's natural finish. The abort peer is retired after
+# two tokens and holds only its own prompt blocks while it runs.
 SURVIVOR_FINISH_MAX_TOKENS = 512
 
 # The K-matrix engine keeps upstream's 4096 context on a 2 GiB budget, far above
@@ -94,16 +91,38 @@ def blocks_for_tokens(tokens: int) -> int:
     return cdiv(tokens, BLOCK_SIZE)
 
 
+def prompt_token_ids_are_pairwise_content_distinct(
+    prompt_token_ids: Sequence[Sequence[int]],
+) -> bool:
+    """Return whether every prompt pair differs at a shared token position.
+
+    A length-only difference is not enough: when one prompt is a prefix of the
+    other, the shared token positions are identical and this returns ``False``.
+    """
+    return all(
+        any(left != right for left, right in zip(first, second))
+        for first, second in combinations(prompt_token_ids, 2)
+    )
+
+
 def mixed_admission_blocks(
-    prompt_tokens: Sequence[int], shared_prefix_tokens: int
+    prompt_tokens: Sequence[int],
+    shared_prefix_tokens: int,
+    *,
+    prefix_cache_enabled: bool,
 ) -> int:
     """Blocks resident when every mixed-phase prompt is admitted at once.
 
-    The warmed shared prefix is stored once; each request then adds only its
-    unique suffix blocks plus one block to start decoding. This is the pressure
-    the scheduler sees when the peers join, so it must stay below the budget or
-    the prompts would wait in the queue instead of triggering preemption.
+    With prefix caching, the warmed shared prefix is stored once; each request
+    then adds only its unique suffix blocks plus one block to start decoding.
+    Without prefix caching, every prompt owns its rounded prompt blocks plus
+    one block to start decoding. This is the pressure the scheduler sees when
+    the peers join, so it must stay below the budget or the prompts would wait
+    in the queue instead of triggering preemption.
     """
+    if not prefix_cache_enabled:
+        return sum(blocks_for_tokens(tokens) + 1 for tokens in prompt_tokens)
+
     prefix_blocks = blocks_for_tokens(shared_prefix_tokens)
     unique = sum(
         max(0, blocks_for_tokens(tokens) - prefix_blocks) for tokens in prompt_tokens
@@ -115,19 +134,24 @@ def mixed_growth_blocks(
     prompt_tokens: Sequence[int],
     max_tokens: Sequence[int],
     shared_prefix_tokens: int,
+    *,
+    prefix_cache_enabled: bool,
 ) -> int:
     """Blocks resident if every request reaches its generation cap.
 
-    The warmed shared prefix is stored once, so it is counted once here; each
-    request then contributes only its unique suffix blocks. Summing
-    ``blocks_for_tokens(prompt + cap)`` per request counts the shared prefix once
-    per request and over-estimates the resident set, which is why an earlier
-    version of this budget let the survivor's preemption gate pass its
-    inequality while the engine still read ``preemptions=0`` (contract12/13).
-    This is still an upper bound while the abort peer is alive, and the sum
+    Without prefix caching, each request contributes its complete rounded
+    prompt-plus-generation footprint. With prefix caching, the warmed shared
+    prefix is stored once and each request contributes only its unique growth.
+    The result is an upper bound while the abort peer is alive, and the sum
     above the budget is what makes a running request's ``allocate_slots`` fail
     and preempt the last running peer.
     """
+    if not prefix_cache_enabled:
+        return sum(
+            blocks_for_tokens(prompt + cap)
+            for prompt, cap in zip(prompt_tokens, max_tokens)
+        )
+
     prefix_blocks = blocks_for_tokens(shared_prefix_tokens)
     return prefix_blocks + sum(
         max(0, blocks_for_tokens(prompt + cap) - prefix_blocks)
@@ -139,20 +163,29 @@ def mixed_crossing_tokens(
     peer_prompt_tokens: int,
     shared_prefix_tokens: int,
     budget_blocks: int,
+    *,
+    prefix_cache_enabled: bool,
 ) -> int:
     """Generated tokens at which the two long peers alone outgrow the budget.
 
     By the time the pair has grown this far the short seed has finished and the
-    abort peer is retired, so the resident set is the warmed prefix stored once
-    plus each long peer's unique growth. The survivor e2e test asserts this is
-    below ``SURVIVOR_FINISH_MAX_TOKENS``: if the crossing were at or past the
-    cap, a peer could finish naturally before the scheduler had to preempt one,
-    and the token-equality gate would pass without exercising the resume path.
+    abort peer is retired. Without prefix caching, each peer owns its complete
+    prompt-plus-generation footprint; with prefix caching, the warmed prefix is
+    stored once and each peer contributes only its unique growth. The survivor
+    e2e test asserts this is below ``SURVIVOR_FINISH_MAX_TOKENS``: if the
+    crossing were at or past the cap, a peer could finish naturally before the
+    scheduler had to preempt one.
     """
     prefix_blocks = blocks_for_tokens(shared_prefix_tokens)
     tokens = 0
     while True:
-        unique = max(0, blocks_for_tokens(peer_prompt_tokens + tokens) - prefix_blocks)
-        if prefix_blocks + 2 * unique > budget_blocks:
+        if prefix_cache_enabled:
+            unique = max(
+                0, blocks_for_tokens(peer_prompt_tokens + tokens) - prefix_blocks
+            )
+            resident_blocks = prefix_blocks + 2 * unique
+        else:
+            resident_blocks = 2 * blocks_for_tokens(peer_prompt_tokens + tokens)
+        if resident_blocks > budget_blocks:
             return tokens
         tokens += 1

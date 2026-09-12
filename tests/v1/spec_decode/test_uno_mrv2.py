@@ -575,6 +575,17 @@ def test_survivor_kv_budget_clears_the_engine_admission_floor():
         )
 
 
+def test_survivor_prompts_require_content_difference_at_shared_positions():
+    """Length-only prompt changes must not masquerade as distinct peers."""
+    from tests.v1.e2e.spec_decode.uno_kv_budget import (
+        prompt_token_ids_are_pairwise_content_distinct,
+    )
+
+    assert prompt_token_ids_are_pairwise_content_distinct([[1, 2], [1, 3]])
+    assert not prompt_token_ids_are_pairwise_content_distinct([[1, 2], [1, 2]])
+    assert not prompt_token_ids_are_pairwise_content_distinct([[1, 2], [1, 2, 3]])
+
+
 def test_survivor_preemption_arithmetic_fits_then_overflows_the_budget():
     """The survivor window admits four prompts but their growth exceeds it.
 
@@ -582,15 +593,14 @@ def test_survivor_preemption_arithmetic_fits_then_overflows_the_budget():
     they are pinned to the same prompt shapes at the pinned revision, so the
     preemption geometry is provable on CPU. The finish-peer cap is read from
     ``uno_kv_budget.SURVIVOR_FINISH_MAX_TOKENS`` so the CPU pin and the e2e
-    cannot drift. ``mixed_growth_blocks`` counts the warmed shared prefix once;
-    an earlier per-request sum over-estimated the resident set, so the gate
-    passed its inequality while the engine never preempted. The inverted run
+    cannot drift. Prefix caching is disabled in this phase, so every request's
+    complete prompt-plus-generation footprint is counted. The inverted run
     swaps max_tokens back to [96, 4, 4, 2] and must fail the growth assertion.
 
     The compared request is one of the two long peers, so the crossing point
     (when the pair alone outgrows the budget) must sit below the cap: above it a
     peer could finish naturally before preemption and the resume path would
-    never run. An inverted run with the cap at 448 fails this assertion.
+    never run. An inverted run with the cap at 320 fails this assertion.
     """
     from tests.v1.e2e.spec_decode import uno_kv_budget as budget
 
@@ -604,10 +614,20 @@ def test_survivor_preemption_arithmetic_fits_then_overflows_the_budget():
     ]
     budget_blocks = budget.survivor_kv_budget() // budget.kv_bytes_per_block()
 
-    admission = budget.mixed_admission_blocks(prompt_tokens, shared_prefix_tokens)
-    growth = budget.mixed_growth_blocks(prompt_tokens, max_tokens, shared_prefix_tokens)
+    admission = budget.mixed_admission_blocks(
+        prompt_tokens, shared_prefix_tokens, prefix_cache_enabled=False
+    )
+    growth = budget.mixed_growth_blocks(
+        prompt_tokens,
+        max_tokens,
+        shared_prefix_tokens,
+        prefix_cache_enabled=False,
+    )
     crossing = budget.mixed_crossing_tokens(
-        prompt_tokens[1], shared_prefix_tokens, budget_blocks
+        prompt_tokens[1],
+        shared_prefix_tokens,
+        budget_blocks,
+        prefix_cache_enabled=False,
     )
 
     assert admission < budget_blocks, (
@@ -632,7 +652,10 @@ def test_survivor_preemption_arithmetic_fits_then_overflows_the_budget():
     # The old peer cap finished before growth could empty the budget; the same
     # arithmetic must not clear the gate, which is why the gate was vacuous.
     old_growth = budget.mixed_growth_blocks(
-        prompt_tokens, [96, 4, 4, 2], shared_prefix_tokens
+        prompt_tokens,
+        [96, 4, 4, 2],
+        shared_prefix_tokens,
+        prefix_cache_enabled=False,
     )
     assert old_growth <= budget_blocks, (
         f"the old max_tokens=4 peers ({old_growth} blocks) unexpectedly clear "

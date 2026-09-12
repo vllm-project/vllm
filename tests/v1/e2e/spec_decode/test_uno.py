@@ -3,6 +3,7 @@
 """Greedy Uno parity with the original Qwen3-8B adapter on one NVIDIA GPU."""
 
 from dataclasses import dataclass
+from itertools import combinations
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from vllm.transformers_utils.repo_utils import hf_api
 from vllm.v1.metrics.reader import Counter, Histogram, Metric
 
 from .uno_kv_budget import (
+    BLOCK_SIZE,
     MATRIX_KV_BUDGET_BYTES,
     MATRIX_MAX_MODEL_LEN,
     MODEL_ID,
@@ -28,6 +30,7 @@ from .uno_kv_budget import (
     mixed_admission_blocks,
     mixed_crossing_tokens,
     mixed_growth_blocks,
+    prompt_token_ids_are_pairwise_content_distinct,
     qwen3_geometry,
     survivor_kv_budget,
 )
@@ -176,6 +179,8 @@ class _MixedPhase:
     # One line per observed preemption: which request, at which token, while
     # which requests were running/waiting. Printed so a GPU run can be read.
     receipts: list[str]
+    # Highest scheduler-reported KV occupancy observed during the mixed phase.
+    peak_kv_cache_usage: float
 
 
 def _run_survivor_with_peers(
@@ -213,9 +218,12 @@ def _run_survivor_with_peers(
     finished: dict[str, tuple[int, ...]] = {}
     preempted_while_active: dict[str, int] = {}
     receipts: list[str] = []
+    peak_kv_cache_usage = 0.0
     seen_preemptions: dict[str, int] = {}
     while engine.has_unfinished_requests():
-        for output in engine.step():
+        outputs = engine.step()
+        peak_kv_cache_usage = max(peak_kv_cache_usage, scheduler.get_kv_cache_usage())
+        for output in outputs:
             if output.request_id == seed_id:
                 if output.outputs:
                     seed_len = max(seed_len, len(output.outputs[0].token_ids))
@@ -273,6 +281,7 @@ def _run_survivor_with_peers(
         finished=finished,
         preempted_while_active=preempted_while_active,
         receipts=receipts,
+        peak_kv_cache_usage=peak_kv_cache_usage,
     )
 
 
@@ -307,7 +316,10 @@ def test_uno_continuous_batching_survivor_matches_solo(
     shared_prefix = "The quick brown fox jumps over the lazy dog. " * 16
     seed_suffix = " Now count from one to twenty slowly and carefully."
     seed_prompt = shared_prefix + seed_suffix
-    finish_prompts = [shared_prefix + _peer_body(f"Peer {index}") for index in range(2)]
+    finish_prompts = [
+        shared_prefix + _peer_body("Peer Alpha"),
+        shared_prefix + _peer_body("Peer Bravo"),
+    ]
     abort_prompt = shared_prefix + _peer_body("Abort")
 
     seed_sampling = SamplingParams(
@@ -315,10 +327,10 @@ def test_uno_continuous_batching_survivor_matches_solo(
     )
     finish_sampling = SamplingParams(
         # Long enough that the peers' generation growth, not their prompt size,
-        # is what exhausts the KV budget and forces preemption. With the warmed
-        # shared prefix counted once, the two long peers alone cross the
-        # 81-block budget at ~472 generated tokens, before the 512 cap, so a
-        # peer cannot finish naturally before the scheduler preempts it.
+        # is what exhausts the KV budget and forces preemption. With prefix
+        # caching disabled, the two long peers cross the 81-block budget at
+        # 376 generated tokens, before the 512 cap, so a peer cannot finish
+        # naturally before the scheduler preempts it.
         temperature=0,
         max_tokens=SURVIVOR_FINISH_MAX_TOKENS,
         ignore_eos=True,
@@ -333,22 +345,21 @@ def test_uno_continuous_batching_survivor_matches_solo(
         seed=0,
     )
 
-    # Preemption is forced by GROWTH, not by prompt size. All four prompts are
-    # admitted together: the warmed prefix is stored once, so their unique
-    # prompt footprint plus one decode block each (mixed_admission_blocks) stays
-    # below the 81-block budget. The two finish peers then generate
-    # SURVIVOR_FINISH_MAX_TOKENS tokens each, so the resident set -- the shared
-    # prefix once plus each running request's unique growth (mixed_growth_blocks)
-    # -- grows past the budget. The scheduler's running loop preempts the last
-    # running request when allocate_slots fails; the short seed finishes before
-    # the crossing and the abort peer is retired, so the preempted request is
-    # one of the two long peers and its resumed tokens are the correctness gate.
+    # Preemption is forced by GROWTH, not by prompt size. Prefix caching is off,
+    # so all four prompts own their prompt blocks and are admitted together
+    # (mixed_admission_blocks) below the 81-block budget. The two finish peers
+    # then generate SURVIVOR_FINISH_MAX_TOKENS tokens each, so their independent
+    # growth (mixed_growth_blocks) passes the budget. The scheduler's running
+    # loop preempts the last running request when allocate_slots fails; the
+    # short seed finishes before the crossing and the abort peer is retired, so
+    # the preempted request is one of the two long peers and its resumed tokens
+    # are the correctness gate.
     # Both inequalities and the crossing point are asserted with their counts
     # here and pinned on CPU by test_uno_mrv2.py (an inverted run with a cap
     # below the crossing must fail).
     max_model_len = SURVIVOR_MAX_MODEL_LEN
-    kv_cache_memory_bytes = survivor_kv_budget()
-    budget_blocks = kv_cache_memory_bytes // kv_bytes_per_block()
+    kv_cache_budget_bytes = survivor_kv_budget()
+    budget_blocks = kv_cache_budget_bytes // kv_bytes_per_block()
     tokenizer = AutoTokenizer.from_pretrained(
         MODEL_ID, revision=MODEL_REVISION, local_files_only=HF_HUB_OFFLINE
     )
@@ -363,18 +374,45 @@ def test_uno_continuous_batching_survivor_matches_solo(
         finish_sampling.max_tokens,
         abort_sampling.max_tokens,
     ]
-    prompt_tokens = [_token_count(tokenizer, prompt) for prompt in prompts]
+    prompt_token_ids = [
+        tokenizer.encode(prompt, add_special_tokens=False) for prompt in prompts
+    ]
+    prompt_tokens = [len(token_ids) for token_ids in prompt_token_ids]
+    prompt_labels = ("seed", "finish-peer-0", "finish-peer-1", "abort-peer")
+    prompt_distinctness = {
+        f"{prompt_labels[left]}!={prompt_labels[right]}": (
+            prompt_token_ids_are_pairwise_content_distinct(
+                [prompt_token_ids[left], prompt_token_ids[right]]
+            )
+        )
+        for left, right in combinations(range(len(prompt_labels)), 2)
+    }
     shared_prefix_tokens = _token_count(tokenizer, shared_prefix)
-    admission_blocks = mixed_admission_blocks(prompt_tokens, shared_prefix_tokens)
-    growth_blocks = mixed_growth_blocks(prompt_tokens, max_tokens, shared_prefix_tokens)
+    assert all(prompt_distinctness.values()), (
+        "mixed-phase prompts must differ in token content, not only length: "
+        f"{prompt_distinctness}"
+    )
+    admission_blocks = mixed_admission_blocks(
+        prompt_tokens, shared_prefix_tokens, prefix_cache_enabled=False
+    )
+    growth_blocks = mixed_growth_blocks(
+        prompt_tokens,
+        max_tokens,
+        shared_prefix_tokens,
+        prefix_cache_enabled=False,
+    )
     crossing_tokens = mixed_crossing_tokens(
-        max(prompt_tokens[1:3]), shared_prefix_tokens, budget_blocks
+        max(prompt_tokens[1:3]),
+        shared_prefix_tokens,
+        budget_blocks,
+        prefix_cache_enabled=False,
     )
     kv_floor = engine_minimum_kv_bytes(max_model_len)
-    assert kv_floor <= kv_cache_memory_bytes, (
+    kv_floor_blocks = kv_floor // kv_bytes_per_block()
+    assert kv_floor <= kv_cache_budget_bytes, (
         "the survivor KV budget is below vLLM's single-request floor: floor "
         f"{kv_floor} B ({kv_floor // kv_bytes_per_block()} blocks) > budget "
-        f"{kv_cache_memory_bytes} B ({budget_blocks} blocks) at "
+        f"{kv_cache_budget_bytes} B ({budget_blocks} blocks) at "
         f"max_model_len={max_model_len}"
     )
     assert admission_blocks < budget_blocks, (
@@ -402,7 +440,7 @@ def test_uno_continuous_batching_survivor_matches_solo(
     # The prompts stay inside the context window; `_validate_prompt_len` raises
     # VLLMValidationError at `add_request` rather than clamping.
     for label, prompt_len, cap in zip(
-        ("seed", "finish-peer-0", "finish-peer-1", "abort-peer"),
+        prompt_labels,
         prompt_tokens,
         max_tokens,
     ):
@@ -412,7 +450,15 @@ def test_uno_continuous_batching_survivor_matches_solo(
             "_validate_prompt_len raises rather than clamping"
         )
 
-    total_memory = torch.cuda.get_device_properties(0).total_memory
+    print(f"survivor prompt token-id distinctness: {prompt_distinctness}")
+    print(
+        "survivor KV arithmetic: prefix_cache=False, "
+        f"floor_blocks={kv_floor_blocks}, budget_blocks={budget_blocks}, "
+        f"admission_blocks={admission_blocks}, growth_blocks={growth_blocks}, "
+        f"crossing_tokens={crossing_tokens}, prompt_tokens={prompt_tokens}, "
+        f"max_tokens={max_tokens}"
+    )
+
     common = dict(
         revision=MODEL_REVISION,
         dtype="bfloat16",
@@ -425,9 +471,9 @@ def test_uno_continuous_batching_survivor_matches_solo(
         max_num_seqs=4,
         max_num_batched_tokens=256,
         enable_chunked_prefill=True,
-        enable_prefix_caching=True,
-        gpu_memory_utilization=min(0.9, 24 * 1024**3 / total_memory),
-        kv_cache_memory_bytes=kv_cache_memory_bytes,
+        block_size=BLOCK_SIZE,
+        enable_prefix_caching=False,
+        num_gpu_blocks_override=budget_blocks,
         enable_lora=True,
         max_lora_rank=128,
         max_loras=2,
@@ -458,16 +504,7 @@ def test_uno_continuous_batching_survivor_matches_solo(
             len(ids) == finish_sampling.max_tokens for ids in solo_ids.values()
         ), f"solo finish peers did not reach their cap: {solo_ids}"
 
-        # Reset the cache and warm the shared prefix so the mixed phase hits it.
-        runner.llm.reset_prefix_cache()
-        _run_request_to_finish(
-            engine,
-            "uno-warm",
-            shared_prefix,
-            SamplingParams(temperature=0, max_tokens=1, ignore_eos=True, seed=0),
-        )
-
-        # The cumulative counters also cover the solo and warm runs, so snapshot
+        # The cumulative counters also cover the solo runs, so snapshot
         # at the start of the mixed phase and assert only the phase deltas.
         before_metrics = runner.llm.get_metrics()
         mixed = _run_survivor_with_peers(
@@ -485,6 +522,8 @@ def test_uno_continuous_batching_survivor_matches_solo(
         print(f"survivor mixed tokens {request_id}={list(tokens)}")
     for receipt in mixed.receipts:
         print(f"survivor engagement receipt: {receipt}")
+    print(f"survivor peak KV cache usage: {mixed.peak_kv_cache_usage:.3%}")
+    print(f"survivor prompt token-id distinctness: {prompt_distinctness}")
     print(
         f"survivor preempted-while-active counts: {mixed.preempted_while_active} "
         f"(solo lengths: {[len(ids) for ids in solo_ids.values()]})"
@@ -497,7 +536,10 @@ def test_uno_continuous_batching_survivor_matches_solo(
     if not mixed.preempted_while_active:
         pytest.skip(
             "no finish peer was preempted while still generating, so the resume "
-            f"path was not exercised; receipts={mixed.receipts}"
+            "path was not exercised; "
+            f"peak_kv_cache_usage={mixed.peak_kv_cache_usage:.3%}; "
+            f"prompt_token_id_distinctness={prompt_distinctness}; "
+            f"receipts={mixed.receipts}"
         )
 
     for request_id, count in mixed.preempted_while_active.items():
@@ -514,9 +556,6 @@ def test_uno_continuous_batching_survivor_matches_solo(
     preemptions = _counter_total(
         after_metrics, "vllm:num_preemptions"
     ) - _counter_total(before_metrics, "vllm:num_preemptions")
-    prefix_hits = _counter_total(
-        after_metrics, "vllm:prefix_cache_hits"
-    ) - _counter_total(before_metrics, "vllm:prefix_cache_hits")
     # Second, independent signal that the gate cannot pass vacuously:
     # `vllm:num_preemptions` counts scheduler iterations, while this histogram is
     # observed in `IterationStats.update_from_finished_request` ->
@@ -528,7 +567,6 @@ def test_uno_continuous_batching_survivor_matches_solo(
     ) - _histogram_total(before_metrics, "vllm:request_num_preemptions")
     print(
         f"survivor mixed-phase deltas: drafts={drafts}, preemptions={preemptions}, "
-        f"prefix_cache_hits={prefix_hits}, "
         f"finished_preemptions={finished_preemptions}"
     )
     assert drafts > 0, "Uno did not draft during the mixed phase"
@@ -541,7 +579,6 @@ def test_uno_continuous_batching_survivor_matches_solo(
         f"(vllm:request_num_preemptions delta={finished_preemptions}); the "
         "mixed phase produced no surviving recompute"
     )
-    assert prefix_hits > 0, "the mixed phase did not hit the warmed prefix cache"
 
 
 @pytest.mark.parametrize(
