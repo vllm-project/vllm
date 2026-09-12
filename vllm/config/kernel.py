@@ -286,14 +286,14 @@ class KernelConfig:
       1024B-aligned row stride, at least 32 rows) -> "cooperative"
       (topk in {512, 1024, 2048}, <= 64 rows, SM90+ non-SM12x) ->
       "persistent" (topk in {512, 1024, 2048}) -> "per_row"
-    - "deep_select": Force the DeepSelect top-k kernel (vllm._deepselect_C).
+    - "deep_select": Use the DeepSelect top-k kernel (vllm._deepselect_C).
       Same constraints as "auto" except the 32-row threshold
-    - "cooperative": Force vLLM's cooperative_topk kernel
-    - "persistent": Force vLLM's persistent_topk kernel
-    - "per_row": Force vLLM's top_k_per_row_decode kernel (no constraints)
-    - "flashinfer": Force FlashInfer's top_k_ragged_transform kernel
+    - "cooperative": Use vLLM's cooperative_topk kernel
+    - "persistent": Use vLLM's persistent_topk kernel
+    - "per_row": Use vLLM's top_k_per_row_decode kernel (no constraints)
+    - "flashinfer": Use FlashInfer's top_k_ragged_transform kernel
       (debug/benchmark)
-    - "torch": Force a plain torch.topk implementation (debug reference)
+    - "torch": Use a plain torch.topk implementation (debug reference)
 
     Explicit (non-"auto") values raise RuntimeError when their constraints
     are not met.
