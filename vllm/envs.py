@@ -208,6 +208,7 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_MOE_SKIP_PADDING: bool = True
+    VLLM_MOE_HEAD_GATHER_FIRST: bool = True
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
@@ -1588,6 +1589,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
     # treats topk_id == -1 as a skip sentinel
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
+    # DeepSeek-V4 only. On prefill-containing steps, gather the logits rows
+    # before hc_head + final RMSNorm instead of running them on all T rows.
+    # Both ops are row-wise; selected rows match the full path up to rare
+    # 1-ULP rms_norm reduction-order differences across batch row counts.
+    "VLLM_MOE_HEAD_GATHER_FIRST": lambda: bool(
+        int(os.getenv("VLLM_MOE_HEAD_GATHER_FIRST", "1"))
+    ),
     # Kimi-K3 only. Under sequence-parallel MoE the dense and shared-expert MLPs
     # are replicated on every rank, so each rank streams the whole weight to
     # serve its own token shard. Shard them across TP instead: the MLP then
