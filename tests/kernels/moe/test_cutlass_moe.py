@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsFp8,
     CutlassExpertsMxfp4,
     CutlassExpertsW4A8Fp8,
+    _normalize_cutlass_topk_ids,
     run_cutlass_moe_fp4,
     run_cutlass_moe_fp8,
     run_cutlass_moe_mxfp4,
@@ -64,6 +65,16 @@ MNK_FACTORS = [
 ]
 
 vllm_config = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+
+
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_normalize_cutlass_topk_ids(dtype: torch.dtype):
+    topk_ids = torch.tensor([[0, 1], [2, -1]], dtype=dtype)
+
+    normalized = _normalize_cutlass_topk_ids(topk_ids)
+
+    assert normalized.dtype == torch.int32
+    torch.testing.assert_close(normalized, topk_ids.to(torch.int32))
 
 
 @pytest.mark.parametrize(

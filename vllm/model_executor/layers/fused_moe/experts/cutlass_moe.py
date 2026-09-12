@@ -52,6 +52,10 @@ from vllm.scalar_type import scalar_types
 logger = init_logger(__name__)
 
 
+def _normalize_cutlass_topk_ids(topk_ids: torch.Tensor) -> torch.Tensor:
+    return topk_ids.to(dtype=torch.int32)
+
+
 def run_cutlass_moe_fp8(
     output: torch.Tensor,
     hidden_states: torch.Tensor,
@@ -602,7 +606,7 @@ def run_cutlass_moe_fp4(
     # problem shapes should have [m, n, k]
     # Note that problem sizes are based on logical number of elements.
     ops.get_cutlass_moe_mm_data(
-        topk_ids,
+        _normalize_cutlass_topk_ids(topk_ids),
         expert_offsets,
         problem_sizes1,
         problem_sizes2,
@@ -878,7 +882,7 @@ def run_cutlass_moe_mxfp4(
         a.mul_(topk_weights.to(out_dtype))
 
     ops.get_cutlass_moe_mm_data(
-        topk_ids,
+        _normalize_cutlass_topk_ids(topk_ids),
         expert_offsets,
         problem_sizes1,
         problem_sizes2,
