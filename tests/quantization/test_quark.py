@@ -797,7 +797,7 @@ def test_quark_mapper_preserves_structured_lists():
     assert config.quant_config["exclude"] == [
         "language_model.layers.0.self_attn.q_proj"
     ]
-    assert config.quant_config["weight_quant"] == structured
+    assert config.quant_config["weight_quant"] == [{"weight": {"dtype": "int4"}}]
 
 
 def test_quant_method_dispatch_ignored(default_vllm_config):
