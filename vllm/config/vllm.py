@@ -1948,6 +1948,27 @@ class VllmConfig:
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
 
+        if self.kv_transfer_config and self.kv_transfer_config.pd_role is not None:
+            parallel = self.parallel_config
+            if (
+                parallel._api_process_count != 1
+                or parallel.data_parallel_external_lb
+                or parallel.data_parallel_hybrid_lb
+                or parallel.pipeline_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+                or parallel.decode_context_parallel_size != 1
+                or parallel.enable_elastic_ep
+                or self.speculative_config is not None
+                or self.model_config.enable_sleep_mode
+                or self.model_config.is_multimodal_model
+                or self.model_config.runner_type != "generate"
+            ):
+                raise ValueError(
+                    "Runtime P/D role switching requires one API process, internal "
+                    "DP load balancing, PP=PCP=DCP=1, and a text generation model "
+                    "without speculation, sleep mode, or elastic EP resizing."
+                )
+
         if self.is_mm_encoder_only and self.cache_config.enable_prefix_caching:
             # Such an instance publishes encoder embeddings and runs no language
             # model, so it holds no KV cache for prefix caching to reuse and its

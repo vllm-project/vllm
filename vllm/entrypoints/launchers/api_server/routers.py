@@ -49,6 +49,10 @@ def register_api_routers(
 
         elastic_ep_attach_router(app)
 
+        from vllm.entrypoints.serve.pd_role.api_router import router as pd_role_router
+
+        app.include_router(pd_role_router)
+
     if "generate" in supported_tasks or "render" in supported_tasks:
         from vllm.entrypoints.scale_out.factories import register_scale_out_api_routers
 
