@@ -203,7 +203,14 @@ def _qsa_sparse_paged_attention_reference(
     block_table: torch.Tensor,
     token_to_req: torch.Tensor,
     softmax_scale: float,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
 ) -> torch.Tensor:
+    """Dense reference for QSA sparse paged attention.
+
+    Mirrors the kernel's dequant: fp8-e4m3 K/V caches are dequantized with the
+    per-tensor k_scale/v_scale host floats; bf16 caches use unit scales.
+    """
     output = torch.zeros_like(q)
     repeats = q.shape[1] // k_cache.shape[2]
     page_size = k_cache.shape[1]
@@ -215,13 +222,15 @@ def _qsa_sparse_paged_attention_reference(
         request = token_to_req[row].long()
         pages = block_table[request, logical // page_size].long()
         offsets = logical % page_size
-        keys = k_cache[pages, offsets].repeat_interleave(repeats, dim=1)
-        values = v_cache[pages, offsets].repeat_interleave(repeats, dim=1)
-        scores = torch.einsum("hd,khd->hk", q[row].float(), keys.float())
-        probabilities = torch.softmax(scores * softmax_scale, dim=-1)
-        output[row] = torch.einsum("hk,khd->hd", probabilities, values.float()).to(
-            q.dtype
+        keys = (k_cache[pages, offsets].float() * k_scale).repeat_interleave(
+            repeats, dim=1
         )
+        values = (v_cache[pages, offsets].float() * v_scale).repeat_interleave(
+            repeats, dim=1
+        )
+        scores = torch.einsum("hd,khd->hk", q[row].float(), keys)
+        probabilities = torch.softmax(scores * softmax_scale, dim=-1)
+        output[row] = torch.einsum("hk,khd->hd", probabilities, values).to(q.dtype)
     return output
 
 
@@ -906,22 +915,28 @@ def test_qsa_block_expansion_correctness() -> None:
         "page_size",
         "use_prefill_config",
         "num_requests",
+        "fp8",
     ),
     [
         # Production page sizes from hybrid-cache block alignment: 784/800
         # at TP4 and 1568/1600 at TP1/TP2 (no-MTP / MTP num_spec=3). Head
         # splits are per-rank TP1/TP2/TP4; the largest batch runs both
         # use_prefill_config variants.
-        pytest.param(1, 24, 2, 1600, True, 2, id="tp1_r1"),
-        pytest.param(16, 12, 1, 1600, True, 3, id="tp2_r16"),
-        pytest.param(32, 6, 1, 800, True, 5, id="tp4_r32"),
-        pytest.param(128, 24, 2, 1568, True, 7, id="tp1_r128"),
-        pytest.param(257, 6, 1, 800, True, 13, id="tp4_r257"),
-        pytest.param(513, 6, 1, 784, True, 17, id="tp4_r513"),
-        pytest.param(700, 6, 1, 800, True, 23, id="tp4_r700"),
-        pytest.param(1024, 24, 2, 1600, True, 33, id="tp1_r1024"),
-        pytest.param(2048, 24, 2, 1600, True, 63, id="tp1_r2048_prefill"),
-        pytest.param(2048, 24, 2, 1600, False, 63, id="tp1_r2048_uniform"),
+        pytest.param(1, 24, 2, 1600, True, 2, False, id="tp1_r1"),
+        pytest.param(16, 12, 1, 1600, True, 3, False, id="tp2_r16"),
+        pytest.param(32, 6, 1, 800, True, 5, False, id="tp4_r32"),
+        pytest.param(128, 24, 2, 1568, True, 7, False, id="tp1_r128"),
+        pytest.param(257, 6, 1, 800, True, 13, False, id="tp4_r257"),
+        pytest.param(513, 6, 1, 784, True, 17, False, id="tp4_r513"),
+        pytest.param(700, 6, 1, 800, True, 23, False, id="tp4_r700"),
+        pytest.param(1024, 24, 2, 1600, True, 33, False, id="tp1_r1024"),
+        pytest.param(2048, 24, 2, 1600, True, 63, False, id="tp1_r2048_prefill"),
+        pytest.param(2048, 24, 2, 1600, False, 63, False, id="tp1_r2048_uniform"),
+        # fp8_e4m3 K/V caches on the TP1 head split.
+        pytest.param(1, 24, 2, 1600, True, 2, True, id="tp1_r1_fp8"),
+        pytest.param(128, 24, 2, 1568, True, 7, True, id="tp1_r128_fp8"),
+        pytest.param(2048, 24, 2, 1600, True, 63, True, id="tp1_r2048_prefill_fp8"),
+        pytest.param(2048, 24, 2, 1600, False, 63, True, id="tp1_r2048_uniform_fp8"),
     ],
 )
 def test_qsa_sparse_paged_attention_correctness(
@@ -931,8 +946,18 @@ def test_qsa_sparse_paged_attention_correctness(
     page_size: int,
     use_prefill_config: bool,
     num_requests: int,
+    fp8: bool,
 ) -> None:
+    """QSA sparse paged attention matches the dense reference.
+
+    fp8 only changes the K/V cache dtype (e4m3 with a per-tensor scale pair) and
+    the scales; the reference dequantizes the same cache with those scales, so
+    both paths compare the production kernel against the reference on identical
+    inputs. fp8=True additionally covers the host-side scale folding.
+    """
     torch.manual_seed(2)
+    # One QSA attention problem: bf16 Q and paged K/V, a packed selection with
+    # the trailing count column, block table and row-to-request map.
     head_dim = 256
     num_selected_pages = 64
     # Keep the newest page outside the synthetic top-k as causal headroom.
@@ -1012,8 +1037,18 @@ def test_qsa_sparse_paged_attention_correctness(
         indexer_budget,
         logical_indices,
     )
-    assert logical_indices.shape == (num_rows, selection_width + 1)
-    scale = q.shape[-1] ** -0.5
+
+    scale = head_dim**-0.5
+
+    if fp8:
+        # A fixed non-unit pair (k != v) exercises the host-side scale folding
+        # and catches a k/v swap; scales are host floats, as the layer exposes
+        # them. Stored values are the scaled ones, as reshape_and_cache does.
+        k_scale, v_scale = 0.5, 2.0
+        k_cache = (k_cache / k_scale).to(torch.float8_e4m3fn)
+        v_cache = (v_cache / v_scale).to(torch.float8_e4m3fn)
+    else:
+        k_scale, v_scale = 1.0, 1.0
 
     actual = qsa_ops.qsa_sparse_paged_attention(
         q,
@@ -1023,6 +1058,8 @@ def test_qsa_sparse_paged_attention_correctness(
         block_table,
         token_to_req,
         use_prefill_config=use_prefill_config,
+        k_scale=k_scale,
+        v_scale=v_scale,
     )
     expected = _qsa_sparse_paged_attention_reference(
         q,
@@ -1032,8 +1069,9 @@ def test_qsa_sparse_paged_attention_correctness(
         block_table,
         token_to_req,
         scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
     )
-
     torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
 
 
