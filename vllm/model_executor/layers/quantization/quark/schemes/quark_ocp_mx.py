@@ -12,6 +12,7 @@ from vllm.model_executor.kernels.linear import (
     MxFp6LinearKernel,
     init_mxfp4_linear_kernel,
     init_mxfp6_linear_kernel,
+    is_mxfp6_sm120_available,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     _ACTIVATION_QUANT_KEY_MAP,
@@ -23,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
     kMxfp6E2M3Static,
     kMxfp6E3M2Static,
+    kMxfp8Dynamic,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
@@ -36,10 +38,18 @@ from .quark_scheme import QuarkScheme
 
 logger = init_logger(__name__)
 
+_LINEAR_ACTIVATION_QUANT_KEY_MAP = {
+    **_ACTIVATION_QUANT_KEY_MAP,
+    "mxfp8_e4m3": kMxfp8Dynamic,
+}
+
 
 class QuarkOCP_MX(QuarkScheme):
     ocp_mx_linear: MxFp6LinearKernel | MxFp4LinearKernel
-    supported_activation_quant_keys = [*_ACTIVATION_QUANT_KEY_MAP.values(), None]
+    supported_activation_quant_keys = [
+        *_LINEAR_ACTIVATION_QUANT_KEY_MAP.values(),
+        None,
+    ]
     supported_weight_quant_keys = [*_WEIGHT_QUANT_KEY_MAP.values()]
 
     def __init__(
@@ -58,7 +68,7 @@ class QuarkOCP_MX(QuarkScheme):
         self.input_dtype = (
             next(
                 dtype
-                for dtype, quant_key in _ACTIVATION_QUANT_KEY_MAP.items()
+                for dtype, quant_key in _LINEAR_ACTIVATION_QUANT_KEY_MAP.items()
                 if quant_key == activation_quant_key
             )
             if activation_quant_key is not None
@@ -70,7 +80,14 @@ class QuarkOCP_MX(QuarkScheme):
         else:
             self.packed_factor = Fraction(numerator=8, denominator=6)
 
-        if not current_platform.supports_mx():
+        is_sm120_w6a8 = (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability(120)
+            and self.weight_dtype == "mxfp6_e3m2"
+            and self.input_dtype == "mxfp8_e4m3"
+            and is_mxfp6_sm120_available()
+        )
+        if not current_platform.supports_mx() and not is_sm120_w6a8:
             logger.warning_once(
                 "The current platform does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
@@ -78,8 +95,10 @@ class QuarkOCP_MX(QuarkScheme):
                 "layers computed in high precision."
             )
 
-        if current_platform.supports_mx() and (
-            self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
+        if (
+            current_platform.supports_mx()
+            and not is_sm120_w6a8
+            and (self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4")
         ):
             logger.warning_once(
                 "The current platform supports native MXFP4/MXFP6 "
