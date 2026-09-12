@@ -62,3 +62,25 @@ async def test_merge_async_iterators_single_closes_underlying():
     assert await anext(merged) == (0, "x")
     await merged.aclose()
     assert closed
+
+
+@pytest.mark.asyncio
+async def test_merge_async_iterators_multi_awaits_underlying_cleanup():
+    closed: set[int] = set()
+    wait_forever = asyncio.Event()
+
+    async def gen(index: int):
+        try:
+            yield index
+            await wait_forever.wait()
+        finally:
+            await asyncio.sleep(0)
+            closed.add(index)
+
+    merged = merge_async_iterators(gen(0), gen(1))
+    await anext(merged)
+    # Let the replacement anext task enter the underlying generator.
+    await asyncio.sleep(0)
+    await merged.aclose()
+
+    assert closed == {0, 1}
