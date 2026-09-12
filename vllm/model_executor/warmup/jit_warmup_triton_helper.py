@@ -13,6 +13,7 @@ from vllm.model_executor.warmup.jit_warmup import (
     VllmJitKernel,
     get_ast_full_name,
     get_function_source_node,
+    kernel_launcher,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
@@ -256,18 +257,25 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
 
     def launch(
         self,
-        grid: tuple[int, ...],
-        input_names: tuple[str, ...],
-        input_values: tuple[Any, ...],
-        /,
-        _runtime_launcher: Any = None,
-        _runtime_launcher_arg_count: int = 0,
-        **kwargs: Any,
+        launch_spec: LaunchSpec,
+        inputs: Mapping[str, Any],
     ) -> Any:
-        kwargs = self._prepare_launch_kwargs(input_names, input_values, kwargs)
+        if len(launch_spec) == 3:
+            grid, launch_kwargs, outputs = launch_spec
+        else:
+            grid, launch_kwargs = launch_spec
+            outputs = None
+        kwargs = self._prepare_launch_kwargs(
+            tuple(inputs), tuple(inputs.values()), dict(launch_kwargs)
+        )
+        kernel = kwargs.pop("kernel", None) or self.kernel
+        runtime_launcher = kwargs.pop("_runtime_launcher", None)
+        runtime_launcher_arg_count = kwargs.pop("_runtime_launcher_arg_count", 0)
         if self._warming:
             if self._run_autotune:
-                return self.kernel[grid](**kwargs)
+                assert grid is not None
+                kernel[grid](**kwargs)
+                return outputs
             kwargs = {
                 name: _triton_metadata_arg(value) for name, value in kwargs.items()
             }
@@ -277,51 +285,21 @@ class VllmTritonJitKernel(VllmJitKernel[CompileKeyT], Generic[CompileKeyT]):
                 and hasattr(self._warming_compile_key, "launch_pdl")
             ):
                 kwargs["launch_pdl"] = self._warming_compile_key.launch_pdl
-            warmup = getattr(self.kernel, "warmup", None)
+            warmup = getattr(kernel, "warmup", None)
             assert warmup is not None
-            return warmup(grid=(1,), **kwargs)
-        if _runtime_launcher is not None:
+            warmup(grid=(1,), **kwargs)
+            return outputs
+        if grid is None:
+            return outputs
+        if runtime_launcher is not None:
             regular_args = [
                 kwargs.pop(name)
-                for name in self._kernel_arg_names[:_runtime_launcher_arg_count]
+                for name in self._kernel_arg_names[:runtime_launcher_arg_count]
             ]
-            return _runtime_launcher(self.kernel, grid, *regular_args, **kwargs)
-        return self.kernel[grid](**kwargs)
-
-
-def kernel_launcher(
-    call_fn: Callable[..., LaunchSpec],
-) -> Callable[..., Any]:
-    """Launch a Triton kernel from a declarative ``__call__`` specification.
-
-    ``call_fn`` returns either ``(grid, launch_kwargs)`` or, when it allocates
-    its own outputs, ``(grid, launch_kwargs, outputs)``. The declared outputs are
-    returned to the caller.
-    """
-    signature = inspect.signature(call_fn)
-
-    @wraps(call_fn)
-    def wrapper(
-        self: VllmTritonJitKernel[Any],
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        spec = call_fn(self, *args, **kwargs)
-        if len(spec) == 3:
-            grid, launch_kwargs, outputs = spec
+            runtime_launcher(kernel, grid, *regular_args, **kwargs)
         else:
-            grid, launch_kwargs = spec
-            outputs = None
-        bound = signature.bind(self, *args, **kwargs)
-        bound.apply_defaults()
-        inputs = {
-            name: value for name, value in bound.arguments.items() if name != "self"
-        }
-        if grid is not None:
-            self.launch(grid, tuple(inputs), tuple(inputs.values()), **launch_kwargs)
+            kernel[grid](**kwargs)
         return outputs
-
-    return wrapper
 
 
 @dataclass(frozen=True)

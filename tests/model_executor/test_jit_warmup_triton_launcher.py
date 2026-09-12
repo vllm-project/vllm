@@ -11,13 +11,13 @@ from vllm.model_executor.warmup import jit_warmup_triton_helper
 from vllm.model_executor.warmup.jit_warmup import (
     WarmupChoices,
     WarmupIntRange,
+    kernel_launcher,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonJitKey,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
     triton_kernel_dispatcher_with_warmup,
     triton_warmup_inputs,
 )
@@ -438,13 +438,13 @@ def test_compute_slot_mapping_uses_named_launcher_inputs(monkeypatch) -> None:
     )
     launches: list[tuple[Any, ...]] = []
 
-    def launch(grid: Any, names: Any, values: Any, **kwargs: Any) -> None:
-        launches.append((grid, dict(zip(names, values)), kwargs))
+    def launch(launch_spec: Any, inputs: Any) -> None:
+        launches.append((launch_spec, inputs))
 
     monkeypatch.setattr(owner, "launch", launch)
     owner.compile(compile_key)
 
-    grid, inputs, kwargs = launches[0]
+    (grid, kwargs), inputs = launches[0]
     assert grid == (2,)
     assert inputs["num_tokens"] == 2
     assert inputs["block_table_stride"] == 128
