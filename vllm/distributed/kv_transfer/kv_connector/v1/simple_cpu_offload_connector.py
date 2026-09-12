@@ -214,17 +214,17 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         attn_metadata: "AttentionMetadata",
         **kwargs: Any,
     ) -> None:
-        pass  # Always save asynchronously, issued in wait_for_save()
+        pass  # Always save asynchronously, issued in get_finished().
 
     def wait_for_save(self) -> None:
-        if self.worker_handler is not None:
-            self.worker_handler.wait_for_save()
+        pass  # Stores are submitted by get_finished(), including no-forward steps.
 
     def get_finished(
         self,
         finished_req_ids: set[str],
     ) -> tuple[set[str] | None, set[str] | None]:
         if self.worker_handler is not None:
+            self.worker_handler.wait_for_save()
             return self.worker_handler.get_finished(finished_req_ids)
         return None, None
 
