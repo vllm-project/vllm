@@ -13,7 +13,7 @@ use tracing::{debug, error, warn};
 
 use crate::client::AbortRequest;
 use crate::client::state::OutputReceiver;
-use crate::protocol::output::{EngineCoreFinishReason, EngineCoreOutput};
+use crate::protocol::output::{EngineCoreFinishReason, EngineCoreOutput, StopReason};
 use crate::{AbortCause, Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +102,17 @@ impl Stream for EngineCoreOutputStream {
                                 error!(
                                     self.request_id,
                                     "request failed with an internal error during generation"
+                                );
+                            }
+                            if output.finish_reason == Some(EngineCoreFinishReason::Rejected) {
+                                let message = match &output.stop_reason {
+                                    Some(StopReason::Text(message)) => message.as_str(),
+                                    _ => "request rejected by the engine",
+                                };
+                                warn!(
+                                    self.request_id,
+                                    rejection = %message,
+                                    "request rejected during generation"
                                 );
                             }
                             debug!(self.request_id, "request completed via final output");

@@ -353,7 +353,9 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> Result<pb::FinishIn
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
         FinishReason::Error => return Err(Status::internal("engine failed during generation")),
-        FinishReason::Abort | FinishReason::Repetition(_) => (PbFinishReason::Aborted as i32, None),
+        FinishReason::Abort | FinishReason::Rejected(_) | FinishReason::Repetition(_) => {
+            (PbFinishReason::Aborted as i32, None)
+        }
     };
 
     Ok(pb::FinishInfo {

@@ -159,8 +159,10 @@ async fn collect_completion(
         .collect_output()
         .await
         .map_err(|error| server_error!("completion stream failed: {}", error.to_report_string()))?;
-    let finish_reason = collected.finish_reason.clone();
-    let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
+    let stop_reason = collected.finish_reason.as_stop_reason().map(stop_reason_to_json);
+    // A terminal failure is reported before the output's logprobs are demanded:
+    // a rejection carries neither tokens nor logprobs.
+    let finish_reason = completion_finish_reason_to_openai(&collected.finish_reason)?.to_string();
 
     let prompt_char_count = echo.as_ref().map(|prompt| text_len(prompt)).unwrap_or_default();
     let logprobs = if requested_logprobs.is_some() && prompt_only {
@@ -196,7 +198,6 @@ async fn collect_completion(
         Some(prompt) if prompt_only => prompt.clone(),
         Some(prompt) => format!("{prompt}{}", collected.text),
     };
-    let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
     let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details);
 
     if enable_log_requests {
@@ -265,6 +266,7 @@ async fn completion_chunk_stream(
     ));
     let mut visible_text_len = 0_u32;
     let mut first_chunk = true;
+    let mut deferred_prompt_logprobs_error: Option<ApiError> = None;
     let mut continuous_usage = ContinuousUsage::default();
 
     /// Yield a chunk with optional continuous usage attached.
@@ -289,12 +291,21 @@ async fn completion_chunk_stream(
                 if let Some(prompt) = echo.as_ref() {
                     visible_text_len = text_len(prompt);
                     let logprobs = if prompt_only && requested_logprobs.is_some() {
-                        Some(prompt_only_logprobs_to_openai(
+                        match prompt_only_logprobs_to_openai(
                             prompt_logprobs.as_ref(),
                             prompt,
                             prompt_token_ids.as_ref(),
                             return_tokens_as_token_ids,
-                        )?)
+                        ) {
+                            Ok(logprobs) => Some(logprobs),
+                            // The terminal event decides whether the missing prompt
+                            // logprobs are a rejection or a generation that returned
+                            // none; nothing is emitted until it arrives.
+                            Err(error) => {
+                                deferred_prompt_logprobs_error = Some(error);
+                                continue;
+                            }
+                        }
                     } else {
                         None
                     };
@@ -331,6 +342,10 @@ async fn completion_chunk_stream(
                 // so hide its delta and forward only the terminal finish/usage metadata.
                 if prompt_only {
                     if let Some(finished) = finished {
+                        if let Some(error) = deferred_prompt_logprobs_error.take() {
+                            completion_finish_reason_to_openai(&finished.finish_reason)?;
+                            return Err(error);
+                        }
                         if enable_log_requests {
                             info!(
                                 stream = true,
@@ -362,6 +377,11 @@ async fn completion_chunk_stream(
                     continue;
                 }
                 let delta_text_len = text_len(&delta);
+                // A terminal failure is reported before the delta's logprobs are
+                // demanded: a rejection carries neither tokens nor logprobs.
+                if let Some(finished) = &finished {
+                    completion_finish_reason_to_openai(&finished.finish_reason)?;
+                }
                 let logprobs = if requested_logprobs.is_some() {
                     let decoded_logprobs = logprobs.as_ref().ok_or_else(|| {
                         server_error!(
@@ -465,6 +485,7 @@ fn completion_finish_reason_to_openai(
         FinishReason::Error => {
             bail_server_error!("Internal server error");
         }
+        FinishReason::Rejected(reason) => Err(ApiError::engine_rejection(reason.as_ref())),
     }
 }
 
