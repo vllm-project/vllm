@@ -9,6 +9,7 @@ MoE/MLA/SSM and the sampler) run mixed, so they are unaffected.
 """
 
 from dataclasses import dataclass
+from functools import partial
 
 import pytest
 
@@ -24,15 +25,27 @@ class JitModel:
     model: str
     draft: str | None = None
     trust_remote_code: bool = False
+    num_dummy_layers: int | None = None
 
 
 JIT_MONITOR_MODELS = [
-    JitModel("deepseek-ai/DeepSeek-V4-Flash", trust_remote_code=True),
+    JitModel(
+        "deepseek-ai/DeepSeek-V4-Flash",
+        trust_remote_code=True,
+        num_dummy_layers=4,
+    ),
     JitModel(
         "deepseek-ai/DeepSeek-V4-Flash",
         draft="deepseek-ai/DeepSeek-V4-Flash",
         trust_remote_code=True,
+        num_dummy_layers=4,
     ),
+    JitModel(
+        "deepseek-ai/DeepSeek-V4-Pro",
+        trust_remote_code=True,
+        num_dummy_layers=4,
+    ),
+    JitModel("google/gemma-4-31B-it", trust_remote_code=True),
 ]
 
 
@@ -102,7 +115,11 @@ def can_run_without_jit(spec: JitModel):
         max_num_seqs=8,
         gpu_memory_utilization=0.80,
         load_format="dummy",
-        hf_overrides=dummy_hf_overrides,
+        hf_overrides=(
+            partial(dummy_hf_overrides, num_dummy_layers=spec.num_dummy_layers)
+            if spec.num_dummy_layers is not None
+            else dummy_hf_overrides
+        ),
         # cuda graphs cover captured decode shapes, run eager.
         enforce_eager=False,
         jit_monitor_mode="error",
