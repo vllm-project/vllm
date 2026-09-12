@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
+import inspect
+from collections.abc import Callable
+from typing import TYPE_CHECKING, cast
 
 import torch
 
 from vllm.config import VllmConfig
-from vllm.config.speculative import XPRESS_ARCHITECTURES
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
     from vllm.v1.worker.gpu.states import RequestState
 
 
@@ -16,79 +19,30 @@ def init_speculator(
     device: torch.device,
     req_states: "RequestState",
 ):
-    """Build the speculator for this config."""
+    """Build the speculator named by `speculative_config.speculator_config`.
+
+    The speculator is constructed with `(vllm_config, device)`, plus
+    `req_states` if its constructor accepts it.
+    """
+    from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
+
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
-    if speculative_config.method == "extract_hidden_states":
-        from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
-            ExtractHiddenStatesSpeculator,
-        )
-
-        return ExtractHiddenStatesSpeculator(vllm_config, device)
-    elif speculative_config.method == "dflash":
-        architectures = speculative_config.draft_model_config.architectures
-        if any(arch in XPRESS_ARCHITECTURES for arch in architectures):
-            from vllm.v1.worker.gpu.spec_decode.xpress.speculator import (
-                XPressSpeculator,
-            )
-
-            return XPressSpeculator(vllm_config, device)
-        if "LiLiCorrDraftModel" in architectures:
-            from vllm.v1.worker.gpu.spec_decode.lilicorr.speculator import (
-                LiLiCorrSpeculator,
-            )
-
-            return LiLiCorrSpeculator(vllm_config, device)
-        if {"DFlash2DraftModel", "DFlash2BeamDraftModel"}.intersection(architectures):
-            from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import (
-                DFlash2Speculator,
-            )
-
-            return DFlash2Speculator(vllm_config, device)
-        from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
-            DFlashSpeculator,
-        )
-
-        return DFlashSpeculator(vllm_config, device)
-    elif speculative_config.method == "dspark":
-        from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
-            DSparkSpeculator,
-        )
-
-        return DSparkSpeculator(vllm_config, device)
-    elif speculative_config.use_gemma4_mtp():
-        from vllm.v1.worker.gpu.spec_decode.gemma4.speculator import (
-            Gemma4Speculator,
-        )
-
-        return Gemma4Speculator(vllm_config, device)
-    elif speculative_config.use_multi_module_mtp():
-        from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.speculator import (
-            MultiModuleMTPSpeculator,
-        )
-
-        return MultiModuleMTPSpeculator(vllm_config, device)
-    elif speculative_config.method == "mtp":
-        from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
-
-        return MTPSpeculator(vllm_config, device)
-    elif speculative_config.use_eagle():
-        from vllm.v1.worker.gpu.spec_decode.eagle.speculator import (
-            EagleSpeculator,
-        )
-
-        return EagleSpeculator(vllm_config, device)
-    elif speculative_config.uses_draft_model():
-        from vllm.v1.worker.gpu.spec_decode.standalone_ar.speculator import (
-            StandaloneARSpeculator,
-        )
-
-        return StandaloneARSpeculator(vllm_config, device)
-    elif speculative_config.use_ngram():
-        from vllm.v1.worker.gpu.spec_decode.ngram.speculator import (
-            NgramGPUSpeculator,
-        )
-
-        return NgramGPUSpeculator(vllm_config, device, req_states)
-    else:
+    speculator_config = speculative_config.speculator_config
+    qualname = speculator_config.speculator_class
+    if qualname is None:
         raise NotImplementedError(f"{speculative_config.method} is not supported yet.")
+    speculator_cls = resolve_obj_by_qualname(qualname)
+    if not (
+        isinstance(speculator_cls, type) and issubclass(speculator_cls, BaseSpeculator)
+    ):
+        raise TypeError(
+            f"speculator_class '{qualname}' of {type(speculator_config).__name__} "
+            f"must be a subclass of {BaseSpeculator.__module__}."
+            f"{BaseSpeculator.__qualname__}."
+        )
+    # BaseSpeculator doesn't define the constructor signature.
+    factory = cast(Callable[..., "BaseSpeculator"], speculator_cls)
+    if "req_states" in inspect.signature(factory).parameters:
+        return factory(vllm_config, device, req_states=req_states)
+    return factory(vllm_config, device)
