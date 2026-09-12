@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.utils import (
     dispatch_unquantized_gemm,
+    maybe_pad_weight_avoid_cache_aliasing,
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -224,6 +225,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 and weight.stride(0) != 1
             ):
                 layer.weight.data = weight.t().contiguous().t()
+        elif current_platform.is_rocm():
+            layer.weight.data = maybe_pad_weight_avoid_cache_aliasing(layer.weight.data)
 
     def apply(
         self,
