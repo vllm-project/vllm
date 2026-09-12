@@ -289,6 +289,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
         self.pcp_manager: pcp.PCPManager | None = None
+        self.pcp_restore_buffers = pcp.allocate_pcp_restore_buffers(
+            self.vllm_config, self.device, self.supports_mm_inputs
+        )
 
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
@@ -658,6 +661,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.supports_mm_inputs,
             self.block_tables,
             cls=self.pcp_manager_cls,
+            restore_buffers=self.pcp_restore_buffers,
         )
         self.ubatch_runner = maybe_build_ubatch_runner(
             self.vllm_config,
@@ -2157,6 +2161,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
+        if getattr(self, "pcp_restore_buffers", None) is not None:
+            if self.pcp_manager is not None:
+                self.pcp_manager.release_restore_buffers()
+            self.pcp_restore_buffers = None
         self.cudagraph_manager = None
         self.fast_prefill = None
         if hasattr(self, "kv_caches"):

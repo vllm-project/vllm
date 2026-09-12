@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+import time
 from dataclasses import replace
 from types import SimpleNamespace as NS
 
@@ -221,8 +223,9 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
 @pytest.mark.parametrize(
     "consumer", ["sampling", "batch_sharding", "speculation", "prompt_logprobs"]
 )
+@pytest.mark.parametrize("multicast", [False, True])
 def test_sampling_matches_global_rows(
-    monkeypatch, world, queries, prefilling, consumer
+    monkeypatch, world, queries, prefilling, consumer, multicast
 ):
     """Preserve sampled order and dense prompt rows across ragged/padded PCP batches."""
     monkeypatch.setattr(pcp_manager_module, "async_copy_to_gpu", _copy_to_cpu)
@@ -254,6 +257,7 @@ def test_sampling_matches_global_rows(
                 else torch.tensor(starts[1:] - 1, dtype=torch.int64)
             ),
             num_reqs=len(q),
+            num_tokens=int(q.sum()),
             num_scheduled_tokens=q,
             has_prefill=bool(np.any(prefilling)),
             idx_mapping_np=np.arange(len(q)),
@@ -275,6 +279,22 @@ def test_sampling_matches_global_rows(
         )
     )
     for manager, hidden in zip(managers, local):
+        if multicast and not replicated:
+            n = manager._sample_local_row_idx.numel()
+            manager._restore_buffers = (
+                torch.empty(n, 3),
+                torch.empty(n * world, 3),
+                torch.empty(2, len(q), 3),
+            )
+
+        def publish(tensor, group_name, out, manager=manager, hidden=hidden):
+            assert not dense and packed is not None
+            torch.testing.assert_close(tensor, hidden[manager._sample_local_row_idx])
+            out.copy_(packed)
+
+        monkeypatch.setattr(
+            torch.ops.symm_mem, "multimem_all_gather_out", publish, raising=False
+        )
 
         def gather(tensor, dim, manager=manager, hidden=hidden):
             assert not replicated
@@ -286,7 +306,9 @@ def test_sampling_matches_global_rows(
             return packed
 
         monkeypatch.setattr(
-            pcp_manager_module, "get_pcp_group", lambda: NS(all_gather=gather)
+            pcp_manager_module,
+            "get_pcp_group",
+            lambda: NS(all_gather=gather, cpu_group=NS(group_name="test")),
         )
         runner = NS(
             pcp_manager=manager,
@@ -314,6 +336,107 @@ def test_restore_without_pcp_preserves_inputs():
         NS(pcp_manager=None), hidden, input_batch
     )
     assert restored is hidden and sampled is None and batch is input_batch
+
+
+@pytest.mark.parametrize("failed_phase", [1, 2])
+def test_restore_allocation_fallback_is_rank_consistent(monkeypatch, failed_phase):
+    import torch.distributed._symmetric_memory as symm_mem
+
+    calls = []
+
+    def agree(ready, **kwargs):
+        calls.append("agree")
+        if calls.count("agree") == failed_phase:
+            ready.zero_()
+
+    def rendezvous(*args):
+        calls.append("rendezvous")
+        return NS(multicast_ptr=1)
+
+    monkeypatch.setattr(PCPManager, "validate_config", lambda *args: None)
+    monkeypatch.setattr(
+        pcp_manager_module, "get_pcp_group", lambda: NS(cpu_group=NS(size=lambda: 4))
+    )
+    monkeypatch.setattr(pcp_manager_module.dist, "all_reduce", agree)
+    monkeypatch.setattr(symm_mem, "empty", torch.empty)
+    monkeypatch.setattr(symm_mem, "rendezvous", rendezvous)
+    config = NS(
+        parallel_config=NS(prefill_context_parallel_size=4),
+        scheduler_config=NS(max_num_seqs=4),
+        model_config=NS(dtype=torch.bfloat16, get_hidden_size=lambda: 16),
+    )
+    assert (
+        pcp_manager_module.allocate_pcp_restore_buffers(
+            config, torch.device("cpu"), False
+        )
+        is None
+    )
+    assert calls == (
+        ["agree"] if failed_phase == 1 else ["agree", "rendezvous", "agree"]
+    )
+
+
+def _multicast_restore_worker(rank, port):
+    import torch.distributed as dist
+
+    os.environ.update(MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port))
+    torch.accelerator.set_device_index(rank)
+    dist.init_process_group("gloo", rank=rank, world_size=4)
+    nccl = dist.new_group(backend="nccl")
+    pcp_manager_module.get_pcp_group = lambda: NS(cpu_group=dist.group.WORLD)
+    PCPManager.validate_config = staticmethod(lambda *args: None)
+    for dtype in (torch.bfloat16, torch.float16):
+        config = NS(
+            parallel_config=NS(prefill_context_parallel_size=4),
+            scheduler_config=NS(max_num_seqs=64),
+            model_config=NS(dtype=dtype, get_hidden_size=lambda: 32),
+        )
+        buffers = pcp_manager_module.allocate_pcp_restore_buffers(
+            config, torch.device("cuda", rank), False
+        )
+        assert buffers is not None
+        manager = PCPManager(
+            4, rank, torch.device("cuda", rank), restore_buffers=buffers
+        )
+        manager._global_batch = NS(has_prefill=True)
+        for rows, skew in ((1, False), (7, False), (64, True)):
+            n = rows if skew else (rows + 3) // 4
+            ids = torch.arange(rows, device="cuda")
+            owners = torch.zeros_like(ids) if skew else ids % 4
+            slots = ids if skew else ids // 4
+            manager._sample_local_row_idx = torch.arange(n, device="cuda") * 2
+            manager._sample_restore_idx = owners * n + slots
+            previous = expected_previous = None
+            for epoch in range(3):
+                hidden = torch.randn(2 * n + 1, 32, dtype=dtype, device="cuda")
+                gathered = torch.empty(
+                    4 * hidden.shape[0], 32, dtype=dtype, device="cuda"
+                )
+                dist.all_gather_into_tensor(gathered, hidden, group=nccl)
+                expected = gathered[owners * hidden.shape[0] + slots * 2]
+                if rank == 0 and epoch == 1:
+                    time.sleep(0.01)
+                output = manager.restore_sample_hidden_states(hidden)
+                torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                if previous is not None:
+                    torch.testing.assert_close(
+                        previous, expected_previous, rtol=0, atol=0
+                    )
+                previous, expected_previous = output, expected.clone()
+        manager.release_restore_buffers()
+        manager.release_restore_buffers()
+    dist.destroy_process_group()
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 4, reason="requires four CUDA GPUs"
+)
+def test_multicast_restore_buffers_match_dense_oracle():
+    import torch.multiprocessing as mp
+
+    from vllm.utils.network_utils import get_open_port
+
+    mp.spawn(_multicast_restore_worker, args=(get_open_port(),), nprocs=4, join=True)
 
 
 def test_prompt_logprob_worker_exposes_dense_hidden_requirement() -> None:
