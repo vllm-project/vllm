@@ -175,7 +175,8 @@ class DraftModelSpeculator(BaseSpeculator):
             )
 
         self.draft_watermarker: DraftWatermarker | None = None
-        if watermark_config := vllm_config.watermark_config:
+        watermark_config = getattr(vllm_config, "watermark_config", None)
+        if watermark_config is not None:
             watermarker = create_watermarker(watermark_config)
             self.draft_watermarker = create_speculative_draft_watermarker(
                 watermarker,

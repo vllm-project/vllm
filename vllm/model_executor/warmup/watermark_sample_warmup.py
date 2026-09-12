@@ -63,7 +63,7 @@ def _philox_sampler_keys(watermarker: Watermarker) -> list[int]:
 
 @torch.inference_mode()
 def watermark_sample_warmup(worker: Worker) -> None:
-    if worker.vllm_config.watermark_config is None:
+    if getattr(worker.vllm_config, "watermark_config", None) is None:
         return
     # ``GumbelWatermarker`` launches the kernel only on CUDA
     # (vllm/v1/watermarking/gumbel.py:63,:82); elsewhere the sampler takes the

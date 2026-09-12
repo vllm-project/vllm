@@ -45,7 +45,7 @@ def spec_decode_rejection_warmup(worker: Worker) -> None:
     tokens_per_req = num_spec + 1
     num_logits = num_reqs * tokens_per_req
 
-    watermark_config = worker.vllm_config.watermark_config
+    watermark_config = getattr(worker.vllm_config, "watermark_config", None)
     watermark_kwargs: dict[str, Any] = {}
     if watermark_config is not None:
         from vllm.v1.watermarking.spec_decode import speculative_target_watermark_key
