@@ -1318,7 +1318,8 @@ def test_workspace_topk_padded_stride(top_k: int, backend: str) -> None:
 
 
 @pytest.mark.skipif(
-    not _has_device_capability(100), reason="DeepSelect requires SM100a/SM103a"
+    not current_platform.is_device_capability_family(100),
+    reason="DeepSelect requires SM100a/SM103a",
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("batch_size", [1, 8, 64])
@@ -1374,7 +1375,8 @@ def test_deep_select_topk(
 
 
 @pytest.mark.skipif(
-    not _has_device_capability(100), reason="DeepSelect requires SM100a/SM103a"
+    not current_platform.is_device_capability_family(100),
+    reason="DeepSelect requires SM100a/SM103a",
 )
 @torch.inference_mode()
 def test_deep_select_topk_preallocated_output() -> None:
@@ -1424,7 +1426,7 @@ def _has_flashinfer_topk() -> bool:
 
 
 def _has_deep_select() -> bool:
-    if not _has_device_capability(100):
+    if not current_platform.is_device_capability_family(100):
         return False
     from vllm.model_executor.layers import deep_select_topk
 
@@ -1587,6 +1589,6 @@ def test_sparse_indexer_topk_backend_resolution() -> None:
         resolve("persistent", k=3000)
     with pytest.raises(RuntimeError, match="topk_tokens must be in"):
         resolve("cooperative", k=3000)
-    if _has_device_capability(100) and not _has_deep_select():
+    if current_platform.is_device_capability_family(100) and not _has_deep_select():
         with pytest.raises(RuntimeError, match="not available"):
             resolve("deep_select")
