@@ -4,6 +4,7 @@
 DeepseekV4 MLA Attention Layer
 """
 
+import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from functools import cached_property
@@ -25,6 +26,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.deepseek_v4_1.common.ops import (
     MXFP4_BLOCK_SIZE,
@@ -61,6 +63,9 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV41IndexerBackend,
     dsa_indexer_uses_fp4,
     get_max_prefill_buffer_size,
+)
+from vllm.v1.attention.backends.mla.sparse_indexer import (
+    DeepseekV41SparseIndexerBackend,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import (
@@ -979,7 +984,9 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         self.cache_config = cache_config
         self.dtype = dtype
         self.compress_ratio = compress_ratio
-        compilation_config = get_current_vllm_config().compilation_config
+        vllm_config = get_current_vllm_config()
+        self.sparse_logits = vllm_config.attention_config.indexer_sparse_logits
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -1000,11 +1007,22 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             tokens_per_state=self.compress_ratio,
             # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
             alignment=576 if uses_fp8_ds_mla_layout else 512,
+            # DeepGEMM's paged sparse MQA logits address pages by the block
+            # stride, which packs every layer's page in this layout, and need
+            # it 512B-aligned; FlashMLA's fp8_ds_mla decode reads the same
+            # blocks and needs 576B, so keep both.
+            block_stride_alignment=(
+                (math.lcm(512, 576) if uses_fp8_ds_mla_layout else 512)
+                if self.sparse_logits
+                else None
+            ),
         )
 
     def forward(self): ...
 
     def get_attn_backend(self) -> type[AttentionBackend]:
+        if self.sparse_logits:
+            return DeepseekV41SparseIndexerBackend
         return DeepseekV41IndexerBackend
 
 
@@ -1104,7 +1122,15 @@ class DeepseekV4Indexer(nn.Module):
             self.k_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
         self.k_cache = k_cache
 
-        self.indexer_op = SparseAttnIndexer(
+        # Candidate consumers can score only the candidate blocks (opt-in);
+        # the candidate source and pre-candidate indexers stay dense.
+        use_sparse_logits = (
+            vllm_config.attention_config.indexer_sparse_logits
+            and candidate_block_buffer is not None
+            and not candidate_write
+        )
+        indexer_cls = SparseMQAIndexer if use_sparse_logits else SparseAttnIndexer
+        self.indexer_op = indexer_cls(
             self.k_cache,
             self.quant_block_size,
             self.scale_fmt,

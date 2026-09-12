@@ -724,8 +724,9 @@ def get_sparse_mqa_logits_metadata(
         num_kv_tokens: Total KV tokens in the packed workspace.
         sparse_kv_block_indices: Per-row candidate block ids, shape
             [num_q_tokens, num_max_sparse_blocks], dtype int32. Each row's
-            valid prefix must be unique and strictly increasing; pad by
-            repeating the last valid block. Block ``i`` covers tokens
+            valid prefix must be sorted ascending (repeats are tolerated but
+            wasteful); pad by repeating the last valid block. Block ``i``
+            covers tokens
             ``[i * sparse_block_kv + ks % sparse_block_kv, ...)``.
         qk_dtype: dtype of the packed Q values (``torch.int8`` for MXFP4,
             ``torch.float8_e4m3fn`` for FP8).

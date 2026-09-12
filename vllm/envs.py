@@ -58,7 +58,6 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
-    VLLM_DSA_SPARSE_MQA_LOGITS: bool = False
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
@@ -1088,13 +1087,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default: 512 MB
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
-    ),
-    # Use DeepGEMM's sparse MQA logits kernels for the DeepSeek V4.1
-    # two-level indexer: score only the candidate blocks instead of computing
-    # dense logits and masking them down. Requires an MXFP4 indexer cache,
-    # SM100-class GPUs, and DeepGEMM >= 2.8.
-    "VLLM_DSA_SPARSE_MQA_LOGITS": lambda: bool(
-        int(os.getenv("VLLM_DSA_SPARSE_MQA_LOGITS", "0"))
     ),
     # KV context length each adaptive-verification profiling request pretends to
     # carry, so the profiled step reads a realistic amount of cache.

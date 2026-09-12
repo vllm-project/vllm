@@ -491,13 +491,34 @@ def _candidate_token_mask(
     return in_cand[:, :total]
 
 
-def _topk_overlap(a: torch.Tensor, b: torch.Tensor) -> float:
-    total, inter = 0, 0
-    for ra, rb in zip(a.cpu(), b.cpu()):
-        sa, sb = set(ra[ra >= 0].tolist()), set(rb[rb >= 0].tolist())
-        total += len(sb)
-        inter += len(sa & sb)
-    return inter / max(total, 1)
+def _assert_same_selection(
+    logits: torch.Tensor,
+    got: torch.Tensor,
+    expected: torch.Tensor,
+    row_starts: torch.Tensor | None = None,
+) -> None:
+    """Both top-k index sets must pick the same multiset of logit values per
+    row (-1 padding must match too). Indices themselves may differ: the radix
+    top-k kernels break ties among equal values in nondeterministic order."""
+    for r in range(logits.shape[0]):
+        base = int(row_starts[r]) if row_starts is not None else 0
+        g, e = got[r][got[r] >= 0], expected[r][expected[r] >= 0]
+        assert g.numel() == e.numel(), f"row {r}: {g.numel()} vs {e.numel()} selected"
+        vg = logits[r][(base + g).long()].sort().values
+        ve = logits[r][(base + e).long()].sort().values
+        assert torch.equal(vg, ve), f"row {r}: selected values differ"
+
+
+def _sparse_scratch(rows: int, num_sparse: int, topk: int) -> dict:
+    """Caller-owned buffers the sparse path writes into (the metadata builder
+    owns these in production)."""
+    i32 = dict(dtype=torch.int32, device="cuda")
+    return dict(
+        sparse_indices=torch.zeros(rows, num_sparse, **i32),
+        end=torch.zeros(rows, **i32),
+        col_indices=torch.zeros(rows, topk, **i32),
+        workspace=torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda"),
+    )
 
 
 def test_candidate_blocks_to_sparse_indices_math():
@@ -565,8 +586,10 @@ def _quant_fp4(x: torch.Tensor):
 
 @pytest.mark.parametrize("capture", [False, True])
 def test_sparse_mqa_logits_prefill_matches_dense_masked(capture: bool):
-    """Sparse-MQA candidate path selects the same top-k as the production
-    dense logits + candidate-mask path (incl. under CUDA graph capture)."""
+    """The sparse-MQA candidate path selects exactly the same logit values as
+    dense bf16 logits masked to the candidates (the two kernels agree bitwise
+    on candidate columns), incl. under CUDA graph capture, and a later layer
+    reusing the step's expansion/schedule selects the same values."""
     deep_gemm = _skip_unless_sm100_deep_gemm()
     from vllm import _custom_ops as ops  # noqa: F401  (registers _C topk ops)
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
@@ -591,8 +614,8 @@ def test_sparse_mqa_logits_prefill_matches_dense_masked(capture: bool):
     weights = torch.randn(rows, num_heads, device="cuda", dtype=torch.bfloat16)
     candidates = _make_candidates(lens, num_candidates, cbk).cuda()
 
-    # Reference: production dense path (bf16 logits masked to candidates,
-    # then the same radix top-k kernel the dense path uses).
+    # Reference: dense bf16 logits masked to the candidates, then the same
+    # radix top-k kernel the dense path uses.
     dense = deep_gemm.fp8_fp4_mqa_logits(
         (
             q_fp.view(torch.int8).view(rows, num_heads, head_dim // 2),
@@ -617,9 +640,11 @@ def test_sparse_mqa_logits_prefill_matches_dense_masked(capture: bool):
     ops.top_k_per_row_prefill(masked, ks, ke, ref, rows, masked.stride(0), 1, topk)
 
     out = torch.full((rows, topk), -1, dtype=torch.int32, device="cuda")
+    scratch = _sparse_scratch(rows, num_candidates, topk)
+    zero_starts = torch.zeros(rows, dtype=torch.int32, device="cuda")
 
-    def run_sparse():
-        sparse_mqa_logits_prefill_chunk(
+    def run_sparse(kernel_metadata=None):
+        return sparse_mqa_logits_prefill_chunk(
             q_fp.view(torch.int8).view(rows, num_heads, head_dim // 2),
             q_sf.view(rows, num_heads),
             k_fp.view(torch.int8),
@@ -629,8 +654,12 @@ def test_sparse_mqa_logits_prefill_matches_dense_masked(capture: bool):
             ke,
             candidates,
             cbk,
+            cbk,
             topk,
             out,
+            zero_starts=zero_starts,
+            kernel_metadata=kernel_metadata,
+            **scratch,
         )
 
     if capture:
@@ -643,11 +672,12 @@ def test_sparse_mqa_logits_prefill_matches_dense_masked(capture: bool):
         out.fill_(-1)
         graph.replay()
     else:
-        run_sparse()
+        kernel_metadata = run_sparse()
+        _assert_same_selection(dense, out, ref, row_starts=ks)
+        out.fill_(-1)
+        run_sparse(kernel_metadata)
 
-    overlap = _topk_overlap(out, ref)
-    print(f"prefill top-{topk} overlap vs dense masked path: {overlap:.4f}")
-    assert overlap >= 0.99
+    _assert_same_selection(dense, out, ref, row_starts=ks)
 
 
 def _build_fp4_paged_cache(req_lens: torch.Tensor, page_kv: int, head_dim: int):
@@ -685,8 +715,9 @@ def _build_fp4_paged_cache(req_lens: torch.Tensor, page_kv: int, head_dim: int):
 @pytest.mark.parametrize("next_n", [1, 2])
 @pytest.mark.parametrize("capture", [False, True])
 def test_sparse_mqa_logits_paged_matches_dense_masked(next_n: int, capture: bool):
-    """Paged sparse-MQA decode path, incl. MTP rows (next_n > 1 flattened to
-    one query row each) and CUDA graph capture/replay."""
+    """Paged sparse-MQA decode selects exactly the values of the dense bf16
+    masked path, incl. MTP rows (next_n > 1 flattened to one query row each),
+    CUDA graph capture/replay and schedule reuse by a later layer."""
     deep_gemm = _skip_unless_sm100_deep_gemm()
     from vllm import _custom_ops as _ops  # noqa: F401  (registers _C topk ops)
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
@@ -752,27 +783,35 @@ def test_sparse_mqa_logits_paged_matches_dense_masked(next_n: int, capture: bool
     expected, dense_logits = reference_topk()
     out = torch.full((rows, topk), -1, dtype=torch.int32, device="cuda")
 
-    def run_sparse(o: torch.Tensor):
-        assert sparse_mqa_logits_paged_decode(
-            q,
-            q_scale,
+    # The metadata builder flattens every query to one row: per-row context
+    # lengths, an expanded block table and a row -> request map.
+    context_lens = row_lens.flatten().contiguous()
+    row_block_table = block_table.repeat_interleave(next_n, dim=0)
+    row_indices = torch.arange(batch, dtype=torch.int32, device="cuda")
+    row_indices = row_indices.repeat_interleave(next_n)
+    row_ks = torch.zeros(rows, dtype=torch.int32, device="cuda")
+    scratch = _sparse_scratch(rows, num_candidates, topk)
+
+    def run_sparse(o: torch.Tensor, kernel_metadata=None):
+        return sparse_mqa_logits_paged_decode(
+            q.view(rows, 1, num_heads, head_dim // 2),
+            q_scale.view(rows, 1, num_heads),
             kv_cache,
             weights,
-            row_lens.view(batch, next_n),
-            block_table,
-            None,
+            context_lens,
+            row_block_table,
+            row_indices,
             candidates,
+            cbk,
             cbk,
             topk,
             o,
+            row_ks=row_ks,
+            kernel_metadata=kernel_metadata,
+            **scratch,
         )
 
     if capture:
-        # persistent_topk's tie-breaking among equal values is
-        # order-nondeterministic; compare the deterministic selected *value*
-        # multisets (the dense and sparse logits are bitwise-equal there).
-        eager_out = torch.full((rows, topk), -1, dtype=torch.int32, device="cuda")
-        run_sparse(eager_out)
         stream = torch.cuda.Stream()
         with torch.cuda.stream(stream):
             run_sparse(out)
@@ -781,28 +820,23 @@ def test_sparse_mqa_logits_paged_matches_dense_masked(next_n: int, capture: bool
                 run_sparse(out)
         out.fill_(-1)
         graph.replay()
-        for r in range(rows):
-            for sel in (out, eager_out):
-                pass
-            vc = dense_logits[r][out[r][out[r] >= 0].long()].sort().values
-            ve = dense_logits[r][eager_out[r][eager_out[r] >= 0].long()].sort().values
-            assert torch.equal(vc, ve), f"row {r}: replay selected different values"
     else:
-        run_sparse(out)
-        overlap = _topk_overlap(out, expected)
-        print(f"paged top-{topk} overlap vs dense masked path: {overlap:.4f}")
-        assert overlap >= 0.99
+        kernel_metadata = run_sparse(out)
+        _assert_same_selection(dense_logits, out, expected)
+        out.fill_(-1)
+        run_sparse(out, kernel_metadata)
+
+    _assert_same_selection(dense_logits, out, expected)
 
 
 def test_sparse_mqa_logits_accuracy_vs_torch():
     """Sparse-kernel numerics vs a PyTorch fp32 reference on the dequantized
-    MXFP4 inputs, with the dense kernel as a context point."""
-    deep_gemm = _skip_unless_sm100_deep_gemm()
+    MXFP4 inputs."""
+    _skip_unless_sm100_deep_gemm()
     from deep_gemm.utils import cast_back_from_fp4
 
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
         candidate_blocks_to_sparse_indices,
-        sparse_topk_remap,
     )
     from vllm.utils.deep_gemm import (
         fp8_fp4_sparse_mqa_logits,
@@ -875,45 +909,3 @@ def test_sparse_mqa_logits_accuracy_vs_torch():
     # bf16-level numerics: far below the value gaps that change top-k selection.
     assert norm_err.quantile(0.99).item() < 1e-2
     assert norm_err.max().item() < 2e-2
-
-    # Selection quality vs the fp32 reference restricted to the candidates,
-    # with the dense kernel as a context point.
-    topk = 64
-    ref_masked = ref.masked_fill(
-        ~_candidate_token_mask(candidates, sbk, total, ks), float("-inf")
-    )
-    ref_top = ref_masked.topk(topk, dim=1)
-    ref_idx = torch.where(
-        ref_top.values == float("-inf"), -1, ref_top.indices - ks.unsqueeze(1).long()
-    ).to(torch.int32)
-    out = torch.full((rows, topk), -1, dtype=torch.int32, device="cuda")
-    sparse_topk_remap(logits, sparse_idx, end, ks, sbk, topk, out, decode=False)
-    dense_masked = deep_gemm.fp8_fp4_mqa_logits(
-        (
-            q_fp.view(torch.int8).view(rows, num_heads, head_dim // 2),
-            q_sf.view(rows, num_heads),
-        ),
-        (k_fp.view(torch.int8), k_sf.view(total)),
-        weights,
-        ks,
-        ke,
-        clean_logits=False,
-        logits_dtype=torch.bfloat16,
-    ).masked_fill(~_candidate_token_mask(candidates, sbk, total, ks), float("-inf"))
-    dense_top = dense_masked.topk(topk, dim=1)
-    dense_idx = torch.where(
-        dense_top.values == float("-inf"),
-        -1,
-        dense_top.indices - ks.unsqueeze(1).long(),
-    ).to(torch.int32)
-    sparse_ov = _topk_overlap(out, ref_idx)
-    dense_ov = _topk_overlap(dense_idx, ref_idx)
-    print(
-        f"top-{topk} overlap vs torch fp32: "
-        f"sparse={sparse_ov:.4f}, dense={dense_ov:.4f}"
-    )
-    # The sparse path uses vllm's radix top-k while both references here use
-    # torch.topk; tie-break order alone costs a few percent at bf16 value
-    # granularity, so the meaningful guard is parity with the dense kernel.
-    assert sparse_ov >= 0.95
-    assert sparse_ov >= dense_ov - 0.02
