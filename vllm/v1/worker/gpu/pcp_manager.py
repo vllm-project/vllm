@@ -6,10 +6,10 @@ from dataclasses import dataclass, replace
 import numpy as np
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import (
@@ -154,30 +154,48 @@ class PCPManager:
                     "MRV2 PCP only supports DSpark or single-module MTP "
                     "speculative decoding."
                 )
-        if vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
+        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+        if parallel_config.decode_context_parallel_size > 1 and not is_sparse_mla:
+            # Dense MLA prefill sizes its DCP KV gather from each rank's own
+            # chunk rows, so the ranks' collectives diverge (#53573).
+            raise NotImplementedError("MRV2 PCP + DCP supports sparse MLA models only.")
+        if (
+            is_sparse_mla
+            and parallel_config.decode_context_parallel_size == 1
+            and cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            raise NotImplementedError(
+                "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
+                "Set -cc.cudagraph_mode=NONE."
+            )
+        if cudagraph_mode.has_full_cudagraphs():
             raise NotImplementedError("MRV2 PCP supports PIECEWISE CUDA graphs only.")
+        if (
+            parallel_config.decode_context_parallel_size > 1
+            and parallel_config.dcp_comm_backend != "ag_rs"
+        ):
+            raise NotImplementedError(
+                "MRV2 PCP + DCP requires dcp_comm_backend='ag_rs'; got "
+                f"'{parallel_config.dcp_comm_backend}'."
+            )
 
     @staticmethod
     def _reorder_segments(
         segments: list[RankSegment],
-        num_computed_tokens: np.ndarray,
         is_prefilling: np.ndarray,
-        query_start_loc_np: np.ndarray,
     ) -> list[RankSegment]:
-        """Move pure prefills last to match the batch ordering expected by
-        attention backends like MLA and sparse MLA.
-        """
+        """Order this rank's rows decodes-first, then prefills, canonically."""
 
-        def is_pure_prefill(segment: RankSegment) -> bool:
+        def sort_key(segment: RankSegment) -> tuple[bool, int, int]:
             req_idx = segment.global_batch_req_idx
-            start_pos = (
-                num_computed_tokens[req_idx]
-                + segment.global_batch_slice.start
-                - query_start_loc_np[req_idx]
+            return (
+                bool(is_prefilling[req_idx]),
+                req_idx,
+                segment.global_batch_slice.start,
             )
-            return is_prefilling[req_idx] and start_pos == 0
 
-        segments.sort(key=is_pure_prefill)
+        segments.sort(key=sort_key)
         rank_offset = 0
         for index, segment in enumerate(segments):
             segments[index] = replace(
@@ -188,6 +206,21 @@ class PCPManager:
             )
             rank_offset += segment.num_tokens
         return segments
+
+    def replicated_requests(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        is_prefilling: np.ndarray,
+    ) -> np.ndarray:
+        """Per global request, whether every PCP rank gets the whole query."""
+        num_chunks = 2 * self.pcp_world_size
+        query_lens = np.asarray(num_scheduled_tokens, dtype=np.int64)
+        replicated = ~np.asarray(is_prefilling, dtype=np.bool_)
+        if self.dcp_world_size > 1:
+            chunk_sizes = (query_lens + num_chunks - 1) // num_chunks
+            drops_a_chunk = (num_chunks - 1) * chunk_sizes >= query_lens
+            replicated |= drops_a_chunk
+        return replicated
 
     def _iter_rank_chunks(
         self,
@@ -204,17 +237,20 @@ class PCPManager:
             rank 1:      1                   6
             rank 2:          2           5
             rank 3:              3   4
+
+        Decodes, and prefills too short to fill all eight, are replicated instead.
         """
         num_chunks = 2 * self.pcp_world_size
+        replicated = self.replicated_requests(num_scheduled_tokens, is_prefilling)
         for global_batch_req_idx, num_tokens in enumerate(num_scheduled_tokens):
             query_len = int(num_tokens)
             if query_len == 0:
                 continue
             chunk_indices: tuple[int, ...]
-            if bool(is_prefilling[global_batch_req_idx]):
+            if not replicated[global_batch_req_idx]:
                 chunk_size = (query_len + num_chunks - 1) // num_chunks
                 chunk_indices = (rank, num_chunks - 1 - rank)
-            else:  # decodes are replicated
+            else:  # decodes, and short prefills under DCP, are replicated
                 chunk_size = query_len
                 chunk_indices = (0,)
 
@@ -229,7 +265,6 @@ class PCPManager:
         self,
         rank: int,
         num_scheduled_tokens: np.ndarray,
-        num_computed_tokens: np.ndarray,
         is_prefilling: np.ndarray,
         query_start_loc_np: np.ndarray,
     ) -> list[RankSegment]:
@@ -248,12 +283,7 @@ class PCPManager:
                 )
             )
             rank_offset += chunk_len
-        return self._reorder_segments(
-            rank_segments,
-            num_computed_tokens,
-            is_prefilling,
-            query_start_loc_np,
-        )
+        return self._reorder_segments(rank_segments, is_prefilling)
 
     def _build_batch_layout(
         self,
@@ -263,13 +293,13 @@ class PCPManager:
         query_start_loc_np: np.ndarray,
         padded_num_tokens: int | None = None,
     ) -> tuple[list[list[RankSegment]], list[int]]:
+        replicated = self.replicated_requests(num_scheduled_tokens, is_prefilling)
         segments_by_rank = []
         per_rank_num_tokens = []
         for rank in range(self.pcp_world_size):
             segments = self._get_rank_segments(
                 rank,
                 num_scheduled_tokens,
-                num_computed_tokens,
                 is_prefilling,
                 query_start_loc_np,
             )
@@ -309,7 +339,7 @@ class PCPManager:
                     dtype=np.int64,
                 )
                 # Cache insertion pairs one slot entry with each rank's local decode.
-                if not bool(is_prefilling[segment.global_batch_req_idx]) and rank != 0:
+                if replicated[segment.global_batch_req_idx] and rank != 0:
                     continue
                 gathered_kv_write_mask[padded_gathered_slice] = True
                 hidden_restore_idx[segment.global_batch_slice] = np.arange(
@@ -527,6 +557,19 @@ class PCPManager:
         )
         seq_lens_cpu_upper_bound_np = np.zeros(num_local_reqs, dtype=np.int32)
         seq_lens_cpu_upper_bound_np[:] = local_start_pos_np + local_num_scheduled_tokens
+        dcp_local_seq_lens_cpu_upper_bound = None
+        if self.dcp_world_size > 1:
+            # The largest DCP shard of each row's whole request, identical on
+            # every PCP rank: the sparse backends pad their KV gather to it.
+            request_seq_lens = (num_computed_tokens + num_scheduled_tokens)[
+                local_to_global_batch_req_idx_np
+            ]
+            dcp_local_seq_lens_cpu_upper_bound = get_dcp_local_seq_lens(
+                torch.from_numpy(request_seq_lens.astype(np.int32)),
+                self.dcp_world_size,
+                0,
+                self.cp_interleave,
+            )
 
         self._local_batch = replace(
             input_batch,
@@ -549,6 +592,7 @@ class PCPManager:
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_cpu_upper_bound_np),
             dcp_local_seq_lens=None,
+            dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
             num_computed_tokens_np=local_start_pos_np,
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
