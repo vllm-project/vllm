@@ -3,11 +3,12 @@
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field, fields, make_dataclass
+from dataclasses import dataclass, field, fields
 from typing import (
     TYPE_CHECKING,
     Any,
     Protocol,
+    cast,
 )
 
 import numpy as np
@@ -16,6 +17,7 @@ from typing_extensions import runtime_checkable
 
 from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import _layout_from_name
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MambaSpec
@@ -375,7 +377,10 @@ def get_num_attention_heads_from_layers(
     )
     if not attn_layers:
         return None
-    heads = {layer.impl.num_heads for layer in attn_layers.values()}
+    heads = {
+        cast(Any, getattr(layer, "impl", layer)).num_heads
+        for layer in attn_layers.values()
+    }
     assert len(heads) == 1, (
         f"All layers in one attention group must share num_heads; "
         f"got {heads} for {layer_names}."
@@ -471,7 +476,9 @@ def make_local_attention_virtual_batches(
     block_size: int = 0,
 ) -> tuple[CommonAttentionMetadata, Callable[[torch.Tensor], torch.Tensor]]:
     query_start_loc_np = common_attn_metadata.query_start_loc_cpu.numpy()
-    seq_lens_np = common_attn_metadata.seq_lens_cpu.numpy()
+    with gpu_sync_allowed():
+        # TODO see https://github.com/vllm-project/vllm/pull/31852
+        seq_lens_np = common_attn_metadata.seq_lens.cpu().numpy()
     block_table = common_attn_metadata.block_table_tensor
     device = common_attn_metadata.query_start_loc.device
 
@@ -534,8 +541,6 @@ def make_local_attention_virtual_batches(
     #   seqlens_k_local = [4, 2, 4, 4, 4, 1, 4, 1]
     seqlens_k_local = np.full(cu_num_blocks[-1], attn_chunk_size, dtype=np.int32)
     seqlens_k_local[cu_num_blocks - 1] = tokens_in_last_block
-    num_computed_tokens_local = seqlens_k_local - seqlens_q_local
-
     k_seqstarts_absolute = np.repeat(seq_lens_np, local_blocks) - (
         rarange * attn_chunk_size + np.repeat(tokens_in_last_block, local_blocks)
     )
@@ -605,9 +610,7 @@ def make_local_attention_virtual_batches(
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
-        seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
-        _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=torch.from_numpy(num_computed_tokens_local),
+        seq_lens_cpu_upper_bound=seq_lens_cpu,
     ), make_block_table
 
 
@@ -619,8 +622,13 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         # Skip computing fast prefill path
         return common_attn_metadata
 
-    assert common_attn_metadata.logits_indices_padded is not None
-    assert common_attn_metadata.num_logits_indices is not None
+    if (
+        common_attn_metadata.logits_indices_padded is None
+        or common_attn_metadata.num_logits_indices is None
+    ):
+        # Fast prefill not armed for this step (e.g. cudagraph capture, or a
+        # pure-decode step): run the KV-sharing layers on the full batch.
+        return common_attn_metadata
 
     logits_indices_padded = common_attn_metadata.logits_indices_padded
     num_logits_indices = common_attn_metadata.num_logits_indices
@@ -680,8 +688,6 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
         seq_lens_cpu_upper_bound=common_attn_metadata.seq_lens_cpu_upper_bound,
-        _seq_lens_cpu=common_attn_metadata._seq_lens_cpu,
-        _num_computed_tokens_cpu=common_attn_metadata._num_computed_tokens_cpu,
     )
     return common_attn_metadata
 
@@ -966,19 +972,6 @@ def reshape_attn_output_for_spec_decode(attn_output: torch.Tensor) -> torch.Tens
     assert attn_output.dim() == 4, f"attn_output must be 4D, got {attn_output.dim()}D"
     total_tokens = attn_output.shape[0] * attn_output.shape[1]
     return attn_output.view(total_tokens, attn_output.shape[2], attn_output.shape[3])
-
-
-def subclass_attention_metadata(
-    name_prefix: str,
-    metadata_cls: Any,
-    fields: list[tuple[str, Any, Any]],
-) -> Any:
-    """
-    Return a new subclass of `metadata_cls` with additional fields
-    """
-    name: str = name_prefix + metadata_cls.__name__  # type: ignore
-    Wrapped = make_dataclass(name, fields, bases=(metadata_cls,))
-    return Wrapped
 
 
 @runtime_checkable

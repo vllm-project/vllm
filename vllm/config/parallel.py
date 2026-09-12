@@ -142,6 +142,8 @@ class ParallelConfig:
     """IP of the data parallel master."""
     data_parallel_rpc_port: int = Field(default=29550, ge=1, le=65535)
     """Fixed port for data parallel messaging, shared by all nodes."""
+    dp_sync_interval: int = Field(default=16, ge=1)
+    """Steps between DP finish-sync all-reduces; must match across DP ranks."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
     data_parallel_backend: DataParallelBackend = "mp"
@@ -164,6 +166,13 @@ class ParallelConfig:
     """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    enable_batch_sharded_sampling: bool | None = None
+    """Use sharded sampling across tensor parallel ranks. Each rank samples
+    a slice of the batch instead of every rank sampling all of it. Currently
+    defaults to False if not set. Enabling it explicitly raises when the config
+    cannot support it (`tensor_parallel_size` must be > 1, `max_num_seqs` at
+    least `tensor_parallel_size`, and `max_logprobs` non-negative). Models opt in
+    by implementing `compute_logits_local`."""
     enable_ep_weight_filter: bool = False
     """Skip non-local expert weights during model loading when expert
     parallelism is active.  Each rank only reads its own expert shard from
@@ -194,8 +203,8 @@ class ParallelConfig:
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "nixl_ep": Use nixl-ep kernels
-    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
-    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
+    - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
+    - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl"""
 
     max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
@@ -384,7 +393,14 @@ class ParallelConfig:
         in (rank i+1, block j) only after (rank i, block j) is fully occupied.
     Block_size should be greater than or equal to cp_kv_cache_interleave_size.
     Block_size should be divisible by cp_kv_cache_interleave_size.
+
+    When --cp-kv-cache-interleave-size is omitted (None), the interleave size
+    is resolved automatically based on NIXL transfer requirements.
+    Explicit settings take priority.
     """
+
+    _allow_auto_resolve_cp_interleave_size: bool = True
+    """Whether NIXL may select the interleave size automatically."""
 
     data_parallel_index: int = Field(init=False)
     """Equal to the data parallel rank but not used for torch process groups
@@ -538,8 +554,6 @@ class ParallelConfig:
         tp = self.tensor_parallel_size
         pcp = self.prefill_context_parallel_size
         dcp = self.decode_context_parallel_size
-        if pcp > 1 and self.data_parallel_size > 1:
-            raise ValueError("PCP does not support data parallelism yet.")
         if pcp == 1:
             # DCP reuses the TP ranks when PCP is disabled.
             if tp % dcp != 0:
@@ -1056,6 +1070,17 @@ class ParallelConfig:
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError(
                 "Unable to use nsight profiling unless workers run with Ray."
+            )
+
+        # A batch below one token per microbatch cannot be split, so the
+        # thresholds have to keep it out rather than the split having to cope.
+        if self.use_ubatching and (
+            min(self.dbo_decode_token_threshold, self.dbo_prefill_token_threshold)
+            < self.num_ubatches
+        ):
+            raise ValueError(
+                "dbo_decode_token_threshold and dbo_prefill_token_threshold must "
+                f"be at least the number of microbatches ({self.num_ubatches})."
             )
 
         return self

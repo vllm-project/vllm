@@ -91,7 +91,9 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
             # prompt tokens.
             dummy_prompt = []
         else:
-            dummy_prompt = tokenizer.encode(dummy_text, truncation=False)
+            from .processor import cached_encode
+
+            dummy_prompt = cached_encode(tokenizer, dummy_text, truncation=False)
 
         return ProcessorInputs(
             prompt=dummy_prompt,
@@ -191,5 +193,5 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                         height,
                     )
                 height = min(height, overrides.height)
-        video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
+        video = np.full((num_frames, height, width, 3), 255, dtype=np.uint8)
         return [video] * num_videos

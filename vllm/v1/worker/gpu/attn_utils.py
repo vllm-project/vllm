@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
+import numpy as np
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -14,6 +17,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -21,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
+from vllm.v1.worker.ubatch_utils import get_num_ubatches
 from vllm.v1.worker.utils import (
     AttentionGroup,
     add_kv_sharing_layers_to_kv_cache_groups,
@@ -28,6 +33,12 @@ from vllm.v1.worker.utils import (
     bind_kv_cache,
     prepare_kernel_block_sizes,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.cudagraph_utils import (
+        BatchExecutionDescriptor,
+        CudaGraphManager,
+    )
 
 
 @dataclass(frozen=True)
@@ -46,6 +57,66 @@ class AttentionCGSupportInfo:
         if support.value < self.min_cg_support.value:
             return AttentionCGSupportInfo(support, backend)
         return self
+
+
+@dataclass(frozen=True)
+class FastPrefillBatchMetadata:
+    """Per-step inputs for the KV-sharing fast prefill path."""
+
+    logits_indices_padded: torch.Tensor
+    num_logits_indices: int
+    max_logits_per_req: int
+
+
+class FastPrefillHelper:
+    """Decides per step whether to arm the KV-sharing fast prefill path, and
+    stages the logits indices it runs on.
+    """
+
+    def __init__(self, cudagraph_manager: "CudaGraphManager", max_num_tokens: int):
+        self.max_num_tokens = max_num_tokens
+        self.cudagraph_manager = cudagraph_manager
+        self.logits_indices_buf = torch.zeros(
+            max_num_tokens, dtype=torch.int32, device=cudagraph_manager.device
+        )
+
+    def prepare(
+        self,
+        logits_indices: torch.Tensor,
+        num_reqs: int,
+        cu_num_logits_np: np.ndarray,
+        has_prefill: bool,
+        batch_desc: "BatchExecutionDescriptor",
+    ) -> FastPrefillBatchMetadata | None:
+        if (
+            not has_prefill
+            or batch_desc.cg_mode == CUDAGraphMode.FULL
+            or batch_desc.num_ubatches > 1
+        ):
+            return None
+        buf = self.logits_indices_buf
+        num_logits = logits_indices.shape[0]
+        assert num_logits > 0
+        buf[:num_logits].copy_(logits_indices)
+        # There might be leftover indices in buf[num_logits:] from previous
+        # iterations. Broadcast the scalar GPU-side to keep them valid.
+        buf[num_logits:] = logits_indices[-1]
+        # Pad so the model's KV-sharing layers run their reduced (logits-only)
+        # batch at a captured piecewise cudagraph size. Pre-capture, or with
+        # cudagraphs off, dispatch returns the unpadded count.
+        desc = self.cudagraph_manager.dispatch(
+            num_reqs=num_reqs,
+            num_tokens=num_logits,
+            uniform_token_count=None,
+            num_active_loras=0,
+        )
+        num_logits_padded = min(desc.num_tokens, self.max_num_tokens)
+        return FastPrefillBatchMetadata(
+            logits_indices_padded=buf[:num_logits_padded],
+            num_logits_indices=num_logits,
+            # Largest per-request logits count, known on the host.
+            max_logits_per_req=int(np.diff(cu_num_logits_np).max()),
+        )
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -73,11 +144,42 @@ def get_shared_kv_cache_layers(vllm_config: VllmConfig):
     }
 
 
+def get_kv_sharing_fast_prefill_eligible_layers(
+    vllm_config: VllmConfig, draft_layer_names: set[str] | None = None
+) -> set[str]:
+    """Trailing run of KV-sharing layers, eligible for fast prefill.
+
+    In You Only Cache Once (https://arxiv.org/abs/2405.05254) or other similar
+    KV sharing setups, only the layers that generate KV caches are involved in
+    the prefill phase, enabling prefill to early exit. Layers are registered in
+    execution order, so the eligible layers are the contiguous suffix of
+    KV-sharing layers.
+
+    Speculator draft layers register after the target model's layers (and may
+    themselves share KV), so they are excluded from the walk.
+    """
+    if not vllm_config.cache_config.kv_sharing_fast_prefill:
+        return set()
+    shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
+    if not shared_kv_cache_layers:
+        return set()
+    eligible_layers: set[str] = set()
+    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+    for layer_name in reversed(attn_layers):
+        if draft_layer_names is not None and layer_name in draft_layer_names:
+            continue
+        if layer_name not in shared_kv_cache_layers:
+            break
+        eligible_layers.add(layer_name)
+    return eligible_layers
+
+
 def init_attn_backend(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
     device: torch.device,
     active_layer_names: set[str] | None = None,
+    draft_layer_names: set[str] | None = None,
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
@@ -86,6 +188,9 @@ def init_attn_backend(
     # discovered alongside the target layer in Phase 1 below.
     add_kv_sharing_layers_to_kv_cache_groups(
         get_shared_kv_cache_layers(vllm_config), kv_cache_config.kv_cache_groups
+    )
+    fast_prefill_eligible_layers = get_kv_sharing_fast_prefill_eligible_layers(
+        vllm_config, draft_layer_names
     )
 
     # Phase 1: discover attention groups for each kv cache group.
@@ -104,6 +209,10 @@ def init_attn_backend(
 
         for layer_name in layer_names:
             attn_backend = attn_layers[layer_name].get_attn_backend()
+            if layer_name in fast_prefill_eligible_layers:
+                attn_backend = create_fast_prefill_custom_backend(
+                    "FastPrefill", attn_backend
+                )
 
             layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -130,8 +239,6 @@ def init_attn_backend(
 
     # Phase 3: create metadata builders and determine cudagraph support.
     attn_backend_workspace: torch.Tensor | None = None
-    min_cg_support = AttentionCGSupport.ALWAYS
-    min_cg_attn_backend = None
     for kv_cache_group_id, groups in enumerate(attn_groups):
         kernel_block_size = None
         if kv_cache_group_id < len(kernel_block_sizes):
@@ -141,16 +248,39 @@ def init_attn_backend(
                 vllm_config=vllm_config,
                 device=device,
                 kernel_block_size=kernel_block_size,
-                num_metadata_builders=1,
+                # Microbatches build attention metadata concurrently, and some
+                # builders keep the prepared metadata on themselves (MLA stores
+                # it on the prefill backend), so each ubatch needs its own.
+                num_metadata_builders=get_num_ubatches(vllm_config.parallel_config),
             )
-            builder = group.get_metadata_builder(0)
-            if attn_backend_workspace is None:
-                if hasattr(builder, "_get_workspace_buffer"):
-                    attn_backend_workspace = builder._get_workspace_buffer()
-            else:
-                if hasattr(builder, "set_workspace_buffer"):
+            # The microbatches' builders share the workspace: they all issue
+            # attention on the one compute stream the threads hand off, so the
+            # buffer is written serially, as it already is across steps.
+            for builder in group.metadata_builders:
+                if attn_backend_workspace is None:
+                    if hasattr(builder, "_get_workspace_buffer"):
+                        attn_backend_workspace = builder._get_workspace_buffer()
+                elif hasattr(builder, "set_workspace_buffer"):
                     builder.set_workspace_buffer(attn_backend_workspace)
-            # Check cudagraph support for the attention backend
+    attn_cg_support_info = get_attn_cg_support(attn_groups, vllm_config)
+    return attn_groups, attn_cg_support_info, kernel_block_sizes
+
+
+def get_attn_cg_support(
+    attn_groups: list[list[AttentionGroup]],
+    vllm_config: VllmConfig,
+    checked_layer_names: set[str] | None = None,
+) -> AttentionCGSupportInfo:
+    """Return the weakest CUDA graph support among the checked layers."""
+    min_cg_support = AttentionCGSupport.ALWAYS
+    min_cg_attn_backend = None
+    for groups in attn_groups:
+        for group in groups:
+            if checked_layer_names is not None and checked_layer_names.isdisjoint(
+                group.layer_names
+            ):
+                continue
+            builder = group.get_metadata_builder(0)
             cg_support = builder.get_cudagraph_support(
                 vllm_config,
                 group.kv_cache_spec,
@@ -158,15 +288,15 @@ def init_attn_backend(
             if cg_support.value < min_cg_support.value:
                 min_cg_support = cg_support
                 min_cg_attn_backend = group.backend.__name__
-
-    attn_cg_support_info = AttentionCGSupportInfo(
-        min_cg_support=min_cg_support, min_cg_attn_backend=min_cg_attn_backend
+    return AttentionCGSupportInfo(
+        min_cg_support=min_cg_support,
+        min_cg_attn_backend=min_cg_attn_backend,
     )
-    return attn_groups, attn_cg_support_info, kernel_block_sizes
 
 
 def get_query_lens_mismatch_unsupported_backend(
     attn_groups: list[list[AttentionGroup]],
+    checked_layer_names: set[str] | None = None,
 ) -> str | None:
     """Name the first backend needing the CPU query lengths to be exact, if any.
 
@@ -176,6 +306,10 @@ def get_query_lens_mismatch_unsupported_backend(
     """
     for groups in attn_groups:
         for group in groups:
+            if checked_layer_names is not None and checked_layer_names.isdisjoint(
+                group.layer_names
+            ):
+                continue
             if not group.backend.supports_device_cpu_query_lens_mismatch():
                 return group.backend.__name__
     return None
@@ -188,13 +322,16 @@ def init_kv_cache(
     device: torch.device,
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
+    kv_cache_allocation_context: AbstractContextManager | None = None,
 ) -> dict[str, Any]:
-    kv_caches = allocate_kv_cache(
-        kv_cache_config,
-        device,
-        vllm_config.cache_config.get_resolved_kv_cache_layout(),
-        kernel_block_sizes,
-    )
+    allocation_context = kv_cache_allocation_context or nullcontext()
+    with allocation_context:
+        kv_caches = allocate_kv_cache(
+            kv_cache_config,
+            device,
+            vllm_config.cache_config.get_resolved_kv_cache_layout(),
+            kernel_block_sizes,
+        )
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
@@ -205,7 +342,13 @@ def init_kv_cache(
         in ("longcat_flash", "longcat_flash_ngram")
         else 1
     )
-    bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
+    bind_kv_cache(
+        kv_caches,
+        forward_context,
+        runner_kv_caches,
+        num_attn_module,
+        kv_cache_groups=kv_cache_config.kv_cache_groups,
+    )
     return kv_caches
 
 
@@ -241,6 +384,8 @@ def build_attn_metadata(
     for_cudagraph_capture: bool = False,
     causal: bool | torch.Tensor | Mapping[int, bool] = True,
     rswa_prefix_lens: torch.Tensor | None = None,
+    ubatch_idx: int = 0,
+    fast_prefill: FastPrefillBatchMetadata | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
@@ -268,6 +413,12 @@ def build_attn_metadata(
         group_is_prefilling = common_attn_metadata_extra_kwargs.pop(
             "is_prefilling", is_prefilling
         )
+        if fast_prefill is not None:
+            common_attn_metadata_extra_kwargs.update(
+                logits_indices_padded=fast_prefill.logits_indices_padded,
+                num_logits_indices=fast_prefill.num_logits_indices,
+                max_logits_per_req=fast_prefill.max_logits_per_req,
+            )
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
@@ -289,7 +440,7 @@ def build_attn_metadata(
         )
 
         for attn_group in attn_groups[i]:
-            attn_metadata_builder = attn_group.get_metadata_builder(0)
+            attn_metadata_builder = attn_group.get_metadata_builder(ubatch_idx)
             if for_cudagraph_capture:
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(
                     common_attn_metadata

@@ -17,7 +17,12 @@ import pytest
 
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import DEFAULT_NONE_HASH_SEED, init_none_hash
-from vllm.v1.kv_offload.base import LookupResult, ReqContext, ScheduleEndContext
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadPolicy,
+    ReqContext,
+    ScheduleEndContext,
+)
 from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
@@ -86,17 +91,17 @@ def _req_context(kv_params: dict | None = None) -> ReqContext:
 def _job_metadata(
     job_id: int,
     keys: list[bytes] | None = None,
-    block_ids: list[int] | None = None,
+    chunk_ids: list[int] | None = None,
     kv_params: dict | None = None,
 ) -> TransferJob:
     if keys is None:
         keys = [b"key1"]
-    if block_ids is None:
-        block_ids = list(range(len(keys)))
+    if chunk_ids is None:
+        chunk_ids = list(range(len(keys)))
     return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids),
+        chunk_ids=np.array(chunk_ids),
         is_promotion=False,
         req_context=_req_context(kv_params),
     )
@@ -241,6 +246,28 @@ class TestLookup:
 
 
 # ---------------------------------------------------------------------------
+# Tests for on_new_request offload policy
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "kv_params,expected",
+    [
+        (_remote_decoder_kv_params(), OffloadPolicy.REQUEST_LEVEL),
+        (None, OffloadPolicy.CHUNK_LEVEL),
+        (_remote_prefiller_kv_params(), OffloadPolicy.CHUNK_LEVEL),
+        ({"remote_decoder": {}}, OffloadPolicy.CHUNK_LEVEL),
+    ],
+    ids=["producer", "plain", "consumer", "producer_no_id"],
+)
+def test_on_new_request_policy(monkeypatch, kv_params, expected):
+    """Only a producer leg carrying a kv_request_id widens to REQUEST_LEVEL."""
+    mgr = _make_manager()
+    monkeypatch.setattr(mgr, "_get_or_create_session", lambda peer_id: None)
+    assert mgr.on_new_request(_req_context(kv_params=kv_params)).policy is expected
+
+
+# ---------------------------------------------------------------------------
 # Tests for serve_external_requests
 # ---------------------------------------------------------------------------
 
@@ -339,7 +366,7 @@ class TestSubmitStore:
         job = _job_metadata(
             job_id=1,
             keys=[b"k1", b"k2"],
-            block_ids=[3, 4],
+            chunk_ids=[3, 4],
             kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
         mgr.submit_store(job)
@@ -370,7 +397,7 @@ class TestSubmitStore:
         job = _job_metadata(
             job_id=7,
             keys=[b"k1", b"k2"],
-            block_ids=[3, 4],
+            chunk_ids=[3, 4],
             kv_params=_remote_decoder_kv_params(kv_request_id="req-1"),
         )
         mgr.submit_store(job)
@@ -413,7 +440,7 @@ class TestSubmitLoad:
         """Empty key list succeeds immediately."""
         mgr = _make_manager()
         job = _job_metadata(
-            job_id=1, keys=[], block_ids=[], kv_params=_remote_prefiller_kv_params()
+            job_id=1, keys=[], chunk_ids=[], kv_params=_remote_prefiller_kv_params()
         )
         mgr.submit_load(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=True)]
@@ -436,7 +463,7 @@ class TestSubmitLoad:
         job = _job_metadata(
             job_id=42,
             keys=[b"k1", b"k2"],
-            block_ids=[5, 6],
+            chunk_ids=[5, 6],
             kv_params=_remote_prefiller_kv_params(kv_request_id="req-42"),
         )
         mgr.submit_load(job)
@@ -1128,7 +1155,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=100,
                 keys=[b"a-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_prefiller_params,
             )
         )
@@ -1136,7 +1163,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=200,
                 keys=[b"b-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=b_prefiller_params,
             )
         )
@@ -1146,7 +1173,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=101,
                 keys=[b"b-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_decoder_params,
             )
         )
@@ -1154,7 +1181,7 @@ class TestBidirectionalManager:
             _job_metadata(
                 job_id=201,
                 keys=[b"a-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=b_decoder_params,
             )
         )
@@ -1546,7 +1573,7 @@ class TestConnectionDeathMidTransfer:
             _job_metadata(
                 job_id=900,
                 keys=[b"a-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_prefiller_params,
             )
         )
@@ -1554,7 +1581,7 @@ class TestConnectionDeathMidTransfer:
             _job_metadata(
                 job_id=901,
                 keys=[b"b-block"],
-                block_ids=[0],
+                chunk_ids=[0],
                 kv_params=a_decoder_params,
             )
         )

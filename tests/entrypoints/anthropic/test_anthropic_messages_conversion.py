@@ -3,7 +3,7 @@
 """Unit tests for Anthropic-to-OpenAI request conversion.
 
 Tests the image source handling and tool_result content parsing in
-AnthropicServingMessages._convert_anthropic_to_openai_request().
+AnthropicServingMessages.to_chat_completion_request().
 
 Also covers extended-thinking edge cases such as ``redacted_thinking``
 blocks echoed back by Anthropic clients, and streaming conversion in
@@ -32,6 +32,11 @@ from vllm.entrypoints.anthropic.serving import (
     AnthropicServingMessages,
     _build_anthropic_usage,
 )
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
@@ -39,19 +44,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
-    DeltaMessage,
-    DeltaToolCall,
-    PromptTokenUsageInfo,
-    UsageInfo,
-)
+from vllm.entrypoints.serve.engine.protocol import PromptTokenUsageInfo, UsageInfo
 from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
 from vllm.exceptions import VLLMValidationError
 
-_convert = AnthropicServingMessages._convert_anthropic_to_openai_request
+_convert = AnthropicServingMessages.to_chat_completion_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
 
 
@@ -1584,6 +1583,32 @@ class TestStopSequenceReason:
         msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
         assert msg_deltas[0]["delta"]["stop_reason"] == "stop_sequence"
         assert msg_deltas[0]["delta"]["stop_sequence"] == "</tool>"
+
+    @pytest.mark.asyncio
+    async def test_streaming_no_stop_string_emits_explicit_null_stop_sequence(self):
+        """exclude_unset=True drops stop_sequence unless it is set explicitly."""
+
+        async def sse_input():
+            yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+            yield _make_stream_chunk(delta=DeltaMessage(content="hi"))
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+
+        events = _parse_sse_events(output)
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+        assert len(msg_deltas) == 1
+        assert msg_deltas[0]["delta"]["stop_reason"] == "end_turn"
+        assert "stop_sequence" in msg_deltas[0]["delta"]
+        assert msg_deltas[0]["delta"]["stop_sequence"] is None
 
 
 # ======================================================================

@@ -66,7 +66,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2_audio import Qwen2AudioProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItems
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+)
 from vllm.multimodal.parse import AudioProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing.processor import (
     MultiModalPromptUpdates,
@@ -84,6 +88,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -191,8 +196,12 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         self.embed_dim = config.d_model
         self.num_heads = config.encoder_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
+        # Audio encoder uses 20 heads. Shard across TP when divisible
+        # (e.g. TP=2/4); otherwise keep unreplicated (e.g. TP=8).
         tp_size = get_tensor_model_parallel_world_size()
-        self.num_local_heads = self.num_heads // tp_size
+        disable_tp = self.num_heads % tp_size != 0
+        effective_tp = 1 if disable_tp else tp_size
+        self.num_local_heads = self.num_heads // effective_tp
 
         if (self.head_dim * self.num_heads) != self.embed_dim:
             raise ValueError(
@@ -202,19 +211,21 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
 
         self.scaling = self.head_dim**-0.5
 
-        self.qkv = QKVParallelLinear(
+        self.qkv_proj = QKVParallelLinear(
             hidden_size=self.embed_dim,
             head_size=self.head_dim,
             total_num_heads=self.num_heads,
             total_num_kv_heads=self.num_heads,
             bias=True,
-            prefix=f"{prefix}.qkv",
+            disable_tp=disable_tp,
+            prefix=f"{prefix}.qkv_proj",
         )
 
         self.out_proj = RowParallelLinear(
             input_size=self.embed_dim,
             output_size=self.embed_dim,
             bias=True,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.out_proj",
         )
 
@@ -232,7 +243,7 @@ class Qwen3OmniMoeAudioAttention(nn.Module):
         max_seqlen: torch.Tensor | None,
     ) -> torch.Tensor:
         seq_length, _ = hidden_states.size()
-        qkv, _ = self.qkv(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(3, dim=-1)
         q = q.view(1, seq_length, -1, self.head_dim)
         k = k.view(1, seq_length, -1, self.head_dim)
@@ -266,16 +277,20 @@ class Qwen3OmniMoeAudioEncoderLayer(nn.Module):
         )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.activation_fn = _ACTIVATION_REGISTRY[config.activation_function]
+        tp_size = get_tensor_model_parallel_world_size()
+        disable_tp = config.encoder_attention_heads % tp_size != 0
         self.fc1 = ColumnParallelLinear(
             self.embed_dim,
             config.encoder_ffn_dim,
             bias=True,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.fc1",
         )
         self.fc2 = RowParallelLinear(
             config.encoder_ffn_dim,
             self.embed_dim,
             bias=True,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.fc2",
         )
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
@@ -323,9 +338,9 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
-            ".self_attn.q_proj.": (".self_attn.qkv.", "q"),
-            ".self_attn.k_proj.": (".self_attn.qkv.", "k"),
-            ".self_attn.v_proj.": (".self_attn.qkv.", "v"),
+            ".self_attn.q_proj.": (".self_attn.qkv_proj.", "q"),
+            ".self_attn.k_proj.": (".self_attn.qkv_proj.", "k"),
+            ".self_attn.v_proj.": (".self_attn.qkv_proj.", "v"),
         }
     )
 
@@ -830,9 +845,14 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         return self.patch_embed.proj.weight.device
 
     def rot_pos_emb(self, grid_thw):
+        max_grid_size = grid_thw[:, 1:].max()
+
+        # Use pre-computed cos_sin_cache from RotaryEmbedding
+        cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
+
         pos_ids = []
         for t, h, w in grid_thw:
-            hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
+            hpos_ids = torch.arange(h, device=cos.device).unsqueeze(1).expand(-1, w)
             hpos_ids = hpos_ids.reshape(
                 h // self.spatial_merge_size,
                 self.spatial_merge_size,
@@ -842,7 +862,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             hpos_ids = hpos_ids.permute(0, 2, 1, 3)
             hpos_ids = hpos_ids.flatten()
 
-            wpos_ids = torch.arange(w).unsqueeze(0).expand(h, -1)
+            wpos_ids = torch.arange(w, device=cos.device).unsqueeze(0).expand(h, -1)
             wpos_ids = wpos_ids.reshape(
                 h // self.spatial_merge_size,
                 self.spatial_merge_size,
@@ -853,12 +873,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             wpos_ids = wpos_ids.flatten()
             pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
         pos_ids = torch.cat(pos_ids, dim=0)
-        max_grid_size = grid_thw[:, 1:].max()
 
-        # Use pre-computed cos_sin_cache from RotaryEmbedding
-        cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
-
-        pos_ids = pos_ids.to(cos.device, non_blocking=True)
         cos_combined = cos[pos_ids].flatten(1)
         sin_combined = sin[pos_ids].flatten(1)
 
@@ -989,7 +1004,7 @@ class Qwen3Omni_VisionTransformer(nn.Module):
 
         # Move cu_seqlens to GPU; grid_thw may be on CPU during profile_run
         # and FA3 vit attention requires cu_seqlens on CUDA.
-        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
+        cu_seqlens = async_tensor_h2d(cu_seqlens, self.device)
         hidden_states = hidden_states.unsqueeze(1)
         rotary_pos_emb_cos = rotary_pos_emb_cos.to(hidden_states.device)
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(hidden_states.device)
@@ -1562,8 +1577,8 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
         input_features = audio_input["input_features"]
         # audio_feature_lengths is keep_on_cpu; the audio tower derives
         # device placement from feature_lens, so move it explicitly.
-        audio_feature_lengths = audio_input["audio_feature_lengths"].to(
-            input_features.device, non_blocking=True
+        audio_feature_lengths = async_tensor_h2d(
+            audio_input["audio_feature_lengths"], input_features.device
         )
 
         audio_output_lengths = _get_feat_extract_output_lengths(audio_feature_lengths)
@@ -1584,12 +1599,15 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
 class Qwen3OmniMoeThinkerForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsLoRA,
     SupportsPP,
     SupportsMRoPE,
     SupportsEagle3,
     Qwen3OmniMoeConditionalGenerationMixin,
     SupportsTranscription,
 ):
+    is_3d_moe_weight: bool = True
+    supports_tower_connector_lora: bool = True
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "thinker.lm_head.": "language_model.lm_head.",
@@ -1597,6 +1615,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             "thinker.": "",
             "talker.": None,
             "code2wav.": None,
+            # Adapter trained/saved directly from the thinker model
+            "model.": "language_model.model.",
+            "lm_head.": "language_model.lm_head.",
         }
     )
 
@@ -1610,6 +1631,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             "gate_proj",
             "up_proj",
         ],
+        "qkv": ["qkv"],  # for visual encoder
     }
 
     supported_languages = ISO639_1_SUPPORTED_LANGS
@@ -1631,6 +1653,8 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         thinker_config: Qwen3OmniMoeThinkerConfig = (
             vllm_config.model_config.hf_config.thinker_config
         )
+        # MoE LoRA uses the architecture to determine its weight layout.
+        thinker_config.architectures = vllm_config.model_config.hf_config.architectures
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = thinker_config
@@ -2299,3 +2323,23 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             connector="visual.merger",
             tower_model=["visual.", "audio_tower."],
         )
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        if modality in ("image", "video"):
+            hf_config = self.config
+            vision_config = hf_config.vision_config
+            merge_size = vision_config.spatial_merge_size
+            tower_tokens = num_mm_embeds * merge_size**2
+            connector_tokens = num_mm_embeds
+
+        if modality == "audio":
+            tower_tokens = num_mm_embeds
+            connector_tokens = num_mm_embeds
+
+        return tower_tokens, connector_tokens
