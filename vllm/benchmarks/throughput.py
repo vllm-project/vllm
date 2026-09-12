@@ -4,7 +4,6 @@
 
 import argparse
 import json
-import probe
 import os
 import random
 import time
@@ -1141,11 +1140,6 @@ def main(args: argparse.Namespace):
     )
     print(f"Total num prompt tokens:  {total_prompt_tokens}")
     print(f"Total num output tokens:  {total_output_tokens}")
-    if probe.enabled():  # correctness checkpoints of the campaign; off unless PROBE=1
-        probe.record("num_requests", len(requests))
-        probe.record("total_prompt_tokens", int(total_prompt_tokens))
-        probe.record("total_output_tokens", int(total_output_tokens))
-        probe.flush()
 
     # Output JSON results if specified
     if args.output_json:
