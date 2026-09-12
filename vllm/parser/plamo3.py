@@ -166,18 +166,18 @@ class Plamo3Parser(ParserEngine):
         )
         super().__init__(tokenizer, tools, **kwargs)
 
-        self._reasoning_start_token_ids: list[int] = list(
+        self._reasoning_start_token_id_sequence: list[int] = list(
             tokenizer.encode(BEGIN_THINK, add_special_tokens=False)
         )
-        self._reasoning_end_token_ids = list(
+        self._reasoning_end_token_id_sequence: list[int] = list(
             tokenizer.encode(END_THINK, add_special_tokens=False)
         )
         self._partial_think_end_markers = tuple(
             tokenizer.decode(
-                self._reasoning_end_token_ids[:size],
+                self._reasoning_end_token_id_sequence[:size],
                 skip_special_tokens=False,
             )
-            for size in range(1, len(self._reasoning_end_token_ids))
+            for size in range(1, len(self._reasoning_end_token_id_sequence))
         )
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
@@ -185,16 +185,12 @@ class Plamo3Parser(ParserEngine):
         if not self.thinking_enabled:
             return True
 
+        start_ids = self._reasoning_start_token_id_sequence
+        end_ids = self._reasoning_end_token_id_sequence
         for i in range(len(input_ids) - 1, -1, -1):
-            if (
-                input_ids[i : i + len(self._reasoning_end_token_ids)]
-                == self._reasoning_end_token_ids
-            ):
+            if input_ids[i : i + len(end_ids)] == end_ids:
                 return True
-            if (
-                input_ids[i : i + len(self._reasoning_start_token_ids)]
-                == self._reasoning_start_token_ids
-            ):
+            if input_ids[i : i + len(start_ids)] == start_ids:
                 return False
             if input_ids[i] == self.vocab.get(EOT):
                 return False
@@ -204,7 +200,7 @@ class Plamo3Parser(ParserEngine):
         # Extract content after PLaMo's multi-token reasoning end marker.
         if not self.thinking_enabled:
             return input_ids
-        end_ids = self._reasoning_end_token_ids
+        end_ids = self._reasoning_end_token_id_sequence
         for i in range(len(input_ids) - len(end_ids), -1, -1):
             if input_ids[i : i + len(end_ids)] == end_ids:
                 return input_ids[i + len(end_ids) :]
@@ -226,7 +222,7 @@ class Plamo3Parser(ParserEngine):
             suffix = value[start:]
             if any(
                 marker != suffix and marker.startswith(suffix)
-                for marker in self.parser_engine_config.terminals.values()
+                for marker in self.parser_engine_config.terminal_literals
             ):
                 return value[:start] or None
         return value or None
