@@ -18,6 +18,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
+    BlockIds,
     EngineId,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -174,6 +175,23 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
             request, blocks, num_external_tokens
         )
 
+    def request_needs_model_step_callback(self, request: "Request") -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_needs_model_step_callback(request)
+
+    def update_state_after_model_step(
+        self,
+        request: "Request",
+        block_ids: BlockIds,
+        num_settled_prompt_tokens: int,
+    ) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_state_after_model_step(
+            request,
+            block_ids,
+            num_settled_prompt_tokens,
+        )
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -224,6 +242,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
+
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        assert self.connector_worker is not None
+        assert isinstance(kv_connector_metadata, NixlConnectorMetadata)
+        self.connector_worker.handle_preemptions(kv_connector_metadata)
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         assert self.connector_worker is not None

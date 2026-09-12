@@ -873,6 +873,8 @@ def test_multi_connector_overrides_all_base_methods():
         "role",
         "has_connector_metadata",
         "get_kv_connector_kv_cache_events",
+        "request_needs_model_step_callback",
+        "update_state_after_model_step",
     }
 
     base_members = {

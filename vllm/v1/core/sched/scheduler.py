@@ -2119,6 +2119,22 @@ class Scheduler(SchedulerInterface):
                         self.kv_cache_manager.estimate_cached_tokens(request)
                     )
 
+            if (
+                not output_is_stale
+                and not stopped
+                and self.connector is not None
+                and self.connector.request_needs_model_step_callback(request)
+            ):
+                num_settled_prompt_tokens = min(
+                    request.num_computed_tokens - request.num_in_flight_tokens,
+                    request.num_prompt_tokens,
+                )
+                self.connector.update_state_after_model_step(
+                    request,
+                    self.kv_cache_manager.get_block_ids(request.request_id),
+                    num_settled_prompt_tokens,
+                )
+
             finish_reason = None
             if stopped:
                 # Capture finish_reason BEFORE _handle_stopped_request, which may

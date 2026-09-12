@@ -581,6 +581,7 @@ def make_nixl_push_scheduler(
     sched._reqs_not_processed = set()
     sched._reqs_need_save = {}
     sched._kv_lease_duration = 30
+    sched.block_size = 16
     sched.decoder_kv_blocks_ttl = decoder_kv_blocks_ttl
     sched.use_host_buffer = False
     sched.engine_id = "decode-engine"
@@ -603,6 +604,11 @@ def make_nixl_push_scheduler(
     sched._push_registration_deadlines = {}
     sched._finished_request_blocks = {}
     sched._newly_finished_push_blocks = {}
+    sched._push_pending_updates = {}
+    sched._push_pending_preemptions = set()
+    sched._push_pending_cancellations = set()
+    sched._progressive_states = {}
+    sched._progressive_push_eligible = False
     sched._push_registration_timeout = (
         push_registration_timeout
         if push_registration_timeout is not None

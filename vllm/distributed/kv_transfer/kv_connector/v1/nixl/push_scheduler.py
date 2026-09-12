@@ -25,6 +25,7 @@ been registered but not fulfilled within a configurable timeout.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
@@ -36,9 +37,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
+    PushBlockUpdate,
     ReqId,
 )
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -49,6 +53,14 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class _ProgressiveRequestState:
+    # Number of leading P-side blocks already published to the worker.
+    num_published_blocks: int = 0
+    # Whether the request must finish through the legacy terminal push path.
+    fallback: bool = False
 
 
 class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
@@ -88,6 +100,14 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         self._finished_request_blocks: dict[ReqId, BlockIds] = {}
         # P-side: newly finished blocks to ship to P workers on next step.
         self._newly_finished_push_blocks: dict[ReqId, BlockIds] = {}
+        # P-side: immutable block deltas waiting to be sent to workers.
+        self._push_pending_updates: dict[ReqId, PushBlockUpdate] = {}
+        # P-side: preempted requests whose in-flight WRITEs must be fenced.
+        self._push_pending_preemptions: set[ReqId] = set()
+        # P-side: aborted requests whose progressive state must be discarded.
+        self._push_pending_cancellations: set[ReqId] = set()
+        # P-side: per-request progressive publication state.
+        self._progressive_states: dict[ReqId, _ProgressiveRequestState] = {}
 
         # Soft watchdog timeout (seconds) for D-side registrations that
         # never receive a push completion. Defaults to the existing
@@ -99,6 +119,73 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 self.decoder_kv_blocks_ttl,
             )
         )
+        self._progressive_push_eligible = self._is_progressive_push_eligible()
+
+    def _is_progressive_push_eligible(self) -> bool:
+        assert self.vllm_config.kv_transfer_config is not None
+        transfer_config = self.vllm_config.kv_transfer_config
+        groups = self.kv_cache_config.kv_cache_groups
+        return bool(
+            transfer_config.get_from_extra_config("progressive_push", False)
+            and current_platform.device_type == "cuda"
+            and transfer_config.kv_buffer_device == "cuda"
+            and not transfer_config.enable_permute_local_kv
+            and not self.use_host_buffer
+            and self.vllm_config.parallel_config.pipeline_parallel_size == 1
+            and self.vllm_config.scheduler_config.enable_chunked_prefill
+            and len(groups) == 1
+            and not groups[0].is_eagle_group
+            and isinstance(groups[0].kv_cache_spec, FullAttentionSpec)
+            and groups[0].kv_cache_spec.sliding_window is None
+            and groups[0].kv_cache_spec.attention_chunk_size is None
+            and not groups[0].kv_cache_spec.non_causal
+        )
+
+    def request_needs_model_step_callback(self, request: Request) -> bool:
+        if not self._progressive_push_eligible:
+            return False
+        params = request.kv_transfer_params
+        if not params or not params.get("do_remote_decode"):
+            return False
+        state = self._progressive_states.get(request.request_id)
+        return state is None or not state.fallback
+
+    def update_state_after_model_step(
+        self,
+        request: Request,
+        block_ids: BlockIds,
+        num_settled_prompt_tokens: int,
+    ) -> None:
+        """Stage newly immutable full-attention blocks after a model step."""
+        if not self._progressive_push_eligible:
+            return
+        assert len(block_ids) == 1
+        # Keep one block for the terminal batch so it can carry the existing
+        # NIXL completion notification without a separate control message.
+        num_ready = max(num_settled_prompt_tokens // self.block_size - 1, 0)
+        state = self._progressive_states.setdefault(
+            request.request_id, _ProgressiveRequestState()
+        )
+        num_ready = min(num_ready, len(block_ids[0]))
+        if num_ready <= state.num_published_blocks:
+            return
+        delta = ([*block_ids[0][state.num_published_blocks : num_ready]],)
+        state.num_published_blocks = num_ready
+        self._stage_push_update(request.request_id, delta)
+
+    def _stage_push_update(
+        self,
+        request_id: ReqId,
+        block_ids: BlockIds,
+        *,
+        is_final: bool = False,
+    ) -> None:
+        pending = self._push_pending_updates.setdefault(
+            request_id,
+            PushBlockUpdate(block_ids=([],)),
+        )
+        pending.block_ids[0].extend(block_ids[0])
+        pending.is_final |= is_final
 
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
@@ -170,6 +257,14 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         )
         local_block_ids: BlockIds = blocks.get_unhashed_block_ids_all_groups()
         local_block_ids = self.get_exchange_clipped_blocks(local_block_ids)
+        source_block_offset = 0
+        if self._progressive_push_eligible:
+            token_ids = request.prompt_token_ids or []
+            remote_prefill_tokens = self._get_remote_prefill_token_count(len(token_ids))
+            num_cached_tokens = remote_prefill_tokens - num_external_tokens
+            assert num_cached_tokens >= 0
+            assert num_cached_tokens % self.block_size == 0
+            source_block_offset = num_cached_tokens // self.block_size
 
         # ``remote_*`` fields are P's coordinates (from D's perspective).
         # ``decode_*`` fields are D's own info that P needs for the
@@ -186,6 +281,9 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             "remote_port": params["remote_port"],
             "remote_tp_size": params["tp_size"],
             "remote_pp_size": params.get("pp_size", 1),
+            "progressive_push": self._progressive_push_eligible,
+            "decode_block_size": self.block_size,
+            "source_block_offset": source_block_offset,
         }
         self._push_registration_deadlines[request.request_id] = (
             time.perf_counter() + self._push_registration_timeout
@@ -253,6 +351,11 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             RequestStatus.FINISHED_LENGTH_CAPPED,
             RequestStatus.FINISHED_STOPPED,
         ):
+            if self._progressive_push_eligible:
+                state = self._progressive_states.pop(request.request_id, None)
+                if state is not None and state.num_published_blocks:
+                    self._push_pending_updates.pop(request.request_id, None)
+                    self._push_pending_cancellations.add(request.request_id)
             self._reqs_not_processed.add(request.request_id)
             self._reqs_need_save.pop(request.request_id, None)
             return False, None
@@ -276,7 +379,22 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # Store finished blocks for worker-level matching with D
             # registrations (via NIXL notifications).
             self._finished_request_blocks[request.request_id] = block_ids
-            self._newly_finished_push_blocks[request.request_id] = block_ids
+            progressive_state = None
+            if self._progressive_push_eligible:
+                progressive_state = self._progressive_states.get(request.request_id)
+            if (
+                progressive_state is not None
+                and progressive_state.num_published_blocks
+                and not progressive_state.fallback
+            ):
+                remaining = (block_ids[0][progressive_state.num_published_blocks :],)
+                self._stage_push_update(
+                    request.request_id,
+                    remaining,
+                    is_final=True,
+                )
+            else:
+                self._newly_finished_push_blocks[request.request_id] = block_ids
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -299,11 +417,22 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         meta = super().build_connector_meta(scheduler_output)
         assert isinstance(meta, NixlConnectorMetadata)
 
+        if self._progressive_push_eligible:
+            for req_id in scheduler_output.preempted_req_ids or ():
+                state = self._progressive_states.get(req_id)
+                if (
+                    state is not None
+                    and state.num_published_blocks
+                    and not state.fallback
+                ):
+                    state.fallback = True
+                    self._push_pending_preemptions.add(req_id)
+                self._push_pending_updates.pop(req_id, None)
+
         # Watchdog: any D-side registration whose deadline has passed without
         # a corresponding push completion is treated as failed and cleaned up.
-        # The corresponding request is already tracked via _reqs_need_recv;
-        # the engine layer will eventually time it out via the lease, but we
-        # at least drop the stale registration so we don't keep retrying.
+        # The request itself remains blocked until its request-level abort path;
+        # this watchdog only prevents a stale registration retry.
         now = time.perf_counter()
         # Deadlines are inserted in non-decreasing order (monotonic clock +
         # constant timeout, armed once per request), and dict insertion order
@@ -330,6 +459,19 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             meta.push_registrations = dict(self._push_pending_registrations)
             self._push_pending_registrations.clear()
 
+        # P side: package progressive updates and lifecycle controls.
+        if self._progressive_push_eligible and self._push_pending_updates:
+            meta.push_updates = self._push_pending_updates
+            self._push_pending_updates = {}
+
+        if self._progressive_push_eligible and self._push_pending_preemptions:
+            meta.push_preemptions = self._push_pending_preemptions
+            self._push_pending_preemptions = set()
+
+        if self._progressive_push_eligible and self._push_pending_cancellations:
+            meta.push_cancellations = self._push_pending_cancellations
+            self._push_pending_cancellations = set()
+
         # P side: package newly finished blocks for P workers to match against
         # any D registrations they have received via NIXL notifications.
         if self._newly_finished_push_blocks:
@@ -343,13 +485,26 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # - finished P blocks awaiting WRITE completion, or
         # - pending D registrations the worker has not yet shipped, or
         # - newly finished blocks not yet shipped to P workers.
-        return bool(self._finished_request_blocks or self._push_pending_registrations)
+        return bool(
+            self._finished_request_blocks
+            or self._push_pending_registrations
+            or (
+                self._progressive_push_eligible
+                and (
+                    self._push_pending_updates
+                    or self._push_pending_preemptions
+                    or self._push_pending_cancellations
+                )
+            )
+        )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Clean up finished request blocks after push completes."""
         super().update_connector_output(connector_output)
         for req_id in connector_output.finished_sending or ():
             self._finished_request_blocks.pop(req_id, None)
+            if self._progressive_push_eligible:
+                self._progressive_states.pop(req_id, None)
         # On D side, finished_recving means the push completed; clear the
         # watchdog so we don't trip an expiration on a fulfilled request.
         for req_id in connector_output.finished_recving or ():

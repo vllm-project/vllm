@@ -36,6 +36,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
     NixlConnectorMetadata,
+    PushBlockUpdate,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
@@ -70,6 +71,7 @@ def _make_request(
     req = MagicMock()
     req.request_id = request_id
     req.num_computed_tokens = 64
+    req.prompt_token_ids = list(range(64))
 
     if is_d_side:
         # D-side request: do_remote_prefill=True -> prefill on a remote P.
@@ -117,6 +119,38 @@ def _stub_sw_clipping(scheduler) -> None:
 
 
 class TestPushScheduler:
+    def test_progressive_callback_fast_path_when_ineligible(self):
+        sched = make_nixl_push_scheduler()
+
+        class UninspectableRequest:
+            @property
+            def kv_transfer_params(self):
+                raise AssertionError("ineligible fast path inspected request")
+
+        request: Any = UninspectableRequest()
+        assert not sched.request_needs_model_step_callback(request)
+        sched.update_state_after_model_step(request, (), 0)
+        assert sched._progressive_states == {}
+
+    def test_progressive_push_is_eligible_with_prefix_caching(self):
+        sched = make_nixl_push_scheduler()
+        transfer_config = MagicMock()
+        transfer_config.get_from_extra_config.return_value = True
+        transfer_config.kv_buffer_device = "cuda"
+        transfer_config.enable_permute_local_kv = False
+        sched.vllm_config.kv_transfer_config = transfer_config
+        sched.vllm_config.parallel_config.pipeline_parallel_size = 1
+        sched.vllm_config.scheduler_config.enable_chunked_prefill = True
+        sched.vllm_config.cache_config.enable_prefix_caching = True
+        platform = MagicMock(device_type="cuda")
+
+        with patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
+            "push_scheduler.current_platform",
+            platform,
+        ):
+            assert sched._is_progressive_push_eligible()
+
     def test_p_side_mamba_truncates_before_cache_lookup(self):
         """Push mode normalizes P-side Mamba requests before cache lookup."""
         sched = make_nixl_push_scheduler(has_mamba=True)
@@ -138,6 +172,7 @@ class TestPushScheduler:
     def test_d_side_update_state_after_alloc_stages_registration(self):
         """D scheduler stashes registration data + arms watchdog deadline."""
         sched = make_nixl_push_scheduler()
+        sched._progressive_push_eligible = True
         _stub_sw_clipping(sched)
 
         request = _make_request(request_id="req-d-1")
@@ -154,6 +189,7 @@ class TestPushScheduler:
         assert reg["decode_port"] == sched.side_channel_port
         assert reg["local_block_ids"] == ([10, 11, 12],)
         assert reg["remote_engine_id"] == "prefill-engine"
+        assert reg["source_block_offset"] == 1
 
         # Watchdog deadline set in the future.
         deadline = sched._push_registration_deadlines[request.request_id]
@@ -312,6 +348,81 @@ class TestPushScheduler:
         assert d_req.request_id not in sched._push_pending_registrations
         assert d_req.request_id not in meta.push_registrations
 
+    def test_progressive_push_stages_deltas_then_terminal_tail(self):
+        sched = make_nixl_push_scheduler()
+        sched._progressive_push_eligible = True
+        _stub_sw_clipping(sched)
+        request = _make_request(
+            request_id="req-progressive", is_d_side=False, finished=False
+        )
+
+        sched.update_state_after_model_step(
+            request,
+            ([10, 11, 12, 13],),
+            num_settled_prompt_tokens=48,
+        )
+        output = MagicMock(preempted_req_ids=set())
+        with patch.object(
+            sched.__class__.__mro__[1],
+            "build_connector_meta",
+            return_value=NixlConnectorMetadata(),
+        ):
+            meta = sched.build_connector_meta(output)
+
+        assert meta.push_updates[request.request_id] == PushBlockUpdate(
+            block_ids=([10, 11],), is_final=False
+        )
+
+        from vllm.v1.request import RequestStatus
+
+        request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+        delay, _ = sched.request_finished(request, ([10, 11, 12, 13],))
+
+        assert delay
+        assert sched._push_pending_updates[request.request_id] == PushBlockUpdate(
+            block_ids=([12, 13],), is_final=True
+        )
+        assert request.request_id not in sched._newly_finished_push_blocks
+
+    def test_progressive_preemption_falls_back_to_terminal_push(self):
+        sched = make_nixl_push_scheduler()
+        sched._progressive_push_eligible = True
+        _stub_sw_clipping(sched)
+        request = _make_request(
+            request_id="req-preempt", is_d_side=False, finished=False
+        )
+        sched.update_state_after_model_step(request, ([1, 2, 3],), 48)
+
+        output = MagicMock(preempted_req_ids={request.request_id})
+        with patch.object(
+            sched.__class__.__mro__[1],
+            "build_connector_meta",
+            return_value=NixlConnectorMetadata(),
+        ):
+            meta = sched.build_connector_meta(output)
+
+        assert meta.push_preemptions == {request.request_id}
+        assert meta.push_updates == {}
+
+        from vllm.v1.request import RequestStatus
+
+        request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+        sched.request_finished(request, ([4, 5, 6],))
+        assert sched._newly_finished_push_blocks[request.request_id] == ([4, 5, 6],)
+
+    def test_aborted_progressive_request_stages_cancellation(self):
+        sched = make_nixl_push_scheduler()
+        sched._progressive_push_eligible = True
+        request = _make_request(request_id="req-abort", is_d_side=False, finished=False)
+        sched.update_state_after_model_step(request, ([1, 2, 3],), 48)
+
+        delay, params = sched.request_finished(request, ([1, 2, 3],))
+
+        assert not delay
+        assert params is None
+        assert sched._push_pending_cancellations == {request.request_id}
+        assert request.request_id not in sched._push_pending_updates
+
 
 # ----------------------------------------------------------------- #
 #  Worker-side tests                                                 #
@@ -336,9 +447,15 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._sending_transfers_lock = threading.Lock()
         w._push_finished_blocks = {}
         w._pending_d_registrations = {}
+        w._progressive_states = {}
+        w._progressive_fallbacks = set()
         w._reg_send_inbox = queue.Queue()
         w._finished_blocks_inbox = queue.Queue()
         w._pending_completion_notifs = queue.Queue()
+        w._progressive_updates_inbox = queue.Queue()
+        w._progressive_fence_inbox = queue.Queue()
+        w._progressive_handshake_inbox = queue.Queue()
+        w._progressive_done_outbox = queue.Queue()
         w._evict_finished_inbox = queue.Queue()
         w._deferred_push_inbox = queue.Queue()
         w._push_writer_wake = threading.Event()
@@ -354,6 +471,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w.tp_rank = 0
         w.pcp_rank = 0
         w.world_size = 1
+        w.block_size = 16
         w.engine_id = "test-decode-engine"
         w._remote_agents = {}
         w._physical_blocks_per_logical_kv_block = 1
@@ -397,6 +515,9 @@ def _registration_data(
     remote_host: str = "10.0.0.1",
     remote_port: int = 5601,
     remote_tp_size: int = 1,
+    progressive_push: bool = False,
+    decode_block_size: int = 16,
+    source_block_offset: int = 0,
 ) -> dict[str, Any]:
     return {
         "request_id": request_id,
@@ -409,6 +530,9 @@ def _registration_data(
         "remote_host": remote_host,
         "remote_port": remote_port,
         "remote_tp_size": remote_tp_size,
+        "progressive_push": progressive_push,
+        "decode_block_size": decode_block_size,
+        "source_block_offset": source_block_offset,
     }
 
 
@@ -486,6 +610,165 @@ class TestPushWriterMatching:
         # Undecodable payload also dropped.
         w._handle_push_reg_notif(PUSH_REG_NOTIF_PREFIX + b"\xff\xff\xff")
         assert w.start_push_calls == []
+
+
+class TestProgressivePushWorker:
+    @staticmethod
+    def _record_batches(w: _StubWriterWorker):
+        batches = []
+
+        def start(state, local, remote, final):
+            batches.append((local, remote, final))
+            return [len(batches)]
+
+        w._ensure_handshake = lambda *args, **kwargs: None
+        w._start_progressive_batch = start
+        w.nixl_wrapper = MagicMock()
+        w.nixl_wrapper.check_xfer_state.return_value = "DONE"
+        w.xfer_stats = MagicMock()
+        return batches
+
+    def test_progressive_batches_only_complete_on_final_tail(self):
+        w = _StubWriterWorker.fresh()
+        batches = self._record_batches(w)
+        registration = _registration_data(
+            "req-progressive",
+            local_block_ids=((100, 101, 102),),
+            progressive_push=True,
+        )
+        w._handle_push_reg_notif(
+            PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(registration)
+        )
+
+        w._handle_progressive_update(
+            "req-progressive",
+            PushBlockUpdate(block_ids=([1, 2],)),
+        )
+        assert batches == [(([1, 2],), ([100, 101],), False)]
+        w._poll_progressive_transfers()
+        assert w._progressive_done_outbox.empty()
+
+        w._handle_progressive_update(
+            "req-progressive",
+            PushBlockUpdate(block_ids=([3],), is_final=True),
+        )
+        assert batches[-1] == (([3],), ([102],), True)
+        w._poll_progressive_transfers()
+        assert w._progressive_done_outbox.get_nowait() == "req-progressive"
+
+    def test_prefix_hit_skips_cached_source_blocks_before_early_write(self):
+        w = _StubWriterWorker.fresh()
+        batches = self._record_batches(w)
+        registration = _registration_data(
+            "req-prefix",
+            local_block_ids=((100, 101, 102),),
+            progressive_push=True,
+            source_block_offset=2,
+        )
+
+        # Updates may reach P's writer before D's registration. Once the
+        # registration arrives, cached prefix blocks are discarded across
+        # update boundaries before the first uncached block is written.
+        w._handle_progressive_update(
+            "req-prefix",
+            PushBlockUpdate(block_ids=([10],)),
+        )
+        assert batches == []
+        w._handle_push_reg_notif(
+            PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(registration)
+        )
+        assert batches == []
+        w._handle_progressive_update(
+            "req-prefix",
+            PushBlockUpdate(block_ids=([11, 12],)),
+        )
+        assert batches == [(([12],), ([100],), False)]
+        w._poll_progressive_transfers()
+
+        w._handle_progressive_update(
+            "req-prefix",
+            PushBlockUpdate(block_ids=([13, 14],), is_final=True),
+        )
+        assert batches[-1] == (([13, 14],), ([101, 102],), True)
+        w._poll_progressive_transfers()
+        assert w._progressive_done_outbox.get_nowait() == "req-prefix"
+
+    def test_logical_block_size_mismatch_falls_back_to_terminal_push(self):
+        w = _StubWriterWorker.fresh()
+        batches = self._record_batches(w)
+        # P uses 32-token logical blocks backed by two 16-token kernel blocks;
+        # D uses 16-token logical blocks, so they cannot be paired one-to-one.
+        w._physical_blocks_per_logical_kv_block = 2
+        registration = _registration_data(
+            "req-block-size",
+            local_block_ids=((100, 101),),
+            progressive_push=True,
+            decode_block_size=16,
+        )
+        w._handle_push_reg_notif(
+            PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(registration)
+        )
+
+        w._handle_progressive_update(
+            "req-block-size",
+            PushBlockUpdate(block_ids=([10],), is_final=True),
+        )
+
+        assert batches == []
+        assert len(w.start_push_calls) == 1
+        request_id, block_ids, matched_registration = w.start_push_calls[0]
+        assert request_id == "req-block-size"
+        assert block_ids == ([10],)
+        assert matched_registration["decode_block_size"] == 16
+
+    def test_preemption_fence_returns_registration_to_legacy_path(self):
+        w = _StubWriterWorker.fresh()
+        self._record_batches(w)
+        registration = _registration_data(
+            "req-preempt",
+            local_block_ids=((100, 101),),
+            progressive_push=True,
+        )
+        w._handle_push_reg_notif(
+            PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(registration)
+        )
+        w._handle_progressive_update(
+            "req-preempt",
+            PushBlockUpdate(block_ids=([1],)),
+        )
+
+        event = threading.Event()
+        w._handle_progressive_fence("req-preempt", event)
+        assert not event.is_set()
+        w._poll_progressive_transfers()
+
+        assert event.is_set()
+        assert "req-preempt" not in w._progressive_states
+        assert "req-preempt" in w._pending_d_registrations
+        assert "req-preempt" in w._progressive_fallbacks
+
+    def test_cancellation_fence_discards_registration(self):
+        w = _StubWriterWorker.fresh()
+        self._record_batches(w)
+        registration = _registration_data(
+            "req-abort",
+            local_block_ids=((100,),),
+            progressive_push=True,
+        )
+        w._handle_push_reg_notif(
+            PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(registration)
+        )
+        w._handle_progressive_update(
+            "req-abort",
+            PushBlockUpdate(block_ids=([1],)),
+        )
+
+        event = threading.Event()
+        w._handle_progressive_fence("req-abort", event, retain_registration=False)
+        w._poll_progressive_transfers()
+
+        assert event.is_set()
+        assert "req-abort" not in w._pending_d_registrations
 
 
 class TestPushWriterStartLoadKv:

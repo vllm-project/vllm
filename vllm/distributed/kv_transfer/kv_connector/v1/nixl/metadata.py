@@ -248,6 +248,14 @@ class ReqMeta:
     pp_size: int = 1
 
 
+@dataclass
+class PushBlockUpdate:
+    # Newly immutable P-side logical block IDs, grouped by KV-cache group.
+    block_ids: BlockIds
+    # Whether this update contains the request's terminal block delta.
+    is_final: bool = False
+
+
 class NixlConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
@@ -266,6 +274,11 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         # Push mode (D side): registration data the D worker should send to
         # P workers via NIXL notification on this step.
         self.push_registrations: dict[ReqId, dict[str, Any]] = {}
+        # P-side immutable block deltas. The legacy terminal snapshot remains
+        # separate so a preempted progressive request can fall back to it.
+        self.push_updates: dict[ReqId, PushBlockUpdate] = {}
+        self.push_preemptions: set[ReqId] = set()
+        self.push_cancellations: set[ReqId] = set()
         # Push mode (P side): newly finished request blocks to be matched
         # against pending D registrations on the P worker.
         self.push_finished_blocks: dict[ReqId, BlockIds] = {}

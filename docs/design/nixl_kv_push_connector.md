@@ -157,18 +157,21 @@ PUSH_REG:<msgpack-encoded dict>
 
 Fields in the dict:
 
-| Field                | Set by | Meaning                                                                |
-|----------------------|--------|------------------------------------------------------------------------|
-| ``request_id``       | D      | D's own vLLM request id; P's match key, echoed in the completion notif |
-| ``decode_engine_id`` | D      | D's engine id (P uses this for the reverse handshake)                  |
-| ``decode_host``      | D      | D's NIXL side-channel host                                             |
-| ``decode_port``      | D      | D's NIXL side-channel port                                             |
-| ``decode_tp_size``   | D      | D's tensor-parallel size                                               |
-| ``local_block_ids``  | D      | per-group lists of D's *logical* block ids (preallocated)              |
-| ``remote_engine_id`` | D      | P's engine id (for the existing P-side handshake)                      |
-| ``remote_host``      | D      | P's NIXL side-channel host                                             |
-| ``remote_port``      | D      | P's NIXL side-channel port                                             |
-| ``remote_tp_size``   | D      | P's tensor-parallel size                                               |
+| Field                   | Set by | Meaning                                                                |
+|-------------------------|--------|------------------------------------------------------------------------|
+| ``request_id``          | D      | D's own vLLM request id; P's match key, echoed in the completion notif |
+| ``decode_engine_id``    | D      | D's engine id (P uses this for the reverse handshake)                  |
+| ``decode_host``         | D      | D's NIXL side-channel host                                             |
+| ``decode_port``         | D      | D's NIXL side-channel port                                             |
+| ``decode_tp_size``      | D      | D's tensor-parallel size                                               |
+| ``local_block_ids``     | D      | per-group lists of D's *logical* block ids (preallocated)              |
+| ``remote_engine_id``    | D      | P's engine id (for the existing P-side handshake)                      |
+| ``remote_host``         | D      | P's NIXL side-channel host                                             |
+| ``remote_port``         | D      | P's NIXL side-channel port                                             |
+| ``remote_tp_size``      | D      | P's tensor-parallel size                                               |
+| ``progressive_push``    | D      | Whether D supports progressive WRITE for this request                  |
+| ``decode_block_size``   | D      | D's logical block size                                                 |
+| ``source_block_offset`` | D      | Number of P prefix blocks already cached on D                          |
 
 D ships **logical** block ids; P expands them to physical block ids at
 WRITE-submission time using the ratio learned during the NIXL
@@ -180,6 +183,34 @@ The completion notif sent from P to D after a WRITE is the existing
 `<request_id>:<tp_size>` format used in pull mode (here ``request_id``
 is D's own request id, taken from the registration), so the D-side
 accounting code is unchanged.
+
+## Progressive push
+
+!!! warning "Experimental feature"
+    **Progressive push is an experimental feature and is disabled by default.**
+    Its configuration, wire metadata, supported topologies, and fallback
+    behavior may change without backward compatibility.
+
+Setting ``progressive_push=true`` in ``kv_connector_extra_config`` lets P
+WRITE completed full-attention blocks after each chunk instead of waiting for
+the whole prefill. Intermediate WRITEs omit the completion notification, so D
+continues waiting until the terminal batch. One block is reserved for that
+terminal batch, allowing it to use the existing completion protocol.
+
+The initial implementation is enabled only for direct CUDA transfers with one
+non-EAGLE ``FullAttention`` cache group, chunked prefill, and PP=1. Prefix-cache
+hits are supported when P and D use the same logical block size: D includes its
+block-aligned cache-hit offset in the registration, and P skips those source
+blocks before pairing each progressive batch with D's uncomputed suffix.
+Host buffers, cache permutation, sliding-window attention, attention chunking,
+non-causal attention, and ``MultiConnector`` fall back to the existing terminal
+push path.
+
+If P is preempted after publishing a delta, the worker waits for any in-flight
+WRITE before the released source blocks can be reused. The request then stays
+on the existing terminal path: queued deltas are discarded, D's registration
+is retained, and the completed retry sends one full snapshot. Aborted requests
+use the same fence but discard the registration.
 
 ## Scheduler-side responsibilities
 

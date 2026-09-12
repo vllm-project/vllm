@@ -36,6 +36,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -47,6 +48,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlConnectorMetadata,
+    PushBlockUpdate,
     RemoteMeta,
     ReqId,
     ReqMeta,
@@ -72,6 +74,34 @@ logger = init_logger(__name__)
 # main thread (start_load_kv / get_finished). Smaller -> lower latency
 # while active, slightly more CPU.
 _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
+
+
+@dataclass
+class _ProgressivePushState:
+    # P-side request ID used to match scheduler updates.
+    request_id: ReqId
+    # P logical blocks ready for the next WRITE.
+    ready_block_ids: list[int] = field(default_factory=list)
+    # D logical blocks that have not been filled yet.
+    remaining_block_ids: list[int] = field(default_factory=list)
+    # Cached P prefix blocks that still need to be skipped.
+    num_source_blocks_to_skip: int = 0
+    # Matched D registration data.
+    registration: dict[str, Any] | None = None
+    # Transfer handles for the currently submitted batch.
+    in_flight: list[TransferHandle] = field(default_factory=list)
+    # Whether the terminal block update has arrived.
+    final_received: bool = False
+    # Whether the in-flight batch carries the completion notification.
+    final_in_flight: bool = False
+    # Whether the P-to-D handshake is still running.
+    handshake_pending: bool = False
+    # Whether this request can no longer submit progressive WRITEs.
+    failed: bool = False
+    # Event released after in-flight WRITEs are fenced.
+    fence_event: threading.Event | None = None
+    # Keep the D registration when falling back after preemption.
+    retain_registration: bool = True
 
 
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
@@ -107,11 +137,23 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # P-side: D registrations received via NIXL notification that have
         # not yet been matched with a finished P request.
         self._pending_d_registrations: dict[ReqId, dict[str, Any]] = {}
+        self._progressive_states: dict[ReqId, _ProgressivePushState] = {}
+        self._progressive_fallbacks: set[ReqId] = set()
 
         # Cross-thread channels.
         self._reg_send_inbox: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
         self._finished_blocks_inbox: queue.Queue[tuple[str, BlockIds]] = queue.Queue()
         self._pending_completion_notifs: queue.Queue[bytes] = queue.Queue()
+        self._progressive_updates_inbox: queue.Queue[tuple[ReqId, PushBlockUpdate]] = (
+            queue.Queue()
+        )
+        self._progressive_fence_inbox: queue.Queue[
+            tuple[ReqId, threading.Event, bool]
+        ] = queue.Queue()
+        self._progressive_handshake_inbox: queue.Queue[tuple[ReqId, bool]] = (
+            queue.Queue()
+        )
+        self._progressive_done_outbox: queue.Queue[ReqId] = queue.Queue()
         # Main thread → writer: req_ids whose lease has expired or whose
         # WRITE has completed. Writer drops them from
         # ``_push_finished_blocks`` so an unmatched entry doesn't keep the
@@ -157,9 +199,37 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 for handle in handles:
                     self.nixl_wrapper.release_xfer_handle(handle)
             self._sending_transfers.clear()
+        for state in self._progressive_states.values():
+            for handle in state.in_flight:
+                self.nixl_wrapper.release_xfer_handle(handle)
         super().shutdown()
 
     # --- Engine-main-thread entry point -------------------------------- #
+
+    def handle_preemptions(self, metadata: NixlConnectorMetadata) -> None:
+        self._fence_progressive_requests(
+            metadata.push_cancellations, retain_registration=False
+        )
+        self._fence_progressive_requests(metadata.push_preemptions)
+
+    def _fence_progressive_requests(
+        self,
+        request_ids: set[ReqId],
+        *,
+        retain_registration: bool = True,
+    ) -> None:
+        if not request_ids:
+            return
+        assert self._push_writer_thread is not None
+
+        events = []
+        for req_id in request_ids:
+            event = threading.Event()
+            events.append(event)
+            self._progressive_fence_inbox.put((req_id, event, retain_registration))
+        self._push_writer_wake.set()
+        for event in events:
+            event.wait()
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Pre-process metadata; defer NIXL ops to the writer thread."""
@@ -187,6 +257,18 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if metadata.push_registrations:
             for req_id, reg_data in metadata.push_registrations.items():
                 self._reg_send_inbox.put((req_id, reg_data))
+            self._push_writer_wake.set()
+
+        # --- P-side: enqueue progressive block deltas for the writer. ---
+        if metadata.push_updates:
+            for req_id, update in metadata.push_updates.items():
+                self._progressive_updates_inbox.put((req_id, update))
+            self._push_writer_wake.set()
+
+        # --- P-side: discard state for canceled progressive requests. ---
+        for req_id in metadata.push_cancellations:
+            self._evict_finished_inbox.put(req_id)
+        if metadata.push_cancellations:
             self._push_writer_wake.set()
 
         # --- P-side: newly finished blocks awaiting a D registration match ---
@@ -222,7 +304,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         while not self._push_writer_stop.is_set():
             try:
-                # 1. D registrations to send.
+                # 1. D-side: send registrations to P.
                 while True:
                     try:
                         rid, rd = self._reg_send_inbox.get_nowait()
@@ -230,7 +312,33 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         break
                     self._send_registration_to_p(rid, rd)
 
-                # 2. Deferred P→D pushes whose handshake just completed; do xfer now
+                # 2. P-side: process pushes and their lifecycle state.
+
+                # Fences must run before queued updates so a preemption can
+                # invalidate every delta from the released block generation.
+                while True:
+                    try:
+                        rid, event, retain_registration = (
+                            self._progressive_fence_inbox.get_nowait()
+                        )
+                    except queue.Empty:
+                        break
+                    self._handle_progressive_fence(rid, event, retain_registration)
+
+                # Resume progressive requests after their handshake completes.
+                while True:
+                    try:
+                        rid, succeeded = self._progressive_handshake_inbox.get_nowait()
+                    except queue.Empty:
+                        break
+                    state = self._progressive_states.get(rid)
+                    if state is None:
+                        continue
+                    state.handshake_pending = False
+                    state.failed = not succeeded
+                    self._maybe_start_progressive_push(state)
+
+                # Submit terminal pushes deferred for a P-to-D handshake.
                 while True:
                     try:
                         rid, blocks, rd = self._deferred_push_inbox.get_nowait()
@@ -238,7 +346,15 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         break
                     self._do_start_push_kv(rid, blocks, rd)
 
-                # 3. P-side finished blocks; match against pending regs.
+                # Consume progressive block deltas from the P scheduler.
+                while True:
+                    try:
+                        rid, update = self._progressive_updates_inbox.get_nowait()
+                    except queue.Empty:
+                        break
+                    self._handle_progressive_update(rid, update)
+
+                # Match terminal P blocks against pending D registrations.
                 while True:
                     try:
                         rid, blocks = self._finished_blocks_inbox.get_nowait()
@@ -250,19 +366,22 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     else:
                         self._push_finished_blocks[rid] = blocks
 
-                # 3b. Evict finished blocks for requests that have either
-                # completed (WRITE acknowledged) or whose lease expired
-                # without a D registration.  Drop pending registrations
-                # for the same reason so we don't leak state.
+                # Poll submitted progressive WRITEs.
+                self._poll_progressive_transfers()
+
+                # Evict P state after WRITE completion or lease expiry.
                 while True:
                     try:
                         rid = self._evict_finished_inbox.get_nowait()
                     except queue.Empty:
                         break
                     self._push_finished_blocks.pop(rid, None)
-                    self._pending_d_registrations.pop(rid, None)
+                    self._pop_matching_registration(rid)
+                    base_id = get_base_request_id(rid)
+                    self._progressive_states.pop(base_id, None)
+                    self._progressive_fallbacks.discard(base_id)
 
-                # 4. NIXL notifs: route PUSH_REG; forward the rest.
+                # 3. Both sides: route incoming NIXL notifications.
                 for notifs in self.nixl_wrapper.get_new_notifs().values():
                     for notif in notifs:
                         if notif.startswith(PUSH_REG_NOTIF_PREFIX):
@@ -275,7 +394,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # Self-poll only while there is no other wake source: P-side
             # finished blocks waiting for a D PUSH_REG match. All other
             # progress is event-driven (see module docstring).
-            if self._push_finished_blocks:
+            if self._push_finished_blocks or any(
+                state.in_flight or state.registration is None
+                for state in self._progressive_states.values()
+            ):
                 self._push_writer_stop.wait(timeout=sleep_s)
             else:
                 self._push_writer_wake.wait()
@@ -290,6 +412,15 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         rid = reg_data.get("request_id") if isinstance(reg_data, dict) else None
         if not isinstance(rid, str):
             logger.warning("PUSH_REG notif missing request_id; dropping")
+            return
+
+        state = self._progressive_states.get(get_base_request_id(rid))
+        if state is not None:
+            if state.registration is None:
+                self._attach_progressive_registration(state, reg_data)
+            elif state.registration != reg_data:
+                logger.error("Conflicting PUSH_REG for request %s", rid)
+                state.failed = True
             return
 
         match = self._pop_matching_finished_blocks(rid)
@@ -408,6 +539,276 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 return fin_id, self._push_finished_blocks.pop(fin_id)
         return None
 
+    # --- Progressive single-group push ------------------------------- #
+
+    def _handle_progressive_update(
+        self,
+        request_id: ReqId,
+        update: PushBlockUpdate,
+    ) -> None:
+        base_id = get_base_request_id(request_id)
+        if base_id in self._progressive_fallbacks:
+            return
+        state = self._progressive_states.get(base_id)
+        if state is None:
+            state = _ProgressivePushState(request_id=request_id)
+            self._progressive_states[base_id] = state
+        elif state.request_id != request_id:
+            logger.error("Conflicting progressive request ID for %s", request_id)
+            state.failed = True
+            return
+
+        grouped_ids = self._as_grouped_block_ids(update.block_ids)
+        if len(grouped_ids) != 1:
+            logger.error("Progressive push only supports one KV group")
+            state.failed = True
+            return
+        state.ready_block_ids.extend(grouped_ids[0])
+        self._skip_cached_prefix_blocks(state)
+        state.final_received |= update.is_final
+        if state.registration is None:
+            registration = self._pop_matching_registration(request_id)
+            if registration is not None:
+                self._attach_progressive_registration(state, registration)
+                return
+        self._maybe_start_progressive_push(state)
+
+    def _attach_progressive_registration(
+        self,
+        state: _ProgressivePushState,
+        registration: dict[str, Any],
+    ) -> None:
+        state.registration = registration
+        remote_ids = self._as_grouped_block_ids(registration["local_block_ids"])
+        if len(remote_ids) != 1:
+            logger.error("Progressive push only supports one remote KV group")
+            state.failed = True
+            return
+        state.remaining_block_ids = list(remote_ids[0])
+        if self._registration_supports_progressive(registration):
+            source_block_offset = registration.get("source_block_offset", 0)
+            if not isinstance(source_block_offset, int) or source_block_offset < 0:
+                logger.error(
+                    "Invalid progressive source block offset for %s: %r",
+                    state.request_id,
+                    source_block_offset,
+                )
+                state.failed = True
+                return
+            state.num_source_blocks_to_skip = source_block_offset
+            self._skip_cached_prefix_blocks(state)
+        self._maybe_start_progressive_push(state)
+
+    def _registration_supports_progressive(self, registration: dict[str, Any]) -> bool:
+        prefill_logical_block_size = (
+            self.block_size * self._physical_blocks_per_logical_kv_block
+        )
+        return bool(registration.get("progressive_push")) and (
+            registration.get("decode_block_size") == prefill_logical_block_size
+        )
+
+    @staticmethod
+    def _skip_cached_prefix_blocks(state: _ProgressivePushState) -> None:
+        num_to_skip = min(state.num_source_blocks_to_skip, len(state.ready_block_ids))
+        if num_to_skip:
+            del state.ready_block_ids[:num_to_skip]
+            state.num_source_blocks_to_skip -= num_to_skip
+
+    def _maybe_start_progressive_push(self, state: _ProgressivePushState) -> None:
+        if state.in_flight:
+            return
+        if state.fence_event is not None:
+            self._finish_progressive_fence(state)
+            return
+        if state.failed or state.handshake_pending or state.registration is None:
+            return
+
+        registration = state.registration
+        supports_progressive = self._registration_supports_progressive(registration)
+        if not supports_progressive:
+            if state.final_received:
+                self._progressive_states.pop(
+                    get_base_request_id(state.request_id), None
+                )
+                self._do_start_push_kv(
+                    state.request_id,
+                    (state.ready_block_ids,),
+                    registration,
+                )
+            return
+
+        if state.final_received and (
+            state.num_source_blocks_to_skip
+            or len(state.ready_block_ids) != len(state.remaining_block_ids)
+        ):
+            logger.error(
+                "Progressive push block-count mismatch for %s: %d prefix blocks "
+                "still to skip, %d local vs %d remote",
+                state.request_id,
+                state.num_source_blocks_to_skip,
+                len(state.ready_block_ids),
+                len(state.remaining_block_ids),
+            )
+            state.failed = True
+            return
+        if not state.ready_block_ids:
+            return
+        if not self._progressive_handshake_ready(state):
+            return
+
+        count = min(len(state.ready_block_ids), len(state.remaining_block_ids))
+        local_block_ids = ([*state.ready_block_ids[:count]],)
+        remote_block_ids = ([*state.remaining_block_ids[:count]],)
+        completes_request = state.final_received and count == len(
+            state.remaining_block_ids
+        )
+        handles = self._start_progressive_batch(
+            state,
+            local_block_ids,
+            remote_block_ids,
+            completes_request,
+        )
+        if not handles:
+            state.failed = True
+            return
+        del state.ready_block_ids[:count]
+        del state.remaining_block_ids[:count]
+        state.in_flight = handles
+        state.final_in_flight = completes_request
+
+    def _progressive_handshake_ready(self, state: _ProgressivePushState) -> bool:
+        assert state.registration is not None
+        registration = state.registration
+        future = self._ensure_handshake(
+            registration["decode_engine_id"],
+            registration["decode_host"],
+            registration["decode_port"],
+            registration["decode_tp_size"],
+        )
+        if future is None:
+            return True
+
+        state.handshake_pending = True
+        request_base_id = get_base_request_id(state.request_id)
+
+        def _on_handshake(
+            completed: Future[tuple[dict[tuple[int, int], str], float]],
+            base_id: ReqId = request_base_id,
+        ) -> None:
+            succeeded = completed.exception() is None
+            self._progressive_handshake_inbox.put((base_id, succeeded))
+            self._push_writer_wake.set()
+
+        future.add_done_callback(_on_handshake)
+        return False
+
+    def _start_progressive_batch(
+        self,
+        state: _ProgressivePushState,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
+        completes_request: bool,
+    ) -> list[TransferHandle]:
+        assert state.registration is not None
+        registration = state.registration
+        decode_engine_id = registration["decode_engine_id"]
+        self._engine_last_active[decode_engine_id] = time.perf_counter()
+        logical_local = self._as_grouped_block_ids(local_block_ids)
+        physical_local = self._logical_to_kernel_block_ids(
+            logical_local, self._physical_blocks_per_logical_kv_block
+        )
+        meta = ReqMeta(
+            local_block_ids=logical_local,
+            local_physical_block_ids=physical_local,
+            tp_size=self.world_size,
+            remote=RemoteMeta(
+                block_ids=self._as_grouped_block_ids(remote_block_ids),
+                host="",
+                port=0,
+                engine_id=decode_engine_id,
+                request_id=registration["request_id"],
+            ),
+        )
+        return self._xfer_blocks_for_req(
+            req_id=state.request_id,
+            meta=meta,
+            notify_completion=completes_request,
+            track_for_request=False,
+        )
+
+    def _handle_progressive_fence(
+        self,
+        request_id: ReqId,
+        event: threading.Event,
+        retain_registration: bool = True,
+    ) -> None:
+        base_id = get_base_request_id(request_id)
+        self._progressive_fallbacks.add(base_id)
+        state = self._progressive_states.get(base_id)
+        if state is None:
+            event.set()
+            return
+        state.ready_block_ids.clear()
+        state.handshake_pending = False
+        state.fence_event = event
+        state.retain_registration = retain_registration
+        if not state.in_flight:
+            self._finish_progressive_fence(state)
+
+    def _finish_progressive_fence(self, state: _ProgressivePushState) -> None:
+        assert not state.in_flight and state.fence_event is not None
+        if state.retain_registration and state.registration is not None:
+            registration_id = state.registration["request_id"]
+            self._pending_d_registrations[registration_id] = state.registration
+        self._progressive_states.pop(get_base_request_id(state.request_id), None)
+        event = state.fence_event
+        state.fence_event = None
+        event.set()
+
+    def _poll_progressive_transfers(self) -> None:
+        for state in list(self._progressive_states.values()):
+            if not state.in_flight:
+                continue
+            in_progress = []
+            for handle in state.in_flight:
+                try:
+                    xfer_state = self.nixl_wrapper.check_xfer_state(handle)
+                    if xfer_state == "DONE":
+                        telemetry = self.nixl_wrapper.get_xfer_telemetry(handle)
+                        self.xfer_stats.record_transfer(telemetry)
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                    elif xfer_state == "PROC":
+                        in_progress.append(handle)
+                    else:
+                        state.failed = True
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                        self.xfer_stats.record_failed_transfer()
+                except Exception as error:
+                    state.failed = True
+                    self._log_failure(
+                        failure_type="progressive_push_transfer_failed",
+                        req_id=state.request_id,
+                        error=error,
+                    )
+                    self.nixl_wrapper.release_xfer_handle(handle)
+                    self.xfer_stats.record_failed_transfer()
+            if in_progress:
+                state.in_flight = in_progress
+                continue
+
+            state.in_flight = []
+            if state.fence_event is not None:
+                self._finish_progressive_fence(state)
+            elif state.failed:
+                continue
+            elif state.final_in_flight:
+                self._progressive_states.pop(
+                    get_base_request_id(state.request_id), None
+                )
+                self._progressive_done_outbox.put(state.request_id)
+            else:
+                self._maybe_start_progressive_push(state)
+
     # --- WRITE transfer logic (writer thread) ------------------------- #
 
     def _do_start_push_kv(
@@ -505,7 +906,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return (list(block_ids),)
         return block_ids
 
-    def _xfer_blocks_for_req(self, req_id: str, meta: ReqMeta):
+    def _xfer_blocks_for_req(
+        self,
+        req_id: str,
+        meta: ReqMeta,
+        *,
+        notify_completion: bool = True,
+        track_for_request: bool = True,
+    ) -> list[TransferHandle]:
         """Issue WRITE transfers to one or more remote TP ranks."""
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
@@ -589,6 +997,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 remote_request_id=meta.remote.request_id,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
+                notify_completion=notify_completion,
             )
             if handle is not None:
                 handles.append(handle)
@@ -596,9 +1005,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # Publish all the request's WRITE handles in one locked update: a
         # partial set would let ``_pop_done_transfers`` finish the request
         # early, then double-report it as the remaining writes land.
-        if handles:
+        if handles and track_for_request:
             with self._sending_transfers_lock:
                 self._sending_transfers[req_id].extend(handles)
+        return handles
 
     def _xfer_blocks(
         self,
@@ -608,6 +1018,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_request_id: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
+        notify_completion: bool = True,
     ) -> int | None:
         """Post a WRITE point-to-point xfer request.
 
@@ -689,7 +1100,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 local_block_descs_ids,
                 remote_xfer_side_handle,
                 remote_block_descs_ids,
-                notif_msg=notif_id,
+                notif_msg=notif_id if notify_completion else b"",
             )
             self.nixl_wrapper.transfer(handle)
             # Caller tracks the handle (atomically with the request's other
@@ -783,7 +1194,24 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # notifs, late PUSH_REGs) even if it had been parked.
         self._push_writer_wake.set()
 
+        done_progressive = set[ReqId]()
+        while True:
+            try:
+                req_id = self._progressive_done_outbox.get_nowait()
+            except queue.Empty:
+                break
+            self._reqs_to_send.pop(req_id, None)
+            self._reqs_to_process.discard(req_id)
+            done_progressive.add(req_id)
+
         done_sending, done_recving = super().get_finished()
+        expired_progressive = {
+            req_id
+            for req_id in done_sending
+            if get_base_request_id(req_id) in self._progressive_states
+        }
+        self._fence_progressive_requests(expired_progressive)
+        done_sending.update(done_progressive)
 
         # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
         # writer thread also appends to it, so guard the pop.

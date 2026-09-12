@@ -55,6 +55,7 @@ from vllm.v1.outputs import KVConnectorOutput
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
+    from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
@@ -506,6 +507,38 @@ class KVConnectorBase_V1(ABC):
                 external KV cache. 0 means nothing should be loaded.
         """
         pass
+
+    def request_needs_model_step_callback(self, request: "Request") -> bool:
+        """Return whether a request needs a post-model-step callback.
+
+        The scheduler uses this to avoid collecting block state for connectors
+        that do not need per-step updates.
+
+        Args:
+            request: The request whose model step has completed.
+
+        Returns:
+            True if ``update_state_after_model_step`` should be called for the
+            request.
+        """
+        return False
+
+    def update_state_after_model_step(
+        self,
+        request: "Request",
+        block_ids: "BlockIds",
+        num_settled_prompt_tokens: int,
+    ) -> None:
+        """Update connector state after a request's model step completes.
+
+        Args:
+            request: The request whose model step has completed.
+            block_ids: Logical KV-cache block IDs currently assigned to the
+                request, grouped by KV-cache group.
+            num_settled_prompt_tokens: Number of prompt tokens whose model
+                execution has completed and is no longer in flight.
+        """
+        return
 
     @abstractmethod
     def build_connector_meta(

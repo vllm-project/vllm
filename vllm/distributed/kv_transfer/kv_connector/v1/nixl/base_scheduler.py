@@ -496,6 +496,17 @@ class NixlBaseConnectorScheduler:
         for req_id in connector_output.finished_recving or ():
             self._stop_heartbeat(req_id)
 
+    def request_needs_model_step_callback(self, request: "Request") -> bool:
+        return False
+
+    def update_state_after_model_step(
+        self,
+        request: "Request",
+        block_ids: BlockIds,
+        num_settled_prompt_tokens: int,
+    ) -> None:
+        return
+
     def has_pending_push_work(self) -> bool:
         return False
 

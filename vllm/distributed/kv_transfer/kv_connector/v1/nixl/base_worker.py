@@ -154,6 +154,9 @@ def _uses_dense_virtual_transfer_pages(
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
+    def handle_preemptions(self, metadata: NixlConnectorMetadata) -> None:
+        return
+
     # Transfer mode included in the NIXL compatibility hash so that a push
     # (WRITE) connector and a pull (READ) connector never handshake together.
     # Overridden by NixlPushConnectorWorker.
