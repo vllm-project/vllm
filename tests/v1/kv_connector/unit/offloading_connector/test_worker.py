@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 
@@ -636,3 +637,91 @@ def test_register_kv_caches_uniform_type(backend):
     # opaque mapping rather than a certified, parallelism-agnostic one
     assert group_refs[0].mapping.parallelism_agnostic
     assert not group_refs[1].mapping.parallelism_agnostic
+
+
+@pytest.mark.parametrize("dtype,row_width", [(torch.bfloat16, 576), (torch.uint8, 656)])
+def test_packed_tail_alignment_survives_registration_and_transfer(dtype, row_width):
+    """Offloading must copy whole physical blocks, including alignment tails."""
+    from vllm.config import CacheConfig
+    from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
+    from vllm.v1.kv_offload.cpu.gpu_worker import SingleDirectionOffloadingHandler
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    specs = {
+        name: MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=width,
+            dtype=dt,
+            block_stride_alignment_bytes=width * get_dtype_size(dt),
+        )
+        for name, width, dt in [
+            ("mla.0", row_width, dtype),
+            ("mla.1", row_width, dtype),
+            ("indexer", 132, torch.uint8),
+        ]
+    }
+    group = KVCacheGroupSpec(
+        list(specs), UniformTypeKVCacheSpecs(block_size=64, kv_cache_specs=specs)
+    )
+    config = _single_rank_vllm_config(1)
+    config.cache_config = CacheConfig(block_size=64)
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.cache_config.num_gpu_blocks_override = 3
+    cache = get_kv_cache_config_from_groups(config, [group], 0)
+    views = allocate_kv_cache(cache, torch.device("cpu"), KVCacheLayout.BLHNC)
+    before = {name: (v.data_ptr(), v.shape, v.stride()) for name, v in views.items()}
+    for value, view in enumerate(views.values(), 1):
+        view.fill_(value)
+
+    worker, spec = _make_worker(cache)
+    worker.vllm_config = config
+    worker.register_kv_caches(views)
+    canonical = spec.get_worker.call_args.args[0]
+    assert len(canonical.tensors) == 1
+    packed = canonical.tensors[0]
+    stride = cache.kv_cache_tensors[0].block_stride
+    content = sum(s.page_size_bytes for s in specs.values())
+    assert stride > content
+    assert packed.page_size_bytes == stride
+    assert packed.tensor.shape == (3, stride)
+    assert packed.tensor.stride() == (stride, 1)
+    assert packed.tensor.data_ptr() == views["mla.0"].untyped_storage().data_ptr()
+    assert canonical.group_data_refs == [[CanonicalKVCacheRef(0, stride)]]
+    packed.tensor[:, content:].fill_(91)
+
+    # Exercise the real direct transfer descriptor builder on CPU; only CUDA
+    # stream allocation/dispatch is omitted. Registration/mapping is unmocked.
+    handler = object.__new__(SingleDirectionOffloadingHandler)
+    handler.src_tensors = [packed.tensor]
+    handler.dst_tensors = [torch.empty_like(packed.tensor)]
+    handler.src_blocks_per_chunk = handler.dst_blocks_per_chunk = 1
+    handler.layer_refs_per_group = canonical.group_data_refs
+    src, dst, sizes = (np.empty(3, dtype=np.uint64) for _ in range(3))
+    count, nbytes = handler._fill_direct_ops(
+        0,
+        np.array([0, 1, 2]),
+        np.array([2, 0, 1]),
+        3,
+        0,
+        0,
+        src,
+        dst,
+        sizes,
+        0,
+    )
+    assert count == 3 and nbytes == 3 * stride
+    assert sizes.tolist() == [stride] * 3
+    assert src.tolist() == [packed.tensor.data_ptr() + b * stride for b in range(3)]
+    assert dst.tolist() == [
+        handler.dst_tensors[0].data_ptr() + b * stride for b in (2, 0, 1)
+    ]
+    assert src[-1] + sizes[-1] == packed.tensor.data_ptr() + packed.tensor.numel()
+    offset = 0
+    for value, (name, layer_spec) in enumerate(specs.items(), 1):
+        view = views[name]
+        assert (view.data_ptr(), view.shape, view.stride()) == before[name]
+        assert view[1].data_ptr() == packed.tensor[1].data_ptr() + offset
+        assert torch.all(view == value)
+        offset += layer_spec.page_size_bytes
+    assert torch.all(packed.tensor[:, content:] == 91)

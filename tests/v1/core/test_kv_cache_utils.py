@@ -59,6 +59,7 @@ from vllm.v1.kv_cache_interface import (
     KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayout,
     KVCacheSpec,
     KVCacheSpecKind,
     KVCacheTensor,
@@ -1287,6 +1288,52 @@ def test_get_kv_cache_configs_pp_sharding(asymmetric_memory):
             kv_cache_groups=[KVCacheGroupSpec(["layer2"], ref_kv_cache_spec)],
         ),
     ]
+
+
+@pytest.mark.parametrize("override", [None, 11])
+def test_aligned_sparse_mla_capacity_and_pp_replanning(override):
+    """Every worker must retain the same block count after aligned re-planning."""
+    config = VllmConfig(model_config=ModelConfig(max_model_len=64))
+    config.cache_config.block_size = 64
+    config.cache_config.kv_cache_layout = "BLHNC"
+    config.cache_config.num_gpu_blocks_override = override
+    workers = [
+        {
+            f"stage{stage}.{name}": MLAAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=width,
+                dtype=torch.uint8,
+                block_stride_alignment_bytes=width,
+            )
+            for name, width in [("mla", 656), ("indexer", 132)]
+        }
+        for stage in range(2)
+    ]
+    stride = 64944  # ceil(64 * (656 + 132) / lcm(656, 132)) * lcm(656, 132)
+    configs = get_kv_cache_configs(config, workers, [11 * stride, 20 * stride])
+    for cache in configs:
+        assert cache.num_blocks == 11
+        assert {t.size for t in cache.kv_cache_tensors} == {11 * stride}
+        assert {t.block_stride for t in cache.kv_cache_tensors} == {stride}
+        from vllm.v1.worker.utils import allocate_kv_cache
+
+        views = allocate_kv_cache(cache, torch.device("cpu"), KVCacheLayout.BLHNC)
+        storage = next(iter(views.values())).untyped_storage()
+        assert storage.nbytes() == cache.num_blocks * stride
+        assert all(
+            v.untyped_storage().data_ptr() == storage.data_ptr() for v in views.values()
+        )
+    config.model_config.original_max_model_len = -1
+    config.model_config.max_model_len = 2048
+    get_kv_cache_configs(config, workers, [11 * stride, 20 * stride])
+    assert config.model_config.max_model_len == 10 * 64
+    # Twelve blocks cover only eleven usable blocks once the null block is reserved.
+    config.cache_config.num_gpu_blocks_override = None
+    config.model_config.original_max_model_len = None
+    config.model_config.max_model_len = 12 * 64
+    with pytest.raises(ValueError, match="max seq len"):
+        get_kv_cache_configs(config, workers, [12 * stride, 20 * stride])
 
 
 def test_project_kv_cache_groups_to_worker():
@@ -3809,6 +3856,57 @@ def test_check_enough_kv_cache_memory_reserves_null_block():
     check_enough_kv_cache_memory(
         vllm_config, {"layer1": spec}, spec.page_size_bytes * 33
     )
+
+
+@pytest.mark.parametrize("logical_blocks,max_model_len", [(1, 64), (2, 192)])
+def test_check_enough_kv_cache_memory_uses_aligned_groups(
+    logical_blocks, max_model_len
+):
+    """Admission and its estimate must match the allocator's usable blocks."""
+    from vllm.v1.core.block_pool import BlockPool
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
+    config.cache_config.block_size = 64
+    config.cache_config.kv_cache_layout = "BLHNC"
+    # Ordinary FP8 MLA storage and its FP8 indexer (128 data + 4 scale bytes).
+    specs = {
+        name: MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=width,
+            dtype=torch.uint8,
+            block_stride_alignment_bytes=width,
+        )
+        for name, width in [("mla", 576), ("indexer", 132)]
+    }
+    groups = get_kv_cache_groups(config, specs)
+    logical_bytes = sum(spec.page_size_bytes for spec in specs.values())
+    stride = kv_cache_utils._pool_bytes_per_block(groups, config)
+    assert stride > logical_bytes
+    available_memory = stride + logical_blocks * logical_bytes
+    cache = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, groups, available_memory
+    )
+    views = allocate_kv_cache(cache, torch.device("cpu"), KVCacheLayout.BLHNC)
+    assert (
+        next(iter(views.values())).untyped_storage().nbytes()
+        == cache.num_blocks * stride
+    )
+    pool = BlockPool(cache.num_blocks, enable_caching=False, hash_block_size=64)
+    usable_blocks = pool.get_num_free_blocks()
+    assert usable_blocks == logical_blocks - 1
+    with pytest.raises(ValueError, match="max seq len") as exc:
+        check_enough_kv_cache_memory(config, specs, available_memory)
+    if usable_blocks:
+        assert f"estimated maximum model length is {usable_blocks * 64}." in str(
+            exc.value
+        )
+    else:
+        assert "estimated maximum model length" not in str(exc.value)
+    assert config.model_config.max_model_len == max_model_len
+    # Exact physical capacity, including the reserved null block, is accepted.
+    check_enough_kv_cache_memory(config, specs, (max_model_len // 64 + 1) * stride)
 
 
 def test_is_full_attention_spec_unwraps_uniform_type_specs():

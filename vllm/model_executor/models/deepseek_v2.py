@@ -26,6 +26,7 @@
 
 import typing
 from collections.abc import Callable, Iterable
+from dataclasses import replace
 from itertools import islice
 
 import torch
@@ -651,12 +652,13 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         self.kv_cache = kv_cache.squeeze(1)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return MLAAttentionSpec(
+        spec = MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
         )  # Only has one vector instead of K + V
+        return replace(spec, block_stride_alignment_bytes=spec.state_content_size_bytes)
 
     def forward(self): ...
 

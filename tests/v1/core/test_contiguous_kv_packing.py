@@ -10,12 +10,16 @@ block); the allocation is the same either way.
 """
 
 from dataclasses import replace
+from math import lcm
+from random import Random
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
 from vllm.config import CacheConfig
+from vllm.v1.attention.backends.mla.sparse_utils import flat_kv_row_view
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     _get_kv_cache_bytes_per_block,
@@ -36,6 +40,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
+    create_kv_cache_views,
     iter_layer_specs,
 )
 from vllm.v1.worker.utils import allocate_kv_cache
@@ -594,6 +599,220 @@ class TestDensePacking:
         for i, name in enumerate(specs):
             assert (views[name].to(torch.int32) == i + 1).all(), name
             assert views[name].shape[0] == config.num_blocks
+
+
+@pytest.mark.parametrize(
+    "cache_dtype,dtype,row_bytes",
+    [
+        ("fp8_ds_mla", torch.uint8, 656),
+        ("nvfp4_ds_mla", torch.uint8, 352),
+        ("auto", torch.bfloat16, 1152),
+    ],
+)
+def test_sparse_mla_packed_row_addresses(cache_dtype, dtype, row_bytes):
+    """Heterogeneous pages must remain addressable in whole physical rows."""
+    mla = MLAAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=dtype,
+        cache_dtype_str=cache_dtype,
+        state_content_bytes=row_bytes,
+        block_stride_alignment_bytes=row_bytes,
+    )
+    indexer = replace(_mla(128 + 4), block_stride_alignment_bytes=132)
+    # A small heterogeneous inventory, not a claim about a model's layer count.
+    specs = {"mla.0": mla, "mla.1": mla, "idx.0": indexer}
+    groups = [_uniform_group(specs)]
+    real_bytes = sum(spec.page_size_bytes for spec in specs.values())
+    alignment = lcm(row_bytes, indexer.state_content_size_bytes)
+    stride = (real_bytes + alignment - 1) // alignment * alignment
+    memory = 11 * stride + stride - 1
+    config = get_kv_cache_config_from_groups(_mock_vllm_config("BLHNC"), groups, memory)
+    raw = torch.full((config.kv_cache_tensors[0].size,), -1, dtype=torch.int8)
+    random = Random(55431)
+    offset = 0
+    for tensor in config.kv_cache_tensors:
+        spec = specs[tensor.layers[0]]
+        assert tensor.block_stride % spec.state_content_size_bytes == 0
+        assert tensor.block_stride == stride
+        assert tensor.layer_stride == spec.page_size_bytes
+        assert tensor.offset == offset
+        views = create_kv_cache_views(
+            raw,
+            spec,
+            config.num_blocks,
+            KVCacheLayout.BLHNC,
+            tensor,
+            kernel_block_size=64,
+        )
+        for i, view in enumerate(views):
+            layer_offset = offset + i * spec.page_size_bytes
+            assert view.data_ptr() == raw.data_ptr() + layer_offset
+            assert view.storage_offset() * view.element_size() == layer_offset
+            assert view.untyped_storage().data_ptr() == raw.data_ptr()
+            assert view.untyped_storage().nbytes() == config.num_blocks * stride
+            assert view.numel() * view.element_size() == (
+                config.num_blocks * spec.page_size_bytes
+            )
+            byte_view = view.view(torch.uint8)
+            width = spec.state_content_size_bytes
+            rows, stride_rows = flat_kv_row_view(byte_view.squeeze(1), 64)
+            assert stride_rows == stride // width
+            for block in [0, config.num_blocks - 1, 7, 2, 9, 1] + [
+                random.randrange(config.num_blocks) for _ in range(20)
+            ]:
+                token = random.randrange(64)
+                column = random.randrange(width)
+                physical = layer_offset + block * stride + token * width + column
+                row = block * stride_rows + token
+                assert layer_offset + row * width + column == physical
+                assert rows[row, column].data_ptr() == raw.data_ptr() + physical
+                byte_view[block, 0, token, column] = 42
+                assert raw[physical].item() == 42
+                assert rows[row, column].item() == 42
+        offset += len(tensor.layers) * spec.page_size_bytes
+    assert offset == real_bytes
+    assert config.num_blocks == memory // stride
+    assert torch.all(raw.view(config.num_blocks, stride)[:, real_bytes:] == -1)
+
+
+@pytest.mark.parametrize("layout", ["LBNHC", "LBHNC", "BLHNC"])
+def test_packed_stride_alignment_leaves_dense_pages_unchanged(layout):
+    # Three NVFP4 pages plus one FP8 indexer page already satisfy both row widths.
+    specs = {f"mla.{i}": _mla(352) for i in range(3)}
+    specs["idx.0"] = _mla(132)
+    aligned = {
+        name: replace(spec, block_stride_alignment_bytes=spec.state_content_size_bytes)
+        for name, spec in specs.items()
+    }
+    config = _mock_vllm_config(layout)
+    before = get_kv_cache_config_from_groups(config, [_uniform_group(specs)], MEMORY)
+    after = get_kv_cache_config_from_groups(config, [_uniform_group(aligned)], MEMORY)
+    assert before.num_blocks == after.num_blocks
+    assert before.kv_cache_tensors == after.kv_cache_tensors
+
+
+@pytest.mark.parametrize(
+    "layout_name,resolved",
+    [
+        ("NHD", KVCacheLayout.LBNHC),
+        ("HND", KVCacheLayout.LBHNC),
+        ("BLHNC", KVCacheLayout.BLHNC),
+        (None, None),
+    ],
+)
+def test_pool_bytes_resolves_layout_aliases(layout_name, resolved):
+    config = _mock_vllm_config(layout_name)
+    specs = {
+        name: replace(_mla(width), block_stride_alignment_bytes=width)
+        for name, width in [("mla", 576), ("idx", 132)]
+    }
+    if resolved is None:
+        groups = [_uniform_group(specs)]
+        expected = sum(spec.page_size_bytes for spec in specs.values())
+        assert _pool_bytes_per_block(groups, config) == expected
+        assert _pool_bytes_per_block(groups) == expected
+        return
+    assert resolve_kv_cache_layout(config, [[resolved.name]]) == resolved
+    assert config.cache_config.kv_cache_layout == layout_name
+    groups = get_kv_cache_groups(config, specs)
+    cache = get_kv_cache_config_from_groups(config, groups, MEMORY)
+    views = allocate_kv_cache(cache, torch.device("cpu"), resolved)
+    allocation_bytes = views["mla"].untyped_storage().nbytes()
+    # Capacity accounting must accept the same names and bytes as allocation.
+    pool_bytes = _pool_bytes_per_block(groups, config)
+    assert allocation_bytes == cache.num_blocks * pool_bytes
+    assert cache.num_blocks == MEMORY // pool_bytes
+
+
+@pytest.mark.parametrize("layout", ["LBNHC", "LBHNC"])
+def test_layer_compact_ignores_packed_stride_alignment(layout):
+    specs = {"mla": _mla(656), "idx": _mla(132)}
+    aligned = {
+        name: replace(spec, block_stride_alignment_bytes=spec.state_content_size_bytes)
+        for name, spec in specs.items()
+    }
+    config = _mock_vllm_config(layout)
+    before = get_kv_cache_config_from_groups(config, [_uniform_group(specs)], MEMORY)
+    after = get_kv_cache_config_from_groups(config, [_uniform_group(aligned)], MEMORY)
+    assert before.num_blocks == after.num_blocks
+    assert before.kv_cache_tensors == after.kv_cache_tensors
+
+
+def test_packed_stride_alignment_includes_smaller_overlaid_group():
+    # The largest group determines content size, but every group constrains stride.
+    large = replace(_mla(656), block_stride_alignment_bytes=656)
+    small = replace(_mla(132), block_stride_alignment_bytes=132)
+    groups = [KVCacheGroupSpec(["large"], large), KVCacheGroupSpec(["small"], small)]
+    stride = 2 * lcm(656, 132)
+    config = get_kv_cache_config_from_groups(_mock_vllm_config("BLHNC"), groups, MEMORY)
+    assert config.num_blocks == MEMORY // stride
+    assert all(
+        t.block_stride == stride and t.offset == 0 for t in config.kv_cache_tensors
+    )
+
+
+def test_mla_merge_preserves_all_block_stride_requirements():
+    spec = _mla(132)
+    merged = MLAAttentionSpec.merge(
+        [
+            spec,
+            replace(spec, block_stride_alignment_bytes=132),
+            replace(spec, block_stride_alignment_bytes=16),
+        ]
+    )
+    assert merged.block_stride_alignment_bytes == lcm(132, 16)
+    assert merged.page_size_bytes == spec.page_size_bytes
+    assert MLAAttentionSpec.merge([spec, spec]).block_stride_alignment_bytes is None
+
+
+@pytest.mark.parametrize("alignment", [0, -1])
+def test_mla_rejects_invalid_block_stride_alignment(alignment):
+    with pytest.raises(
+        ValueError, match="block_stride_alignment_bytes must be positive"
+    ):
+        replace(_mla(132), block_stride_alignment_bytes=alignment)
+
+
+def test_packed_sparse_mla_rejects_manager_block_splitting():
+    specs = {
+        "mla": replace(_mla(656), block_size=128, block_stride_alignment_bytes=656),
+        "idx": replace(_mla(132), block_size=128, block_stride_alignment_bytes=132),
+    }
+    groups = [
+        KVCacheGroupSpec(
+            list(specs), UniformTypeKVCacheSpecs(block_size=128, kv_cache_specs=specs)
+        )
+    ]
+    config = get_kv_cache_config_from_groups(_mock_vllm_config("BLHNC"), groups, MEMORY)
+    with pytest.raises(ValueError, match="cannot be split into 2 kernel blocks of 64"):
+        allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout.BLHNC, [64])
+
+
+@pytest.mark.parametrize("row_bytes", [352, 576, 656, 1152])
+def test_packed_sparse_row_coordinates_fit_int32_above_two_gib(row_bytes):
+    # A conservative 101-segment bound, not the production model's inventory:
+    # 100 wide pages plus one indexer maximize stride for these two row widths.
+    wide = replace(_mla(row_bytes), block_stride_alignment_bytes=row_bytes)
+    indexer = replace(_mla(132), block_stride_alignment_bytes=132)
+    specs = {f"mla.{i}": wide for i in range(100)} | {"idx": indexer}
+    config = _mock_vllm_config("BLHNC")
+    config.cache_config.num_gpu_blocks_override = 20307
+    cache = get_kv_cache_config_from_groups(config, [_uniform_group(specs)], 0)
+    for tensor in cache.kv_cache_tensors:
+        spec = specs[tensor.layers[0]]
+        assert tensor.size > 2**31
+        assert tensor.block_stride < 2**31
+        raw = torch.empty(tensor.size, dtype=torch.int8, device="meta")
+        view = create_kv_cache_views(
+            raw, spec, cache.num_blocks, KVCacheLayout.BLHNC, tensor
+        )[-1]
+        rows, stride_rows = flat_kv_row_view(view.squeeze(1), 64)
+        max_row = (cache.num_blocks - 1) * stride_rows + 63
+        assert max_row == rows.shape[0] - 1
+        assert max_row < torch.iinfo(torch.int32).max
+        assert max_row * spec.state_content_size_bytes > 2**31
 
 
 if __name__ == "__main__":

@@ -518,6 +518,76 @@ def test_register_compressed_indexer_uses_virtual_transfer_pages(
     )
 
 
+@pytest.mark.parametrize("layout,num_regions", [("LBHNC", 3), ("BLHNC", 1)])
+def test_sparse_mla_allocator_views_register_packed_region(layout, num_regions):
+    from unittest.mock import MagicMock
+
+    from vllm.config import set_current_vllm_config
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseBackend
+    from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
+    from vllm.v1.kv_cache_interface import (
+        KVCacheGroupSpec,
+        KVCacheLayout,
+        MLAAttentionSpec,
+        UniformTypeKVCacheSpecs,
+    )
+    from vllm.v1.worker.utils import allocate_kv_cache
+
+    specs = {
+        name: MLAAttentionSpec(
+            block_size=64,
+            num_kv_heads=1,
+            head_size=width,
+            dtype=torch.uint8,
+            block_stride_alignment_bytes=width,
+        )
+        for name, width in [("mla.0", 656), ("mla.1", 656), ("idx.0", 132)]
+    }
+    group = KVCacheGroupSpec(
+        list(specs), UniformTypeKVCacheSpecs(block_size=64, kv_cache_specs=specs)
+    )
+    config = create_vllm_config(block_size=64)
+    config.cache_config.kv_cache_layout = layout
+    config.cache_config.num_gpu_blocks_override = 11
+    config.kv_transfer_config.kv_buffer_device = "cuda"
+    cache_config = get_kv_cache_config_from_groups(config, [group], 2**20)
+    caches = allocate_kv_cache(cache_config, torch.device("cpu"), KVCacheLayout[layout])
+    fake_platform = MagicMock()
+    fake_platform.device_type = "cuda"
+    fake_platform.get_nixl_memory_type.return_value = "VRAM"
+    with (
+        patch.object(bw, "NixlWrapper", _RecordingNixl),
+        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
+        patch.object(
+            bw, "get_current_attn_backends", return_value=[FlashMLASparseBackend]
+        ),
+        patch.object(bw, "current_platform", fake_platform),
+        set_current_vllm_config(config),
+    ):
+        worker = NixlConnectorWorker(config, "local-engine", cache_config)
+        worker.use_mla = True
+        worker.register_kv_caches(caches)
+    assert worker.num_regions == num_regions
+    assert worker._region_is_mla == [True] * num_regions
+    if layout == "BLHNC":
+        storage = caches["mla.0"].untyped_storage()
+        stride = cache_config.kv_cache_tensors[0].block_stride
+        assert storage.nbytes() == cache_config.num_blocks * stride
+        assert worker.block_len_per_layer == worker.block_stride_per_layer == [stride]
+        assert worker._registered_descs[0] == [
+            (storage.data_ptr(), storage.nbytes(), 0, "")
+        ]
+        np.testing.assert_array_equal(
+            worker.src_blocks_data,
+            [[storage.data_ptr() + b * stride, stride, 0] for b in range(11)],
+        )
+
+
 def _make_remote_meta(
     worker,
     remote_block_size,
