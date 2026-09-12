@@ -740,3 +740,70 @@ def test_async_loads_both_admitted_when_pool_fits():
 
     for req in reqs:
         assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+def test_duplicate_finished_recving_is_ignored():
+    """A repeated finished_recving for an already-promoted request is dropped
+    rather than taking down the engine.
+
+    `MultiConnector` aggregates finished_recving from every sub-connector
+    without the de-duplication it applies to finished_sending, so a load
+    completed by one connector can be reported again by another one some steps
+    later. By then the request is running and its blocks are live, so they must
+    not be freed.
+    """
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+
+    request = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=int(BLOCK_SIZE * 2.5),
+        do_remote_prefill=True,
+    )
+    scheduler.add_request(request)
+    request_id = request.request_id
+    req_to_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0
+    ].req_to_blocks
+
+    # Park the request on the remote load, then complete that load.
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(reqs=[], finished_recving={request_id}),
+    )
+
+    # The request is now live and holds the blocks it loaded into.
+    scheduler_output = scheduler.schedule()
+    assert len(scheduler.running) == 1
+    scheduler.update_from_output(
+        scheduler_output, create_model_runner_output([request])
+    )
+    assert request.status == RequestStatus.RUNNING
+    block_ids_before = [block.block_id for block in req_to_blocks[request_id]]
+
+    # A second connector reports the same load as finished.
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output([request], finished_recving={request_id}),
+    )
+
+    assert request.status == RequestStatus.RUNNING
+    assert [block.block_id for block in req_to_blocks[request_id]] == block_ids_before
+    assert all(block.ref_cnt == 1 for block in req_to_blocks[request_id])
+
+    # The request still finishes cleanly and leaves no state behind.
+    scheduler_output = scheduler.schedule()
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler_output, create_model_runner_output([request], use_eos=True)
+    )
+    scheduler.schedule()
+    assert engine_core_outputs[0].outputs[0].finish_reason == FinishReason.STOP
+    assert_scheduler_empty(scheduler)

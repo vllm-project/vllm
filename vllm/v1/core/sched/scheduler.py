@@ -3035,9 +3035,19 @@ class Scheduler(SchedulerInterface):
             req = self.requests[req_id]
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
-            else:
-                assert RequestStatus.is_finished(req.status)
+            elif RequestStatus.is_finished(req.status):
                 self._free_blocks(self.requests[req_id])
+            else:
+                # Duplicate signal: an earlier one already promoted the
+                # request. Its blocks are in use by a live request, so
+                # freeing them here would corrupt it.
+                logger.warning(
+                    "Ignoring duplicate finished_recving for request %s in "
+                    "state %s: a KV connector reported the same load as "
+                    "finished more than once.",
+                    req_id,
+                    req.status.name,
+                )
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
             assert req_id in self.requests
