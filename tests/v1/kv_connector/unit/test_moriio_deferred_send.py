@@ -24,6 +24,7 @@ def _producer_sched() -> SimpleNamespace:
         _pending_sent_acks={},
         _defer_timeout=60.0,
         _stale_deferred_sends=set(),
+        _stale_deferred_log_at=0.0,
         transfer_id_to_request_id={},
         request_id_to_transfer_id={},
     )
@@ -44,6 +45,41 @@ def test_expired_deferred_send_is_not_finished_sending():
     assert "rid-a" in sched._deferred_send_deadlines
     assert sched.request_id_to_transfer_id == {"rid-a": "tid-a"}
     assert "rid-a" in sched._stale_deferred_sends
+    assert sched.transfer_id_to_request_id == {"tid-a": "rid-a"}
+
+
+def test_lost_acks_retain_all_deferred_entries_and_mappings():
+    """A lost ACK path must keep every deferred entry and transfer-id
+    mapping so a late ACK can still free. Force-freeing or dropping
+    maps would return blocks to the pool while a READ may still
+    reference them."""
+    sched = _producer_sched()
+    n = 1000
+    expired_at = time.monotonic() - 1.0
+    for i in range(n):
+        rid, tid = f"rid-{i}", f"tid-{i}"
+        sched.map_request_id(rid, tid)
+        sched._deferred_send_deadlines[rid] = (expired_at, tid)
+
+    output = KVConnectorOutput(finished_sending=None)
+    _update(sched, output)
+
+    assert output.finished_sending is None
+    assert len(sched._deferred_send_deadlines) == n
+    assert len(sched.request_id_to_transfer_id) == n
+    assert len(sched.transfer_id_to_request_id) == n
+    assert len(sched._stale_deferred_sends) == n
+
+    ack_output = KVConnectorOutput(finished_sending={"rid-7"})
+    _update(sched, ack_output)
+
+    assert ack_output.finished_sending == {"rid-7"}
+    assert "rid-7" not in sched._deferred_send_deadlines
+    assert "rid-7" not in sched.request_id_to_transfer_id
+    assert "tid-7" not in sched.transfer_id_to_request_id
+    assert len(sched._deferred_send_deadlines) == n - 1
+    assert len(sched.request_id_to_transfer_id) == n - 1
+    assert len(sched.transfer_id_to_request_id) == n - 1
 
 
 def test_ack_still_surfaces_deferred_send_for_free():

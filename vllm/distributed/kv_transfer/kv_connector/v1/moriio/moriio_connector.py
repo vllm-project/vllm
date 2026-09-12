@@ -436,7 +436,11 @@ class MoRIIOConnectorScheduler:
             )
         )
         # Expired deferred sends already logged; still waiting for an ACK.
+        # Lost ACKs keep these entries (and transfer-id maps) until a real
+        # ACK arrives: dropping them would prevent a late free, and
+        # surfacing them as finished_sending would reuse the blocks.
         self._stale_deferred_sends: set[ReqId] = set()
+        self._stale_deferred_log_at: float = 0.0
         # Buffer for early ACKs that arrive before request_finished.
         self._pending_sent_acks: dict[ReqId, float] = {}
         self.paths: dict[str, zmq.Socket] = {}
@@ -1005,8 +1009,12 @@ class MoRIIOConnectorScheduler:
           ``_pending_sent_acks`` and released on a later step once the
           request enters ``_deferred_send_deadlines``.
         * A deferred send whose ACK never arrives is held past
-          ``_defer_timeout``. Force-freeing would return blocks to the
-          pool while a consumer READ may still reference them.
+          ``_defer_timeout``, including its transfer-id mapping. That is
+          the fail-safe: force-freeing would return blocks to the pool
+          while a consumer READ may still reference them, and dropping
+          the mapping would make a late ACK unable to free. KV-cache
+          pressure from held blocks is the backpressure if the ACK path
+          is lost; a consumer transfer timeout still sends ``release``.
         * A parked ACK that never matches a deferral before its own
           deadline is a stale duplicate and is dropped.
 
@@ -1048,13 +1056,17 @@ class MoRIIOConnectorScheduler:
         ]
         if newly_stale:
             self._stale_deferred_sends.update(newly_stale)
+        n_stale = len(self._stale_deferred_sends)
+        log_at = getattr(self, "_stale_deferred_log_at", 0.0)
+        if n_stale and (newly_stale or now >= log_at):
             logger.warning(
-                "Holding %d deferred sends with no finished_sending "
-                "notification after %.0fs. Blocks stay allocated until "
-                "an ACK arrives.",
-                len(newly_stale),
-                self._defer_timeout,
+                "Holding %d deferred sends with no finished_sending ACK "
+                "(%d transfer-id mappings). Blocks stay allocated until "
+                "an ACK arrives; lost ACKs are not force-freed.",
+                n_stale,
+                len(self.request_id_to_transfer_id),
             )
+            self._stale_deferred_log_at = now + self._defer_timeout
 
         # Finalize the requests we are surfacing: drop their deferral/park
         # bookkeeping and unmap their transfer ids.
