@@ -7,6 +7,8 @@ import pytest
 import torch
 import torch.distributed
 
+import vllm.distributed.eplb.eplb_communicator as eplb_comm
+import vllm.utils.gpu_sync_debug as gsd
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.eplb.eplb_communicator import (
     create_eplb_communicator,
@@ -23,6 +25,29 @@ from vllm.distributed.parallel_state import (
 )
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_gloo_receive_staging_does_not_force_gpu_sync(monkeypatch):
+    """Gloo receives must reach the GPU without an implicit pageable copy."""
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+    gsd._install_copy_checkers()
+    monkeypatch.setattr(eplb_comm, "is_local_first_rank", lambda: False)
+
+    monkeypatch.setattr(eplb_comm, "P2POp", lambda op, tensor, peer, group: tensor)
+
+    def receive(tensors):
+        for tensor in tensors:
+            tensor.fill_(7)
+        return []
+
+    monkeypatch.setattr(eplb_comm, "batch_isend_irecv", receive)
+    communicator = eplb_comm.TorchDistGlooStagedEplbCommunicator(cpu_group=None)
+    dst = torch.empty(32, device="cuda")
+    communicator.add_recv([dst], src_rank=1, expert_id=0)
+    gsd.with_gpu_sync_check(communicator.execute)()
+    torch.testing.assert_close(dst.cpu(), torch.full((32,), 7.0))
 
 
 def create_expert_indices_with_redundancy(
@@ -781,126 +806,4 @@ def test_rearrange_expert_weights_profile_mode(world_size):
     distributed_run(
         _test_rearrange_expert_weights_profile_mode,
         world_size,
-    )
-
-
-def _test_nixl_deferred_init_worker(
-    env,
-    world_size: int,
-    num_layers: int,
-    num_local_experts: int,
-    num_logical_experts: int,
-) -> None:
-    """Exercise NixlEplbCommunicator with defer_remote_setup=True (elastic EP path)."""
-    from vllm.distributed.eplb.eplb_communicator import NixlEplbCommunicator
-
-    set_env_vars_and_device(env)
-
-    vllm_config = VllmConfig()
-    vllm_config.parallel_config.tensor_parallel_size = world_size
-
-    with set_current_vllm_config(vllm_config):
-        ensure_model_parallel_initialized(
-            tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
-        )
-
-        ep_group_coordinator = get_tp_group()
-        ep_group = ep_group_coordinator.cpu_group
-        ep_rank = torch.distributed.get_rank()
-        device = torch.device(f"cuda:{ep_rank}")
-
-        total_physical_experts = world_size * num_local_experts
-        hidden_sizes = [32, 64]
-
-        redundancy_config = create_redundancy_config(
-            num_logical_experts, total_physical_experts
-        )
-        old_indices = create_expert_indices_with_redundancy(
-            num_layers,
-            num_logical_experts,
-            total_physical_experts,
-            redundancy_config,
-        )
-
-        new_redundancy_config = create_redundancy_config(
-            num_logical_experts, total_physical_experts
-        )
-        new_indices = create_expert_indices_with_redundancy(
-            num_layers,
-            num_logical_experts,
-            total_physical_experts,
-            new_redundancy_config,
-        )
-
-        expert_weights = create_expert_weights(
-            num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
-        )
-
-        expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
-
-        communicator = NixlEplbCommunicator(
-            cpu_group=ep_group_coordinator.cpu_group,
-            all_expert_weights=expert_weights,
-            expert_buffer=expert_buffer,
-            defer_remote_setup=True,
-        )
-        assert not communicator._remote_state_initialized
-
-        rearrange_expert_weights_inplace(
-            old_indices,
-            new_indices,
-            expert_weights,
-            expert_buffer,
-            ep_group,
-            communicator,
-        )
-
-        assert communicator._remote_state_initialized
-
-    local_ok = verify_expert_weights_after_shuffle(
-        expert_weights,
-        new_indices,
-        hidden_sizes,
-        ep_rank,
-        num_local_experts,
-    )
-
-    local_ok = (
-        verify_redundant_experts_have_same_weights(
-            expert_weights,
-            new_indices,
-            hidden_sizes,
-            ep_rank,
-            world_size,
-            num_local_experts,
-        )
-        and local_ok
-    )
-    assert_verification_synced(
-        local_ok,
-        "Deferred NIXL init verification failed on at least one rank.",
-    )
-
-
-@pytest.mark.skipif(not has_nixl(), reason="NIXL is not available")
-@pytest.mark.parametrize(
-    "world_size,num_layers,num_local_experts,num_logical_experts",
-    [(2, 2, 3, 4)],
-)
-def test_nixl_deferred_init(
-    world_size,
-    num_layers,
-    num_local_experts,
-    num_logical_experts,
-):
-    """Test NixlEplbCommunicator with defer_remote_setup=True (elastic EP path)."""
-
-    if torch.accelerator.device_count() < world_size:
-        pytest.skip(f"Need at least {world_size} GPUs to run the test")
-    distributed_run(
-        _test_nixl_deferred_init_worker,
-        world_size,
-        num_layers,
-        num_local_experts,
-        num_logical_experts,
     )

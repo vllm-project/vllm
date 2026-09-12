@@ -857,6 +857,12 @@ def invoke_fused_moe_triton_kernel(
             BLOCK_SIZE_K,
         )
         use_td = False
+
+    # Triton treats 0-D tensor arguments as scalar values, but the kernel
+    # loads tensor-wise activation scales through a pointer.
+    if A_scale is not None and A_scale.ndim == 0:
+        A_scale = A_scale.reshape(1)
+
     fused_moe_kernel[grid](
         A,
         B,

@@ -1,24 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 
 import numpy as np
 import torch
 
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
-    combine_sampled_and_draft_tokens,
-    prepare_pos_seq_lens,
 )
-from vllm.v1.worker.gpu.states import RequestState
 
 logger = init_logger(__name__)
 
@@ -48,7 +45,6 @@ class PCPManager:
         pcp_world_size: int,
         pcp_rank: int,
         device: torch.device,
-        req_states: RequestState | None = None,
         max_num_reqs: int | None = None,
         max_num_tokens: int | None = None,
         block_tables: BlockTables | None = None,
@@ -64,7 +60,9 @@ class PCPManager:
         self.cp_interleave = cp_interleave
 
         self._global_batch: InputBatch | None = None
-        self._req_states = req_states
+        self._local_batch: InputBatch | None = None
+        self._local_gather_idx: torch.Tensor | None = None
+        self.draft_prefill_batch: InputBatch | None = None
         self._block_tables = block_tables
         self._hidden_restore_idx: torch.Tensor | None = None
         self._padded_gather_idx: torch.Tensor | None = None
@@ -75,11 +73,6 @@ class PCPManager:
         self._input_buffers = (
             InputBuffers(max_num_local_reqs, max_num_tokens, device)
             if max_num_local_reqs is not None and max_num_tokens is not None
-            else None
-        )
-        self._local_req_idx = (
-            torch.arange(max_num_local_reqs, dtype=torch.int32, device=device)
-            if max_num_local_reqs is not None
             else None
         )
         self._local_block_tables: tuple[torch.Tensor, ...] | None
@@ -144,19 +137,23 @@ class PCPManager:
             raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
-        if vllm_config.speculative_config is not None:
-            raise NotImplementedError(
-                "MRV2 PCP does not support speculative decoding yet."
-            )
-        is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
-        if (
-            is_sparse_mla
-            and vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            raise NotImplementedError(
-                "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
-                "Set -cc.cudagraph_mode=NONE."
-            )
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None:
+            if speculative_config.use_dspark():
+                dcp_size = parallel_config.decode_context_parallel_size
+                if dcp_size not in (1, pcp_size):
+                    raise NotImplementedError(
+                        "MRV2 PCP DSpark requires DCP=1 or DCP=PCP; got "
+                        f"DCP={dcp_size}, PCP={pcp_size}."
+                    )
+            elif (
+                speculative_config.method != "mtp"
+                or speculative_config.use_multi_module_mtp()
+            ):
+                raise NotImplementedError(
+                    "MRV2 PCP only supports DSpark or single-module MTP "
+                    "speculative decoding."
+                )
         if vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
             raise NotImplementedError("MRV2 PCP supports PIECEWISE CUDA graphs only.")
 
@@ -192,15 +189,13 @@ class PCPManager:
             rank_offset += segment.num_tokens
         return segments
 
-    def _get_rank_segments(
+    def _iter_rank_chunks(
         self,
         rank: int,
         num_scheduled_tokens: np.ndarray,
-        num_computed_tokens: np.ndarray,
         is_prefilling: np.ndarray,
-        query_start_loc_np: np.ndarray,
-    ) -> list[RankSegment]:
-        """Build one rank's attention-compatible DualChunkSwap rows.
+    ) -> Iterator[tuple[int, int, int]]:
+        """Yield ``(request index, query offset, length)`` for one PCP rank.
 
         PCP=4 partitions each prefill into eight chunks:
 
@@ -210,14 +205,11 @@ class PCPManager:
             rank 2:          2           5
             rank 3:              3   4
         """
-        rank_segments = []
-        rank_offset = 0
         num_chunks = 2 * self.pcp_world_size
         for global_batch_req_idx, num_tokens in enumerate(num_scheduled_tokens):
             query_len = int(num_tokens)
             if query_len == 0:
                 continue
-            global_batch_start = int(query_start_loc_np[global_batch_req_idx])
             chunk_indices: tuple[int, ...]
             if bool(is_prefilling[global_batch_req_idx]):
                 chunk_size = (query_len + num_chunks - 1) // num_chunks
@@ -231,17 +223,31 @@ class PCPManager:
                 chunk_len = min(chunk_size, query_len - chunk_offset)
                 if chunk_len <= 0:
                     continue
-                chunk_start = global_batch_start + chunk_offset
-                rank_segments.append(
-                    RankSegment(
-                        global_batch_req_idx=global_batch_req_idx,
-                        global_batch_slice=slice(chunk_start, chunk_start + chunk_len),
-                        rank_local_batch_slice=slice(
-                            rank_offset, rank_offset + chunk_len
-                        ),
-                    )
+                yield global_batch_req_idx, chunk_offset, chunk_len
+
+    def _get_rank_segments(
+        self,
+        rank: int,
+        num_scheduled_tokens: np.ndarray,
+        num_computed_tokens: np.ndarray,
+        is_prefilling: np.ndarray,
+        query_start_loc_np: np.ndarray,
+    ) -> list[RankSegment]:
+        rank_segments = []
+        rank_offset = 0
+        for global_batch_req_idx, chunk_offset, chunk_len in self._iter_rank_chunks(
+            rank, num_scheduled_tokens, is_prefilling
+        ):
+            global_batch_start = int(query_start_loc_np[global_batch_req_idx])
+            chunk_start = global_batch_start + chunk_offset
+            rank_segments.append(
+                RankSegment(
+                    global_batch_req_idx=global_batch_req_idx,
+                    global_batch_slice=slice(chunk_start, chunk_start + chunk_len),
+                    rank_local_batch_slice=slice(rank_offset, rank_offset + chunk_len),
                 )
-                rank_offset += chunk_len
+            )
+            rank_offset += chunk_len
         return self._reorder_segments(
             rank_segments,
             num_computed_tokens,
@@ -255,6 +261,7 @@ class PCPManager:
         num_computed_tokens: np.ndarray,
         is_prefilling: np.ndarray,
         query_start_loc_np: np.ndarray,
+        padded_num_tokens: int | None = None,
     ) -> tuple[list[list[RankSegment]], list[int]]:
         segments_by_rank = []
         per_rank_num_tokens = []
@@ -279,7 +286,13 @@ class PCPManager:
         # Therefore global = gathered[hidden_restore_idx] and
         # padded_gathered = global[padded_gather_idx].
         hidden_restore_idx = np.empty(int(query_start_loc_np[-1]), dtype=np.int64)
-        padded_num_tokens = max(per_rank_num_tokens)
+        if padded_num_tokens is None:
+            padded_num_tokens = max(per_rank_num_tokens)
+        elif padded_num_tokens < max(per_rank_num_tokens):
+            raise ValueError(
+                "PCP padded token count is smaller than the largest rank-local "
+                f"batch: {padded_num_tokens} < {max(per_rank_num_tokens)}."
+            )
         num_expanded_tokens = padded_num_tokens * self.pcp_world_size
         padded_gather_idx = np.zeros(num_expanded_tokens, dtype=np.int64)
         gathered_kv_write_mask = np.zeros(num_expanded_tokens, dtype=np.bool_)
@@ -316,13 +329,34 @@ class PCPManager:
         )
         return segments_by_rank, per_rank_num_tokens
 
-    def partition_batch(self, input_batch: InputBatch) -> InputBatch:
-        assert self._req_states is not None
+    def get_num_tokens_for_dispatch(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        is_prefilling: np.ndarray,
+    ) -> int:
+        """Return the largest real rank-local batch before graph padding."""
+        return max(
+            sum(
+                chunk_len
+                for _, _, chunk_len in self._iter_rank_chunks(
+                    rank, num_scheduled_tokens, is_prefilling
+                )
+            )
+            for rank in range(self.pcp_world_size)
+        )
+
+    @property
+    def input_buffers(self) -> InputBuffers:
         assert self._input_buffers is not None
-        req_states = self._req_states
+        return self._input_buffers
+
+    def partition_batch(
+        self,
+        input_batch: InputBatch,
+        padded_num_tokens: int | None = None,
+    ) -> InputBatch:
+        assert self._input_buffers is not None
         input_buffers = self._input_buffers
-        if input_batch.num_draft_tokens > 0:
-            raise NotImplementedError("MRV2 PCP does not support spec decode yet.")
 
         global_batch = input_batch
         self._global_batch = global_batch
@@ -336,6 +370,7 @@ class PCPManager:
             num_computed_tokens,
             is_prefilling,
             global_batch.query_start_loc_np,
+            padded_num_tokens=padded_num_tokens,
         )
 
         local_segments = segments_by_rank[self.pcp_rank]
@@ -384,7 +419,9 @@ class PCPManager:
         ]
 
         num_local_tokens = int(local_num_scheduled_tokens.sum())
-        num_local_tokens_padded = max(per_rank_num_tokens)
+        num_local_tokens_padded = (
+            max(per_rank_num_tokens) if padded_num_tokens is None else padded_num_tokens
+        )
         fresh_prefills = int(
             np.count_nonzero(is_prefilling & (num_computed_tokens == 0))
         )
@@ -414,11 +451,20 @@ class PCPManager:
         local_gather_idx = self._padded_gather_idx[
             rank_token_start : rank_token_start + num_local_tokens_padded
         ]
+        self._local_gather_idx = local_gather_idx
         torch.index_select(
             global_batch.input_ids,
             0,
             local_gather_idx,
             out=input_buffers.input_ids[:num_local_tokens_padded],
+        )
+        # Keep the GPU request-state cursor materialized by prepare_inputs().
+        # The CPU cursor can lag after speculative rejection.
+        torch.index_select(
+            global_batch.positions,
+            0,
+            local_gather_idx,
+            out=input_buffers.positions[:num_local_tokens_padded],
         )
 
         local_query_start_loc_np = np.empty(
@@ -434,17 +480,16 @@ class PCPManager:
         local_to_global_req_idx = async_copy_to_gpu(
             local_to_global_req_idx_np, device=self.device
         )
-        local_start_pos = async_copy_to_gpu(local_start_pos_np, device=self.device)
-
-        assert self._local_req_idx is not None
-        prepare_pos_seq_lens(
-            self._local_req_idx[:num_local_reqs],
-            local_query_start_loc,
-            local_start_pos,
-            input_buffers.positions,
-            input_buffers.seq_lens[:num_local_reqs],
-        )
         seq_lens = input_buffers.seq_lens[:num_local_reqs]
+        if num_local_tokens > 0:
+            local_end_positions = torch.index_select(
+                input_buffers.positions,
+                0,
+                local_query_start_loc[1:] - 1,
+            )
+            seq_lens.copy_(local_end_positions + 1)
+        else:
+            seq_lens.zero_()
         is_padding = input_buffers.is_padding[:num_local_tokens_padded]
         is_padding[:num_local_tokens].fill_(False)
         is_padding[num_local_tokens:].fill_(True)
@@ -467,18 +512,9 @@ class PCPManager:
             cu_num_logits = torch.zeros(
                 num_local_reqs + 1, device=self.device, dtype=torch.int32
             )
-        logits_indices = combine_sampled_and_draft_tokens(
-            input_buffers.input_ids,
-            local_to_global_req_idx,
-            req_states.last_sampled_tokens,
-            local_query_start_loc,
-            seq_lens,
-            req_states.prefill_len.gpu,
-            req_states.draft_tokens,
-            cu_num_logits,
-            total_num_logits,
-            1,
-        )
+        # Local logits are never sampled. The complete hidden-state tensor is
+        # restored first and sampled with the untouched global InputBatch.
+        logits_indices = local_query_start_loc[1:] - 1
 
         local_prefill_len_np = global_batch.prefill_len_np[
             local_to_global_batch_req_idx_np
@@ -492,19 +528,7 @@ class PCPManager:
         seq_lens_cpu_upper_bound_np = np.zeros(num_local_reqs, dtype=np.int32)
         seq_lens_cpu_upper_bound_np[:] = local_start_pos_np + local_num_scheduled_tokens
 
-        dcp_local_seq_lens = None
-        if self.dcp_world_size > 1:
-            prepare_dcp_local_seq_lens(
-                input_buffers.dcp_local_seq_lens,
-                seq_lens,
-                num_local_reqs,
-                self.dcp_world_size,
-                self.dcp_rank,
-                self.cp_interleave,
-            )
-            dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_local_reqs]
-
-        return replace(
+        self._local_batch = replace(
             input_batch,
             req_ids=local_req_ids,
             num_reqs=num_local_reqs,
@@ -524,14 +548,12 @@ class PCPManager:
             query_start_loc_np=local_query_start_loc_np[: num_local_reqs + 1],
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_cpu_upper_bound_np),
-            dcp_local_seq_lens=dcp_local_seq_lens,
+            dcp_local_seq_lens=None,
             num_computed_tokens_np=local_start_pos_np,
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
             is_prefilling_np=local_is_prefilling_np,
-            max_seq_len_np=global_batch.max_seq_len_np[local_to_global_batch_req_idx_np]
-            if global_batch.max_seq_len_np is not None
-            else None,
+            has_prefill=bool(local_is_prefilling_np.any()),
             input_ids=input_buffers.input_ids[:num_local_tokens_padded],
             positions=input_buffers.positions[:num_local_tokens_padded],
             is_padding=is_padding,
@@ -540,6 +562,7 @@ class PCPManager:
             cu_num_logits_np=cu_num_logits_np,
             prompt_lens=None,
         )
+        return self._local_batch
 
     def prepare_attn(
         self, input_batch: InputBatch
@@ -610,6 +633,46 @@ class PCPManager:
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
         return gathered[self._hidden_restore_idx]
 
+    def get_draft_input_buffers(
+        self, input_buffers: InputBuffers
+    ) -> InputBatch | InputBuffers:
+        return self.draft_prefill_batch or input_buffers
+
+    def prepare_draft_prefill(
+        self,
+        input_batch: InputBatch,
+        input_ids: torch.Tensor,
+    ) -> None:
+        if input_batch is not self._global_batch or self._local_batch is None:
+            return
+        local_batch = self._local_batch
+        assert self._local_gather_idx is not None
+        num_local_tokens = self._local_gather_idx.shape[0]
+        torch.index_select(
+            input_ids,
+            0,
+            self._local_gather_idx,
+            out=local_batch.input_ids[:num_local_tokens],
+        )
+        self.draft_prefill_batch = local_batch
+
+    def restore_draft_prefill(
+        self,
+        last_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.draft_prefill_batch is None:
+            return last_hidden_states, hidden_states
+        local_last_hidden_states = last_hidden_states
+        last_hidden_states = self.restore_hidden_states(local_last_hidden_states)
+        hidden_states = (
+            last_hidden_states
+            if local_last_hidden_states is hidden_states
+            else self.restore_hidden_states(hidden_states)
+        )
+        self.draft_prefill_batch = None
+        return last_hidden_states, hidden_states
+
     def restore_for_sampling(
         self,
         hidden_states: torch.Tensor,
@@ -621,10 +684,14 @@ class PCPManager:
 def maybe_partition_pcp_batch(
     manager: PCPManager | None,
     input_batch: InputBatch,
+    padded_num_tokens: int | None = None,
 ) -> InputBatch:
     if manager is None:
         return input_batch
-    return manager.partition_batch(input_batch)
+    return manager.partition_batch(
+        input_batch,
+        padded_num_tokens=padded_num_tokens,
+    )
 
 
 def maybe_get_pcp_dummy_slot_mappings(
@@ -652,7 +719,6 @@ def maybe_build_pcp_manager(
     vllm_config: VllmConfig,
     device: torch.device,
     supports_mm_inputs: bool,
-    req_states: RequestState,
     block_tables: BlockTables,
     cls: type[PCPManager] = PCPManager,
 ) -> PCPManager | None:
@@ -671,7 +737,6 @@ def maybe_build_pcp_manager(
         pcp_world_size=pcp_size,
         pcp_rank=pcp_rank,
         device=device,
-        req_states=req_states,
         max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
         max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
         block_tables=block_tables,
