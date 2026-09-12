@@ -7,7 +7,7 @@ import sys
 import uuid
 import weakref
 from abc import ABC, abstractmethod
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
@@ -1504,6 +1504,12 @@ class DPAsyncMPClient(AsyncMPClient):
         return self.core_engine
 
 
+# Cap on remembered prefix->engine affinities; oldest entries are evicted.
+# 16k entries is a few hundred KiB and covers far more concurrent
+# conversations than a single frontend process realistically serves.
+PREFIX_AFFINITY_LRU_SIZE = 16 * 1024
+
+
 class DPLBAsyncMPClient(DPAsyncMPClient):
     """Asyncio-compatible client for multi-proc, multi-engine (data parallel)
     EngineCore. Load-balances between multiple engine processes."""
@@ -1543,6 +1549,30 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             len(self.core_engines) * self.client_index
         ) // client_count
 
+        # Prefix-affinity memory: hash of a request's first-block prompt
+        # prefix -> engine index that most recently served that prefix.
+        # Consulted only to break score ties, so multi-turn conversations and
+        # shared-prefix request families keep landing on the engine that
+        # already holds their prefix in KV cache, while unrelated tied
+        # requests still rotate and load-aware decisions are unaffected.
+        self.prefix_affinity: OrderedDict[int, int] = OrderedDict()
+
+    def _prefix_affinity_key(self, request: EngineCoreRequest) -> int | None:
+        """Affinity key for prefix-cache locality, or None when the request
+        cannot hit the prefix cache (embeds input, or fewer prompt tokens
+        than one KV block)."""
+        tokens = request.prompt_token_ids
+        block_size = self.vllm_config.cache_config.block_size
+        if (
+            not tokens
+            or len(tokens) < block_size
+            or request.prompt_embeds is not None
+            or request.prompt_is_token_ids is not None
+        ):
+            return None
+        lora_id = request.lora_request.lora_int_id if request.lora_request else None
+        return hash((request.cache_salt, lora_id, tuple(tokens[:block_size])))
+
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
         if (eng_index := request.data_parallel_rank) is None and (
@@ -1553,6 +1583,14 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
+            affinity_key = self._prefix_affinity_key(request)
+            affinity_index: int | None = None
+            if affinity_key is not None:
+                affinity_index = self.prefix_affinity.get(affinity_key)
+                if affinity_index is not None and affinity_index >= num_engines:
+                    # Engine count shrank since the entry was recorded
+                    # (elastic EP scale-in); the mapping is stale.
+                    affinity_index = None
             min_score: float = sys.maxsize
             eng_index = 0
             for i in range(num_engines):
@@ -1577,7 +1615,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     # the penalty stays off, preserving exact round-robin.
                     # Ramps from 0 at <=50% usage to 3x waiting at 100%.
                     score += waiting * 6.0 * max(0.0, kv_cache_usage - 0.5)
-                if score < min_score:
+                # Prefer the engine that already holds this request's prefix
+                # in KV cache when it ties on score: recomputing a shared
+                # prefix elsewhere costs a full prefill, spreading ties across
+                # engines saves nothing.
+                if score < min_score or (score == min_score and idx == affinity_index):
                     min_score = score
                     eng_index = idx
             # Increment local waiting count for better balancing between stats
@@ -1587,8 +1629,15 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             # after a coordinator stats reset when engines look equally loaded)
             # don't systematically favor the same engine. This removes the
             # fixed tie-break bias without affecting load-aware decisions when
-            # scores actually differ.
+            # scores actually differ. Requests with a remembered prefix are
+            # exempt from the rotation (they stick to their engine on ties);
+            # everything else still spreads evenly.
             self.eng_start_index = (self.eng_start_index + 1) % num_engines
+            if affinity_key is not None:
+                self.prefix_affinity[affinity_key] = eng_index
+                self.prefix_affinity.move_to_end(affinity_key)
+                if len(self.prefix_affinity) > PREFIX_AFFINITY_LRU_SIZE:
+                    self.prefix_affinity.popitem(last=False)
 
         chosen_engine = self.core_engines[eng_index]
         # Record which engine is chosen for this request, to handle aborts.
