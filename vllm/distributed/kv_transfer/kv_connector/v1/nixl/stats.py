@@ -23,7 +23,30 @@ if TYPE_CHECKING:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """Container for transfer performance metrics in NIXL KV Cache transfers.
+
+    In multi-rank (tensor parallel, TP > 1) deployments, each TP rank
+    independently records its own per-transfer telemetry (such as
+    `transfer_duration`, `post_duration`, `bytes_transferred`, and
+    `num_descriptors`). When stats are collected:
+    - Stats from all ranks are concatenated via :meth:`aggregate`
+      (`list.extend`).
+    - :meth:`reduce` computes summary statistics over the combined pool
+      of observations from all ranks.
+
+    Metric aggregation semantics in multi-rank settings:
+    - **Num successful transfers**: Total count of transfers across all
+      TP ranks combined (not per-rank or per-engine).
+    - **Avg MB per transfer**: Mean bytes moved across all individual
+      rank-level transfers (`total_mb_all_ranks / num_transfers_all_ranks`),
+      not the total bytes moved for a single high-level KV transfer.
+    - **Throughput (MB/s)**: Aggregate bytes divided by total transfer
+      duration (`total_mb_all_ranks / total_time_all_ranks`), representing
+      the average per-rank throughput over the combined observation pool.
+    - **P90 xfer time (ms) / P90 post time (ms)**: 90th percentile computed
+      over the combined distribution of all ranks' transfer/post durations.
+    - **Avg number of descriptors**: Mean descriptors per rank-level transfer.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -84,7 +107,12 @@ class NixlKVConnectorStats(KVConnectorStats):
         return self
 
     def reduce(self) -> dict[str, int | float]:
-        # Compute compact representative stats suitable for CLI logging
+        # Compute compact representative stats suitable for CLI logging.
+        # Note on multi-rank (TP > 1) semantics:
+        # Since stats arrive pre-aggregated across all ranks via aggregate(),
+        # total_mb and total_time_seconds reflect sums over all individual
+        # rank observations. throughput_mb_s is thus an average per-rank
+        # throughput over the combined pool (total_MB / total_time).
         if self.num_successful_transfers == 0:
             # CLI logging only reports successful transfers stats. If all requests in
             # the interval were unsuccessful, Prom will report failures stats instead.
