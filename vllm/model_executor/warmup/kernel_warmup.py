@@ -29,6 +29,7 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
+from vllm.model_executor.warmup.logprob_triton_warmup import logprob_triton_warmup
 from vllm.model_executor.warmup.mamba_triton_warmup import mamba_triton_warmup
 from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
     qwen4_exp_qsa_triton_warmup,
@@ -199,6 +200,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         kimi_k3_triton_warmup(worker)
         watermark_sample_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
+        if worker.use_v2_model_runner:
+            logprob_triton_warmup(worker.model_runner)
 
     if enable_jit_warmup and current_platform.is_device_capability_family(100):
         _warmup_bf16x3_router_gemm(
