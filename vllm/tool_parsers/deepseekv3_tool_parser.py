@@ -109,7 +109,16 @@ class DeepSeekV3ToolParser(ToolParser):
                         )
                     )
 
-                content = model_output[: model_output.find(self.tool_calls_start_token)]
+                tool_calls_start = model_output.find(self.tool_calls_start_token)
+                tool_calls_end = model_output.find(
+                    self.tool_calls_end_token,
+                    tool_calls_start + len(self.tool_calls_start_token),
+                )
+                content = model_output[:tool_calls_start]
+                if tool_calls_end != -1:
+                    content += model_output[
+                        tool_calls_end + len(self.tool_calls_end_token) :
+                    ]
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
