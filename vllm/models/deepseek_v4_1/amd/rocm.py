@@ -198,7 +198,8 @@ def combine_topk_swa_indices(
         dtype=torch.int32,
         device=topk_indices.device,
     )
-    combined_lens = torch.empty(
+    # Zeros: the early return below hands these back unwritten.
+    combined_lens = torch.zeros(
         num_tokens, dtype=torch.int32, device=topk_indices.device
     )
     if num_tokens == 0 or num_reqs == 0:
