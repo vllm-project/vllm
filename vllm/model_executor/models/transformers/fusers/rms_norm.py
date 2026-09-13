@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """RMSNorm fuser: detect the norm structurally and swap in vLLM's fused RMSNorm."""
 
-from dataclasses import dataclass
+import functools
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
@@ -16,6 +17,7 @@ from vllm.distributed import (
 from vllm.distributed.parallel_state import model_parallel_is_initialized
 from vllm.distributed.utils import split_tensor_along_last_dim
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import op_registry_oot
 from vllm.model_executor.models.transformers.fusers.base import BaseFuser
 from vllm.model_executor.models.transformers.fx_utils import (
     find_node,
@@ -36,33 +38,61 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _operand(node: fx.Node, index: int, name: str) -> object | None:
+    """Operand `index` of `node`, whether it was passed positionally or as `name`.
+
+    The functional spellings (`torch.pow(input=v, exponent=-0.5)`) are as valid
+    as the positional ones, so every operand is read through here rather than
+    off `node.args` directly.
+    """
+    if len(node.args) > index:
+        return node.args[index]
+    return node.kwargs.get(name)
+
+
 def _is_squared(node: object, x: fx.Node) -> bool:
     """`x**2`, `x.square()` or `x * x`, through any dtype casts."""
     node = peel(node)
     if is_op(node, "pow"):
-        base, exp = node.args
-        return peel(base) is x and exp == 2
+        return (
+            peel(_operand(node, 0, "input")) is x and _operand(node, 1, "exponent") == 2
+        )
     if is_op(node, "square"):
-        return peel(node.args[0]) is x
+        return peel(_operand(node, 0, "input")) is x
     if is_op(node, "mul"):
-        a, b = node.args
-        return peel(a) is x and peel(b) is x
+        return (
+            peel(_operand(node, 0, "input")) is x
+            and peel(_operand(node, 1, "other")) is x
+        )
+    return False
+
+
+def _is_inverse_sqrt(node: object) -> bool:
+    """Detect `rsqrt(v)`, or the `pow(v, -0.5)` / `v ** -0.5` spelling of it.
+
+    Read `v` back with `_operand(node, 0, "input")`.
+    """
+    if is_op(node, "rsqrt"):
+        return True
+    if is_op(node, "pow"):
+        return _operand(node, 1, "exponent") == -0.5
     return False
 
 
 def _variance_eps(rsqrt: fx.Node, x: fx.Node) -> float | None:
     """eps from `rsqrt(mean(x**2, -1) + eps)`, or `None` if not that shape."""
-    add = peel(rsqrt.args[0])
+    add = peel(_operand(rsqrt, 0, "input"))
     if not is_op(add, "add"):
         return None
-    consts = [a for a in add.args if isinstance(a, (int, float))]
-    nodes = [a for a in add.args if isinstance(a, fx.Node)]
+    operands = [_operand(add, 0, "input"), _operand(add, 1, "other")]
+    consts = [a for a in operands if isinstance(a, (int, float))]
+    nodes = [a for a in operands if isinstance(a, fx.Node)]
     if len(consts) != 1 or len(nodes) != 1:
         return None
     mean = peel(nodes[0])
     if not is_op(mean, "mean"):
         return None
-    if not _is_squared(mean.args[0], x):
+    if not _is_squared(_operand(mean, 0, "input"), x):
         return None
     return float(consts[0])
 
@@ -117,6 +147,54 @@ class TPAwareGemmaRMSNorm(TPAwareNormMixin, GemmaRMSNorm):
     """`GemmaRMSNorm` that reconstructs a TP-sharded input before normalizing."""
 
 
+def _norm_impl(base: type[nn.Module]) -> type[nn.Module]:
+    """`base`, or the out-of-tree class registered under its name if usable."""
+    impl = op_registry_oot.get(base.__name__, base)
+    # A non-subclass is not a usable override: `CustomOp.__new__` would refuse
+    # the swap anyway, so keep the in-tree implementation.
+    return impl if issubclass(impl, base) else base
+
+
+@functools.cache
+def _build_tp_aware(impl: type[nn.Module]) -> type[nn.Module]:
+    """The TP-aware subclass of an out-of-tree norm override, memoised on `impl`.
+
+    The cache is load-bearing, not a freshness optimisation. `recursive_replace`
+    calls `fuse` once per norm *instance* (611 times on the Gemma-4 31B), so
+    without the memo each site would mint its own structurally identical class:
+    one class per instance is the pathological input for dynamo guards and
+    per-class compile caches. The fixed `TPAwareRMSNorm` / `TPAwareGemmaRMSNorm`
+    classes hold the "one class per norm kind, not one per instance" invariant
+    for the in-tree path; this memo holds it once an override makes the class
+    dynamic.
+
+    Named and moduled after `impl`, so a repr, stack trace or fuse log names the
+    implementation that actually runs: an override typically registers under the
+    in-tree name and reuses it for its own class, so the name alone would read
+    identically whether or not the override was picked up. `impl` alone keys the
+    cache: `RMSNorm` and `GemmaRMSNorm` are siblings, so no single class can be a
+    usable override for both.
+    """
+    built = type(f"TPAware{impl.__name__}", (TPAwareNormMixin, impl), {})
+    built.__module__ = impl.__module__
+    return built
+
+
+def _tp_aware(base: type[nn.Module]) -> type[nn.Module]:
+    """The TP-aware norm class for `base`, honouring out-of-tree overrides.
+
+    `CustomOp.__new__` keys the out-of-tree swap on `cls.__name__`, so a fixed
+    subclass named `TPAwareRMSNorm` never matches a platform plugin's
+    ``"RMSNorm"`` registration. When an override is registered, derive the
+    TP-aware class from it so both the plugin's kernels and the TP gather apply
+    (see `_build_tp_aware`); otherwise use the fixed in-tree class.
+    """
+    impl = _norm_impl(base)
+    if impl is base:
+        return {RMSNorm: TPAwareRMSNorm, GemmaRMSNorm: TPAwareGemmaRMSNorm}[base]
+    return _build_tp_aware(impl)
+
+
 @dataclass
 class RMSNormFuser(BaseFuser):
     """Fuser for RMSNorm patterns, including Gemma-style zero-centered weights."""
@@ -129,10 +207,13 @@ class RMSNormFuser(BaseFuser):
     """Attribute holding `eps`, read per instance in `fuse`."""
     eps: float | None = None
     """`eps` itself, when it is not held in an attribute (see `_eps_source`)."""
+    fused_cls: type[nn.Module] | None = field(default=None, init=False, repr=False)
+    """The class `fuse` installed, stashed so `info` names exactly that."""
 
     def info(self, name: str) -> str:
-        norm = "GemmaRMSNorm" if self.zero_centered else "RMSNorm"
-        return f"Fused: {name} ({self.source_cls}) -> {norm} (CustomOp)"
+        cls = self.fused_cls
+        impl = f"{cls.__module__}.{cls.__name__}"
+        return f"Fused: {name} ({self.source_cls}) -> {impl} (CustomOp)"
 
     @classmethod
     def match(cls, graph: fx.Graph, module: nn.Module) -> "RMSNormFuser | None":
@@ -158,7 +239,7 @@ class RMSNormFuser(BaseFuser):
         # The rsqrt over the mean-square variance is the spine of the norm.
         rsqrt = None
         for node in graph.nodes:
-            if is_op(node, "rsqrt") and _variance_eps(node, x) is not None:
+            if _is_inverse_sqrt(node) and _variance_eps(node, x) is not None:
                 rsqrt = node
                 break
         if rsqrt is None:
@@ -239,7 +320,7 @@ class RMSNormFuser(BaseFuser):
             eps = args[3] if len(args) > 3 else kwargs.get("eps")
             return float(eps) if isinstance(eps, (int, float)) else None
         for node in graph.nodes:
-            if is_op(node, "rsqrt") and (eps := _variance_eps(node, x)) is not None:
+            if _is_inverse_sqrt(node) and (eps := _variance_eps(node, x)) is not None:
                 return eps
         return None
 
@@ -258,9 +339,10 @@ class RMSNormFuser(BaseFuser):
             # If eps was not detected, match torch behaviour.
             dtype = weight.dtype if has_weight else vllm_config.model_config.dtype
             eps = torch.finfo(dtype).eps
+        self.fused_cls = _tp_aware(GemmaRMSNorm if self.zero_centered else RMSNorm)
         if self.zero_centered:
-            return TPAwareGemmaRMSNorm(hidden_size=hidden_size, eps=eps)
-        return TPAwareRMSNorm(
+            return self.fused_cls(hidden_size=hidden_size, eps=eps)
+        return self.fused_cls(
             hidden_size=hidden_size,
             eps=eps,
             has_weight=has_weight,
