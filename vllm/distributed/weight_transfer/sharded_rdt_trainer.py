@@ -47,6 +47,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
     buffer_alloc_bytes,
     check_ray_rdt_version,
+    initialize_ray_nixl,
 )
 from vllm.logger import init_logger
 
@@ -338,6 +339,7 @@ class _RDTProducerServer:
 
         self._nixl_warmup_buf = torch.zeros(1 << 20, dtype=torch.uint8, device="cuda")
         with self._reg_lock:
+            initialize_ray_nixl()
             register_nixl_memory(self._nixl_warmup_buf)
 
     # ---------------- engine-facing (per sync) ----------------
