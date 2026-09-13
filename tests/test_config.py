@@ -866,10 +866,8 @@ def test_models_default_to_v2_model_runner(model_config, expected, monkeypatch):
 
 def test_v1_model_runner_rejects_v2_only_features():
     config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            prefill_context_parallel_size=2,
-            enable_batch_sharded_sampling=False,
-        ),
+        parallel_config=ParallelConfig(prefill_context_parallel_size=2),
+        scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
         speculative_config=None,
         model_config=None,
     )
@@ -1029,13 +1027,31 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
     assert cfg.scheduler_config.async_scheduling is True
 
 
-def test_pipeline_parallelism_requires_v2_model_runner():
-    config = SimpleNamespace(
-        parallel_config=SimpleNamespace(
-            prefill_context_parallel_size=1,
-            pipeline_parallel_size=1,
-            enable_batch_sharded_sampling=False,
+def test_v1_model_runner_drops_async_scheduling_with_pipeline_parallelism(monkeypatch):
+    """PP>1 must stay buildable whenever the V1 model runner is selected, such
+    as the external_launcher fallback; async scheduling is dropped instead."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+
+    cfg = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
         ),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2,
+            distributed_executor_backend="mp",
+            nnodes=2,
+        ),
+    )
+    assert cfg.scheduler_config.async_scheduling is False
+
+
+def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
+    """Only the async combination desyncs the grammar FSM (#45014), so plain
+    PP>1 must stay usable on the V1 model runner."""
+    config = SimpleNamespace(
+        parallel_config=ParallelConfig(pipeline_parallel_size=2),
+        scheduler_config=SchedulerConfig.default_factory(async_scheduling=False),
         speculative_config=None,
         model_config=None,
     )
@@ -1044,9 +1060,9 @@ def test_pipeline_parallelism_requires_v2_model_runner():
 
     assert VllmConfig._get_v1_model_runner_unsupported_features(config) == []
 
-    config.parallel_config.pipeline_parallel_size = 2
+    config.scheduler_config.async_scheduling = True
     unsupported = VllmConfig._get_v1_model_runner_unsupported_features(config)
-    assert "pipeline parallelism" in unsupported
+    assert "pipeline parallelism with async scheduling" in unsupported
 
 
 def test_data_parallel_rpc_port_has_fixed_default():
