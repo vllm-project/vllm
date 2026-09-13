@@ -507,6 +507,16 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
+    "Qwen3KSAForCausalLM": _HfExamplesInfo(
+        "OpenOneRec/KSA-4B-base",
+        revision="6b60859be46422fc5949a0e69d2a338c4a618c90",
+        dtype="bfloat16",
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        max_model_len=4096,
+        use_original_num_layers=True,
+        hf_overrides={"architectures": ["Qwen3KSAForCausalLM"]},
+    ),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "Qwen3_5ForCausalLM": _HfExamplesInfo("codecho/Qwen3.5-0.8B-text-only"),
     "Qwen3_5MoeForCausalLM": _HfExamplesInfo(
