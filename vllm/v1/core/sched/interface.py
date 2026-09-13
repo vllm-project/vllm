@@ -235,6 +235,18 @@ class SchedulerInterface(ABC):
         """Returns (num_running_reqs, num_waiting_reqs)."""
         raise NotImplementedError
 
+    def get_runtime_config(self) -> dict[str, int]:
+        """Return scheduler settings that can be changed at runtime."""
+        return {}
+
+    def update_runtime_config(
+        self, max_num_running_seqs: int | None = None
+    ) -> dict[str, int]:
+        """Update scheduler settings that do not resize engine resources."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support runtime configuration"
+        )
+
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return 0.0
