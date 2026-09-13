@@ -327,6 +327,11 @@ class HummingConfig(QuantizationConfig):
             elif isinstance(layer, LinearBase):
                 return UnquantizedLinearMethod()
         elif isinstance(layer, LinearBase):
+            input_size = layer.input_size
+            partition_size = getattr(layer, "input_size_per_partition", input_size)
+            is_online_quant = quant_config.is_online_quant
+            if is_online_quant and (input_size % 32 != 0 or partition_size % 32 != 0):
+                return UnquantizedLinearMethod()
             return HummingLinearMethod(quant_config)
         elif isinstance(layer, RoutedExperts):
             return HummingMoEMethod(quant_config, layer.moe_config)
