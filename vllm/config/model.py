@@ -4,7 +4,7 @@
 from collections.abc import Callable
 from dataclasses import InitVar, field
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Literal, cast, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, get_args
 
 import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -1420,6 +1420,8 @@ class ModelConfig:
     def verify_with_parallel_config(
         self,
         parallel_config: ParallelConfig,
+        *,
+        is_draft_model: bool = False,
     ) -> None:
         total_num_attention_heads = self.model_arch_config.total_num_attention_heads
         tensor_parallel_size = parallel_config.tensor_parallel_size
@@ -1438,8 +1440,7 @@ class ModelConfig:
             self.architectures, self
         ):
             raise NotImplementedError(
-                "Pipeline parallelism is not supported for this model. "
-                "Supported models implement the `SupportsPP` interface."
+                self._pp_unsupported_message(is_draft_model=is_draft_model)
             )
 
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
@@ -1488,6 +1489,96 @@ class ModelConfig:
                 "data_parallel_size > 1 or tensor_parallel_size > 1 "
                 "or pipeline_parallel_size > 1."
             )
+
+    # Substring markers used only to shape the PP-unsupported error
+    # message; false positives here just produce a slightly more verbose
+    # hint on a plain target-model failure and never affect execution.
+    _DRAFT_ARCH_MARKERS: ClassVar[tuple[str, ...]] = (
+        "MTP",
+        "Mtp",
+        "Eagle",
+        "EAGLE",
+        "DFlash",
+        "DSpark",
+        "Drafter",
+    )
+
+    def _looks_like_draft_arch(self) -> bool:
+        """Best-effort: does at least one architecture entry look like a
+        speculative-decoding draft head (MTP / Eagle / DFlash / DSpark /
+        …)?"""
+        return any(
+            any(marker in arch for marker in self._DRAFT_ARCH_MARKERS)
+            for arch in (self.architectures or [])
+        )
+
+    def _pp_unsupported_message(self, *, is_draft_model: bool) -> str:
+        """Actionable error text for a PP>1 config whose model does not
+        implement `SupportsPP`.
+
+        We distinguish three cases:
+
+        * an explicit draft-model config (passed via ``is_draft_model``);
+        * a target-model config whose architecture *looks* like a draft
+          head (e.g. someone accidentally served ``ErnieMTP`` directly);
+        * every other target model.
+
+        The first two are the common self-serve pitfalls -- see #52069
+        for the full report and #46994 / #53408 / #54635 / #55081 for the
+        established fix pattern -- so we point users at the exact
+        modification instead of a generic "implement the interface" line.
+        """
+        base = (
+            "Pipeline parallelism is not supported for this model "
+            f"({self.architectures}). "
+            "Supported models implement the `SupportsPP` interface."
+        )
+        looks_draft = is_draft_model or self._looks_like_draft_arch()
+        if not looks_draft:
+            return base
+
+        return (
+            f"{base}\n"
+            "\n"
+            "This model looks like a speculative-decoding draft head. "
+            "The draft is only built on the last PP stage (see the "
+            "`is_last_pp_rank` guard in `vllm/v1/worker/gpu/model_runner.py`), "
+            "so the SupportsPP-shaped `forward` is never actually called "
+            "on it -- the mixin only satisfies the config verification "
+            "path that copies `pipeline_parallel_size` from the target "
+            "into `draft_parallel_config`. To fix on the draft class:\n"
+            "\n"
+            "    from vllm.model_executor.models.interfaces import SupportsPP\n"
+            "    from vllm.model_executor.models.utils import (\n"
+            "        make_empty_intermediate_tensors_factory,\n"
+            "    )\n"
+            "\n"
+            "    class YourDraft(nn.Module, SupportsPP):\n"
+            "        def __init__(self, *, vllm_config, prefix=''):\n"
+            "            super().__init__()\n"
+            "            ...\n"
+            "            self.make_empty_intermediate_tensors = (\n"
+            "                make_empty_intermediate_tensors_factory(\n"
+            "                    ['hidden_states', 'residual'],\n"
+            "                    self.config.hidden_size,\n"
+            "                )\n"
+            "            )\n"
+            "\n"
+            "        # MTP-shaped forward takes an extra positional "
+            "`hidden_states`;\n"
+            "        # the type ignore is needed because SupportsPP's "
+            "protocol\n"
+            "        # doesn't have that positional. It is never called "
+            "on the\n"
+            "        # draft under PP, so the Liskov violation is inert.\n"
+            "        def forward(  # type: ignore[override]\n"
+            "            self, input_ids, positions, hidden_states, ...\n"
+            "        ):\n"
+            "            ...\n"
+            "\n"
+            "See #52069 for the report and #46994 / #53408 / #54635 / "
+            "#55081 for landed instances of this exact pattern."
+        )
 
     def get_sliding_window(self) -> int | None:
         """Get the sliding window size from the HF text config if present."""
