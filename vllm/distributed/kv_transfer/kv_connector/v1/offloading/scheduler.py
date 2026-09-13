@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import chain, islice
 from typing import Any, NamedTuple
 
@@ -114,7 +114,10 @@ class GroupOffloadConfig(NamedTuple):
             window = max(
                 window,
                 cdiv(
-                    self.kv_cache_spec.sliding_window - 1 + right_padding,
+                    self.kv_cache_spec.sliding_window
+                    - 1
+                    + self.kv_cache_spec.extra_retained_tokens
+                    + right_padding,
                     self.tokens_per_chunk,
                 ),
             )
@@ -126,7 +129,13 @@ def get_sliding_window_size_in_chunks(
 ) -> int | None:
     if isinstance(kv_cache_spec, SlidingWindowSpec):
         assert kv_cache_spec.sliding_window > 0
-        return cdiv(kv_cache_spec.sliding_window, tokens_per_chunk)
+        return max(
+            cdiv(kv_cache_spec.sliding_window, tokens_per_chunk),
+            cdiv(
+                kv_cache_spec.sliding_window - 1 + kv_cache_spec.extra_retained_tokens,
+                tokens_per_chunk,
+            ),
+        )
 
     if isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
         # Attention never reaches back past one chunk
@@ -1425,11 +1434,24 @@ class OffloadingConnectorScheduler:
     ) -> list[bool] | None:
         """Build the block mask for a range of candidate offload chunks."""
         blocks_per_chunk = self.config.blocks_per_chunk
+        kv_cache_spec = group_config.kv_cache_spec
+        if isinstance(kv_cache_spec, SlidingWindowSpec) and (
+            kv_cache_spec.extra_retained_tokens
+        ):
+            # Offload restores all allocated history, including MTP re-prefill
+            # tokens. Widen only the store mask, not the model's attention window.
+            kv_cache_spec = replace(
+                kv_cache_spec,
+                sliding_window=(
+                    kv_cache_spec.sliding_window + kv_cache_spec.extra_retained_tokens
+                ),
+                extra_retained_tokens=0,
+            )
         return group_config.manager_cls.reachable_block_mask(
             start_block=start_chunk_idx * blocks_per_chunk,
             end_block=end_chunk_idx * blocks_per_chunk,
             alignment_tokens=self.config.alignment_tokens,
-            kv_cache_spec=group_config.kv_cache_spec,
+            kv_cache_spec=kv_cache_spec,
             use_eagle=group_config.is_eagle_group,
             retention_interval=self.config.retention_interval,
             reachable_boundaries=reachable_boundaries,
