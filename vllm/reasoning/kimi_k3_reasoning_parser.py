@@ -99,6 +99,13 @@ class KimiK3ReasoningParser(ReasoningParser):
         # XTML markers as literal strings (skip_special_tokens=False at serve time)
         self._think_open = "<|open|>think<|sep|>"
         self._think_close = "<|close|>think<|sep|>"
+        self._tools_open = "<|open|>tools<|sep|>"
+        self._implicit_reasoning_end_markers = (
+            self._tools_open,
+            "<|open|>response<|sep|>",
+            "<|close|>response<|sep|>",
+            "<|close|>message<|sep|>",
+        )
 
         # Content-channel markers that must be stripped from the final output.
         # The tool parser handles these when active, but when tool_choice is
@@ -117,6 +124,7 @@ class KimiK3ReasoningParser(ReasoningParser):
         sep_marker = r"<\|sep\|>"
         self._think_open_re = re.compile(open_marker + r"\s*think\s*" + sep_marker)
         self._think_close_re = re.compile(close_marker + r"\s*think\s*" + sep_marker)
+        self._tools_open_re = re.compile(open_marker + r"\s*tools\s*" + sep_marker)
         self._response_open_re = re.compile(
             open_marker + r"\s*response\s*" + sep_marker
         )
@@ -133,6 +141,13 @@ class KimiK3ReasoningParser(ReasoningParser):
         )
         self._think_close_ids = tokenizer.encode(
             self._think_close, add_special_tokens=False
+        )
+        self._tools_open_ids = tokenizer.encode(
+            self._tools_open, add_special_tokens=False
+        )
+        self._implicit_reasoning_end_ids = tuple(
+            tokenizer.encode(marker, add_special_tokens=False)
+            for marker in self._implicit_reasoning_end_markers
         )
         self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
         self._last_streaming_content_token_ids: list[int] | None = None
@@ -166,8 +181,11 @@ class KimiK3ReasoningParser(ReasoningParser):
         # marker). A missing open marker (e.g. it was consumed as the generation
         # prefix) means a close marker alone ends reasoning, which is what
         # "close is the newest marker" already encodes.
-        return (
-            _newest_marker(input_ids, self._think_close_ids, self._think_open_ids) == 0
+        if _newest_marker(input_ids, self._think_close_ids, self._think_open_ids) == 0:
+            return True
+        return any(
+            _newest_marker(input_ids, marker_ids, self._think_open_ids) == 0
+            for marker_ids in self._implicit_reasoning_end_ids
         )
 
     def is_reasoning_end_streaming(
@@ -189,18 +207,41 @@ class KimiK3ReasoningParser(ReasoningParser):
         delta = list(delta_ids)
         if not delta:
             return False
-        carry = max(len(self._think_close_ids), len(self._think_open_ids)) - 1
+        carry = (
+            max(
+                len(self._think_close_ids),
+                len(self._think_open_ids),
+                *(len(marker_ids) for marker_ids in self._implicit_reasoning_end_ids),
+            )
+            - 1
+        )
         head = len(input_ids) - len(delta)
         window = list(input_ids[max(0, head - carry) : head]) + delta
-        return _newest_marker(window, self._think_close_ids, self._think_open_ids) == 0
+        return self.is_reasoning_end(window)
+
+    def _first_reasoning_end(
+        self, input_ids: Sequence[int], start: int
+    ) -> tuple[int, int] | None:
+        markers = (self._think_close_ids, *self._implicit_reasoning_end_ids)
+        matches = (
+            (index, len(marker))
+            for marker in markers
+            for index in range(start, len(input_ids) - len(marker) + 1)
+            if _match_at(input_ids, index, marker)
+        )
+        return min(matches, default=None)
 
     def _extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self._thinking_enabled:
             return input_ids
-        idx = _subseq_index(input_ids, self._think_close_ids)
-        if idx == -1:
+        think_open = _subseq_index(input_ids, self._think_open_ids)
+        end = self._first_reasoning_end(
+            input_ids, think_open + len(self._think_open_ids) if think_open != -1 else 0
+        )
+        if end is None:
             return []  # still reasoning
-        return input_ids[idx + len(self._think_close_ids) :]
+        idx, marker_len = end
+        return input_ids[idx + marker_len :]
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         cached_delta_ids = self._last_streaming_delta_token_ids
@@ -271,13 +312,38 @@ class KimiK3ReasoningParser(ReasoningParser):
         # open marker was already consumed as a generation prefix)
         content_start = m_open.end() if m_open is not None else 0
         # if there is no think channel at all, everything is content
-        if m_open is None and self._think_close_re.search(model_output) is None:
+        if m_open is None and not any(
+            matcher.search(model_output)
+            for matcher in (
+                self._think_close_re,
+                self._tools_open_re,
+                self._response_open_re,
+                self._response_close_re,
+                self._message_close_re,
+            )
+        ):
             return None, self._content_after_reasoning(model_output, request)
 
-        m_close = self._think_close_re.search(model_output, content_start)
-        if m_close is not None:
-            reasoning = model_output[content_start : m_close.start()]
-            rest = model_output[m_close.end() :]
+        end_matches = [
+            matcher.search(model_output, content_start)
+            for matcher in (
+                self._think_close_re,
+                self._tools_open_re,
+                self._response_open_re,
+                self._response_close_re,
+                self._message_close_re,
+            )
+        ]
+        end_matches = [match for match in end_matches if match is not None]
+        if end_matches:
+            end_marker = min(end_matches, key=lambda match: match.start())
+            reasoning = model_output[content_start : end_marker.start()]
+            rest_start = (
+                end_marker.end()
+                if end_marker.re is self._think_close_re
+                else end_marker.start()
+            )
+            rest = model_output[rest_start:]
             return (reasoning or None, self._content_after_reasoning(rest, request))
         # think not closed -> still reasoning, no content yet
         return (model_output[content_start:] or None, None)
@@ -306,7 +372,11 @@ class KimiK3ReasoningParser(ReasoningParser):
         if m_open is not None:
             text = text[m_open.end() :]
         overlap = 0
-        for marker in (self._think_open, self._think_close):
+        for marker in (
+            self._think_open,
+            self._think_close,
+            *self._implicit_reasoning_end_markers,
+        ):
             max_check = min(len(marker) - 1, len(text))
             for n in range(max_check, 0, -1):
                 if text.endswith(marker[:n]):
@@ -385,10 +455,21 @@ class KimiK3ReasoningParser(ReasoningParser):
         if self._think_close_re.search(previous_text):
             return DeltaMessage(content=delta_text)
 
-        # the close marker completes within this delta's accumulated text:
+        # A reasoning-end marker completes within this delta's accumulated text:
         # split the buffer at the close marker into reasoning vs trailing content.
-        m_close = self._think_close_re.search(current_text)
-        if m_close is not None:
+        end_matches = [
+            matcher.search(current_text)
+            for matcher in (
+                self._think_close_re,
+                self._tools_open_re,
+                self._response_open_re,
+                self._response_close_re,
+                self._message_close_re,
+            )
+        ]
+        end_matches = [match for match in end_matches if match is not None]
+        if end_matches:
+            m_close = min(end_matches, key=lambda match: match.start())
             self._last_streaming_delta_token_ids = tuple(delta_token_ids)
             self._last_streaming_content_token_ids = self._extract_content_ids(
                 list(current_token_ids)
@@ -401,7 +482,10 @@ class KimiK3ReasoningParser(ReasoningParser):
                 reasoning_delta = reasoning[len(already_sent) :]
             else:
                 reasoning_delta = reasoning
-            content = current_text[m_close.end() :]
+            content_start = (
+                m_close.end() if m_close.re is self._think_close_re else m_close.start()
+            )
+            content = current_text[content_start:]
             return DeltaMessage(
                 reasoning=reasoning_delta or None,
                 content=content or None,
