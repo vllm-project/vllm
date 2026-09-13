@@ -71,7 +71,7 @@ def test_selector_edges_match_sequential_reference():
     torch.testing.assert_close(actual, expected)
 
 
-def _stub_base(monkeypatch, draft_logits):
+def _stub_base(monkeypatch, draft_logits, *, adaptive=False):
     """A DFlashSpeculator.__init__ that allocates only what the base class would.
 
     The real base class fills draft_logits from draft_logits_spec, so callers
@@ -79,6 +79,7 @@ def _stub_base(monkeypatch, draft_logits):
     """
 
     def init_base(self, _vllm_config, device):
+        self.speculative_config = SimpleNamespace(enable_adaptive_verification=adaptive)
         self.draft_model_config = SimpleNamespace(
             hf_config=SimpleNamespace(dflash_config={"selector_top_k": 3})
         )
@@ -116,6 +117,165 @@ def test_selector_asks_for_fp32_proposal_logits():
 
     assert dtype is torch.float32
     assert fill == float("-inf")
+
+
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_confidence_buffer_is_only_allocated_for_adaptive(monkeypatch, adaptive):
+    _stub_base(monkeypatch, None, adaptive=adaptive)
+    speculator = DFlash2Speculator(None, torch.device("cpu"))
+    confidence = speculator.draft_token_confidence_probs
+    if adaptive:
+        assert confidence.shape == speculator.draft_tokens.shape
+        assert confidence.dtype == torch.float32
+    else:
+        assert confidence is None
+
+
+@pytest.mark.parametrize("adaptive", [False, True])
+@pytest.mark.parametrize("has_head", [False, True])
+def test_adaptive_requires_loaded_confidence_weights(monkeypatch, adaptive, has_head):
+    _stub_base(monkeypatch, None, adaptive=adaptive)
+    selector = SimpleNamespace(
+        confidence_head=torch.nn.Linear(2, 1) if has_head else None
+    )
+    model = SimpleNamespace(model=SimpleNamespace(candidate_selector=selector))
+    monkeypatch.setattr(DFlashSpeculator, "load_draft_model", lambda *args: model)
+    speculator = DFlash2Speculator(None, torch.device("cpu"))
+    if adaptive and not has_head:
+        with pytest.raises(ValueError, match="confidence head"):
+            speculator.load_draft_model(None, set())
+    else:
+        assert speculator.load_draft_model(None, set()) is model
+
+
+@pytest.mark.parametrize("compute_confidence", [False, True])
+def test_selector_confidence_is_opt_in_and_does_not_change_scores(
+    monkeypatch, compute_confidence
+):
+    """A serialized head must not add work or change proposals in fixed mode."""
+    from vllm.model_executor.models import qwen3_dflash2 as module
+
+    predecessors = torch.tensor([[0.0, 0.0], [1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    candidates = torch.tensor([[[1, 2], [2, 3]]])
+    hidden = torch.tensor([[[2.0, 3.0], [5.0, 7.0]]])
+    anchors = torch.tensor([3])
+    unary = torch.zeros(1, 2, 2)
+    head = torch.nn.Linear(2, 1)
+    with torch.no_grad():
+        head.weight.copy_(torch.tensor([[2.0, -1.0]]))
+        head.bias.fill_(0.5)
+    selector = SimpleNamespace(
+        hidden_projection=torch.nn.Identity(),
+        predecessor_codebook=predecessors,
+        successor_codebook=predecessors,
+        confidence_head=head,
+        top_k=2,
+    )
+    if not compute_confidence:
+
+        def unexpected_confidence(*args, **kwargs):
+            pytest.fail("fixed-budget drafting must not compute confidence")
+
+        monkeypatch.setattr(module, "_confidence_rows", unexpected_confidence)
+
+    scores, confidence = module.CandidateSelector.forward(
+        selector,
+        candidates,
+        unary,
+        hidden,
+        anchors,
+        compute_confidence=compute_confidence,
+    )
+    torch.testing.assert_close(
+        scores,
+        _score_edges(predecessors, predecessors, candidates, unary, hidden, anchors, 2),
+        rtol=0,
+        atol=0,
+    )
+    if compute_confidence:
+        # The anchor conditions every row at p0; p1 uses p0's candidates.
+        torch.testing.assert_close(
+            confidence, torch.tensor([[[2.5, 2.5], [-3.5, 2.5]]])
+        )
+    else:
+        assert confidence is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_selector_walk_confidence_follows_selected_predecessors(monkeypatch, adaptive):
+    _stub_base(monkeypatch, None, adaptive=adaptive)
+    speculator = DFlash2Speculator(None, torch.device("cuda"))
+    speculator.num_speculative_steps = 3
+    speculator.selector_top_k = 2
+    speculator.use_fp64_gumbel = False
+    speculator.sample_pos = torch.arange(3, device="cuda").view(1, 3)
+    speculator.sample_idx_mapping = torch.zeros(
+        (1, 3), dtype=torch.int32, device="cuda"
+    )
+    speculator.temperature = torch.zeros(1, device="cuda")
+    speculator.seeds = torch.zeros(1, dtype=torch.int64, device="cuda")
+    speculator.draft_tokens = torch.empty((1, 3), dtype=torch.int64, device="cuda")
+    speculator._selector_scores = torch.empty((1, 3, 2), device="cuda")
+    speculator.draft_token_confidence_probs = (
+        torch.full((1, 3), -1.0, device="cuda") if adaptive else None
+    )
+    candidates = torch.tensor([[[10, 11], [20, 21], [30, 31]]], device="cuda")
+    scores = torch.tensor(
+        [
+            [
+                [[0.0, 2.0], [0.0, 2.0]],
+                [[0.0, 3.0], [4.0, 0.0]],
+                [[0.0, 5.0], [6.0, 0.0]],
+            ]
+        ],
+        device="cuda",
+    )
+    confidence = torch.tensor([[[0.1, 0.9], [0.2, 0.8], [0.3, 0.7]]], device="cuda")
+    speculator._sample_path(candidates, scores, 1, confidence if adaptive else None)
+    assert speculator.draft_tokens.tolist() == [[11, 20, 31]]
+    if adaptive:
+        torch.testing.assert_close(
+            speculator.draft_token_confidence_probs,
+            torch.tensor([[0.1, 0.8, 0.3]], device="cuda").sigmoid(),
+        )
+
+
+@pytest.mark.parametrize("adaptive", [False, True])
+def test_generate_draft_uses_selector_call_with_opt_in_confidence(
+    monkeypatch, adaptive
+):
+    """Both modes must use __call__, which owns the selector's compile wrapper."""
+    _stub_base(monkeypatch, None, adaptive=adaptive)
+    speculator = DFlash2Speculator(None, torch.device("cpu"))
+    hidden = torch.zeros(5, 2)
+    candidates = torch.arange(12).view(4, 3)
+    scores = torch.zeros(1, 4, 3, 3)
+    confidence = torch.zeros(1, 4, 3) if adaptive else None
+
+    class Selector:
+        def __call__(self, ids, unary, states, anchors, *, compute_confidence):
+            assert compute_confidence is adaptive
+            return scores, confidence
+
+    speculator.model = SimpleNamespace(
+        compute_candidates=lambda _: (candidates, torch.zeros(4, 3)),
+        model=SimpleNamespace(candidate_selector=Selector()),
+    )
+    speculator.input_buffers = SimpleNamespace(
+        input_ids=torch.zeros(5, dtype=torch.long)
+    )
+    speculator.sample_indices = torch.arange(4)
+    speculator._run_model = lambda *args: hidden
+    sampled = []
+    speculator._sample_path = lambda *args: sampled.append(args)
+    speculator._generate_draft(1, 5, None, None, None)
+    assert len(sampled) == 1
+    ids, actual_scores, num_reqs, actual_confidence = sampled[0]
+    torch.testing.assert_close(ids, candidates.view(1, 4, 3))
+    assert actual_scores is scores
+    assert num_reqs == 1
+    assert actual_confidence is confidence
 
 
 @pytest.mark.skip_global_cleanup

@@ -149,6 +149,7 @@ def update_dflash2(config_dict: dict, pre_trained_config: dict) -> None:
         "conv_group_size",
         "selector_rank",
         "selector_top_k",
+        "enable_confidence_head",
     ):
         if config_dict.get(key) is not None:
             pre_trained_config["dflash_config"][key] = config_dict[key]

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -184,6 +186,25 @@ def _score_edges(
     )
 
 
+def _confidence_rows(
+    predecessor_table: torch.Tensor,
+    candidate_ids: torch.Tensor,
+    hidden: torch.Tensor,
+    anchor_token_ids: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+) -> torch.Tensor:
+    predecessor_ids = torch.cat(
+        (
+            anchor_token_ids[:, None, None].expand(-1, 1, candidate_ids.shape[-1]),
+            candidate_ids[:, :-1],
+        ),
+        dim=1,
+    )
+    context = predecessor_table[predecessor_ids] * hidden[:, :, None]
+    return torch.einsum("blpr,r->blp", context, weight) + bias
+
+
 @support_torch_compile
 class CandidateSelector(nn.Module):
     def __init__(
@@ -192,6 +213,7 @@ class CandidateSelector(nn.Module):
         vocab_size: int,
         rank: int,
         top_k: int,
+        enable_confidence_head: bool,
         params_dtype: torch.dtype,
         prefix: str,
     ) -> None:
@@ -212,6 +234,18 @@ class CandidateSelector(nn.Module):
             prefix=maybe_prefix(prefix, "hidden_projection"),
             return_bias=False,
         )
+        # Loading the optional head does not enable confidence computation.
+        self.confidence_head: ReplicatedLinear | None = None
+        if enable_confidence_head:
+            self.confidence_head = ReplicatedLinear(
+                rank,
+                1,
+                bias=True,
+                params_dtype=params_dtype,
+                quant_config=None,
+                prefix=maybe_prefix(prefix, "confidence_head"),
+                return_bias=False,
+            )
 
     def forward(
         self,
@@ -219,9 +253,10 @@ class CandidateSelector(nn.Module):
         unary_logits: torch.Tensor,
         hidden_states: torch.Tensor,
         anchor_token_ids: torch.Tensor,
-    ) -> torch.Tensor:
+        compute_confidence: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         hidden = self.hidden_projection(hidden_states)
-        return _score_edges(
+        scores = _score_edges(
             self.predecessor_codebook,
             self.successor_codebook,
             candidate_ids,
@@ -230,6 +265,17 @@ class CandidateSelector(nn.Module):
             anchor_token_ids,
             self.top_k,
         )
+        if not compute_confidence or self.confidence_head is None:
+            return scores, None
+        confidence_logits = _confidence_rows(
+            self.predecessor_codebook,
+            candidate_ids,
+            hidden,
+            anchor_token_ids,
+            self.confidence_head.weight.squeeze(0),
+            self.confidence_head.bias.squeeze(0),
+        )
+        return scores, confidence_logits
 
 
 class DFlash2Qwen3Model(DFlashQwen3Model):
@@ -258,6 +304,9 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
                 vocab_size=self.config.vocab_size,
                 rank=int(draft_config["selector_rank"]),
                 top_k=int(draft_config["selector_top_k"]),
+                enable_confidence_head=bool(
+                    draft_config.get("enable_confidence_head", False)
+                ),
                 params_dtype=vllm_config.model_config.dtype,
                 prefix=maybe_prefix(prefix, "candidate_selector"),
             )
@@ -285,6 +334,24 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
         return self.candidate_logits_processor.get_top_k_tokens(
             self.lm_head, hidden_states, self.model.candidate_selector.top_k
         )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        includes_confidence_head = False
+
+        def tracked_weights():
+            nonlocal includes_confidence_head
+            for name, loaded_weight in weights:
+                if "candidate_selector.confidence_head" in name:
+                    includes_confidence_head = True
+                yield name, loaded_weight
+
+        loaded = super().load_weights(tracked_weights())
+        # `enable_confidence_head` is a property of the checkpoint, so a config
+        # that claims a head the weights do not contain would otherwise leave an
+        # uninitialized module behind. Drop it rather than serve random values.
+        if not includes_confidence_head:
+            self.model.candidate_selector.confidence_head = None
+        return loaded
 
 
 EntryClass = DFlash2Qwen3ForCausalLM

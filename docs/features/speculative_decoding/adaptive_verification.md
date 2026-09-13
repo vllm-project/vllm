@@ -12,7 +12,7 @@ The practical effect is that one configuration holds up across the whole load ra
 
 ## Support
 
-Adaptive verification needs per-position acceptance estimates, so today it is only supported for DSpark with a **confidence head**.
+Adaptive verification needs per-position acceptance estimates. It supports DSpark and DFlash2 checkpoints with a trained **confidence head**. The attention-backend requirements below still apply.
 
 ## Usage
 
@@ -31,6 +31,10 @@ vllm serve deepseek-ai/DeepSeek-V4-Flash-DSpark \
 ```
 
 Set `enable_adaptive_verification: false` to verify the full block for every request.
+
+For DFlash2, use `method: "dflash"` with a DFlash2 checkpoint and explicitly set `enable_adaptive_verification: true`. The selector estimates confidence conditioned on the predecessor actually chosen along the draft path. Enabling AV without loaded confidence-head weights raises an error.
+
+A DFlash2 checkpoint containing a confidence head can also be served with fixed-budget drafting: loading the head does not enable AV. With AV disabled (the default), vLLM neither computes confidence scores nor allocates their output buffer.
 
 ## Requirements and limitations
 
