@@ -7,6 +7,7 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
+from http import HTTPStatus
 from typing import Any
 
 import vllm.envs as envs
@@ -18,7 +19,10 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
-from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
+from vllm.entrypoints.serve.elastic_ep.middleware import (
+    get_scaling_elastic_ep,
+    set_scaling_elastic_ep,
+)
 from vllm.exceptions import (
     GracefulHTTPError,
     MaxQueuedTokensError,
@@ -310,6 +314,8 @@ class AsyncLLM(EngineClient):
             QueueOverflowError: If ``max_num_queued_reqs`` would be exceeded.
             MaxQueuedTokensError: If ``max_num_queued_tokens`` would be exceeded.
         """
+        self._check_elastic_ep_admission(request_id)
+
         max_num_reqs = self.scheduler_config.max_num_queued_reqs
         if max_num_reqs is not None:
             current = self.get_num_unfinished_requests()
@@ -336,6 +342,17 @@ class AsyncLLM(EngineClient):
                     max_queued_tokens,
                 )
                 raise MaxQueuedTokensError()
+
+    def _check_elastic_ep_admission(self, request_id: str | None = None) -> None:
+        if get_scaling_elastic_ep():
+            logger.info(
+                "Elastic EP scaling is in progress - rejecting request %s",
+                request_id,
+            )
+            raise GracefulHTTPError(
+                "The model is currently scaling. Please try again later.",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if not hasattr(self, "_supported_tasks"):
@@ -480,14 +497,22 @@ class AsyncLLM(EngineClient):
 
         # Fan out child requests (for n>1).
         parent_request = ParentRequest(request)
+        self._check_elastic_ep_admission(request.request_id)
+        child_requests = []
         for idx in range(parent_params.n):
             request_id, child_params = parent_request.get_child_info(idx)
             child_request = request if idx == parent_params.n - 1 else copy(request)
             child_request.request_id = request_id
             child_request.sampling_params = child_params
-            await self._add_request(
+            # Register every child before the first await so a drain sees all of them.
+            self.output_processor.add_request(
                 child_request, prompt_text, parent_request, idx, queue
             )
+            child_requests.append(child_request)
+        for child_request in child_requests:
+            await self.engine_core.add_request_async(child_request)
+            if self.log_requests:
+                logger.info("Added request %s.", child_request.request_id)
         return queue
 
     async def _add_request(
@@ -1113,11 +1138,18 @@ class AsyncLLM(EngineClient):
         """Wait for all requests to be drained."""
         start_time = time.time()
         while time.time() - start_time < drain_timeout:
-            if not self.engine_core.dp_engines_running():
+            dp_engines_running = self.engine_core.dp_engines_running()
+            has_unfinished_requests = self.output_processor.has_unfinished_requests()
+            if not dp_engines_running and not has_unfinished_requests:
                 logger.info("Engines are idle, requests have been drained")
                 return
 
-            logger.info("Engines are still running, waiting for requests to drain...")
+            logger.info(
+                "Waiting for requests to drain "
+                "(engines_running=%s, frontend_unfinished=%s)",
+                dp_engines_running,
+                has_unfinished_requests,
+            )
             await asyncio.sleep(1)  # Wait 1 second before checking again
 
         raise TimeoutError(
@@ -1127,10 +1159,7 @@ class AsyncLLM(EngineClient):
 
     async def _drain_requests_for_elastic_ep(self, drain_timeout: int) -> None:
         try:
-            logger.info(
-                "VLLM_ELASTIC_EP_DRAIN_REQUESTS is set, "
-                "waiting for requests to drain before scaling"
-            )
+            logger.info("Waiting for requests to drain before Elastic EP scaling")
             await self.wait_for_requests_to_drain(drain_timeout)
         except BaseException:
             set_scaling_elastic_ep(False)
@@ -1173,8 +1202,17 @@ class AsyncLLM(EngineClient):
                 self._logger_ref[0] = self.logger_manager
             self.logger_manager.log_engine_initialized()
 
+        from vllm.distributed.elastic_ep.elastic_execute import (
+            can_reuse_fused_moe_kernel,
+        )
+
+        # MRV2 ranks that re-warm at commit need an empty request pool.
+        drain = envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS or (
+            self.vllm_config.use_v2_model_runner
+            and not can_reuse_fused_moe_kernel(self.vllm_config.parallel_config)
+        )
         set_scaling_elastic_ep(True)
-        if envs.VLLM_ELASTIC_EP_DRAIN_REQUESTS:
+        if drain:
             await self._drain_requests_for_elastic_ep(drain_timeout)
 
         await self.engine_core.commit_elastic_ep()

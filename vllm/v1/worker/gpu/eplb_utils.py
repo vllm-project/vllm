@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from functools import wraps
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -14,6 +15,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     get_mixture_of_experts_model,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -89,9 +93,8 @@ class EPLBController:
         self,
         model: nn.Module,
         model_config: Any,
-        load_dummy_weights: bool,
     ) -> bool:
-        if not self.parallel_config.enable_eplb or load_dummy_weights:
+        if not self.parallel_config.enable_eplb:
             return False
 
         moe_model = get_mixture_of_experts_model(model)
@@ -106,7 +109,13 @@ class EPLBController:
         self._has_registered_models = True
         return True
 
-    def maybe_start_async_loop(self, eplb_models_added: bool) -> None:
+    def maybe_start_async_loop(
+        self, eplb_models_added: bool, load_dummy_weights: bool = False
+    ) -> None:
+        # A scaling-up worker registers to join the communicator handshake, but
+        # its groups are not live yet, so _perform_eplb_reshuffle() starts this.
+        if load_dummy_weights:
+            return
         if eplb_models_added and self.state is not None and self.state.is_async:
             self.state.start_async_loop()
 
@@ -141,18 +150,30 @@ class EPLBController:
 
     def setup_from_mapping(
         self,
-        model: nn.Module,
         model_config: Any,
         expanded_physical_to_logical: torch.Tensor,
     ) -> None:
-        moe_model = get_mixture_of_experts_model(model)
-        assert moe_model is not None
+        # Update in place: a fresh EplbState would build a second communicator
+        # over a group the other ranks have already left.
+        assert self.state is not None
+        self.state.update_mapping(model_config, expanded_physical_to_logical)
 
-        self.state = EplbState.from_mapping(
-            model=moe_model,
-            model_config=model_config,
-            device=self.device,
-            parallel_config=self.parallel_config,
-            expanded_physical_to_logical=expanded_physical_to_logical,
+    @contextmanager
+    def preserve_serving_state(self, runner: "GPUModelRunner") -> Iterator[None]:
+        """Keep the elastic EP warmup out of the EPLB stats and the KV cache."""
+        req_states = runner.req_states
+        assert not req_states.req_id_to_index, (
+            "MRV2 warmup requires an empty request pool, found "
+            f"{len(req_states.req_id_to_index)} live requests"
         )
-        self._has_registered_models = True
+        runner.block_tables.redirect_writes_to_null_block = True
+        self.suppressed = True
+        try:
+            yield
+        finally:
+            for req_id in list(req_states.req_id_to_index):
+                runner._remove_request(req_id)
+            runner.block_tables.redirect_writes_to_null_block = False
+            self.suppressed = False
+            if runner.kv_block_zeroer is not None:
+                runner.kv_block_zeroer.zero_block_ids([0])
