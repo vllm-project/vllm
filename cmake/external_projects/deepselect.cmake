@@ -18,8 +18,8 @@ if(DEEPSELECT_SRC_DIR)
 else()
   FetchContent_Declare(
         deepselect
-        GIT_REPOSITORY https://github.com/ZJY0516/DeepSelect.git
-        GIT_TAG c0e1f9cd40d3fdc79e75f2d14d1520936915f6b8
+        GIT_REPOSITORY https://github.com/vllm-project/DeepSelect.git
+        GIT_TAG d96d33afe1fab0d6066da49cdc91e64c2bee65ea
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
