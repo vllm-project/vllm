@@ -42,8 +42,8 @@ ARG NCCL_VERSION=2.30.7
 
 # Build wheels against the same glibc floor as PyTorch's published wheels.
 ARG BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359
-# Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
-ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION}
+# Using ubuntu base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
+ARG FINAL_BASE_IMAGE=ubuntu:${UBUNTU_VERSION}
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
 # their own mirror. When doing so, we don't benefit from the transparent
@@ -730,6 +730,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
 FROM ${FINAL_BASE_IMAGE} AS vllm-runtime-base
+
+# set env variables for NVIDIA container toolkit to automatically mount GPU drivers
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 ARG INSTALL_RUBIN_PRERELEASE
 ARG CUDA_VERSION
