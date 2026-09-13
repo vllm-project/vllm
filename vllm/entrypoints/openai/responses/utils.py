@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -13,6 +15,8 @@ from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool,
 )
 from openai.types.responses import (
+    ResponseCustomToolCall,
+    ResponseCustomToolCallOutputItem,
     ResponseFunctionToolCall,
     ResponseOutputItem,
     ResponseOutputMessage,
@@ -59,6 +63,7 @@ def build_response_output_items(
 ) -> list[ResponseOutputItem]:
     outputs: list[ResponseOutputItem] = []
     tool_call_name_map = build_responses_tool_call_name_map(tools)
+    custom_tool_names = extract_custom_tool_names(tools)
 
     if reasoning:
         outputs.append(
@@ -96,18 +101,31 @@ def build_response_output_items(
             call_name = resolve_responses_tool_call_name(
                 tool_call.name, tool_call_name_map=tool_call_name_map
             )
-            outputs.append(
-                ResponseFunctionToolCall(
-                    id=f"fc_{random_uuid()}",
-                    call_id=tool_call.id
-                    or make_tool_call_id(func_name=tool_call.name, idx=idx),
-                    type="function_call",
-                    status="completed",
-                    name=call_name.name,
-                    namespace=call_name.namespace,
-                    arguments=tool_call.arguments,
+            if tool_call.name in custom_tool_names:
+                outputs.append(
+                    ResponseCustomToolCall(
+                        id=f"ctc_{random_uuid()}",
+                        call_id=tool_call.id
+                        or make_tool_call_id(func_name=tool_call.name, idx=idx),
+                        type="custom_tool_call",
+                        name=call_name.name,
+                        namespace=call_name.namespace,
+                        input=decode_custom_tool_input(tool_call.arguments),
+                    )
                 )
-            )
+            else:
+                outputs.append(
+                    ResponseFunctionToolCall(
+                        id=f"fc_{random_uuid()}",
+                        call_id=tool_call.id
+                        or make_tool_call_id(func_name=tool_call.name, idx=idx),
+                        type="function_call",
+                        status="completed",
+                        name=call_name.name,
+                        namespace=call_name.namespace,
+                        arguments=tool_call.arguments,
+                    )
+                )
 
     return outputs
 
@@ -157,6 +175,10 @@ def should_continue_final_message(
         return last_item.get("status") in ("in_progress", "incomplete")
 
     return False
+
+
+def _item_field(item: Any, key: str) -> Any:
+    return item.get(key) if isinstance(item, dict) else getattr(item, key, None)
 
 
 def construct_input_messages(
@@ -234,6 +256,10 @@ def _construct_message_from_response_item(
         prev_msg if prev_msg and prev_msg.get("role") == "assistant" else None
     )
 
+    tool_call: (
+        ChatCompletionMessageToolCallParam
+        | None
+    ) = None
     if isinstance(item, ResponseFunctionToolCall):
         tool_name = item.name
         if item.namespace:
@@ -246,6 +272,26 @@ def _construct_message_from_response_item(
             ),
             type="function",
         )
+    elif isinstance(item, ResponseCustomToolCall) or (
+        isinstance(item, dict) and item.get("type") == "custom_tool_call"
+    ):
+        call_id = _item_field(item, "call_id")
+        func_name = _item_field(item, "name")
+        namespace = _item_field(item, "namespace")
+        if namespace:
+            func_name = flat_namespace_tool_name(namespace, func_name)
+        tool_call = ChatCompletionMessageToolCallParam(
+            id=call_id,
+            function=FunctionCallTool(
+                name=func_name,
+                arguments=json.dumps({"input": _item_field(item, "input")}),
+            ),
+            type="function",
+        )
+
+    # Function and custom calls share the same merge path into the previous
+    # assistant message.
+    if tool_call is not None:
         if prev_assistant_msg:
             tool_calls = prev_assistant_msg.get("tool_calls")
             if tool_calls is None:
@@ -265,13 +311,13 @@ def _construct_message_from_response_item(
                 "Previous assistant message has unknown tool_calls format. "
                 "Tool call merging is skipped and a new assistant message is created. "
                 "Item %s",
-                item.id,
+                getattr(item, "id", None),
             )
         return ChatCompletionAssistantMessageParam(
             role="assistant",
             tool_calls=[tool_call],
         )
-    elif isinstance(item, ResponseReasoningItem):
+    if isinstance(item, ResponseReasoningItem):
         reasoning = ""
         if item.encrypted_content:
             raise VLLMValidationError(
@@ -309,14 +355,19 @@ def _construct_message_from_response_item(
             "role": "assistant",
             "content": output_text,
         }
-    elif isinstance(item, ResponseFunctionToolCallOutputItem):
+    elif isinstance(
+        item,
+        (ResponseFunctionToolCallOutputItem, ResponseCustomToolCallOutputItem),
+    ):
         return ChatCompletionToolMessageParam(
             role="tool",
             content=item.output,
             tool_call_id=item.call_id,
         )
-    elif isinstance(item, dict) and item.get("type") == "function_call_output":
-        # Append the function call output as a tool message.
+    elif isinstance(item, dict) and item.get("type") in (
+        "function_call_output",
+        "custom_tool_call_output",
+    ):
         return ChatCompletionToolMessageParam(
             role="tool",
             content=item.get("output"),
@@ -345,18 +396,28 @@ def _construct_message_from_response_item(
     )
 
 
-def extract_function_tool_names(tools: list[Tool]) -> frozenset[str]:
-    names = []
-    for tool in tools:
-        if tool.type == "function":
+def _extract_tool_names(
+    tools: list[Tool] | None, tool_type: str
+) -> frozenset[str]:
+    names: list[str] = []
+    for tool in tools or ():
+        if tool.type == tool_type:
             names.append(tool.name)
         elif tool.type == "namespace":
             names.extend(
-                flat_namespace_tool_name(tool.name, namespaced_tool.name)
-                for namespaced_tool in tool.tools
-                if namespaced_tool.type == "function"
+                flat_namespace_tool_name(tool.name, child.name)
+                for child in tool.tools
+                if child.type == tool_type
             )
     return frozenset(names)
+
+
+def extract_function_tool_names(tools: list[Tool]) -> frozenset[str]:
+    return _extract_tool_names(tools, "function")
+
+
+def extract_custom_tool_names(tools: list[Tool] | None) -> frozenset[str]:
+    return _extract_tool_names(tools, "custom")
 
 
 def extract_tool_types(tools: list[Tool]) -> set[str]:
@@ -390,6 +451,93 @@ def convert_tool_responses_to_completions_format(
             {k: v for k, v in tool.items() if k != "type"}
         ),
     )
+
+
+_CUSTOM_INPUT_PREFIX = re.compile(r'^\s*\{\s*"input"\s*:\s*"')
+_JSON_ESCAPE_MAP = {
+    '"': '"',
+    "\\": "\\",
+    "/": "/",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+}
+
+
+def decode_custom_tool_input_prefix(raw: str) -> str:
+    """Decode the complete portion of a streamed JSON ``input`` string."""
+    match = _CUSTOM_INPUT_PREFIX.match(raw)
+    if match is None:
+        return ""
+
+    i = match.end()
+    out: list[str] = []
+    while i < len(raw):
+        ch = raw[i]
+        if ch == '"':
+            break
+        if ch != "\\":
+            if ord(ch) < 0x20:
+                break
+            out.append(ch)
+            i += 1
+            continue
+
+        if i + 1 >= len(raw):
+            break
+        escape = raw[i + 1]
+        if escape in _JSON_ESCAPE_MAP:
+            out.append(_JSON_ESCAPE_MAP[escape])
+            i += 2
+            continue
+        if escape != "u" or i + 6 > len(raw):
+            break
+
+        digits = raw[i + 2 : i + 6]
+        if not all(c in "0123456789abcdefABCDEF" for c in digits):
+            break
+        codepoint = int(digits, 16)
+        if 0xD800 <= codepoint <= 0xDBFF:
+            if i + 12 > len(raw) or raw[i + 6 : i + 8] != "\\u":
+                break
+            low_digits = raw[i + 8 : i + 12]
+            if not all(c in "0123456789abcdefABCDEF" for c in low_digits):
+                break
+            low = int(low_digits, 16)
+            if not 0xDC00 <= low <= 0xDFFF:
+                break
+            combined = 0x10000 + ((codepoint - 0xD800) << 10) + (low - 0xDC00)
+            out.append(chr(combined))
+            i += 12
+            continue
+        if 0xDC00 <= codepoint <= 0xDFFF:
+            break
+        out.append(chr(codepoint))
+        i += 6
+
+    return "".join(out)
+
+
+def decode_custom_tool_input(raw: str | None) -> str:
+    """Unwrap a completed custom-tool shim payload to freeform ``input``."""
+    if raw is None:
+        return ""
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return decode_custom_tool_input_prefix(raw) or raw
+    if isinstance(value, dict):
+        if "input" in value:
+            value = value["input"]
+        elif len(value) == 1:
+            value = next(iter(value.values()))
+        else:
+            return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
 
 
 def construct_tool_dicts(

@@ -610,9 +610,9 @@ class ResponsesRequest(OpenAIBaseModel):
         tools = data.get("tools")
         tool_choice = data.get("tool_choice", "auto")
         has_tools = tools is not None and len(tools) > 0
-        is_named_tool_choice = (
-            isinstance(tool_choice, dict) and tool_choice.get("type") == "function"
-        )
+        is_named_tool_choice = isinstance(tool_choice, dict) and tool_choice.get(
+            "type"
+        ) in ("function", "custom")
 
         if not has_tools:
             if tool_choice in ("auto", "none"):

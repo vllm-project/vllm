@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from openai.types.responses import CustomTool
 from xgrammar import Grammar, StructuralTag
 from xgrammar.testing import _is_grammar_accept_string
 
@@ -448,6 +449,21 @@ def test_get_model_structural_tag_supports_named_tool_choice(
     )
 
     assert isinstance(tag, StructuralTag)
+
+
+def test_deepseek_v4_forced_custom_tool_uses_function_shim():
+    tools = [
+        CustomTool(type="custom", name="apply_patch", description="Apply a patch.")
+    ]
+    tag = get_model_structural_tag(
+        model="deepseek_v4",
+        tools=tools,
+        tool_choice="required",
+        reasoning=False,
+    )
+
+    assert isinstance(tag, StructuralTag)
+    assert "apply_patch" in tag.model_dump_json()
 
 
 @pytest.mark.parametrize(
