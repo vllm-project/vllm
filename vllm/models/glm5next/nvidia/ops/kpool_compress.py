@@ -378,6 +378,7 @@ def _kpool_tail_seed_kernel(
     HEAD_DIM: tl.constexpr,
     KPOOL: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    NUM_TAIL_BLOCKS: tl.constexpr,
 ):
     """Copy token ``i``'s raw K + gate into its request's tail block.
 
@@ -391,6 +392,8 @@ def _kpool_tail_seed_kernel(
     if t < 0:
         return
     blk = t // KPOOL  # t >= 0 here, so trunc == floor
+    if blk >= NUM_TAIL_BLOCKS:
+        return
     ahead = tl.load(tslot_ptr + i + KPOOL, mask=i + KPOOL < n_tokens, other=-1).to(
         tl.int64
     )
@@ -431,6 +434,7 @@ def kpool_seed_tail_cache(
         HEAD_DIM=head_dim,
         KPOOL=kpool,
         BLOCK_D=triton.next_power_of_2(head_dim),
+        NUM_TAIL_BLOCKS=int(tail_kv_cache.shape[0]),
     )
 
 
