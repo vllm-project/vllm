@@ -1100,10 +1100,12 @@ def get_max_concurrency_for_kv_cache_config(
     max_concurrency = min(limits)
     # --- DIAG #55533: spec-decode x mamba concurrency (remove before merge) ---
     logger.info(
-        "[diag55533] mamba_cache_mode=%s num_speculative_tokens=%d num_blocks=%d",
+        "[diag55533] mamba_cache_mode=%s num_speculative_tokens=%d num_blocks=%d "
+        "host_num_blocks=%s",
         vllm_config.cache_config.mamba_cache_mode,
         vllm_config.num_speculative_tokens,
         kv_cache_config.num_blocks,
+        kv_cache_config.hisparse_host_num_blocks,
     )
     for i, group in enumerate(kv_cache_config.kv_cache_groups):
         spec = group.kv_cache_spec
@@ -1111,17 +1113,20 @@ def get_max_concurrency_for_kv_cache_config(
             spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes
         )
         logger.info(
-            "[diag55533] group=%d type=%s per_req_blocks=%d spec_blocks=%s "
-            "page_bytes=%d",
+            "[diag55533] group=%d type=%s host_resident=%s per_req_blocks=%d "
+            "spec_blocks=%s page_bytes=%d",
             i,
             type(spec).__name__,
+            group.host_resident,
             per_req_blocks,
             getattr(spec, "num_speculative_blocks", "-"),
             spec.page_size_bytes,
         )
     logger.info(
-        "[diag55533] num_blocks_per_request=%d max_concurrency=%.2f",
+        "[diag55533] num_blocks_per_request=%d host_blocks_per_request=%d "
+        "max_concurrency=%.2f",
         num_blocks_per_request,
+        host_blocks_per_request,
         max_concurrency,
     )
     # --- END DIAG ---
