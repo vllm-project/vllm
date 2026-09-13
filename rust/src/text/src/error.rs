@@ -71,6 +71,8 @@ pub enum Error {
     TruncateUnsupportedWithMultimodal,
     #[error("invalid repetition detection params: {message}")]
     InvalidRepetitionDetection { message: String },
+    #[error("{message}")]
+    InvalidCacheSalt { message: &'static str },
     #[error("text request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error(transparent)]
@@ -102,6 +104,7 @@ impl Error {
             | Self::InvalidTruncatePromptTokens { .. }
             | Self::TruncateUnsupportedWithMultimodal
             | Self::InvalidRepetitionDetection { .. }
+            | Self::InvalidCacheSalt { .. }
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
             | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
