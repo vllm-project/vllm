@@ -54,7 +54,7 @@ from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.metrics.stats import RequestStateStats
+from vllm.v1.metrics.stats import PrefillStats, RequestStateStats
 
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
 GPT_OSS_SPECULATOR_NAME = "RedHatAI/gpt-oss-20b-speculator.eagle3"
@@ -64,6 +64,18 @@ _PER_REQUEST_STATS = RequestStateStats(
     first_token_ts=2.0,
     last_token_ts=3.0,
     num_generation_tokens=2,
+)
+_PREFIX_CACHE_STATS = PrefillStats(
+    num_prompt_tokens=42,
+    num_computed_tokens=26,
+    num_cached_tokens=16,
+    num_local_cached_tokens=12,
+    num_external_cached_tokens=4,
+    num_cache_creation_tokens=24,
+    num_new_full_blocks=2,
+    num_block_allocations=3,
+    num_block_evictions=1,
+    num_prefill_chunks=2,
 )
 
 
@@ -662,6 +674,7 @@ def _make_metrics_request_output(
         ],
         finished=True,
         metrics=metrics,
+        prefill_stats=_PREFIX_CACHE_STATS,
     )
 
 
@@ -712,6 +725,21 @@ def test_build_per_request_timing_metrics_valid_timestamps():
     assert metrics.mean_itl_ms == pytest.approx(1000.0 / 9, rel=1e-4)
     assert metrics.tokens_per_second == pytest.approx(10.0 / 1.5, rel=1e-4)
 
+    metrics = build_per_request_timing_metrics(
+        _PER_REQUEST_STATS,
+        num_generation_tokens=10,
+        prefill_stats=_PREFIX_CACHE_STATS,
+    )
+    assert metrics.prefix_cache is not None
+    assert metrics.prefix_cache.num_computed_tokens == 26
+    assert metrics.prefix_cache.num_local_cached_tokens == 12
+    assert metrics.prefix_cache.num_external_cached_tokens == 4
+    assert metrics.prefix_cache.num_new_full_blocks == 2
+    assert metrics.prefix_cache.num_block_allocations == 3
+    assert metrics.prefix_cache.num_block_evictions == 1
+    assert metrics.prefix_cache.num_prefill_chunks == 2
+    assert metrics.prefix_cache.prefill_time_ms == pytest.approx(500.0)
+
 
 @pytest.mark.asyncio
 async def test_chat_per_request_metrics_follow_server_flag():
@@ -753,6 +781,9 @@ async def test_chat_per_request_metrics_follow_server_flag():
     )
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert enabled_response.id == "chatcmpl-test-id"
+    assert enabled_response.metrics.prefix_cache is not None
+    assert enabled_response.metrics.prefix_cache.num_cached_tokens == 16
 
 
 @pytest.mark.asyncio
@@ -793,6 +824,9 @@ async def test_chat_streaming_metrics_ride_on_usage_chunk():
     usage_chunks = [chunk for chunk in chunks if chunk.get("usage")]
     assert usage_chunks
     assert usage_chunks[-1]["metrics"]["time_to_first_token_ms"] == pytest.approx(500.0)
+    assert usage_chunks[-1]["id"] == "chatcmpl-test-id"
+    assert usage_chunks[-1]["metrics"]["prefix_cache"]["num_computed_tokens"] == 26
+    assert usage_chunks[-1]["metrics"]["prefix_cache"]["num_block_evictions"] == 1
 
 
 @pytest.mark.asyncio

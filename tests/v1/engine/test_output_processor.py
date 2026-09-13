@@ -23,6 +23,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
@@ -1448,3 +1449,169 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+def test_prefill_stats_propagate_to_request_output():
+    from vllm.v1.metrics.stats import PrefillStats
+
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="request-internal",
+        external_req_id="request-external",
+        prompt_token_ids=[1, 2, 3, 4],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            detokenize=False,
+            output_kind=RequestOutputKind.DELTA,
+        ),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, prompt=None)
+
+    prefill_stats = PrefillStats(
+        num_prompt_tokens=4,
+        num_computed_tokens=2,
+        num_cached_tokens=2,
+        num_local_cached_tokens=1,
+        num_external_cached_tokens=1,
+        num_cache_creation_tokens=2,
+        num_new_full_blocks=1,
+        num_block_allocations=2,
+        num_block_evictions=1,
+        num_prefill_chunks=2,
+    )
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[42],
+                finish_reason=FinishReason.LENGTH,
+                prefill_stats=prefill_stats,
+            )
+        ]
+    )
+
+    assert len(processed.request_outputs) == 1
+    request_output = processed.request_outputs[0]
+    assert isinstance(request_output, RequestOutput)
+    assert request_output.request_id == "request-external"
+    assert request_output.prefill_stats is prefill_stats
+    assert request_output.prefill_stats.num_block_evictions == 1
+
+
+def test_streaming_prefill_stats_are_session_cumulative():
+    from vllm.v1.metrics.stats import PrefillStats
+
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+    request = EngineCoreRequest(
+        request_id="request-internal",
+        external_req_id="request-external",
+        prompt_token_ids=[1, 2, 3, 4],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            detokenize=False,
+            output_kind=RequestOutputKind.DELTA,
+        ),
+        pooling_params=None,
+        resumable=True,
+    )
+    output_processor.add_request(request, prompt=None)
+
+    first_stats = PrefillStats(
+        num_prompt_tokens=4,
+        num_computed_tokens=2,
+        num_cached_tokens=2,
+        num_local_cached_tokens=1,
+        num_external_cached_tokens=1,
+        num_cache_creation_tokens=2,
+        num_new_full_blocks=1,
+        num_block_allocations=2,
+        num_block_evictions=1,
+        num_prefill_chunks=2,
+    )
+    first_processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[42],
+                finish_reason=FinishReason.LENGTH,
+                prefill_stats=first_stats,
+            )
+        ]
+    )
+    first_output = first_processed.request_outputs[0]
+    assert isinstance(first_output, RequestOutput)
+    assert first_output.prefill_stats is first_stats
+
+    continuation = EngineCoreRequest(
+        request_id=request.request_id,
+        external_req_id=request.external_req_id,
+        prompt_token_ids=[5, 6],
+        mm_features=None,
+        arrival_time=1,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            detokenize=False,
+            output_kind=RequestOutputKind.DELTA,
+        ),
+        pooling_params=None,
+        resumable=True,
+    )
+    output_processor.add_request(continuation, prompt=None)
+
+    second_stats = PrefillStats(
+        num_prompt_tokens=2,
+        num_computed_tokens=2,
+        num_cache_creation_tokens=1,
+        num_new_full_blocks=1,
+        num_block_allocations=1,
+        num_block_evictions=2,
+        num_prefill_chunks=1,
+    )
+    second_processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[43],
+                finish_reason=FinishReason.LENGTH,
+                prefill_stats=second_stats,
+            )
+        ]
+    )
+
+    second_output = second_processed.request_outputs[0]
+    assert isinstance(second_output, RequestOutput)
+    cumulative = second_output.prefill_stats
+    assert cumulative is not None
+    assert cumulative is not first_stats
+    assert cumulative is not second_stats
+    assert cumulative.num_prompt_tokens == 6
+    assert cumulative.num_computed_tokens == 4
+    assert cumulative.num_cached_tokens == 2
+    assert cumulative.num_local_cached_tokens == 1
+    assert cumulative.num_external_cached_tokens == 1
+    assert cumulative.num_cache_creation_tokens == 3
+    assert cumulative.num_new_full_blocks == 2
+    assert cumulative.num_block_allocations == 3
+    assert cumulative.num_block_evictions == 3
+    assert cumulative.num_prefill_chunks == 3
+
+    # Replacing the accumulator with a new merged snapshot prevents already
+    # emitted RequestOutputs from changing retroactively.
+    assert first_output.prefill_stats is first_stats
+    assert first_output.prefill_stats.num_prompt_tokens == 4
+    assert first_output.prefill_stats.num_block_evictions == 1
+
+    first_output.add(second_output, aggregate=True)
+    assert first_output.prefill_stats is cumulative
+    assert first_output.prefill_stats.num_prompt_tokens == 6

@@ -35,6 +35,7 @@ from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
     IterationStats,
     LoRARequestStates,
+    PrefillStats,
     RequestSpecDecodeMetrics,
     RequestStateStats,
     SchedulerStats,
@@ -176,6 +177,7 @@ class RequestState:
         self.queue = queue
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
+        self.prefill_stats: PrefillStats | None = None
         # Per-sequence spec-decode accumulator; arrives once (on finish) via
         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
@@ -389,6 +391,7 @@ class RequestState:
             ec_transfer_params=ec_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             num_cache_creation_tokens=self.num_cache_creation_tokens,
+            prefill_stats=self.prefill_stats,
             metrics=self.stats,
         )
 
@@ -674,11 +677,17 @@ class OutputProcessor:
 
             if req_state.is_prefilling:
                 if engine_core_output.prefill_stats is not None:
+                    if req_state.prefill_stats is None:
+                        req_state.prefill_stats = engine_core_output.prefill_stats
+                    else:
+                        req_state.prefill_stats = req_state.prefill_stats.merged(
+                            engine_core_output.prefill_stats
+                        )
                     req_state.num_cached_tokens = (
-                        engine_core_output.prefill_stats.num_cached_tokens
+                        req_state.prefill_stats.num_cached_tokens
                     )
                     req_state.num_cache_creation_tokens = (
-                        engine_core_output.prefill_stats.num_cache_creation_tokens
+                        req_state.prefill_stats.num_cache_creation_tokens
                     )
                 req_state.is_prefilling = False
 
@@ -868,6 +877,7 @@ class OutputProcessor:
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,
             num_cached_tokens=req_state.num_cached_tokens,
+            prefill_stats=req_state.prefill_stats,
         )
         self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -20,7 +21,11 @@ from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.metrics.stats import RequestSpecDecodeMetrics, RequestStateStats
+from vllm.v1.metrics.stats import (
+    PrefillStats,
+    RequestSpecDecodeMetrics,
+    RequestStateStats,
+)
 
 MODEL_NAME = "openai-community/gpt2"
 MODEL_NAME_SHORT = "gpt2"
@@ -30,6 +35,18 @@ _PER_REQUEST_STATS = RequestStateStats(
     first_token_ts=2.0,
     last_token_ts=3.0,
     num_generation_tokens=2,
+)
+_PREFIX_CACHE_STATS = PrefillStats(
+    num_prompt_tokens=42,
+    num_computed_tokens=26,
+    num_cached_tokens=16,
+    num_local_cached_tokens=12,
+    num_external_cached_tokens=4,
+    num_cache_creation_tokens=24,
+    num_new_full_blocks=2,
+    num_block_allocations=3,
+    num_block_evictions=1,
+    num_prefill_chunks=2,
 )
 BASE_MODEL_PATHS = [
     BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
@@ -106,6 +123,8 @@ def _build_minimal_metrics_serving_completion(
 ) -> OpenAIServingCompletion:
     serving = OpenAIServingCompletion.__new__(OpenAIServingCompletion)
     serving.enable_prompt_tokens_details = False
+    serving.enable_force_include_usage = False
+    serving.return_tokens_as_token_ids = False
     serving.system_fingerprint = None
     serving.enable_per_request_metrics = enable_per_request_metrics
     return serving
@@ -131,6 +150,7 @@ def _make_metrics_request_output(
         ],
         finished=True,
         metrics=metrics,
+        prefill_stats=_PREFIX_CACHE_STATS,
     )
 
 
@@ -173,6 +193,46 @@ def test_completion_per_request_metrics_follow_server_flag():
     )
     assert enabled_response.metrics is not None
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert enabled_response.id == "cmpl-test-id"
+    assert enabled_response.metrics.prefix_cache is not None
+    assert enabled_response.metrics.prefix_cache.num_external_cached_tokens == 4
+
+
+@pytest.mark.asyncio
+async def test_completion_streaming_prefix_cache_metrics_ride_on_usage_chunk():
+    serving = _build_minimal_metrics_serving_completion(enable_per_request_metrics=True)
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        max_tokens=10,
+        stream=True,
+        stream_options={"include_usage": True},
+    )
+
+    async def result_generator():
+        yield 0, _make_metrics_request_output()
+
+    chunks = []
+    async for line in serving.completion_stream_generator(
+        request=request,
+        engine_inputs=[MagicMock()],
+        result_generator=result_generator(),
+        request_id="cmpl-test-id",
+        created_time=0,
+        model_name=MODEL_NAME,
+        num_prompts=1,
+        tokenizer=None,
+        request_metadata=RequestResponseMetadata(request_id="cmpl-test-id"),
+    ):
+        payload = line.removeprefix("data: ").strip()
+        if payload != "[DONE]":
+            chunks.append(json.loads(payload))
+
+    usage_chunks = [chunk for chunk in chunks if chunk.get("usage")]
+    assert usage_chunks[-1]["id"] == "cmpl-test-id"
+    prefix_cache = usage_chunks[-1]["metrics"]["prefix_cache"]
+    assert prefix_cache["num_cached_tokens"] == 16
+    assert prefix_cache["num_prefill_chunks"] == 2
 
 
 def test_completion_per_request_metrics_suppressed_for_multiple_prompts():
