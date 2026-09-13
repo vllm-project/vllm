@@ -34,7 +34,7 @@ from .device import DeviceConfig
 from .diffusion import DiffusionConfig
 from .ec_manager_config import EncoderCacheManagerConfig
 from .ec_transfer import ECTransferConfig
-from .engram import EngramConfig
+from .engram import EngramConfig, model_has_engram_layers
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
@@ -50,7 +50,7 @@ from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config, replace
+from .utils import SupportsHash, config, get_field, replace
 from .watermarking import WatermarkConfig
 from .weight_transfer import WeightTransferConfig
 
@@ -110,10 +110,17 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        # Breakable CUDA graphs currently regress performance on ROCm, so no
-        # architecture opts in by default here. Users can still force it with
+        # Breakable CUDA graphs currently regress performance on ROCm for
+        # models that can use torch.compile piecewise graphs instead. Do not
+        # opt those in by default. Users can still force them with
         # VLLM_USE_BREAKABLE_CUDAGRAPH=1.
-        return frozenset()
+        #
+        # DeepseekV41ForCausalLM cannot torch.compile, and the ROCm sparse
+        # SWA backend only reports AttentionCGSupport.UNIFORM_BATCH. Default
+        # FULL_AND_PIECEWISE then dies at capture unless breakable CUDA
+        # graphs are on. Enable this architecture so the published AMD
+        # recipe can start.
+        return frozenset({"DeepseekV41ForCausalLM"})
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 
@@ -374,7 +381,7 @@ class VllmConfig:
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
     engram_config: EngramConfig | None = None
-    """Optional Engram configuration, only valid for supported PLE models."""
+    """N-gram embedding storage and sharding settings."""
     mamba_config: MambaConfig = Field(default_factory=MambaConfig)
     """Mamba configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
@@ -666,6 +673,14 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
+        if self.attention_config.hisparse_config is not None:
+            if envs.VLLM_USE_V2_MODEL_RUNNER is False:
+                raise ValueError(
+                    "HiSparse requires Model Runner V2; remove "
+                    "VLLM_USE_V2_MODEL_RUNNER=0."
+                )
+            return True
+
         if getattr(self, "watermark_config", None) is not None:
             if envs.VLLM_USE_V2_MODEL_RUNNER is False:
                 logger.info_once(
@@ -1134,14 +1149,67 @@ class VllmConfig:
         watermark_config = getattr(self, "watermark_config", None)
         if watermark_config is None:
             return
-        if (
-            self.speculative_config is not None
-            and not watermark_config.supports_speculative_decoding
-        ):
-            raise ValueError(
-                f"The {watermark_config.algorithm} watermarking algorithm "
-                "does not support speculative decoding."
-            )
+        if self.speculative_config is not None:
+            speculative_config = self.speculative_config
+            if speculative_config.draft_sample_method != "probabilistic":
+                raise ValueError(
+                    "Speculative decoding with watermarking requires "
+                    "draft_sample_method='probabilistic'."
+                )
+            if speculative_config.rejection_sample_method != "standard":
+                raise ValueError(
+                    "Speculative decoding with watermarking requires "
+                    "rejection_sample_method='standard'."
+                )
+            if (
+                speculative_config.parallel_drafting
+                and speculative_config.method != "dspark"
+            ):
+                raise ValueError(
+                    "Parallel speculative drafting is not supported with watermarking."
+                )
+            if speculative_config.method not in ("dspark", "eagle", "eagle3", "mtp"):
+                raise ValueError(
+                    "Watermarking supports only autoregressive model-based "
+                    "speculative decoding."
+                )
+            if (
+                not watermark_config.allow_target_only_watermarking
+                and not watermark_config.supports_speculative_decoding
+            ):
+                raise ValueError(
+                    f"The '{watermark_config.algorithm}' watermarking algorithm "
+                    "does not support speculative decoding. Set "
+                    "allow_target_only_watermarking=true to leave draft tokens "
+                    "unwatermarked."
+                )
+            if (
+                watermark_config.allow_target_only_watermarking
+                and not watermark_config.supports_speculative_decoding
+            ):
+                logger.warning_once(
+                    "Target-only watermarking leaves accepted draft tokens "
+                    "unwatermarked, weakening detectability in proportion to the "
+                    "share of output tokens supplied by accepted drafts.",
+                    scope="global",
+                )
+            if watermark_config.deduplicate_contexts != "none":
+                logger.warning_once(
+                    "Context deduplication is not supported with speculative "
+                    "decoding and will not be applied to accepted drafts, "
+                    "rejection-recovery tokens, or bonus tokens.",
+                    scope="global",
+                )
+            if watermark_config.algorithm == "dual_key_gumbel" and (
+                watermark_config.alpha != get_field(WatermarkConfig, "alpha").default
+            ):
+                logger.warning_once(
+                    "Speculative decoding selects the watermark key by token role: "
+                    "draft tokens use key A, recovery and bonus tokens use key B. "
+                    "The configured alpha=%s is not used.",
+                    watermark_config.alpha,
+                    scope="global",
+                )
         if beam_search:
             raise ValueError("Beam search is not supported with watermarking.")
         if custom_sampler:
@@ -1150,22 +1218,37 @@ class VllmConfig:
             )
 
     def _resolve_and_verify_engram_config(self) -> None:
-        """Resolve legacy offload settings and validate model and parallel configs."""
-        if self.engram_config is None:
-            if not envs.VLLM_PLE_CPU_OFFLOAD:
-                return
-            self.engram_config = EngramConfig()
+        """Resolve defaults and validate n-gram embedding settings."""
+        from vllm.platforms import current_platform
+
         model_config = self.model_config
         speculative_config = self.speculative_config
         # Draft configs inherit the target's communication groups and settings.
-        # Qwen4Exp MTP itself disables PLE, so validate its target instead.
+        # Validate the target because the draft may disable n-gram embeddings.
         if (
             speculative_config is not None
             and model_config is speculative_config.draft_model_config
         ):
             model_config = speculative_config.target_model_config
+        if (
+            model_config is not None
+            and model_config.architecture == "DeepseekV41ForCausalLM"
+            and getattr(model_config.hf_text_config, "engram_layer_ids", None)
+            and self.parallel_config.use_ubatching
+        ):
+            raise ValueError(
+                "DeepSeek V4.1 Engram does not support DBO or microbatching. "
+                "Disable --enable-dbo and set --ubatch-size to 0."
+            )
+        if self.engram_config is None:
+            if not current_platform.is_cuda() or not model_has_engram_layers(
+                model_config
+            ):
+                return
+            self.engram_config = EngramConfig()
         self.engram_config.verify_model_config(model_config)
         self.engram_config.verify_parallel_config(self.parallel_config)
+        self.engram_config.verify_load_config(self.load_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
     def __post_init__(self):
@@ -1559,6 +1642,39 @@ class VllmConfig:
         self._maybe_disable_dynamic_sd_for_data_parallel()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
+        if self.attention_config.hisparse_config is not None:
+            if not current_platform.is_cuda():
+                raise ValueError("HiSparse currently requires NVIDIA CUDA.")
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError("HiSparse does not support pipeline parallelism.")
+            if self.parallel_config.decode_context_parallel_size > 1:
+                raise ValueError(
+                    "HiSparse does not support decode context parallelism."
+                )
+            if self.model_config is not None and not hasattr(
+                self.model_config.hf_config, "index_topk"
+            ):
+                raise ValueError(
+                    "HiSparse is only supported for DSA models with index_topk."
+                )
+            if self.kv_transfer_config is not None and (
+                self.kv_transfer_config.kv_connector
+                not in (
+                    None,
+                    "NixlConnector",
+                    "MooncakeStoreConnector",
+                    "MultiConnector",
+                )
+            ):
+                logger.warning(
+                    "HiSparse host-resident KV is configured with connector "
+                    "%s. NixlConnector (GPU-staged host imports) and "
+                    "MooncakeStoreConnector (shared-store offload) are the "
+                    "validated paths; other connectors are treated as "
+                    "debug/fallback paths.",
+                    self.kv_transfer_config.kv_connector,
+                )
+
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
         )
@@ -1936,6 +2052,16 @@ class VllmConfig:
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
+
+        if (
+            self.attention_config.hisparse_config is not None
+            and self.scheduler_config.disable_hybrid_kv_cache_manager
+        ):
+            raise ValueError(
+                "HiSparse requires the hybrid KV cache manager; remove "
+                "--disable-hybrid-kv-cache-manager or use connectors that "
+                "support HMA."
+            )
 
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (

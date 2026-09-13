@@ -82,6 +82,13 @@ ci_otel_start() {
   CI_INFRA_COMMAND_SPAN_ID="${_CI_INFRA_OTEL_COMMAND_SPAN_ID}"
   export CI_INFRA_TRACE_ID CI_INFRA_COMMAND_SPAN_ID
   _CI_INFRA_OTEL_ACTIVE=1
+  _CI_INFRA_GPU_PID=""
+  if [ "${CI_INFRA_GPU_SAMPLING:-1}" != "0" ] &&
+    [ -f "${CI_INFRA_OTEL_DIR}/ci_gpu.py" ] &&
+    command -v nvidia-smi >/dev/null 2>&1; then
+    "${_CI_INFRA_OTEL_PYTHON}" "${CI_INFRA_OTEL_DIR}/ci_gpu.py" "$$" </dev/null &
+    _CI_INFRA_GPU_PID=$!
+  fi
 }
 
 ci_otel_finish() {
@@ -93,6 +100,18 @@ ci_otel_finish() {
     "${_CI_INFRA_OTEL_PARENT_SPAN_ID}" "${_CI_INFRA_OTEL_START_NS}" \
     "${_CI_INFRA_OTEL_COMMAND_INDEX}" "${_CI_INFRA_OTEL_COMMAND_STATUS}" \
     "${_CI_INFRA_OTEL_COMMAND_LABEL}" || :
+  if [ -n "${_CI_INFRA_GPU_PID:-}" ]; then
+    kill -TERM "${_CI_INFRA_GPU_PID}" 2>/dev/null || :
+    _CI_INFRA_GPU_WAIT=0
+    while kill -0 "${_CI_INFRA_GPU_PID}" 2>/dev/null &&
+      [ "${_CI_INFRA_GPU_WAIT}" -lt 30 ]; do
+      sleep 0.1
+      _CI_INFRA_GPU_WAIT=$((_CI_INFRA_GPU_WAIT + 1))
+    done
+    kill -KILL "${_CI_INFRA_GPU_PID}" 2>/dev/null || :
+    wait "${_CI_INFRA_GPU_PID}" 2>/dev/null || :
+    _CI_INFRA_GPU_PID=""
+  fi
   CI_INFRA_TRACE_ID=""
   CI_INFRA_COMMAND_SPAN_ID=""
   export CI_INFRA_TRACE_ID CI_INFRA_COMMAND_SPAN_ID
