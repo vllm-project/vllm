@@ -240,6 +240,11 @@ pub struct ChatCompletionRequest {
     #[validate(length(min = 1))]
     pub cache_salt: Option<String>,
 
+    /// Pre-tokenized prompt. Implemented by the Python frontend only; declared
+    /// here so that a request setting it is rejected rather than silently
+    /// re-tokenized from `messages`.
+    pub prompt_token_ids: Option<Vec<u32>>,
+
     /// KV transfer parameters for disaggregated serving
     pub kv_transfer_params: Option<HashMap<String, Value>>,
 
@@ -314,6 +319,7 @@ impl Default for ChatCompletionRequest {
             return_tokens_as_token_ids: None,
             return_token_ids: None,
             cache_salt: None,
+            prompt_token_ids: None,
             kv_transfer_params: None,
             ec_transfer_params: None,
             vllm_xargs: None,
@@ -473,6 +479,13 @@ fn validate_chat_cross_parameters(
     {
         let mut e = validator::ValidationError::new("json_schema_name_empty");
         e.message = Some("JSON schema name cannot be empty".into());
+        return Err(e);
+    }
+
+    // 5. Pre-tokenized prompts are not implemented by the Rust frontend
+    if req.prompt_token_ids.is_some() {
+        let mut e = validator::ValidationError::new("prompt_token_ids_unsupported");
+        e.message = Some("prompt_token_ids is not supported by the Rust frontend".into());
         return Err(e);
     }
 
