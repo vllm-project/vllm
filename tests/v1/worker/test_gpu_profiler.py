@@ -904,22 +904,14 @@ def test_gpu_worker_reuses_cuda_graph_proton_session():
 
 
 @_requires_cuda_for_proton
-@pytest.mark.parametrize("runner", ["disabled", "opt_out", "v1", "no_capture"])
-def test_proton_is_not_initialized_without_cuda_graph_capture(runner):
+@pytest.mark.parametrize("runner", ["attribution_off", "v1", "no_capture"])
+def test_proton_not_initialized_without_capture(runner):
     worker = MagicMock()
     worker.profiler = None
     worker.profiler_config.profiler = "proton"
-    worker.profiler_config.proton_graph_attribution = runner not in (
-        "disabled",
-        "opt_out",
-    )
-    worker.vllm_config.compilation_config.cudagraph_mode = (
-        CUDAGraphMode.NONE if runner == "disabled" else CUDAGraphMode.FULL
-    )
-    worker.model_runner.model_state.supports_mm_inputs = False
+    worker.profiler_config.proton_graph_attribution = runner != "attribution_off"
     worker.use_v2_model_runner = runner != "v1"
-    if runner in ("disabled", "no_capture"):
-        worker.model_runner.cudagraph_manager.needs_capture.return_value = False
+    worker.model_runner.needs_cudagraph_capture.return_value = runner != "no_capture"
 
     context = Worker._get_cudagraph_capture_context(worker)
 
@@ -929,10 +921,7 @@ def test_proton_is_not_initialized_without_cuda_graph_capture(runner):
 
 
 @_requires_cuda_for_proton
-@pytest.mark.parametrize(
-    "capture_encoder,capture_decoder", [(False, True), (True, False), (True, True)]
-)
-def test_proton_initializes_before_cuda_graph_capture(capture_encoder, capture_decoder):
+def test_proton_initializes_before_cuda_graph_capture():
     class FakeProtonProfiler:
         def __init__(self, config, worker_name):
             self.config = config
@@ -947,13 +936,8 @@ def test_proton_initializes_before_cuda_graph_capture(capture_encoder, capture_d
     worker.profiler = None
     worker.profiler_config.profiler = "proton"
     worker.profiler_config.proton_graph_attribution = True
-    worker.vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
     worker.use_v2_model_runner = True
-    worker.model_runner.cudagraph_manager.needs_capture.return_value = capture_decoder
-    worker.model_runner.model_state.supports_mm_inputs = capture_encoder
-    worker.model_runner.model_state.encoder_runner.has_cudagraph.return_value = (
-        capture_encoder
-    )
+    worker.model_runner.needs_cudagraph_capture.return_value = True
 
     with (
         patch(
@@ -961,7 +945,7 @@ def test_proton_initializes_before_cuda_graph_capture(capture_encoder, capture_d
             return_value="rank2",
         ),
         patch(
-            "vllm.v1.worker.gpu_worker.ProtonProfilerWrapper",
+            "vllm.profiler.wrapper.ProtonProfilerWrapper",
             FakeProtonProfiler,
         ),
     ):
@@ -975,10 +959,7 @@ def test_proton_initializes_before_cuda_graph_capture(capture_encoder, capture_d
 @_requires_cuda_for_proton
 @pytest.mark.parametrize("context", ["shadow", "python"])
 @pytest.mark.parametrize("output_format", ["hatchet", "hatchet_msgpack"])
-@pytest.mark.parametrize("encoder_only", [False, True])
-def test_proton_cuda_graph_replay_attribution_on_gpu(
-    tmp_path, context, output_format, encoder_only
-):
+def test_proton_cuda_graph_replay_attribution_on_gpu(tmp_path, context, output_format):
     """Both intervals contain replay kernels, without capture-only activity."""
     import json
 
@@ -1003,13 +984,6 @@ def test_proton_cuda_graph_replay_attribution_on_gpu(
     worker = SimpleNamespace(
         profiler=wrapper,
         use_v2_model_runner=True,
-        model_runner=SimpleNamespace(
-            cudagraph_manager=SimpleNamespace(needs_capture=lambda: not encoder_only),
-            model_state=SimpleNamespace(
-                supports_mm_inputs=encoder_only,
-                encoder_runner=SimpleNamespace(has_cudagraph=lambda: encoder_only),
-            ),
-        ),
     )
     x = torch.ones(1024, device="cuda")
     graph = torch.cuda.CUDAGraph()

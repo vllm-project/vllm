@@ -9,7 +9,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from types import NoneType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import regex as re
@@ -63,6 +63,7 @@ from vllm.profiler.wrapper import (
     CudaProfilerWrapper,
     ProtonProfilerWrapper,
     TorchProfilerWrapper,
+    create_graph_capture_profiler,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
@@ -141,6 +142,7 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
@@ -942,32 +944,18 @@ class Worker(WorkerBase):
         )
 
     def _get_cudagraph_capture_context(self) -> AbstractContextManager[None]:
-        """Prepare annotations for CUDA graph capture."""
+        """Let the configured profiler observe CUDA graph capture."""
         if not self.use_v2_model_runner:
             return nullcontext()
-        if self.profiler is None and not (
-            self.profiler_config.profiler == "proton"
-            and self.profiler_config.proton_graph_attribution
-        ):
-            return nullcontext()
-        cudagraph_manager = getattr(self.model_runner, "cudagraph_manager", None)
-        assert cudagraph_manager is not None
-        model_state = getattr(self.model_runner, "model_state", None)
-        assert model_state is not None
-        capture_encoder = (
-            model_state.supports_mm_inputs
-            and model_state.encoder_runner.has_cudagraph()
-        )
-        if not capture_encoder and not cudagraph_manager.needs_capture():
-            return nullcontext()
-
         if self.profiler is None:
-            from vllm.distributed.utils import get_worker_rank_suffix
-
-            self.profiler = ProtonProfilerWrapper(
-                self.profiler_config,
-                worker_name=get_worker_rank_suffix(global_rank=self.rank),
+            model_runner = cast("GPUModelRunnerV2", self.model_runner)
+            if not model_runner.needs_cudagraph_capture():
+                return nullcontext()
+            self.profiler = create_graph_capture_profiler(
+                self.profiler_config, global_rank=self.rank
             )
+            if self.profiler is None:
+                return nullcontext()
         return self.profiler.capture_cuda_graphs()
 
     def reset_mm_cache(self) -> None:

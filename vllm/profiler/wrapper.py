@@ -160,6 +160,11 @@ class WorkerProfiler(ABC):
         if self._running:
             self.stop()
 
+    @property
+    def has_cuda_graph_session(self) -> bool:
+        """Whether a capture-time session is retained to attribute replays."""
+        return False
+
     def capture_cuda_graphs(self) -> AbstractContextManager[None]:
         """Observe graph creation for backends that attribute replay activity."""
         return nullcontext()
@@ -591,3 +596,24 @@ class CudaProfilerWrapper(WorkerProfiler):
     @override
     def annotate_context_manager(self, name: str):
         return torch.cuda.nvtx.range(name)
+
+
+def create_graph_capture_profiler(
+    profiler_config: ProfilerConfig, global_rank: int
+) -> WorkerProfiler | None:
+    """Create a profiler to observe CUDA graph capture, if configured.
+
+    Applies only to backends that attribute graph replay activity which
+    need a session around capture (Proton with ``proton_graph_attribution``).
+    """
+    if (
+        profiler_config.profiler == "proton"
+        and profiler_config.proton_graph_attribution
+    ):
+        from vllm.distributed.utils import get_worker_rank_suffix
+
+        return ProtonProfilerWrapper(
+            profiler_config,
+            worker_name=get_worker_rank_suffix(global_rank=global_rank),
+        )
+    return None
