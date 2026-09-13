@@ -195,6 +195,72 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
     )
 
 
+def load_moe_expert_slice_to_flashinfer_trtllm_block_layout(
+    cache_permute_indices: dict,
+    dst_expert: torch.Tensor,
+    loaded_weight: torch.Tensor,
+    shard_id: str,
+    intermediate_size: int,
+) -> None:
+    """Write one checkpoint-format expert slice into a weight that is already in
+    FlashInfer's TRTLLM block layout (see the converter above).
+
+    The block layout is a pure per-expert permutation (row reorder + 128-byte K
+    blocks), so a single ``w1``/``w3`` slice of shape (I, K) or ``w2`` slice of
+    shape (K, I) can be scattered straight into its expert of the kernel-format
+    weight. Used for in-place weight updates (e.g. RL refit), where the
+    checkpoint-format tensor no longer exists.
+
+    Args:
+        cache_permute_indices: cache shared with the converter.
+        dst_expert: kernel-format weight of ONE expert (``param.data[expert]``).
+        loaded_weight: bf16 checkpoint-format slice for this expert / shard.
+        shard_id: ``"w1"``, ``"w3"`` or ``"w2"``.
+        intermediate_size: per-partition intermediate size (rows of ``w1``).
+    """
+    from flashinfer.fused_moe.core import (
+        _maybe_get_cached_w3_w1_permute_indices,
+        get_w2_permute_indices_with_cache,
+    )
+
+    epilogue_tile_m = 128
+    block_k = 128
+    src_u8 = loaded_weight.contiguous().view(torch.uint8)  # (rows, K bytes)
+    rows, k_bytes = src_u8.shape
+    device = dst_expert.device
+    if shard_id == "w2":
+        key = ("w2_slice", rows, k_bytes)
+        if key not in cache_permute_indices:
+            perm = get_w2_permute_indices_with_cache(
+                cache_permute_indices, src_u8, epilogue_tile_m
+            )
+            cache_permute_indices[key] = (
+                torch.arange(rows, device=device),
+                perm.to(device),
+            )
+    else:
+        w13_rows = 2 * intermediate_size
+        key = ("w13_slice", shard_id, w13_rows, k_bytes)
+        if key not in cache_permute_indices:
+            dummy = torch.empty(w13_rows, k_bytes, dtype=torch.uint8, device="cpu")
+            perm = _maybe_get_cached_w3_w1_permute_indices(
+                cache_permute_indices, dummy, epilogue_tile_m, is_gated_act_gemm=True
+            )
+            perm = (perm + w13_rows // 2) % w13_rows  # dest row d <- source row perm[d]
+            in_shard = (perm < intermediate_size) if shard_id == "w1" else (
+                perm >= intermediate_size
+            )
+            dst_rows = torch.nonzero(in_shard).flatten()
+            src_rows = perm[in_shard] - (0 if shard_id == "w1" else intermediate_size)
+            cache_permute_indices[key] = (dst_rows.to(device), src_rows.to(device))
+    dst_rows, src_rows = cache_permute_indices[key]
+
+    # (rows, nblk, block_k) -> (nblk, rows, block_k), matching the converter.
+    src_blocks = src_u8.view(rows, k_bytes // block_k, block_k).permute(1, 0, 2)
+    dst_u8 = dst_expert.view(torch.uint8).view(k_bytes // block_k, -1, block_k)
+    dst_u8.index_copy_(1, dst_rows, src_blocks.index_select(1, src_rows))
+
+
 def align_fp4_moe_weights_for_fi(
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
