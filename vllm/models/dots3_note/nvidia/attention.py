@@ -19,7 +19,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import PIN_MEMORY, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -231,8 +231,12 @@ def _build_sliding_window_metadata(
         query_lens = query_lens_cpu[req_start:req_end]
         kv_lens = kv_lens_cpu[req_start:req_end]
         num_reqs = req_end - req_start
-        cu_seq_lens_q_cpu = torch.zeros(num_reqs + 1, dtype=torch.int32)
-        cu_seq_lens_k_cpu = torch.zeros(num_reqs + 1, dtype=torch.int32)
+        cu_seq_lens_q_cpu = torch.zeros(
+            num_reqs + 1, dtype=torch.int32, pin_memory=PIN_MEMORY
+        )
+        cu_seq_lens_k_cpu = torch.zeros(
+            num_reqs + 1, dtype=torch.int32, pin_memory=PIN_MEMORY
+        )
         torch.cumsum(query_lens, 0, out=cu_seq_lens_q_cpu[1:])
         torch.cumsum(kv_lens, 0, out=cu_seq_lens_k_cpu[1:])
         token_to_seq_cpu = torch.repeat_interleave(
