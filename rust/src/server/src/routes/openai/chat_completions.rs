@@ -28,13 +28,14 @@ use vllm_engine_core_client::protocol::output::StopReason;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
+use self::types::ChatCompletionResponse;
+pub(crate) use self::types::{
+    AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionStreamChoice,
+    ChatCompletionStreamResponse, ChatMessageDelta,
+};
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, chat_submit_error, server_error};
 use crate::lora::LoraModelResolution;
-use crate::routes::openai::chat_completions::types::{
-    AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionResponse,
-    ChatCompletionStreamChoice, ChatCompletionStreamResponse, ChatMessageDelta,
-};
 use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
 };
