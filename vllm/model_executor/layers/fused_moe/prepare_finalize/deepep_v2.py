@@ -7,7 +7,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig,
+    get_deepep_v2_max_num_tokens_per_rank,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
@@ -18,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     swizzle_mxfp8_scale,
 )
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
@@ -201,10 +204,12 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             dp_meta = get_forward_context().dp_metadata
             if dp_meta is not None:
                 n = int(dp_meta.num_tokens_across_dp_cpu.max())
-                n = cdiv(n, self.sp_size)
+                num_max_tokens_per_rank = get_deepep_v2_max_num_tokens_per_rank(
+                    n, self.sp_size
+                )
             else:
                 n = tokens.shape[0]
-            num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
+                num_max_tokens_per_rank = get_deepep_v2_max_num_tokens_per_rank(n, 1)
 
         (
             recv_x,

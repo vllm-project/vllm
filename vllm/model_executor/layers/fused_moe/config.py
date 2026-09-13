@@ -19,9 +19,15 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import get_triton_kernels_version
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, next_power_of_2
 
 logger = init_logger(__name__)
+
+
+def get_deepep_v2_max_num_tokens_per_rank(max_num_tokens: int, sp_size: int) -> int:
+    """Return DeepEP v2's power-of-two capacity for one input rank."""
+    return next_power_of_2(cdiv(max_num_tokens, sp_size))
+
 
 _triton_kernels_version = get_triton_kernels_version()
 
@@ -1430,6 +1436,11 @@ class FusedMoEConfig:
     @property
     def sp_size(self):
         return self.moe_parallel_config.sp_size
+
+    @property
+    def deepep_v2_max_num_tokens_per_rank(self) -> int:
+        """DeepEP v2 token capacity for one sequence-parallel rank."""
+        return get_deepep_v2_max_num_tokens_per_rank(self.max_num_tokens, self.sp_size)
 
     @property
     def is_sequence_parallel(self):
