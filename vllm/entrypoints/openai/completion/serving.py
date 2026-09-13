@@ -295,8 +295,10 @@ class OpenAIServingCompletion(GenerateBaseServing):
         previous_num_tokens = [0] * num_choices * num_prompts
         has_echoed = [False] * num_choices * num_prompts
         num_prompt_tokens = [0] * num_prompts
-        num_cached_tokens = None
-        first_iteration = True
+        # ``merge_async_iterators`` interleaves outputs from each prompt, so
+        # cache statistics must be tracked per prompt rather than taken from
+        # the first result.
+        num_cached_tokens_by_prompt: list[int | None] = [None] * num_prompts
 
         stream_options = request.stream_options
         include_usage, include_continuous_usage = should_include_usage(
@@ -310,9 +312,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
 
-                if first_iteration:
-                    num_cached_tokens = res.num_cached_tokens
-                    first_iteration = False
+                if num_cached_tokens_by_prompt[prompt_idx] is None:
+                    num_cached_tokens_by_prompt[prompt_idx] = res.num_cached_tokens
 
                 prompt_text = res.prompt
                 if prompt_text is None:
@@ -448,9 +449,22 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 total_tokens=total_prompt_tokens + total_completion_tokens,
             )
 
-            if self.enable_prompt_tokens_details and num_cached_tokens is not None:
+            total_cached_tokens = (
+                sum(
+                    cached_tokens
+                    for cached_tokens in num_cached_tokens_by_prompt
+                    if cached_tokens is not None
+                )
+                if num_cached_tokens_by_prompt
+                and all(
+                    cached_tokens is not None
+                    for cached_tokens in num_cached_tokens_by_prompt
+                )
+                else None
+            )
+            if self.enable_prompt_tokens_details and total_cached_tokens is not None:
                 final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
-                    cached_tokens=num_cached_tokens
+                    cached_tokens=total_cached_tokens
                 )
 
             if include_usage:
@@ -516,6 +530,21 @@ class OpenAIServingCompletion(GenerateBaseServing):
         kv_transfer_params = None
         ec_transfer_params = None
         last_final_res = None
+        # The completion request may contain multiple prompts.  Each engine
+        # result reports cache hits for one prompt, so usage must aggregate all
+        # of them instead of using the last result only.
+        total_cached_tokens = (
+            sum(
+                final_res.num_cached_tokens
+                for final_res in final_res_batch
+                if final_res.num_cached_tokens is not None
+            )
+            if final_res_batch
+            and all(
+                final_res.num_cached_tokens is not None for final_res in final_res_batch
+            )
+            else None
+        )
         for final_res in final_res_batch:
             last_final_res = final_res
             prompt_token_ids = final_res.prompt_token_ids
@@ -603,13 +632,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
 
-        if (
-            self.enable_prompt_tokens_details
-            and last_final_res
-            and last_final_res.num_cached_tokens is not None
-        ):
+        if self.enable_prompt_tokens_details and total_cached_tokens is not None:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=last_final_res.num_cached_tokens
+                cached_tokens=total_cached_tokens
             )
 
         request_metadata.final_usage_info = usage
