@@ -118,6 +118,49 @@ for output in outputs:
     print(f"Generated: {generated_text!r}\n")
 ```
 
+## Mamba2 Models
+
+Mamba2 layers normally run two different kernels: a chunked scan for prefill
+and a recurrent single-token update for decode. The two are not bit-identical,
+so a request's logits would depend on how it was scheduled (prefill versus
+decode, chunked-prefill split points, recompute after preemption).
+
+Under `VLLM_BATCH_INVARIANT=1` the Mamba2 backend therefore changes how the
+layers run. The SSM state is kept in fp32, and every scan call for a sequence
+(prefill, chunked-prefill continuation and each decode step) starts from the
+fp32 state at the sequence's last chunk boundary and the inputs of the current
+partial chunk, which are kept in a per-sequence buffer that is part of the
+layer's state. Prefill re-feeds the buffered inputs so the chunked-scan kernels
+see the chunk grid of a single-shot prefill. Decode computes only the new
+token's output row from the buffered inputs and the boundary state, with
+row-gated kernels that perform the same fp32 arithmetic as the chunked scan in
+the same order, and folds a chunk into the boundary state when it completes.
+The SSM computation produces identical bits on every path. Nothing is
+configured per model: every model built on `MambaMixer2` behaves this way, and
+in a hybrid model the attention layers keep using their own batch-invariant
+kernels.
+
+```bash
+VLLM_BATCH_INVARIANT=1 vllm serve <mamba2-model> --no-enable-prefix-caching
+```
+
+Current limitations (the engine fails at startup otherwise): prefix caching
+must be off for the Mamba2 layers, pipeline-parallel size 1, no
+speculative decoding, no micro-batching (`--enable-dbo` or `--ubatch-size > 1`), no
+KV connectors, the Triton mamba backend, and not together with
+`--use-replayssm`. Decode-only batches run in full CUDA graphs as usual;
+prefill runs the Mamba2 layers outside the graphs, like in the default mode.
+
+Costs: each decode step reads the current partial chunk's buffered inputs
+instead of a single token, and the per-layer Mamba state grows from two tensors
+(conv state, SSM state) to five. The three partial-chunk
+buffers `x`, raw `dt` and `B` hold `chunk_size` tokens of scan inputs per
+sequence (`C` is not buffered: it only enters a token's own output row, and the
+re-fed rows are discarded); for a layer with `nheads` heads of size `head_dim`
+and `ngroups` groups of size `dstate` in bf16 that is
+`chunk_size * (nheads * head_dim + ngroups * dstate + nheads) * 2` bytes per
+sequence, in addition to the fp32 SSM state.
+
 ## Tested Models
 
 Batch invariance has been tested and verified on the following models:
@@ -132,6 +175,7 @@ Batch invariance has been tested and verified on the following models:
 - **Mistral**: `mistralai/Mistral-7B-v0.3`
 - **Phi series**: `microsoft/Phi-3.5-mini-instruct`
 - **Granite 3.1 (MoE)**: `ibm-granite/granite-3.1-1b-a400m-instruct`, `ibm-granite/granite-3.1-3b-a800m-instruct`
+- **Mamba2**: `AntonV/mamba2-130m-hf`; **Mamba2 + attention hybrid**: `ibm-granite/granite-4.0-h-350m` (including scheduler preemption)
 - **Granite 3.1 (Dense)**: `ibm-granite/granite-3.1-2b-instruct`, `ibm-granite/granite-3.1-8b-instruct`
 - **EXAONE 4.0 series**: `LGAI-EXAONE/EXAONE-4.0-1.2B`, `LGAI-EXAONE/EXAONE-4.0.1-32B`, `LGAI-EXAONE/EXAONE-4.0-32B`
 - **OLMo 2**: `allenai/OLMo-2-0425-1B-Instruct`
