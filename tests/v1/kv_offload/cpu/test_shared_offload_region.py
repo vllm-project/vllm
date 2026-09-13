@@ -42,10 +42,13 @@ def _make_region(
     num_chunks: int = 4,
     cpu_page_size: int = PAGE_SIZE,
     num_workers: int = 1,
-    rank: int = 0,
+    rank: int | None = 0,
     barrier=None,
+    unlink_owner: bool | None = None,
 ) -> SharedOffloadRegion:
     assert cpu_page_size % PAGE_SIZE == 0
+    if unlink_owner is None:
+        unlink_owner = rank == 0
     return SharedOffloadRegion(
         engine_id=engine_id,
         num_chunks=num_chunks,
@@ -53,6 +56,7 @@ def _make_region(
         kv_bytes_per_chunk=num_workers * cpu_page_size,
         cpu_page_size=cpu_page_size,
         barrier=barrier,
+        unlink_owner=unlink_owner,
     )
 
 
@@ -111,6 +115,9 @@ def _multi_region(
             rank=rank,
             kv_bytes_per_chunk=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
+            # These workers intentionally construct without a barrier.  The
+            # owner must therefore be assigned by the last opener, not rank 0.
+            unlink_owner=rank == num_workers - 1,
         )
         for rank in range(num_workers)
     ]
@@ -119,7 +126,6 @@ def _multi_region(
     finally:
         for r in regions:
             r.cleanup()
-        _cleanup_file(regions[0].mmap_path)
 
 
 def _race_construct(
@@ -142,6 +148,7 @@ def _race_construct(
                 rank=rank,
                 kv_bytes_per_chunk=num_workers * cpu_page_size,
                 cpu_page_size=cpu_page_size,
+                unlink_owner=False,
             )
         except Exception as e:
             errors.append(e)
@@ -169,12 +176,14 @@ def _mp_race_construct_and_write(
     for the parent's cleanup signal before tearing down.  The wait gives the
     parent a window to read the raw mmap before the creator removes the file."""
     try:
+        region_module.is_local_first_rank = lambda: rank == 0
         region = SharedOffloadRegion(
             engine_id=engine_id,
             num_chunks=num_chunks,
             rank=rank,
             kv_bytes_per_chunk=num_workers * cpu_page_size,
             cpu_page_size=cpu_page_size,
+            unlink_owner=False,
         )
         t = region.create_next_worker_view(cpu_page_size)
         t[:, :] = fill_value
@@ -207,6 +216,7 @@ def _mp_barrier_construct_and_hold(
             return get_populate_write_fn(mmap_obj)
 
         region_module._get_populate_write_fn = track_population
+        region_module.is_local_first_rank = lambda: rank == 0
         region = SharedOffloadRegion(
             engine_id=engine_id,
             num_chunks=2,
@@ -215,6 +225,7 @@ def _mp_barrier_construct_and_hold(
             cpu_page_size=PAGE_SIZE,
             barrier=lambda: barrier.wait(30),
             populate_only_on_creator=replicated,
+            unlink_owner=rank == 0,
         )
         # The constructor's barrier precedes the creator's unlink.
         barrier.wait(30)
@@ -395,6 +406,7 @@ def test_create_next_worker_view_multiprocess_slots(iid):
         rank=0,
         kv_bytes_per_chunk=num_workers * PAGE_SIZE,
         cpu_page_size=PAGE_SIZE,
+        unlink_owner=False,
     )
     try:
         child = ctx.Process(
@@ -457,32 +469,19 @@ def test_create_next_worker_view_worker_isolation(iid):
 
 
 # ---------------------------------------------------------------------------
-# Constructor — creator vs joiner semantics
+# Constructor — initialization and joiner semantics
 # ---------------------------------------------------------------------------
-
-
-def test_creator_flag_set_on_first_open(iid):
-    """The first worker to open the file must have _creator == True."""
-    with _region(iid) as r:
-        assert r._creator is True
-
-
-def test_joiner_flag_not_set(iid):
-    """A second worker opening the same file must have _creator == False."""
-    with _multi_region(iid, num_workers=2) as (r0, r1):
-        assert r0._creator is True
-        assert r1._creator is False
 
 
 def test_file_exists_after_construction(iid):
     """The mmap file must be present on disk after __init__ completes."""
-    with _region(iid) as r:
+    with _region(iid, unlink_owner=False) as r:
         assert os.path.exists(r.mmap_path)
 
 
 def test_file_has_correct_size(iid):
     """The mmap file size on disk must equal total_size_bytes."""
-    with _region(iid, num_chunks=4) as r:
+    with _region(iid, num_chunks=4, unlink_owner=False) as r:
         assert os.path.getsize(r.mmap_path) == 4 * PAGE_SIZE
 
 
@@ -624,20 +623,13 @@ def test_madvise_unexpected_oserror_propagates(iid, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_multi_worker_race_exactly_one_creator(iid):
-    """When N threads race to create the same region, exactly one becomes creator."""
+def test_multi_worker_race_constructs_one_shared_region(iid):
+    """Concurrent initialization must construct one usable shared region."""
     num_workers = 8
     regions, errors = _race_construct(iid, num_workers=num_workers)
     try:
         assert not errors, f"Workers raised: {errors}"
         assert len(regions) == num_workers, "Some workers failed to construct"
-
-        creators = [r for r in regions if r._creator]
-        assert len(creators) == 1, f"Expected 1 creator, got {len(creators)}"
-        assert sum(1 for r in regions if not r._creator) == num_workers - 1, (
-            f"Expected {num_workers - 1} non-creators, got "
-            f"{sum(1 for r in regions if not r._creator)}"
-        )
 
         for r in regions:
             assert not r.mmap_obj.closed
@@ -720,6 +712,7 @@ def test_multiprocess_race_construct_and_write(iid):
     for p in procs:
         p.join(timeout=10)
         assert p.exitcode == 0
+    _cleanup_file(mmap_path)
 
 
 # ---------------------------------------------------------------------------
@@ -727,25 +720,26 @@ def test_multiprocess_race_construct_and_write(iid):
 # ---------------------------------------------------------------------------
 
 
-def test_cleanup_creator_all_effects(iid):
-    """cleanup() on the creator closes mmap, closes fd, and removes the file."""
-    r = _make_region(iid)
+def test_cleanup_unlink_owner_removes_file(iid):
+    """An active unlink owner removes the file during cleanup."""
+    r = _make_region(iid, unlink_owner=False)
     path = r.mmap_path
     fd = r.fd
     mmap_obj = r.mmap_obj
 
+    r._is_unlink_owner = True
     r.cleanup()
 
     assert mmap_obj.closed, "mmap should be closed after cleanup"
-    assert not os.path.exists(path), "creator should remove the file"
+    assert not os.path.exists(path), "unlink owner should remove the file"
     with pytest.raises(OSError):
         os.fstat(fd)  # fd should be closed
 
 
-def test_cleanup_non_creator_all_effects(iid):
-    """cleanup() on a non-creator closes mmap and fd, but leaves the file on disk."""
-    r0 = _make_region(iid)  # creator
-    r1 = _make_region(iid)  # joiner
+def test_cleanup_non_owner_leaves_file(iid):
+    """A non-owner must close local resources without removing the file."""
+    r0 = _make_region(iid, unlink_owner=False)
+    r1 = _make_region(iid, unlink_owner=False)
     path = r0.mmap_path
     fd1 = r1.fd
     mmap_obj1 = r1.mmap_obj
@@ -761,11 +755,42 @@ def test_cleanup_non_creator_all_effects(iid):
         _cleanup_file(path)
 
 
-def test_cleanup_idempotent(iid):
-    """Calling cleanup() twice must not raise any exception."""
-    r = _make_region(iid)
-    r.cleanup()
-    r.cleanup()  # must be a no-op
+def test_joiner_owner_unlinks_without_barrier(iid):
+    """An owner without a barrier unlinks after mapping the shared file."""
+    creator = _make_region(iid, unlink_owner=False)
+    owner = _make_region(iid, unlink_owner=True)
+    path = creator.mmap_path
+    try:
+        creator.cleanup()
+        assert not os.path.exists(path)
+        owner.cleanup()
+    finally:
+        creator.cleanup()
+        owner.cleanup()
+        _cleanup_file(path)
+
+
+def test_cleanup_disarms_unlink_owner(iid, monkeypatch):
+    """A cleanup owner must not try to unlink the path on a second cleanup."""
+    unlink = MagicMock(wraps=os.unlink)
+    from vllm.v1.kv_offload.cpu import shared_offload_region as sor
+
+    monkeypatch.setattr(sor.os, "unlink", unlink)
+    region = _make_region(iid, unlink_owner=False)
+    path = region.mmap_path
+    try:
+        region._is_unlink_owner = True
+        region.cleanup()
+
+        replacement_fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        os.close(replacement_fd)
+        region.cleanup()
+
+        assert unlink.call_count == 1
+        assert region._is_unlink_owner is False
+        assert os.path.exists(path)
+    finally:
+        _cleanup_file(path)
 
 
 def test_cleanup_unregisters_every_pinned_chunk(iid, monkeypatch):
@@ -885,6 +910,7 @@ def test_creator_memory_check_runs_only_for_creator(iid):
             kv_bytes_per_chunk=PAGE_SIZE,
             cpu_page_size=PAGE_SIZE,
             creator_memory_check=checked_sizes.append,
+            unlink_owner=False,
         )
         assert checked_sizes == [4 * PAGE_SIZE]
     finally:
@@ -921,14 +947,15 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
             rank=0,
             kv_bytes_per_chunk=PAGE_SIZE,
             cpu_page_size=PAGE_SIZE,
+            unlink_owner=True,
         )
 
     mock_unlink.assert_called_once_with(mmap_path)
     mock_close.assert_called_once_with(9999)
 
 
-def test_ftruncate_failure_cleans_up_creator(monkeypatch):
-    """A failed creator ftruncate must close and unlink before re-raising."""
+def test_ftruncate_failure_removes_newly_created_file(monkeypatch):
+    """A failed initialization must close and unlink its newly created file."""
     import vllm.v1.kv_offload.cpu.shared_offload_region as region
 
     engine_id = str(uuid.uuid4())
@@ -952,6 +979,7 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
             rank=0,
             kv_bytes_per_chunk=PAGE_SIZE,
             cpu_page_size=PAGE_SIZE,
+            unlink_owner=True,
         )
 
     mock_unlink.assert_called_once_with(mmap_path)
@@ -975,7 +1003,7 @@ def test_backing_file_unlinked_after_barrier(iid):
     try:
         assert seen_at_barrier == [True], "file must exist during rendezvous"
         assert not os.path.exists(path), "name must be dropped after the barrier"
-        assert region._creator is False, "nothing left for cleanup() to unlink"
+        assert region._is_unlink_owner is False
         t = region.create_next_worker_view(PAGE_SIZE)
         t[:, :] = 7
         assert memoryview(region.mmap_obj)[0] == 7, "mapping must stay valid"
@@ -985,13 +1013,28 @@ def test_backing_file_unlinked_after_barrier(iid):
         _cleanup_file(path)
 
 
-def test_barrier_failure_unlinks_creator_and_raises(iid):
-    """A failed rendezvous must remove the creator's file and re-raise, not
+def test_barrier_failure_unlinks_local_owner_and_raises(iid):
+    """A failed rendezvous must remove the local owner's file and re-raise, not
     leave a stub that wedges the next start in _wait_for_file_size."""
     path = f"/dev/shm/vllm_offload_{iid}.mmap"
     with pytest.raises(RuntimeError, match="peer died"):
         _make_region(iid, barrier=MagicMock(side_effect=RuntimeError("peer died")))
     assert not os.path.exists(path)
+
+
+def test_ready_joiners_unlink_after_barrier(iid, monkeypatch):
+    """Local rank 0 must unlink a ready stale file without an initializer."""
+    initializer = _make_region(iid, unlink_owner=False)
+    path = initializer.mmap_path
+    initializer.cleanup()
+    assert os.path.exists(path)
+
+    joiner = _make_region(iid, barrier=lambda: None, unlink_owner=True)
+    try:
+        assert not os.path.exists(path)
+    finally:
+        joiner.cleanup()
+        _cleanup_file(path)
 
 
 @pytest.mark.parametrize("replicated", [False, True])
@@ -1029,8 +1072,8 @@ def test_mp_barrier_unlinks_file_and_survives_sigkill(iid, replicated):
             p.join(timeout=10)
 
     assert not os.path.exists(path), "SIGKILL must not leak the file"
-    with _region(iid) as restarted:
-        assert restarted._creator is True, "restart must be able to create anew"
+    with _region(iid, unlink_owner=False) as restarted:
+        assert os.path.exists(restarted.mmap_path), "restart must create a new file"
 
 
 @pytest.mark.parametrize("failure_phase", ["shm", "memory", "population"])
@@ -1059,14 +1102,15 @@ def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch, failure_p
             barrier=barrier,
             creator_memory_check=memory_check,
             populate_only_on_creator=True,
+            unlink_owner=True,
         )
 
     barrier.assert_called_once_with()
     assert seen_at_barrier == [False]
 
 
-def test_mmap_failure_unlinks_creator_before_releasing_peers(iid, monkeypatch):
-    """A creator that fails after sizing the file must drop it before arriving
+def test_mmap_failure_unlinks_initialized_file_before_releasing_peers(iid, monkeypatch):
+    """A failed initialization must drop its file before arriving
     at the barrier, so the next start does not land on a stale file."""
     path = f"/dev/shm/vllm_offload_{iid}.mmap"
     monkeypatch.setattr("mmap.mmap", MagicMock(side_effect=OSError("mmap")))

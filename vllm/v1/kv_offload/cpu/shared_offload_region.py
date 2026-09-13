@@ -71,15 +71,17 @@ def _get_populate_write_fn(
 class SharedOffloadRegion:
     """
     Single mmap-backed memory region shared across all workers for a
-    vLLM instance.  Workers coordinate via the filesystem: the first worker
-    to open the file with O_EXCL becomes the creator and calls ftruncate;
-    the rest open the existing file and wait until it reaches the expected
-    size.  Each worker then mmap()s the full file.
+    vLLM instance. Workers coordinate via the filesystem: the first worker
+    to open the file with O_EXCL initializes it with ftruncate; the rest open
+    the existing file and wait until it reaches the expected size. Each worker
+    then mmap()s the full file. The caller selects the successful-path unlink
+    owner; coordinated startup-abort paths explicitly unlink the shared path
+    after all openers have reached the mapping barrier.
 
-    File path: /dev/shm/vllm_offload_{engine_id}.mmap.  When a barrier is
-    given, the path is unlinked once every worker has mapped the file, so
-    the kernel reclaims the memory when the last worker exits, no matter
-    how it exits; mappings taken before the unlink stay valid.
+    File path: /dev/shm/vllm_offload_{engine_id}.mmap. The caller-selected
+    unlink owner removes the path after the optional barrier; without a
+    barrier, it removes the path as soon as its mapping is ready. Mappings
+    taken before the unlink stay valid.
 
     Creator-only population pre-faults the entire region before the barrier
     and requires that barrier to keep joiners from using unpopulated pages.
@@ -98,6 +100,7 @@ class SharedOffloadRegion:
         *,
         creator_memory_check: Callable[[int], None] | None = None,
         populate_only_on_creator: bool = False,
+        unlink_owner: bool,
     ) -> None:
         if populate_only_on_creator and barrier is None:
             raise ValueError("Creator-only population requires a barrier.")
@@ -108,17 +111,24 @@ class SharedOffloadRegion:
         self._row_stride = kv_bytes_per_chunk
         self.total_size_bytes = self.num_chunks * self._row_stride
 
-        self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
-        self._creator = False  # set True only if this worker creates the file
         self.rank = rank
+        self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
+        self._is_unlink_owner = unlink_owner
+        self.fd: int | None = None
+        self.mmap_obj: mmap.mmap | None = None
+        self._base: torch.Tensor | None = None
+        self._views: list[torch.Tensor] = []
+        self._canonical_offset = 0
+        self.is_pinned = False
         if rank is not None:
             # byte offset to this worker's first slot within each chunk row
             self._worker_offset = rank * cpu_page_size
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
+        created_path = False
         try:
             try:
-                self.fd: int | None = os.open(
+                self.fd = os.open(
                     self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
                 )
             except FileExistsError:
@@ -130,9 +140,8 @@ class SharedOffloadRegion:
             else:
                 # Creator path. We won O_EXCL, so we own the file: any
                 # failure here must clean up so concurrent joiners don't
-                # land on a 0-byte stub and spin in _wait_for_file_size
-                # for the full 30 s timeout.
-                self._creator = True
+                # land on a 0-byte stub and spin in _wait_for_file_size.
+                created_path = True
                 if creator_memory_check is not None:
                     creator_memory_check(self.total_size_bytes)
                 check_shm_free_space(self.total_size_bytes)
@@ -143,21 +152,19 @@ class SharedOffloadRegion:
                     self.total_size_bytes / 1e9,
                 )
 
-            self.mmap_obj: mmap.mmap | None = mmap.mmap(
+            self.mmap_obj = mmap.mmap(
                 self.fd,
                 self.total_size_bytes,
                 flags=mmap.MAP_SHARED,
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
-
-            if populate_only_on_creator and self._creator:
+            if populate_only_on_creator and created_path:
                 populate_write_fn = _get_populate_write_fn(self.mmap_obj)
                 populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
         except Exception:
-            if self._creator:
+            if created_path:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(self.mmap_path)
-                self._creator = False
             if hasattr(self, "mmap_obj") and self.mmap_obj is not None:
                 self.mmap_obj.close()
                 self.mmap_obj = None
@@ -176,6 +183,10 @@ class SharedOffloadRegion:
                         "Failed to release peers waiting at the mmap barrier",
                         exc_info=True,
                     )
+            if barrier is not None and not created_path:
+                self.abort_startup_cleanup()
+            elif barrier is None and not created_path:
+                self._cleanup_local_resources()
             raise
 
         if barrier is not None:
@@ -185,29 +196,36 @@ class SharedOffloadRegion:
             try:
                 barrier()
             except Exception:
-                if self._creator:
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(self.mmap_path)
-                    self._creator = False
-                self.mmap_obj.close()
-                os.close(self.fd)
-                self.mmap_obj = None
-                self.fd = None
+                self.abort_startup_cleanup()
                 raise
-            if self._creator:
-                os.unlink(self.mmap_path)
-                self._creator = False
-                logger.info("Unlinked mmap file %s", self.mmap_path)
+
+        # The owner is responsible for removing the name regardless of
+        # whether this region participates in a barrier.  With a barrier,
+        # unlink only after rendezvous; without one, this is safe once this
+        # process has mapped the file (for example, the tiering scheduler is
+        # the last participant to open it).
+        if self._is_unlink_owner:
+            os.unlink(self.mmap_path)
+            self._is_unlink_owner = False
+            logger.info("Unlinked mmap file %s", self.mmap_path)
 
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
-        self._views: list[torch.Tensor] = []
+        self._views = []
         self._canonical_offset = 0
-        self.is_pinned: bool = False
+        self.is_pinned = False
         self.pinned_addresses: list[int] = []
 
         if populate_only_on_creator:
             return
 
+        try:
+            self._initialize_buffer(rank, cpu_page_size)
+        except Exception:
+            self.abort_startup_cleanup()
+            raise
+
+    def _initialize_buffer(self, rank: int | None, cpu_page_size: int) -> None:
+        assert self.mmap_obj is not None
         populate_write_fn = _get_populate_write_fn(self.mmap_obj)
 
         if rank is not None:
@@ -215,7 +233,7 @@ class SharedOffloadRegion:
             worker_offset = rank * cpu_page_size
             _t0 = time.perf_counter()
             page_size = self.page_size
-            for chunk in range(num_chunks):
+            for chunk in range(self.num_chunks):
                 raw_offset = chunk * self._row_stride + worker_offset
                 aligned_offset = (raw_offset // page_size) * page_size
                 end = raw_offset + cpu_page_size
@@ -223,7 +241,7 @@ class SharedOffloadRegion:
                 populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
             logger.debug(
                 "MADV_POPULATE_WRITE loop: %d chunks in %.3f s",
-                num_chunks,
+                self.num_chunks,
                 time.perf_counter() - _t0,
             )
         else:
@@ -231,7 +249,8 @@ class SharedOffloadRegion:
             _t0 = time.perf_counter()
             populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
             logger.debug(
-                "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
+                "MADV_POPULATE_WRITE entire region: %.3f s",
+                time.perf_counter() - _t0,
             )
 
     @property
@@ -329,6 +348,7 @@ class SharedOffloadRegion:
         Shape: (num_chunks, row_stride_bytes). Secondary tiers address
         chunk *b* as ``view[b]``.
         """
+        assert self._base is not None
         kv_tensor = self._base.view(self.num_chunks, self._row_stride)
         np_arr = kv_tensor.numpy()
         assert np_arr.ctypes.data == self._base.data_ptr(), (
@@ -337,7 +357,7 @@ class SharedOffloadRegion:
         )
         return memoryview(np_arr)
 
-    def cleanup(self) -> None:
+    def _cleanup_local_resources(self) -> None:
         if self.is_pinned and self._base is not None:
             if current_platform.is_cuda_alike():
                 base_ptr = self._base.data_ptr()
@@ -373,12 +393,28 @@ class SharedOffloadRegion:
             except Exception:
                 logger.warning("Failed to close fd %s", self.fd, exc_info=True)
             self.fd = None
-        if self._creator and getattr(self, "mmap_path", None):
+
+    def _unlink_shared_path(self) -> None:
+        if getattr(self, "mmap_path", None):
             try:
                 os.unlink(self.mmap_path)
                 logger.info("Removed mmap file %s", self.mmap_path)
+            except FileNotFoundError:
+                pass
             except Exception:
                 logger.warning(
                     "Failed to unlink path %s", self.mmap_path, exc_info=True
                 )
-            self._creator = False
+
+    def cleanup(self) -> None:
+        """Release resources owned by this process during normal shutdown."""
+        self._cleanup_local_resources()
+        if self._is_unlink_owner:
+            self._unlink_shared_path()
+        self._is_unlink_owner = False
+
+    def abort_startup_cleanup(self) -> None:
+        """Release local resources and remove a region from failed startup."""
+        self._cleanup_local_resources()
+        self._unlink_shared_path()
+        self._is_unlink_owner = False
