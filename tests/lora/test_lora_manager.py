@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -362,6 +363,107 @@ def test_get_dummy_lora_warmup_rank_for_fully_sharded_moe():
     }
 
     assert manager.get_dummy_lora_warmup_rank(8) == 32
+
+
+@pytest.mark.parametrize(
+    "target_projections",
+    [
+        pytest.param({"gate_up"}, id="gate-up-only"),
+        pytest.param({"down"}, id="down-only"),
+        pytest.param({"gate_up", "down"}, id="gate-up-and-down"),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_stack_partial_3d_moe_lora_weights(target_projections):
+    """Omitted fused-MoE projections remain no-ops after EP slicing."""
+    module_name = "model.layers.0.mlp.experts"
+    gate_up_name = module_name + ".base_layer"
+    global_num_experts = 4
+    local_num_experts = 2
+    ep_rank = 1
+    rank = 2
+    hidden_size = 3
+    intermediate_size = 5
+
+    gate_up_a = torch.arange(
+        global_num_experts * rank * hidden_size, dtype=torch.float32
+    ).reshape(global_num_experts * rank, hidden_size)
+    gate_up_b = torch.arange(
+        intermediate_size * 2 * global_num_experts * rank,
+        dtype=torch.float32,
+    ).reshape(intermediate_size * 2, global_num_experts * rank)
+    down_a = torch.arange(
+        global_num_experts * rank * intermediate_size, dtype=torch.float32
+    ).reshape(global_num_experts * rank, intermediate_size)
+    down_b = torch.arange(
+        hidden_size * global_num_experts * rank, dtype=torch.float32
+    ).reshape(hidden_size, global_num_experts * rank)
+
+    loras = {}
+    if "gate_up" in target_projections:
+        loras[gate_up_name] = LoRALayerWeights(
+            gate_up_name, rank, rank, gate_up_a.clone(), gate_up_b.clone()
+        )
+    if "down" in target_projections:
+        loras[module_name] = LoRALayerWeights(
+            module_name, rank, rank, down_a.clone(), down_b.clone()
+        )
+
+    lora_model = LoRAModel(1, rank, loras)
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager.is_pooling_model = False
+    manager._is_3d_moe_model = True
+    module = SimpleNamespace(
+        global_num_experts=global_num_experts,
+        ep_rank=ep_rank,
+        w13_input_size=hidden_size,
+        w13_output_size=intermediate_size * 2,
+        w2_input_size=intermediate_size,
+        w2_output_size=hidden_size,
+        w13_lora_a_stacked=(torch.empty(1, local_num_experts, rank, hidden_size),),
+    )
+
+    manager._stack_moe_lora_weights(lora_model, module, module_name)
+
+    module_lora = lora_model.loras[module_name]
+    assert isinstance(module_lora.lora_a, list)
+    assert isinstance(module_lora.lora_b, list)
+    assert gate_up_name not in lora_model.loras
+
+    expert_start = ep_rank * local_num_experts
+    expert_end = expert_start + local_num_experts
+    expected_gate_up_a = gate_up_a.reshape(global_num_experts, rank, hidden_size)[
+        expert_start:expert_end
+    ]
+    expected_gate_up_b = (
+        gate_up_b.reshape(intermediate_size * 2, rank, global_num_experts)[
+            ..., expert_start:expert_end
+        ]
+        .permute(2, 0, 1)
+        .contiguous()
+    )
+    expected_down_a = down_a.reshape(global_num_experts, rank, intermediate_size)[
+        expert_start:expert_end
+    ]
+    expected_down_b = (
+        down_b.reshape(hidden_size, rank, global_num_experts)[
+            ..., expert_start:expert_end
+        ]
+        .permute(2, 0, 1)
+        .contiguous()
+    )
+
+    if "gate_up" not in target_projections:
+        expected_gate_up_a = torch.zeros_like(expected_gate_up_a)
+        expected_gate_up_b = torch.zeros_like(expected_gate_up_b)
+    if "down" not in target_projections:
+        expected_down_a = torch.zeros_like(expected_down_a)
+        expected_down_b = torch.zeros_like(expected_down_b)
+
+    torch.testing.assert_close(module_lora.lora_a[0], expected_gate_up_a)
+    torch.testing.assert_close(module_lora.lora_b[0], expected_gate_up_b)
+    torch.testing.assert_close(module_lora.lora_a[1], expected_down_a)
+    torch.testing.assert_close(module_lora.lora_b[1], expected_down_b)
 
 
 @pytest.mark.parametrize("device", DEVICES)
