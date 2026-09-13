@@ -383,6 +383,12 @@ def process_dict_updates(
         return False
 
     updated = False
+    # Process removed requests before replacements added at the same index.
+    for index in batch_update.removed:
+        if req_entries.pop(index, None) is not None:
+            updated = True
+
+    # Process added requests.
     for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:
         if (state := new_state(params, prompt_tok_ids, output_tok_ids)) is not None:
             req_entries[index] = state
@@ -391,11 +397,6 @@ def process_dict_updates(
             updated = True
 
     if req_entries:
-        # Process removed requests.
-        for index in batch_update.removed:
-            if req_entries.pop(index, None):
-                updated = True
-
         # Process moved requests, unidirectional (a->b) and
         # swapped (a<->b)
         for a_index, b_index, direct in batch_update.moved:
