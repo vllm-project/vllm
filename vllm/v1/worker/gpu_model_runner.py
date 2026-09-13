@@ -6299,6 +6299,17 @@ class GPUModelRunner(
             sampler_output = self.sampler(
                 logits=logits, sampling_metadata=dummy_metadata
             )
+
+            # Warmup greedy path (#54455)
+            self.sampler(
+                logits=logits,
+                sampling_metadata=replace(
+                    dummy_metadata,
+                    temperature=None,
+                    all_greedy=True,
+                ),
+            )
+
             # Also warm forward_native (taken when generators dict is non-empty),
             # but skip the extra call in 'processed_logits' / 'processed_logprobs'
             # modes — there TopKTopPSampler binds forward = forward_native at
@@ -6306,13 +6317,15 @@ class GPUModelRunner(
             # memory during profile_run.
             # No .clone() of logits: warmup output is discarded, so any in-place
             # mutation by forward_native does not affect correctness.
+            # Warmup seeded path (#54425)
             if self.sampler.logprobs_mode not in PROCESSED_LOGPROBS_MODES:
                 self.sampler(
                     logits=logits,
                     sampling_metadata=replace(
                         dummy_metadata,
+                        temperature=dummy_tensors(0.9),
                         generators={
-                            0: torch.Generator(device=self.device).manual_seed(0)
+                            0: torch.Generator(device=self.device).manual_seed(42)
                         },
                     ),
                 )
@@ -6371,6 +6384,13 @@ class GPUModelRunner(
                 logits,
                 all_greedy_metadata,
             )
+            if self.model_config.dtype != logits.dtype:
+                self.rejection_sampler(
+                    dummy_spec_decode_metadata,
+                    draft_probs,
+                    logits.to(self.model_config.dtype),
+                    all_greedy_metadata,
+                )
             torch.accelerator.synchronize()
         return sampler_output
 
