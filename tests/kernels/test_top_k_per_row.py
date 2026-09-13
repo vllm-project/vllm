@@ -1415,11 +1415,10 @@ def test_deep_select_topk_preallocated_output() -> None:
 def _has_flashinfer_topk() -> bool:
     if not current_platform.is_cuda():
         return False
-    try:
-        from flashinfer.topk import top_k_ragged_transform  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    # find_spec only: importing flashinfer initializes CUDA at import time.
+    import importlib.util
+
+    return importlib.util.find_spec("flashinfer") is not None
 
 
 def _has_cooperative_topk() -> bool:

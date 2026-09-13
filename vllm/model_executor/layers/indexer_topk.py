@@ -9,16 +9,10 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.worker.workspace import current_workspace_manager
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
-
-try:
-    from flashinfer.topk import (
-        top_k_ragged_transform as _fi_top_k_ragged_transform,
-    )
-except ImportError:
-    _fi_top_k_ragged_transform = None
 
 # ---------------------------------------------------------------------------
 # DeepSelect (vllm._deepselect_C)
@@ -157,7 +151,7 @@ class SparseIndexerTopk(torch.nn.Module):
         self._has_deep_select = self._is_cuda and (
             current_platform.is_device_capability_family(100)
         )
-        self._has_flashinfer_topk = _fi_top_k_ragged_transform is not None
+        self._has_flashinfer_topk = has_flashinfer()
         self._cooperative_capable = self._is_cuda and (
             current_platform.has_device_capability(90)
             and not current_platform.is_device_capability_family(120)
@@ -307,14 +301,16 @@ class SparseIndexerTopk(torch.nn.Module):
                 logits.shape[1],
             )
         elif backend == "flashinfer":
-            assert _fi_top_k_ragged_transform is not None
+            # Deferred: importing flashinfer initializes CUDA at import time.
+            from flashinfer.topk import top_k_ragged_transform
+
             row_ends = self._row_ends(seq_lens, next_n, logits.shape[0])
             offsets = torch.zeros(
                 logits.shape[0], dtype=torch.int32, device=logits.device
             )
             # top_k_ragged_transform selects within [0, row_ends[i]) per
             # row and -1-fills past the row length.
-            indices = _fi_top_k_ragged_transform(logits, offsets, row_ends, topk_tokens)
+            indices = top_k_ragged_transform(logits, offsets, row_ends, topk_tokens)
             topk_indices.copy_(indices)
         elif backend == "torch":
             # Debug reference: mask everything past each row's end, then topk.
