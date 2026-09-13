@@ -21,6 +21,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.worker.gpu.launch_key_debug import record_triton_launch
 
 
 @triton.jit(do_not_specialize=["step"])
@@ -351,7 +352,52 @@ def prepare_uno_inputs_fused(
         buffers.query_start_loc.numel(),
     )
     block = 256
-    _prepare_uno_inputs_kernel[(triton.cdiv(output_capacity, block),)](
+    launch_grid = (triton.cdiv(output_capacity, block),)
+    record_triton_launch(
+        "_prepare_uno_inputs_kernel",
+        _prepare_uno_inputs_kernel,
+        launch_grid,
+        input_batch.idx_mapping,
+        num_sampled,
+        num_sampled if num_rejected is None else num_rejected,
+        input_batch.query_start_loc,
+        input_batch.positions,
+        last_sampled,
+        next_prefill_tokens,
+        seeds,
+        block_table,
+        block_table.stride(0),
+        buffers.input_ids,
+        buffers.positions,
+        slot_mapping,
+        sample_idx_mapping,
+        buffers.seq_lens,
+        buffers.query_start_loc,
+        int(step),
+        NUM_REQS=num_reqs,
+        K=int(k),
+        COUNT=count,
+        INPUT_CAP=buffers.input_ids.numel(),
+        POSITION_CAP=buffers.positions.numel(),
+        SLOT_CAP=slot_mapping.numel(),
+        SAMPLE_CAP=sample_idx_mapping.numel(),
+        SEQ_CAP=buffers.seq_lens.numel(),
+        QUERY_CAP=buffers.query_start_loc.numel(),
+        TARGET_QUERY_CAP=input_batch.query_start_loc.numel(),
+        TARGET_POSITION_CAP=input_batch.positions.numel(),
+        STATE_CAP=state_capacity,
+        BLOCK_COLS=block_table.shape[1],
+        BLOCK_SIZE=int(block_size),
+        MAX_MODEL_LEN=int(max_model_len),
+        NOISE_SEED=int(noise_seed),
+        NOISE_LOW=1,
+        NOISE_HIGH=int(noise_high),
+        HAS_REJECTED=num_rejected is not None,
+        PAD_ID=PAD_SLOT_ID,
+        BLOCK=block,
+        num_warps=4,
+    )
+    _prepare_uno_inputs_kernel[launch_grid](
         input_batch.idx_mapping,
         num_sampled,
         num_sampled if num_rejected is None else num_rejected,

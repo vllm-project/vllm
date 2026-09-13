@@ -86,6 +86,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.gpu.launch_key_debug import mark_launch_key_serving_ready
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
@@ -915,6 +916,7 @@ class Worker(WorkerBase):
 
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
+        mark_launch_key_serving_ready()
         from vllm.utils.jit_monitor import activate as activate_jit_monitor
 
         activate_jit_monitor(

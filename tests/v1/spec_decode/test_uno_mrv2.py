@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.launch_key_debug import _LaunchKeyReceipts
 from vllm.v1.worker.gpu.spec_decode.uno import (
     UNO_LORA_ID,
     UnoSpeculator,
@@ -766,6 +767,64 @@ def test_draft_warmup_skips_a_speculator_that_does_not_ask_for_it(monkeypatch):
     )
     runner._warm_up_draft_kernels()
     assert ran == [] and reported == []
+
+
+@pytest.mark.skip_global_cleanup
+def test_launch_key_receipt_compares_first_served_key_to_all_warmup_keys():
+    """The side-by-side record retains the actual warmup key set, not a sample."""
+    receipts = _LaunchKeyReceipts()
+    warmup_one = {
+        "kernel": "_prepare_uno_inputs_kernel",
+        "triton_key": "warmup-one",
+    }
+    warmup_two = {
+        "kernel": "_prepare_uno_inputs_kernel",
+        "triton_key": "warmup-two",
+    }
+
+    assert receipts.add("warmup", warmup_one) == {"record": warmup_one}
+    assert receipts.add("warmup", warmup_two) == {"record": warmup_two}
+    assert receipts.add("warmup", warmup_one) is None
+
+    served = {
+        "kernel": "_prepare_uno_inputs_kernel",
+        "triton_key": "warmup-two",
+    }
+    emitted = receipts.add("served", served)
+
+    assert emitted is not None
+    comparison = emitted["compare"]
+    assert comparison["served"] is served
+    assert comparison["served_key_was_warmed"]
+    assert [item["triton_key"] for item in comparison["warmup"]] == [
+        "warmup-one",
+        "warmup-two",
+    ]
+    # Only the first actual serving record is the diagnostic comparison.
+    assert (
+        receipts.add(
+            "served",
+            {"kernel": "_prepare_uno_inputs_kernel", "triton_key": "another"},
+        )
+        is None
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_launch_key_receipt_says_when_served_key_was_not_warmed():
+    receipts = _LaunchKeyReceipts()
+    receipts.add(
+        "warmup",
+        {"kernel": "_prepare_uno_inputs_kernel", "triton_key": "warmup-only"},
+    )
+
+    emitted = receipts.add(
+        "served",
+        {"kernel": "_prepare_uno_inputs_kernel", "triton_key": "served-only"},
+    )
+
+    assert emitted is not None
+    assert not emitted["compare"]["served_key_was_warmed"]
 
 
 def test_attention_config_leaves_the_version_to_the_platform():

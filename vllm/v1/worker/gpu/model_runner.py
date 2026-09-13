@@ -129,6 +129,7 @@ from vllm.v1.worker.gpu.kv_connector import (
     KVConnector,
     get_kv_connector,
 )
+from vllm.v1.worker.gpu.launch_key_debug import launch_key_phase, serving_launches
 from vllm.v1.worker.gpu.lora_utils import (
     LoraState,
     create_lora_capture_hook,
@@ -925,7 +926,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
         # during actual execution.
         assert self.sampler is not None
-        self.sampler(logits, dummy_input_batch)
+        with launch_key_phase("warmup"):
+            self.sampler(logits, dummy_input_batch)
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
@@ -1000,8 +1002,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         counts = token_counts()
         if not counts:
             return
-        for num_tokens in counts:
-            self._dummy_run(num_tokens)
+        with launch_key_phase("warmup"):
+            for num_tokens in counts:
+                self._dummy_run(num_tokens)
         report(len(counts))
 
     @torch.inference_mode()
@@ -1986,6 +1989,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     @step_eplb_after()
+    @serving_launches
     def sample_tokens(
         self, grammar_output: GrammarOutput | None
     ) -> AsyncOutput | ModelRunnerOutput | None:

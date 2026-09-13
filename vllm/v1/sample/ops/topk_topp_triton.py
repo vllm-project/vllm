@@ -15,6 +15,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.platform_utils import num_compute_units
+from vllm.v1.worker.gpu.launch_key_debug import record_triton_launch
 
 _TRITON_TABLE_CACHE: dict[tuple[torch.device], tuple[torch.Tensor, torch.Tensor]] = {}
 _TRITON_BUFFER_CACHE: dict[tuple[torch.device, torch.dtype, int], torch.Tensor] = {}
@@ -1339,7 +1340,23 @@ def _apply_topp_split(
     k_ptr = k if k is not None else logits  # dummy pointer when HAS_K=False
     has_k = k is not None
 
-    _topp_sb_stats_kernel[(batch_size * splits,)](
+    stats_grid = (batch_size * splits,)
+    record_triton_launch(
+        "_topp_sb_stats_kernel",
+        _topp_sb_stats_kernel,
+        stats_grid,
+        logits,
+        logits.stride(0),
+        ws["stats"],
+        k_ptr,
+        p,
+        HAS_K=has_k,
+        VOCAB_SIZE=vocab_size,
+        S=splits,
+        BLOCK=8192,
+        num_warps=8,
+    )
+    _topp_sb_stats_kernel[stats_grid](
         logits,
         logits.stride(0),
         ws["stats"],
@@ -1352,7 +1369,11 @@ def _apply_topp_split(
         num_warps=8,
     )
     for round_i in range(_SPLIT_ROUNDS):
-        _topp_sb_step_kernel[(batch_size * splits,)](
+        step_grid = (batch_size * splits,)
+        record_triton_launch(
+            "_topp_sb_step_kernel",
+            _topp_sb_step_kernel,
+            step_grid,
             logits,
             logits.stride(0),
             ws["stats"],
@@ -1368,7 +1389,43 @@ def _apply_topp_split(
             BLOCK=2048,
             num_warps=8,
         )
-    _topp_sb_mask_kernel[(batch_size * splits,)](
+        _topp_sb_step_kernel[step_grid](
+            logits,
+            logits.stride(0),
+            ws["stats"],
+            ws["parts"],
+            k_ptr,
+            p,
+            round_i,
+            HAS_K=has_k,
+            S=splits,
+            F=_SPLIT_FANOUT,
+            NUM_ROUNDS=_SPLIT_ROUNDS,
+            VOCAB_SIZE=vocab_size,
+            BLOCK=2048,
+            num_warps=8,
+        )
+    mask_grid = (batch_size * splits,)
+    record_triton_launch(
+        "_topp_sb_mask_kernel",
+        _topp_sb_mask_kernel,
+        mask_grid,
+        logits,
+        logits.stride(0),
+        ws["stats"],
+        ws["parts"],
+        k_ptr,
+        p,
+        HAS_K=has_k,
+        MASK_VALUE=mask_value,
+        S=splits,
+        F=_SPLIT_FANOUT,
+        NUM_ROUNDS=_SPLIT_ROUNDS,
+        VOCAB_SIZE=vocab_size,
+        BLOCK=8192,
+        num_warps=8,
+    )
+    _topp_sb_mask_kernel[mask_grid](
         logits,
         logits.stride(0),
         ws["stats"],
@@ -1493,7 +1550,29 @@ def apply_top_k_top_p_triton(
         # faster on every arch measured (SM90, SM100, SM120, gfx950); 16 is not.
         launch_kwargs["num_warps"] = 8
 
-    _topk_topp_kernel[(NUM_PROGRAMS,)](
+    launch_grid = (NUM_PROGRAMS,)
+    record_triton_launch(
+        "_topk_topp_kernel",
+        _topk_topp_kernel,
+        launch_grid,
+        logits,
+        logits.stride(0),
+        buffer,
+        percentile_to_std_table,
+        normal_cdf_to_sigma_table,
+        k_ptr,
+        p_ptr,
+        BATCH_SIZE=batch_size,
+        MASK_VALUE=mask_value,
+        VOCAB_SIZE=vocab_size,
+        BLOCK_SIZE=block_size,
+        BLOCK_SIZE_TRUNC=block_size_trunc,
+        TOPK_ENABLED=topk_enabled,
+        TOPP_ENABLED=topp_enabled,
+        SPLIT_COVERS_PONLY=use_split,
+        **launch_kwargs,
+    )
+    _topk_topp_kernel[launch_grid](
         logits,
         logits.stride(0),
         buffer,
