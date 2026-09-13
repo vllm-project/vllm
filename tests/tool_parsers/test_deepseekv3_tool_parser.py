@@ -82,7 +82,14 @@ class TestDeepSeekV3ToolParser(ToolParserTests):
             parallel_tool_calls_count=2,
             parallel_tool_calls_names=["get_weather", "search_hotels"],
             # xfail markers
-            xfail_streaming={},
+            xfail_streaming={
+                "test_streaming_split_invariance": (
+                    "Streamed result depends on delta boundaries: the call is dropped "
+                    "when a delta carries it whole (#48020, PR #48636) and "
+                    "arguments are lost when the end token shares a delta "
+                    "(#48342, PR #48343)"
+                ),
+            },
             xfail_nonstreaming={
                 "test_malformed_input": (
                     "Parser sets tools_called=True even when tool_calls is "

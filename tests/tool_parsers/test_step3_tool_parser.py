@@ -99,6 +99,10 @@ class TestStep3ToolParser(ToolParserTests):
                 "test_escaped_strings": "Step3 parser non-streaming has bugs",
             },
             xfail_streaming={
+                "test_streaming_split_invariance": (
+                    "Streamed tool arguments are empty unless each token arrives in "
+                    "its own delta"
+                ),
                 "test_parallel_tool_calls": (
                     "Step3 parser has significant bugs in both streaming "
                     "and non-streaming"

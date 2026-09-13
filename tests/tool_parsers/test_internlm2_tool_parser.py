@@ -98,6 +98,11 @@ class TestInternLM2ToolParser(ToolParserTests):
             allow_empty_or_json_empty_args=True,
             # xfail markers
             xfail_streaming={
+                "test_streaming_split_invariance": (
+                    "Streamed result depends on delta boundaries; arguments or the "
+                    "whole call are lost when a delta carries the call "
+                    "whole (#48347, PR #50461)"
+                ),
                 "test_single_tool_call_simple_args": (
                     "InternLM2 streaming not fully implemented"
                 ),
