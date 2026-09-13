@@ -1565,6 +1565,7 @@ def test_platform_rejects_unsupported_arch_during_config(monkeypatch):
     rejected = []
 
     def verify_model_arch(model_arch: str) -> None:
+        """Record the architecture checked, then reject it."""
         rejected.append(model_arch)
         raise ValueError(f"Model architecture '{model_arch}' is not supported")
 

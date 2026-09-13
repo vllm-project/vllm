@@ -318,6 +318,15 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
+        """Reject architectures with no working kernel on this GPU.
+
+        Args:
+            model_arch: Resolved model architecture name.
+
+        Raises:
+            ValueError: If the device's compute capability is listed as
+                unsupported for this architecture.
+        """
         unsupported_majors = _CAPABILITY_RESTRICTED_MODELS.get(model_arch)
         if unsupported_majors is None:
             return

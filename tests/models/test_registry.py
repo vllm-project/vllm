@@ -31,6 +31,7 @@ from .utils import skip_if_capability_restricted
 
 @pytest.mark.parametrize("model_arch", ModelRegistry.get_supported_archs())
 def test_registry_imports(model_arch):
+    """Every registered architecture imports on a platform that can run it."""
     # Skip if transformers version is incompatible
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_transformers_version(

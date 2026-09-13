@@ -42,6 +42,7 @@ _SPLIT_KV_MAJORS = (10, 11)
 
 @cache
 def _use_sheared_bias() -> bool:
+    """Return whether this GPU's FA4 forward takes the sheared bias layout."""
     capability = current_platform.get_device_capability()
     return capability is not None and capability.major in _SHEARED_BIAS_MAJORS
 
