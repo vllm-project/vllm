@@ -15,19 +15,42 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, fields
+from functools import wraps
 from typing import Any, Generic, TypeVar, cast
 
 __all__ = [
     "JitWarmupRegistry",
     "VllmJitKernel",
+    "WarmupChoices",
     "WarmupIntRange",
     "get_ast_full_name",
     "get_function_source_node",
+    "kernel_launcher",
     "zip_inputs",
 ]
 
 
 CompileKeyT = TypeVar("CompileKeyT")
+
+
+def kernel_launcher(call_fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Delegate a declarative launch specification to its backend owner."""
+    signature = inspect.signature(call_fn)
+
+    @wraps(call_fn)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        launch_spec = call_fn(self, *args, **kwargs)
+        if not self.bind_launch_inputs:
+            return self.launch(launch_spec, {})
+
+        bound = signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        inputs = {
+            name: value for name, value in bound.arguments.items() if name != "self"
+        }
+        return self.launch(launch_spec, inputs)
+
+    return wrapper
 
 
 @dataclass(frozen=True)
@@ -38,6 +61,21 @@ class WarmupIntRange:
     stop: int
     step: int = 1
     advance: Callable[[int], int] | None = None
+
+
+@dataclass(frozen=True)
+class WarmupChoices:
+    """Expand an explicit finite set of values in a traced warmup method."""
+
+    values: tuple[Any, ...]
+
+    def __init__(self, *values: Any) -> None:
+        object.__setattr__(self, "values", values)
+
+
+def _when(condition: bool) -> None:
+    """Filter symbolic cases in an AST-traced warmup-cases method."""
+    raise RuntimeError("_when() is only valid in an AST-traced warmup method")
 
 
 WarmupValues = Any
@@ -65,6 +103,8 @@ class _WarmupInputRows:
 
 
 def _expand_warmup_values(values: WarmupValues) -> tuple[Any, ...]:
+    if isinstance(values, WarmupChoices):
+        return values.values
     if isinstance(values, WarmupIntRange):
         if values.advance is None:
             return tuple(range(values.start, values.stop, values.step))
@@ -256,6 +296,27 @@ class _DispatchExprEvaluator(ast.NodeVisitor):
     def visit_Constant(self, node: ast.Constant) -> Any:
         return node.value
 
+    def visit_Lambda(self, node: ast.Lambda) -> Callable[..., Any]:
+        arguments = node.args
+        if (
+            arguments.posonlyargs
+            or arguments.vararg is not None
+            or arguments.kwonlyargs
+            or arguments.kwarg is not None
+            or arguments.defaults
+        ):
+            raise _dispatch_expr_error(node, "Traced lambdas require positional args")
+        names = tuple(argument.arg for argument in arguments.args)
+
+        def evaluate(*values: Any) -> Any:
+            if len(values) != len(names):
+                raise TypeError(f"Expected {len(names)} lambda arguments")
+            return type(self)(
+                dict(self.values) | dict(zip(names, values)), self.globals
+            ).eval(node.body)
+
+        return evaluate
+
     def visit_IfExp(self, node: ast.IfExp) -> Any:
         return self.visit(node.body if self.visit(node.test) else node.orelse)
 
@@ -311,7 +372,12 @@ class _DispatchExprEvaluator(ast.NodeVisitor):
         return op(self.visit(node.left), self.visit(node.right))
 
     def visit_Call(self, node: ast.Call) -> Any:
-        args = [self.visit(arg) for arg in node.args]
+        args: list[Any] = []
+        for arg in node.args:
+            if isinstance(arg, ast.Starred):
+                args.extend(self.visit(arg.value))
+            else:
+                args.append(self.visit(arg))
         fn = self.visit(node.func)
         call_kwargs: dict[str, Any] = {}
         for keyword in node.keywords:
@@ -366,6 +432,45 @@ def _eval_dispatch_expr(
     return _DispatchExprEvaluator(kwargs, globals_).eval(node)
 
 
+def _validate_dispatch_expr(node: ast.AST) -> None:
+    """Enforce the dispatch AST subset before compiling traced code."""
+    allowed_nodes = (
+        ast.Name,
+        ast.Constant,
+        ast.Lambda,
+        ast.arguments,
+        ast.arg,
+        ast.IfExp,
+        ast.Tuple,
+        ast.List,
+        ast.BoolOp,
+        ast.And,
+        ast.Or,
+        ast.Compare,
+        *tuple(_CMP_OPS),
+        ast.UnaryOp,
+        ast.Not,
+        ast.USub,
+        ast.BinOp,
+        *tuple(_BIN_OPS),
+        ast.Call,
+        ast.keyword,
+        ast.Starred,
+        ast.Attribute,
+        ast.Subscript,
+        ast.Load,
+    )
+    for child in ast.walk(node):
+        if not isinstance(child, allowed_nodes):
+            raise _dispatch_expr_error(child, "Unsupported dispatch expression")
+        if isinstance(child, ast.Call) and any(
+            keyword.arg is None for keyword in child.keywords
+        ):
+            raise _dispatch_expr_error(
+                child, "Dispatch helper calls cannot use **kwargs"
+            )
+
+
 def _collect_input_names(
     node: ast.AST,
     candidate_names: set[str],
@@ -384,6 +489,23 @@ def _collect_input_names(
     }
 
 
+def _named_assignment(
+    statement: ast.stmt,
+    subject: str,
+) -> tuple[str, ast.AST] | None:
+    match statement:
+        case ast.Assign(targets=[ast.Name(id=name)], value=value):
+            return name, value
+        case ast.AnnAssign(target=ast.Name(id=name), value=value) if value is not None:
+            return name, value
+        case ast.Assign() | ast.AnnAssign():
+            raise _dispatch_expr_error(
+                statement, f"{subject} assignments require one name"
+            )
+        case _:
+            return None
+
+
 def _collect_expression_body(
     fn: Callable[..., Any],
     function_def: ast.FunctionDef | ast.Lambda,
@@ -400,37 +522,18 @@ def _collect_expression_body(
         ):
             continue
 
-        if isinstance(statement, ast.Assign):
-            if len(statement.targets) != 1 or not isinstance(
-                statement.targets[0], ast.Name
-            ):
-                raise _dispatch_expr_error(
-                    statement,
-                    "Traced warmup helper assignments must target one local name",
-                )
-            local_exprs.append((statement.targets[0].id, statement.value))
+        if (
+            assignment := _named_assignment(statement, "Traced warmup helper")
+        ) is not None:
+            local_exprs.append(assignment)
             continue
-
-        if isinstance(statement, ast.AnnAssign):
-            if statement.value is None:
-                raise _dispatch_expr_error(
-                    statement, "Traced warmup helper annotations must assign a value"
-                )
-            if not isinstance(statement.target, ast.Name):
-                raise _dispatch_expr_error(
-                    statement,
-                    "Traced warmup helper assignments must target one local name",
-                )
-            local_exprs.append((statement.target.id, statement.value))
-            continue
-
-        if isinstance(statement, ast.Return) and statement.value is not None:
-            return local_exprs, statement.value
 
         if isinstance(statement, ast.Return):
-            raise _dispatch_expr_error(
-                statement, "Traced warmup helper must return an expression"
-            )
+            if statement.value is None:
+                raise _dispatch_expr_error(
+                    statement, "Traced warmup helper must return an expression"
+                )
+            return local_exprs, statement.value
 
         raise _dispatch_expr_error(
             statement,
@@ -549,12 +652,20 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
     """Kernel wrapper that owns dispatch, warmup keys, and compilation."""
 
     CompileKey: type[CompileKeyT]
+    bind_launch_inputs = True
 
     def __init__(self) -> None:
-        self._dispatch_trace = _trace_compile_key_dispatch(self.dispatch)
+        dispatch = type(self).dispatch
+        self._dispatch_trace = (
+            None
+            if dispatch is VllmJitKernel.dispatch
+            else _trace_compile_key_dispatch(self.dispatch)
+        )
         self._compiled_cache: dict[Any, Any] = {}
 
     def compile_key(self, kwargs: Mapping[str, Any]) -> CompileKeyT:
+        if self._dispatch_trace is None:
+            raise TypeError(f"{type(self).__name__} does not define dispatch()")
         return self._dispatch_trace.compile_key(self.CompileKey, kwargs)
 
     def _get_or_compile(
@@ -660,7 +771,184 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
 
         return traced
 
-    @abstractmethod
+    def _expand_warmup_cases(
+        self,
+        cases_fn: Callable[..., Any],
+        *args: Any,
+        _value_expander: Callable[[WarmupValues], tuple[Any, ...]] = (
+            _expand_warmup_values
+        ),
+        **kwargs: Any,
+    ) -> Iterator[Mapping[str, Any]]:
+        """Expand symbolic domains declared inside a warmup-cases method."""
+        function_def = get_function_source_node(cases_fn)
+        if isinstance(function_def, ast.Lambda):
+            raise _dispatch_expr_error(
+                function_def, "Warmup cases must be a function definition"
+            )
+        signature = inspect.signature(cases_fn)
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        static_values = dict(bound.arguments)
+        bound_self = getattr(cases_fn, "__self__", None)
+        if bound_self is not None:
+            static_values["self"] = bound_self
+        globals_ = getattr(cases_fn, "__func__", cases_fn).__globals__
+
+        domains: list[tuple[str, tuple[Any, ...]]] = []
+        local_exprs: list[tuple[str, ast.AST]] = []
+        predicates: list[ast.AST] = []
+        return_expr: ast.AST | None = None
+        for statement in function_def.body:
+            if (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Constant)
+                and isinstance(statement.value.value, str)
+            ):
+                continue
+            assignment = _named_assignment(statement, "Warmup case")
+            if assignment is not None:
+                name, value_expr = assignment
+                call_name = (
+                    (get_ast_full_name(value_expr.func) or "").split(".")[-1]
+                    if isinstance(value_expr, ast.Call)
+                    else ""
+                )
+                if call_name in {"WarmupIntRange", "WarmupChoices"}:
+                    value = _eval_dispatch_expr(value_expr, static_values, globals_)
+                    domains.append((name, _value_expander(value)))
+                else:
+                    local_exprs.append((name, value_expr))
+                continue
+            if (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Call)
+                and (get_ast_full_name(statement.value.func) or "").endswith("_when")
+            ):
+                if len(statement.value.args) != 1 or statement.value.keywords:
+                    raise _dispatch_expr_error(
+                        statement, "_when requires exactly one positional expression"
+                    )
+                predicates.append(statement.value.args[0])
+                continue
+            if isinstance(statement, ast.Return):
+                if return_expr is not None or statement.value is None:
+                    raise _dispatch_expr_error(
+                        statement, "Warmup cases require one final return expression"
+                    )
+                return_expr = statement.value
+                continue
+            raise _dispatch_expr_error(
+                statement,
+                "AST-traced warmup cases support assignments, _when, and return",
+            )
+
+        if return_expr is None or not isinstance(return_expr, ast.Call):
+            raise ValueError("AST-traced warmup cases must return one case(...) call")
+        if any(keyword.arg is None for keyword in return_expr.keywords):
+            raise _dispatch_expr_error(
+                return_expr, "Warmup case expressions do not support **kwargs"
+            )
+
+        class _InlineDomainRewriter(ast.NodeTransformer):
+            def visit_Call(self, node: ast.Call) -> ast.AST:
+                call_name = (get_ast_full_name(node.func) or "").split(".")[-1]
+                if call_name not in {"WarmupIntRange", "WarmupChoices"}:
+                    return self.generic_visit(node)
+                name = f"__warmup_domain_{len(domains)}"
+                domain = _eval_dispatch_expr(node, static_values, globals_)
+                domains.append((name, _value_expander(domain)))
+                return ast.copy_location(ast.Name(id=name, ctx=ast.Load()), node)
+
+        return_expr = cast(ast.Call, _InlineDomainRewriter().visit(return_expr))
+
+        domain_names = tuple(name for name, _ in domains)
+        dynamic_names = set(domain_names)
+        dynamic_local_exprs: list[tuple[str, ast.AST]] = []
+        for name, expr in local_exprs:
+            referenced_names = {
+                node.id for node in ast.walk(expr) if isinstance(node, ast.Name)
+            }
+            if referenced_names & dynamic_names:
+                dynamic_local_exprs.append((name, expr))
+                dynamic_names.add(name)
+            else:
+                static_values[name] = _eval_dispatch_expr(expr, static_values, globals_)
+
+        for _, expr in dynamic_local_exprs:
+            _validate_dispatch_expr(expr)
+        for predicate in predicates:
+            _validate_dispatch_expr(predicate)
+        _validate_dispatch_expr(return_expr)
+
+        case_body: list[ast.stmt] = [
+            ast.Assign(
+                targets=[ast.Name(id=name, ctx=ast.Store())],
+                value=cast(ast.expr, expr),
+            )
+            for name, expr in dynamic_local_exprs
+        ]
+        if predicates:
+            predicate = (
+                predicates[0]
+                if len(predicates) == 1
+                else ast.BoolOp(
+                    op=ast.And(),
+                    values=[cast(ast.expr, value) for value in predicates],
+                )
+            )
+            case_body.append(
+                ast.If(
+                    test=ast.UnaryOp(op=ast.Not(), operand=cast(ast.expr, predicate)),
+                    body=[ast.Return(value=ast.Constant(value=None))],
+                    orelse=[],
+                )
+            )
+        case_body.append(ast.Return(value=cast(ast.expr, return_expr)))
+        # FunctionDef fields vary across the supported Python versions, so no
+        # single constructor overload matches every mypy target.
+        case_function = ast.FunctionDef(  # type: ignore[call-overload]
+            name="__vllm_warmup_case",
+            args=ast.arguments(
+                posonlyargs=[],
+                args=[ast.arg(arg=name) for name in domain_names],
+                kwonlyargs=[],
+                kw_defaults=[],
+                defaults=[],
+            ),
+            body=case_body,
+            decorator_list=[],
+            returns=None,
+            type_comment=None,
+        )
+        case_globals = dict(globals_)
+        case_globals.update(static_values)
+        exec(
+            compile(
+                ast.fix_missing_locations(
+                    ast.Module(body=[case_function], type_ignores=[])
+                ),
+                "<jit-warmup>",
+                "exec",
+            ),
+            case_globals,
+        )
+        evaluate_case = cast(Callable[..., Any], case_globals[case_function.name])
+
+        domain_values = tuple(values for _, values in domains)
+        for values in itertools.product(*domain_values):
+            case = evaluate_case(*values)
+            if case is None:
+                continue
+            if not isinstance(case, Mapping):
+                raise TypeError("AST-traced warmup cases must return a mapping")
+            if any(
+                isinstance(value, WarmupChoices | WarmupIntRange)
+                for value in case.values()
+            ):
+                raise TypeError("Warmup domains must be direct expressions")
+            yield case
+
     def dispatch(self, **kwargs: Any) -> CompileKeyT:
         """Build one compile key from one concrete dispatch point."""
         raise NotImplementedError
@@ -728,6 +1016,19 @@ class JitWarmupRegistry:
             list[tuple[tuple[Any, ...], dict[str, Any]]],
         ] = {}
 
+    @classmethod
+    def capture(cls, init_fn: Callable[..., None]) -> Callable[..., None]:
+        """Collect warmup registrations made while the decorated callable runs."""
+
+        @wraps(init_fn)
+        def wrapped(instance: Any, vllm_config: Any, *args: Any, **kwargs: Any) -> None:
+            registry = cls(vllm_config)
+            instance.jit_warmup_registry = registry
+            with registry.activate():
+                init_fn(instance, vllm_config, *args, **kwargs)
+
+        return wrapped
+
     @contextmanager
     def activate(self) -> Iterator[None]:
         """Collect registrations made in this context."""
@@ -785,9 +1086,10 @@ class JitWarmupRegistry:
                 if (
                     not args
                     and not kwargs
-                    and inspect.signature(kernel.get_warmup_keys).parameters
+                    and "vllm_config"
+                    in inspect.signature(kernel.get_warmup_keys).parameters
                 ):
-                    args = (self.vllm_config,)
+                    kwargs = {"vllm_config": self.vllm_config}
                 for compile_key in kernel.get_warmup_keys(*args, **kwargs):
                     compile_keys[compile_key] = None
             if compile_keys:

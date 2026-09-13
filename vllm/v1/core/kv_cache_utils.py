@@ -8,23 +8,30 @@ import math
 import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
+from typing import TYPE_CHECKING, Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.hashing import xxhash, xxhash_cbor
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.hisparse.layout import (
+    get_hisparse_gpu_memory_usage,
+    get_hisparse_host_pool_bytes,
+    get_hisparse_kv_cache_config,
+    get_hisparse_kv_cache_groups,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
+    HiSparseHotSpec,
     KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -43,6 +50,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
+
+if TYPE_CHECKING:
+    from vllm.v1.core.block_pool import BlockPool
+
 
 # BlockHash represents the hash of a single KV-cache block used for
 # prefix caching.  Treating it as a distinct type from `bytes` helps
@@ -169,6 +180,10 @@ class KVCacheBlock:
     block_id: int
     # Reference count.
     ref_cnt: int = 0
+    # Deferred frees may contain blocks from multiple pools.
+    pool: "BlockPool | None" = field(
+        default=None, repr=False, compare=False, kw_only=True
+    )
     # The hash key (block hash + group id) of the block, only available
     # when the block is full and cached.
     _block_hash: BlockHashWithGroupId | None = None
@@ -1062,21 +1077,32 @@ def get_max_concurrency_for_kv_cache_config(
 
     A request at max_model_len consumes whole blocks from each group's block
     table — cdiv(per-request bytes, page bytes) of the group's spec — and all
-    groups draw those block ids from one shared pool, so the per-request
+    device groups draw those block ids from one shared pool, so the per-request
     total is the sum over groups. The memory/page ratio is identical whether
     a group carries an aggregated UniformTypeKVCacheSpecs (worker config) or
     a representative per-layer spec (scheduler config), so both capacity
     call sites agree.
+
+    Host groups use a separate pool; the smaller concurrency limit applies.
     """
-    num_blocks_per_request = sum(
-        cdiv(
+    num_blocks_per_request = 0
+    host_blocks_per_request = 0
+    for group in kv_cache_config.kv_cache_groups:
+        required = cdiv(
             group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
             group.kv_cache_spec.page_size_bytes,
         )
-        for group in kv_cache_config.kv_cache_groups
-    )
-    max_concurrency = kv_cache_config.num_blocks / num_blocks_per_request
-    return max_concurrency
+        if group.host_resident:
+            host_blocks_per_request += required
+        else:
+            num_blocks_per_request += required
+    limits = [kv_cache_config.num_blocks / num_blocks_per_request]
+    if host_blocks_per_request:
+        assert kv_cache_config.hisparse_host_num_blocks is not None
+        limits.append(
+            kv_cache_config.hisparse_host_num_blocks / host_blocks_per_request
+        )
+    return min(limits)
 
 
 def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
@@ -1580,6 +1606,13 @@ def _get_kv_cache_bytes_per_block(
         for group in kv_cache_groups
     )
     assert bytes_per_block > 0
+    hot_page_sizes = [
+        group.kv_cache_spec.page_size_bytes
+        for group in kv_cache_groups
+        if isinstance(group.kv_cache_spec, HiSparseHotSpec)
+    ]
+    if hot_page_sizes:
+        bytes_per_block = round_up(bytes_per_block, math.lcm(*hot_page_sizes))
     return bytes_per_block
 
 
@@ -1643,6 +1676,12 @@ def get_kv_cache_config_from_groups(
             prefix_cache_retention_interval=(
                 vllm_config.cache_config.prefix_cache_retention_interval
             ),
+        )
+
+    if vllm_config.attention_config.hisparse_config is not None:
+        host_budget = get_hisparse_host_pool_bytes(vllm_config)
+        return get_hisparse_kv_cache_config(
+            vllm_config, kv_cache_groups, available_memory, host_budget
         )
 
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
@@ -2215,6 +2254,9 @@ def get_kv_cache_groups(
         # attention free models.
         return []
 
+    if hisparse_groups := get_hisparse_kv_cache_groups(vllm_config, kv_cache_spec):
+        return hisparse_groups
+
     if is_kv_cache_spec_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for
@@ -2292,6 +2334,10 @@ def generate_scheduler_kv_cache_config(
     assert all(
         [cfg.num_blocks == kv_cache_configs[0].num_blocks for cfg in kv_cache_configs]
     )
+    assert all(
+        cfg.hisparse_host_num_blocks == kv_cache_configs[0].hisparse_host_num_blocks
+        for cfg in kv_cache_configs
+    )
     # All workers have the same kv_cache_config except layer names, so use
     # an arbitrary one to initialize the scheduler.
     cfg = copy.deepcopy(kv_cache_configs[0])
@@ -2352,6 +2398,9 @@ def _max_memory_usage_bytes_from_groups(
     if not kv_cache_groups:
         return 0
 
+    if vllm_config.attention_config.hisparse_config is not None:
+        return get_hisparse_gpu_memory_usage(vllm_config, kv_cache_groups)
+
     if (glm5_layout := _glm5_next_tensor_layout(kv_cache_groups)) is not None:
         (
             attn_group,
@@ -2401,9 +2450,21 @@ def _estimate_max_model_len_from_groups(
     Returns 0 if even 1 token doesn't fit.
     """
     original_max = vllm_config.model_config.max_model_len
+    hisparse_enabled = (
+        vllm_config.attention_config.hisparse_config is not None
+        and bool(kv_cache_groups)
+    )
 
     def fits(model_len: int) -> bool:
         vllm_config.model_config.max_model_len = model_len
+        if hisparse_enabled:
+            try:
+                config = get_kv_cache_config_from_groups(
+                    vllm_config, kv_cache_groups, available_memory
+                )
+            except ValueError:
+                return False
+            return get_max_concurrency_for_kv_cache_config(vllm_config, config) >= 1
         return (
             _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
             <= available_memory
@@ -2633,6 +2694,9 @@ def get_kv_cache_configs(
             )
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
+
+    if vllm_config.attention_config.hisparse_config is not None:
+        available_memory = [min(available_memory)] * len(available_memory)
 
     # Reserve the null block BlockPool permanently holds back, so auto-fit and
     # the capacity check both plan against usable blocks. Allocation below

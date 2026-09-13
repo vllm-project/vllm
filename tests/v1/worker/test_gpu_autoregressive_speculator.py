@@ -157,6 +157,7 @@ def test_mm_support_configured_after_model_load(monkeypatch):
         speculator.device = device
         speculator.max_num_tokens = 4
         speculator.max_num_reqs = 2
+        speculator.num_speculative_steps = 1
         speculator.hidden_size = 3
         speculator.dtype = torch.float32
         speculator.draft_model_config = draft_model_config
@@ -351,6 +352,8 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     speculator = object.__new__(_TestSpeculator)
     speculator.num_speculative_steps = 4
     speculator.current_draft_step = torch.tensor(0)
+    speculator.slot_mapping_observer = None
+    speculator.host_mirror_forward_observer = None
     speculator.input_buffers = SimpleNamespace(
         positions=torch.arange(2),
         query_start_loc=torch.arange(3),

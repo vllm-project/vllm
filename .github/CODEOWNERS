@@ -73,7 +73,7 @@
 /vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
 /vllm/v1/sample @22quinn @houseroad @njhill
 /vllm/v1/spec_decode @benchislett @luccafong @MatthewBonanni
-/vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
+/vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett @arpera
 /vllm/v1/kv_cache_interface.py @heheda12345 @ivanium
 /vllm/v1/kv_offload @ApostaC @orozery
 /vllm/v1/simple_kv_offload @ivanium
@@ -108,7 +108,7 @@
 /tests/multimodal/media @Isotr0py
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety @zyongye @AndreasKaratzas
 /tests/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
-/tests/v1/structured_output @mgoin @russellb @aarnphm
+/tests/v1/structured_output @mgoin @russellb @aarnphm @arpera
 /tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery @ivanium
 /tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
