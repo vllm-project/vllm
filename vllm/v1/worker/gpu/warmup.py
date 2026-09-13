@@ -429,7 +429,16 @@ def run_uno_served_jit_self_check(
     monitor_armed = is_active()
     speculator = getattr(model_runner, "speculator", None)
     if not isinstance(speculator, UnoSpeculator):
-        return UnoJitSelfCheck(False, monitor_armed, {}, {}, {}, {}, ())
+        return UnoJitSelfCheck(
+            ran=False,
+            monitor_armed=monitor_armed,
+            sampler_calls={},
+            sampler_launches={},
+            sampler_branches={},
+            branch_mismatches={},
+            missing_launches={},
+            compilations=(),
+        )
     if not monitor_armed:
         speculator._step = 0
         raise RuntimeError("Uno startup JIT self-check requires an armed JIT monitor")

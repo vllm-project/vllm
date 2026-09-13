@@ -1817,6 +1817,37 @@ def test_uno_self_check_token_count_keeps_fixture_and_production_bounds_distinct
     assert uno_self_check_token_count(2048, 2047) == 2048
 
 
+@pytest.mark.parametrize("monitor_armed", [False, True])
+@pytest.mark.parametrize("has_other_speculator", [False, True])
+def test_uno_startup_self_check_returns_without_touching_non_uno_worker(
+    monkeypatch, monitor_armed, has_other_speculator
+):
+    """The unconditional worker startup caller must accept plain and other drafts."""
+    from vllm.utils import jit_monitor
+    from vllm.v1.worker.gpu import warmup
+
+    runner = SimpleNamespace(speculator=object() if has_other_speculator else None)
+    execute_model = Mock(side_effect=AssertionError("non-Uno warmup dispatch"))
+    sample_tokens = Mock(side_effect=AssertionError("non-Uno sampler dispatch"))
+    before = vars(runner).copy()
+    monkeypatch.setattr(jit_monitor, "_active", monitor_armed)
+
+    result = warmup.run_uno_served_jit_self_check(runner, execute_model, sample_tokens)
+
+    assert not result.ran
+    assert not result.passed
+    assert result.monitor_armed is monitor_armed
+    assert result.sampler_calls == {}
+    assert result.sampler_launches == {}
+    assert result.sampler_branches == {}
+    assert result.branch_mismatches == {}
+    assert result.missing_launches == {}
+    assert result.compilations == ()
+    assert vars(runner) == before
+    execute_model.assert_not_called()
+    sample_tokens.assert_not_called()
+
+
 def test_uno_startup_jit_self_check_cannot_pass_unarmed_or_unreached(monkeypatch):
     """A skipped cycle or missing kernel counter is not a successful check."""
     from vllm.utils import jit_monitor
