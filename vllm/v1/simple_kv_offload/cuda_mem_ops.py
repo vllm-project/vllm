@@ -239,6 +239,31 @@ def copy_blocks(
 
     src_ids = np.array(src_block_ids, dtype=np.uint64)
     dst_ids = np.array(dst_block_ids, dtype=np.uint64)
+    if current_platform.is_rocm():
+        ascending = (
+            (src_ids[1:] > src_ids[:-1])
+            & (src_ids[1:] - src_ids[:-1] == 1)
+            & (dst_ids[1:] > dst_ids[:-1])
+            & (dst_ids[1:] - dst_ids[:-1] == 1)
+        )
+        descending = (
+            (src_ids[:-1] > src_ids[1:])
+            & (src_ids[:-1] - src_ids[1:] == 1)
+            & (dst_ids[:-1] > dst_ids[1:])
+            & (dst_ids[:-1] - dst_ids[1:] == 1)
+        )
+        directions = ascending.astype(np.int8) - descending.astype(np.int8)
+        breaks = directions == 0
+        breaks[1:] |= (directions[:-1] != 0) & (directions[1:] != directions[:-1])
+        starts = np.concatenate(([0], np.flatnonzero(breaks) + 1))
+        lengths = np.diff(np.append(starts, n)).astype(np.uint64)
+        ends = np.append(starts[1:], n) - 1
+        src_ids = np.minimum(src_ids[starts], src_ids[ends])
+        dst_ids = np.minimum(dst_ids[starts], dst_ids[ends])
+        sz_all = (params.bpb[:, None] * lengths[None, :]).ravel()
+        n = len(starts)
+    else:
+        sz_all = np.repeat(params.bpb, n)
 
     src_all = (
         params.src_bases[:, None] + src_ids[None, :] * params.bpb[:, None]
@@ -246,7 +271,6 @@ def copy_blocks(
     dst_all = (
         params.dst_bases[:, None] + dst_ids[None, :] * params.bpb[:, None]
     ).ravel()
-    sz_all = np.repeat(params.bpb, n)
     total = n * params.num_layers
 
     # Chunk on ROCm: hipMemcpyBatchAsync faults above 8192 descriptors/call.
