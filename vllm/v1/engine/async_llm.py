@@ -52,8 +52,10 @@ from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.metrics.loggers import (
+    PrometheusStatLogger,
     StatLoggerFactory,
     StatLoggerManager,
+    get_stat_logger_requirements,
     load_stat_logger_plugin_factories,
 )
 from vllm.v1.metrics.prometheus import shutdown_prometheus
@@ -138,6 +140,16 @@ class AsyncLLM(EngineClient):
                 "but custom stat loggers were found; "
                 "enabling logging without default stat loggers."
             )
+
+        active_stat_logger_factories = list(custom_stat_loggers)
+        if self.log_stats:
+            active_stat_logger_factories.append(PrometheusStatLogger)
+        stat_logger_requirements = get_stat_logger_requirements(
+            active_stat_logger_factories, vllm_config
+        )
+        self.observability_config.collect_iteration_details = (
+            stat_logger_requirements.iteration_details
+        )
 
         self.renderer = renderer = renderer_from_config(self.vllm_config)
 

@@ -88,6 +88,14 @@ class ObservabilityConfig:
     This includes number of context/generation requests and tokens
     and the elapsed cpu time for the iteration."""
 
+    collect_iteration_details: bool = Field(default=False, init=False)
+    """Collect iteration details requested by stat loggers.
+
+    This is set internally before EngineCore starts and is intentionally
+    separate from ``enable_logging_iteration_details`` so collecting plugin
+    data does not enable per-iteration INFO logs.
+    """
+
     jit_monitor_mode: Literal["warn", "error"] = "warn"
     """How to handle post-warmup JIT compilation events."""
 
