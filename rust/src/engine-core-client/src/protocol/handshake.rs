@@ -104,6 +104,9 @@ pub struct EngineCoreReadyResponse {
     /// Whether the engine has a speculative draft model that can be updated.
     #[serde(default)]
     pub supports_draft_weight_updates: bool,
+    /// Whether the engine was started with speculative decoding enabled.
+    #[serde(default)]
+    pub use_spec_decode: bool,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

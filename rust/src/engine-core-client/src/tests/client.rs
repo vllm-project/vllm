@@ -2852,6 +2852,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     );
     assert!(ready_response.enable_sleep_mode);
     assert!(ready_response.supports_draft_weight_updates);
+    assert!(ready_response.use_spec_decode);
     let kv_events_config = ready_response.kv_events_config.expect("KV events config should decode");
     assert!(kv_events_config.enable_kv_cache_events);
     assert_eq!(kv_events_config.publisher, "zmq");

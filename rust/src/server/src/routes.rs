@@ -115,7 +115,8 @@ fn build_router_with_options(
         .route("/v1/chat/completions", post(openai::chat_completions))
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
-        .route("/detokenize", post(tokenize::detokenize));
+        .route("/detokenize", post(tokenize::detokenize))
+        .route("/generative_scoring", post(inference::generative_scoring));
 
     if scale_out_endpoints_enabled {
         router = router.route("/inference/v1/generate", post(inference::generate));
