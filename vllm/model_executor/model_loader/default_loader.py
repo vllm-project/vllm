@@ -326,6 +326,7 @@ class DefaultModelLoader(BaseModelLoader):
         primary_weights = DefaultModelLoader.Source(
             model_config.model,
             model_config.revision,
+            subfolder=model_config.subfolder,
             prefix="",
             fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", True),
             allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
@@ -342,7 +343,7 @@ class DefaultModelLoader(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(
             model_name_or_path=model_config.model,
-            subfolder=None,
+            subfolder=model_config.subfolder,
             revision=model_config.revision,
             fall_back_to_pt=True,
             allow_patterns_overrides=None,
