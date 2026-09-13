@@ -53,24 +53,46 @@ def test_watermark_config_cli():
             "--model",
             "dummy",
             "--watermark-config",
-            '{"algorithm":"gumbel","key":42,"prf":"philox"}',
+            '{"algorithm":"dual_key_gumbel","key":42,"prf":"philox","alpha":0.25,'
+            '"allow_target_only_watermarking":true}',
         ]
     )
 
     config = EngineArgs.from_cli_args(args).create_watermark_config()
 
     assert config is not None
-    assert config.algorithm == "gumbel"
+    assert config.algorithm == "dual_key_gumbel"
     assert config.key == 42
+    assert config.alpha == 0.25
     assert config.context_width == 4
+    assert config.deduplicate_contexts == "single_turn"
+    assert config.deduplicate_contexts_max_history == 8192
     assert config.prf == "philox"
-    assert not config.supports_speculative_decoding
+    assert config.allow_target_only_watermarking
+
+    args = parser.parse_args(
+        [
+            "--model",
+            "dummy",
+            "--watermark-config",
+            '{"key":42,"deduplicate_contexts":"none",'
+            '"deduplicate_contexts_max_history":32}',
+        ]
+    )
+    config = EngineArgs.from_cli_args(args).create_watermark_config()
+
+    assert config is not None
+    assert config.deduplicate_contexts == "none"
+    assert config.deduplicate_contexts_max_history == 32
 
 
 @pytest.mark.parametrize(
     "options",
     [
-        ["--engram-config", '{"cpu_offload": false, "embedding_across_dp": true}'],
+        [
+            "--engram-config",
+            '{"cpu_offload": false, "embedding_across_dp": true}',
+        ],
         [
             "--engram-config.cpu_offload",
             "false",
@@ -79,9 +101,8 @@ def test_watermark_config_cli():
         ],
     ],
 )
-def test_engram_config_cli(options, monkeypatch):
-    """CLI settings take precedence over the legacy offload environment."""
-    monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", "1")
+def test_engram_config_cli(options):
+    """JSON and dotted CLI options independently control Engram settings."""
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = EngineArgs.from_cli_args(parser.parse_args(options))
     assert args.engram_config is not None
@@ -90,14 +111,26 @@ def test_engram_config_cli(options, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "options, provided",
-    [([], False), (["--engram-config", "{}"], True)],
+    "options,provided,dp_shared_memory",
+    [
+        ([], False, False),
+        (["--engram-config", "{}"], True, False),
+        (
+            ["--engram-config", '{"dp_shared_memory": true}'],
+            True,
+            True,
+        ),
+        (["--engram-config.dp_shared_memory", "true"], True, True),
+    ],
 )
-def test_engram_config_cli_optional(options, provided):
-    """An explicit empty config must remain distinct from an omitted config."""
+def test_engram_config_cli_optional(options, provided, dp_shared_memory):
+    """Explicit configs honor defaults and the JSON/dotted DP shared-memory flag."""
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = EngineArgs.from_cli_args(parser.parse_args(options))
     assert (args.engram_config is not None) == provided
+    if provided:
+        assert args.engram_config.cpu_offload is True
+        assert args.engram_config.dp_shared_memory is dp_shared_memory
 
 
 @pytest.mark.parametrize(

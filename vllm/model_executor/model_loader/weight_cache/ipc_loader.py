@@ -119,9 +119,9 @@ class IpcModelLoader(BaseModelLoader):
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
-        # Unsupported quantization is a permanent misconfiguration rather than a
-        # transient daemon outage, so it is raised even when fallback is on.
-        self._check_supported(vllm_config, model_config)
+        # An unsupported platform is a permanent misconfiguration rather than
+        # a transient daemon outage, so it is raised even when fallback is on.
+        check_ipc_platform_support()
         state_fetched = False
         try:
             entries, aliases = self._fetch_entries(model_config)
@@ -135,6 +135,11 @@ class IpcModelLoader(BaseModelLoader):
             logger.warning(
                 "Weight cache unusable (%s); falling back to disk loading", e
             )
+        except UnsupportedQuantForIPCError:
+            # Unsupported quantization is a permanent misconfiguration rather
+            # than a transient daemon outage, so it is raised even when
+            # fallback is on.
+            raise
         except Exception:
             if not self.fallback:
                 raise
@@ -176,6 +181,7 @@ class IpcModelLoader(BaseModelLoader):
                     model_config=model_config,
                     prefix=prefix,
                 )
+            check_ipc_quant_support(model)
             self._apply_entries(model, entries, aliases, device_index)
             # The daemon exports tensors that already went through
             # process_weights_after_loading; re-run it in pre-processed mode
@@ -196,22 +202,6 @@ class IpcModelLoader(BaseModelLoader):
             self.mode,
         )
         return model.eval()
-
-    @staticmethod
-    def _check_supported(vllm_config: VllmConfig, model_config: ModelConfig) -> None:
-        check_ipc_platform_support(where="engine")
-        check_ipc_quant_support(model_config, where="engine")
-        cache_dtype = vllm_config.cache_config.cache_dtype
-        if cache_dtype != "auto" and not str(cache_dtype).startswith("fp8"):
-            # BaseKVCacheMethod.process_weights_after_loading turns the loaded
-            # k/v scale parameters into plain float attributes. For fp8 cache
-            # dtypes those are rebuilt from the exported scale buffers when
-            # process_weights_after_loading runs in pre-processed mode; other
-            # quantized cache dtypes are not verified.
-            raise UnsupportedQuantForIPCError(
-                f"[weight_cache:engine] kv cache dtype {cache_dtype!r} is not "
-                "supported by the weight cache; use --kv-cache-dtype auto."
-            )
 
     def _apply_entries(
         self,
