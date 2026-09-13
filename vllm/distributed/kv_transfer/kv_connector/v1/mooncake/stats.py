@@ -8,12 +8,14 @@ from typing import Any
 
 import numpy as np
 
+from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
     KVConnectorStats,
+    PromMetric,
+    PromMetricT,
 )
-
-# TODO(mooncake-stats): add MooncakePromMetrics (mirror NixlPromMetrics)
-# and wire it via MooncakeConnector.build_prom_metrics in a follow-up PR.
+from vllm.v1.metrics.utils import create_metric_per_engine
 
 
 @dataclass
@@ -144,3 +146,140 @@ class MooncakeKVConnectorStats(KVConnectorStats):
     @property
     def num_successful_transfers(self) -> int:
         return len(self.data["transfer_duration"])
+
+
+class MooncakePromMetrics(KVConnectorPromMetrics):
+    """Prometheus metrics for Mooncake KV transfer."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ):
+        super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
+
+        buckets = [
+            0.001,
+            0.005,
+            0.01,
+            0.025,
+            0.05,
+            0.075,
+            0.1,
+            0.2,
+            0.3,
+            0.5,
+            0.75,
+            1.0,
+            5.0,
+        ]
+        mooncake_histogram_xfer_time = self._histogram_cls(
+            name="vllm:mooncake_xfer_time_seconds",
+            documentation=(
+                "Histogram of transfer duration for Mooncake"
+                " KV Cache transfers."
+            ),
+            buckets=buckets[1:],
+            labelnames=labelnames,
+        )
+        self.mooncake_histogram_xfer_time = create_metric_per_engine(
+            mooncake_histogram_xfer_time, self.per_engine_labelvalues
+        )
+        buckets = [2 ** (10 + i) for i in range(1, 25, 2)]
+        mooncake_histogram_bytes_transferred = self._histogram_cls(
+            name="vllm:mooncake_bytes_transferred",
+            documentation=(
+                "Histogram of bytes transferred per Mooncake"
+                " KV Cache transfer."
+            ),
+            buckets=buckets,
+            labelnames=labelnames,
+        )
+        self.mooncake_histogram_bytes_transferred = create_metric_per_engine(
+            mooncake_histogram_bytes_transferred, self.per_engine_labelvalues
+        )
+        buckets = [
+            10,
+            20,
+            30,
+            50,
+            75,
+            100,
+            200,
+            400,
+            1000,
+            2000,
+            4000,
+            10000,
+            20000,
+            50000,
+        ]
+        mooncake_histogram_num_descriptors = self._histogram_cls(
+            name="vllm:mooncake_num_descriptors",
+            documentation=(
+                "Histogram of number of descriptors per Mooncake"
+                " KV Cache transfer."
+            ),
+            buckets=buckets,
+            labelnames=labelnames,
+        )
+        self.mooncake_histogram_num_descriptors = create_metric_per_engine(
+            mooncake_histogram_num_descriptors, self.per_engine_labelvalues
+        )
+        counter_mooncake_num_failed_transfers = self._counter_cls(
+            name="vllm:mooncake_num_failed_transfers",
+            documentation="Number of failed Mooncake KV Cache transfers.",
+            labelnames=labelnames,
+        )
+        self.counter_mooncake_num_failed_transfers = create_metric_per_engine(
+            counter_mooncake_num_failed_transfers, self.per_engine_labelvalues
+        )
+        counter_mooncake_num_failed_recvs = self._counter_cls(
+            name="vllm:mooncake_num_failed_recvs",
+            documentation="Number of failed Mooncake KV Cache receives.",
+            labelnames=labelnames,
+        )
+        self.counter_mooncake_num_failed_recvs = create_metric_per_engine(
+            counter_mooncake_num_failed_recvs, self.per_engine_labelvalues
+        )
+        counter_mooncake_num_kv_expired_reqs = self._counter_cls(
+            name="vllm:mooncake_num_kv_expired_reqs",
+            documentation="Number of requests that had their KV expire. "
+            "NOTE: This metric is tracked on the P instance.",
+            labelnames=labelnames,
+        )
+        self.counter_mooncake_num_kv_expired_reqs = create_metric_per_engine(
+            counter_mooncake_num_kv_expired_reqs, self.per_engine_labelvalues
+        )
+
+    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+        for prom_obj, list_item_key in zip(
+            [
+                self.mooncake_histogram_xfer_time,
+                self.mooncake_histogram_bytes_transferred,
+                self.mooncake_histogram_num_descriptors,
+            ],
+            [
+                "transfer_duration",
+                "bytes_transferred",
+                "num_descriptors",
+            ],
+        ):
+            for list_item in transfer_stats_data[list_item_key]:
+                prom_obj[engine_idx].observe(list_item)
+        for counter_obj, counter_item_key in zip(
+            [
+                self.counter_mooncake_num_failed_transfers,
+                self.counter_mooncake_num_failed_recvs,
+                self.counter_mooncake_num_kv_expired_reqs,
+            ],
+            [
+                "num_failed_transfers",
+                "num_failed_recvs",
+                "num_kv_expired_reqs",
+            ],
+        ):
+            for list_item in transfer_stats_data[counter_item_key]:
+                counter_obj[engine_idx].inc(list_item)
