@@ -227,6 +227,113 @@ def prune(
     )
 
 
+@app.function(
+    image=image,
+    gpu=GPU,
+    timeout=TIMEOUT_S,
+    volumes={"/cache/hf": hf_cache, "/artifacts": artifacts},
+    secrets=HF_SECRETS,
+)
+def evaluate(
+    model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    tasks: str = "openbookqa",
+    num_fewshot: int = 0,
+    limit: int = 0,
+    gpu_memory_utilization: float = 0.85,
+    max_model_len: int = 4096,
+    # Qwen3 non-thinking defaults from the model card. Only affect *generative*
+    # tasks (humaneval, gsm8k); multiple-choice tasks such as openbookqa,
+    # arc_challenge and winogrande are scored by loglikelihood over the
+    # candidate answers and never sample.
+    temperature: float = 0.7,
+    top_p: float = 0.8,
+    top_k: int = 20,
+    min_p: float = 0.0,
+) -> str:
+    """Run lm-eval tasks against a model, in-process via vLLM."""
+    import json
+
+    # Two independent gates gate code execution, and satisfying one is not
+    # enough. `confirm_run_unsafe_code=True` below is lm-eval's; this is
+    # HuggingFace `evaluate`'s, checked inside the `code_eval` metric
+    # (`if os.getenv("HF_ALLOW_CODE_EVAL", 0) != "1": raise ValueError`).
+    # humaneval's utils.py invokes that metric at *import* time, so without
+    # this the whole run dies while building the task dict -- taking the
+    # multiple-choice tasks down with it.
+    os.environ["HF_ALLOW_CODE_EVAL"] = "1"
+
+    from lm_eval import evaluator
+    from lm_eval.tasks import get_task_dict
+    from lm_eval.utils import make_table
+
+    task_list = [t.strip() for t in tasks.split(",") if t.strip()]
+    print(f"[eval] {model} | tasks={task_list} | {num_fewshot}-shot", flush=True)
+
+    # Preflight the task configs before the model loads. simple_evaluate
+    # constructs the LM *first* and only then calls get_task_dict, so a bad
+    # task name or an ungated metric otherwise costs a full ~5 min weight load
+    # before it reports. Resolving the dict here fails in seconds instead.
+    get_task_dict(task_list)
+    print(f"[eval] {len(task_list)} task config(s) resolved", flush=True)
+
+    model_args = {
+        "pretrained": model,
+        "gpu_memory_utilization": gpu_memory_utilization,
+        "max_model_len": max_model_len,
+        "trust_remote_code": True,
+        "dtype": "bfloat16",
+    }
+    # do_sample=True is load-bearing, not decoration. lm-eval merges this
+    # string into each task's own `generation_kwargs` rather than replacing
+    # it, and `humaneval.yaml` ships `do_sample: false`. The vLLM backend's
+    # modify_gen_kwargs() then does
+    #     if do_sample is False or "temperature" not in kwargs:
+    #         kwargs["temperature"] = 0.0
+    # so without this the four sampling flags below are silently discarded and
+    # the run is greedy.
+    gen_kwargs = ",".join(
+        [
+            "do_sample=True",
+            f"temperature={temperature}",
+            f"top_p={top_p}",
+            f"top_k={top_k}",
+            f"min_p={min_p}",
+        ]
+    )
+    results = evaluator.simple_evaluate(
+        model="vllm",
+        model_args=model_args,
+        tasks=task_list,
+        num_fewshot=num_fewshot,
+        limit=limit or None,
+        batch_size="auto",
+        gen_kwargs=gen_kwargs,
+        apply_chat_template=False,
+        # humaneval declares `unsafe_code: true` -- it scores by exec()ing the
+        # model's completion against the reference tests. lm-eval refuses to
+        # run such a task without explicit opt-in. Safe here because the whole
+        # run is inside a disposable Modal container.
+        confirm_run_unsafe_code=True,
+        random_seed=42,
+        numpy_random_seed=42,
+        torch_random_seed=42,
+    )
+
+    table = make_table(results)
+    print(table, flush=True)
+
+    label = model.rstrip("/").split("/")[-1]
+    out = f"/artifacts/evals/{label}"
+    os.makedirs(out, exist_ok=True)
+    name = "-".join(task_list)[:60]
+    with open(f"{out}/{name}.json", "w") as handle:
+        json.dump(results.get("results", results), handle, indent=2, default=str)
+    with open(f"{out}/{name}.txt", "w") as handle:
+        handle.write(f"{model}\ntasks={task_list} {num_fewshot}-shot\n\n{table}\n")
+    artifacts.commit()
+    return f"{model}\n{table}\n\nsaved to {out}/{name}.{{json,txt}}"
+
+
 @app.local_entrypoint()
 def main(
     model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507",

@@ -5,3 +5,4 @@ __pycache__/
 .coverage
 patches/
 reap/
+speculators/
