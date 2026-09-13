@@ -60,7 +60,11 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch, hisparse) -> No
                 )
             ]
 
-        monkeypatch.setattr(hisparse_binding, "HiSparseHostPool", lambda: host_pool)
+        monkeypatch.setattr(
+            hisparse_binding,
+            "HiSparseHostPool",
+            lambda vllm_config, kv_cache_config: host_pool,
+        )
         monkeypatch.setattr(hisparse_binding, "allocate_hisparse_kv_caches", allocate)
         monkeypatch.setattr(hisparse_binding, "bind_hisparse_kv_caches", bind_hisparse)
 
