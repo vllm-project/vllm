@@ -613,7 +613,14 @@ def make_nvfp4_moe_kernel(
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     extra_kwargs = {}
-    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM and per_token_activation:
+    if (
+        backend
+        in (
+            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        )
+        and per_token_activation
+    ):
         extra_kwargs["per_token_activation"] = True
 
     # Create Experts.

@@ -36,6 +36,7 @@ except json.JSONDecodeError:
 DEFAULT_ENV_VAR_PREFIXES: set[str] = {
     "VLLM_",
     "FLASH_ATTENTION_",
+    "FLASHINFER_",
     "LMCACHE_",
     "NCCL_",
     "UCX_",
