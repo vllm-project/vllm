@@ -9,7 +9,7 @@ group index means for any ``WeightSource``, not just this transport.
 """
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -75,6 +75,36 @@ def check_ray_rdt_version() -> None:
             f"set_target_for_ref) needs at least 2.55. Found {current}. "
             f"Run `pip install -U 'ray>={required}'`."
         )
+
+
+def initialize_ray_nixl() -> None:
+    """Initialize Ray's process-local NIXL agent with the ROCm package."""
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        return
+
+    import ray
+    from ray.experimental.rdt.nixl_tensor_transport import NixlTensorTransport
+    from ray.experimental.rdt.util import get_tensor_transport_manager
+
+    transport = cast(NixlTensorTransport, get_tensor_transport_manager("NIXL"))
+    if transport._nixl_agent is not None:
+        return
+
+    from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
+
+    if NixlWrapper is None or nixl_agent_config is None:
+        raise ImportError("Sharded RDT on ROCm requires the nixl_rocm package")
+
+    actor_id = ray.get_runtime_context().get_actor_id()
+    if actor_id is None:
+        import uuid
+
+        actor_id = f"RAY-DRIVER-{uuid.uuid4()}"
+    # Ray imports nixl._api when creating its agent. Populate the same cache
+    # with the ROCm implementation before any registration or transfer.
+    transport._nixl_agent = NixlWrapper(actor_id, nixl_agent_config(backends=["UCX"]))
 
 
 def assign_producer_indices(

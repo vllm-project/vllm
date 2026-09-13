@@ -24,6 +24,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -31,6 +33,7 @@ import torch
 import vllm.distributed.weight_transfer.sharded_rdt_trainer as trainer_mod
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     buffer_alloc_bytes,
+    initialize_ray_nixl,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
     DEFAULT_GATHER_LOOKAHEAD,
@@ -43,6 +46,77 @@ from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
 GI_A, GI_B = 0, 1
 GROUP_A = ("model.layers.0.w", "model.layers.0.b")
 GROUP_B = ("model.layers.1.w",)
+
+
+@pytest.fixture
+def ray_nixl_transport(monkeypatch):
+    import ray
+    from ray.experimental.rdt import util
+    from ray.experimental.rdt.nixl_tensor_transport import NixlTensorTransport
+
+    from vllm.distributed import nixl_utils
+    from vllm.platforms import current_platform
+
+    transport = NixlTensorTransport()
+    agent = Mock(return_value=object())
+    config = Mock(return_value=object())
+    monkeypatch.setattr(util, "transport_managers", {"NIXL": transport})
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(
+        ray,
+        "get_runtime_context",
+        lambda: SimpleNamespace(get_actor_id=lambda: "rdt-actor"),
+    )
+    # Bypass lazy imports so these tests need neither NIXL nor a GPU.
+    monkeypatch.setitem(nixl_utils.__dict__, "NixlWrapper", agent)
+    monkeypatch.setitem(nixl_utils.__dict__, "nixl_agent_config", config)
+    return transport, agent, config
+
+
+@pytest.mark.parametrize("existing_agent", [False, True])
+def test_ray_reuses_rocm_nixl_agent(ray_nixl_transport, existing_agent):
+    """Ray's real accessor must reuse ROCm NIXL without importing CUDA NIXL."""
+    transport, agent, config = ray_nixl_transport
+    expected = object() if existing_agent else agent.return_value
+    if existing_agent:
+        transport._nixl_agent = expected
+
+    initialize_ray_nixl()
+    assert transport.get_nixl_agent() is expected
+    initialize_ray_nixl()
+    assert transport.get_nixl_agent() is expected
+    if existing_agent:
+        agent.assert_not_called()
+        config.assert_not_called()
+    else:
+        config.assert_called_once_with(backends=["UCX"])
+        agent.assert_called_once_with("rdt-actor", config.return_value)
+
+
+def test_ray_nixl_initialization_leaves_non_rocm_unchanged(
+    monkeypatch, ray_nixl_transport
+):
+    from vllm.platforms import current_platform
+
+    transport, agent, config = ray_nixl_transport
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    initialize_ray_nixl()
+    assert transport._nixl_agent is None
+    agent.assert_not_called()
+    config.assert_not_called()
+
+
+def test_ray_nixl_initialization_reports_missing_rocm_package(
+    monkeypatch, ray_nixl_transport
+):
+    from vllm.distributed import nixl_utils
+
+    transport, agent, _ = ray_nixl_transport
+    monkeypatch.setitem(nixl_utils.__dict__, "NixlWrapper", None)
+    with pytest.raises(ImportError, match="nixl_rocm"):
+        initialize_ray_nixl()
+    assert transport._nixl_agent is None
+    agent.assert_not_called()
 
 
 @pytest.fixture
