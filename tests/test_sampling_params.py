@@ -51,6 +51,17 @@ def test_non_diffusion_models_unaffected():
     params.verify(MockModelConfig(), None, None, None)
 
 
+def test_non_int_top_k_raises_validation_error_not_comparison_error():
+    """top_k's isinstance check must run before the `< -1` comparison.
+
+    Comparing a non-numeric top_k against -1 first raises a bare TypeError
+    ("'<' not supported between instances of 'str' and 'int'") that is not a
+    VLLMValidationError, so it never reaches the 4xx mapping.
+    """
+    with pytest.raises(VLLMValidationError, match="top_k must be an integer, got str"):
+        SamplingParams(top_k="bad")
+
+
 @pytest.mark.parametrize("value", [-(2**63) - 1, 2**64])
 def test_extra_args_rejects_nested_integer_overflow(value):
     """Reject extension values before they reach the engine transport."""
