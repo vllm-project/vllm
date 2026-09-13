@@ -27,17 +27,45 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.utils import get_num_attention_heads_from_layers
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
     has_native_kv_cache_layout,
+    reserve_splitkv_workspace,
 )
 from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout, KVQuantMode
 
 logger = init_logger(__name__)
+
+
+def _splitkv_workspace_support(
+    kv_cache_spec: AttentionSpec,
+    model_dtype: torch.dtype,
+    *,
+    is_e4m3_kv_cache: bool,
+    is_gfx1x: bool,
+    is_gfx12x: bool,
+) -> tuple[bool, bool]:
+    """Return ``(supported, is_fp8)`` for SplitKV scratch reservation.
+
+    FP8 cache specs use byte storage, so the caller supplies the concrete
+    encoding retained by the cache configuration.
+    """
+    native_kv_supported = (
+        kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+        and kv_cache_spec.dtype == model_dtype
+    )
+    fp8_kv_supported = (
+        kv_cache_spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+        and kv_cache_spec.dtype.itemsize == 1
+        and is_e4m3_kv_cache
+        and is_gfx12x
+    )
+    return is_gfx1x and (native_kv_supported or fp8_kv_supported), fp8_kv_supported
 
 
 @dataclass
@@ -88,11 +116,39 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         self.block_size = kv_cache_spec.block_size
 
         model_config = vllm_config.model_config
-        self.num_heads_q = model_config.get_num_attention_heads(
-            vllm_config.parallel_config
+        self.num_heads_q = get_num_attention_heads_from_layers(
+            vllm_config, layer_names
+        ) or model_config.get_num_attention_heads(vllm_config.parallel_config)
+        self.num_heads_kv = kv_cache_spec.num_kv_heads
+        self.headdim = kv_cache_spec.head_size
+
+        from vllm.platforms.rocm import on_gfx1x, on_gfx12x
+
+        splitkv_supported, fp8_kv_supported = _splitkv_workspace_support(
+            kv_cache_spec,
+            model_config.dtype,
+            is_e4m3_kv_cache=vllm_config.cache_config.cache_dtype
+            in ("fp8", "fp8_e4m3"),
+            is_gfx1x=on_gfx1x(),
+            is_gfx12x=on_gfx12x(),
         )
-        self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
-        self.headdim = model_config.get_head_size()
+
+        if (
+            splitkv_supported
+            and self.headdim in (128, 256)
+            and self.num_heads_kv > 0
+            and self.num_heads_q % self.num_heads_kv == 0
+            and self.num_heads_q // self.num_heads_kv <= 16
+        ):
+            reserve_splitkv_workspace(
+                vllm_config.scheduler_config.max_num_seqs,
+                self.num_heads_q,
+                self.num_heads_kv,
+                self.headdim,
+                self.block_size,
+                model_config.max_model_len,
+                allow_short_context=fp8_kv_supported,
+            )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata

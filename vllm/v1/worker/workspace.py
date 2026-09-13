@@ -140,6 +140,24 @@ class WorkspaceManager:
             for i in range(len(shapes_and_dtypes))
         ]
 
+    def _reserve_simultaneous(
+        self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
+    ) -> None:
+        """Pre-size the current lane for every DBO ubatch during initialization.
+
+        This must run before execution can retain workspace views. Resizing a
+        different active ubatch would otherwise invalidate its live views.
+        """
+        if self._locked:
+            raise RuntimeError("Workspace reservation is initialization-only.")
+        actual_bytes = [
+            _compute_bytes(shape, dtype) for shape, dtype in shapes_and_dtypes
+        ]
+        required_bytes = sum(round_up(actual, 256) for actual in actual_bytes)
+        lane = _workspace_lane.get()
+        for ubatch_id in range(self._num_ubatches):
+            self._ensure_workspace_slot_size(required_bytes, ubatch_id, lane)
+
     def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.
 
@@ -149,8 +167,13 @@ class WorkspaceManager:
         Returns:
             The current workspace tensor.
         """
-        ubatch_id = dbo_current_ubatch_id()
-        lane = _workspace_lane.get()
+        return self._ensure_workspace_slot_size(
+            required_bytes, dbo_current_ubatch_id(), _workspace_lane.get()
+        )
+
+    def _ensure_workspace_slot_size(
+        self, required_bytes: int, ubatch_id: int, lane: int
+    ) -> torch.Tensor:
         if lane >= self._num_lanes:
             raise RuntimeError(
                 f"Workspace lane {lane} is not configured; manager has "
