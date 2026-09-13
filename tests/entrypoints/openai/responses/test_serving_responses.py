@@ -1211,6 +1211,31 @@ def _make_serving_instance_with_reasoning():
     return serving
 
 
+def test_nonstreaming_parser_receives_prompt_token_ids():
+    serving = _make_serving_instance_with_reasoning()
+    parser = MagicMock()
+    parser.parse_with_prompt.return_value = (None, "Hello!", None)
+    completion = CompletionOutput(
+        index=0,
+        text="Hello!",
+        token_ids=[1],
+        cumulative_logprob=0.0,
+        logprobs=None,
+        finish_reason="stop",
+        stop_reason=None,
+    )
+
+    serving._make_response_output_items(
+        ResponsesRequest(input="hi", tools=[], stream=False),
+        completion,
+        MagicMock(),
+        parser=parser,
+        prompt_token_ids=[7, 8],
+    )
+
+    assert parser.parse_with_prompt.call_args.kwargs["prompt_token_ids"] == [7, 8]
+
+
 def _identity_increment(event):
     """Simple identity callable for _increment_sequence_number_and_return."""
     seq = getattr(_identity_increment, "_counter", 0)

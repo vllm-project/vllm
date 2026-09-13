@@ -198,6 +198,15 @@ class ReasoningParser:
         """
         return
 
+    def reasoning_ended_in_prompt(self, prompt_token_ids: Sequence[int]) -> bool:
+        """Return whether generated output should start as content.
+
+        This is separate from :meth:`is_reasoning_end` because not every
+        parser can distinguish current-turn markers from reasoning in the
+        conversation history.
+        """
+        return False
+
     def prepare_structured_tag(
         self,
         original_tag: str | None,

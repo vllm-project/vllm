@@ -265,10 +265,11 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     logprobs = None
 
                 if parser is not None:
-                    reasoning, content, _ = parser.parse(
+                    reasoning, content, _ = parser.parse_with_prompt(
                         output.text,
                         request=request,  # type: ignore[arg-type]
                         model_output_token_ids=output.token_ids,
+                        prompt_token_ids=final_res.prompt_token_ids,
                     )
                     if not request.include_reasoning:
                         reasoning = None

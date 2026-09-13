@@ -31,6 +31,12 @@ _IM_START_ID = 70
 _IM_END_ID = 71
 _TEXT_ID = 100
 
+_CLOSED_THINK_PROMPT_IDS = [
+    _IM_START_ID,
+    _THINK_START_ID,
+    _THINK_END_ID,
+]
+
 _QWEN3_VOCAB = {
     "<think>": _THINK_START_ID,
     "</think>": _THINK_END_ID,
@@ -57,6 +63,43 @@ def parser(mock_tokenizer):
 
 
 class TestNonStreaming:
+    def test_closed_think_in_prompt_routes_output_to_content(
+        self, parser, mock_request
+    ):
+        reasoning, content, tool_calls = parser.parse_with_prompt(
+            "The answer is 42.",
+            mock_request,
+            model_output_token_ids=[_TEXT_ID],
+            prompt_token_ids=_CLOSED_THINK_PROMPT_IDS,
+        )
+
+        assert reasoning is None
+        assert content == "The answer is 42."
+        assert tool_calls is None
+        assert parser.count_reasoning_tokens([_TEXT_ID]) == 0
+
+    @pytest.mark.parametrize(
+        "prompt_token_ids",
+        [
+            [_IM_START_ID, _THINK_END_ID, _IM_END_ID, _IM_START_ID],
+            [_IM_START_ID, _TOOL_CALL_ID],
+        ],
+    )
+    def test_prompt_without_current_think_end_keeps_output_as_reasoning(
+        self, parser, mock_request, prompt_token_ids
+    ):
+        reasoning, content, tool_calls = parser.parse_with_prompt(
+            "Still thinking.",
+            mock_request,
+            model_output_token_ids=[_TEXT_ID],
+            prompt_token_ids=prompt_token_ids,
+        )
+
+        assert reasoning == "Still thinking."
+        assert content is None
+        assert tool_calls is None
+        assert parser.count_reasoning_tokens([_TEXT_ID]) == 1
+
     def test_reasoning_then_content(self, parser):
         text = "<think>Let me analyze.</think>The answer is 42."
         reasoning, content = parser.extract_reasoning(text, None)
@@ -276,6 +319,23 @@ class TestIsReasoningEndTurnBoundaries:
 
 
 class TestDelegatingPromptDetection:
+    def test_closed_think_in_prompt_routes_non_streaming_output_to_content(
+        self, mock_tokenizer, mock_request
+    ):
+        parser = _Qwen3DelegatingParser(mock_tokenizer)
+
+        reasoning, content, tool_calls = parser.parse_with_prompt(
+            "The answer is 42.",
+            mock_request,
+            model_output_token_ids=[_TEXT_ID],
+            prompt_token_ids=_CLOSED_THINK_PROMPT_IDS,
+        )
+
+        assert reasoning is None
+        assert content == "The answer is 42."
+        assert tool_calls == []
+        assert parser.count_reasoning_tokens([_TEXT_ID]) == 0
+
     def test_prompt_tool_example_does_not_skip_streaming_reasoning(
         self, mock_tokenizer, mock_request
     ):
@@ -343,9 +403,35 @@ class TestDelegatingPromptDetection:
         assert delta is not None
         assert delta.reasoning is None
         assert delta.content == "answer"
+        assert parser.count_reasoning_tokens([_TEXT_ID]) == 0
+
+        parser.parse_delta(
+            "",
+            [_IM_END_ID],
+            mock_request,
+            prompt_token_ids=prompt_ids,
+            finished=True,
+        )
+        assert parser.count_reasoning_tokens([_TEXT_ID, _IM_END_ID]) == 0
 
 
 class TestStreaming:
+    def test_closed_think_in_prompt_routes_output_to_content(
+        self, parser, mock_request
+    ):
+        delta = parser.parse_delta(
+            "The answer is 42.",
+            [_TEXT_ID],
+            mock_request,
+            prompt_token_ids=_CLOSED_THINK_PROMPT_IDS,
+            finished=False,
+        )
+
+        assert delta is not None
+        assert delta.reasoning is None
+        assert delta.content == "The answer is 42."
+        assert parser.count_reasoning_tokens([_TEXT_ID]) == 0
+
     def test_basic_streaming(self, parser):
         reasoning, content = simulate_reasoning_streaming(
             parser,

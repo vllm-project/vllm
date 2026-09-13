@@ -756,6 +756,34 @@ async def test_chat_per_request_metrics_follow_server_flag():
 
 
 @pytest.mark.asyncio
+async def test_nonstreaming_parser_receives_prompt_token_ids():
+    serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=False)
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        stream=False,
+    )
+    request_output = _make_metrics_request_output()
+    parser = MagicMock()
+    parser.parse_with_prompt.return_value = (None, "Hello", None)
+    parser.count_reasoning_tokens.return_value = 0
+
+    await serving.chat_completion_full_generator(
+        request,
+        _single_request_output(request_output),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=[{"role": "user", "content": "Test"}],
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+        parser=parser,
+    )
+
+    assert parser.parse_with_prompt.call_args.kwargs["prompt_token_ids"] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
 async def test_chat_per_request_metrics_suppressed_for_n_greater_than_one():
     serving = _build_minimal_metrics_serving_chat(enable_per_request_metrics=True)
     response = await serving.chat_completion_full_generator(

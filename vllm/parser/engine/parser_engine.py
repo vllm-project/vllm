@@ -202,6 +202,11 @@ class ParserEngine(Parser):
         """See :meth:`ReasoningParser.adjust_initial_state_from_prompt`."""
         return
 
+    def _initial_state_from_prompt(
+        self, prompt_token_ids: Sequence[int]
+    ) -> ParserState | None:
+        return None
+
     def finish_streaming(self) -> DeltaMessage | None:
         events = self._engine.finish()
         if events or self._deferred_content:
@@ -454,10 +459,14 @@ class ParserEngine(Parser):
     ) -> DeltaMessage | None:
         self._initialize_history_tool_call_cnt(request)
         if not self._prompt_streaming_prepared and prompt_token_ids is not None:
-            # NOTE: call the hook BEFORE setting the flag, because the hook
-            # may invoke ``_reset`` (e.g. via ``initialize_streaming``) which
-            # clears ``_prompt_streaming_prepared``.
-            self.adjust_initial_state_from_prompt(prompt_token_ids)
+            initial_state = self._initial_state_from_prompt(prompt_token_ids)
+            if initial_state is None:
+                # NOTE: call the hook BEFORE setting the flag, because the hook
+                # may invoke ``_reset`` (e.g. via ``initialize_streaming``) which
+                # clears ``_prompt_streaming_prepared``.
+                self.adjust_initial_state_from_prompt(prompt_token_ids)
+            else:
+                self.initialize_streaming(initial_state=initial_state)
             self._prompt_streaming_prepared = True
         self._check_skip_tool_parsing(request)
         events = self._feed(delta_text, delta_token_ids)
@@ -727,11 +736,45 @@ class ParserEngine(Parser):
         enable_auto_tools: bool = False,
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        return self._parse_complete_output(
+            model_output,
+            request,
+            model_output_token_ids,
+        )
+
+    def parse_with_prompt(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        enable_auto_tools: bool = False,
+        model_output_token_ids: Sequence[int] = (),
+        prompt_token_ids: Sequence[int] | None = None,
+    ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        initial_state = (
+            self._initial_state_from_prompt(prompt_token_ids)
+            if prompt_token_ids is not None
+            else None
+        )
+        return self._parse_complete_output(
+            model_output,
+            request,
+            model_output_token_ids,
+            initial_state=initial_state,
+        )
+
+    def _parse_complete_output(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        model_output_token_ids: Sequence[int],
+        initial_state: ParserState | None = None,
+    ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         self._initialize_history_tool_call_cnt(request)
         self._check_skip_tool_parsing(request)
         reasoning, content, tool_call_info = self._single_pass_parse(
             model_output,
             model_output_token_ids,
+            initial_state=initial_state,
         )
 
         tool_calls: list[FunctionCall] | None = None
