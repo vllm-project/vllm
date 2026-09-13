@@ -173,6 +173,13 @@ FusedMoEExpertsModular performs the core of the fused MoE operations. The variou
 `FusedMoEExpertsModular::finalize_weight_and_reduce_impl` /
 `FusedMoEExpertsModular::apply`: Refer to `FusedMoEExpertsModular` section above.
 
+An out-of-tree FP8 implementation can register its `FusedMoEExperts` class with
+`register_fp8_moe_backend()` from a `vllm.general_plugins` entry point. The
+registration selects only the experts component: vLLM continues to construct
+the router and the compatible `FusedMoEPrepareAndFinalize` implementation.
+Registered implementations receive canonical vLLM FP8 MoE weights and declare
+their deployment compatibility through `is_supported_config()`.
+
 ### FusedMoEModularKernel Initialization
 
 `FusedMoEMethodBase` class has 3 methods that are collectively responsible in creating the `FusedMoEModularKernel` object. They are,
