@@ -195,7 +195,8 @@ def benchmark_config(
         end_event.record()
         end_event.synchronize()
         latencies.append(start_event.elapsed_time(end_event))
-    avg = sum(latencies) / (num_iters * 10) * 1000  # us
+    # Each measured interval contains one kernel invocation.
+    avg = sum(latencies) / num_iters * 1000  # ms -> us
     return avg
 
 
