@@ -15,7 +15,10 @@ from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.base_loader import (
+    BaseModelLoader,
+    _has_online_quant,
+)
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_local_expert_ids,
 )
@@ -74,6 +77,7 @@ class DefaultModelLoader(BaseModelLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         self.local_expert_ids: set[int] | None = None
+        self.params_materialize_during_load = False
 
         extra_config = load_config.model_loader_extra_config
         if not isinstance(extra_config, dict):
@@ -268,6 +272,7 @@ class DefaultModelLoader(BaseModelLoader):
                 weights_iterator = fastsafetensors_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
+                    accumulate_resident=self.params_materialize_during_load,
                 )
             elif self.load_config.load_format == "instanttensor":
                 weights_iterator = instanttensor_weights_iterator(
@@ -423,6 +428,16 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.safetensors_load_strategy = "torchao"
 
         self._init_ep_weight_filter(model_config)
+
+        # Every quant method reachable from this loader creates its parameters
+        # in create_weights at model-init time, so the load only copies into
+        # memory that is already allocated. uses_meta_device marks the sole
+        # exception -- parameters left on meta and materialized during the
+        # load -- which is what _has_online_quant detects. The fastsafetensors
+        # fit planner reads this to decide whether device memory grows across
+        # the iteration; a future quant method that materializes during the
+        # load without setting uses_meta_device would be charged no residency.
+        self.params_materialize_during_load = _has_online_quant(model)
 
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
 
