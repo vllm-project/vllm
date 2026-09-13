@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from copy import deepcopy
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import regex as re
@@ -11,6 +13,7 @@ from pydantic import TypeAdapter
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
+from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
 from vllm.tool_parsers.utils import (
     find_tool_properties,
@@ -65,6 +68,21 @@ EXAMPLE_TOOLS = [
         "strict": True,
     },
 ]
+
+
+class _FakeTokenizer(TokenizerLike):
+    @classmethod
+    def from_pretrained(
+        cls,
+        path_or_repo_id: str | Path,
+        *args,
+        trust_remote_code: bool = False,
+        revision: str | None = None,
+        download_dir: str | None = None,
+        **kwargs,
+    ) -> "TokenizerLike":
+        raise MagicMock()
+
 
 
 def _compile_and_check(
@@ -295,6 +313,7 @@ def _collect_required_tool_streaming_json(output_json: str, delta_len: int) -> s
             function_name_returned=function_name_returned,
             tool_call_idx=None,
             tool_call_id_type="random",
+            tokenizer=_FakeTokenizer.from_pretrained("fake/fake_model"),
         )
 
         if delta_message:
