@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
+from concurrent.futures import InvalidStateError as FutureInvalidStateError
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.queues import Queue
@@ -844,11 +845,27 @@ class MPClient(EngineCoreClient):
                 assert response.dp_stats_address == self.stats_update_address
 
 
+def _fail_pending_utility_calls(
+    utility_results: dict[int, AnyFuture], error: Exception
+) -> None:
+    while True:
+        try:
+            _, future = utility_results.popitem()
+        except KeyError:
+            return
+        # A caller may have cancelled or already completed its future.
+        with contextlib.suppress(asyncio.InvalidStateError, FutureInvalidStateError):
+            future.set_exception(error)
+
+
 def _process_utility_output(
     output: UtilityOutput, utility_results: dict[int, AnyFuture]
 ):
     """Set the result from a utility method in the waiting future."""
-    future = utility_results.pop(output.call_id)
+    future = utility_results.pop(output.call_id, None)
+    if future is None:
+        # The call may have been cancelled or failed during receiver cleanup.
+        return
     failure_message = output.failure_message
     try:
         if failure_message is not None:
@@ -903,6 +920,7 @@ class SyncMPClient(MPClient):
         def process_outputs_socket():
             assert isinstance(out_socket, zmq.Socket)
             shutdown_socket = ctx.socket(zmq.PAIR)
+            error: Exception = EngineDeadError()
             try:
                 shutdown_socket.bind(shutdown_path)
                 poller = zmq.Poller()
@@ -924,8 +942,11 @@ class SyncMPClient(MPClient):
                     else:
                         outputs_queue.put_nowait(outputs)
             except Exception as e:
+                error = e
                 outputs_queue.put_nowait(e)
             finally:
+                resources.engine_dead = True
+                _fail_pending_utility_calls(utility_results, error)
                 # Close sockets.
                 shutdown_socket.close(linger=0)
                 out_socket.close(linger=0)
@@ -966,9 +987,11 @@ class SyncMPClient(MPClient):
         call_id = uuid.uuid1().int >> 64
         future: Future[Any] = Future()
         self.utility_results[call_id] = future
-        self._send_input(EngineCoreRequestType.UTILITY, (0, call_id, method, args))
-
-        return future.result()
+        try:
+            self._send_input(EngineCoreRequestType.UTILITY, (0, call_id, method, args))
+            return future.result()
+        finally:
+            self.utility_results.pop(call_id, None)
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.call_utility("get_supported_tasks")
@@ -1109,6 +1132,7 @@ class AsyncMPClient(MPClient):
         ) = getattr(self.__class__, "eep_process_engine_core_notification", None)
 
         async def process_outputs_socket():
+            error: Exception = EngineDeadError()
             try:
                 while True:
                     frames = await output_socket.recv_multipart(copy=False)
@@ -1156,13 +1180,26 @@ class AsyncMPClient(MPClient):
                     if outputs.outputs or outputs.scheduler_stats:
                         outputs_queue.put_nowait(outputs)
             except Exception as e:
+                error = e
                 outputs_queue.put_nowait(e)
             except asyncio.CancelledError:
-                outputs_queue.put_nowait(EngineDeadError())
+                outputs_queue.put_nowait(error)
+            finally:
+                resources.engine_dead = True
+                _fail_pending_utility_calls(utility_results, error)
+
+        def on_output_queue_done(task: asyncio.Task) -> None:
+            # A task cancelled before its first step never enters the finally block.
+            if task.cancelled():
+                resources.engine_dead = True
+                error = EngineDeadError()
+                outputs_queue.put_nowait(error)
+                _fail_pending_utility_calls(utility_results, error)
 
         resources.output_queue_task = asyncio.create_task(
             process_outputs_socket(), name="EngineCoreOutputQueueTask"
         )
+        resources.output_queue_task.add_done_callback(on_output_queue_done)
 
     async def get_output_async(self) -> EngineCoreOutputs:
         self._ensure_output_queue_task()
@@ -1205,13 +1242,17 @@ class AsyncMPClient(MPClient):
         call_id = uuid.uuid1().int >> 64
         future = asyncio.get_running_loop().create_future()
         self.utility_results[call_id] = future
-        message = (
-            EngineCoreRequestType.UTILITY.value,
-            *self.encoder.encode((self.client_index, call_id, method, args)),
-        )
-        await self._send_input_message(message, engine)
-        self._ensure_output_queue_task()
-        return await future
+        try:
+            message = (
+                EngineCoreRequestType.UTILITY.value,
+                *self.encoder.encode((self.client_index, call_id, method, args)),
+            )
+            await self._send_input_message(message, engine)
+            self._ensure_output_queue_task()
+            return await future
+        finally:
+            self.utility_results.pop(call_id, None)
+            future.cancel()
 
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         return await self.call_utility_async("get_supported_tasks")
@@ -1865,9 +1906,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             await asyncio.gather(*finish_futures)
             await wait_future
             self._wait_for_new_engine_ready(new_core_engines)
-        except Exception:
+        finally:
             wait_future.cancel()
-            raise
 
         self.core_engines.extend(new_core_engines)
         # Update the parallel config
@@ -1959,9 +1999,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             await self.first_req_send_socket.send(scale_down_marker)
             await wait_future
             await self.resume_scheduler_async()
-        except Exception:
+        finally:
             wait_future.cancel()
-            raise
 
         logger.info(
             "[Elastic EP] Scale down completed, new data parallel size: %s",
