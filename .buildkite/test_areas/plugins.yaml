@@ -75,6 +75,20 @@ steps:
   commands:
     - pip install "vllm-gguf-plugin >= 0.0.2"
     - pytest -v -s plugins_tests/gguf
+  mirror:
+    amd:
+      label: ":amd: (MI300) GGUF Plugin"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 45
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/layers/quantization
+      - tests/plugins_tests/test_gguf_plugin.py
+      - tests/plugins_tests/gguf
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 18GB) BitsAndBytes Plugin"
   key: bitsandbytes-plugin

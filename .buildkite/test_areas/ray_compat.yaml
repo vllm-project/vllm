@@ -16,3 +16,19 @@ steps:
   - setup.py
   commands:
   - bash /vllm-workspace/.buildkite/scripts/check-ray-compatibility.sh
+  mirror:
+    amd:
+      label: ":amd: (MI300) Ray Dependency Compatibility Check"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 25
+      working_dir: "/"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - .buildkite/scripts/check-ray-compatibility.sh
+      - requirements/
+      - setup.py
+      - vllm/platforms/rocm.py
+      commands:
+      - bash /vllm-workspace/.buildkite/scripts/check-ray-compatibility.sh

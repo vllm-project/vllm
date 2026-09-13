@@ -13,6 +13,22 @@ steps:
   commands:
     - pytest -v -s tests/ir
     - pytest -v -s tests/kernels/ir
+  mirror:
+    amd:
+      label: ":amd: (MI300) vLLM IR"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 50
+      working_dir: "/vllm-workspace/"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/ir/
+      - tests/kernels/ir/
+      - vllm/ir
+      - vllm/kernels
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H200 MIG 35GB) Core Operation Kernels Shard %N"
   device: h200_35gb
@@ -26,6 +42,29 @@ steps:
   commands:
     - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 3
+  mirror:
+    amd:
+      label: ":amd: (MI355) Core Operation Kernels Shard %N"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 40
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - tests/kernels/core
+      - tests/kernels/test_top_k_per_row.py
+      - tests/kernels/test_concat_mla_q.py
+      - tests/kernels/test_rocm_fp32_router_gemm.py
+      - vllm/model_executor/layers/fused_moe/router/gate_linear.py
+      - vllm/model_executor/layers/fused_moe/router/rocm_fp32_router_gemm.py
+      - vllm/model_executor/layers/rotary_embedding/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - tests/kernels/test_fused_qk_norm_rope_gate.py
+      commands:
+      - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_fused_qk_norm_rope_gate.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py kernels/test_rocm_fp32_router_gemm.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":nvidia: (H100) MiniMax Reduce RMS Kernels"
   key: kernels-minimax-reduce-rms-test-2-gpus
@@ -491,6 +530,25 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_deepep_deepgemm_moe.py
     - pytest -v -s kernels/moe/test_deepep_moe.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) DeepEP FP8 MoE Kernels"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 45
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/moe/
+      - csrc/quantization/w8a8/cutlass/moe/
+      - vllm/model_executor/layers/fused_moe/
+      - tests/kernels/moe/test_deepep_moe.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/envs.py
+      commands:
+      - pytest -v -s kernels/moe/test_deepep_moe.py
 
 - label: ":nvidia: (B200) FP4 MoE Kernels"
   key: kernels-fp4-moe-test-b200
@@ -520,7 +578,30 @@ steps:
   - vllm/config
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
-
+  mirror:
+    amd:
+      label: ":amd: (MI355) FusedMoE Layer Kernels"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 35
+      working_dir: "/vllm-workspace/tests"
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/moe/
+      - csrc/rocm/
+      - tests/kernels/moe
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/model_executor/layers/quantization/
+      - vllm/distributed/
+      - vllm/config/
+      - vllm/forward_context.py
+      - vllm/v1/worker/workspace.py
+      - vllm/utils/import_utils.py
+      - vllm/utils/math_utils.py
+      - vllm/utils/torch_utils.py
+      - vllm/platforms/
+      - vllm/_aiter_ops.py
 
 - label: ":nvidia: (B200) FusedMoE Layer Kernels"
   key: kernels-fusedmoe-layer-test-2-b200s
