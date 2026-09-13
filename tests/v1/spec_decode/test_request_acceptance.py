@@ -13,6 +13,7 @@ import pytest
 from vllm.outputs import CompletionOutput
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.metrics.stats import RequestSpecDecodeMetrics
+from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingStats
 
 
 def _metrics(pairs, num_spec_tokens=3, detailed=False):
@@ -27,6 +28,7 @@ def test_new_allocates_dense_histogram_of_k_plus_one():
     assert s.num_spec_tokens == 3
     assert s.histogram == [0, 0, 0, 0]
     assert s.num_draft_tokens == 0
+    assert s.num_committed_tokens == 0
     assert s.per_step_accepted == []
 
 
@@ -58,6 +60,7 @@ def test_to_dict_summary_omits_per_step_arrays():
         "acceptance_histogram": [1, 1, 1, 2],  # dense, index j = step count
         "num_spec_steps": 5,
         "num_accepted_draft_tokens": 9,
+        "num_committed_tokens": 14,
         "num_draft_tokens": 15,
         "num_spec_tokens": 3,
     }
@@ -70,6 +73,21 @@ def test_to_dict_detailed_appends_per_step_arrays():
     # summary fields still present in detailed mode
     assert d["num_spec_steps"] == 3
     assert d["num_accepted_draft_tokens"] == 5
+    assert d["num_committed_tokens"] == 8
+
+
+def test_to_dict_uses_committed_tokens_for_terminal_eos_step():
+    s = RequestSpecDecodeMetrics.new(num_spec_tokens=5)
+    s.observe(
+        num_draft_tokens=5,
+        num_accepted=5,
+        num_committed_tokens=3,
+    )
+
+    d = s.to_dict()
+    assert d["mean_acceptance_length"] == pytest.approx(3.0)
+    assert d["num_accepted_draft_tokens"] == 5
+    assert d["num_committed_tokens"] == 3
 
 
 def test_to_dict_histogram_is_dense_list_indexed_by_j():
@@ -123,6 +141,7 @@ def test_engine_core_output_round_trips_spec_decode_metrics():
     decoded = decoder.decode(msgspec.msgpack.encode(out))
     assert decoded.spec_decode_metrics.histogram == [1, 0, 1, 1]
     assert decoded.spec_decode_metrics.num_draft_tokens == 9
+    assert decoded.spec_decode_metrics.num_committed_tokens == 8
     assert decoded.spec_decode_metrics.per_step_accepted == [0, 3, 2]
 
     without = EngineCoreOutput(request_id="r2", new_token_ids=[1])
@@ -148,3 +167,17 @@ def test_completion_output_carries_spec_decode_metrics():
     out = _completion_output(spec_decode_metrics=metrics)
     assert out.spec_decode_metrics is metrics
     assert _completion_output().spec_decode_metrics is None
+
+
+def test_logging_uses_committed_tokens_for_mean_acceptance_length():
+    stats = SpecDecodingStats.new(num_spec_tokens=5)
+    stats.observe_draft(
+        num_draft_tokens=5,
+        num_accepted_tokens=5,
+        num_committed_tokens=3,
+    )
+
+    logged_args = []
+    SpecDecodingLogging().log(lambda _message, *args: logged_args.append(args))
+
+    assert logged_args[0][0] == pytest.approx(3.0)
