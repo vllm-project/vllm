@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
+from vllm.tool_parsers.utils import find_common_prefix
 
 logger = init_logger(__name__)
 
@@ -238,15 +239,23 @@ class FunctionGemmaToolParser(ToolParser):
                         if self.current_tool_name_sent and args_part:
                             current_args = self._parse_arguments(args_part)
                             if current_args:
+                                # Mid-stream, more keys may still arrive, so the
+                                # object isn't closed yet -- drop the trailing '}'
+                                # that json.dumps() always adds for a complete
+                                # dict. The real closing brace is only sent once,
+                                # from the "function call just ended" branch below.
                                 current_args_json = json.dumps(
                                     current_args, ensure_ascii=False
-                                )
+                                )[:-1]
                                 prev_streamed = self.streamed_args_for_tool[
                                     self.current_tool_id
                                 ]
 
-                                if len(current_args_json) > len(prev_streamed):
-                                    diff = current_args_json[len(prev_streamed) :]
+                                if current_args_json != prev_streamed:
+                                    common = find_common_prefix(
+                                        current_args_json, prev_streamed
+                                    )
+                                    diff = current_args_json[len(common) :]
                                     self.streamed_args_for_tool[
                                         self.current_tool_id
                                     ] = current_args_json
@@ -288,8 +297,9 @@ class FunctionGemmaToolParser(ToolParser):
                         prev_streamed = self.streamed_args_for_tool[
                             self.current_tool_id
                         ]
-                        if len(args_json) > len(prev_streamed):
-                            diff = args_json[len(prev_streamed) :]
+                        if args_json != prev_streamed:
+                            common = find_common_prefix(args_json, prev_streamed)
+                            diff = args_json[len(common) :]
                             self.streamed_args_for_tool[self.current_tool_id] = (
                                 args_json
                             )
