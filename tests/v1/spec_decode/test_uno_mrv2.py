@@ -327,8 +327,18 @@ def test_eager_draft_attn_metadata_keeps_k_row_physical_capacity(monkeypatch):
     assert captured["num_query_per_req"] == k
 
 
-def _cpu_uno_proposer(k: int) -> UnoSpeculator:
-    """A real UnoSpeculator wired to a CPU CudaGraphManager (no CUDA/build)."""
+def _cpu_uno_proposer(
+    k: int,
+    max_num_seqs: int = 4,
+    capture_sizes: list[int] | None = None,
+) -> UnoSpeculator:
+    """A real UnoSpeculator wired to a CPU CudaGraphManager (no CUDA/build).
+
+    ``max_num_seqs`` and ``capture_sizes`` are parameters because draft graph
+    coverage is a property of all three together with K, not of K alone: one
+    serving shape covers every request count and another leaves the top of the
+    range drafting eagerly.
+    """
     from vllm.config import (
         CompilationConfig,
         ParallelConfig,
@@ -337,16 +347,19 @@ def _cpu_uno_proposer(k: int) -> UnoSpeculator:
     )
     from vllm.v1.attention.backend import AttentionCGSupport
 
+    sizes = sorted(capture_sizes or [8, 16, 32, 64])
     compilation_config = CompilationConfig(
         cudagraph_mode="FULL_DECODE_ONLY",
-        cudagraph_capture_sizes=[8, 16, 32, 64],
+        cudagraph_capture_sizes=sizes,
     )
-    compilation_config.max_cudagraph_capture_size = 64
+    compilation_config.max_cudagraph_capture_size = sizes[-1]
     compilation_config.post_init_cudagraph_sizes()
 
     vllm_config = MagicMock(spec=VllmConfig)
     vllm_config.compilation_config = compilation_config
-    vllm_config.scheduler_config = SchedulerConfig.default_factory(max_num_seqs=4)
+    vllm_config.scheduler_config = SchedulerConfig.default_factory(
+        max_num_seqs=max_num_seqs
+    )
     vllm_config.parallel_config = ParallelConfig()
     vllm_config.speculative_config = None
     vllm_config.num_speculative_tokens = 0
@@ -362,16 +375,19 @@ def _cpu_uno_proposer(k: int) -> UnoSpeculator:
     proposer._step = 0
     proposer.num_graph_replays = 0
     proposer.num_eager_proposals = 0
+    proposer.num_warmup_proposals = 0
+    proposer.max_num_reqs = max_num_seqs
     proposer.max_model_len = 64
     proposer.speculative_config = SimpleNamespace(
         uno_mask_token_id=1000, uno_noise_seed=42
     )
-    proposer.input_buffers = InputBuffers(4, 32, torch.device("cpu"))
-    proposer.sample_idx_mapping = torch.empty(32, dtype=torch.int32)
-    proposer.draft_tokens = torch.empty((4, k), dtype=torch.int64)
+    rows = max(32, max_num_seqs * k)
+    proposer.input_buffers = InputBuffers(max_num_seqs, rows, torch.device("cpu"))
+    proposer.sample_idx_mapping = torch.empty(rows, dtype=torch.int32)
+    proposer.draft_tokens = torch.empty((max_num_seqs, k), dtype=torch.int64)
     proposer.block_tables = SimpleNamespace(
-        slot_mappings=torch.empty((1, 32), dtype=torch.int64),
-        input_block_tables=[torch.ones((4, 8), dtype=torch.int32)],
+        slot_mappings=torch.empty((1, rows), dtype=torch.int64),
+        input_block_tables=[torch.ones((max_num_seqs, 8), dtype=torch.int32)],
         kernel_block_sizes=[4],
     )
     proposer.kv_cache_config = Mock()
@@ -381,6 +397,272 @@ def _cpu_uno_proposer(k: int) -> UnoSpeculator:
     proposer.set_lora_hook(lambda mapping: None)
     proposer.attn_groups = [[Mock()]]
     return proposer
+
+
+def _cpu_graph_manager_patches(monkeypatch):
+    """Let a real CudaGraphManager be built without CUDA or a graph pool."""
+    from vllm.v1.worker.gpu import cudagraph_utils as gpu_cudagraph_utils
+
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform,
+        "get_global_graph_pool",
+        lambda: object(),
+    )
+    monkeypatch.setattr(gpu_cudagraph_utils, "get_offloader", lambda: Mock())
+
+
+def _captured_draft_rows(proposer) -> list[int]:
+    """The draft row counts this configuration would capture a graph for."""
+    manager = proposer.cudagraph_manager
+    assert manager is not None
+    from vllm.config.compilation import CUDAGraphMode
+
+    descs = manager._capture_descs.get(CUDAGraphMode.FULL, [])
+    return sorted({desc.num_tokens for desc in descs})
+
+
+@pytest.mark.parametrize(
+    ("k", "max_num_seqs", "capture_sizes", "expected_rows", "expected_uncovered"),
+    [
+        # The H100 serving shape the TTFT lane measured: every request count
+        # from 1 to 16 has a graph, and the top draft batch (128 rows) is
+        # captured rather than dropped.
+        (8, 16, [1, 2, 4, 8, 16, 32, 64, 128, 144], [8, 16, 32, 64, 128], []),
+        # The same capture list at K=3 does NOT cover the top: the largest
+        # captured count is 33 draft rows, so 12 or more concurrent requests
+        # draft eagerly. This is the silent gap the startup line now names.
+        (
+            3,
+            16,
+            [1, 2, 4, 8, 16, 32, 64, 128, 144],
+            [3, 6, 9, 18, 33],
+            list(range(12, 17)),
+        ),
+        # The greedy matrix's own shape: small, and fully covered.
+        (8, 4, [8, 16, 32, 64], [8, 16, 32], []),
+        # K=1 with a capture list whose smallest entry exceeds max_num_seqs:
+        # nothing is captured at all and every proposal drafts eagerly.
+        (1, 4, [8, 16, 32, 64], [], [1, 2, 3, 4]),
+    ],
+    ids=["h100_k8_covered", "h100_k3_top_uncovered", "matrix_k8_covered", "k1_none"],
+)
+def test_draft_graph_coverage_is_derived_from_k_seqs_and_capture_sizes(
+    k, max_num_seqs, capture_sizes, expected_rows, expected_uncovered, monkeypatch
+):
+    """Which request counts get a draft graph follows from all three inputs.
+
+    The H100 TTFT lane proposed that a 16-request batch at K=8 falls back to
+    eager drafting because 128 draft rows exceed the largest capture size. It
+    does not: with the default capture list, 128 is captured and the batch
+    replays a graph. The gap is real for other shapes, though, and it is
+    silent -- K=3 on the same server leaves 12 or more concurrent requests
+    drafting eagerly. Pinning all four shapes keeps the arithmetic honest in
+    both directions rather than asserting the conclusion for one of them.
+    """
+    from vllm.config.compilation import CUDAGraphMode
+    from vllm.v1.worker.gpu.spec_decode.uno import uncovered_draft_request_counts
+
+    _cpu_graph_manager_patches(monkeypatch)
+    proposer = _cpu_uno_proposer(
+        k, max_num_seqs=max_num_seqs, capture_sizes=capture_sizes
+    )
+    proposer.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
+
+    rows = _captured_draft_rows(proposer)
+    assert rows == expected_rows, (
+        f"K={k}, max_num_seqs={max_num_seqs}, capture_sizes={capture_sizes} "
+        f"should capture draft row counts {expected_rows}, got {rows}"
+    )
+    assert uncovered_draft_request_counts(rows, k, max_num_seqs) == expected_uncovered
+
+
+def test_draft_dispatch_pads_up_to_the_next_captured_size(monkeypatch):
+    """Every request count in range dispatches to a graph, not only exact fits.
+
+    A draft batch is n*K rows, and most n produce a row count no capture size
+    equals: at K=8 the captured counts are 8, 16, 32, 64 and 128, while three
+    requests need 24 rows and five need 40. Dispatch pads up to the next
+    captured descriptor, so those still replay a graph. If dispatch ever
+    required an exact match, this test fails for every n outside the captured
+    set, which is the regression the H100 lane suspected had already happened.
+    """
+    from vllm.config.compilation import CUDAGraphMode
+
+    _cpu_graph_manager_patches(monkeypatch)
+    k = 8
+    max_num_seqs = 16
+    proposer = _cpu_uno_proposer(
+        k,
+        max_num_seqs=max_num_seqs,
+        capture_sizes=[1, 2, 4, 8, 16, 32, 64, 128, 144],
+    )
+    proposer.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
+    manager = proposer.cudagraph_manager
+    assert manager is not None
+    manager._graphs_captured = True
+
+    padded: dict[int, int] = {}
+    for n in range(1, max_num_seqs + 1):
+        desc = manager.dispatch(n, n * k, k, 2)
+        assert desc.cg_mode == CUDAGraphMode.FULL, (
+            f"{n} requests ({n * k} draft rows) fell back to eager drafting"
+        )
+        assert desc.num_tokens >= n * k
+        assert desc.num_reqs is not None and desc.num_reqs >= n
+        padded[n] = desc.num_tokens
+
+    # The top of the range is served by its own graph, not by padding into a
+    # larger one, and the row counts that are not captured pad upward.
+    assert padded[16] == 128
+    assert padded[3] == 32 and padded[5] == 64
+    assert sorted(set(padded.values())) == [8, 16, 32, 64, 128]
+
+
+def test_draft_dispatch_falls_back_above_the_largest_captured_size(monkeypatch):
+    """The fallback exists; it is the top of the range, and it is silent.
+
+    At K=3 with the same capture list the largest captured draft batch is 33
+    rows, so 12 concurrent requests (36 rows) have nothing to pad into and
+    drop to eager. Nothing in the dispatch path says so, which is why the
+    speculator now reports coverage once at startup.
+    """
+    from vllm.config.compilation import CUDAGraphMode
+
+    _cpu_graph_manager_patches(monkeypatch)
+    k = 3
+    proposer = _cpu_uno_proposer(
+        k, max_num_seqs=16, capture_sizes=[1, 2, 4, 8, 16, 32, 64, 128, 144]
+    )
+    proposer.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
+    manager = proposer.cudagraph_manager
+    assert manager is not None
+    manager._graphs_captured = True
+
+    assert manager.dispatch(11, 11 * k, k, 2).cg_mode == CUDAGraphMode.FULL
+    assert manager.dispatch(12, 12 * k, k, 2).cg_mode == CUDAGraphMode.NONE
+
+
+def test_uncovered_request_counts_are_the_top_of_the_range():
+    """Padding means the gap can only be at the top, never a hole inside."""
+    from vllm.v1.worker.gpu.spec_decode.uno import uncovered_draft_request_counts
+
+    assert uncovered_draft_request_counts([8, 16, 32], 8, 4) == []
+    assert uncovered_draft_request_counts([8, 16, 32], 8, 6) == [5, 6]
+    assert uncovered_draft_request_counts([], 8, 3) == [1, 2, 3]
+    # A contiguous tail, so a reader can act on the first uncovered count.
+    gap = uncovered_draft_request_counts([33], 3, 16)
+    assert gap == list(range(gap[0], 17))
+    # Degenerate shapes answer rather than raising.
+    assert uncovered_draft_request_counts([8], 0, 4) == []
+    assert uncovered_draft_request_counts([8], 8, 0) == []
+
+
+def test_startup_coverage_is_logged_for_both_outcomes(monkeypatch, caplog):
+    """A deployment learns about eager drafting at startup, not from latency.
+
+    The one-time eager line can fire only once and says nothing about the rest
+    of the range, so on its own it cannot tell an operator that this server
+    will draft eagerly at its own concurrency. Both outcomes are logged: the
+    covered case states the range it covers, the uncovered case warns and
+    names the capture size to add.
+    """
+    import logging
+
+    from vllm.config.compilation import CUDAGraphMode
+
+    _cpu_graph_manager_patches(monkeypatch)
+    sizes = [1, 2, 4, 8, 16, 32, 64, 128, 144]
+
+    covered = _cpu_uno_proposer(8, max_num_seqs=16, capture_sizes=sizes)
+    covered.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
+    manager = covered.cudagraph_manager
+    assert manager is not None
+    for desc in manager._capture_descs[CUDAGraphMode.FULL]:
+        manager.graphs[desc] = Mock()
+    with caplog.at_level(logging.INFO, logger="vllm.v1.worker.gpu.spec_decode.uno"):
+        covered._log_draft_graph_coverage()
+    assert "cover every request count" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    caplog.clear()
+    gapped = _cpu_uno_proposer(3, max_num_seqs=16, capture_sizes=sizes)
+    gapped.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
+    manager = gapped.cudagraph_manager
+    assert manager is not None
+    for desc in manager._capture_descs[CUDAGraphMode.FULL]:
+        manager.graphs[desc] = Mock()
+    with caplog.at_level(logging.INFO, logger="vllm.v1.worker.gpu.spec_decode.uno"):
+        gapped._log_draft_graph_coverage()
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings, caplog.text
+    message = warnings[0].getMessage()
+    assert "will draft eagerly" in message
+    # It names the capture size to add, which is what the reader acts on.
+    assert "48" in message
+
+
+def test_warmup_proposals_do_not_consume_the_serving_counters(monkeypatch):
+    """Startup work must not spend the one-time eager announcement.
+
+    On the H100 the profiling pass made five eager proposals before the API
+    server accepted a request, so the counter was already past one and the
+    "drafting eagerly" line had been emitted and could never be emitted again.
+    Any real fallback during serving was therefore unobservable, which is why
+    that run's receipts cannot answer whether one happened. Profiling and
+    capture proposals now count separately.
+    """
+    from vllm.config.compilation import CUDAGraphMode
+
+    _cpu_graph_manager_patches(monkeypatch)
+    proposer = _cpu_uno_proposer(8, max_num_seqs=4, capture_sizes=[8, 16, 32])
+    proposer.init_cudagraph_manager(CUDAGraphMode.FULL_DECODE_ONLY)
+    manager = proposer.cudagraph_manager
+    assert manager is not None
+    manager._graphs_captured = True
+
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.uno.prepare_uno_inputs_fused",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.uno.build_slot_mappings_by_layer",
+        lambda *args, **kwargs: {},
+    )
+    # The dummy_run call dispatches into a graph, so give it one to replay.
+    desc = manager.dispatch(2, 2 * 8, 8, 2)
+    proposer._graph_attn_metadata[desc] = {"layer": object()}
+    manager.graphs[desc] = Mock()
+    manager.run_fullgraph = Mock()
+    batch = SimpleNamespace(
+        num_reqs=2,
+        idx_mapping=torch.arange(2),
+        seq_lens_cpu_upper_bound=torch.full((4,), 8, dtype=torch.int32),
+    )
+    common = dict(
+        attn_metadata={},
+        slot_mappings={},
+        last_hidden_states=torch.zeros(1),
+        aux_hidden_states=None,
+        num_sampled=torch.zeros(2, dtype=torch.int32),
+        num_rejected=torch.zeros(2, dtype=torch.int32),
+        last_sampled=torch.zeros(2, dtype=torch.int64),
+        next_prefill_tokens=torch.zeros(2, dtype=torch.int64),
+        temperature=torch.zeros(2),
+        seeds=torch.zeros(2, dtype=torch.int64),
+    )
+
+    proposer.propose(batch, is_profile=True, **common)
+    assert (proposer.num_eager_proposals, proposer.num_graph_replays) == (0, 0)
+    assert proposer.num_warmup_proposals == 1
+
+    proposer.propose(batch, dummy_run=True, **common)
+    assert (proposer.num_eager_proposals, proposer.num_graph_replays) == (0, 0)
+    assert proposer.num_warmup_proposals == 2
 
 
 @pytest.mark.parametrize(

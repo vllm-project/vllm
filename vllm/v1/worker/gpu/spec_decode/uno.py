@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Uno shared-model parallel drafting for Model Runner V2."""
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any
 
@@ -106,6 +106,29 @@ def prepare_uno_inputs_reference(
     slot_mapping[count:].fill_(PAD_SLOT_ID)
 
 
+def uncovered_draft_request_counts(
+    captured_token_counts: Sequence[int],
+    k: int,
+    max_num_reqs: int,
+) -> list[int]:
+    """Request counts whose draft batch has no captured graph to pad into.
+
+    A draft batch is ``n * k`` rows and dispatch pads up: a captured graph
+    serves any batch at or below its own row count, so ``n`` is covered when
+    ``n * k`` is at most the largest captured count. The gap is therefore only
+    at the top, and it is silent -- a batch above the largest captured count
+    falls back to eager drafting, which is far slower, with nothing said at
+    startup. Whether the gap exists depends on ``k``, ``max_num_seqs`` and the
+    capture list together: Qwen3-8B at ``max_num_seqs=16`` with the default
+    capture sizes covers every request count at ``k=8`` and leaves the top of
+    the range uncovered at ``k=3``.
+    """
+    if k <= 0 or max_num_reqs <= 0:
+        return []
+    largest = max(captured_token_counts, default=0)
+    return [n for n in range(1, max_num_reqs + 1) if n * k > largest]
+
+
 class UnoSpeculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         if device.type != "cuda" or not current_platform.is_cuda():
@@ -133,6 +156,11 @@ class UnoSpeculator(DraftModelSpeculator):
         self._step = 0
         self.num_graph_replays = 0
         self.num_eager_proposals = 0
+        # Proposals made while profiling or capturing are counted apart from
+        # serving ones. They used to share the counters, so the one-time
+        # "using eager execution" line was always emitted by startup warmup and
+        # a later fallback in serving could never announce itself.
+        self.num_warmup_proposals = 0
 
     def set_lora_hook(self, hook: Callable[[tuple[int, int] | None], None]) -> None:
         self._lora_hook = hook
@@ -261,6 +289,58 @@ class UnoSpeculator(DraftModelSpeculator):
         finally:
             if self._lora_hook is not None:
                 self._lora_hook(None)
+        self._log_draft_graph_coverage()
+
+    def _log_draft_graph_coverage(self) -> None:
+        """Say once, at startup, which request counts have a draft graph.
+
+        Drafting eagerly costs far more per step than replaying a graph, and
+        the fallback is chosen per step with no other announcement: the
+        one-time eager line can only fire once, and it says nothing about the
+        rest of the range. A deployment that will draft eagerly at its own
+        concurrency should learn that at startup rather than from its latency.
+        """
+        assert self.cudagraph_manager is not None
+        captured = sorted({desc.num_tokens for desc in self.cudagraph_manager.graphs})
+        uncovered = uncovered_draft_request_counts(captured, self.k, self.max_num_reqs)
+        if not captured:
+            logger.info(
+                "Uno draft CUDA graphs: none captured, so every proposal "
+                "drafts eagerly. A draft graph needs a cudagraph_capture_sizes "
+                "entry of at least %d (num_speculative_tokens), and the "
+                "largest usable entry is bounded by max_num_seqs * "
+                "num_speculative_tokens = %d.",
+                self.k,
+                self.max_num_reqs * self.k,
+            )
+            return
+        if uncovered:
+            logger.warning(
+                "Uno draft CUDA graphs cover %d of %d request counts: "
+                "captured draft row counts %s serve up to %d concurrent "
+                "requests, and %d..%d will draft eagerly because %d rows "
+                "exceed the largest captured count %d. Add a "
+                "cudagraph_capture_sizes entry at or above max_num_seqs * "
+                "num_speculative_tokens = %d, or lower max_num_seqs.",
+                uncovered[0] - 1,
+                self.max_num_reqs,
+                captured,
+                uncovered[0] - 1,
+                uncovered[0],
+                uncovered[-1],
+                self.max_num_reqs * self.k,
+                captured[-1],
+                self.max_num_reqs * self.k,
+            )
+            return
+        logger.info(
+            "Uno draft CUDA graphs cover every request count: captured draft "
+            "row counts %s serve all %d concurrent requests at "
+            "num_speculative_tokens=%d.",
+            captured,
+            self.max_num_reqs,
+            self.k,
+        )
 
     def _generate_draft(
         self,
@@ -364,7 +444,9 @@ class UnoSpeculator(DraftModelSpeculator):
                     for attn_group in attn_groups:
                         attn_group.update_draft_decode_metadata(captured_attn)
                 self.cudagraph_manager.run_fullgraph(desc)
-                if not dummy_run:
+                if dummy_run or is_profile:
+                    self.num_warmup_proposals += 1
+                else:
                     self.num_graph_replays += 1
                     if self.num_graph_replays == 1:
                         logger.info("Uno draft CUDA graph replay is active.")
@@ -386,8 +468,17 @@ class UnoSpeculator(DraftModelSpeculator):
                     self.kv_cache_config,
                 )
                 self._generate_draft(n, desc.num_tokens, draft_attn, slots)
-                if not dummy_run:
+                if dummy_run or is_profile:
+                    self.num_warmup_proposals += 1
+                else:
                     self.num_eager_proposals += 1
                     if self.num_eager_proposals == 1:
-                        logger.info("Uno drafting is using eager execution.")
+                        logger.info(
+                            "Uno drafting fell back to eager execution for "
+                            "%d draft rows (%d requests). Eager drafting is "
+                            "far slower than a captured graph; see the draft "
+                            "graph coverage line logged at startup.",
+                            desc.num_tokens,
+                            n,
+                        )
         return self.draft_tokens[:n]
