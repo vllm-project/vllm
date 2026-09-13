@@ -131,10 +131,8 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      - files~=^examples/.*llama.*\.py
-      - files~=^tests/.*llama.*\.py
-      - files~=^vllm/model_executor/models/.*llama.*\.py
-      - files~=^vllm/tool_parsers/.*llama.*\.py
+      # LlamaIndex and LlamaStack are separate projects, not Llama the model.
+      - files~=(?i)llama(?!(?:index|stack))
       - title~=(?i)llama
   actions:
     label:
@@ -223,12 +221,7 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      - files~=^examples/.*qwen.*\.py
-      - files~=^tests/.*qwen.*\.py
-      - files~=^vllm/model_executor/models/.*qwen.*\.py
-      - files~=^vllm/tool_parsers/.*qwen.*\.py
-      - files~=^vllm/reasoning/.*qwen.*\.py
-      - files~=^vllm/transformers_utils/.*qwen.*\.py
+      - files~=(?i)qwen
       - title~=(?i)Qwen
   actions:
     label:
@@ -299,10 +292,7 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      - files~=^vllm/models/minimax.*/
-      - files~=^vllm/model_executor/models/.*minimax.*\.py
-      - files~=^vllm/tool_parsers/.*minimax.*\.py
-      - files~=^tests/.*minimax.*\.py
+      - files~=(?i)minimax
       - title~=(?i)minimax
   actions:
     label:
