@@ -190,9 +190,21 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         """
 
         x = x.view(-1, x.shape[-1])
-        # TODO fuse these kernels
-        for slice_idx in range(len(lora_a_stacked)):
-            self._apply_shrink(y[slice_idx], x, lora_a_stacked[slice_idx], scale)
+        if len(lora_a_stacked) == 1:
+            self._apply_shrink(y[0], x, lora_a_stacked[0], scale)
+            return
+
+        # Every slice shares the same input x and (per layer) the same
+        # rank, so concatenate their A weights along the rank axis and
+        # shrink all slices in a single GEMM instead of looping per slice.
+        ranks = [w.shape[-2] for w in lora_a_stacked]
+        stacked_a = torch.cat(lora_a_stacked, dim=-2)
+        stacked_y = torch.cat([t.view(-1, t.shape[-1]) for t in y], dim=-1)
+        self._apply_shrink(stacked_y, x, stacked_a, scale)
+        offset = 0
+        for slice_idx, r in enumerate(ranks):
+            y[slice_idx].view(-1, r).copy_(stacked_y[:, offset : offset + r])
+            offset += r
 
     def add_expand(
         self,
