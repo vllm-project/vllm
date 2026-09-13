@@ -34,6 +34,18 @@ except ImportError:
 # which is a host op, so we cache it once here.
 FP8_DTYPE = current_platform.fp8_dtype()
 _HIPB_MM_INITIALIZED_DEVICES: set[int] = set()
+_FP8_E4M3_DTYPES = {
+    dtype
+    for dtype in (
+        getattr(torch, "float8_e4m3fn", None),
+        getattr(torch, "float8_e4m3fnuz", None),
+    )
+    if dtype is not None
+}
+
+
+def _is_fp8_e4m3_tensor(t: torch.Tensor | None) -> bool:
+    return t is not None and t.dtype in _FP8_E4M3_DTYPES
 
 
 def _ensure_hipb_mm_extension_initialized() -> None:
@@ -1981,6 +1993,106 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_shuffle_kv_cache_enabled(cls) -> bool:
         return cls._SHUFFLE_KV_CACHE_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def fused_qknorm_idxrqknorm_enabled(
+        cls,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor | None = None,
+        v_scale: torch.Tensor | None = None,
+    ) -> bool:
+        """Whether MiniMax-M3 can use AITER's consolidated fused QK-norm.
+
+        Requires AITER to be installed and enabled. bf16 (``auto``) always
+        qualifies; fp8 e4m3 also needs K/V scales. Other cache dtypes fall
+        back to vLLM's fused kernel.
+        """
+        if not cls._AITER_ENABLED:
+            return False
+        if kv_cache_dtype == "auto":
+            return True
+        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            return k_scale is not None and v_scale is not None
+        return False
+
+    @classmethod
+    def fused_qknorm_idxrqknorm(
+        cls,
+        qkv: torch.Tensor,
+        q_norm_weight: torch.Tensor,
+        k_norm_weight: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        positions: torch.Tensor,
+        num_heads: int,
+        num_kv_heads: int,
+        rotary_dim: int,
+        eps: float,
+        slot_mapping: torch.Tensor,
+        kv_cache_k: torch.Tensor,
+        kv_cache_v: torch.Tensor,
+        q_out: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor | None = None,
+        v_scale: torch.Tensor | None = None,
+        index_q_norm_weight: torch.Tensor | None = None,
+        index_k_norm_weight: torch.Tensor | None = None,
+        num_index_heads: int = 0,
+        index_cache: torch.Tensor | None = None,
+        index_q_out: torch.Tensor | None = None,
+        index_slot_mapping: torch.Tensor | None = None,
+        skip_index_branch: bool = False,
+    ) -> None:
+        """Run consolidated MiniMax-M3 QK-norm fusion.
+
+        Callers must check ``fused_qknorm_idxrqknorm_enabled`` first. Runtime
+        failures from the AITER op are deliberately propagated.
+        """
+        if kv_cache_dtype == "auto":
+            aiter_kv_cache_dtype = "auto"
+            aiter_k_scale = None
+            aiter_v_scale = None
+        elif kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            aiter_kv_cache_dtype = "fp8_e4m3_static"
+            aiter_k_scale = k_scale
+            aiter_v_scale = v_scale
+        else:
+            raise ValueError(
+                "AITER fused QK-norm requires kv_cache_dtype 'auto', 'fp8', "
+                f"or 'fp8_e4m3', got {kv_cache_dtype!r}"
+            )
+        aiter_index_cache_dtype = "fp8" if _is_fp8_e4m3_tensor(index_cache) else "auto"
+
+        from aiter import fused_qknorm_idxrqknorm
+
+        fused_qknorm_idxrqknorm(
+            qkv,
+            q_norm_weight,
+            k_norm_weight,
+            cos_sin_cache,
+            positions,
+            num_heads,
+            num_kv_heads,
+            rotary_dim,
+            eps,
+            index_q_norm_weight=index_q_norm_weight,
+            index_k_norm_weight=index_k_norm_weight,
+            num_index_heads=num_index_heads,
+            slot_mapping=slot_mapping,
+            kv_cache_k=kv_cache_k,
+            kv_cache_v=kv_cache_v,
+            index_cache=index_cache,
+            block_size=16,
+            q_out=q_out,
+            index_q_out=index_q_out,
+            index_slot_mapping=index_slot_mapping,
+            kv_cache_dtype=aiter_kv_cache_dtype,
+            index_cache_dtype=aiter_index_cache_dtype,
+            k_scale=aiter_k_scale,
+            v_scale=aiter_v_scale,
+            asm_layout=True,
+            skip_index_branch=skip_index_branch,
+        )
 
     @classmethod
     @if_aiter_supported
