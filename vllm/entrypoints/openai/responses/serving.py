@@ -33,6 +33,10 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.reasoning_effort import (
+    ReasoningEffortRounding,
+    normalize_reasoning_effort,
+)
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
     HarmonyContext,
@@ -111,6 +115,8 @@ class OpenAIServingResponses(GenerateBaseServing):
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        supported_reasoning_efforts: list[str] | None = None,
+        reasoning_effort_rounding: ReasoningEffortRounding = "down",
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -123,6 +129,10 @@ class OpenAIServingResponses(GenerateBaseServing):
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.chat_template_kwargs = default_chat_template_kwargs or {}
+        self.supported_reasoning_efforts = supported_reasoning_efforts
+        self.reasoning_effort_rounding: ReasoningEffortRounding = (
+            reasoning_effort_rounding
+        )
         self.enable_log_outputs = enable_log_outputs
 
         # Set up the unified parser - either a unified parser or fall back to
@@ -317,6 +327,15 @@ class OpenAIServingResponses(GenerateBaseServing):
         | ResponsesResponse
         | ErrorResponse
     ):
+        if request.reasoning is not None:
+            request.reasoning.effort = cast(
+                Any,
+                normalize_reasoning_effort(
+                    request.reasoning.effort,
+                    self.supported_reasoning_efforts,
+                    self.reasoning_effort_rounding,
+                ),
+            )
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
