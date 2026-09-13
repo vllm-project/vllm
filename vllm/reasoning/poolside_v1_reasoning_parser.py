@@ -48,6 +48,19 @@ class PoolsideV1ReasoningParser(DeepSeekV3ReasoningParser):
             self._start_of_assistant_message
         ]
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        if isinstance(self._parser, IdentityReasoningParser):
+            return 0
+
+        assert isinstance(self._parser, DeepSeekR1ReasoningParser)
+        # The first marker distinguishes explicit from prompt-opened reasoning.
+        for index, token_id in enumerate(token_ids):
+            if token_id == self._parser.start_token_id:
+                return self._parser.count_reasoning_tokens(token_ids)
+            if token_id == self._parser.end_token_id:
+                return index
+        return len(token_ids)
+
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         # IdentityReasoningParser always returns True: no reasoning to parse.
         if isinstance(self._parser, IdentityReasoningParser):
