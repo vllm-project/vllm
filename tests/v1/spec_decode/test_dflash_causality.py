@@ -16,6 +16,7 @@ from vllm.model_executor.models.qwen3_dflash import (
     _get_dflash_fc_input_size,
     dflash_has_any_non_causal,
 )
+from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,
 )
@@ -81,6 +82,41 @@ def test_dflash_layer_causal_honors_top_level_override():
     )
     assert _dflash_layer_causal(config, 0) is False
     assert _dflash_layer_causal(config, 1) is False
+
+
+@pytest.mark.parametrize("algorithm", ["dflash", "dflash2"])
+@pytest.mark.parametrize("non_causal", [False, True, None])
+@pytest.mark.parametrize(
+    "layer_types,swa_causal",
+    [
+        (["full_attention"] * 2, [False, False]),
+        (["sliding_attention"] * 2, [True, True]),
+        (["sliding_attention", "full_attention"], [True, False]),
+        (None, [False, False]),
+    ],
+)
+def test_speculators_swa_causality_is_per_layer(
+    algorithm, non_causal, layer_types, swa_causal
+):
+    """SWA masking must not make full-attention draft blocks causal."""
+    checkpoint = {
+        "speculators_model_type": algorithm,
+        "mask_token_id": 0,
+        "aux_hidden_state_layer_ids": [1],
+        "transformer_layer_config": {
+            "num_hidden_layers": 2,
+            "layer_types": layer_types,
+        },
+    }
+    if non_causal is not None:
+        checkpoint["sliding_window_non_causal"] = non_causal
+    config = SimpleNamespace(
+        **SpeculatorsConfig.extract_transformers_pre_trained_config(checkpoint)
+    )
+
+    expected = swa_causal if non_causal is False else [False, False]
+    assert [_dflash_layer_causal(config, i) for i in range(2)] == expected
+    assert dflash_has_any_non_causal(config) is (not all(expected))
 
 
 def _vllm_config(**draft_config):
