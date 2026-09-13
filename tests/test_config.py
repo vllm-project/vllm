@@ -2822,6 +2822,24 @@ def test_draft_sample_method_probabilistic_is_accepted():
     assert speculative_config.draft_sample_method == "probabilistic"
 
 
+@pytest.mark.parametrize(
+    ("lookup_min", "lookup_max", "expected"),
+    [(None, None, (5, 5)), (None, 3, (3, 3)), (2, None, (2, 2)), (2, 4, (2, 4))],
+)
+def test_ngram_prompt_lookup_defaults(lookup_min, lookup_max, expected):
+    """An omitted bound mirrors the other one; both omitted gives 5."""
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+        prompt_lookup_min=lookup_min,
+        prompt_lookup_max=lookup_max,
+    )
+    assert (
+        speculative_config.prompt_lookup_min,
+        speculative_config.prompt_lookup_max,
+    ) == expected
+
+
 @pytest.mark.parametrize("disable_eagle_block_drop", [False, True])
 def test_eagle_block_drop_can_be_disabled_without_disabling_eagle(
     disable_eagle_block_drop: bool,
