@@ -32,7 +32,7 @@ def assert_valid_routed_experts(encoded: str | None) -> None:
     assert (routed_experts < NUM_LOCAL_EXPERTS).all()
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def server():
     args = [
         "--max-model-len",
