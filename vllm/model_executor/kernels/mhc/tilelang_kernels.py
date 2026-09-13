@@ -37,8 +37,67 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
     return split_k
 
 
-def _mhc_fused_n_splits(num_tokens: int, hidden_size: int) -> int:
-    return 8 if num_tokens < 8 and hidden_size <= 4096 else 4
+# ``mhc_fused_tilelang`` splits the hidden size across a fixed thread block, so
+# every (tile_n, n_thr) pair is one more kernel to compile. Tuned on GB300
+# (hc_mult 4, hidden_size 5120 and 7168) against the separate post + split-k
+# GEMM it replaces; the bands are coarse because the loss against a per-shape
+# optimum is ~1-2%, while one fixed config gives up to 18% at the top of the
+# range.
+_FUSED_POST_PRE_N_THR = 128
+_FUSED_POST_PRE_MAX_TOKENS = 32
+
+
+def mhc_fused_post_pre_split_config(
+    num_tokens: int, hidden_size: int, hc_mult: int
+) -> tuple[int, int, int] | None:
+    """Pick ``(tile_n, n_splits, n_thr)`` for the fused post + pre-norm GEMM.
+
+    Returns None when a separate post kernel followed by a split-k GEMM is the
+    better choice, or when the hidden size does not divide evenly across the
+    fused kernel's block. One source of truth for the dispatch decision, the
+    compile key and the launch, which must agree.
+    """
+    if num_tokens > _FUSED_POST_PRE_MAX_TOKENS:
+        return None
+    n_thr = _FUSED_POST_PRE_N_THR
+    if hidden_size % n_thr:
+        return None
+    # The projection tiles supply the parallelism a small token count cannot,
+    # so the tile grows with the batch: 1.3x at one token and 1.03x at 32
+    # against a split-k GEMM given the split its own estimator computes.
+    if num_tokens < 16:
+        tile_n, n_splits = 2, 8
+    else:
+        tile_n, n_splits = 6, 8
+    # The kernel drops projection tiles and k-slices it cannot fill evenly.
+    mix_size = hc_mult * (hc_mult + 2)
+    while tile_n > 1 and mix_size % tile_n:
+        tile_n -= 1
+    while n_splits > 1 and hidden_size % (n_splits * n_thr):
+        n_splits //= 2
+    return tile_n, n_splits, n_thr
+
+
+def require_fused_post_pre_config(
+    num_tokens: int, hidden_size: int, hc_mult: int
+) -> tuple[int, int, int]:
+    """The config for a shape the caller has already committed to fusing."""
+    config = mhc_fused_post_pre_split_config(num_tokens, hidden_size, hc_mult)
+    if config is None:
+        raise ValueError(
+            "the fused mHC post + pre-norm GEMM does not cover num_tokens="
+            f"{num_tokens} at hidden_size={hidden_size}"
+        )
+    return config
+
+
+def mhc_fused_post_pre_splits(hidden_size: int, hc_mult: int) -> tuple[int, ...]:
+    """Every split-k factor the fused post + pre-norm GEMM path can pick."""
+    configs = (
+        mhc_fused_post_pre_split_config(num_tokens, hidden_size, hc_mult)
+        for num_tokens in range(1, _FUSED_POST_PRE_MAX_TOKENS + 1)
+    )
+    return tuple(sorted({config[1] for config in configs if config is not None}))
 
 
 @tilelang_jit
@@ -1247,8 +1306,14 @@ class MhcPreBigFuseTileLangKernel(
             if use_pre_gemm_splits
             else n_splits
         )
-        fused_n_splits = _mhc_fused_n_splits(num_tokens, hidden_size)
-        actual_n_splits = fused_n_splits if use_fused_tilelang else pre_gemm_n_splits
+        # The epilogue reduces over whatever the fused kernel split the GEMM
+        # into, so both have to read the same config.
+        fused_config = mhc_fused_post_pre_split_config(num_tokens, hidden_size, hc_mult)
+        actual_n_splits = (
+            fused_config[1]
+            if use_fused_tilelang and fused_config is not None
+            else pre_gemm_n_splits
+        )
         actual_norm_eps = broadcast_norm_eps if is_broadcast else norm_eps
         actual_use_norm_weight = use_norm_weight or is_broadcast
         return self.CompileKey(
@@ -1540,6 +1605,7 @@ class MhcFusedTileLangKernel(
         hc_mult: int
         n_splits: int
         tile_n: int
+        n_thr: int
 
     @staticmethod
     def kernel() -> Any:
@@ -1552,14 +1618,15 @@ class MhcFusedTileLangKernel(
         hidden_size: int,
         hc_mult: int,
     ) -> CompileKey:
-        # TODO(gnovack): investigate autotuning these heuristics
-        tile_n = 2 if num_tokens < 8 else 3
-        n_splits = _mhc_fused_n_splits(num_tokens, hidden_size)
+        # Subscripts rather than an unpack: the warmup tracer parses this body
+        # and allows only plain assignments before the return.
+        config = require_fused_post_pre_config(num_tokens, hidden_size, hc_mult)
         return self.CompileKey(
             hidden_size=hidden_size,
             hc_mult=hc_mult,
-            n_splits=n_splits,
-            tile_n=tile_n,
+            n_splits=config[1],
+            tile_n=config[0],
+            n_thr=config[2],
         )
 
     def get_warmup_keys(
@@ -1574,11 +1641,11 @@ class MhcFusedTileLangKernel(
             num_tokens=WarmupIntRange(1, max_tokens + 1),
             hidden_size=hidden_size,
             hc_mult=hc_mult,
-            _when=lambda *, num_tokens: num_tokens <= 16,
+            _when=lambda *, num_tokens: num_tokens <= _FUSED_POST_PRE_MAX_TOKENS,
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        num_tokens = 1 if compile_key.tile_n == 2 else 8
+        num_tokens = 1 if compile_key.tile_n == 2 else 16
         hidden_size = compile_key.hidden_size
         hc_mult = compile_key.hc_mult
         hc_mult3 = hc_mult * (2 + hc_mult)
@@ -1617,8 +1684,9 @@ class MhcFusedTileLangKernel(
         hc_mult3: int,
     ) -> TileLangLaunchSpec:
         num_tokens = residual_in.shape[0]
-        tile_n = 2 if num_tokens < 8 else 3
-        n_splits = _mhc_fused_n_splits(num_tokens, hidden_size)
+        tile_n, n_splits, n_thr = require_fused_post_pre_config(
+            num_tokens, hidden_size, hc_mult
+        )
         yp_out = residual_in.new_empty(
             (n_splits, num_tokens, hc_mult3), dtype=torch.float32
         )
@@ -1639,7 +1707,7 @@ class MhcFusedTileLangKernel(
                 hidden_size,
                 hc_mult3,
             ),
-            dict(tile_n=tile_n, split_k=n_splits),
+            dict(n_thr=n_thr, tile_n=tile_n),
             (yp_out, rp_out, residual_out),
         )
 
