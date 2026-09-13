@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+from contextlib import suppress
+from typing import Any
+
 from fastapi.responses import JSONResponse, Response
 
 from vllm import PoolingParams
@@ -10,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.tasks import SCORE_TYPE_MAP, SupportedTask
 from vllm.utils import random_uuid
+from vllm.utils.async_utils import collect_from_async_generator
 from vllm.v1.pool.late_interaction import (
     build_late_interaction_doc_params,
     build_late_interaction_query_params,
@@ -193,12 +198,63 @@ class ServingScores(PoolingServing):
         ctx = await self._init_ctx(self.io_processor, *args, **kwargs)
         await self._preprocessing(self.io_processor, ctx)
 
-        # stage 1: encode queries and cache token embeddings on workers.
-        await self._flash_late_interaction_encode_queries(ctx)
-        # stage 2: encode docs and return scalar scores from workers.
-        await self._flash_late_interaction_encode_docs(ctx)
+        try:
+            # stage 1: encode queries and cache token embeddings on workers.
+            await self._flash_late_interaction_encode_queries(ctx)
+            # stage 2: encode docs and return scalar scores from workers.
+            await self._flash_late_interaction_encode_docs(ctx)
+        except (Exception, asyncio.CancelledError):
+            cleanup = asyncio.create_task(self._release_late_interaction_queries(ctx))
+            try:
+                await self._await_late_interaction_cleanup(cleanup)
+            except Exception:
+                logger.exception("Failed to release late-interaction query cache")
+            raise
 
         return await self._postprocessing_async(self.io_processor, ctx)
+
+    @staticmethod
+    async def _await_late_interaction_cleanup(task: asyncio.Future[Any]) -> None:
+        """Finish cleanup even if the handler is cancelled again."""
+        while not task.done():
+            with suppress(asyncio.CancelledError):
+                await asyncio.shield(task)
+        task.result()
+
+    async def _release_late_interaction_queries(self, ctx: ScoringServeContext):
+        query_keys = ctx.late_interaction_query_keys
+        if not query_keys:
+            return
+        # Also abort requests cancelled before add_request returned a collector.
+        await self.engine_client.abort(
+            query_keys + (ctx.late_interaction_doc_keys or [])
+        )
+        await self.engine_client.collective_rpc(
+            "release_late_interaction_queries",
+            args=(query_keys,),
+            wait_for_inflight_batches=True,
+        )
+
+    async def _collect_late_interaction_batch(self, ctx: ScoringServeContext):
+        generators = await self._prepare_generators(ctx)
+        tasks = [
+            asyncio.create_task(collect_from_async_generator(generator))
+            for generator in generators
+        ]
+        batch_future = asyncio.gather(*tasks)
+        try:
+            batches = await asyncio.shield(batch_future)
+        except (Exception, asyncio.CancelledError):
+            # Stop and join every producer before aborting and releasing keys.
+            for task in tasks:
+                task.cancel()
+            await self._await_late_interaction_cleanup(
+                asyncio.gather(batch_future, *tasks, return_exceptions=True)
+            )
+            raise
+        if any(not batch for batch in batches):
+            raise ValueError("Failed to generate results for all prompts")
+        ctx.final_res_batch = [batch[-1] for batch in batches]
 
     async def _flash_late_interaction_encode_queries(self, ctx: ScoringServeContext):
         assert ctx.n_queries is not None
@@ -241,8 +297,7 @@ class ServingScores(PoolingServing):
             prompt_extras=ctx.prompt_extras,
         )
 
-        await self._prepare_generators(query_ctx)
-        await self._collect_batch(query_ctx)
+        await self._collect_late_interaction_batch(query_ctx)
         ctx.query_final_res_batch = query_ctx.final_res_batch
 
     async def _flash_late_interaction_encode_docs(self, ctx: ScoringServeContext):
@@ -257,7 +312,8 @@ class ServingScores(PoolingServing):
         query_keys = ctx.late_interaction_query_keys
         if query_keys is None:
             raise RuntimeError("Late-interaction query keys were not initialized.")
-        doc_keys = [f"{ctx.request_id}-doc-{i}" for i in range(n_docs)]
+        doc_keys = [f"{query_keys[0]}-doc-{i}" for i in range(n_docs)]
+        ctx.late_interaction_doc_keys = doc_keys
 
         for i in range(n_docs):
             query_idx = 0 if n_queries == 1 else i
@@ -282,7 +338,6 @@ class ServingScores(PoolingServing):
             prompt_extras=ctx.prompt_extras,
         )
 
-        await self._prepare_generators(doc_ctx)
-        await self._collect_batch(doc_ctx)
+        await self._collect_late_interaction_batch(doc_ctx)
 
         ctx.final_res_batch = doc_ctx.final_res_batch

@@ -946,6 +946,9 @@ class Worker(WorkerBase):
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
 
+    def release_late_interaction_queries(self, query_keys: list[str]) -> None:
+        self.model_runner.release_late_interaction_queries(query_keys)
+
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 

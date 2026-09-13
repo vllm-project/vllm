@@ -93,6 +93,9 @@ class PoolingRunner:
     def clear(self) -> None:
         self.late_interaction_runner.clear()
 
+    def release_late_interaction_queries(self, query_keys: list[str]) -> None:
+        self.late_interaction_runner.release_queries(query_keys)
+
     def _get_pooling_metadata(
         self,
         input_batch: InputBatch,

@@ -29,6 +29,18 @@ class LateInteractionRunner:
         self._query_uses.clear()
         self._doc_query_keys.clear()
 
+    def release_queries(self, query_keys: list[str]) -> None:
+        """Release queries after their scoring requests have stopped."""
+        keys = set(query_keys)
+        for query_key in keys:
+            self._query_cache.pop(query_key, None)
+            self._query_uses.pop(query_key, None)
+        self._doc_query_keys = {
+            req_id: query_key
+            for req_id, query_key in self._doc_query_keys.items()
+            if query_key not in keys
+        }
+
     def register_request(
         self, req_id: str, pooling_params: PoolingParams | None
     ) -> None:
