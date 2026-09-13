@@ -114,6 +114,164 @@ __global__ void batched_moe_align_block_size_kernel(
     }
   }
 }
+
+__global__ void batched_moe_align_block_size_multi_cuda_block_kernel(
+    int32_t const num_batches, int32_t const max_tokens_per_batch,
+    int32_t const block_size, int32_t const* __restrict__ batch_num_tokens,
+    int32_t* __restrict__ sorted_ids, int32_t* __restrict__ block_ids,
+    int32_t* __restrict__ num_tokens_post_pad) {
+  // Dynamic shared memory to hold prefix sums and token counts for fast access
+  // Size needed: 2 * num_batches * sizeof(int32_t) (max 8kb per sm)
+  /*
+  For example if batch_num_tokens is [2, 5, 7] with block_size = 4
+  smem will be [0, 4, 12, 2, 5, 7] the first num_batches
+  positions describe the starting index for that batch
+  batch 0 starts at 0, 1 at 4 (Just the exclusive prefix sum)
+  and the next num_batches is simply the batch_num_tokens.
+  This is used later to get the num_tokens_post_pad
+  which is simply shared_cumsum[num_batches - 1] +
+  CEILDIV(shared_actual_tokens[num_batches - 1], block_size) * block_size;
+  in the example 12 + 8 = 20.
+  */
+  extern __shared__ int32_t smem[];
+  int32_t* shared_cumsum = smem;
+  int32_t* shared_actual_tokens = smem + num_batches;
+
+  int32_t const tid = threadIdx.x;
+  size_t const global_idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int32_t const num_blocks_per_batch =
+      CEILDIV(max_tokens_per_batch, block_size);
+  size_t const sorted_ids_size =
+      (size_t)num_blocks_per_batch * num_batches * block_size;
+  int32_t const SENTINEL = num_batches * max_tokens_per_batch;
+
+  // ==============================================================================
+  // STEP 1: Redundant Prefix Sum (Extremely fast, enables multi-block scaling)
+  // ==============================================================================
+  int32_t b_num_tokens = 0;
+
+  if (tid < num_batches) {
+    b_num_tokens = batch_num_tokens[tid];
+    shared_actual_tokens[tid] = b_num_tokens;
+  }
+  int32_t const ceil_b_num_tokens =
+      CEILDIV(b_num_tokens, block_size) * block_size;
+
+  using BlockScan = cub::BlockScan<int32_t, 1024>;  // Match blockDim.x
+  __shared__ typename BlockScan::TempStorage temp_storage;
+
+  int32_t cumsum_val;
+  BlockScan(temp_storage).ExclusiveSum(ceil_b_num_tokens, cumsum_val);
+  if (tid < num_batches) {
+    shared_cumsum[tid] = cumsum_val;
+  }
+  __syncthreads();  // Ensure all threads see the prefix sum
+
+  // Determine the exact padded size across all batches
+  int32_t total_padded_tokens = 0;
+  if (num_batches > 0) {
+    total_padded_tokens =
+        shared_cumsum[num_batches - 1] +
+        CEILDIV(shared_actual_tokens[num_batches - 1], block_size) * block_size;
+  }
+
+  // Only the absolute first thread writes the total tokens out
+  if (global_idx == 0) {
+    *num_tokens_post_pad = total_padded_tokens;
+  }
+
+  // ==============================================================================
+  // STEP 2: Massively Parallel Array Population (1 Thread = 1 Target Index)
+  // ==============================================================================
+  /*
+
+  Example:
+      Let num_batches=5, max_tokens_per_batch=8, block_size=4, and
+    expert_num_tokens=[2, 3, 0, 6, 8]. This expert_num_tokens tensor
+    indicates that,
+     - The first 2 tokens in the 0th batch are valid and the rest 6 are
+     invalid (i.e. in the 2D hidden_states tensor of shape,
+     [num_batches * max_tokens_per_batch, K], indices 0, 1 are valid)
+     - The first 3 tokens in the 1st batch are valid. i.e. indices 8, 9, 10
+     - 0 tokens in the 2nd batch are valid
+     - first 6 tokens in the  3rd batch are valid. i.e. indices,
+     24, 25, 26, 27, 28, 29
+     - so on ...
+
+     In this case,
+      sorted_token_ids will be [0, 1, 40, 40,
+                                8, 9, 10, 40,
+                                24, 25, 26, 27,
+                                28, 29, 40, 40,
+                                32, 33, 34, 35,
+                                36, 37, 38, 39,
+                                40, 40, 40, 40,
+                                (rest all 40, 40, 40, 40)
+                                ...]
+      Here, 40 represents an invalid index. as there is no token index 40.
+      The gemm kernel using this sorted_token_ids is expected to skip the
+      gemm computation when it encounters this invalid index.
+
+      expert_ids will be [0, 1, 3, 3, 4, 4, -1, -1, (rest all -1) ...]
+      Here, -1 represents an invalid expert. The gemm kernel using this
+      expert_ids is expected to skip the gemm computation when it encounters
+      an expert of id -1.
+
+      num_tokens_post_pad will be 24 as sorted_token_ids has valid entries
+      until 24.
+      the sorted_token_ids size is 40
+      Suppose threads per block are 8 then for the above example we will launch
+  the kernel with (5 * 2 * 4) + 8 - 1/8 = 5 blocks. thread 0 of block 0 will
+  write 0 to index 0 of sorted_token_ids thread 1 will write 1 at index 1 of
+  sorted_token_ids however threads 2 and 3 will correctly write SENTINEL as the
+  local_idx calculated as global_idx - shared_cumsum[batch_id] will be greater
+      than shared_actual_tokens[0] which is 2 in our case.
+
+      thread 4 (global_idx_4) will write to the 4th index but it will write the
+      value 8 because shared_cumsum[1] == 4 == global_idx. This way each thread
+  only writes 1 value therefore reducing the time complexity of the original
+  kernel.
+
+  */
+  if (global_idx < sorted_ids_size) {
+    if (global_idx >= total_padded_tokens) {
+      // Tail end of the array gets sentinel (Replaces your initialization
+      // loops)
+      sorted_ids[global_idx] = SENTINEL;
+      if (global_idx % block_size == 0) {
+        block_ids[global_idx / block_size] = -1;
+      }
+    } else {
+      // Binary search shared memory to find which batch this global_idx belongs
+      // to. Because num_batches is small, this is blazing fast.
+      int32_t batch_id = 0;
+      int32_t left = 0;
+      int32_t right = num_batches - 1;
+      while (left <= right) {
+        int32_t mid = left + (right - left) / 2;
+        if (shared_cumsum[mid] <= global_idx) {
+          batch_id = mid;
+          left = mid + 1;
+        } else {
+          right = mid - 1;
+        }
+      }
+
+      int32_t local_idx = global_idx - shared_cumsum[batch_id];
+      // Write directly to global_idx! This ensures PERFECT memory coalescing.
+      if (local_idx < shared_actual_tokens[batch_id]) {
+        sorted_ids[global_idx] = batch_id * max_tokens_per_batch + local_idx;
+      } else {
+        sorted_ids[global_idx] = SENTINEL;  // Padding gets sentinel
+      }
+
+      // Safely initialize block_ids without atomics or extra loops
+      if (global_idx % block_size == 0) {
+        block_ids[global_idx / block_size] = batch_id;
+      }
+    }
+  }
+}
 }  // namespace batched_moe_align_block_size
 
 template <typename scalar_t>
@@ -781,21 +939,44 @@ void batched_moe_align_block_size(int64_t max_tokens_per_batch,
   STD_TORCH_CHECK(num_tokens_post_pad.size(0) == 1);
   STD_TORCH_CHECK(B <= batched_kernel::num_threads);
 
-  // Avoid coordination overhead for small capacities or many batches.
-  int64_t const cooperative_threshold = std::max<int64_t>(256, 8 * B);
-  bool const use_cooperative_writes =
-      max_tokens_per_batch >= cooperative_threshold;
-  auto kernel =
-      use_cooperative_writes
-          ? batched_kernel::batched_moe_align_block_size_kernel<true>
-          : batched_kernel::batched_moe_align_block_size_kernel<false>;
-  kernel<<<batched_kernel::num_blocks, batched_kernel::num_threads, 0,
-           stream>>>(
-      B, max_tokens_per_batch, block_size,
-      reinterpret_cast<const int32_t*>(batch_num_tokens.const_data_ptr()),
-      reinterpret_cast<int32_t*>(sorted_ids.mutable_data_ptr()),
-      reinterpret_cast<int32_t*>(batch_ids.mutable_data_ptr()),
-      reinterpret_cast<int32_t*>(num_tokens_post_pad.mutable_data_ptr()));
+  // Threshold derived empirically from benchmarks. 
+  // > 131k elements favors grid-scaled multi-SM saturation and handles skewed load-balancing.
+  // <= 131k elements favors the 1-block cooperative writes.
+  int64_t const grid_scale_threshold = 131072;
+  
+  if (sorted_ids_size <= grid_scale_threshold){
+    // Avoid coordination overhead for small capacities or many batches.
+    int64_t const cooperative_threshold = std::max<int64_t>(256, 8 * B);
+    bool const use_cooperative_writes =
+        max_tokens_per_batch >= cooperative_threshold;
+    auto kernel =
+        use_cooperative_writes
+            ? batched_kernel::batched_moe_align_block_size_kernel<true>
+            : batched_kernel::batched_moe_align_block_size_kernel<false>;
+    kernel<<<batched_kernel::num_blocks, batched_kernel::num_threads, 0,
+             stream>>>(
+        B, max_tokens_per_batch, block_size,
+        reinterpret_cast<const int32_t*>(batch_num_tokens.const_data_ptr()),
+        reinterpret_cast<int32_t*>(sorted_ids.mutable_data_ptr()),
+        reinterpret_cast<int32_t*>(batch_ids.mutable_data_ptr()),
+        reinterpret_cast<int32_t*>(num_tokens_post_pad.mutable_data_ptr()));
+  } else {
+    // 1024 matches the cub::BlockScan template size inside the kernel
+    int threads_per_block = 1024;
+    int blocks = (sorted_ids_size + threads_per_block - 1) / threads_per_block;
+
+    // Calculate dynamic shared memory required (max 8kb for 1024 batches)
+    size_t shared_mem_bytes = 2 * B * sizeof(int32_t);
+
+    // Launch configuration
+    batched_kernel::batched_moe_align_block_size_multi_cuda_block_kernel<<<
+        blocks, threads_per_block, shared_mem_bytes, stream>>>(
+        B, max_tokens_per_batch, block_size,
+        reinterpret_cast<const int32_t*>(batch_num_tokens.const_data_ptr()),
+        reinterpret_cast<int32_t*>(sorted_ids.mutable_data_ptr()),
+        reinterpret_cast<int32_t*>(batch_ids.mutable_data_ptr()),
+        reinterpret_cast<int32_t*>(num_tokens_post_pad.mutable_data_ptr()));
+  }
 }
 
 void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
