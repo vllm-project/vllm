@@ -9,7 +9,7 @@ vllm --help
 Available Commands:
 
 ```bash
-vllm {chat,complete,serve,launch,bench,collect-env,run-batch}
+vllm {chat,complete,serve,launch,bench,collect-env,run-batch,preload}
 ```
 
 ## serve
@@ -211,6 +211,31 @@ vllm run-batch \
 ```
 
 See [vllm run-batch](./run-batch.md) for the full reference of all available arguments.
+
+## preload
+
+Launch weight cache daemons (one per TP rank) that hold the post-quantized,
+TP-sharded weights in GPU memory and serve CUDA IPC handles to vLLM engines
+over a Unix domain socket. Restarting engines then map the weights via
+zero-copy IPC instead of reloading from disk, enabling fast engine restarts.
+
+```bash
+# Launch one daemon per TP rank
+vllm preload --model meta-llama/Llama-3.2-1B-Instruct --tensor-parallel-size 4
+
+# Engines then load from the daemons
+vllm serve meta-llama/Llama-3.2-1B-Instruct --tensor-parallel-size 4 \
+    --load-format ipc_cache
+```
+
+The daemon accepts the standard engine arguments (model, dtype, quantization,
+tensor-parallel-size, ...) plus `--weight-cache-socket-dir` to override the
+directory holding the per-GPU Unix sockets. Only tensor and expert parallelism
+are supported; pipeline and data parallelism are rejected at launch.
+
+See [Preload](../features/preload.md) for how it works, cache modes, and
+limitations, and [vllm preload](./preload.md) for the full reference of all
+available arguments.
 
 ## More Help
 
