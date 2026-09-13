@@ -5,6 +5,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, cast
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -446,15 +447,62 @@ class EncoderLayer(nn.Module):
         self.norm1 = LayerNorm(size)
         self.norm2 = LayerNorm(size)
 
-    def forward(self, hidden_states: torch.Tensor):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+        sequence_lengths: torch.Tensor | None = None,
+    ):
         residual = hidden_states
         hidden_states = self.norm1(hidden_states)
-        hidden_states = residual + self.self_attn(hidden_states, None, None)
+        hidden_states = residual + self.self_attn(
+            hidden_states, cu_seqlens, max_seqlen, sequence_lengths
+        )
         residual = hidden_states
         hidden_states = self.norm2(hidden_states)
         hidden_states = residual + self.feed_forward(hidden_states)
 
         return hidden_states
+
+
+class FunASREncoderAttention(MMEncoderAttention):
+    """MMEncoderAttention with 2D (seq_len, hidden_size) tensor support.
+
+    Mirrors `vllm.model_executor.models.whisper.WhisperEncoderAttention`:
+    the adaptor flattens its batch dim into the sequence dim so that
+    segmented `cu_seqlens` can confine attention to each row's valid
+    prefix without crossing into another row's padding.
+    """
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+        sequence_lengths: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        is_2d = query.dim() == 2
+        if is_2d:
+            query = query.unsqueeze(0)
+            key = key.unsqueeze(0)
+            value = value.unsqueeze(0)
+
+        out = super().forward(
+            query,
+            key,
+            value,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
+        )
+
+        if is_2d:
+            out = out.squeeze(0)
+
+        return out
 
 
 class FunASRAudioAttention(nn.Module):
@@ -495,7 +543,7 @@ class FunASRAudioAttention(nn.Module):
             prefix=f"{prefix}.out_proj",
         )
 
-        self.attn = MMEncoderAttention(
+        self.attn = FunASREncoderAttention(
             num_heads=self.num_local_heads,
             head_size=self.head_dim,
             scale=self.scaling,
@@ -504,15 +552,12 @@ class FunASRAudioAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        cu_seqlens: torch.Tensor,
+        cu_seqlens: torch.Tensor | None,
         max_seqlen: torch.Tensor | None,
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        bs, seq_length, _ = hidden_states.size()
         qkv, _ = self.qkv(hidden_states)
         q, k, v = qkv.chunk(3, dim=-1)
-        q = q.view(bs, seq_length, -1, self.head_dim)
-        k = k.view(bs, seq_length, -1, self.head_dim)
-        v = v.view(bs, seq_length, -1, self.head_dim)
 
         attn_output = self.attn(
             query=q,
@@ -520,11 +565,55 @@ class FunASRAudioAttention(nn.Module):
             value=v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
 
-        attn_output = attn_output.view(bs, seq_length, -1)
         output, _ = self.out_proj(attn_output)
         return output
+
+
+def _build_adaptor_attn_metadata(
+    attn: MMEncoderAttention,
+    feature_lens: torch.Tensor,
+    seq_len: int,
+    hidden_size: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor | None]:
+    """Segmented varlen attention metadata for the padded adaptor batch.
+
+    Each padded row contributes up to two sequences to `cu_seqlens`: its
+    valid prefix and its padding tail, so attention never crosses a
+    valid/padding boundary while every row keeps a fixed token count.
+    Mirrors `vllm.model_executor.models.ultravox._build_chunk_attn_metadata`.
+    """
+    batch_size = feature_lens.shape[0]
+    starts = np.arange(batch_size, dtype=np.int64) * seq_len
+    lens_np = feature_lens.cpu().numpy().astype(np.int64)
+    bounds = np.stack([starts + lens_np, starts + seq_len], axis=1).reshape(-1)
+    cu_seqlens_np = np.concatenate(([0], bounds))
+    # Fully-valid rows produce empty padding segments; drop the duplicates.
+    cu_seqlens_np = np.unique(cu_seqlens_np).astype(np.int32)
+
+    attn_backend = attn.attn_backend
+    sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+        attn_backend, cu_seqlens_np, device
+    )
+    max_seqlen = torch.tensor(
+        MMEncoderAttention.compute_max_seqlen(attn_backend, cu_seqlens_np),
+        dtype=torch.int32,
+    )
+    cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+        attn_backend,
+        cu_seqlens_np,
+        hidden_size,
+        get_tensor_model_parallel_world_size(),
+        device,
+    )
+    return {
+        "cu_seqlens": cu_seqlens,
+        "max_seqlen": max_seqlen,
+        "sequence_lengths": sequence_lengths,
+    }
 
 
 class Transformer(nn.Module):
@@ -592,8 +681,19 @@ class Transformer(nn.Module):
         olens = (ilens - 1) // self.k + 1
 
         if self.blocks is not None:
+            attn_metadata = _build_adaptor_attn_metadata(
+                self.blocks[0].self_attn.attn,
+                feature_lens=olens,
+                seq_len=chunk_num,
+                hidden_size=self.llm_dim,
+                device=hidden_states.device,
+            )
+            # Flatten batch into the sequence dim so segmented cu_seqlens
+            # can confine each row's attention to its own valid prefix.
+            hidden_states = hidden_states.reshape(batch_size * chunk_num, self.llm_dim)
             for layer, block in enumerate(self.blocks):
-                hidden_states = block(hidden_states)
+                hidden_states = block(hidden_states, **attn_metadata)
+            hidden_states = hidden_states.reshape(batch_size, chunk_num, self.llm_dim)
         return hidden_states, olens
 
 
