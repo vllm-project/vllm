@@ -2163,6 +2163,30 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
+            if (
+                self.use_uno
+                and UNO_STEP_TIMING_DEBUG
+                and scheduler_output.debug_uno_step_id is not None
+            ):
+                debug_k = len(scheduled_spec_token_ids or ())
+                debug_accepted = max(len(generated_token_ids) - 1, 0) if debug_k else 0
+                logger.info(
+                    "UNO_STEP_TIMING_OUTPUT step_id=%d req_id=%s O_before=%d "
+                    "O_after=%d P_after=%d current_k=%d accepted=%d rejected=%d "
+                    "emitted=%d stale=%s stopped=%s",
+                    scheduler_output.debug_uno_step_id,
+                    req_id,
+                    num_output_tokens_before,
+                    request.num_output_tokens,
+                    request.num_output_placeholders,
+                    debug_k,
+                    debug_accepted,
+                    debug_k - debug_accepted,
+                    len(new_token_ids),
+                    output_is_stale,
+                    stopped,
+                )
+
             if new_token_ids and self.structured_output_manager.should_advance(
                 request, new_token_ids=new_token_ids
             ):
