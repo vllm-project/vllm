@@ -242,6 +242,25 @@ steps:
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt
 
+- label: ":nvidia: (L4) LM Eval Humming TEMPORARY"
+  key: lm-eval-humming-l4
+  timeout_in_minutes: 90
+  device: l4
+  num_devices: 1
+  source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/configs/humming/
+  - requirements/cuda.txt
+  - vllm/utils/humming.py
+  - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/
+  - vllm/model_executor/kernels/linear/
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
+
 - label: ":nvidia: (A100) LM Eval Humming FP16 TEMPORARY Shard %N"
   key: lm-eval-humming-f16-a100
   timeout_in_minutes: 75
@@ -301,7 +320,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
   # - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-int8.txt
 
-- label: ":nvidia: (2xH200) LM Eval Humming DeepEP TEMPORARY"
+- label: ":nvidia: (H200) LM Eval Humming DeepEP TEMPORARY"
   key: lm-eval-humming-deepep-2xh200
   timeout_in_minutes: 60
   device: h200
