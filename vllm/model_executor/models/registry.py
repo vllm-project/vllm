@@ -376,6 +376,10 @@ _MULTIMODAL_MODELS = {
         "vllm.models.deepseek_v4",
         "DeepseekV4ForConditionalGeneration",
     ),
+    "DeepseekV41ForCausalLM": (
+        "vllm.models.deepseek_v4_1",
+        "DeepseekV41ForCausalLM",
+    ),
     "Dots3NoteForCausalLM": (
         "vllm.models.dots3_note",
         "Dots3NoteForCausalLM",
@@ -640,6 +644,10 @@ _SPECULATIVE_DECODING_MODELS = {
     "MuseGlimmerAssistantModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "DFlashMuseGlimmerAssistantModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "DSparkDraftModel": ("vllm.models.deepseek_v4", "DSparkDeepseekV4ForCausalLM"),
+    "DSparkV41DraftModel": (
+        "vllm.models.deepseek_v4_1",
+        "DSparkDeepseekV4ForCausalLM",
+    ),
     "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     "Qwen3OmniDSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     "K3DSparkModel": (
@@ -1264,9 +1272,11 @@ class _ModelRegistry:
                     "'auto_map' (relevant if the model is custom)."
                 )
 
+        assert issubclass(model_module, transformers.PreTrainedModel)
+        transformers_model_cls: type[transformers.PreTrainedModel] = model_module
         if not (
-            model_module.is_backend_compatible()
-            or model_module._can_set_attn_implementation()
+            transformers_model_cls.is_backend_compatible()
+            or transformers_model_cls._can_set_attn_implementation()
         ):
             if model_config.model_impl != "transformers":
                 return None
@@ -1323,6 +1333,7 @@ class _ModelRegistry:
                     return (model_info, arch)
         elif model_config.model_impl == "terratorch":
             model_info = self._try_inspect_model_cls("Terratorch")
+            assert model_info is not None
             return (model_info, "Terratorch")
 
         # Fallback to transformers impl (after resolving convert_type)
