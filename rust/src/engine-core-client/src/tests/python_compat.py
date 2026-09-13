@@ -10,6 +10,7 @@
 # ]
 # ///
 
+import sys
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 
@@ -482,6 +483,55 @@ multi_connector_stats = {
     "UnsupportedConnector": {"sample_count": 1},
 }
 
+scheduler_stats = {
+    "num_running_reqs": 7,
+    "num_waiting_reqs": 3,
+    "num_skipped_waiting_reqs": 0,
+    "step_counter": 0,
+    "current_wave": 0,
+    "kv_cache_usage": 0.25,
+    "prefix_cache_stats": {
+        "reset": False,
+        "requests": 0,
+        "queries": 0,
+        "hits": 0,
+        "preempted_requests": 0,
+        "preempted_queries": 0,
+        "preempted_hits": 0,
+    },
+    "connector_prefix_cache_stats": None,
+    "kv_cache_eviction_events": [],
+    "spec_decoding_stats": None,
+    "kv_connector_stats": None,
+    "cudagraph_stats": None,
+    "perf_stats": None,
+}
+scheduler_stats_variants = [
+    scheduler_stats,
+    {**scheduler_stats, "external_metrics": None},
+    {
+        **scheduler_stats,
+        "external_metrics": {
+            "example.plugin": {
+                "limits": [-(2**63), 2**64 - 1],
+                "labels": {"pool": "kv"},
+                "ratio": 0.5,
+                "enabled": True,
+                "optional": None,
+            }
+        },
+    },
+]
+
+# Decode the Rust re-encoding when invoked by the round-trip test.
+if len(sys.argv) > 1:
+    assert len(sys.argv[1:]) == len(scheduler_stats_variants)
+    for encoded, expected in zip(sys.argv[1:], scheduler_stats_variants):
+        decoded = msgspec.msgpack.decode(bytes.fromhex(encoded))
+        decoded.setdefault("external_metrics", None)
+        assert decoded == {"external_metrics": None, **expected}
+    sys.exit(0)
+
 print(msgspec.msgpack.encode(request).hex())
 print(msgspec.msgpack.encode(defaults_request).hex())
 print(msgpack.packb(multimodal_request_wire, use_bin_type=True).hex())
@@ -505,3 +555,5 @@ print(msgspec.msgpack.encode(nixl_stats).hex())
 print(msgspec.msgpack.encode(mooncake_stats).hex())
 print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())
+for stats in scheduler_stats_variants:
+    print(msgspec.msgpack.encode(stats).hex())
