@@ -2475,6 +2475,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
+        causal: bool = True,
     ) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
@@ -2632,7 +2633,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     (max_seq_len + num_partitions - 1) // num_partitions
                 ) * self.cp_kv_cache_interleave_size
 
-            decode_metadata = self._build_decode(
+            decode_kwargs: dict = dict(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
                 seq_lens_device=seq_lens[:num_decodes],
                 max_seq_len=max_seq_len,
@@ -2640,7 +2641,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
                 dcp_tot_seq_lens_device=dcp_tot_seq_lens_device,
+                causal=not non_causal_decode,
             )
+            decode_metadata = self._build_decode(**decode_kwargs)
 
         attn_metadata = self.metadata_cls(
             num_reqs=common_attn_metadata.num_reqs,

@@ -176,3 +176,41 @@ def test_pad_unpad_round_trip_preserves_head_order(num_heads):
 
     assert unpadded.shape == q.shape
     torch.testing.assert_close(unpadded, q)
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8", "auto"])
+@pytest.mark.parametrize("num_heads", [8, 12, 16, 32])
+def test_a_non_causal_block_never_routes_to_gluon(
+    gluon_available, num_heads, kv_cache_dtype
+):
+    """Gluon masks the block causally with no way to turn it off, so a
+    non-causal block has to reach the padded asm decode -- at any head count
+    and either cache dtype. The fixture pins the arch gate, so a gfx942 host
+    cannot pass this for the wrong reason."""
+    assert not AiterMLAHelper.use_gluon_verify(
+        num_heads, 8, kv_cache_dtype, causal=False
+    )
+
+
+def test_a_causal_small_head_bf16_block_still_uses_gluon(gluon_available):
+    """The routing this backend already had must not move."""
+    assert AiterMLAHelper.use_gluon_verify(12, 8, "auto", causal=True)
+
+
+@pytest.mark.parametrize(
+    "num_heads, expected",
+    [
+        (16, False),
+        (32, True),
+        (33, False),
+        (48, False),
+        (64, True),
+        (80, False),
+        (96, True),
+        (112, False),
+        (128, True),
+    ],
+)
+def test_fp8_qlen2_fold_matches_pinned_aiter_kernel_table(num_heads, expected):
+    """Only 32/64/96/128 fold qlen 2 onto the 16/4 kernel; 48/80/112 keep Q2."""
+    assert AiterMLAHelper.has_fp8_non_causal_qlen2_kernel(num_heads) is expected
