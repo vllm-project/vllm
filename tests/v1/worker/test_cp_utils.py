@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+from vllm.v1.worker import cp_utils
 from vllm.v1.worker.cp_utils import should_skip_dcp_context_attention
 
 
@@ -43,3 +46,74 @@ def test_skip_gate_rank_invariant_with_divergent_local_context(
     assert max(local_maxes) > 0
     # The batch still has context globally, so no rank may skip.
     assert not should_skip_dcp_context_attention(context_kv_lens)
+
+
+# -- Tests for improved error messages in check_attention_cp_compatibility --
+
+
+class _DummyBackend:
+    @staticmethod
+    def get_name():
+        return "DummyBackend"
+
+    @staticmethod
+    def supports_pcp():
+        return False
+
+
+class _DummyImpl:
+    need_to_return_lse_for_decode = False
+    supports_pcp = True
+    supports_mtp_with_cp_non_trivial_interleave_size = True
+
+
+class _DummyLayer:
+    impl = _DummyImpl()
+
+    @staticmethod
+    def get_attn_backend():
+        return _DummyBackend()
+
+
+def test_dcp_error_includes_backend_hint(monkeypatch: pytest.MonkeyPatch):
+    """DCP assertion should mention --attention-backend and
+    --decode-context-parallel-size for actionable guidance."""
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=2,
+            cp_kv_cache_interleave_size=1,
+        ),
+        speculative_config=None,
+    )
+    monkeypatch.setattr(
+        cp_utils,
+        "get_layers_from_vllm_config",
+        lambda *_: {"layer.0": _DummyLayer()},
+    )
+    with pytest.raises(AssertionError, match="--attention-backend") as exc:
+        cp_utils.check_attention_cp_compatibility(vllm_config)
+    assert "--decode-context-parallel-size" in str(exc.value)
+    assert "DummyImpl" in str(exc.value)
+
+
+def test_pcp_error_includes_backend_hint(monkeypatch: pytest.MonkeyPatch):
+    """PCP assertion should mention --attention-backend and
+    --prefill-context-parallel-size for actionable guidance."""
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            decode_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+        speculative_config=None,
+    )
+    monkeypatch.setattr(
+        cp_utils,
+        "get_layers_from_vllm_config",
+        lambda *_: {"layer.0": _DummyLayer()},
+    )
+    with pytest.raises(AssertionError, match="--attention-backend") as exc:
+        cp_utils.check_attention_cp_compatibility(vllm_config)
+    assert "--prefill-context-parallel-size" in str(exc.value)
+    assert "DummyBackend" in str(exc.value)
