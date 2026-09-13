@@ -356,9 +356,9 @@ class OpenAIServingChat(GenerateBaseServing):
                 if not request.include_reasoning:
                     reasoning_ended = True
                 elif request._grammar_from_parser:
-                    # The Mistral grammar already includes an optional
-                    # `think?` rule that handles both reasoning and
-                    # non-reasoning outputs.
+                    # A parser-provided grammar (Mistral lark, GLM EBNF)
+                    # already covers the full assistant output, including
+                    # any thinking block.
                     reasoning_ended = True
                 elif parser is not None and parser.reasoning_parser is not None:
                     reasoning_ended = parser.is_reasoning_end(prompt_token_ids or [])

@@ -50,6 +50,7 @@ from openai.types.shared import Metadata, Reasoning
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     Field,
+    PrivateAttr,
     ValidationError,
     field_serializer,
     model_validator,
@@ -281,6 +282,9 @@ class ResponsesRequest(OpenAIBaseModel):
         default=None,
         description="Additional kwargs for structured outputs",
     )
+
+    _grammar_from_parser: bool = PrivateAttr(default=False)
+    """CAUTION: Should only be set by the parser's adjust_request."""
 
     repetition_penalty: float | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
