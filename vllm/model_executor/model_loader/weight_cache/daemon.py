@@ -38,6 +38,7 @@ from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
 )
+from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -48,13 +49,15 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_platform_support,
     check_ipc_quant_support,
     ensure_private_socket_dir,
-    get_physical_device_id,
+    get_current_device_uuid,
     get_socket_path,
     recv_msg,
     send_msg,
     verify_peer_is_owner,
 )
 from vllm.platforms import current_platform
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.network_utils import get_distributed_init_method, get_open_port
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger("vllm.model_executor.model_loader.weight_cache.daemon")
@@ -185,7 +188,7 @@ class WeightCacheDaemon:
             ready_callback: Invoked once the socket is bound and listening,
                 so the launcher can report overall readiness.
         """
-        socket_path = self._socket_path()
+        socket_path = self._socket_path
         ensure_private_socket_dir(
             os.path.dirname(socket_path), strict_perms=self.socket_dir is None
         )
@@ -244,12 +247,9 @@ class WeightCacheDaemon:
             ) from e
         return lock_fd
 
+    @property
     def _socket_path(self) -> str:
-        device_index = torch.accelerator.current_device_index()
-        gpu_id = get_physical_device_id(device_index)
-        if gpu_id is None:
-            gpu_id = device_index
-        return get_socket_path(gpu_id, self.socket_dir)
+        return get_socket_path(get_current_device_uuid(), self.socket_dir)
 
     def _handle_connection(self, conn: socket.socket) -> None:
         request = recv_msg(conn)
@@ -280,7 +280,7 @@ class WeightCacheDaemon:
                 "status": "ok",
                 "entries": self.entries,
                 "aliases": self.aliases,
-                "gpu_uuid": self._gpu_uuid(),
+                "gpu_uuid": get_current_device_uuid(),
             },
         )
         logger.info_once(
@@ -297,12 +297,6 @@ class WeightCacheDaemon:
         torch.accelerator.empty_cache()
         logger.info("Weight cache daemon rank %d released cached weights", self.tp_rank)
         send_msg(conn, {"status": "ok"})
-
-    def _gpu_uuid(self) -> str:
-        props = torch.cuda.get_device_properties(
-            torch.accelerator.current_device_index()
-        )
-        return str(props.uuid)
 
 
 def _run_daemon(
@@ -334,10 +328,6 @@ def _reject_unsupported_parallelism(parallel_config: ParallelConfig) -> None:
 
 
 def main() -> None:
-    from vllm.engine.arg_utils import EngineArgs
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-    from vllm.utils.network_utils import get_distributed_init_method, get_open_port
-
     parser = FlexibleArgumentParser(
         description="Launch weight cache daemons (one per TP rank)."
     )

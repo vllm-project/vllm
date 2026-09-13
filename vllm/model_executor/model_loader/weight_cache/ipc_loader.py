@@ -12,6 +12,10 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
@@ -27,7 +31,7 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     WeightCacheUnavailableError,
     check_ipc_platform_support,
     check_ipc_quant_support,
-    get_physical_device_id,
+    get_current_device_uuid,
     get_socket_path,
     recv_msg,
     send_msg,
@@ -56,7 +60,7 @@ class IpcModelLoader(BaseModelLoader):
     Extra config keys (via --model-loader-extra-config):
 
     - socket_path: explicit daemon socket path. Defaults to a per-GPU path
-      derived from the physical GPU id.
+      derived from the physical GPU uuid.
     - socket_dir: directory containing the daemon sockets.
     - mode: "zero_copy" (default) or "copy".
     - fallback: fall back to disk loading when the daemon is unavailable or
@@ -261,11 +265,6 @@ class IpcModelLoader(BaseModelLoader):
     def _fetch_entries(
         self, model_config: ModelConfig
     ) -> tuple[dict[str, TensorEntry], dict[str, str]]:
-        from vllm.distributed import (
-            get_tensor_model_parallel_rank,
-            get_tensor_model_parallel_world_size,
-        )
-
         cache_config = WeightCacheKey.from_model_config(
             model_config,
             tp_size=get_tensor_model_parallel_world_size(),
@@ -317,22 +316,12 @@ class IpcModelLoader(BaseModelLoader):
     def _resolve_socket_path(self) -> str:
         if self.socket_path is not None:
             return self.socket_path
-        device_index = torch.accelerator.current_device_index()
-        gpu_id = get_physical_device_id(device_index)
-        if gpu_id is None:
-            raise WeightCacheUnavailableError(
-                "Cannot infer the physical GPU id from CUDA_VISIBLE_DEVICES; "
-                "pass socket_path via --model-loader-extra-config"
-            )
-        return get_socket_path(gpu_id, self.socket_dir)
+        return get_socket_path(get_current_device_uuid(), self.socket_dir)
 
     def _check_gpu_uuid(self, daemon_uuid: str | None) -> None:
         if daemon_uuid is None:
             return
-        props = torch.cuda.get_device_properties(
-            torch.accelerator.current_device_index()
-        )
-        local_uuid = str(props.uuid)
+        local_uuid = get_current_device_uuid()
         if daemon_uuid != local_uuid:
             raise CacheConfigMismatchError(
                 f"Daemon GPU {daemon_uuid} != engine GPU {local_uuid}; "
