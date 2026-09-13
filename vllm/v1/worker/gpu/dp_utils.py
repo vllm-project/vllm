@@ -108,10 +108,8 @@ def sync_cudagraph_and_dp_padding(
             int(num_tokens_across_dp.min()),
             uniform_decode=uniform_decode_across_dp,
         ):
-            # Microbatching is all-or-nothing: the expert all-to-all is
-            # collective, so every rank splits and pads to the same token count.
-            # A rank too small to fill a microbatch does no work in it, like a
-            # dummy run.
+            # Expert all-to-all requires every rank to split and pad equally.
+            # Empty microbatches run as dummy batches.
             ubatch_num_tokens = int(num_tokens_across_dp.max())
             num_ubatches = get_num_ubatches(parallel_config)
             ubatch_desc = None

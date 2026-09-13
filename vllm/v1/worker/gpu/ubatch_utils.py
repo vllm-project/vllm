@@ -318,9 +318,7 @@ class UBatchRunner:
             for _ in range(self.num_ubatches)
         ]
         self.comm_stream = torch.cuda.Stream(device=device)
-        # A capture has to name its stream up front, or the threads' work lands
-        # on `torch.cuda.graph()`'s own side stream and outside the graph. This
-        # is the stream `CudaGraphManager` opens the capture on.
+        # Threads and graph capture must use the same compute stream.
         self.capture_stream = torch.cuda.Stream(device=device)
         # The microbatch threads plus the thread that starts them.
         self.ready_barrier = threading.Barrier(self.num_ubatches + 1)
@@ -340,10 +338,8 @@ class UBatchRunner:
         Attention metadata is built per microbatch and carried in the forward
         contexts the threads install, not in the caller's.
 
-        `cg_mode` and `for_capture` reach each microbatch's attention metadata
-        the same way `prepare_inputs_to_capture` passes them on the non-ubatched
-        path: FULL builds against the padded sizes, and `for_capture` re-stages
-        from the dummy block tables instead of the last real step's state.
+        FULL uses padded sizes; `for_capture` refreshes metadata from dummy
+        block tables.
         """
         ubatch_slices = create_ubatch_slices(input_batch, self.num_ubatches)
 
@@ -439,22 +435,14 @@ class UBatchRunner:
         ubatch_state: UBatchState,
         for_capture: bool = False,
     ) -> Callable[[], Any]:
-        """Start the microbatch threads and return a callback that joins them.
+        """Start microbatch threads and return a callback to run and join them.
 
-        Split out of `run` so a FULL cudagraph capture can start the threads
-        outside the `torch.cuda.graph(...)` block and keep only the
-        handoff-and-join -- pure stream/event work, no Python allocation --
-        inside it, as V1 does in `gpu_ubatch_wrapper.py::_capture_ubatches`.
+        For capture, start threads outside the graph and call the callback inside.
+        `for_capture` selects the capture stream and initializes cuBLAS workspaces
+        before capture.
 
-        The callback must run exactly once, on the same thread as this call.
-        Until it does the threads stay parked and the barrier stays armed, so a
-        caller that may fail in between has to route the failure through
-        `abort_pending_run`.
-
-        `for_capture` puts the microbatches on `self.capture_stream` -- the
-        stream the caller opens `torch.cuda.graph()` on -- and has each thread
-        initialize its cuBLAS workspace before parking, since cuBLAS allocates
-        it on first use per stream and allocating inside a capture is illegal.
+        Call the callback exactly once on this thread, or call `abort_pending_run`
+        on failure to release parked threads.
         """
         ubatch_slices = ubatch_state.slices
         assert len(ubatch_slices) == len(ubatch_state.forward_contexts)
@@ -475,12 +463,10 @@ class UBatchRunner:
         @torch.inference_mode()
         def run_ubatch(ubatch_context, inputs: dict[str, Any]) -> None:
             try:
-                # A fresh thread starts on the default device, not this
-                # worker's.
+                # New threads must select the worker's device.
                 torch.accelerator.set_device_index(self.device.index)
                 if for_capture:
-                    # Force cuBLAS to allocate its per-stream workspace now,
-                    # before the caller opens the capture.
+                    # Allocate cuBLAS workspaces before capture.
                     for stream in (compute_stream, self.comm_stream):
                         with torch.cuda.stream(stream):
                             torch.cuda.current_blas_handle()
@@ -496,11 +482,8 @@ class UBatchRunner:
                 # is deliberately out of scope here.
                 errors[ubatch_context.id] = e
 
-        # The threads manage the forward context themselves; clear it here so
-        # it is restored correctly once `finish` is done. Both context
-        # managers have to stay entered across the split, since threads keep
-        # running (and the SM partition stays reserved) until `finish` joins
-        # them -- so open them here and close them from inside `finish`.
+        # Threads own the forward context; keep it cleared and SMs reserved
+        # until finish joins them.
         stack = ExitStack()
         stack.enter_context(override_forward_context(None))
         stack.enter_context(self.sm_control)
@@ -517,9 +500,7 @@ class UBatchRunner:
             threads.append(thread)
             thread.start()
 
-        # Wait for every thread to reach its context before returning. This is
-        # pure CPU synchronization (no CUDA op), so it is safe to do outside
-        # any cudagraph capture the caller may be about to open.
+        # Park all threads before the caller starts capture.
         self.ready_barrier.wait()
 
         def finish() -> Any:
@@ -542,9 +523,7 @@ class UBatchRunner:
         return finish
 
     def abort_pending_run(self) -> None:
-        """Join threads left parked by a `begin_capturable_run` that never
-        finished, so a failed capture raises instead of deadlocking the next
-        one on the barrier."""
+        """Release and join parked threads after a failed capture."""
         if self._pending_finish is None:
             return
         try:

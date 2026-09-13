@@ -732,13 +732,7 @@ def test_slicing_drops_stale_dcp_metadata_when_dcp_is_off():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
 def test_capturable_run_replays_as_a_cudagraph():
-    """The split forward survives `torch.cuda.graph`, and a replay recomputes.
-
-    This is the half of the DBO capture path that end-to-end runs cannot reach
-    without a DeepEP-capable box: threads start (and reach their contexts)
-    outside the graph, only the handoff-and-join is captured, and the replay
-    has to pick up whatever the persistent input buffers hold.
-    """
+    """Microbatched graph replay reads updated persistent input buffers."""
     vllm_config = VllmConfig(
         model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
         parallel_config=ParallelConfig(
@@ -789,14 +783,7 @@ def _request_slices(input_batch: InputBatch) -> list[slice]:
 
 
 def test_captured_split_survives_a_replay_with_enough_requests():
-    """A microbatched FULL graph bakes in where the request split falls.
-
-    Capture takes the split from `make_dummy`'s evenly filled batch, so a replay
-    only lines up while the real batch still reaches the split point. That is
-    the condition `sync_cudagraph_and_dp_padding` checks before it hands back a
-    microbatched FULL descriptor; below it, the split slides onto the last real
-    request and the graph would read the wrong rows.
-    """
+    """Replay preserves the captured split only if real requests reach it."""
     buffers = _make_buffers()
     captured = _request_slices(InputBatch.make_dummy(16, 16, buffers))
 
@@ -848,11 +835,7 @@ def _make_cudagraph_manager(capture_sizes: list[int]) -> CudaGraphManager:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a graph pool")
 def test_microbatched_graphs_are_only_offered_to_uniform_batches():
-    """The captured split only reproduces for a batch shaped like the dummy one.
-
-    So a microbatched graph is pinned to the query length its own shape implies,
-    and a mixed batch of the same size finds nothing and stays eager.
-    """
+    """Mixed batches cannot reuse graphs captured with uniform query lengths."""
     manager = _make_cudagraph_manager([64, 128])
 
     desc = manager.dispatch(
@@ -877,12 +860,7 @@ def test_microbatched_graphs_are_only_offered_to_uniform_batches():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a graph pool")
 def test_microbatched_graph_needs_every_rank_to_reach_the_split():
-    """The split is taken at the midpoint of the padded batch.
-
-    A rank holding under half the captured tokens splits at a different request
-    than the capture did, so the group falls back to eager together rather than
-    replaying against the wrong metadata.
-    """
+    """Fall back to eager on all ranks if any rank cannot reach the captured split."""
     manager = _make_cudagraph_manager([64, 128])
     uniform = [1, 1]
 

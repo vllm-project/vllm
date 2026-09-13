@@ -156,9 +156,7 @@ class CudaGraphManager:
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
         self.varlen_decode = varlen_decode
-        # Set when DBO is configured. Only FULL-mode graphs are captured with
-        # `num_ubatches > 1`; PIECEWISE+DBO is out of scope (neither the V1
-        # runner nor the V2 eager DBO path support it).
+        # DBO supports FULL CUDA graphs only.
         self.ubatch_runner = ubatch_runner
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
@@ -222,17 +220,10 @@ class CudaGraphManager:
     def _maybe_ubatch_twin(
         self, desc: BatchExecutionDescriptor
     ) -> BatchExecutionDescriptor | None:
-        """The microbatched counterpart of a capture candidate, if it needs one.
+        """Return a microbatched capture candidate when eligible.
 
-        A microbatched graph bakes in where the request split falls, and
-        `create_ubatch_slices` derives that from the runtime query lengths. Only
-        a uniform batch reproduces the split the dummy capture batch produced,
-        so the twin is pinned to the query length its own shape implies and
-        uneven shapes get no twin -- the same uniform-decode-only restriction V1
-        puts on `allow_microbatching`.
-
-        The threshold gate matches the one the DP handshake votes with, and is a
-        pure function of config, so every rank derives the same candidate list.
+        Uniform query lengths preserve the captured request split. Use the DP
+        dispatch thresholds so all ranks generate the same candidates.
         """
         if self.ubatch_runner is None or desc.cg_mode != CUDAGraphMode.FULL:
             return None
@@ -341,7 +332,6 @@ class CudaGraphManager:
                     if desc not in descs_by_mode[decode_mode]:
                         descs_by_mode[decode_mode].append(desc)
 
-                    # DBO twin of this decode graph.
                     ubatch_desc = self._maybe_ubatch_twin(desc)
                     if ubatch_desc is not None and (
                         ubatch_desc not in descs_by_mode[decode_mode]
@@ -369,8 +359,6 @@ class CudaGraphManager:
                 )
                 descs_by_mode[mixed_mode].append(desc)
 
-                # DBO twin, for modes without a separate decode routine
-                # where this descriptor is the only FULL one a decode can hit.
                 ubatch_desc = self._maybe_ubatch_twin(desc)
                 if ubatch_desc is not None:
                     descs_by_mode[mixed_mode].append(ubatch_desc)
@@ -399,8 +387,7 @@ class CudaGraphManager:
         return len(self._capture_descs) > 0
 
     def _capture_stream(self, desc: BatchExecutionDescriptor) -> torch.cuda.Stream:
-        """A microbatched graph has to be captured on the stream its threads
-        launch onto, or their work lands outside the graph."""
+        """Capture on the stream used by the microbatch threads."""
         if desc.num_ubatches > 1:
             assert self.ubatch_runner is not None
             return self.ubatch_runner.capture_stream
@@ -423,9 +410,7 @@ class CudaGraphManager:
         """
         with graph_capture(device=self.device), ExitStack() as stack:
             if self.ubatch_runner is not None:
-                # A microbatched capture parks its threads before the graph
-                # opens; join them on the way out so a failure here raises
-                # instead of deadlocking the next capture on the barrier.
+                # Join parked threads on failure to avoid blocking later captures.
                 stack.callback(self.ubatch_runner.abort_pending_run)
             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
             # activations so FULL activations should fit in already allocated
@@ -627,8 +612,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             )
 
         def store_capture_output(num_tokens: int, model_output: Any) -> None:
-            """Stash a forward's output into the manager's persistent output
-            buffers, allocating them on first use."""
+            """Copy outputs to persistent buffers, allocating on first use."""
             if self.is_last_pp_rank:
                 # Last PP rank (common case).
                 if self.use_aux_hidden_state_outputs:
@@ -686,10 +670,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 model_inputs["intermediate_tensors"] = intermediate_tensors[:num_tokens]
 
             if desc.num_ubatches > 1:
-                # Build the dummy split through the same `prepare` real steps
-                # use, park the microbatch threads now (outside the graph, on
-                # the stream `capture()` opens it on), and leave only the
-                # handoff-and-join to the returned forward_fn.
+                # Prepare and park threads before capture; finish runs inside it.
                 assert self.ubatch_runner is not None
                 ubatch_state = self.ubatch_runner.prepare(
                     InputBatch.make_dummy(num_reqs, num_tokens, input_buffers),
