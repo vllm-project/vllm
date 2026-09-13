@@ -17,7 +17,7 @@ class GateLinear(ReplicatedLinear):
     1. cuteDSL ll_bf16_gemm (SM90+, M<=16, bf16 in, fp32 out,
        K divisible by 8)
     2. fp32 specialized kernel (SM90+ or gfx950, bf16/fp32 in, fp32 out,
-       M<=32, model-specific shapes)
+       M<=32, or M<=16 for SM120 fp32 inputs, model-specific shapes)
     3. bf16x3 CuteDSL kernel (SM100, bf16 in, fp32 weight)
     4. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
     5. F.linear via ReplicatedLinear (ultimate fallback)
@@ -44,6 +44,7 @@ class GateLinear(ReplicatedLinear):
     ):
         is_hopper = current_platform.is_device_capability((9, 0))
         is_blackwell = current_platform.is_device_capability_family(100)
+        is_sm120 = current_platform.is_device_capability((12, 0))
         is_gfx950 = False
         if current_platform.is_rocm():
             from vllm.platforms.rocm import on_gfx950
@@ -87,7 +88,7 @@ class GateLinear(ReplicatedLinear):
             and (
                 (
                     current_platform.is_cuda()
-                    and (is_hopper or is_blackwell)
+                    and (is_hopper or is_blackwell or is_sm120)
                     and (input_size, output_size) in self.FP32_SUPPORTED_SHAPES
                 )
                 or (is_gfx950 and is_rocm_fp32_shape)
@@ -184,6 +185,8 @@ class GateLinear(ReplicatedLinear):
             output = torch.ops.vllm.fp32_router_gemm_dispatch(
                 x, self.weight, self.allow_bf16x3_router_gemm
             )
+            if self.out_dtype is not None and output.dtype != self.out_dtype:
+                output = output.to(self.out_dtype)
             return output, None
 
         # Tier 3: bf16x3 CuteDSL kernel for fp32 router weights
@@ -218,13 +221,21 @@ def fp32_router_gemm_dispatch_impl(
     allow_bf16x3_router_gemm: bool,
 ) -> torch.Tensor:
     """
-    Dynamically run fp32 specialized gemm if num_tokens <= FP32_MAX_TOKENS,
-    otherwise optionally run the experimental BF16x3 kernel for medium/large
-    SM100 router batches, then fall back to F.linear.
+    Dynamically run fp32 specialized gemm for small batches, then optionally
+    run the experimental BF16x3 kernel for medium/large SM100 router batches,
+    then fall back to F.linear.
     This must be wrapped in a custom op because our torch.compile integration
     does not support runtime dispatching on num_tokens.
     """
-    if x.shape[0] <= _FP32_ROUTER_GEMM_MAX_TOKENS:
+    max_tokens = _FP32_ROUTER_GEMM_MAX_TOKENS
+    if (
+        x.dtype == torch.float32
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability((12, 0))
+    ):
+        # Larger FP32 activation batches favor F.linear on SM120.
+        max_tokens = 16
+    if x.shape[0] <= max_tokens:
         if current_platform.is_rocm():
             from vllm.model_executor.layers.fused_moe.router.rocm_fp32_router_gemm import (  # noqa: E501
                 can_use_rocm_fp32_router_gemm,
