@@ -63,10 +63,7 @@ class ToolParser:
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        if (
-            cls.structural_tag_model is not None
-            and envs.VLLM_ENFORCE_STRICT_TOOL_CALLING
-        ):
+        if cls.structural_tag_model is not None or cls.engine_based_streaming:
             cls.supports_required_and_named = False
 
     def __init__(
@@ -121,6 +118,11 @@ class ToolParser:
     ) -> ChatCompletionRequest | ResponsesRequest:
         # If there are no tools, return the request as is.
         if not request.tools:
+            return request
+
+        # If this parser does not support generic JSON-based required/named parsing,
+        # do not inject standard JSON schema constraints.
+        if not self.supports_required_and_named:
             return request
 
         # Set structured output params when tool constraints are derived from
