@@ -148,6 +148,14 @@ def test_extract_tool_calls():
     }
 
 
+def test_extract_tool_calls_plain_chat_preserves_content():
+    parser = make_parser()
+    model_output = "The weather is sunny."
+    result = parser.extract_tool_calls(model_output, make_request())
+    assert not result.tools_called
+    assert result.content == "The weather is sunny."
+
+
 def test_function_calls_wrapper_is_not_recognized():
     # The V3.2 wrapper is not a V4 terminal, so it passes through as content,
     # but the invoke inside it is still parsed (tool calls anchor on the invoke).
