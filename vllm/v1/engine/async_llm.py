@@ -314,7 +314,7 @@ class AsyncLLM(EngineClient):
         if max_num_reqs is not None:
             current = self.get_num_unfinished_requests()
             if current + n > max_num_reqs:
-                logger.info(
+                logger.debug(
                     "Request queue full - rejecting request %s "
                     "(current=%d, n=%d, max=%d).",
                     request_id,
@@ -322,20 +322,27 @@ class AsyncLLM(EngineClient):
                     n,
                     max_num_reqs,
                 )
+                self._record_admission_rejection("max_num_queued_reqs")
                 raise QueueOverflowError()
 
         max_queued_tokens = self.scheduler_config.max_num_queued_tokens
         if max_queued_tokens is not None:
             current_tokens = self.get_num_queued_tokens()
             if current_tokens >= max_queued_tokens:
-                logger.info(
+                logger.debug(
                     "Max queued tokens reached - rejecting request %s "
                     "(current_tokens=%d, max=%d).",
                     request_id,
                     current_tokens,
                     max_queued_tokens,
                 )
+                self._record_admission_rejection("max_num_queued_tokens")
                 raise MaxQueuedTokensError()
+
+    def _record_admission_rejection(self, reason: str) -> None:
+        """Increment the frontend admission rejection counter if logging is on."""
+        if self.logger_manager is not None:
+            self.logger_manager.record_admission_rejection(reason)
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if not hasattr(self, "_supported_tasks"):
