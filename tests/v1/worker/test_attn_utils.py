@@ -299,6 +299,8 @@ def test_fast_prefill_dispatch_preserves_active_lora_count(
     assert metadata.logits_indices_padded.shape[0] == num_tokens
     assert metadata.max_logits_per_req == num_tokens
     assert manager.dispatch_calls[-1]["num_active_loras"] == num_active_loras
+
+
 class _FakeSharedHostRegion:
     def __init__(self) -> None:
         self.cleanup_calls = 0
