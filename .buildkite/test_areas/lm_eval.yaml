@@ -110,17 +110,44 @@ steps:
   - csrc/
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP2-PCP2-EP.yaml
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-EP.yaml
+  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-DCP4-EP.yaml
   - tests/evals/gsm8k/configs/models-pcp.txt
   - vllm/model_executor/layers/quantization
   - vllm/config/parallel.py
   - vllm/distributed/parallel_state.py
   - vllm/model_executor/layers/attention/mla_attention.py
   - vllm/model_executor/layers/attention/pcp.py
+  - vllm/model_executor/layers/attention/sparse_mla_attention.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/v1/attention/backends/mla/flashmla_sparse.py
+  - vllm/v1/attention/backends/mla/indexer.py
   - vllm/v1/worker/gpu/model_runner.py
   - vllm/v1/worker/gpu/pcp_manager.py
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt
+
+- label: ":nvidia: (H100) LM Eval Watermark Feature Combination"
+  key: lm-eval-dspark-watermark-2xh100
+  device: h100
+  num_devices: 2
+  # Local TP2 runs took 84–379 seconds, including startup.
+  timeout_in_minutes: 15
+  source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/
+  - vllm/config/speculative.py
+  - vllm/config/vllm.py
+  - vllm/config/watermarking.py
+  - vllm/sampling_params.py
+  - vllm/model_executor/models/qwen3_dspark.py
+  - vllm/model_executor/models/qwen3_dflash.py
+  - vllm/model_executor/warmup/
+  - vllm/v1/watermarking/
+  - vllm/v1/worker/gpu/
+  autorun_on_main: true
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark-dspark-tp2.txt
 
 - label: ":nvidia: (B200) LM Eval Spec Decode"
   key: lm-eval-spec-decode-4xb200
