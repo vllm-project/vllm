@@ -127,7 +127,7 @@ class LoRAModelManager:
         self.max_num_seqs = max_num_seqs
         assert self.capacity >= self.lora_slots
         self._registered_adapters: AdapterLRUCache[LoRAModel] = AdapterLRUCache(
-            self.capacity, self.deactivate_adapter
+            self.capacity, self._remove_registered_adapter
         )
         self._active_adapters: AdapterLRUCache[None] = AdapterLRUCache(
             self.lora_slots, self._deactivate_adapter
@@ -749,12 +749,9 @@ class LoRAModelManager:
 
     def remove_all_adapters(self):
         """Remove all LoRAModels from the manager."""
-        for index in set(self._local_adapter_slots.values()):
-            for module in self.modules.values():
-                module.reset_lora(index)
+        self._registered_adapters.clear()
         self._local_adapter_slots.clear()
         self._staged_local_adapters.clear()
-        self._registered_adapters.clear()
         self.lora_index_to_id = [None] * self.lora_slots
         self._active_adapters.clear()
         self._last_mapping = None
@@ -1612,6 +1609,15 @@ class LoRAModelManager:
         self._active_adapters.pop(adapter_id, None)
         return True
 
+    def _remove_registered_adapter(self, adapter_id: int) -> None:
+        """Release active and reserved GPU state for a cache removal."""
+        self.deactivate_adapter(adapter_id)
+        index = self._local_adapter_slots.pop(adapter_id, None)
+        if index is not None:
+            for module in self.modules.values():
+                module.reset_lora(index)
+            self._staged_local_adapters.discard(adapter_id)
+
     def add_adapter(self, adapter: LoRAModel) -> bool:
         logger.debug("Adding lora. Model id: %d, int id: %d", adapter.id, adapter.id)
         if adapter.id in self._registered_adapters:
@@ -1632,13 +1638,6 @@ class LoRAModelManager:
             self._last_slot_layout = slot_layout
 
     def remove_adapter(self, adapter_id: int) -> bool:
-        self.deactivate_adapter(adapter_id)
-        local_slots = self._local_adapter_slots
-        index = local_slots.pop(adapter_id, None)
-        if index is not None:
-            for module in self.modules.values():
-                module.reset_lora(index)
-            self._staged_local_adapters.discard(adapter_id)
         if adapter_id not in self._registered_adapters:
             return False
         self._registered_adapters.pop(adapter_id, None)
@@ -1672,7 +1671,10 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
     ) -> bool:
         cached = self._registered_adapters.cache.get(lora_id)
         if cached is not None and cached.tensor_extent == "local":
-            return super().activate_adapter(lora_id)
+            result = super().activate_adapter(lora_id)
+            self._registered_adapters.touch(lora_id)
+            self._active_adapters.touch(lora_id)
+            return result
         if (
             lora_id not in self._active_adapters
             and len(self._active_adapters) >= self.lora_slots

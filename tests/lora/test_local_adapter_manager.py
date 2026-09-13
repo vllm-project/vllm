@@ -257,6 +257,49 @@ def test_local_cache_and_gpu_capacity_never_evict_active_generation(manager):
     assert set(manager.list_adapters()) == {1, 2}
 
 
+def test_lru_eviction_releases_local_slot_and_receiver_buffers(manager):
+    if not isinstance(manager, LRUCacheLoRAModelManager):
+        pytest.skip("LRU eviction is specific to LRUCacheLoRAModelManager")
+    plan, factors = make_payload(manager)
+
+    def make_global_adapter(adapter_id: int) -> LoRAModel:
+        a = torch.ones(4, 16, dtype=torch.bfloat16)
+        b = torch.ones(24, 4, dtype=torch.bfloat16)
+        return LoRAModel(
+            adapter_id,
+            4,
+            {"o_proj": LoRALayerWeights("o_proj", 4, 12, a, b)},
+        )
+
+    manager.add_local_adapter(1, plan, factors)
+    manager.activate_adapter(1)
+    manager.deactivate_adapter(1)
+
+    for adapter_id in (2, 3):
+        manager.add_adapter(make_global_adapter(adapter_id))
+    manager.activate_adapter(1)
+    manager.deactivate_adapter(1)
+    manager.add_adapter(make_global_adapter(4))
+    assert set(manager.list_adapters()) == {1, 3, 4}
+
+    for adapter_id in (5, 6):
+        manager.add_adapter(make_global_adapter(adapter_id))
+
+    assert 1 not in manager.list_adapters()
+    assert 1 not in manager._local_adapter_slots
+    assert 1 not in manager._staged_local_adapters
+    assert manager.lora_index_to_id == [None, None]
+    assert all(
+        torch.count_nonzero(a) == torch.count_nonzero(b) == 0
+        for module in manager.modules.values()
+        for a, b in module._get_lora_shard_buffers(0)
+    )
+
+    manager.remove_adapter(4)
+    manager.add_local_adapter(7, plan, factors)
+    assert manager._local_adapter_slots[7] == 0
+
+
 def test_global_adapter_keeps_existing_scaling_and_loading_path(manager):
     a, b = (
         torch.ones(4, 16, dtype=torch.bfloat16),
