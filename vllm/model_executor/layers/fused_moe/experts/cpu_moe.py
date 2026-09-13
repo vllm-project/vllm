@@ -948,6 +948,29 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
 # ===========================================================================
 
 
+def prepare_int8_moe_layer_for_cpu(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Prepack INT8 MoE weights for the current CPU architecture."""
+    # SMMLA packing for AArch64
+    if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+        return (
+            cpu_prepack_moe_weight_int8(w13, "neon"),
+            cpu_prepack_moe_weight_int8(w2, "neon"),
+        )
+    # VSX packing for POWER
+    if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
+        return (
+            cpu_prepack_moe_weight_int8(w13, "vsx"),
+            cpu_prepack_moe_weight_int8(w2, "vsx"),
+        )
+    # VNNI packing for x86
+    packed_w13 = torch.ops._C.convert_weight_packed(w13)
+    packed_w2 = torch.ops._C.convert_weight_packed(w2)
+    return packed_w13, packed_w2
+
+
 class CPUExpertsInt8(mk.FusedMoEExpertsModular):
     """CPU INT8 W8A8 per-channel weight / dynamic per-token activation
     modular MoE experts."""
@@ -1278,6 +1301,160 @@ class ArmCPUExpertsInt8(mk.FusedMoEExpertsModular):
             topk_ids,
             activation.value,
             "neon",
+            skip_weighted=apply_router_weight_on_input,
+        )
+
+
+class PowerCPUExpertsInt8(mk.FusedMoEExpertsModular):
+    """POWER VSX INT8 MoE with per-token activation and channelwise weight quant."""
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return True
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        supported, reason = mk.FusedMoEExpertsModular.is_supported_config(
+            cls,
+            moe_config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
+        if not supported:
+            return supported, reason
+        if moe_config.in_dtype not in (torch.float32, torch.bfloat16):
+            return False, "kernel requires float32 or bfloat16 activations"
+        if moe_config.hidden_dim % 16 != 0:
+            return False, "kernel requires hidden dim divisible by 16"
+        if moe_config.intermediate_size_per_partition % 16 != 0:
+            return False, "kernel requires intermediate dim divisible by 16"
+        return True, None
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+            and hasattr(torch.ops._C, "cpu_fused_moe_int8")
+        )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in (
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
+        )
+
+    @staticmethod
+    def _supports_parallel_config(
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> bool:
+        return not moe_parallel_config.use_ep
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (
+            kInt8StaticChannelSym,
+            kInt8DynamicTokenSym,
+        )
+
+    @staticmethod
+    def _supports_routing_method(
+        routing_method: RoutingMethodType,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return routing_method in [
+            RoutingMethodType.Default,
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
+        ]
+
+    @staticmethod
+    def _supports_router_logits_dtype(
+        router_logits_dtype: torch.dtype | None,
+        routing_method: RoutingMethodType,
+    ) -> bool:
+        return True
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        w13 = cpu_prepack_moe_weight_int8(layer.w13_weight, "vsx")
+        w2 = cpu_prepack_moe_weight_int8(layer.w2_weight, "vsx")
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # cpu_fused_moe_int8 manages its own scratch space.
+        return (0,), (0,), (M, K)
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        return TopKWeightAndReduceNoOP()
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        # The modular prepare step applies router weights to the input when
+        # apply_router_weight_on_input is enabled.
+        assert self.w1_scale is not None
+        assert self.w2_scale is not None
+        cpu_fused_moe_int8(
+            output,
+            hidden_states,
+            w1,
+            w2,
+            self.w1_scale,
+            self.w2_scale,
+            self.w1_bias,
+            self.w2_bias,
+            topk_weights,
+            topk_ids,
+            activation.value,
+            "vsx",
             skip_weighted=apply_router_weight_on_input,
         )
 
