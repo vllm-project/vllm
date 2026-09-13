@@ -99,6 +99,109 @@ def test_free_request_frees_all_inputs():
     assert manager.num_freeable_slots == 10
 
 
+def test_free_request_releases_duplicate_hashes_in_last_occurrence_order():
+    manager = EncoderCacheManager(cache_size=20)
+    req = MockRequest("req", ["a", "b", "a"], [4, 5, 4])
+    newcomer = MockRequest("newcomer", ["c"], [12])
+
+    manager.allocate(req, 0)
+    manager.allocate(req, 1)
+    assert manager.check_and_update_cache(req, 2)
+    manager.get_cached_input_ids = lambda request: [0, 1, 2]
+
+    manager.free(req)
+
+    assert "req" not in manager.request_cached_ids
+    assert list(manager.freeable) == ["b", "a"]
+    assert manager.num_freeable_slots == 20
+
+    assert manager.can_allocate(newcomer, 0, int(1e9), 0)
+    manager.allocate(newcomer, 0)
+    assert manager.get_freed_mm_hashes() == ["b"]
+    assert "a" in manager.cached
+
+
+def test_free_request_keeps_shared_hash_referenced_by_other_request():
+    manager = EncoderCacheManager(cache_size=20)
+    req = MockRequest("req", ["shared", "local", "shared"], [4, 5, 4])
+    other_req = MockRequest("other", ["shared"], [4])
+
+    manager.allocate(req, 0)
+    manager.allocate(req, 1)
+    assert manager.check_and_update_cache(req, 2)
+    assert manager.check_and_update_cache(other_req, 0)
+    manager.get_cached_input_ids = lambda request: [0, 1, 2]
+
+    manager.free(req)
+
+    assert manager.cached["shared"] == {"other"}
+    assert "shared" not in manager.freeable
+    assert not manager.cached["local"]
+    assert "local" in manager.freeable
+    assert "req" not in manager.request_cached_ids
+
+
+def test_free_request_clears_cached_ids_alias_in_place_on_bulk_path():
+    manager = EncoderCacheManager(cache_size=20)
+    req = MockRequest("req", ["a", "b"], [4, 5])
+
+    manager.allocate(req, 0)
+    manager.allocate(req, 1)
+    cached_ids_alias = manager.request_cached_ids["req"]
+    manager.get_cached_input_ids = lambda request: [0, 1]
+
+    manager.free(req)
+
+    assert cached_ids_alias == set()
+    assert "req" not in manager.request_cached_ids
+
+
+def test_free_request_handles_empty_and_single_input_requests():
+    manager = EncoderCacheManager(cache_size=10)
+    empty_req = MockRequest("empty", [], [])
+    single_req = MockRequest("single", ["a"], [4])
+
+    manager.free(empty_req)
+    assert "empty" not in manager.request_cached_ids
+
+    manager.allocate(single_req, 0)
+    cached_ids_alias = manager.request_cached_ids["single"]
+
+    manager.free(single_req)
+
+    assert cached_ids_alias == set()
+    assert "single" not in manager.request_cached_ids
+    assert list(manager.freeable) == ["a"]
+    assert manager.num_freeable_slots == 10
+
+
+def test_free_request_subclass_uses_per_input_callback_sequence():
+    class InstrumentedEncoderCacheManager(EncoderCacheManager):
+        def __init__(self, cache_size: int):
+            super().__init__(cache_size)
+            self.freed_input_ids = []
+
+        def get_cached_input_ids(self, request):
+            return [0, 1, 2]
+
+        def free_encoder_input(self, request, input_id: int) -> None:
+            self.freed_input_ids.append(input_id)
+            super().free_encoder_input(request, input_id)
+
+    manager = InstrumentedEncoderCacheManager(cache_size=20)
+    req = MockRequest("req", ["a", "b", "a"], [4, 5, 4])
+
+    manager.allocate(req, 0)
+    manager.allocate(req, 1)
+    assert manager.check_and_update_cache(req, 2)
+
+    manager.free(req)
+
+    assert manager.freed_input_ids == [0, 1, 2]
+    assert list(manager.freeable) == ["b", "a"]
+    assert "req" not in manager.request_cached_ids
+
+
 def test_eviction_when_cache_is_full():
     manager = EncoderCacheManager(cache_size=10)
 
@@ -453,3 +556,18 @@ def test_encoder_decoder_cache_manager_reset_allows_fresh_allocations():
 
     assert manager.num_free_slots == 2
     assert "img2" in manager.allocated
+
+
+def test_encoder_decoder_cache_manager_free_behavior_is_unchanged():
+    manager = EncoderDecoderCacheManager(cache_size=20)
+    req = MockRequest("req", ["encA", "encB"], [3, 4])
+
+    manager.allocate(req, 0)
+    manager.allocate(req, 1)
+    assert manager.num_free_slots == 13
+
+    manager.free(req)
+
+    assert manager.num_free_slots == 20
+    assert manager.get_freed_mm_hashes() == []
+    assert manager.get_freed_mm_hashes() == ["encA", "encB"]
