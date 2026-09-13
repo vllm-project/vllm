@@ -492,7 +492,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
 
         if is_a_8bit:
-            assert self.quant_config.quant_type.size_bits == 8, (
+            assert self.quant_config.quant_type.size_bits == 4, (
                 "W8A8-INT8 is not supported by marlin kernel."
             )
 
@@ -620,7 +620,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
 
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
 
-        assert not is_a_8bit or self.quant_config.quant_type.size_bits == 8, (
+        assert not is_a_8bit or self.quant_config.quant_type.size_bits == 4, (
             "W8A8-INT8 is not supported by marlin kernel."
         )
 
