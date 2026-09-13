@@ -3256,6 +3256,22 @@ def test_ir_op_priority_default():
     assert priority_config.fused_add_rms_norm == ["native"]
 
 
+@pytest.mark.parametrize("mode", [CompilationMode.NONE, CompilationMode.VLLM_COMPILE])
+@pytest.mark.parametrize("backend", ["inductor", "eager"])
+def test_ir_op_platform_defaults_support_sparse_gelu(mode, backend):
+    """Worker initialization must not select an unregistered sparse GELU provider."""
+    from vllm import ir
+
+    config = SimpleNamespace(
+        compilation_config=CompilationConfig(mode=mode, backend=backend)
+    )
+    priority = current_platform.get_default_ir_op_priority(config)
+    expected = ["triton", "native"] if current_platform.is_cuda() else ["native"]
+
+    with priority.set_priority():
+        assert ir.ops.gelu_and_mul_sparse.get_priority() == expected
+
+
 def test_ir_op_priority_str():
     """Test that passing a comma-delimited string works"""
     from vllm.config.kernel import IrOpPriorityConfig
