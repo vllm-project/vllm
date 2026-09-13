@@ -323,16 +323,6 @@ def tune_on_gpu(args_dict):
     print(f"Tuning on GPU {gpu_id} took {end - start:.2f} seconds")
 
 
-def distribute_batch_sizes(batch_sizes, num_gpus):
-    """Distribute batch sizes across available GPUs."""
-    batches_per_gpu = []
-    for i in range(num_gpus):
-        start_idx = i * len(batch_sizes) // num_gpus
-        end_idx = (i + 1) * len(batch_sizes) // num_gpus
-        batches_per_gpu.append(batch_sizes[start_idx:end_idx])
-    return batches_per_gpu
-
-
 def main(args):
     print(args)
     num_gpus = torch.accelerator.device_count()
@@ -369,21 +359,27 @@ def main(args):
 
     weight_shapes = get_weight_shapes(args.tp_size)
 
-    batches_per_gpu = distribute_batch_sizes(batch_sizes, num_gpus)
+    # Split by shape, not by batch size: save_configs() overwrites the
+    # per-shape JSON file rather than merging into it, so GPUs sharing a
+    # shape across different batch-size subsets silently clobber each
+    # other's results, leaving only the last writer's batch sizes in the
+    # final config.
+    num_workers = min(num_gpus, len(weight_shapes))
+    shapes_per_gpu = [weight_shapes[i::num_workers] for i in range(num_workers)]
 
     process_args = []
-    for gpu_id in range(num_gpus):
+    for gpu_id in range(num_workers):
         process_args.append(
             {
                 "gpu_id": gpu_id,
-                "batch_sizes": batches_per_gpu[gpu_id],
-                "weight_shapes": weight_shapes,  # Each GPU processes all weight shapes
+                "batch_sizes": batch_sizes,
+                "weight_shapes": shapes_per_gpu[gpu_id],
                 "args": args,
             }
         )
 
     ctx = mp.get_context("spawn")
-    with ctx.Pool(num_gpus) as pool:
+    with ctx.Pool(num_workers) as pool:
         pool.map(tune_on_gpu, process_args)
 
     print("Multi-GPU tuning completed")
