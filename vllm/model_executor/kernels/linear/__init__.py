@@ -143,6 +143,7 @@ from vllm.model_executor.kernels.linear.nvfp4.cutlass import (
     CutlassNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.emulation import (
+    EmulationA16NvFp4LinearKernel,
     EmulationNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.fbgemm import (
@@ -1042,6 +1043,7 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         FlashInferCuteDslNvFp4W4A16LinearKernel,
         MarlinNvFp4LinearKernel,
         HummingNvFp4LinearKernel,
+        EmulationA16NvFp4LinearKernel,
     )
 
     # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
@@ -1082,14 +1084,29 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         _cc = current_platform.get_device_capability()
         compute_capability = _cc.to_int() if _cc is not None else None
         # Weight-only: prefer FlashInfer CuTe-DSL W4A16 on SM100/103,
-        # otherwise Marlin.
+        # otherwise Marlin. If the Marlin FP4 kernels are unavailable in
+        # this build/platform, fall back to the weight-only emulation
+        # kernel instead of failing at weight-processing time: W4A16
+        # checkpoints stay loadable (slowly) for correctness work on
+        # builds without the Marlin extensions.
         cutedsl_ok, _ = FlashInferCuteDslNvFp4W4A16LinearKernel.is_supported(
             compute_capability
         )
         if compute_capability in (100, 103) and cutedsl_ok:
             force_kernel = FlashInferCuteDslNvFp4W4A16LinearKernel
         else:
-            force_kernel = MarlinNvFp4LinearKernel
+            marlin_supported, marlin_reason = MarlinNvFp4LinearKernel.is_supported()
+            if marlin_supported:
+                force_kernel = MarlinNvFp4LinearKernel
+            else:
+                logger.warning_once(
+                    "MarlinNvFp4LinearKernel is not supported (%s); falling "
+                    "back to EmulationA16NvFp4LinearKernel for W4A16 NVFP4 "
+                    "linear layers. This is a correctness fallback and will "
+                    "be slow.",
+                    marlin_reason,
+                )
+                force_kernel = EmulationA16NvFp4LinearKernel
 
     if force_kernel is not None:
         if use_a16 and force_kernel not in a16_kernels:
@@ -1267,6 +1284,7 @@ __all__ = [
     "XPUMxFp8LinearKernel",
     "EmulationMxfp8LinearKernel",
     "CutlassNvFp4LinearKernel",
+    "EmulationA16NvFp4LinearKernel",
     "EmulationNvFp4LinearKernel",
     "FbgemmNvFp4LinearKernel",
     "FlashInferCuteDslNvFp4LinearKernel",
