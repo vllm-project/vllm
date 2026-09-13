@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import math
 import os
 import secrets
@@ -67,6 +68,70 @@ def parse_samples(output: str, timestamp_ns: int) -> list[dict]:
     return events
 
 
+def visible_mig_devices() -> list[str]:
+    """Resolve explicit MIG assignments without enumerating sibling instances."""
+    nvidia = os.environ.get("NVIDIA_VISIBLE_DEVICES", "").split(",")
+    nvidia = [value.strip() for value in nvidia]
+    cuda = os.environ.get("CUDA_VISIBLE_DEVICES")
+    devices = nvidia if cuda is None else [value.strip() for value in cuda.split(",")]
+    if devices and all(value.isdigit() for value in devices):
+        if not all(value.startswith("MIG-") for value in nvidia):
+            return []
+        try:
+            devices = [nvidia[int(value)] for value in devices]
+        except IndexError:
+            return []
+    if not devices or not all(value.startswith("MIG-") for value in devices):
+        return []
+    return list(dict.fromkeys(devices))[:MAX_DEVICES]
+
+
+def query_mig_samples(devices: list[str], timestamp_ns: int) -> list[dict]:
+    # Use the binding already shipped with vLLM; never initialize CUDA/Torch.
+    from vllm.third_party import pynvml
+
+    events = []
+    pynvml.nvmlInit()
+    try:
+        for index, uuid in enumerate(devices[:MAX_DEVICES]):
+            if not uuid.startswith("MIG-"):
+                continue
+            attributes: dict[str, str | int | bool] = {
+                "gpu.uuid": uuid,
+                "gpu.index": index,
+                "gpu.name": "NVIDIA MIG",
+                "gpu.status": "unavailable_mig_memory",
+            }
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByUUID(uuid)
+                if not pynvml.nvmlDeviceIsMigDeviceHandle(handle):
+                    continue
+                memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                used = _number(str(memory.used))
+                total = _number(str(memory.total))
+                if used is not None and total and used <= total:
+                    attributes.update(
+                        {
+                            "gpu.memory.used": used,
+                            "gpu.memory.total": total,
+                            "gpu.status": "mig_memory_only",
+                        }
+                    )
+                # NVML does not support per-MIG utilization on these devices.
+            except pynvml.NVMLError:
+                pass
+            events.append(
+                {
+                    "time_ns": timestamp_ns,
+                    "name": "ci.gpu.sample",
+                    "attributes": attributes,
+                }
+            )
+    finally:
+        pynvml.nvmlShutdown()
+    return events
+
+
 def sample_span(events: list[dict]) -> Span:
     return Span(
         trace_id=os.environ["CI_INFRA_TRACE_ID"],
@@ -88,16 +153,22 @@ def collect(parent_pid: int, stop: threading.Event) -> None:
     events: list[dict] = []
     batch_started = time.monotonic()
     failures = 0
+    mig_devices = visible_mig_devices()
+    query = (
+        [sys.executable, __file__, "--query-mig", *mig_devices]
+        if mig_devices
+        else [
+            "nvidia-smi",
+            f"--query-gpu={QUERY}",
+            "--format=csv,noheader,nounits",
+        ]
+    )
     try:
         while not stop.is_set() and os.getppid() == parent_pid:
             started = time.monotonic()
             try:
                 result = subprocess.run(
-                    [
-                        "nvidia-smi",
-                        f"--query-gpu={QUERY}",
-                        "--format=csv,noheader,nounits",
-                    ],
+                    query,
                     capture_output=True,
                     text=True,
                     timeout=QUERY_TIMEOUT_SECONDS,
@@ -105,12 +176,16 @@ def collect(parent_pid: int, stop: threading.Event) -> None:
                 )
                 if stop.is_set():
                     break
-                samples = parse_samples(result.stdout, time.time_ns())
+                samples = (
+                    json.loads(result.stdout)
+                    if mig_devices
+                    else parse_samples(result.stdout, time.time_ns())
+                )
                 if not samples:
                     break
                 events.extend(samples)
                 failures = 0
-            except (OSError, subprocess.SubprocessError):
+            except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
                 failures += 1
                 if failures >= 3:
                     print(
@@ -142,4 +217,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "--query-mig":
+        print(json.dumps(query_mig_samples(sys.argv[2:], time.time_ns())))
+    else:
+        main()
