@@ -22,6 +22,7 @@ from vllm.distributed import (
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4_1.common.engram import (
     DEAD_ID,
     EngramLayout,
@@ -247,6 +248,10 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
         self._view_src: tuple[int, int] | None = None
         super().__init__(num_embeddings, dim, head_sizes, block_size)
         if cpu_offload:
+            # Constant dummy values avoid randomizing huge CPU lookup tables.
+            set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
+            # The ue8m0 encoding of scale 1.0 is exponent byte 127.
+            set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": 127})
             logger.info(
                 "Engram table offloaded to pinned host memory: %d rows x %d, "
                 "%.2f GiB %s",
