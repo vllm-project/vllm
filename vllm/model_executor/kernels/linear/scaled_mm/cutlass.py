@@ -37,6 +37,16 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
             return False, "requires CUDA."
+        # CUTLASS int8 w8a8 is only wired for SM < 100; the SM100/SM120
+        # dispatchers pass a nullptr int8 func and the C++ hard-errors
+        # ("Int8 not supported on SM<n>"). Decline so kernel selection can fall
+        # back to the Triton int8 kernel on Blackwell. See #54311.
+        if compute_capability is not None and compute_capability >= 100:
+            return (
+                False,
+                "CUTLASS int8 w8a8 is not supported on SM100+ (Blackwell); "
+                "use the Triton int8 kernel.",
+            )
         return True, None
 
     @classmethod
