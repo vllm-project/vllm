@@ -43,7 +43,7 @@ def _run_prepare(
         num_scheduled_tokens=np.array([4], dtype=np.int32),
         positions=torch.tensor(target_positions, dtype=torch.int64, device=device),
         query_start_loc=torch.tensor([0, 4], dtype=torch.int32, device=device),
-        idx_mapping=torch.tensor([2], dtype=torch.int64, device=device),
+        idx_mapping=torch.tensor([2], dtype=torch.int32, device=device),
     )
     query_slot_mapping = torch.full(
         (max_num_tokens,), -2, dtype=torch.int64, device=device
