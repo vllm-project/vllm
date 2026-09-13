@@ -10,6 +10,7 @@ from openai.types.responses.tool import Tool as ResponsesTool
 from openai.types.responses.tool_choice_allowed import ToolChoiceAllowed
 from openai.types.responses.tool_choice_function import ToolChoiceFunction
 from xgrammar import StructuralTag, normalize_tool_choice
+from xgrammar import builtin_structural_tag as xgrammar_builtin_structural_tag
 from xgrammar import get_model_structural_tag as get_xgrammar_model_structural_tag
 from xgrammar.openai_tool_call_schema import (
     BuiltinToolParam,
@@ -242,9 +243,20 @@ def get_deepseek_v41_structural_tag(
     token_suffix: str = "",
 ) -> StructuralTag:
     # Serving enables this visible-text grammar after the reasoning boundary.
+    builder = getattr(
+        xgrammar_builtin_structural_tag, "get_deepseek_v4_1_structural_tag", None
+    )
+    if builder is not None:
+        return builder(
+            tools=tools,
+            builtin_tools=builtin_tools,
+            tool_choice=tool_choice,
+            reasoning="disabled",
+        )
+
     del builtin_tools, reasoning, token_suffix
 
-    # TODO: lower parameter schemas into DSML constraints. This builder constrains
+    # Compatibility with xgrammar releases without the V4.1 builtin. This constrains
     # tool names and DSML/value syntax only. Parameter names, presence, uniqueness
     # and value schemas remain unconstrained, including for strict=true. The request
     # layer still uses strict to decide whether auto tool choice activates a grammar.
