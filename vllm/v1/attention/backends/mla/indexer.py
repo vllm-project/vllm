@@ -25,6 +25,7 @@ from vllm.utils.deep_gemm import (
     has_deep_gemm,
     native_next_n_supported,
 )
+from vllm.utils.math_utils import round_down
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.attention.backend import (
@@ -328,7 +329,7 @@ def build_pcp_global_chunk_plan(
     for i in range(len(region_first_row)):
         g = int(region_padded[i]) * dcp_world_size
         t = np.arange(g, dtype=np.int64)
-        local = (t // (dcp_world_size * interleave)) * interleave + t % interleave
+        local = round_down(t // dcp_world_size, interleave) + t % interleave
         # Padded positions are outside causal bounds but must remain in-bounds.
         local = np.minimum(local, region_padded[i] - 1)
         idx_np[region_start[i] : region_start[i] + g] = (
