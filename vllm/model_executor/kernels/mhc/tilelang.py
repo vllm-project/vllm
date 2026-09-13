@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+    mhc_fused_post_pre_split_config,
+)
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -614,7 +617,7 @@ def mhc_fused_post_pre_tilelang(
     post_layer_mix_flat = post_layer_mix.view(num_tokens, hc_mult)
     comb_res_mix_flat = comb_res_mix.view(num_tokens, hc_mult, hc_mult)
 
-    use_small_fma = num_tokens <= 16
+    fused_config = mhc_fused_post_pre_split_config(num_tokens, hidden_size, hc_mult)
 
     post_mix_cur = torch.empty(
         num_tokens,
@@ -635,7 +638,7 @@ def mhc_fused_post_pre_tilelang(
         device=residual.device,
     )
 
-    if use_small_fma:
+    if fused_config is not None:
         gemm_out_mul, gemm_out_sqrsum, residual_cur = _MHC_FUSED_TILELANG_KERNEL(
             comb_res_mix_flat,
             residual_flat,
