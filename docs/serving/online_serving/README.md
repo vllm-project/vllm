@@ -159,6 +159,10 @@ For further details on derenderer APIs, please refer to [this page](derenderer.m
 - `/detokenize` - Detokenize tokens
 - `/tokenizer_info` - Get comprehensive tokenizer information including chat templates and configuration
 
+For Responses API input, use `/v1/responses/render` to get prompt token IDs
+before routing a request. See [Get Responses prompt token IDs](renderer.md#get-responses-prompt-token-ids)
+for an example and the required server configuration.
+
 ## Elastic Expert Parallelism (EEP)
 
 - `/scale_elastic_ep` - Trigger scaling operations
