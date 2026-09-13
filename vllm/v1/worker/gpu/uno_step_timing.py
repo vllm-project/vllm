@@ -43,6 +43,8 @@ class UnoStepTimingTrace:
         default_factory=dict
     )
     _completion_event: torch.cuda.Event | None = None
+    _allocated_bytes: int | None = None
+    _reserved_bytes: int | None = None
     _finished: bool = False
 
     def start_wall(self, stage: str) -> None:
@@ -81,6 +83,10 @@ class UnoStepTimingTrace:
         if self.capture_cuda_events:
             self._completion_event = torch.cuda.Event()
             self._completion_event.record()
+            # These are allocator counters, deliberately distinct from the
+            # device-level residency sampled with nvidia-smi by the harness.
+            self._allocated_bytes = torch.cuda.memory_allocated()
+            self._reserved_bytes = torch.cuda.memory_reserved()
 
     def payload(self) -> dict[str, object]:
         gpu_ms = {
@@ -102,6 +108,8 @@ class UnoStepTimingTrace:
             "running_request_count": self.running_request_count,
             "scheduled_request_count": self.scheduled_request_count,
             "request_steps": self.request_steps,
+            "allocator_allocated_bytes": self._allocated_bytes,
+            "allocator_reserved_bytes": self._reserved_bytes,
         }
 
 
