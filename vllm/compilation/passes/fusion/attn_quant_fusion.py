@@ -12,10 +12,13 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic64Sym,
+    kFp8Dynamic128Sym,
     kNvfp4Dynamic,
     kStaticTensorScale,
 )
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import _USE_LAYERNAME, _encode_layer_name
 
@@ -359,6 +362,182 @@ class AttnNvfp4QuantPattern(
         return inputs
 
 
+class AttnFp8GroupQuantPattern(
+    VllmPatternReplacement[..., tuple[torch.Tensor, torch.Tensor]]
+):
+    """
+    Fusion for Attention + dynamic per-group FP8 quant.
+
+    Matches ``attention -> reshape -> per_token_group_fp8_quant`` and replaces
+    it with ``attention(output_block_scale=group_scale)``.  The Triton
+    attention backend computes the per-group scale in its epilogue, so the
+    standalone quant op is removed from the graph.
+
+    Unlike the MLA per-group pattern, no quant flags are threaded through the
+    attention custom op: ``group_size`` is recovered from the scale tensor's
+    shape, the row/column-major layout from its strides, and the UE8M0
+    rounding mode from ``is_deep_gemm_e8m0_used()`` (which is also what
+    ``per_token_group_quant_fp8`` defaults to). The pattern is therefore only
+    registered for that default rounding mode and for non-TMA-aligned scales
+    (the only layouts the Triton epilogue produces).
+    """
+
+    def __init__(
+        self,
+        layer: Attention,
+        dtype: torch.dtype,
+        quant_key: QuantKey,
+        has_col_major_scales: bool,
+        is_e8m0: bool,
+    ) -> None:
+        self._layer_name = layer.layer_name
+        self._num_heads = layer.num_heads
+        self._head_size = layer.head_size
+        self._dtype = dtype
+        self._group_size = quant_key.scale.group_shape[1]
+        self._has_col_major_scales = has_col_major_scales
+        self._is_e8m0 = is_e8m0
+        self._quant_matcher = MatcherQuantFP8(
+            quant_key,
+            has_col_major_scales=has_col_major_scales,
+            is_e8m0=is_e8m0,
+        )
+
+    @property
+    def pattern(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
+        _ln = _encode_layer_name(self._layer_name)
+        finfo = torch.finfo(FP8_DTYPE)
+
+        def _quant(attn_out_view, scale):
+            result = torch.empty(
+                attn_out_view.shape, device=attn_out_view.device, dtype=FP8_DTYPE
+            )
+            _, result, scale = auto_functionalized(
+                self._quant_matcher.QUANT_OP,
+                input=attn_out_view,
+                output_q=result,
+                output_s=scale,
+                group_size=self._group_size,
+                eps=1e-10,
+                fp8_min=finfo.min,
+                fp8_max=finfo.max,
+                scale_ue8m0=self._is_e8m0,
+                dummy_is_scale_transposed=self._has_col_major_scales,
+                dummy_is_tma_aligned=False,
+            )
+            return result, scale
+
+        if _USE_LAYERNAME:
+
+            def _pattern_with_ln(  # type: ignore[misc]
+                q, k, v, output_attn, scale, kv_cache_dummy_dep, layer_name
+            ):
+                at1 = auto_functionalized(
+                    ATTN_OP,
+                    query=q,
+                    key=k,
+                    value=v,
+                    output=output_attn,
+                    layer_name=layer_name,
+                    output_scale=None,
+                    output_block_scale=None,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
+                )
+                attn_out_view = RESHAPE_OP(
+                    at1[1], [q.shape[0], self._num_heads * self._head_size]
+                )
+                return _quant(attn_out_view, scale)
+
+            return _pattern_with_ln
+
+        def _pattern(q, k, v, output_attn, scale, kv_cache_dummy_dep):
+            at1 = auto_functionalized(
+                ATTN_OP,
+                query=q,
+                key=k,
+                value=v,
+                output=output_attn,
+                layer_name=_ln,
+                output_scale=None,
+                output_block_scale=None,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            attn_out_view = RESHAPE_OP(
+                at1[1], [q.shape[0], self._num_heads * self._head_size]
+            )
+            return _quant(attn_out_view, scale)
+
+        return _pattern
+
+    @property
+    def replacement(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
+        _ln = _encode_layer_name(self._layer_name)
+
+        if _USE_LAYERNAME:
+
+            def _replacement_with_ln(  # type: ignore[misc]
+                q, k, v, output_attn, scale, kv_cache_dummy_dep, layer_name
+            ):
+                output_attn = torch.empty(
+                    [q.shape[0], self._num_heads, self._head_size],
+                    dtype=FP8_DTYPE,
+                    device=q.device,
+                )
+                at1 = auto_functionalized(
+                    ATTN_OP,
+                    query=q,
+                    key=k,
+                    value=v,
+                    output=output_attn,
+                    layer_name=layer_name,
+                    output_scale=None,
+                    output_block_scale=scale,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
+                )
+                return RESHAPE_OP(
+                    at1[1], [-1, self._num_heads * self._head_size]
+                ), scale
+
+            return _replacement_with_ln
+
+        def _replacement(q, k, v, output_attn, scale, kv_cache_dummy_dep):
+            output_attn = torch.empty(
+                [q.shape[0], self._num_heads, self._head_size],
+                dtype=FP8_DTYPE,
+                device=q.device,
+            )
+            at1 = auto_functionalized(
+                ATTN_OP,
+                query=q,
+                key=k,
+                value=v,
+                output=output_attn,
+                layer_name=_ln,
+                output_scale=None,
+                output_block_scale=scale,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            return RESHAPE_OP(at1[1], [-1, self._num_heads * self._head_size]), scale
+
+        return _replacement
+
+    def get_inputs(self):
+        dtype = self._dtype
+        num_heads = self._num_heads
+        head_size = self._head_size
+        inputs: list = [
+            self.empty(5, num_heads, head_size, dtype=dtype),  # q
+            self.empty(5, num_heads, head_size, dtype=dtype),  # k
+            self.empty(5, num_heads, head_size, dtype=dtype),  # v
+            self.empty(5, num_heads, head_size, dtype=dtype),  # output_attn
+            self.empty_fp32(1, 1),  # scale placeholder
+            self.empty(0, dtype=dtype),  # kv_cache_dummy_dep
+        ]
+        if _USE_LAYERNAME:
+            inputs.append(_encode_layer_name(self._layer_name))
+        return inputs
+
+
 class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
     """
     This pass fuses post-attention quantization onto attention if supported.
@@ -399,5 +578,30 @@ class AttnQuantFusionPass(VllmFusionPatternMatcherPass):
                     self.register(AttnNvfp4QuantPattern(layer, dtype))
                     if _USE_LAYERNAME:
                         break
+
+        # Per-group dynamic FP8 (deep_gemm-style block quant).  The Triton
+        # epilogue only produces the platform-default UE8M0 rounding and
+        # non-TMA-aligned scales, so register only those variants (col-major
+        # is handled via the scale tensor's strides).  Other variants simply
+        # don't match and fall back to the standalone quant op.
+        if current_platform.is_cuda():
+            is_e8m0 = is_deep_gemm_e8m0_used()
+            for quant_key in [kFp8Dynamic128Sym, kFp8Dynamic64Sym]:
+                if quant_key not in QUANT_OPS:
+                    continue
+                for has_col_major in [False, True]:
+                    for layer in layers:
+                        if layer.impl.fused_output_quant_supported(quant_key):
+                            self.register(
+                                AttnFp8GroupQuantPattern(
+                                    layer,
+                                    dtype,
+                                    quant_key,
+                                    has_col_major,
+                                    is_e8m0,
+                                )
+                            )
+                            if _USE_LAYERNAME:
+                                break
 
         self.dump_patterns(config, self.pm_pass)
