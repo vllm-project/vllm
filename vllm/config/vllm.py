@@ -3061,6 +3061,27 @@ class VllmConfig:
                 "deprecated when PCP is fully supported."
             )
 
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.kv_connector is not None
+        ):
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
+            )
+
+            connector_cls = KVConnectorFactory.get_connector_class(
+                self.kv_transfer_config
+            )
+            if connector_cls.preserves_dcp_kv_cache_interleave_size(
+                self.kv_transfer_config.kv_connector_extra_config
+            ):
+                logger.info_once(
+                    "KV connector %s preserves cp_kv_cache_interleave_size=%d for DCP.",
+                    connector_cls.__name__,
+                    self.parallel_config.cp_kv_cache_interleave_size,
+                )
+                return
+
         if self.kv_transfer_config is None or not self.kv_transfer_config.has_connector(
             "NixlConnector"
         ):
