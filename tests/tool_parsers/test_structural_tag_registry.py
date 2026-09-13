@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -755,3 +757,24 @@ def test_kimi_k3_forced_tool_choice_builds_single_mandatory_call():
     response_only = _k3_response("no call here")
     assert _is_grammar_accept_string(grammar, ok)
     assert not _is_grammar_accept_string(grammar, response_only)
+
+
+def test_import_without_xgrammar():
+    """Importing vLLM must not require xgrammar (it has no wheels on some
+    platforms); structural tag builders fail only when actually used."""
+    code = """
+import sys
+
+sys.modules["xgrammar"] = None
+
+from vllm import LLM  # noqa: F401
+from vllm.tool_parsers.structural_tag_registry import get_hermes_structural_tag
+
+try:
+    get_hermes_structural_tag([], [], "auto", False)
+except ImportError as error:
+    assert "xgrammar" in str(error), error
+else:
+    raise AssertionError("expected ImportError when xgrammar is unavailable")
+"""
+    subprocess.run([sys.executable, "-c", code], check=True)
