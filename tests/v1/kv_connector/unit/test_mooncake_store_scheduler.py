@@ -735,6 +735,7 @@ def test_from_request_tracker_no_load_saves_normally():
     assert req_meta is not None
     assert req_meta.can_save is True
     assert req_meta.load_spec is None
+    assert req_meta.completed_token_len == 48
     assert tracker.num_saved_tokens == 48
 
 
@@ -991,6 +992,7 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     assert req_meta.token_len_chunk == 0
     assert req_meta.boundary_state_offloads == [(1, 7, 12)]
     assert req_meta.num_prompt_tokens == 12
+    assert req_meta.completed_token_len == 12
     assert req_meta.block_ids == ([0],)
     store_job_id = req_meta.store_job_id
     assert scheduler._pinned_saves[store_job_id][0] == [7]
@@ -1007,6 +1009,7 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job():
     request = SimpleNamespace(
         request_id="req-0",
         block_hashes=[b"h0", b"h1", b"h2"],
+        num_computed_tokens=12,
     )
     scheduler._request_trackers["req-0"] = RequestTracker(
         req_id="req-0",
@@ -1052,6 +1055,7 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job():
     assert req_meta.block_ids == block_ids
     assert req_meta.block_hashes == request.block_hashes
     assert req_meta.boundary_state_offloads == [(1, 9, 12)]
+    assert req_meta.completed_token_len == 12
     assert scheduler._pinned_saves[req_meta.store_job_id][0] == [9]
     assert scheduler._gpu_block_pool.blocks[9].ref_cnt == 1
     assert scheduler._finished_partial_tail_metas == {}

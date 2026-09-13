@@ -534,6 +534,7 @@ class MooncakeStoreScheduler:
             block_hashes=list(request.block_hashes),
             can_save=True,
             num_prompt_tokens=tracker.prefill_end_tokens,
+            completed_token_len=request.num_computed_tokens,
             store_job_id=store_job_id,
             boundary_state_offloads=partial_tail_offloads,
         )
@@ -591,6 +592,7 @@ class MooncakeStoreScheduler:
                     block_hashes=req_tuple[0].block_hashes,
                     can_save=True,
                     num_prompt_tokens=tracker.prefill_end_tokens,
+                    completed_token_len=tracker.token_len,
                     boundary_state_offloads=accepted,
                 )
             )

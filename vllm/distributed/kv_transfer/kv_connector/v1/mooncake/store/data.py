@@ -753,6 +753,8 @@ class ReqMeta:
     # Absolute request offset represented by token_ids[0].
     token_ids_start: int = 0
     num_prompt_tokens: int | None = None
+    # Prefix whose GPU state is valid once current_event completes.
+    completed_token_len: int = 0
     # Identifies this store job for the engine's lifetime. A request id cannot
     # serve that purpose: it is reused once a preempted request resumes, so it
     # would release the wrong job's blocks.
@@ -824,6 +826,7 @@ class ReqMeta:
             token_ids=token_ids,
             token_ids_start=token_ids_start,
             num_prompt_tokens=tracker.prefill_end_tokens,
+            completed_token_len=input_token_len,
         )
 
 
