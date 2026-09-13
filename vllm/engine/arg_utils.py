@@ -552,6 +552,9 @@ class EngineArgs:
     max_num_queued_reqs: int | None = None
     max_num_queued_tokens: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
+    max_repetition_detection_pattern_size: int = (
+        ModelConfig.max_repetition_detection_pattern_size
+    )
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     use_fp64_gumbel: bool = ModelConfig.use_fp64_gumbel
     enable_trace_replay: bool = ModelConfig.enable_trace_replay
@@ -907,6 +910,10 @@ class EngineArgs:
             **model_kwargs["return_sampling_mask"],
         )
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
+        model_group.add_argument(
+            "--max-repetition-detection-pattern-size",
+            **model_kwargs["max_repetition_detection_pattern_size"],
+        )
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
         model_group.add_argument("--use-fp64-gumbel", **model_kwargs["use_fp64_gumbel"])
         model_group.add_argument(
@@ -1831,6 +1838,7 @@ class EngineArgs:
             enable_return_routed_experts=self.enable_return_routed_experts,
             return_sampling_mask=self.return_sampling_mask,
             max_logprobs=self.max_logprobs,
+            max_repetition_detection_pattern_size=self.max_repetition_detection_pattern_size,
             logprobs_mode=self.logprobs_mode,
             use_fp64_gumbel=self.use_fp64_gumbel,
             enable_trace_replay=self.enable_trace_replay,
