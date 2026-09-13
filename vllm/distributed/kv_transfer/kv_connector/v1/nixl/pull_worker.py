@@ -149,7 +149,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 engine_id,
             )
             self.xfer_stats.record_kv_expired_req()
-            self._handle_failed_transfer(req_id, None)
+            # KV expiry is reported separately from transport failures, so only
+            # the state cleanup side of _handle_failed_transfer runs here.
+            self._handle_failed_transfer(req_id, None, record_failed_transfer=False)
             return
 
         if any(len(group) > 0 for group in meta.local_block_ids):
@@ -315,7 +317,20 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             remote_agents = self._remote_agents[meta.remote.engine_id]
             for rank_to_notify, agent in remote_agents.items():
                 if rank_to_notify != (0, read_specs[0].remote_rank):
-                    self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+                    try:
+                        self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+                    except Exception as e:
+                        self._log_failure(
+                            failure_type="notification_failed",
+                            msg="Remote rank will not update request state. "
+                            "This may indicate network issues.",
+                            req_id=req_id,
+                            error=e,
+                            dst_engine_id=meta.remote.engine_id,
+                            remote_rank=rank_to_notify[1],
+                            remote_agent_name=agent,
+                        )
+                        self.xfer_stats.record_failed_notification()
 
     def _read_blocks(
         self,

@@ -43,6 +43,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
+    NixlKVConnectorStats,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     get_base_request_id,
 )
@@ -353,6 +356,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._pending_recv_notifs = {}
         w._failed_inflight_recvs = set()
         w._recving_transfers = defaultdict(list)
+        w.xfer_stats = NixlKVConnectorStats()
         w._reqs_to_process = set()
         w._reqs_to_send = {}
         w.consumer_notification_counts_by_req = defaultdict(int)
@@ -635,6 +639,10 @@ def test_do_start_push_kv_drops_request_on_handshake_failure():
     assert xfer_calls == []
     assert len(failures) == 1
     assert failures[0]["failure_type"] == "push_handshake_failed"
+    # The handshake metric is counted once by _ensure_handshake's own
+    # callback (stubbed out here); the push side must not double-record it.
+    assert w.xfer_stats.data["num_failed_handshakes"] == []
+    assert w.xfer_stats.data["num_failed_transfers"] == []
 
 
 def test_writer_loop_drains_deferred_push_inbox():
