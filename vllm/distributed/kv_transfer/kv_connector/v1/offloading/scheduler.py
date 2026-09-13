@@ -77,6 +77,7 @@ class TransferJobStatus:
     # Offload keys this job covers; passed to manager.complete_*().
     keys: set[OffloadKey]
     is_store: bool
+    failed: bool = False
     # Store source blocks fenced after the request finishes.
     deferred_fence_block_ids: list[int] | None = None
     # Store source blocks fenced when the transfer is created.
@@ -1849,6 +1850,8 @@ class OffloadingConnectorScheduler:
                 )
                 continue
             job_status = self._jobs[job_id]
+            if job_id in meta.failed_jobs:
+                job_status.failed = True
             job_status.pending_count -= count
             if job_status.pending_count > 0:
                 continue
@@ -1856,7 +1859,18 @@ class OffloadingConnectorScheduler:
 
             req_status = self._req_status[job_status.req_id]
             if job_status.is_store:
-                self.manager.complete_store(job_status.keys, req_status.req_context)
+                if job_status.failed:
+                    logger.warning(
+                        "KV offload store job %d failed; dropping %d chunk(s) "
+                        "from the CPU cache rather than publishing them.",
+                        job_id,
+                        len(job_status.keys),
+                    )
+                self.manager.complete_store(
+                    job_status.keys,
+                    req_status.req_context,
+                    success=not job_status.failed,
+                )
             else:
                 self.manager.complete_load(job_status.keys, req_status.req_context)
                 if self._chunks_being_loaded:
