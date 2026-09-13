@@ -645,9 +645,9 @@ def test_mm_prefix_kv_cache_path(head_size: int):
 # --------------------------------------------------------------------------- #
 # FlashInfer JIT-variant path
 # --------------------------------------------------------------------------- #
-# The FlashInfer backend serves mm-prefix through a custom fa2 JIT attention
-# variant that consumes the per-query [start, end] rows directly
-# (variant_owns_mask), so none of these tests depend on FA4.
+# The FlashInfer backend serves mm-prefix through FlashInfer's own wrapper,
+# which consumes the per-query [start, end] rows directly, so none of these
+# tests depend on FA4.
 
 FLASHINFER_MM_SLIDING_WINDOW = 32
 """Narrower than PAGED_MM_RANGES' widest range (224, 287), so the clamp-on
@@ -764,9 +764,9 @@ def test_flashinfer_mm_prefix_combination_rejections(monkeypatch):
         (torch.bfloat16, torch.float16, torch.bfloat16, 512),
     ]
 
-    # An unbuildable variant demotes the backend with a clear reason.
+    # An unavailable wrapper demotes the backend with a clear reason.
     monkeypatch.setattr(fi, "_mm_prefix_jit_available", lambda *a: False)
-    assert "JIT variant" in FlashInferBackend.supports_combination(
+    assert "mm-prefix attention" in FlashInferBackend.supports_combination(
         head_size=128,
         block_size=16,
         kv_cache_dtype=None,
@@ -885,14 +885,20 @@ def test_flashinfer_mm_prefix_builder_is_fail_closed():
 def test_flashinfer_mm_prefix_text_only_and_decode_only_keep_causal():
     """Empty range dicts and decode-only batches must not select the mm path.
 
-    Neither case may touch the JIT wrapper at all, so this test runs without
-    compiling the variant.
+    Neither case may construct the mm wrapper, but the builder's fail-fast
+    backstop still requires the capability to be available here.
     """
     from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
     from vllm.config import set_current_vllm_config
-    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+    from vllm.v1.attention.backends.flashinfer import (
+        FlashInferMetadataBuilder,
+        _mm_prefix_jit_available,
+    )
 
     vllm_config, kv_cache_spec, patch = _flashinfer_builder_env(SLIDING_WINDOW)
+    mc = vllm_config.model_config
+    if not _mm_prefix_jit_available(mc.dtype, mc.dtype, mc.dtype, HEAD_SIZE):
+        pytest.skip("FlashInfer mm-prefix attention unavailable here")
     layer_names = ["model.layers.0.self_attn.attn"]
     device = torch.device("cuda:0")
 
@@ -919,7 +925,7 @@ def test_flashinfer_mm_prefix_text_only_and_decode_only_keep_causal():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
 def test_flashinfer_mm_prefix_kv_cache_path():
-    """FlashInfer JIT variant + paged KV matches the dense reference.
+    """FlashInfer mm-prefix attention + paged KV matches the dense reference.
 
     The sliding window (32) is narrower than the widest range in
     PAGED_MM_RANGES, so the clamp-off and clamp-on formulas genuinely differ
@@ -946,7 +952,7 @@ def test_flashinfer_mm_prefix_kv_cache_path():
     vllm_config, kv_cache_spec, patch = _flashinfer_builder_env(sliding_window)
     mc = vllm_config.model_config
     if not _mm_prefix_jit_available(mc.dtype, mc.dtype, mc.dtype, HEAD_SIZE):
-        pytest.skip("FlashInfer mm-prefix JIT variant unavailable here")
+        pytest.skip("FlashInfer mm-prefix attention unavailable here")
 
     from types import MethodType
 
@@ -1075,7 +1081,7 @@ def test_flashinfer_mm_prefix_short_extend_stays_a_prefill():
     vllm_config, kv_cache_spec, patch = _flashinfer_builder_env(SLIDING_WINDOW)
     mc = vllm_config.model_config
     if not _mm_prefix_jit_available(mc.dtype, mc.dtype, mc.dtype, HEAD_SIZE):
-        pytest.skip("FlashInfer mm-prefix JIT variant unavailable here")
+        pytest.skip("FlashInfer mm-prefix attention unavailable here")
 
     # Reordered batches put decodes first. Request 0: a plain decode.
     # Request 1: query_len 1 but still prefilling (chunked tail at absolute
@@ -1100,7 +1106,11 @@ def test_flashinfer_mm_prefix_short_extend_stays_a_prefill():
     assert md.prefill is not None and md.prefill.mm_wrapper is not None
     assert md.prefill.mm_prefill_ranges is not None
     # The prefill slice holds exactly the tail row: its range, inclusive.
-    assert md.prefill.mm_prefill_ranges.tolist() == [100, 200]
+    # The wrapper takes (N, 2) rows and rejects a non-contiguous tensor, so
+    # both are part of the contract this slice has to satisfy.
+    assert md.prefill.mm_prefill_ranges.shape == (1, 2)
+    assert md.prefill.mm_prefill_ranges.is_contiguous()
+    assert md.prefill.mm_prefill_ranges.tolist() == [[100, 200]]
 
 
 def test_flashinfer_mm_prefix_restricts_kernel_block_sizes(monkeypatch):
@@ -1143,196 +1153,3 @@ def test_flashinfer_mm_prefix_restricts_kernel_block_sizes(monkeypatch):
         finally:
             mc.__dict__.pop("is_mm_prefix_lm", None)
         assert sizes == [16, 32, 64, 128, 256, 512, 1024]
-
-
-NVFP4_MM_REQS = [(96, 96, [(16, 60)]), (48, 64, [(4, 40)])]
-"""(query_len, seq_len, inclusive ranges) for the NVFP4 mm-prefix case."""
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a GPU")
-def test_mm_prefix_variant_reads_packed_nvfp4_kv_cache():
-    """The mask-owning variant must serve a packed NVFP4 KV cache.
-
-    FlashInfer is the only backend that serves NVFP4, so mm-prefix models
-    with an NVFP4 cache have no fallback: the variant declares the per-block
-    scale factors as additional tensors and FlashInfer routes ``kv_cache_sf``
-    into them. The reference is built from the *dequantized* cache, so the
-    fp4 read and the mask are checked together and quantization error is not
-    charged to the kernel.
-    """
-    import flashinfer
-    from flashinfer import BatchPrefillWithPagedKVCacheWrapper
-
-    from vllm.v1.attention.backends.flashinfer import (
-        _mm_prefix_jit_args,
-        _mm_prefix_jit_available,
-    )
-
-    if not hasattr(
-        flashinfer, "nvfp4_quantize_append_paged_kv_cache_with_slot_mapping"
-    ):
-        pytest.skip("FlashInfer NVFP4 slot-mapping KV cache update is unavailable")
-    if not hasattr(flashinfer, "nvfp4_kv_dequantize_paged"):
-        pytest.skip("FlashInfer NVFP4 paged dequantization is unavailable")
-
-    device = torch.device("cuda:0")
-    head_size, page_size = 128, 16
-    num_qo_heads, num_kv_heads = 4, 1
-    sw = FLASHINFER_MM_SLIDING_WINDOW
-    scale = head_size**-0.5
-    if not _mm_prefix_jit_available(DTYPE, torch.uint8, DTYPE, head_size):
-        pytest.skip("NVFP4 mm-prefix JIT variant unavailable here")
-
-    torch.manual_seed(0)
-    qo_lens = [r[0] for r in NVFP4_MM_REQS]
-    kv_lens = [r[1] for r in NVFP4_MM_REQS]
-    pages_per = [(kv + page_size - 1) // page_size for kv in kv_lens]
-    num_pages = sum(pages_per)
-
-    kv_data = tuple(
-        torch.empty(
-            (num_pages, page_size, num_kv_heads, head_size // 2),
-            dtype=torch.uint8,
-            device=device,
-        )
-        for _ in range(2)
-    )
-    kv_sf = tuple(
-        torch.empty(
-            (num_pages, page_size, num_kv_heads, head_size // 16),
-            dtype=torch.float8_e4m3fn,
-            device=device,
-        )
-        for _ in range(2)
-    )
-
-    block_tables = torch.full(
-        (len(NVFP4_MM_REQS), max(pages_per)), -1, dtype=torch.int32, device=device
-    )
-    slots: list[int] = []
-    raw_k, raw_v = [], []
-    page_start = 0
-    for i, (kv_len, n_pages) in enumerate(zip(kv_lens, pages_per, strict=True)):
-        pages = torch.arange(
-            page_start, page_start + n_pages, dtype=torch.int32, device=device
-        )
-        block_tables[i, :n_pages] = pages
-        raw_k.append(
-            torch.randn((kv_len, num_kv_heads, head_size), dtype=DTYPE, device=device)
-            * 0.2
-        )
-        raw_v.append(torch.randn_like(raw_k[-1]) * 0.2)
-        slots.extend(
-            int(pages[t // page_size].item()) * page_size + t % page_size
-            for t in range(kv_len)
-        )
-        page_start += n_pages
-
-    one = torch.ones((), dtype=torch.float32, device=device)
-    flashinfer.nvfp4_quantize_append_paged_kv_cache_with_slot_mapping(
-        torch.cat(raw_k),
-        torch.cat(raw_v),
-        torch.tensor(slots, dtype=torch.int64, device=device),
-        kv_data,
-        kv_sf,
-        one,
-        one,
-        "NHD",
-    )
-
-    k_deq, v_deq = [], []
-    for i, (kv_len, n_pages) in enumerate(zip(kv_lens, pages_per, strict=True)):
-        k_buf = torch.zeros(
-            1, n_pages * page_size, num_kv_heads, head_size, dtype=DTYPE, device=device
-        )
-        v_buf = torch.zeros_like(k_buf)
-        flashinfer.nvfp4_kv_dequantize_paged(
-            kv_data,
-            kv_sf,
-            block_tables[i : i + 1, :n_pages],
-            torch.tensor([kv_len], dtype=torch.int32, device=device),
-            one,
-            one,
-            k_buf,
-            v_buf,
-            kv_layout="NHD",
-        )
-        k_deq.append(k_buf[0, :kv_len])
-        v_deq.append(v_buf[0, :kv_len])
-
-    qo_indptr = torch.tensor(
-        [0] + list(torch.tensor(qo_lens).cumsum(0)), dtype=torch.int32, device=device
-    )
-    kv_indptr = torch.tensor(
-        [0] + list(torch.tensor(pages_per).cumsum(0)), dtype=torch.int32, device=device
-    )
-    kv_indices = torch.arange(num_pages, dtype=torch.int32, device=device)
-    last_page = torch.tensor(
-        [kv - (p - 1) * page_size for kv, p in zip(kv_lens, pages_per, strict=True)],
-        dtype=torch.int32,
-        device=device,
-    )
-    query = (
-        torch.randn(sum(qo_lens), num_qo_heads, head_size, dtype=DTYPE, device=device)
-        * 0.3
-    )
-
-    rows = []
-    for qo_len, kv_len, ranges in NVFP4_MM_REQS:
-        for q_abs in range(kv_len - qo_len, kv_len):
-            hit = (-1, -1)
-            for start, end in ranges:
-                if start <= q_abs <= end:
-                    hit = (start, end)
-                    break
-            rows.append(hit)
-    mm_ranges = torch.tensor(rows, dtype=torch.int32, device=device).view(-1)
-
-    wrapper = BatchPrefillWithPagedKVCacheWrapper(
-        torch.empty(160 * 1024 * 1024, dtype=torch.uint8, device=device),
-        "NHD",
-        backend="fa2",
-        jit_args=_mm_prefix_jit_args(DTYPE, torch.uint8, DTYPE, head_size),
-        jit_kwargs={
-            "use_sliding_window": False,
-            "use_fp16_qk_reduction": False,
-            "pos_encoding_mode": 0,
-        },
-        variant_owns_mask=True,
-    )
-    wrapper.plan(
-        qo_indptr,
-        kv_indptr,
-        kv_indices,
-        last_page,
-        num_qo_heads=num_qo_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim_qk=head_size,
-        page_size=page_size,
-        causal=False,
-        sm_scale=scale,
-        window_left=-1,
-        q_data_type=DTYPE,
-        kv_data_type=torch.uint8,
-        o_data_type=DTYPE,
-    )
-    actual = wrapper.run(
-        query,
-        kv_data,
-        mm_ranges,
-        float(sw),
-        0.0,
-        float(scale),
-        kv_cache_sf=kv_sf,
-    )
-    torch.accelerator.synchronize()
-
-    ranges_by_req = {i: r for i, (_, _, r) in enumerate(NVFP4_MM_REQS) if r}
-    ref_args = (query, k_deq, v_deq, qo_lens, kv_lens)
-    expected = _dense_reference(*ref_args, ranges_by_req, sw, scale)
-    torch.testing.assert_close(actual.float(), expected, atol=5e-2, rtol=5e-2)
-
-    causal_only = _dense_reference(*ref_args, {}, sw, scale)
-    assert not torch.allclose(expected, causal_only, atol=5e-2, rtol=5e-2), (
-        "test batch does not actually exercise the mm_prefix branch"
-    )

@@ -3,7 +3,6 @@
 """Attention layer with FlashInfer."""
 
 import functools
-import inspect
 import os
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -103,143 +102,52 @@ FP4_DTYPE = torch.uint8
 
 logger = init_logger(__name__)
 
-# JIT attention variant implementing mm-prefix (PrefixLM bidirectional)
-# semantics from compact per-query ranges, replacing the O(qo_len * kv_len)
-# dense custom mask. ``mm_q_ranges`` is the flattened ``(N, 2)`` row-major
-# output of ``fill_mm_prefix_query_ranges``: row ``i`` holds the inclusive
-# absolute ``[start, end]`` bounds of the bidirectional range containing
-# query token ``i``, or ``(-1, -1)`` when there is none (the sentinel falls
-# out for free: ``kv <= -1`` is false for every key). The wrapper selects
-# ``MaskMode::kCustom`` through ``variant_owns_mask`` so the FA2 kernel
-# evaluates this hook on every KV tile; under kNone interior tiles would
-# skip it entirely.
-MM_PREFIX_VARIANT_NAME = "VllmMMPrefixAttention"
-# Bump when the declaration changes: the URI keyed off this version is
-# FlashInfer's JIT cache key, and a stale cached module would otherwise be
-# loaded for a different mask semantic.
-MM_PREFIX_VARIANT_VERSION = 1
-MM_PREFIX_VARIANT_DECL = r"""
-struct VllmMMPrefixAttention : AttentionVariantBase {
-  static constexpr bool use_softmax = true;
-
-  uint32_t qo_len, kv_len, window_left;
-  int32_t q_base, sw_left, clamp_sw;
-  float sm_scale_log2;
-
-  template <typename Params>
-  __device__ __host__ VllmMMPrefixAttention(const Params& params, uint32_t batch_idx,
-                                            uint8_t* smem_ptr) {
-    qo_len = params.get_qo_len(batch_idx);
-    kv_len = params.get_kv_len(batch_idx);
-    // The FA2 kernel derives its KV traversal start from qo_len + window_left
-    // (tile pruning). The mask owns the window below, and the clamp-off form
-    // must reach ranges behind the window, so traversal must never prune.
-    window_left = kv_len;
-    q_base = params.q_indptr[batch_idx];
-    sw_left = int32_t(params.mm_sw_left);
-    clamp_sw = int32_t(params.mm_clamp_sw);
-    sm_scale_log2 = params.sm_scale * math::log2e;
-  }
-
-  REGISTER_LOGITS_MASK(params, batch_idx, qo_idx, kv_idx, qo_head_idx, kv_head_idx, {
-    // CTA_TILE_Q padding lanes evaluate the mask for qo_idx >= qo_len and
-    // discard the result; clamp so their loads stay inside this request.
-    const uint32_t q_local = qo_idx < qo_len ? qo_idx : qo_len - 1;
-    const int32_t q_abs = int32_t(kv_len - qo_len + q_local);
-    const int32_t kv = int32_t(kv_idx);
-    bool keep = (kv <= q_abs) && (sw_left <= 0 || (q_abs - kv) < sw_left);
-    const int32_t row = q_base + int32_t(q_local);
-    const int32_t s = params.mm_q_ranges[row * 2];
-    const int32_t e = params.mm_q_ranges[row * 2 + 1];
-    bool mm = (kv >= s) && (kv <= e);
-    if (clamp_sw > 0) {
-      mm = mm && ((q_abs - kv) < clamp_sw);
-    }
-    return keep || mm;
-  })
-};
-"""
+# mm-prefix (PrefixLM) batches are causal except inside per-request ranges
+# that attend bidirectionally. FlashInfer packages that mask as a batch-prefill
+# wrapper whose attention variant evaluates it on every KV tile from the
+# compact ``(N, 2)`` rows ``fill_mm_prefix_query_ranges`` already produces, so
+# no ``O(qo_len * kv_len)`` dense mask is materialized here or there.
+MM_PREFIX_WRAPPER_NAME = "BatchPrefillWithCausalBidirectionalRangesWrapper"
 
 
-def _mm_prefix_variant_kv_is_packed_fp4(dtype_kv: torch.dtype) -> bool:
-    """Whether this KV dtype is FlashInfer's packed NVFP4 storage.
+def _mm_prefix_wrapper_cls() -> type | None:
+    """FlashInfer's mm-prefix wrapper, or ``None`` on a build without it."""
+    import flashinfer
 
-    ``get_dtype_for_flashinfer`` maps every NVFP4 cache dtype to ``uint8``,
-    which the customize-module generator in turn maps to
-    ``__nv_fp4x2_e2m1``; the kernel then needs the per-block scale factors to
-    dequantize, so the variant has to declare them as additional tensors.
-    """
-    return dtype_kv == FP4_DTYPE
-
-
-def _mm_prefix_jit_args(
-    dtype_q: torch.dtype, dtype_kv: torch.dtype, dtype_o: torch.dtype, head_dim: int
-) -> list:
-    def _short(dtype: torch.dtype) -> str:
-        return str(dtype).replace("torch.", "")
-
-    uri = (
-        f"vllm_mm_prefix_{_short(dtype_q)}_{_short(dtype_kv)}_{_short(dtype_o)}"
-        f"_fa2_hd{head_dim}_v{MM_PREFIX_VARIANT_VERSION}"
-    )
-    tensor_names = ["mm_q_ranges"]
-    tensor_dtypes = ["int32_t"]
-    if _mm_prefix_variant_kv_is_packed_fp4(dtype_kv):
-        # These exact names make the generator emit the scale-factor stride
-        # setters (GetFP4ScaleStrides) the fp4 KV load path reads.
-        tensor_names += ["maybe_k_cache_sf", "maybe_v_cache_sf"]
-        tensor_dtypes += ["uint8_t", "uint8_t"]
-    return [
-        uri,
-        dtype_q,
-        dtype_kv,
-        dtype_o,
-        torch.int32,  # idtype
-        head_dim,  # head_dim_qk
-        head_dim,  # head_dim_vo
-        tensor_names,
-        tensor_dtypes,
-        ["mm_sw_left", "mm_clamp_sw", "sm_scale"],
-        ["double", "double", "double"],
-        MM_PREFIX_VARIANT_NAME,
-        MM_PREFIX_VARIANT_DECL,
-    ]
+    return getattr(flashinfer, MM_PREFIX_WRAPPER_NAME, None)
 
 
 @functools.cache
 def _mm_prefix_jit_available(
     dtype_q: torch.dtype, dtype_kv: torch.dtype, dtype_o: torch.dtype, head_dim: int
 ) -> bool:
-    """Whether the mm-prefix JIT variant can actually be built and loaded.
+    """Whether the mm-prefix wrapper can actually be built and loaded.
 
-    The wrapper builds its JIT module eagerly in the constructor, so
-    advertising the capability without this probe would turn a missing
-    compiler or a disabled JIT into a startup crash after backend selection
-    instead of a fallback before it. Compile success cannot be guaranteed
-    without trying; a successful build stays in FlashInfer's process-level
-    module cache and is reused when the wrapper is constructed.
+    The wrapper builds its JIT module eagerly in its constructor, so
+    advertising the capability without this probe would turn a FlashInfer
+    without the wrapper, a missing compiler or a disabled JIT into a startup
+    crash after backend selection instead of a fallback before it. Compile
+    success cannot be guaranteed without trying; a successful build stays in
+    FlashInfer's process-level module cache and is reused when the wrapper is
+    constructed.
     """
     if os.environ.get("FLASHINFER_DISABLE_JIT"):
         return False
     try:
-        if (
-            "variant_owns_mask"
-            not in inspect.signature(
-                BatchPrefillWithPagedKVCacheWrapper.__init__
-            ).parameters
-        ):
-            # The installed FlashInfer predates the explicit
-            # variant-owns-mask contract; without it the kernel only masks
-            # boundary KV tiles.
+        if _mm_prefix_wrapper_cls() is None:
+            # The installed FlashInfer predates the packaged mm-prefix
+            # wrapper; there is no supported way to express this mask here.
             return False
-        from flashinfer.jit.attention import gen_customize_batch_prefill_module
+        from flashinfer.jit.attention import (
+            gen_batch_prefill_bidirectional_ranges_module,
+        )
 
-        gen_customize_batch_prefill_module(
-            "fa2", *_mm_prefix_jit_args(dtype_q, dtype_kv, dtype_o, head_dim)
+        gen_batch_prefill_bidirectional_ranges_module(
+            dtype_q, dtype_kv, dtype_o, torch.int32, head_dim, head_dim
         ).build_and_load()
     except Exception:
         logger.warning(
-            "FlashInfer mm-prefix JIT variant is unavailable "
+            "FlashInfer mm-prefix attention is unavailable "
             "(dtype_q=%s, dtype_kv=%s, head_dim=%s); not advertising "
             "mm-prefix support.",
             dtype_q,
@@ -592,7 +500,7 @@ class FlashInferBackend(AttentionBackend):
                 and current_platform.is_device_capability_family(100)
                 and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
                 # Page sizes >= 128 only run on trtllm-gen, which cannot
-                # serve the fa2 mm-prefix JIT variant.
+                # serve fa2 mm-prefix attention.
                 and not mc.is_mm_prefix_lm
             )
         if not use_large_pages:
@@ -793,17 +701,17 @@ class FlashInferBackend(AttentionBackend):
                     f"mm_prefix requires the fa2 prefill path, but kernel "
                     f"page size {block_size} only runs on trtllm-gen"
                 )
-            # Probe the JIT variant with this layer group's actual head size
-            # and dtypes: hybrid models select their backend per group, and a
-            # variant that only compiled for the global head size would first
-            # be built (and possibly fail) at runtime otherwise.
+            # Probe with this layer group's actual head size and dtypes:
+            # hybrid models select their backend per group, and a wrapper that
+            # only compiled for the global head size would first be built (and
+            # possibly fail) at runtime otherwise.
             kv_torch_dtype = cls._mm_prefix_variant_kv_dtype(kv_cache_dtype, dtype)
             if not _mm_prefix_jit_available(dtype, kv_torch_dtype, dtype, head_size):
                 return (
-                    "mm_prefix requires the FlashInfer mm-prefix JIT variant, "
-                    f"which is unavailable for head_size={head_size}, "
-                    f"dtype={dtype} (disabled JIT, missing toolchain, or a "
-                    "FlashInfer build without variant_owns_mask)"
+                    "mm_prefix requires FlashInfer's mm-prefix attention, which "
+                    f"is unavailable for head_size={head_size}, dtype={dtype} "
+                    "(disabled JIT, missing toolchain, or a FlashInfer build "
+                    "without it)"
                 )
         return None
 
@@ -1056,7 +964,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             None  # Wrapper for non-causal prefill (DFlash)
         )
         self._mm_prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = (
-            None  # Wrapper for mm-prefix prefill (JIT variant owns the mask)
+            None  # FlashInfer's mm-prefix prefill wrapper
         )
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
@@ -1278,7 +1186,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.head_dim,
             ):
                 raise RuntimeError(
-                    "FlashInfer mm-prefix JIT variant cannot be built for "
+                    "FlashInfer mm-prefix attention cannot be built for "
                     f"this KV-cache group (head_dim={self.head_dim}, "
                     f"q_dtype={self.q_data_type_prefill}, "
                     f"kv_dtype={self.kv_cache_dtype}). Failing at engine "
@@ -1600,29 +1508,29 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         return self._prefill_wrapper
 
     def _get_mm_prefill_wrapper(self) -> BatchPrefillWithPagedKVCacheWrapper:
-        """Prefill wrapper whose JIT variant owns the mm-prefix mask.
+        """FlashInfer's prefill wrapper for the mm-prefix mask.
 
-        fa2 is the only backend whose kernels evaluate a custom variant's
-        ``LogitsMask`` on every KV tile under ``MaskMode::kCustom``; the
-        module was already built by the capability probe, so this reuses
-        FlashInfer's process-level JIT cache.
+        The capability probe already built the module for this exact
+        combination, so construction here reuses FlashInfer's process-level
+        JIT cache rather than compiling again.
         """
         if self._mm_prefill_wrapper is None:
             assert not self.use_dcp
             dtype = self.model_config.dtype
-            self._mm_prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+            wrapper_cls = _mm_prefix_wrapper_cls()
+            assert wrapper_cls is not None, (
+                "mm-prefix was advertised without FlashInfer's "
+                f"{MM_PREFIX_WRAPPER_NAME}; the capability probe and this "
+                "construction disagree."
+            )
+            self._mm_prefill_wrapper = wrapper_cls(
                 self._get_workspace_buffer(),
                 get_flashinfer_layout_string(self.kv_cache_layout),
-                backend="fa2",
-                jit_args=_mm_prefix_jit_args(
-                    self.q_data_type_prefill, self.kv_cache_dtype, dtype, self.head_dim
-                ),
-                jit_kwargs={
-                    "use_sliding_window": False,
-                    "use_fp16_qk_reduction": False,
-                    "pos_encoding_mode": 0,
-                },
-                variant_owns_mask=True,
+                q_data_type=self.q_data_type_prefill,
+                kv_data_type=self.kv_cache_dtype,
+                o_data_type=dtype,
+                head_dim_qk=self.head_dim,
+                head_dim_vo=self.head_dim,
             )
         return self._mm_prefill_wrapper
 
@@ -2160,10 +2068,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         mm_ranges_cpu = mm_ranges_cpu.pin_memory()
                     mm_ranges_gpu.copy_(mm_ranges_cpu, non_blocking=True)
                     attn_metadata.mm_prefix_query_range_tensor = mm_ranges_gpu
-                    # Row slices of the row-major (N, 2) buffer are
-                    # contiguous, so the prefill portion is the flat view
-                    # offset by 2 elements per decode token.
-                    mm_prefill_ranges = mm_ranges_gpu[num_decode_tokens:].reshape(-1)
+                    # The wrapper takes the (N, 2) rows and requires them
+                    # contiguous; a row slice of this row-major buffer is.
+                    mm_prefill_ranges = mm_ranges_gpu[num_decode_tokens:]
                     mm_wrapper = self._get_mm_prefill_wrapper()
                     mm_wrapper.plan(
                         qo_indptr=qo_indptr_prefill_cpu,
@@ -2174,10 +2081,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         num_kv_heads=self.num_kv_heads,
                         head_dim_qk=self.head_dim,
                         page_size=self.page_size,
-                        # The variant owns the whole mask expression,
-                        # including the causal term and the sliding window:
-                        # the kernel's built-in window prunes KV tiles that
-                        # the unclamped bidirectional term must still reach.
+                        # The wrapper's variant owns the whole mask,
+                        # including the causal term and both windows; the
+                        # windows are passed to run() instead.
                         causal=False,
                         sm_scale=self.sm_scale,
                         window_left=-1,
@@ -2685,7 +2591,7 @@ class FlashInferImpl(AttentionImpl):
                 # mm-prefix dispatch happens here, at forward time, on the
                 # metadata field: Gemma4 clears it for its full-attention
                 # layer groups after the metadata is built, so a build-time
-                # wrapper choice could not honor that. The JIT variant owns
+                # wrapper choice could not honor that. The mm wrapper owns
                 # the complete mask (causal, sliding window, bidirectional
                 # ranges), so none of the causal-wrapper hyperparameters
                 # apply to it.
@@ -2697,10 +2603,9 @@ class FlashInferImpl(AttentionImpl):
                     mm_wrapper = attn_metadata.prefill.mm_wrapper
                     mm_prefill_ranges = attn_metadata.prefill.mm_prefill_ranges
                     assert mm_prefill_ranges is not None
-                    assert not mm_wrapper._causal
                     # vLLM stores window_left = sliding_window - 1; the
-                    # variant compares (q_abs - kv) < N with N the effective
-                    # window, and 0 disables the window term entirely.
+                    # wrapper's windows are "keep when (q_abs - kv) < N" with
+                    # N the effective window, and 0 disables the term.
                     sw_n = self.window_left + 1 if self.window_left >= 0 else 0
                     clamp_sw = (
                         sw_n
@@ -2708,10 +2613,8 @@ class FlashInferImpl(AttentionImpl):
                         else 0
                     )
                     # A packed NVFP4 cache is handed over as the fp4 data
-                    # views; FlashInfer routes ``kv_cache_sf`` into the
-                    # ``maybe_k_cache_sf`` / ``maybe_v_cache_sf`` tensors the
-                    # variant declares, so the scales must not be passed
-                    # positionally.
+                    # views, with the block scales as ``kv_cache_sf``; the
+                    # wrapper knows how its variant reads them.
                     if self.is_kvcache_nvfp4:
                         assert nvfp4_kv_data is not None
                         assert nvfp4_kv_block_scales is not None
@@ -2726,11 +2629,10 @@ class FlashInferImpl(AttentionImpl):
                         prefill_query,
                         mm_kv_cache,
                         mm_prefill_ranges,
-                        float(sw_n),
-                        float(clamp_sw),
-                        # The wrapper folds q/k scales into sm_scale only on
-                        # the non-JIT path; the JIT scalar must carry them.
-                        float(self.scale * layer._q_scale_float * layer._k_scale_float),
+                        causal_window_left=sw_n,
+                        range_window_left=clamp_sw,
+                        q_scale=layer._q_scale_float,
+                        k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=output[num_decode_tokens:],
                         kv_cache_sf=mm_kv_cache_sf,

@@ -188,7 +188,7 @@ def test_split_request_keeps_mm_ranges_consistent_for_fill():
             out,
             m.mm_req_doc_ranges,
             m.query_start_loc_cpu,
-            m.seq_lens_cpu,
+            m.seq_lens_cpu_upper_bound,
         )
         assert n == m.num_actual_tokens
         return out[:n].tolist()
