@@ -19,13 +19,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.transformers_utils.configs.gemma4 import gemma4_layer_config
 
 from .gemma4_mtp import Gemma4MTPAttention, Gemma4MTPDecoderLayer
 from .qwen3_dflash import DFlashQwen3Model, _dflash_layer_causal
 from .qwen3_dspark import DSparkMarkovHead, Qwen3DSparkForCausalLM
-from .utils import extract_layer_index, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, extract_layer_index, maybe_prefix
 
 
 class Gemma4DSparkAttention(Gemma4MTPAttention):
@@ -270,6 +269,12 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
 
     dspark_shares_target_embeddings = False
     packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        }
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
@@ -290,25 +295,24 @@ class Gemma4DSparkForCausalLM(Qwen3DSparkForCausalLM):
         )
         self.draft_id_to_target_id = None
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked = [("gate_up_proj", "gate_proj", 0), ("gate_up_proj", "up_proj", 1)]
-        params = dict(self.named_parameters())
-        params.update(dict(self.named_buffers()))
-        loaded: set[str] = set()
-        for name, w in weights:
+    def _prefix_checkpoint_names(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        # The checkpoint is flat (no "model." grouping) except for
+        # `lm_head`, which already matches this class's own submodule name.
+        # `confidence_head` is a Qwen3DSpark-only head; this draft model
+        # never has one, so any such weights in the checkpoint are unused.
+        for name, weight in weights:
             if "confidence_head" in name:
                 continue
             if "lm_head" not in name:
                 name = "model." + name
-            for pn, wn, shard in stacked:
-                if wn in name and (mapped := name.replace(wn, pn)) in params:
-                    params[mapped].weight_loader(params[mapped], w, shard)
-                    loaded.add(mapped)
-                    break
-            else:
-                if name in params:
-                    p = params[name]
-                    getattr(p, "weight_loader", default_weight_loader)(p, w)
-                    loaded.add(name)
+            yield name, weight
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        loaded = loader.load_weights(
+            self._prefix_checkpoint_names(weights), mapper=self.hf_to_vllm_mapper
+        )
         self.model._build_fused_kv_buffers()
         return loaded
