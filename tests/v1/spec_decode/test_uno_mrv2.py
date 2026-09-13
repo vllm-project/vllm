@@ -1037,11 +1037,17 @@ def test_uno_startup_jit_self_check_reports_the_compiled_kernel(monkeypatch):
     runner = SimpleNamespace(
         speculator=object.__new__(UnoSpeculator),
         adaptive_verification="saved-adaptive-state",
-        max_num_tokens=32,
-        decode_query_len=9,
+        # The production arithmetic caps the mixed check at the full 2048
+        # token chunk even when decode_query_len + 2 would be larger.
+        max_num_tokens=2048,
+        decode_query_len=2047,
     )
+    worker_execute_model = Mock()
+    worker_sample_tokens = Mock()
 
     def emit_compile(*_args, **_kwargs):
+        assert _args == (runner, worker_execute_model, worker_sample_tokens, 2048)
+        assert _kwargs == {"req_id_prefix": "_uno_jit_self_check"}
         jit_monitor._handle_jit_event(
             backend="Triton",
             event="kernel JIT compilation",
@@ -1056,7 +1062,9 @@ def test_uno_startup_jit_self_check_reports_the_compiled_kernel(monkeypatch):
     warning = Mock()
     monkeypatch.setattr(jit_monitor.logger, "warning", warning)
     with pytest.raises(RuntimeError, match="Uno startup JIT self-check"):
-        warmup.run_uno_served_jit_self_check(runner, Mock(), Mock())
+        warmup.run_uno_served_jit_self_check(
+            runner, worker_execute_model, worker_sample_tokens
+        )
     assert runner.adaptive_verification == "saved-adaptive-state"
     assert warning.call_count == 1
     warning_args = warning.call_args.args
