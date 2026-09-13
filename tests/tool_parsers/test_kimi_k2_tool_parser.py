@@ -580,3 +580,22 @@ class TestStreamingIntervals:
         assert len(rec.tool_calls) == 1
         assert rec.tool_calls[0].function.name == "get_weather"
         assert json.loads(rec.tool_calls[0].function.arguments) == {"city": "Beijing"}
+
+def test_kimi_k2_streaming_index_error_fix(parser):
+    # This simulates a delta that immediately provides the tool call start but triggers 
+    # _emit_name_delta before slot initialization, causing an IndexError without the fix.
+    deltas = [
+        "<|tool_calls_section_begin|>",
+        "<|tool_call_begin|>functions.get_weather:0",
+        "<|tool_call_argument_begin|>",
+        "{\"city\": \"Tokyo\"}",
+        "<|tool_call_end|>",
+        "<|tool_calls_section_end|>",
+    ]
+    reconstructor = run_tool_extraction_streaming(
+        parser,
+        deltas,
+        assert_one_tool_per_delta=False,
+    )
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function.name == "get_weather"
