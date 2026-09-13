@@ -841,7 +841,7 @@ def test_engram_prefetch_detects_missing_dependency(monkeypatch, missing_depende
         monkeypatch.setattr(Engram, "_finish_prefetch", finish)
     delay = "producer" if missing_dependency == "producer_wait" else "lookup"
     try:
-        with pytest.raises(AssertionError, match="Tensor-likes are not equal"):
+        with pytest.raises(AssertionError, match="Tensor-likes are not close!"):
             _run_engram_prepared_rows(True, "eager", delay=delay)
     finally:
         torch.accelerator.synchronize()
