@@ -28,5 +28,6 @@ class DummyPlatform(Platform):
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
+        layout_constraint: tuple[str, ...] | None = None,
     ) -> str:
         return "vllm_add_dummy_platform.dummy_attention_backend.DummyAttentionBackend"  # noqa E501

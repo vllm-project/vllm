@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from functools import cache
 from typing import TYPE_CHECKING, NamedTuple, cast, get_args
 
@@ -8,6 +9,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config.cache import CacheDType
+from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import (
@@ -16,6 +18,8 @@ from vllm.v1.attention.backends.registry import (
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheSpecKind
+
+logger = init_logger(__name__)
 
 
 class AttentionSelectorConfig(NamedTuple):
@@ -97,6 +101,48 @@ def get_attn_spec_kind(
     if has_sliding_window:
         return KVCacheSpecKind.SLIDING_WINDOW
     return KVCacheSpecKind.FULL_ATTENTION
+
+
+# Tags set while building a speculative draft, which shares the target's KV
+# cache. Other tags (gemma4/gemma3n self_decoder and cross_decoder) name parts of
+# the backbone itself and are left to the existing whole-model resolution.
+_SPEC_DECODE_MODEL_TAGS = frozenset(
+    {
+        "eagle_head",
+        "draft_model",
+        "medusa_head",
+        "dspark_head",
+        "dflash_head",
+    }
+)
+
+
+def _resolve_layout_constraint(vllm_config) -> tuple[str, ...] | None:
+    """Layouts already-built attention layers share, or None when unconstrained.
+
+    Read straight off ``static_forward_context`` rather than through
+    ``get_current_attn_backends``, whose empty-context fallback calls back into
+    ``get_attn_backend``.
+    """
+    from vllm.config import get_layers_from_vllm_config
+    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+
+    layers: dict[str, AttentionLayerBase] = get_layers_from_vllm_config(
+        vllm_config, cast(type, AttentionLayerBase)
+    )
+    if not layers:
+        return None
+
+    supported: set[str] | None = None
+    for layer in layers.values():
+        layouts = layer.get_attn_backend().supported_kv_cache_layouts()
+        if layouts is None:
+            continue
+        names = {layout.name for layout in layouts}
+        supported = names if supported is None else supported & names
+    if not supported:
+        return None
+    return tuple(sorted(supported))
 
 
 def get_attn_backend(
@@ -182,12 +228,41 @@ def get_attn_backend(
         )
         backend = attention_config.backend_per_kind.get(kind.value, backend)
 
-    # The KV cache layout is resolved across all of the model's backends at once
-    # in get_kv_cache_spec(); a single selection cannot see its peers.
+    # get_kv_cache_spec() resolves the layout across all of the model's backends
+    # at once, so a selection made for the backbone cannot see its peers. A model
+    # built afterwards (a speculative draft) must not pick a backend whose layouts
+    # are disjoint from the ones already built, or no layout satisfies every set.
+    # Re-imported per call: set_model_tag() rebinds the module global.
+    from vllm.compilation.backends import model_tag as current_model_tag
+
+    layout_constraint = None
+    if current_model_tag in _SPEC_DECODE_MODEL_TAGS:
+        layout_constraint = _resolve_layout_constraint(vllm_config)
+
     return _cached_get_attn_backend(
         backend=backend,
         attn_selector_config=attn_selector_config,
         num_heads=num_heads,
+        layout_constraint=layout_constraint,
+    )
+
+
+@cache
+def _accepts_layout_constraint(fn: Callable) -> bool:
+    """Whether a platform's ``get_attn_backend_cls`` takes ``layout_constraint``.
+
+    Out-of-tree platforms may still override the older signature; passing the
+    argument to those raises TypeError, so drop it and leave them unconstrained.
+    Keyed on the resolved callable so a replaced attribute is inspected too.
+    """
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "layout_constraint" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
     )
 
 
@@ -196,13 +271,24 @@ def _cached_get_attn_backend(
     backend,
     attn_selector_config: AttentionSelectorConfig,
     num_heads: int | None = None,
+    layout_constraint: tuple[str, ...] | None = None,
 ) -> type[AttentionBackend]:
     from vllm.platforms import current_platform
 
+    kwargs: dict[str, tuple[str, ...] | None] = {}
+    if _accepts_layout_constraint(current_platform.get_attn_backend_cls):
+        kwargs["layout_constraint"] = layout_constraint
+    elif layout_constraint is not None:
+        logger.warning_once(
+            "%s.get_attn_backend_cls() predates layout_constraint, so draft "
+            "backend selection is unconstrained on this platform.",
+            type(current_platform).__name__,
+        )
     attention_cls = current_platform.get_attn_backend_cls(
         backend,
         attn_selector_config=attn_selector_config,
         num_heads=num_heads,
+        **kwargs,
     )
     if not attention_cls:
         raise ValueError(
