@@ -8,8 +8,12 @@ Per-op correctness tests live alongside their op definitions
 (e.g. tests/kernels/ir/test_layernorm.py).
 """
 
+import pytest
+
 import vllm.kernels  # noqa: F401 — registers provider implementations
 from vllm.ir.op import IrOp
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 def test_all_ops_have_input_generator():

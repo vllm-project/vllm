@@ -81,10 +81,6 @@ def _fused_marlin_moe(
     input_global_scale2: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
     global_scale2: torch.Tensor | None = None,
-    g_idx1: torch.Tensor | None = None,
-    g_idx2: torch.Tensor | None = None,
-    sort_indices1: torch.Tensor | None = None,
-    sort_indices2: torch.Tensor | None = None,
     w1_zeros: torch.Tensor | None = None,
     w2_zeros: torch.Tensor | None = None,
     workspace: torch.Tensor | None = None,
@@ -92,7 +88,6 @@ def _fused_marlin_moe(
     intermediate_cache2: torch.Tensor | None = None,
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
-    is_k_full: bool = True,
     activation_config: ApplyMoEActivationConfig | None = None,
 ) -> torch.Tensor:
     assert hidden_states.ndim == 2
@@ -142,8 +137,6 @@ def _fused_marlin_moe(
         a_scales1,
         global_scale1,
         w1_zeros,
-        g_idx1,
-        sort_indices1,
         workspace,
         sorted_token_ids,
         expert_ids,
@@ -156,7 +149,6 @@ def _fused_marlin_moe(
         size_m=M,
         size_n=w13_num_shards * N,
         size_k=K,
-        is_k_full=is_k_full,
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
@@ -209,8 +201,6 @@ def _fused_marlin_moe(
         a_scales2,
         global_scale2,
         w2_zeros,
-        g_idx2,
-        sort_indices2,
         workspace,
         sorted_token_ids,
         expert_ids,
@@ -223,7 +213,6 @@ def _fused_marlin_moe(
         size_m=M * num_topk,
         size_n=K,
         size_k=N,
-        is_k_full=is_k_full,
         use_atomic_add=False,
         use_fp32_reduce=True,
         is_zp_float=False,
@@ -253,16 +242,11 @@ def fused_marlin_moe(
     input_global_scale2: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
     global_scale2: torch.Tensor | None = None,
-    g_idx1: torch.Tensor | None = None,
-    g_idx2: torch.Tensor | None = None,
-    sort_indices1: torch.Tensor | None = None,
-    sort_indices2: torch.Tensor | None = None,
     w1_zeros: torch.Tensor | None = None,
     w2_zeros: torch.Tensor | None = None,
     workspace: torch.Tensor | None = None,
     intermediate_cache13: torch.Tensor | None = None,
     intermediate_cache2: torch.Tensor | None = None,
-    is_k_full: bool = True,
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     activation_config: ApplyMoEActivationConfig | None = None,
@@ -277,12 +261,6 @@ def fused_marlin_moe(
     - w2 (torch.Tensor): The second set of expert weights.
     - w1_scale (torch.Tensor): Scale to be used for w1.
     - w2_scale (torch.Tensor): Scale to be used for w2.
-    - g_idx1 (torch.Tensor|None): The first set of act_order indices.
-    - g_idx2 (torch.Tensor|None): The second set of act_order indices.
-    - sort_indices1 (torch.Tensor|None): The first act_order input
-        permutation.
-    - sort_indices2 (torch.Tensor|None): The second act_order input
-        permutation.
     - topk_weights (torch.Tensor): Top-k weights.
     - topk_ids (torch.Tensor): Indices of topk-k elements.
     - w1_zeros (torch.Tensor|None): Optional zero points to be used for w1.
@@ -372,10 +350,6 @@ def fused_marlin_moe(
         input_global_scale2=input_global_scale2,
         global_scale1=global_scale1,
         global_scale2=global_scale2,
-        g_idx1=g_idx1,
-        g_idx2=g_idx2,
-        sort_indices1=sort_indices1,
-        sort_indices2=sort_indices2,
         w1_zeros=w1_zeros,
         w2_zeros=w2_zeros,
         workspace=workspace,
@@ -383,7 +357,6 @@ def fused_marlin_moe(
         intermediate_cache2=intermediate_cache2,
         output=None,
         input_dtype=input_dtype,
-        is_k_full=is_k_full,
     ).view(-1, topk, K)
 
     if output is None:
@@ -416,16 +389,11 @@ def batched_fused_marlin_moe(
     input_global_scale2: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
     global_scale2: torch.Tensor | None = None,
-    g_idx1: torch.Tensor | None = None,
-    g_idx2: torch.Tensor | None = None,
-    sort_indices1: torch.Tensor | None = None,
-    sort_indices2: torch.Tensor | None = None,
     w1_zeros: torch.Tensor | None = None,
     w2_zeros: torch.Tensor | None = None,
     workspace: torch.Tensor | None = None,
     intermediate_cache13: torch.Tensor | None = None,
     intermediate_cache2: torch.Tensor | None = None,
-    is_k_full: bool = True,
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     activation_func: Callable[..., None] | None = None,
@@ -548,10 +516,6 @@ def batched_fused_marlin_moe(
         input_global_scale2=input_global_scale2,
         global_scale1=global_scale1,
         global_scale2=global_scale2,
-        g_idx1=g_idx1,
-        g_idx2=g_idx2,
-        sort_indices1=sort_indices1,
-        sort_indices2=sort_indices2,
         w1_zeros=w1_zeros,
         w2_zeros=w2_zeros,
         workspace=workspace,
@@ -559,7 +523,6 @@ def batched_fused_marlin_moe(
         intermediate_cache2=intermediate_cache2,
         output=output.view(-1, K) if output is not None else output,
         input_dtype=input_dtype,
-        is_k_full=is_k_full,
     )
 
     output = output.view(B, BATCH_TOKENS_MAX, K)
@@ -574,11 +537,6 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         quant_config: FusedMoEQuantConfig,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
-        w13_g_idx: torch.Tensor | None = None,
-        w2_g_idx: torch.Tensor | None = None,
-        w13_g_idx_sort_indices: torch.Tensor | None = None,
-        w2_g_idx_sort_indices: torch.Tensor | None = None,
-        is_k_full: bool = True,
     ):
         # TODO (varun) : Enable activation quantization
         assert (
@@ -588,11 +546,6 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             or quant_config.use_int8_w8a16
             or quant_config.use_fp8_w8a16
         ), "Supports only {mxfp,nvfp,int}4_w4a16, int8_w8a16 or fp8_w8a16"
-        self.w13_g_idx = w13_g_idx
-        self.w2_g_idx = w2_g_idx
-        self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
-        self.w2_g_idx_sort_indices = w2_g_idx_sort_indices
-        self.is_k_full = is_k_full
         self.input_dtype = get_marlin_input_dtype()
 
         super().__init__(
@@ -786,11 +739,6 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 # output buffer allocation. Please refer to workspace_shapes().
                 intermediate_cache13=workspace2,
                 intermediate_cache2=workspace13,
-                g_idx1=self.w13_g_idx,
-                g_idx2=self.w2_g_idx,
-                sort_indices1=self.w13_g_idx_sort_indices,
-                sort_indices2=self.w2_g_idx_sort_indices,
-                is_k_full=self.is_k_full,
                 input_dtype=self.input_dtype,
             )
             return
@@ -901,11 +849,6 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             output=output,
             intermediate_cache13=workspace2,
             intermediate_cache2=workspace13,
-            g_idx1=self.w13_g_idx,
-            g_idx2=self.w2_g_idx,
-            sort_indices1=self.w13_g_idx_sort_indices,
-            sort_indices2=self.w2_g_idx_sort_indices,
-            is_k_full=self.is_k_full,
             input_dtype=self.input_dtype,
         )
 
@@ -931,22 +874,12 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         quant_config: FusedMoEQuantConfig,
         max_num_tokens: int,
         num_dispatchers: int,
-        w13_g_idx: torch.Tensor | None = None,
-        w2_g_idx: torch.Tensor | None = None,
-        w13_g_idx_sort_indices: torch.Tensor | None = None,
-        w2_g_idx_sort_indices: torch.Tensor | None = None,
-        is_k_full: bool = True,
     ):
         super().__init__(
             moe_config=moe_config,
             quant_config=quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
-            w13_g_idx=w13_g_idx,
-            w2_g_idx=w2_g_idx,
-            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-            is_k_full=is_k_full,
         )
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
@@ -1038,14 +971,9 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             output=output,
             intermediate_cache13=workspace13,
             intermediate_cache2=workspace2,
-            g_idx1=self.w13_g_idx,
-            g_idx2=self.w2_g_idx,
-            sort_indices1=self.w13_g_idx_sort_indices,
-            sort_indices2=self.w2_g_idx_sort_indices,
             w1_zeros=self.w1_zp,
             w2_zeros=self.w2_zp,
             input_dtype=self.input_dtype,
-            is_k_full=self.is_k_full,
             activation_func=activation_func,
             activation_config=self.activation_config,
         )

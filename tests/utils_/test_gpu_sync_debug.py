@@ -158,3 +158,149 @@ def test_without_env_set(monkeypatch):
 
     with_gpu_sync_check(_no_sync)()
     with_gpu_sync_check(_causes_sync)()
+
+
+def _pageable_h2d_nonblocking():
+    # Pageable source: the "async" copy is staged through pageable memory.
+    torch.zeros(4).to("cuda", non_blocking=True)
+
+
+def _pinned_h2d_nonblocking():
+    # Pinned, contiguous, same dtype: genuinely asynchronous.
+    torch.zeros(4).pin_memory().to("cuda", non_blocking=True)
+
+
+def _noncontiguous_h2d_nonblocking():
+    # Pinned but gapped layout (strided slice): staged through a pageable temp.
+    torch.zeros(8).pin_memory()[::2].to("cuda", non_blocking=True)
+
+
+def _transposed_h2d_nonblocking():
+    # Dense permuted layout: copied with pitched cudaMemcpy2DAsync, stays async.
+    torch.zeros(4, 4).pin_memory().t().to("cuda", non_blocking=True)
+
+
+def _dtype_converting_h2d_nonblocking():
+    # Pinned and contiguous: the conversion runs GPU-side, staying async.
+    torch.zeros(4, dtype=torch.float64).pin_memory().to(
+        "cuda", dtype=torch.float32, non_blocking=True
+    )
+
+
+def _pageable_h2d_via_cuda():
+    torch.zeros(4).cuda(non_blocking=True)
+
+
+def _pageable_h2d_via_copy_():
+    torch.zeros(4, device="cuda").copy_(torch.zeros(4), non_blocking=True)
+
+
+def _d2h_via_to():
+    # Genuinely asynchronous: torch allocates the destination pinned.
+    torch.zeros(4, device="cuda").to("cpu", non_blocking=True)
+
+
+def _pageable_d2h_via_copy_():
+    torch.zeros(4).copy_(torch.zeros(4, device="cuda"), non_blocking=True)
+
+
+def _pinned_d2h_via_copy_():
+    # Pinned, contiguous, same dtype: genuinely asynchronous.
+    torch.zeros(4).pin_memory().copy_(torch.zeros(4, device="cuda"), non_blocking=True)
+
+
+def _noncontiguous_d2h_via_copy_():
+    # Pinned but gapped (strided slice) destination.
+    torch.zeros(8).pin_memory()[::2].copy_(
+        torch.zeros(4, device="cuda"), non_blocking=True
+    )
+
+
+def _transposed_d2h_via_copy_():
+    # Dense permuted destination: pitched cudaMemcpy2DAsync, stays async.
+    torch.zeros(4, 4).pin_memory().t().copy_(
+        torch.zeros(4, 4, device="cuda"), non_blocking=True
+    )
+
+
+def _empty_h2d_nonblocking():
+    # Empty (e.g. first-step penalties): no CUDA call is issued at all.
+    torch.zeros(0).to("cuda", non_blocking=True)
+
+
+def _dtype_converting_d2h_via_copy_():
+    # Pinned and contiguous: the conversion runs GPU-side, staying async.
+    torch.zeros(4).pin_memory().copy_(
+        torch.zeros(4, dtype=torch.float64, device="cuda"), non_blocking=True
+    )
+
+
+@pytest.mark.parametrize("mode", ["warn", "error"])
+@pytest.mark.parametrize(
+    "fn",
+    [
+        _pageable_h2d_nonblocking,
+        _noncontiguous_h2d_nonblocking,
+        _pageable_h2d_via_cuda,
+        _pageable_h2d_via_copy_,
+        _pageable_d2h_via_copy_,
+        _noncontiguous_d2h_via_copy_,
+    ],
+)
+@create_new_process_for_each_test()
+def test_implicit_copy_sync_detected(monkeypatch, mode, fn):
+    """`non_blocking=True` CPU<->CUDA copies with a pageable or
+    non-densely-laid-out CPU tensor may block the host without tripping
+    torch's sync debug mode; the `Tensor.to`/`cuda`/`copy_` wrappers must
+    flag them.
+    """
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", mode)
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+    gsd._install_copy_checkers()
+
+    if mode == "error":
+        with pytest.raises(RuntimeError, match="Implicit GPU<->CPU sync"):
+            with_gpu_sync_check(fn)()
+    else:
+        with pytest.warns(UserWarning, match="Implicit GPU<->CPU sync"):
+            with_gpu_sync_check(fn)()
+
+
+@create_new_process_for_each_test()
+def test_genuinely_async_transfers_pass(monkeypatch):
+    """Pinned, densely laid out CPU tensors make `non_blocking=True` truly
+    asynchronous in both directions -- even with a dtype conversion, which
+    runs GPU-side, and even permuted (e.g. transposed), which uses pitched
+    cudaMemcpy2D/3DAsync; D2H `Tensor.to` allocates a pinned destination.
+    None of these may be flagged."""
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+    gsd._install_copy_checkers()
+
+    for fn in (
+        _pinned_h2d_nonblocking,
+        _pinned_d2h_via_copy_,
+        _d2h_via_to,
+        _dtype_converting_h2d_nonblocking,
+        _dtype_converting_d2h_via_copy_,
+        _transposed_h2d_nonblocking,
+        _transposed_d2h_via_copy_,
+        _empty_h2d_nonblocking,
+    ):
+        fn()  # Warm up outside the checked region.
+        with_gpu_sync_check(fn)()
+
+
+@create_new_process_for_each_test()
+def test_implicit_copy_sync_can_be_allowed(monkeypatch):
+    """`gpu_sync_allowed()` must exempt implicit copy syncs too."""
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+    gsd._install_copy_checkers()
+
+    def allowed_pageable_copies():
+        with gpu_sync_allowed():
+            _pageable_h2d_nonblocking()
+            _pageable_d2h_via_copy_()
+
+    with_gpu_sync_check(allowed_pageable_copies)()

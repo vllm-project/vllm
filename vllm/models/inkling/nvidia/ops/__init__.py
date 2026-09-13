@@ -15,12 +15,12 @@ from .sconv import fused_sconv
 _LAZY_EXPORTS = {
     "silu_and_mul_triton": "silu_and_mul",
     "sink_silu_mul_epilogue": "silu_and_mul",
-    "INKLING_FA4_REL_ATTENTION_KERNEL": "fa4_rel_attention",
+    "_INKLING_FA4_REL_ATTENTION_KERNEL": "fa4_rel_attention",
 }
 
 if TYPE_CHECKING:
     from .fa4_rel_attention import (  # noqa: F401
-        INKLING_FA4_REL_ATTENTION_KERNEL,
+        _INKLING_FA4_REL_ATTENTION_KERNEL,
     )
     from .silu_and_mul import (  # noqa: F401
         silu_and_mul_triton,

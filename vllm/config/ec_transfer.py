@@ -18,6 +18,11 @@ class ECTransferConfig:
 
     ec_connector: str | None = None
     """The EC connector for vLLM to transmit EC caches between vLLM instances.
+
+    Built-in options include ``ECExampleConnector`` (shared filesystem via
+    safetensors) and ``ECMooncakeConnector`` (Mooncake TransferEngine RDMA;
+    requires ``mooncake-transfer-engine`` and matching producer/consumer
+    ``ec_connector_extra_config``; see ``mooncake_ec_connector`` module docstring).
     """
 
     engine_id: str | None = None

@@ -10,6 +10,7 @@ NEEDS_CLEAN_ENTRY = frozenset(
         # which they used to get only as a side effect of the preceding test
         # cleaning up after itself.
         "test_moe_layer.py",
+        "test_modular_oai_triton_moe.py",
         "test_ocp_mx_moe.py",
         "test_zero_expert_moe.py",
         # Execute no test on ROCm, where this was measured, so nothing is known

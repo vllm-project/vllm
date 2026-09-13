@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -105,19 +106,29 @@ def _silu_and_mul_nvfp4_dynamic(
     # NVFP4 packs 2 values into 1 byte
     result = torch.empty((num_tokens, d // 2), dtype=FP4_DTYPE, device=x.device)
 
-    # Block scale output shape: swizzled layout for tensor cores
-    # Each group of 16 elements shares one FP8 scale
-    num_k_tiles = (d + 63) // 64
+    # Block scale output: swizzled tensor-core layout
+    # [num_m_tiles, num_k_tiles, 32, 4, 4] of int32-packed FP8 scales, so the
+    # row/col extents must be padded to the 128x4 tile like
+    # scaled_fp4_quant's allocator (create_fp4_scale_tensor). Each group of 16
+    # elements shares one FP8 scale.
+    rounded_m = round_up(num_tokens, 128)
+    rounded_n = round_up(d // 16, 4)
     block_scale = torch.empty(
-        (num_tokens, num_k_tiles * 4), dtype=FP8_DTYPE, device=x.device
+        (rounded_m, rounded_n // 4), dtype=torch.int32, device=x.device
+    ).view(FP8_DTYPE)
+
+    # The kernel folds the global scale into the block scales, and the
+    # consumer GEMM's alpha (= input_global_scale * weight_global_scale)
+    # divides it back out, so quantize with the reciprocal like the unfused
+    # scaled_fp4_quant path does.
+    input_global_scale_inv = getattr(linear, "input_global_scale_inv", None)
+    assert input_global_scale_inv is not None, (
+        "input_global_scale_inv is required for NVFP4 quantization"
     )
 
-    input_global_scale = getattr(linear, "input_global_scale", None)
-    assert input_global_scale is not None, (
-        "input_global_scale is required for NVFP4 quantization"
+    torch.ops._C.silu_and_mul_nvfp4_quant(
+        result, block_scale, x, input_global_scale_inv
     )
-
-    torch.ops._C.silu_and_mul_nvfp4_quant(result, block_scale, x, input_global_scale)
 
     return QuantizedActivation(
         data=result.view(out_shape[:-1] + (d // 2,)),

@@ -79,7 +79,7 @@ class ServingScores(PoolingServing):
         final_res_batch = ctx.final_res_batch
         request_id = ctx.request_id
         created_time = ctx.created_time
-        model_name = self.models.model_name()
+        model_name = ctx.model_name
 
         if isinstance(ctx.request, ScoreRequest):
             return self._request_output_to_score_response(

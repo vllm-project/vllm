@@ -158,9 +158,16 @@ class AsyncLookupManager(ABC):
         step's drain_results().  Safe to call with an empty batch (no-op).
         """
         self._need_to_drain = True
-        if self._lookup_batch:
-            self._lookup_queue.put(self._lookup_batch)
-            self._lookup_batch = []
+        batch = self._lookup_batch
+        self._lookup_batch = []
+        batch = [
+            (key, req_context, generation)
+            for key, req_context, generation in batch
+            if (state := self._lookup_state.get(key)) is not None
+            and state.generation == generation
+        ]
+        if batch:
+            self._lookup_queue.put(batch)
 
     def drain_results(self) -> None:
         """Apply pending worker results to _lookup_state.

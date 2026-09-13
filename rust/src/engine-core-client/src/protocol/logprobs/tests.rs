@@ -303,6 +303,29 @@ fn decodes_big_endian_payloads() {
 }
 
 #[test]
+fn rejects_supported_array_dtypes_in_incompatible_logprobs_fields() {
+    for (ids_dtype, probs_dtype, field) in [
+        ("<u4", "<f4", "logprob_token_ids"),
+        ("<i4", "<i4", "logprobs"),
+    ] {
+        let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
+            Some(Value::Array(vec![
+                ndarray_value(ids_dtype, &[1, 1], Value::Ext(3, vec![0; 4])),
+                ndarray_value(probs_dtype, &[1, 1], Value::Ext(3, vec![0; 4])),
+                ndarray_value("<i4", &[1], Value::Ext(3, vec![1, 0, 0, 0])),
+                Value::Nil,
+            ])),
+            None,
+        )))];
+        let error = decode_engine_core_outputs(&frames).unwrap_err();
+        let crate::error::Error::ExtValueDecode { message } = error else {
+            panic!("expected ExtValueDecode");
+        };
+        assert!(message.starts_with(&format!("new_logprobs.{field}: expected dtype")));
+    }
+}
+
+#[test]
 fn rejects_non_none_cu_num_generated_tokens() {
     let frames = vec![Bytes::from(encode_value(&output_wire_with_custom_fields(
         Some(Value::Array(vec![

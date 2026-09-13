@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import torch
 from compressed_tensors.config import CompressionFormat, SparsityCompressionConfig
 from compressed_tensors.quantization import (
+    ActivationOrdering,
     QuantizationArgs,
     QuantizationStrategy,
     QuantizationType,
@@ -325,9 +326,20 @@ class CompressedTensorsConfig(QuantizationConfig):
             targets = quant_config.get("targets")
             for target in targets:
                 target_scheme_map[target] = {}
-                target_scheme_map[target]["weights"] = QuantizationArgs.model_validate(
+                weight_quant = QuantizationArgs.model_validate(
                     quant_config.get("weights")
                 )
+                if weight_quant.actorder in (
+                    ActivationOrdering.GROUP.value,
+                    ActivationOrdering.DYNAMIC.value,
+                ):
+                    raise ValueError(
+                        "Compressed-tensors group/dynamic activation ordering "
+                        f"(actorder={weight_quant.actorder!r}) is no longer supported. "
+                        "Use a checkpoint with static/weight activation ordering or "
+                        "without activation ordering."
+                    )
+                target_scheme_map[target]["weights"] = weight_quant
 
                 target_scheme_map[target]["input_activations"] = None
                 target_scheme_map[target]["format"] = quant_config.get("format")
@@ -754,7 +766,6 @@ class CompressedTensorsConfig(QuantizationConfig):
                 strategy=weight_quant.strategy,
                 symmetric=weight_quant.symmetric,
                 group_size=weight_quant.group_size,
-                actorder=weight_quant.actorder,
             )
 
         # Must come before the WNA16 check; standard 4/8-bit weight-only (no
@@ -803,7 +814,6 @@ class CompressedTensorsConfig(QuantizationConfig):
                 strategy=weight_quant.strategy,
                 symmetric=weight_quant.symmetric,
                 group_size=weight_quant.group_size,
-                actorder=weight_quant.actorder,
                 layer_name=layer_name,
             )
 

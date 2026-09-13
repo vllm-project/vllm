@@ -4,7 +4,7 @@
 
 import inspect
 import warnings
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import torch
@@ -120,11 +120,18 @@ def process_weights_after_loading(
                     "does not support pre-processed weights"
                 )
             # When quant methods need to process weights after loading
-            # (for repacking, quantizing, etc), they expect parameters
+            # (for repacking, quantizing, etc), they typically expect parameters
             # to be on the global target device. This scope is for the
             # case where cpu offloading is used, where we will move the
             # parameters onto device for processing and back off after.
-            with device_loading_context(module, target_device):
+            # Methods that can process weights in place (e.g. PLE scale
+            # validation) set requires_device_loading=False to skip this move.
+            loading_context = (
+                device_loading_context(module, target_device)
+                if quant_method.requires_device_loading
+                else nullcontext()
+            )
+            with loading_context:
                 quant_method.process_weights_after_loading(module)
             # process_weights_after_loading may swap in freshly-created
             # Parameters (e.g. FP8 requantization), which are stamped with the

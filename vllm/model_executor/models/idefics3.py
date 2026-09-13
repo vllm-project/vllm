@@ -16,7 +16,7 @@
 # limitations under the License.
 """Inference-only Idefics3 model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
@@ -722,6 +722,7 @@ class Idefics3ForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,

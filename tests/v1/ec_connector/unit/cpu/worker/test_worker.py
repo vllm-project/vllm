@@ -38,7 +38,10 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
 from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.worker import ECCPUWorker
+from vllm.distributed.ec_transfer.ec_connector.cpu.worker import (
+    ECCPUTransferDirection,
+    ECCPUWorker,
+)
 from vllm.platforms import current_platform
 
 # ── shape constants ──────────────────────────────────────────────────────────
@@ -197,6 +200,71 @@ def _warm_up_stream_pools(worker: ECCPUWorker) -> None:
     worker.flush_saves()
     _wait_for_completion(worker, "w", "saves")
     assert worker._stream_pool, "warm-up did not recycle a stream"
+
+
+# ── backend extension points ────────────────────────────────────────────────
+
+
+def test_save_path_delegates_transfer_submission(make_worker):
+    worker = make_worker()
+    stream = Mock()
+    worker._acquire_stream = Mock(return_value=stream)
+    worker._acquire_event = Mock(side_effect=[Mock(), Mock()])
+    worker._submit_transfer = Mock()
+
+    src = MagicMock()
+    src.numel.return_value = _HIDDEN_DIM
+    src.element_size.return_value = _DTYPE.itemsize
+    src.view.return_value = src
+    src.data_ptr.return_value = 1000
+
+    platform = Mock()
+    platform.current_stream.return_value = Mock()
+    platform.stream.return_value = contextlib.nullcontext()
+    with patch(
+        "vllm.distributed.ec_transfer.ec_connector.cpu.worker.current_platform",
+        platform,
+    ):
+        worker.save_caches({"h": src}, "h", _meta(saves={"h": [3]}))
+        worker.flush_saves()
+
+    worker._submit_transfer.assert_called_once()
+    _, count, direction = worker._submit_transfer.call_args.args
+    assert count == 1
+    assert direction == ECCPUTransferDirection.DEVICE_TO_HOST
+
+
+def test_load_path_delegates_transfer_submission(make_worker):
+    worker = make_worker()
+    stream = Mock()
+    compute_stream = Mock()
+    worker._acquire_stream = Mock(return_value=stream)
+    worker._acquire_event = Mock(side_effect=[Mock(), Mock()])
+    worker._submit_transfer = Mock()
+
+    dst_buf = MagicMock()
+    dst_buf.data_ptr.return_value = 1000
+
+    platform = Mock()
+    platform.device_type = "cpu"
+    platform.current_stream.return_value = compute_stream
+    platform.stream.return_value = contextlib.nullcontext()
+    with (
+        patch(
+            "vllm.distributed.ec_transfer.ec_connector.cpu.worker.current_platform",
+            platform,
+        ),
+        patch(
+            "vllm.distributed.ec_transfer.ec_connector.cpu.worker.torch.empty",
+            return_value=dst_buf,
+        ),
+    ):
+        worker.start_load_caches({}, _meta(loads={"h": [3]}))
+
+    worker._submit_transfer.assert_called_once()
+    _, count, direction = worker._submit_transfer.call_args.args
+    assert count == 1
+    assert direction == ECCPUTransferDirection.HOST_TO_DEVICE
 
 
 # ── save_caches ──────────────────────────────────────────────────────────────
@@ -792,8 +860,10 @@ def test_shutdown_calls_region_cleanup_and_swallows_errors(caplog_vllm):
     worker._inflight_loads = deque()
     worker._stream_pool = []
     worker._event_pool = []
+    worker._shutdown_transfer_backend = MagicMock()
 
     worker.shutdown()
+    worker._shutdown_transfer_backend.assert_called_once()
     mock_region.cleanup.assert_called_once()
 
     mock_region.cleanup.side_effect = RuntimeError("boom")

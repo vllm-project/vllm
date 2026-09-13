@@ -372,7 +372,12 @@ class MooncakeStoreScheduler:
         ) in self._unfinished_requests.items():
             if request_id not in request_ids and request_id not in cached_reqs.req_ids:
                 load_spec = self.load_specs.pop(request_id, None)
-                if not load_spec:
+                # A load spec may have been proposed by this connector's
+                # lookup but rejected by MultiConnector in favor of another
+                # connector. Only the chosen connector may issue the pending
+                # load; the normal store path gets its blocks later from
+                # SchedulerOutput once the request is actually scheduled.
+                if load_spec is None or not load_spec.can_load:
                     continue
                 num_tokens_to_compute = load_spec.kvpool_cached_tokens
                 request_tracker = RequestTracker(
@@ -429,7 +434,7 @@ class MooncakeStoreScheduler:
             "Current block tables are required for Mooncake store jobs"
         )
         for req_meta in save_metas:
-            block_ids = block_state.block_ids.get(req_meta.req_id)
+            block_ids = block_state.get_block_ids(req_meta.req_id)
             assert block_ids is not None, (
                 f"Missing current block table for store request {req_meta.req_id}"
             )

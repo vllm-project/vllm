@@ -330,7 +330,7 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
         quant_config = getattr(model_config.hf_config, "quantization_config", None)
         if quant_config is not None and quant_config.get("quant_method") == "fp8":
             model_type = getattr(model_config.hf_config, "model_type", None)
-            if model_type == "deepseek_v4":
+            if model_type in ("deepseek_v4", "deepseek_v41"):
                 model_config.hf_config.quantization_config["quant_method"] = (
                     "deepseek_v4_fp8"
                 )
@@ -343,7 +343,7 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
             and hf_text_quant_config.get("quant_method") == "fp8"
         ):
             model_type = getattr(model_config.hf_text_config, "model_type", None)
-            if model_type == "deepseek_v4":
+            if model_type in ("deepseek_v4", "deepseek_v41"):
                 model_config.hf_text_config.quantization_config["quant_method"] = (
                     "deepseek_v4_fp8"
                 )
@@ -1003,6 +1003,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColQwen3_5": ColQwen3_5Config,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV4ForConditionalGeneration": DeepseekV4ForCausalLMConfig,
+    "DeepseekV41ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501

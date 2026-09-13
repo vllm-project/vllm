@@ -84,6 +84,7 @@ def test_deferred_finalize_enabled_before_moe_kernel_setup(
         SimpleNamespace(
             is_cuda=lambda: True,
             is_device_capability_family=lambda capability: capability == 100,
+            current_device=lambda: torch.device("cuda"),
         ),
     )
     monkeypatch.setattr(

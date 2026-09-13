@@ -7,6 +7,12 @@
 is a failure. The scoping lives in ContextVars, which are per-thread and
 per-asyncio-task, so an allow region opened on one thread is invisible to
 every other one.
+
+torch's mode only instruments explicit synchronizing calls, so it misses
+`non_blocking=True` CPU<->CUDA copies that the CUDA driver silently stages
+through pageable memory (when the CPU tensor is not pinned or not densely
+laid out). Those are caught by the wrappers on `Tensor.to`/`Tensor.cuda`/
+`Tensor.copy_` installed by `_install_copy_checkers()`.
 """
 
 import functools
@@ -54,6 +60,7 @@ def enable_gpu_sync_check() -> None:
     global _sync_check_enabled
     _sync_check_enabled = True
     _install_compile_time_sync_suppressors()
+    _install_copy_checkers()
 
 
 _arm_lock = threading.Lock()
@@ -195,6 +202,158 @@ def _install_compile_time_sync_suppressors() -> None:
         _ct.cudagraphify = _suppressing(_ct.cudagraphify)
     except Exception:  # pragma: no cover
         pass
+
+
+# ---------------------------------------------------------------------------
+# Implicit sync detection in `non_blocking` CPU<->CUDA copies.
+#
+# A `non_blocking=True` copy between CPU and CUDA still blocks the host when
+# the CPU side is not pinned or not densely laid out (gapped strided slices
+# stage through a pageable temp): D2H copies into such memory wait for the
+# stream, and H2D copies from it do too beyond a driver size threshold.
+# None of that goes through an API torch's sync debug mode instruments, so
+# wrap the Python-level transfer entry points and flag such copies on threads
+# in a checked region.
+
+IMPLICIT_SYNC_ERROR_MESSAGE = (
+    "Implicit GPU<->CPU sync detected - use a pinned, densely laid out CPU "
+    "tensor, or wrap with gpu_sync_allowed()"
+)
+
+# Captured at import; `_install_copy_checkers` replaces these attributes.
+_torch_to = torch.Tensor.to
+_torch_cuda = torch.Tensor.cuda
+_torch_copy_ = torch.Tensor.copy_
+
+# torch's own parser for `Tensor.to`'s overloaded signature, returning
+# (device, dtype, non_blocking, memory_format) (also used by torch._dynamo).
+_parse_to = getattr(torch._C._nn, "_parse_to", None)
+
+
+def _active_check_mode() -> str | None:
+    """The mode the calling thread is being checked in, if any."""
+    if not _sync_check_enabled or _allow_depth.get() or torch.compiler.is_compiling():
+        return None
+    return _checking.get()
+
+
+def _is_dense(t: torch.Tensor) -> bool:
+    """Whether `t`'s elements fill a contiguous storage range, possibly
+    permuted (e.g. a transposed matrix). Such layouts can be copied with
+    pitched cudaMemcpy2D/3DAsync directly from/to pinned memory, whereas
+    gapped layouts (e.g. strided slices) stage through a pageable temp."""
+    if t.is_contiguous():
+        # The common case, answered by a memoized TensorImpl flag.
+        return True
+    expected_stride = 1
+    for stride, size in sorted(zip(t.stride(), t.shape)):
+        if size <= 1:
+            continue
+        if stride != expected_stride:
+            return False
+        expected_stride *= size
+    return True
+
+
+def _cpu_copy_stall_reason(
+    cpu_tensor: torch.Tensor, device: torch.device | None
+) -> str | None:
+    """Why a `non_blocking` copy between `cpu_tensor` and a CUDA tensor would
+    silently block the host, or None if it is genuinely asynchronous.
+
+    `device` describes the other side of the copy; a non-CUDA `device` means
+    the copy does not involve the GPU at all.
+    """
+    if device is None or device.type != "cuda" or cpu_tensor.device.type != "cpu":
+        return None
+    if cpu_tensor.numel() == 0:
+        return None  # Nothing to copy; torch issues no CUDA call at all.
+    if not _is_dense(cpu_tensor):
+        return "the CPU tensor is not densely laid out"
+    if not cpu_tensor.is_pinned():
+        return "the CPU tensor is not pinned"
+    return None
+
+
+def _report_implicit_sync(op: str, direction: str, reason: str, mode: str) -> None:
+    msg = (
+        f"Tensor.{op}: a non_blocking {direction} copy that may be silently "
+        f"synchronous ({reason}). {IMPLICIT_SYNC_ERROR_MESSAGE}"
+    )
+    if mode == "error":
+        raise RuntimeError(msg)
+    warnings.warn(msg, stacklevel=3)
+
+
+def _checked_to(self, *args, **kwargs):
+    # Only H2D is checked: D2H `to` allocates a pinned destination in
+    # supported torch versions, so it is genuinely asynchronous.
+    if (mode := _active_check_mode()) is not None and _parse_to is not None:
+        try:
+            device, _, non_blocking, _ = _parse_to(*args, **kwargs)
+        except Exception:
+            pass  # Invalid args; let the original call raise.
+        else:
+            if non_blocking and (reason := _cpu_copy_stall_reason(self, device)):
+                _report_implicit_sync("to", "H2D", reason, mode)
+    return _torch_to(self, *args, **kwargs)
+
+
+def _checked_cuda(self, *args, **kwargs):
+    # Signature: cuda(device=None, non_blocking=False, memory_format=None).
+    if (mode := _active_check_mode()) is not None:
+        device = args[0] if args else kwargs.get("device")
+        non_blocking = args[1] if len(args) > 1 else kwargs.get("non_blocking", False)
+        if non_blocking:
+            if device is None:
+                device = torch.device("cuda")
+            elif isinstance(device, int):
+                device = torch.device("cuda", device)
+            elif not isinstance(device, torch.device):
+                device = torch.device(device)
+            if reason := _cpu_copy_stall_reason(self, device):
+                _report_implicit_sync("cuda", "H2D", reason, mode)
+    return _torch_cuda(self, *args, **kwargs)
+
+
+def _checked_copy_(self, *args, **kwargs):
+    # Signature: copy_(src, non_blocking=False).
+    if (
+        (mode := _active_check_mode()) is not None
+        and args
+        and isinstance(src := args[0], torch.Tensor)
+    ):
+        non_blocking = args[1] if len(args) > 1 else kwargs.get("non_blocking", False)
+        if non_blocking:
+            if self.device.type == "cuda":
+                reason = _cpu_copy_stall_reason(src, self.device)
+                direction = "H2D"
+            else:
+                reason = _cpu_copy_stall_reason(self, src.device)
+                direction = "D2H"
+            if reason:
+                _report_implicit_sync("copy_", direction, reason, mode)
+    return _torch_copy_(self, *args, **kwargs)
+
+
+_copy_checkers_installed: bool = False
+
+
+def _install_copy_checkers() -> None:
+    """Wrap the Python-level CPU<->CUDA transfer entry points with the checks
+    above.
+
+    The patch is process-global, but it only reports on threads inside a
+    checked region, matching the scoping of the torch-level check. Copies
+    issued from C++ (e.g. inside compiled graphs) bypass it.
+    """
+    global _copy_checkers_installed
+    if _copy_checkers_installed:
+        return
+    _copy_checkers_installed = True
+    torch.Tensor.to = _checked_to  # type: ignore[method-assign]
+    torch.Tensor.cuda = _checked_cuda  # type: ignore[method-assign]
+    torch.Tensor.copy_ = _checked_copy_  # type: ignore[method-assign]
 
 
 def gpu_sync_allowed(first_only: bool = False):

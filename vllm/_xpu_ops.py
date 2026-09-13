@@ -125,15 +125,6 @@ def _gemma_rms_norm_impl(
     torch.ops._C.gemma_rms_norm(out, input, weight, epsilon)
 
 
-def _gemma_rms_norm_fake(
-    out: torch.Tensor,
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-) -> None:
-    return None
-
-
 def _fused_add_gemma_rms_norm_impl(
     input: torch.Tensor,
     residual: torch.Tensor,
@@ -141,15 +132,6 @@ def _fused_add_gemma_rms_norm_impl(
     epsilon: float,
 ) -> None:
     torch.ops._C.fused_add_gemma_rms_norm(input, residual, weight, epsilon)
-
-
-def _fused_add_gemma_rms_norm_fake(
-    input: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-) -> None:
-    return None
 
 
 def _gdn_attention_core_xpu_impl(
@@ -238,16 +220,6 @@ def _gdn_attention_core_xpu_impl(
         tp_size=self.tp_size,
         reorder_input=not self.gqa_interleaved_layout,
     )
-
-
-def _gdn_attention_core_xpu_fake(
-    core_attn_out: torch.Tensor,
-    z: torch.Tensor,
-    projected_states_qkvz: torch.Tensor,
-    projected_states_ba: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
 
 
 def _xpu_ops_deepseek_scaling_rope_impl(
@@ -471,19 +443,6 @@ def _xpu_deepseek_fused_indexer_q_rope_fp8_impl(
     )
 
 
-def _xpu_deepseek_fused_indexer_q_rope_fp8_fake(
-    index_q: torch.Tensor,
-    positions: torch.Tensor,
-    index_q_cos_sin_cache: torch.Tensor,
-    index_weights: torch.Tensor,
-    index_weights_softmax_scale: float,
-    index_weights_head_scale: float,
-    index_q_fp8: torch.Tensor,
-    index_weights_out: torch.Tensor,
-) -> None:
-    return
-
-
 def _xpu_deepseek_fused_indexer_q_rope_mxfp4_impl(
     index_q: torch.Tensor,
     positions: torch.Tensor,
@@ -526,20 +485,6 @@ def _xpu_deepseek_fused_indexer_q_rope_mxfp4_impl(
         index_q_scale,
         index_weights_out,
     )
-
-
-def _xpu_deepseek_fused_indexer_q_rope_mxfp4_fake(
-    index_q: torch.Tensor,
-    positions: torch.Tensor,
-    index_q_cos_sin_cache: torch.Tensor,
-    index_weights: torch.Tensor,
-    index_weights_softmax_scale: float,
-    index_weights_head_scale: float,
-    index_q_packed: torch.Tensor,
-    index_q_scale: torch.Tensor,
-    index_weights_out: torch.Tensor,
-) -> None:
-    return
 
 
 def _xpu_mxfp8_quantize_impl(
@@ -631,6 +576,37 @@ def _xpu_mxfp4_quantize_fake(
     x_q = x_q.view(torch.float4_e2m1fn_x2)
     x_s = x_s.to(dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
     return x_q, x_s
+
+
+def _xpu_fused_input_norm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    visual_dtype: torch.dtype,
+) -> torch.Tensor:
+    patches, size = x.shape
+    out = torch.empty(
+        (patches, size),
+        dtype=visual_dtype,
+        device=x.device,
+    )
+    torch.ops._xpu_C.fused_input_norm(out, x.contiguous(), weight, bias)
+    return out
+
+
+def _xpu_fused_input_norm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    visual_dtype: torch.dtype,
+) -> torch.Tensor:
+    patches, size = x.shape
+    out = torch.empty(
+        (patches, size),
+        dtype=visual_dtype,
+        device=x.device,
+    )
+    return out
 
 
 @triton.jit
@@ -1262,14 +1238,12 @@ class xpu_ops:
                     op_name="xpu_gemma_rms_norm",
                     op_func=_gemma_rms_norm_impl,
                     mutates_args=["out"],
-                    fake_impl=_gemma_rms_norm_fake,
                 )
 
                 direct_register_custom_op(
                     op_name="xpu_fused_add_gemma_rms_norm",
                     op_func=_fused_add_gemma_rms_norm_impl,
                     mutates_args=["input", "residual"],
-                    fake_impl=_fused_add_gemma_rms_norm_fake,
                 )
 
             direct_register_custom_op(
@@ -1314,7 +1288,6 @@ class xpu_ops:
                 op_name="gdn_attention_core_xpu",
                 op_func=eager_break_during_capture(_gdn_attention_core_xpu_impl),
                 mutates_args=["core_attn_out", "z"],
-                fake_impl=_gdn_attention_core_xpu_fake,
             )
 
             direct_register_custom_op(
@@ -1327,7 +1300,6 @@ class xpu_ops:
                 op_name="xpu_deepseek_fused_indexer_q_rope_fp8",
                 op_func=_xpu_deepseek_fused_indexer_q_rope_fp8_impl,
                 mutates_args=["index_q_fp8", "index_weights_out"],
-                fake_impl=_xpu_deepseek_fused_indexer_q_rope_fp8_fake,
             )
 
             direct_register_custom_op(
@@ -1338,7 +1310,12 @@ class xpu_ops:
                     "index_q_scale",
                     "index_weights_out",
                 ],
-                fake_impl=_xpu_deepseek_fused_indexer_q_rope_mxfp4_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_fused_input_norm",
+                op_func=_xpu_fused_input_norm_impl,
+                fake_impl=_xpu_fused_input_norm_fake,
             )
 
             _OPS_REGISTERED = True

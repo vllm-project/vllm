@@ -210,6 +210,8 @@ pub struct Config {
     pub coordinator_mode: CoordinatorMode,
     /// Backend model identifier used for engine-core loading.
     pub model: String,
+    /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
+    pub revision: Option<String>,
     /// Which generation-config sampling defaults to inherit.
     pub generation_config: GenerationConfigMode,
     /// Model name(s) exposed to clients via the OpenAI API. When non-empty,

@@ -14,7 +14,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
-    RowvLLMParameter,
 )
 from vllm.scalar_type import scalar_types
 
@@ -254,16 +253,6 @@ class INCXPULinearBase(INCLinearScheme):
         layer.register_parameter("scales", scales)
         layer.register_parameter("qzeros", qzeros)
 
-        g_idx = RowvLLMParameter(
-            data=torch.tensor(
-                [i // self.group_size for i in range(input_size_per_partition)],
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("g_idx", g_idx)
-
     def _convert_awq_qweight_to_gptq(self, qw: torch.Tensor) -> torch.Tensor:
         """Convert AWQ qweight [K, N // pf] to GPTQ qweight [K // pf, N].
 
@@ -356,7 +345,7 @@ class INCXPULinearMethod(INCXPULinearBase):
             layer.scales,
             layer.qzeros,
             self.group_size,
-            None,
+            None,  # Retained by the external XPU op ABI.
         )
         return out.reshape(out_shape)
 

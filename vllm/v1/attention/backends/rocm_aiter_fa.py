@@ -404,6 +404,14 @@ class AiterFlashAttentionChunkPrefillMetadata:
 
 
 @dataclass
+class AiterKVSharingMetadata:
+    workspace: torch.Tensor
+    query_start_loc: torch.Tensor
+    token_to_batch: torch.Tensor
+    seq_starts: torch.Tensor
+
+
+@dataclass
 class AiterFlashAttentionMetadata:
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|
@@ -439,6 +447,7 @@ class AiterFlashAttentionMetadata:
     # since we might integrate per token quant for kv cache in the future.
     k_scale: dict[str, torch.Tensor] | None
     v_scale: dict[str, torch.Tensor] | None
+    kv_sharing_metadata: AiterKVSharingMetadata | None = None
 
 
 class AiterFlashAttentionMetadataBuilder(
@@ -471,6 +480,7 @@ class AiterFlashAttentionMetadataBuilder(
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
         sliding_window_configs: set[tuple[int, int] | None] = set()
+        kv_sharing_shape = None
         layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for name, layer in layers.items():
             if name not in layer_names:
@@ -480,6 +490,8 @@ class AiterFlashAttentionMetadataBuilder(
                 "with Aiter Flash Attention Impl."
             )
             sliding_window_configs.add(layer.impl.sliding_window)
+            if layer.kv_sharing_target_layer_name is not None:
+                kv_sharing_shape = (layer.impl.num_kv_heads, layer.impl.head_size)
 
         while len(sliding_window_configs) > 0:
             sliding_window_config = sliding_window_configs.pop()
@@ -495,6 +507,19 @@ class AiterFlashAttentionMetadataBuilder(
             device=device,
         )
         self.scale = torch.tensor([1.0], dtype=torch.float, device=self.device)
+        self.kv_sharing_workspace = (
+            torch.empty(
+                (
+                    2,
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    *kv_sharing_shape,
+                ),
+                dtype=self.model_config.dtype,
+                device=device,
+            )
+            if kv_sharing_shape is not None
+            else None
+        )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -553,6 +578,23 @@ class AiterFlashAttentionMetadataBuilder(
             )
 
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+
+        kv_sharing_metadata = None
+        if self.kv_sharing_workspace is not None and seq_lens is not None:
+            query_lens = query_lens_cpu[num_decodes:]
+            token_to_batch = torch.repeat_interleave(
+                torch.arange(len(query_lens), dtype=torch.int32, device="cpu"),
+                query_lens,
+            )
+            query_start_loc = common_attn_metadata.query_start_loc[num_decodes:]
+            kv_sharing_metadata = AiterKVSharingMetadata(
+                workspace=self.kv_sharing_workspace,
+                query_start_loc=query_start_loc - query_start_loc[0],
+                token_to_batch=async_tensor_h2d(token_to_batch, self.device),
+                seq_starts=async_tensor_h2d(
+                    seq_lens[num_decodes:] - query_lens, self.device
+                ),
+            )
 
         decode_metadata = None
         if num_decodes > 0:
@@ -719,6 +761,7 @@ class AiterFlashAttentionMetadataBuilder(
             use_cascade=use_cascade,
             k_scale=self.scale,
             v_scale=self.scale,
+            kv_sharing_metadata=kv_sharing_metadata,
         )
         return attn_metadata
 
@@ -1135,8 +1178,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
         self,
         layer: torch.nn.Module,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
         kv_cache: torch.Tensor,
         attn_metadata: AiterFlashAttentionMetadata,
         output: torch.Tensor,
@@ -1199,10 +1242,36 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_extend_tokens = attn_metadata.num_extend_tokens
+        if self.kv_sharing_target_layer_name is not None and (
+            num_prefills > 0 or num_extends > 0
+        ):
+            # Shared layers project only Q. Fetch the new K/V tokens from the
+            # target cache for the direct prefill and extend suffix kernels.
+            shared = attn_metadata.kv_sharing_metadata
+            assert shared is not None
+            key, value = shared.workspace[:, :num_actual_tokens].unbind(0)
+            cp_mha_gather_cache(
+                key_cache=key_cache,
+                value_cache=value_cache,
+                key=key[num_decode_tokens:],
+                value=value[num_decode_tokens:],
+                block_tables=attn_metadata.block_table[num_decodes:],
+                k_scales=layer._k_scale,
+                v_scales=layer._v_scale,
+                cu_seqlens_kv=shared.query_start_loc,
+                token_to_batch=shared.token_to_batch,
+                seq_starts=shared.seq_starts,
+                dequant=is_quantized_kv_cache(self.kv_cache_dtype),
+                kv_cache_layout="SHUFFLE"
+                if rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+                else "NHD",
+                total_tokens=num_actual_tokens - num_decode_tokens,
+            )
         if not attn_metadata.use_cascade:
             # calculate for pure prefills
             if num_prefills > 0:
                 assert attn_metadata.prefill_metadata is not None
+                assert key is not None and value is not None
 
                 prefill_query = query[num_decode_tokens + num_extend_tokens :]
                 prefill_key = key[num_decode_tokens + num_extend_tokens :]
@@ -1229,6 +1298,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             # calculate for extends
             if num_extends > 0:
                 assert attn_metadata.extend_metadata is not None
+                assert key is not None and value is not None
                 extend_tokens_slice = slice(
                     num_decode_tokens, num_decode_tokens + num_extend_tokens
                 )

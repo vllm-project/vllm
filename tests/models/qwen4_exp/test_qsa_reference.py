@@ -45,10 +45,10 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
     indexer = SimpleNamespace(
         skip_topk=True,
         _metadata=lambda: (raw_metadata, compressed_metadata),
-        index_qk_proj=lambda hidden: (torch.zeros(2, 2), None),
         index_n_heads=1,
         index_kv_heads=1,
         index_head_dim=1,
+        indexer_dtype=torch.bfloat16,
         raw_key_cache=SimpleNamespace(
             kv_cache=torch.empty(0),
             rope_position_cache=None,
@@ -80,7 +80,7 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
 
     actual = indexer_qsa.QSAIndexer.forward(
         indexer,
-        torch.zeros(2, 4),
+        torch.zeros(2, 2),
         torch.tensor([7, 8]),
         rows,
     )
@@ -447,6 +447,72 @@ def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
 
 
 @requires_qsa_kernels
+@pytest.mark.usefixtures("default_vllm_config")
+def test_qsa_unfused_cache_update_ignores_padded_qk() -> None:
+    """Padded projected Q/K rows must not affect either side cache."""
+    from vllm.model_executor.layers.rotary_embedding import get_rope
+
+    device = torch.device("cuda")
+    # Five tokens complete one compressed group and retain four keys in the ring.
+    raw_metadata = SimpleNamespace(
+        num_actual_tokens=5,
+        slot_mapping=torch.tensor([-1, 1, 2, 3, 0], device=device),
+        block_table=torch.zeros((1, 1), dtype=torch.int32, device=device),
+        token_to_req=torch.zeros(5, dtype=torch.int32, device=device),
+        query_start_loc=torch.tensor([0, 5], dtype=torch.int32, device=device),
+        logical_positions=torch.arange(5, device=device),
+    )
+    compressed_metadata = SimpleNamespace(
+        slot_mapping=torch.tensor([-1, -1, -1, 0, -1], device=device),
+    )
+    with torch.device(device):
+        rope = get_rope(
+            head_size=128,
+            max_position=32,
+            rope_parameters={"rope_type": "default", "partial_rotary_factor": 0.5},
+            dtype=torch.bfloat16,
+        )
+    raw_cache = torch.zeros((1, 4, 1, 64), dtype=torch.bfloat16, device=device)
+    compressed_cache = torch.zeros((1, 2, 1, 64), dtype=torch.bfloat16, device=device)
+    norm = SimpleNamespace(
+        weight=torch.zeros(64, dtype=torch.bfloat16, device=device),
+        variance_epsilon=1e-6,
+    )
+    indexer = SimpleNamespace(
+        _metadata=lambda: (raw_metadata, compressed_metadata),
+        skip_topk=True,
+        index_kv_heads=1,
+        use_fused_pre_indexer=False,
+        index_n_heads=1,
+        index_head_dim=64,
+        indexer_dtype=torch.bfloat16,
+        q_layernorm=norm,
+        k_layernorm=norm,
+        rotary_emb=rope,
+        compress_ratio=4,
+        raw_key_cache=SimpleNamespace(
+            kv_cache=raw_cache, key_cache=raw_cache, rope_position_cache=None
+        ),
+        compressed_key_cache=SimpleNamespace(kv_cache=compressed_cache),
+    )
+    keys = torch.arange(1, 6, dtype=torch.bfloat16, device=device)[:, None].expand(
+        5, 64
+    )
+    padded_keys = torch.full((8, 64), torch.nan, dtype=torch.bfloat16, device=device)
+    padded_keys[:5].copy_(keys)
+    indexer_qsa.QSAIndexer.forward(
+        indexer,
+        torch.cat((torch.ones_like(padded_keys), padded_keys), dim=-1),
+        torch.zeros(8, dtype=torch.long, device=device),
+        torch.full((5, 5), -1, dtype=torch.int32, device=device),
+    )
+    torch.testing.assert_close(raw_cache[0, :, 0], keys[[4, 1, 2, 3]])
+    expected_compressed = torch.zeros_like(compressed_cache)
+    expected_compressed[0, 0] = 1
+    torch.testing.assert_close(compressed_cache, expected_compressed)
+
+
+@requires_qsa_kernels
 @pytest.mark.parametrize("compress_ratio", [1, 4])
 @pytest.mark.parametrize("num_reqs", [2, 3, 4, 7, 8, 9])
 def test_qsa_triton_metadata_matches_pytorch(
@@ -602,13 +668,16 @@ def test_qsa_fused_metadata_matches_pytorch_for_large_padded_prefill() -> None:
         (4, 33),
     ],
 )
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
 def test_qsa_decode_selection_correctness(
-    decode_query_len: int, num_requests: int
+    decode_query_len: int, num_requests: int, dtype: torch.dtype
 ) -> None:
     torch.manual_seed(1)
     heads, head_dim = 4, 128
     rows = num_requests * decode_query_len
-    q = torch.randn(rows, heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    q = torch.randn(rows, heads, head_dim, device="cuda", dtype=torch.bfloat16).to(
+        dtype
+    )
     page_size, pages_per_request, max_sequence_length = (
         (16, 40, 2560) if num_requests > 32 else (4, 20, 320)
     )
@@ -620,7 +689,7 @@ def test_qsa_decode_selection_correctness(
         head_dim,
         device="cuda",
         dtype=torch.bfloat16,
-    )
+    ).to(dtype)
     page_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(
         num_requests, pages_per_request
     )
@@ -672,14 +741,39 @@ def test_qsa_decode_selection_correctness(
         compress_ratio,
     )
 
+    if dtype == torch.float8_e4m3fn:
+        # fp8 logits tie at the top-k boundary more often than bf16, so index
+        # identity is not stable; compare the selected value multisets.
+        # SM90 wgmma accumulates fp8 in reduced precision (~3e-4 abs
+        # observed); SM100 tcgen05 is exact fp32.
+        rtol = atol = 1e-3 if current_platform.is_device_capability(90) else None
+        logits = _qsa_mqa_paged_reference(
+            q, cache, page_table, token_to_req, visible_blocks
+        )
+        for row in range(rows):
+            selected = actual[row][actual[row] >= 0]
+            wanted = expected[row][expected[row] >= 0]
+            assert selected.numel() == wanted.numel()
+            torch.testing.assert_close(
+                logits[row, selected.long()].sort().values,
+                logits[row, wanted.long()].sort().values,
+                rtol=rtol,
+                atol=atol,
+            )
+        return
+
     torch.testing.assert_close(actual.sort().values, expected.sort().values)
 
 
 @requires_qsa_kernels
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
 @pytest.mark.parametrize("seq_len_slack", [0, 1792])
 @pytest.mark.parametrize("force_chunk", [False, True])
 def test_qsa_prefill_selection_correctness(
-    monkeypatch: pytest.MonkeyPatch, seq_len_slack: int, force_chunk: bool
+    monkeypatch: pytest.MonkeyPatch,
+    seq_len_slack: int,
+    force_chunk: bool,
+    dtype: torch.dtype,
 ) -> None:
     # page_size=24 (does not divide the 64-aligned clipped width) and an
     # oversized page table, so the clipped logits width comes from
@@ -691,8 +785,12 @@ def test_qsa_prefill_selection_correctness(
     torch.manual_seed(2)
     query_lens = [3, 33]
     rows, heads, head_dim = sum(query_lens), 4, 128
-    q = torch.randn(rows, heads, head_dim, device="cuda", dtype=torch.bfloat16)
-    cache = torch.randn(128, 24, 1, head_dim, device="cuda", dtype=torch.bfloat16)
+    q = torch.randn(rows, heads, head_dim, device="cuda", dtype=torch.bfloat16).to(
+        dtype
+    )
+    cache = torch.randn(128, 24, 1, head_dim, device="cuda", dtype=torch.bfloat16).to(
+        dtype
+    )
     page_table = torch.randperm(128, device="cuda", dtype=torch.int32).reshape(2, 64)
     token_to_req = torch.repeat_interleave(
         torch.arange(2, device="cuda", dtype=torch.int32),
@@ -739,6 +837,27 @@ def test_qsa_prefill_selection_correctness(
         token_topk,
         compress_ratio,
     )
+
+    if dtype == torch.float8_e4m3fn:
+        # fp8 logits tie at the top-k boundary more often than bf16, so index
+        # identity is not stable; compare the selected value multisets.
+        # SM90 wgmma accumulates fp8 in reduced precision (~3e-4 abs
+        # observed); SM100 tcgen05 is exact fp32.
+        rtol = atol = 1e-3 if current_platform.is_device_capability(90) else None
+        logits = _qsa_mqa_paged_reference(
+            q, cache, page_table, token_to_req, visible_blocks
+        )
+        for row in range(rows):
+            selected = actual[row][actual[row] >= 0]
+            wanted = expected[row][expected[row] >= 0]
+            assert selected.numel() == wanted.numel()
+            torch.testing.assert_close(
+                logits[row, selected.long()].sort().values,
+                logits[row, wanted.long()].sort().values,
+                rtol=rtol,
+                atol=atol,
+            )
+        return
 
     torch.testing.assert_close(actual.sort().values, expected.sort().values)
 

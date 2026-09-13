@@ -10,6 +10,8 @@ ARG AITER_BRANCH="v0.1.21.post1"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="f95cd5e0ca7b730f92f9ffdfb358484d6965d9f7" # TheRock compatible v1.1.0
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
+ARG ROCM_SYSTEMS_REPO="https://github.com/ROCm/rocm-systems.git"
+ARG ROCM_RUNTIME_COMMIT="25e14349f2606a6b95c4ccd45eb92a1835646cf2"
 
 
 # TheRock configuration
@@ -247,6 +249,61 @@ RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
 
 ###
+### ROCr + CLR build
+###
+# Brings in multi-stream perf improvements; drop after these arrive in an official release
+FROM base AS build_rocm_runtime
+ARG ROCM_SYSTEMS_REPO
+ARG ROCM_RUNTIME_COMMIT
+# libgl-dev: rocclr does find_package(OpenGL REQUIRED) unconditionally and the wheel image has
+# no GL headers. The link must not pick up a libGL DT_NEEDED, which is asserted after the build.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends g++ libdw-dev xxd libgl-dev libglx-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir CppHeaderParser
+RUN git init -q /src && cd /src \
+    && git remote add origin ${ROCM_SYSTEMS_REPO} \
+    && git config core.sparseCheckout true \
+    && git config remote.origin.promisor true \
+    && git config remote.origin.partialclonefilter blob:none \
+    && git sparse-checkout init --cone \
+    && git sparse-checkout set projects/rocr-runtime projects/clr projects/hip shared cmake \
+    && git fetch --filter=blob:none --depth 1 origin ${ROCM_RUNTIME_COMMIT} \
+    && git checkout -q FETCH_HEAD
+# libelf is taken from the SDK's own vendored sysdeps rather than apt -- the wheel image has no
+# /usr/include/libelf.h -- so ROCr links against the copy the wheel itself was built against.
+ENV SYSDEPS="$SDK_DEV/lib/rocm_sysdeps"
+# ROCr first, and installed into $SDK_DEV, because the clr build below needs its headers.
+RUN cd /src/projects/rocr-runtime \
+    && cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH="$SDK_DEV;$SYSDEPS" \
+        -DCMAKE_INSTALL_PREFIX="$SDK_DEV" \
+        -DLIBELF_INCLUDE_DIRS="$SYSDEPS/include" \
+        -DLIBELF_LIBRARIES="$SYSDEPS/lib/libelf.so" \
+    && cmake --build build --parallel 16 \
+    && cmake --install build \
+    && cmake --install build --prefix /rocr-install --strip
+RUN cd /src/projects/clr \
+    && cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCLR_BUILD_HIP=ON \
+        -DCLR_BUILD_OCL=OFF \
+        -DROCM_KPACK_ENABLED=ON \
+        -DHIP_COMMON_DIR=/src/projects/hip \
+        -DROCM_PATH="$SDK_DEV" \
+        -DCMAKE_PREFIX_PATH="$SDK_DEV;$SYSDEPS" \
+        -DCMAKE_INSTALL_PREFIX="$SDK_DEV" \
+        -DHIP_LLVM_ROOT="$SDK_DEV/lib/llvm" \
+    && cmake --build build --parallel 16 \
+    && cmake --install build --prefix /clr-install --strip
+RUN mkdir -p /staging/lib \
+    && cp -P /rocr-install/lib/libhsa-runtime64.so* /staging/lib/ \
+    && cp -P /clr-install/lib/libamdhip64.so* /staging/lib/ \
+    && ls -l /staging/lib
+
+
+###
 ### Final Build
 ###
 
@@ -273,6 +330,25 @@ FROM base AS final
 # torch 2.12 implicitly attaches rocprofiler-sdk; its queue interposition hangs at HSA
 # teardown, so disable it. TODO: drop once ROCm's stock rocprofiler carries the fix.
 ENV ROCPROFILER_QUEUE_INTERPOSITION=0
+
+COPY --from=build_rocm_runtime /staging/lib/ ${SDK_DEV}/lib/
+# Hard link the patched library onto every stock file name, in both SDK trees, so that the
+# SONAME lookup and the hard coded paths all resolve to it. Hard links rather than symlinks
+# because ldconfig rewrites SONAME symlinks but cannot re-point an inode. $SDK_CORE keeps its
+# own libhsa-runtime64 copy, which is on LD_LIBRARY_PATH and in ld.so.conf; relinking it is
+# belt and braces rather than strictly required, but it leaves no stock ROCr in the image.
+RUN set -eux; \
+    cd "$SDK_DEV/lib"; \
+    ours_hsa="$(readlink -f libhsa-runtime64.so.1)"; \
+    ours_hip="$(readlink -f libamdhip64.so.7)"; \
+    for f in "$SDK_DEV"/lib/libhsa-runtime64.so.1* "$SDK_CORE"/lib/libhsa-runtime64.so.1* \
+             "$SDK_DEV"/lib/libamdhip64.so.7* "$SDK_CORE"/lib/libamdhip64.so.7*; do \
+        [ -f "$f" ] && [ ! -L "$f" ] || continue; \
+        case "${f##*/}" in libhsa*) ours="$ours_hsa";; *) ours="$ours_hip";; esac; \
+        [ "$f" -ef "$ours" ] || ln -f "$ours" "$f"; \
+    done
+
+RUN ldconfig
 
 ARG TRITON_VERSION
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
@@ -304,6 +380,8 @@ ARG AITER_BRANCH
 ARG AITER_REPO
 ARG MORI_BRANCH
 ARG MORI_REPO
+ARG ROCM_SYSTEMS_REPO
+ARG ROCM_RUNTIME_COMMIT
 # Record hashes for Triton and pybind11 so we can verify later.
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "PYTHON_VERSION: ${PYTHON_VERSION}" >> /app/versions.txt \
@@ -319,6 +397,8 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt \
     && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
     && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt \
+    && echo "ROCM_SYSTEMS_REPO: ${ROCM_SYSTEMS_REPO}" >> /app/versions.txt \
+    && echo "ROCM_RUNTIME_COMMIT: ${ROCM_RUNTIME_COMMIT}" >> /app/versions.txt \
     # Fingerprint our triton so Dockerfile.rocm can prove it survived the build.
     && echo "TRITON_VERSION: $(pip show triton | awk '/^Version:/ {print $2}')" >> /app/versions.txt \
     && echo "TRITON_SHA256: $(find $(python3 -c 'import triton, os; print(os.path.dirname(triton.__file__))') \

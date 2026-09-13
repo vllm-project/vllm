@@ -246,16 +246,8 @@ class Gemma4MTPAttention(nn.Module):
 
         q, _ = self.rotary_emb(positions, q, None)
 
-        # Attention reads K/V from the target's cache via KV sharing;
-        # these dummy tensors are never consumed but required by the API.
-        num_tokens = q.shape[0]
-        kv_dummy = torch.empty(
-            num_tokens,
-            self.num_kv_heads * self.head_dim,
-            dtype=q.dtype,
-            device=q.device,
-        )
-        attn_output = self.attn(q, kv_dummy, kv_dummy)
+        # Attention reads K/V from the target's cache via KV sharing.
+        attn_output = self.attn(q, None, None)
         output, _ = self.o_proj(attn_output)
         return output
 

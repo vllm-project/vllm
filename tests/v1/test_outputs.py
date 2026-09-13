@@ -77,6 +77,11 @@ def test_sampling_mask_lists_to_nested_list():
 
 
 @pytest.mark.parametrize("max_num_kept", [512, 20_001])
+@pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason="CI failed on XPU with Triton, Skipped until sycl kernel merged. "
+    "See https://github.com/vllm-project/vllm/pull/55851",
+)
 def test_sampling_mask_tensors_match_finite_support(max_num_kept):
     """Whatever its size (empty, one, around the compact width, beyond the
     cap, the whole vocab), a sampled row's mask is exactly the ascending set

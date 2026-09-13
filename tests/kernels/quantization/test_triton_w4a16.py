@@ -273,14 +273,12 @@ def test_triton_w4a16_process_weights_after_loading_repacks_layout():
         act_type=torch.float16,
         group_size=G,
         zero_points=True,
-        has_g_idx=False,
     )
     kernel = TritonW4A16LinearKernel(
         config,
         w_q_param_name="weight_packed",
         w_s_param_name="weight_scale",
         w_zp_param_name="weight_zero_point",
-        w_gidx_param_name=None,
     )
 
     # Build dummy layer with vLLM parameter wrappers.
@@ -384,14 +382,12 @@ def test_triton_w4a16_process_weights_after_loading_keeps_gptq_qzeros_layout():
         act_type=torch.float16,
         group_size=G,
         zero_points=True,
-        has_g_idx=False,
     )
     kernel = TritonW4A16LinearKernel(
         config,
         w_q_param_name="qweight",
         w_s_param_name="scales",
         w_zp_param_name="qzeros",
-        w_gidx_param_name=None,
     )
 
     weight_loader = lambda *args, **kwargs: None
@@ -461,14 +457,12 @@ def test_triton_w4a16_symmetric_apply_ignores_qzeros(monkeypatch):
         act_type=torch.float16,
         group_size=G,
         zero_points=False,
-        has_g_idx=False,
     )
     kernel = TritonW4A16LinearKernel(
         config,
         w_q_param_name="qweight",
         w_s_param_name="scales",
         w_zp_param_name="qzeros",
-        w_gidx_param_name=None,
     )
 
     class DummyLayer(torch.nn.Module):

@@ -121,18 +121,6 @@ clear_ci_orchestration_env() {
     VLLM_ALLOW_DEPRECATED_BEAM_SEARCH
 }
 
-cleanup_network() {
-  local max_nodes=${NUM_NODES:-2}
-  for node in $(seq 0 $((max_nodes - 1))); do
-    if docker ps -a -q -f name="node${node}" | grep -q .; then
-      docker stop "node${node}" || true
-    fi
-  done
-  if docker network ls | grep -q docker-net; then
-    docker network rm docker-net || true
-  fi
-}
-
 amd_ci_teardown_log() {
   local event=$1
   shift
@@ -1704,13 +1692,11 @@ if is_multi_node "$commands"; then
 
     /bin/bash -c "${composite_command}"
     exit_code=$?
-    cleanup_network
     handle_pytest_exit "$exit_code"
   else
     echo "Multi-node job detected but failed to parse bracket command syntax."
     echo "Expected format: prefix ; [node0_cmd1, node0_cmd2] && [node1_cmd1, node1_cmd2]"
     echo "Got: $commands"
-    cleanup_network
     exit 111
   fi
 else

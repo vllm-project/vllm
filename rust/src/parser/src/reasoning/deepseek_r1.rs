@@ -3,23 +3,23 @@
 
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 
-use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
+use super::{
+    DelimitedReasoningParser, DelimitedReasoningParserBuilder, ReasoningDelta, ReasoningParser,
+    Result,
+};
 
 /// Reasoning parser for DeepSeek R1 style outputs.
-///
-/// DeepSeek R1 may begin generating directly inside a reasoning span and only
-/// emit the closing `</think>` delimiter, so the no-boundary fallback defaults
-/// to `in_reasoning = true`.
 pub struct DeepSeekR1ReasoningParser {
     inner: DelimitedReasoningParser,
 }
 
 impl DeepSeekR1ReasoningParser {
-    /// Create a DeepSeek R1 parser backed by the shared delimited state
-    /// machine.
+    /// Create a DeepSeek R1 parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", true)?,
+            inner: DelimitedReasoningParserBuilder::new(tokenizer, "<think>", "</think>")
+                .with_after_start("\n")
+                .build()?,
         })
     }
 }
@@ -33,8 +33,7 @@ impl ReasoningParser for DeepSeekR1ReasoningParser {
     }
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
-        self.inner.initialize(prompt_token_ids);
-        Ok(())
+        self.inner.initialize(prompt_token_ids)
     }
 
     fn push(&mut self, delta: DecodedText) -> Result<ReasoningDelta> {
@@ -43,5 +42,23 @@ impl ReasoningParser for DeepSeekR1ReasoningParser {
 
     fn finish(&mut self) -> Result<ReasoningDelta> {
         Ok(self.inner.finish())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::DeepSeekR1ReasoningParser;
+    use crate::reasoning::tests::{content_str, fake_tokenizer, push_str};
+
+    #[test]
+    fn deepseek_r1_without_prompt_markers_expects_start_token() {
+        let tokenizer = Arc::new(fake_tokenizer());
+        let mut parser = DeepSeekR1ReasoningParser::new(tokenizer).unwrap();
+
+        let delta = push_str(&mut parser, "reason</think>answer");
+        assert_eq!(delta.reasoning, None);
+        assert_eq!(content_str(&delta), Some("reason</think>answer"));
     }
 }

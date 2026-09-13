@@ -532,6 +532,50 @@ class TestMergeKwargsGpuBackendPolicy:
     def test_unknown_backend_not_treated_as_gpu(self):
         assert not VIDEO_LOADER_REGISTRY.backend_requires_gpu("totally_unknown")
 
+    def test_strips_request_level_device(self):
+        """The decode device is a startup-only knob: a request must not move
+        decoding onto the GPU when the startup config did not opt in, nor off
+        it when it did."""
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"backend": "torchcodec"},
+            runtime_kwargs={"device": "cuda"},
+        )
+        assert "device" not in result
+
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"backend": "torchcodec", "device": "cuda"},
+            runtime_kwargs={"device": "cpu", "num_frames": 8},
+        )
+        assert result["device"] == "cuda"
+        assert result["num_frames"] == 8
+
+
+@pytest.mark.parametrize(
+    "default_kwargs",
+    [
+        {"backend": "torchcodec", "device": "cuda", "seek_mode": "approximate"},
+        {"backend": "pynvvideocodec", "hw_decoders": 2},
+    ],
+)
+def test_switching_backend_drops_stale_codec_options(default_kwargs):
+    """Codec-specific options from the static config must not leak into a
+    different codec backend selected per-request, where they would fail the
+    new backend's option validation."""
+    result = VideoMediaIO.merge_kwargs(
+        default_kwargs={**default_kwargs, "num_frames": 8},
+        runtime_kwargs={"backend": "opencv"},
+    )
+    assert result == {"backend": "opencv", "num_frames": 8}
+
+
+def test_same_backend_keeps_codec_options():
+    result = VideoMediaIO.merge_kwargs(
+        default_kwargs={"backend": "torchcodec", "device": "cuda"},
+        runtime_kwargs={"backend": "torchcodec", "num_frames": 8},
+    )
+    assert result["device"] == "cuda"
+    assert result["num_frames"] == 8
+
 
 @pytest.mark.parametrize("layout", ["nhwc", "nchw"])
 def test_pynvvc_frames_normalized_to_nhwc(layout: str):

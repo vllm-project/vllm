@@ -19,8 +19,8 @@ use crate::output::{
 };
 use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
 use crate::renderer::{
-    DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, HarmonyChatRenderer,
-    InklingChatRenderer, KimiK3ChatRenderer,
+    DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer, DynChatRenderer,
+    HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer,
 };
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
@@ -72,6 +72,7 @@ impl HfChatBackend {
             )?),
             RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new()),
             RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new()),
+            RendererSelection::DeepSeekV41 => Arc::new(DeepSeekV41ChatRenderer::new()),
             RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new()?),
             RendererSelection::Inkling => Arc::new(InklingChatRenderer::new(tokenizer.clone())?),
             RendererSelection::KimiK3 => Arc::new(KimiK3ChatRenderer::new(tokenizer.clone())),
@@ -128,7 +129,7 @@ pub(super) async fn load_model_backends(
     model_id: &str,
     options: LoadModelBackendsOptions,
 ) -> Result<LoadedModelBackends> {
-    let files = ResolvedModelFiles::new(model_id).await?;
+    let files = ResolvedModelFiles::new(model_id, options.revision.as_deref()).await?;
     let text_backend = HfTextBackend::from_resolved_model_files(
         files.clone(),
         model_id.to_string(),
@@ -230,6 +231,7 @@ mod tests {
             resolved_files(config_json, tokenizer_config_json),
             "test-model".to_string(),
             LoadModelBackendsOptions {
+                revision: None,
                 generation_config: Default::default(),
                 renderer,
                 language_model_only: false,

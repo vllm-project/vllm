@@ -3,9 +3,27 @@
 import numpy as np
 import torch
 
+from vllm.config import LoadConfig, replace
+from vllm.distributed import get_pp_group
+from vllm.logger import init_logger
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.input_batch import InputBatch
+
+logger = init_logger(__name__)
+
+
+def get_pp_safe_draft_load_config(load_config: LoadConfig) -> LoadConfig:
+    """Avoid collectives that include PP ranks without a draft model."""
+    if get_pp_group().world_size > 1 and load_config.load_format == "fastsafetensors":
+        logger.warning_once(
+            "fastsafetensors cannot load a draft model instantiated on only "
+            "one pipeline stage; falling back to the standard safetensors "
+            "loader for the draft model. The target model still uses "
+            "fastsafetensors."
+        )
+        return replace(load_config, load_format="auto")
+    return load_config
 
 
 class DraftTokensHandler:

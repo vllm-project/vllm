@@ -23,6 +23,9 @@ else:
 class QuantizeMethodBase(ABC):
     """Base class for different quantized methods."""
 
+    requires_device_loading: bool = True
+    """Whether post-load processing requires parameters on the target device."""
+
     uses_meta_device: bool = False
     """
     Whether this method creates weights on meta device for online quantization.
@@ -237,6 +240,13 @@ class QuantizationConfig(ABC):
             re.compile(r"(?<!\.attn)\.([qkv])_zero_point$"): r".attn.\1_zero_point",
         }
         return WeightsMapper(orig_to_new_regex=orig_to_new_regex)
+
+    @staticmethod
+    def get_checkpoint_weight_mapper() -> "WeightsMapper":
+        """Discard activation-order metadata unused by supported kernels."""
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        return WeightsMapper(orig_to_new_suffix={".g_idx": None})
 
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"

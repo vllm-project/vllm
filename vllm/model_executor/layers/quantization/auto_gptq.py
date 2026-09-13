@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override,
     get_linear_quant_method,
+    normalize_and_validate_gptq_desc_act,
     override_config,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -59,7 +60,6 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedColumnParameter,
     PackedvLLMParameter,
-    RowvLLMParameter,
 )
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
@@ -115,10 +115,7 @@ class AutoGPTQConfig(QuantizationConfig):
         modules_in_block_to_quantize: list[str] | None = None,
     ) -> None:
         super().__init__()
-        if desc_act and group_size == -1:
-            # In this case, act_order == True is the same as act_order == False
-            # (since we have only one group per output channel)
-            desc_act = False
+        desc_act = normalize_and_validate_gptq_desc_act(desc_act, group_size, dynamic)
 
         # GPTQModel use `dynamic` config property to allow per module
         # quantization config so each module can be individually optimized.
@@ -150,7 +147,7 @@ class AutoGPTQConfig(QuantizationConfig):
 
         self.pack_factor = 32 // weight_bits  # packed into int32
         self.group_size = group_size
-        self.desc_act = desc_act
+        self.desc_act: bool = desc_act
         self.lm_head_quantized = lm_head_quantized
         self.full_config = full_config
 
@@ -244,7 +241,7 @@ class AutoGPTQConfig(QuantizationConfig):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
             if not check_moe_marlin_supports_layer(
-                layer, self.group_size, allow_tile_padding=not self.desc_act
+                layer, self.group_size, allow_tile_padding=True
             ):
                 logger.warning_once(
                     f"Layer '{prefix}' is not supported by GPTQMoeMarlin. "
@@ -348,7 +345,6 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             act_type=params_dtype if input_dtype is None else input_dtype,
             group_size=self.quant_config.group_size,
             zero_points=False,
-            has_g_idx=self.quant_config.desc_act,
         )
 
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
@@ -365,7 +361,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
 
         # Determine sharding
         if marlin_repeat_scales_on_all_ranks(
-            self.quant_config.desc_act, self.quant_config.group_size, is_row_parallel
+            self.quant_config.group_size, is_row_parallel
         ):
             # By setting scale_dim == None, weight_loader will
             # repeat the scales on each GPU in TP>1 case.
@@ -388,16 +384,6 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             output_dim=1,
             packed_dim=0,
             packed_factor=self.quant_config.pack_factor,
-            weight_loader=weight_loader,
-        )
-
-        # Activation order
-        g_idx = RowvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition,
-                dtype=torch.int32,
-            ),
-            input_dim=0,
             weight_loader=weight_loader,
         )
 
@@ -440,7 +426,6 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             )
 
         layer.register_parameter("qweight", qweight)
-        layer.register_parameter("g_idx", g_idx)
         layer.register_parameter("scales", scales)
         layer.register_parameter("qzeros", qzeros)
 
@@ -449,7 +434,6 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             w_q_param_name="qweight",
             w_s_param_name="scales",
             w_zp_param_name="qzeros",
-            w_gidx_param_name="g_idx",
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -492,7 +476,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             quant_config=self.quant_config,
             may_have_zp=not self.quant_config.is_sym,
             may_have_bias=True,
-            allow_tile_padding=not self.quant_config.desc_act,
+            allow_tile_padding=True,
         )
 
     def create_weights(
@@ -512,19 +496,9 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
                 "W8A8-INT8 is not supported by marlin kernel."
             )
 
-        intermediate_size_full = extra_weight_attrs.pop("intermediate_size_full")
-
-        self.is_k_full = (not self.quant_config.desc_act) or (
-            intermediate_size_per_partition == intermediate_size_full
-        )
-
         if self.quant_config.group_size != -1:
             scales_size13 = hidden_size // self.quant_config.group_size
-            w2_scales_size = (
-                intermediate_size_full
-                if self.quant_config.desc_act
-                else intermediate_size_per_partition
-            )
+            w2_scales_size = intermediate_size_per_partition
             scales_size2 = w2_scales_size // self.quant_config.group_size
             strategy = FusedMoeWeightScaleSupported.GROUP.value
         else:
@@ -579,8 +553,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_scales", w2_scales)
         set_weight_attrs(w2_scales, extra_weight_attrs)
-        # don't shard the w2 scales when running act order
-        set_weight_attrs(w2_scales, {"load_full_w2": self.quant_config.desc_act})
         # up_proj zero points
         w13_qzeros = torch.nn.Parameter(
             torch.empty(
@@ -607,48 +579,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
-        # don't shard the w2 scales when running act order
-        set_weight_attrs(w2_qzeros, {"load_full_w2": self.quant_config.desc_act})
-        w13_g_idx = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_g_idx", w13_g_idx)
-        set_weight_attrs(w13_g_idx, extra_weight_attrs)
-        w2_g_idx = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                intermediate_size_per_partition,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_g_idx", w2_g_idx)
-        set_weight_attrs(w2_g_idx, extra_weight_attrs)
-        w13_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_g_idx_sort_indices", w13_g_idx_sort_indices)
-        set_weight_attrs(w13_g_idx_sort_indices, extra_weight_attrs)
-        w2_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                intermediate_size_per_partition,
-                dtype=torch.int32,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_g_idx_sort_indices", w2_g_idx_sort_indices)
-        set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
 
         # Some GPTQ checkpoints contain expert biases even when the model
         # architecture does not declare them. Zero initialization keeps
@@ -712,8 +642,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2=layer.w2_qweight,
             w13_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
-            w13_g_idx=layer.w13_g_idx,
-            w2_g_idx=layer.w2_g_idx,
             w13_bias=w13_bias,
             w2_bias=w2_bias,
             w13_qzeros=getattr(layer, "w13_qzeros", None),
@@ -730,10 +658,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2,
             w13_scale,
             w2_scale,
-            w13_g_idx,
-            w2_g_idx,
-            w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices,
             w13_qzeros,
             w2_qzeros,
             w13_input_global_scale,
@@ -746,10 +670,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w2_qweight", w2)
         replace_parameter(layer, "w13_scales", w13_scale)
         replace_parameter(layer, "w2_scales", w2_scale)
-        replace_parameter(layer, "w13_g_idx", w13_g_idx)
-        replace_parameter(layer, "w2_g_idx", w2_g_idx)
-        replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
-        replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
         replace_or_register("w13_input_global_scale", w13_input_global_scale)
         replace_or_register("w2_input_global_scale", w2_input_global_scale)
         replace_or_register("w13_bias", w13_bias)
@@ -772,11 +692,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             backend=self.wna16_moe_backend,
-            is_k_full=self.is_k_full,
-            w13_g_idx=getattr(layer, "w13_g_idx", None),
-            w2_g_idx=getattr(layer, "w2_g_idx", None),
-            w13_g_idx_sort_indices=getattr(layer, "w13_g_idx_sort_indices", None),
-            w2_g_idx_sort_indices=getattr(layer, "w2_g_idx_sort_indices", None),
             routing_tables=layer._expert_routing_tables(),
         )
 

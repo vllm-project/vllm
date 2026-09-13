@@ -193,6 +193,14 @@ def test_load_audio_backend_matches_default(backend, dummy_audio_bytes):
     np.testing.assert_allclose(ref_audio[:n], audio[:n], atol=1e-4)
 
 
+def test_load_audio_default_preserves_vorbis_length(dummy_audio_bytes):
+    """Default decoding must not append Vorbis padding to the speech waveform."""
+    expected, expected_sr = load_audio_soundfile(BytesIO(dummy_audio_bytes), sr=None)
+    audio, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None)
+    assert sr == expected_sr
+    assert audio.shape == expected.shape
+
+
 def test_load_audio_unknown_backend_rejected(dummy_audio_bytes):
     """An unknown backend must fail loudly instead of silently degrading."""
     with pytest.raises(ValueError, match="Unknown audio backend"):

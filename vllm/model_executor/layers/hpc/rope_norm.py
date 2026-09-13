@@ -78,20 +78,10 @@ def hpc_rope_norm_forward(
     rope_norm._forward_impl(qkv, kv_cache, attn_metadata, attn_layer, output)
 
 
-def hpc_rope_norm_forward_fake(
-    qkv: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    """Fake impl for torch.compile trace; output is a mutated arg."""
-    return
-
-
 direct_register_custom_op(
     op_name="hpc_rope_norm_forward",
     op_func=hpc_rope_norm_forward,
     mutates_args=["output"],
-    fake_impl=hpc_rope_norm_forward_fake,
 )
 
 
