@@ -632,12 +632,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         draft_attn_layer_names = None
         if isinstance(self.speculator, DraftModelSpeculator):
             draft_attn_layer_names = self.speculator.draft_attn_layer_names
-        self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
-            self.kv_cache_config,
-            self.vllm_config,
-            self.device,
-            draft_layer_names=draft_attn_layer_names,
-        )
+        # Metadata builders select attention kernels that need JIT warmup.
+        with self.jit_warmup_registry.activate():
+            (
+                self.attn_groups,
+                attn_cg_support,
+                self.kernel_block_sizes,
+            ) = init_attn_backend(
+                self.kv_cache_config,
+                self.vllm_config,
+                self.device,
+                draft_layer_names=draft_attn_layer_names,
+            )
         additional_attn_cg_support = self.model_state.get_additional_cg_support()
         attn_cg_support = attn_cg_support.narrow(*additional_attn_cg_support)
         # The speculator clears the flag at load time when the checkpoint has
