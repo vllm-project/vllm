@@ -879,7 +879,11 @@ struct AttentionInput {
   int32_t* seq_lens;
   int32_t* block_table;
   float* alibi_slopes;
-  c10::BFloat16* s_aux;
+  // Attention sinks pointer. May reference bf16 or fp32 data depending on
+  // `s_aux_is_bf16`. bf16 sinks keep the native bf16 path; anything else is
+  // provided as fp32 and executed in full float precision.
+  const void* s_aux;
+  bool s_aux_is_bf16;
   bool* dynamic_causal;
   float scale;
   bool causal;
@@ -1542,7 +1546,8 @@ class AttentionMainLoop {
       const float scale = input->scale;
       const float softcap_scale = input->softcap;
       const float* alibi_slopes = input->alibi_slopes;
-      const c10::BFloat16* s_aux = input->s_aux;
+      const void* s_aux = input->s_aux;
+      const bool s_aux_is_bf16 = input->s_aux_is_bf16;
       const bool* dynamic_causal = input->dynamic_causal;
       const bool is_dynamic_causal = dynamic_causal != nullptr;
 
@@ -1750,9 +1755,6 @@ class AttentionMainLoop {
               const float* curr_alibi_slopes =
                   (alibi_slopes != nullptr ? alibi_slopes + q_head_start_idx
                                            : nullptr);
-              const c10::BFloat16* curr_s_aux =
-                  (s_aux != nullptr ? s_aux + q_head_start_idx : nullptr);
-
               // copy the Q tile to q_buffer, the logical layout of q_buffer is
               // [actual_q_token_num, curr_q_heads_per_kv, head_dim]
               {
@@ -1764,10 +1766,23 @@ class AttentionMainLoop {
 
               if (use_sink) {
                 alignas(64) float s_aux_fp32[16];
-                // All other platforms have BF16Vec16 available
-                vec_op::BF16Vec16 vec_bf16(curr_s_aux);
-                vec_op::FP32Vec16 vec_fp32(vec_bf16);
-                vec_fp32.save(s_aux_fp32);
+                // Sinks may be provided as bf16 or fp32. Either way they are
+                // loaded into fp32: bf16 sinks are up-converted (native
+                // BF16Vec16 path, available on all platforms), while fp32
+                // sinks are loaded directly and executed in full precision.
+                if (s_aux_is_bf16) {
+                  const c10::BFloat16* curr_s_aux =
+                      static_cast<const c10::BFloat16*>(s_aux) +
+                      q_head_start_idx;
+                  vec_op::BF16Vec16 vec_bf16(curr_s_aux);
+                  vec_op::FP32Vec16 vec_fp32(vec_bf16);
+                  vec_fp32.save(s_aux_fp32);
+                } else {
+                  const float* curr_s_aux =
+                      static_cast<const float*>(s_aux) + q_head_start_idx;
+                  vec_op::FP32Vec16 vec_fp32(curr_s_aux);
+                  vec_fp32.save(s_aux_fp32);
+                }
 
                 float* __restrict__ curr_sum_buffer = sum_buffer;
                 float* __restrict__ curr_max_buffer = max_buffer;

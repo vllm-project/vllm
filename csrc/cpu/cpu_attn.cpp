@@ -252,7 +252,19 @@ void cpu_attention_with_kv_cache(
   input.block_table = block_table.data_ptr<int32_t>();
   input.alibi_slopes =
       alibi_slopes.has_value() ? alibi_slopes->data_ptr<float>() : nullptr;
-  input.s_aux = s_aux.has_value() ? s_aux->data_ptr<c10::BFloat16>() : nullptr;
+  // Attention sinks may be bf16 (native path) or fp32. Anything that is not
+  // bf16 must be provided as fp32 and is executed in full float precision.
+  if (s_aux.has_value()) {
+    TORCH_CHECK(s_aux->scalar_type() == at::ScalarType::BFloat16 ||
+                    s_aux->scalar_type() == at::ScalarType::Float,
+                "cpu_attention_with_kv_cache: s_aux (attention sinks) dtype ",
+                s_aux->scalar_type(), " must be bfloat16 or float32");
+    input.s_aux = s_aux->data_ptr();
+    input.s_aux_is_bf16 = s_aux->scalar_type() == at::ScalarType::BFloat16;
+  } else {
+    input.s_aux = nullptr;
+    input.s_aux_is_bf16 = false;
+  }
   input.dynamic_causal =
       dynamic_causal.has_value() ? dynamic_causal->data_ptr<bool>() : nullptr;
   input.scale = scale;

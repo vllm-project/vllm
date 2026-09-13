@@ -428,6 +428,7 @@ def varlen_with_paged_kv(
     k_scale: float = 1.0,
     v_scale: float = 1.0,
     dynamic_causal: list[bool] | None = None,
+    s_aux_dtype: torch.dtype = torch.bfloat16,
 ) -> None:
     set_random_seed(0)
     num_seqs = len(seq_lens)
@@ -449,9 +450,7 @@ def varlen_with_paged_kv(
     # 2^(-8/n)
     alibi_slopes = _get_alibi_slopes(num_query_heads) if use_alibi else None
 
-    s_aux = (
-        15 * torch.rand((num_query_heads,), dtype=torch.bfloat16) if use_sink else None
-    )
+    s_aux = 15 * torch.rand((num_query_heads,), dtype=s_aux_dtype) if use_sink else None
 
     is_fp8 = kv_cache_dtype != "auto"
     if is_fp8 and current_platform.get_cpu_architecture() != CpuArchEnum.X86:
@@ -538,6 +537,8 @@ def varlen_with_paged_kv(
     )
 
     out_without_split = torch.empty_like(query)
+    if s_aux is not None and s_aux.dtype != torch.bfloat16:
+        s_aux = s_aux.to(torch.float32)
     cpu_attention_with_kv_cache(
         query=query,
         key_cache=packed_key_cache,
@@ -1125,6 +1126,51 @@ def test_varlen_with_paged_kv_sink(
         use_sink=use_sink,
         isa=isa,
         kv_cache_dtype=kv_cache_dtype,
+    )
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
+@pytest.mark.parametrize("seq_lens", SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [96])
+@pytest.mark.parametrize("block_size", [128])
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("soft_cap", [None])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("use_alibi", [False])
+@pytest.mark.parametrize("use_sink", [True])
+@pytest.mark.parametrize("isa", [get_attn_isa()])
+@pytest.mark.parametrize("s_aux_dtype", [torch.float16])
+def test_varlen_with_paged_kv_sink_fp16(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    soft_cap: float | None,
+    num_blocks: int,
+    use_alibi: bool,
+    use_sink: bool,
+    isa: str,
+    kv_cache_dtype: str,
+    s_aux_dtype: torch.dtype,
+) -> None:
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        soft_cap=soft_cap,
+        num_blocks=num_blocks,
+        use_alibi=use_alibi,
+        use_sink=use_sink,
+        isa=isa,
+        kv_cache_dtype=kv_cache_dtype,
+        s_aux_dtype=s_aux_dtype,
     )
 
 
