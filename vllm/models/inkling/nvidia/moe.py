@@ -605,8 +605,9 @@ class InklingMoE(nn.Module):
             # and OOMs the host) and de-interleave on device.
             half = param.shape[1] // 2
             for gid, lid in slots.items():
-                slab = weight[gid].narrow(0, tp_rank * 2 * half, 2 * half)
-                slab = slab.to(param.device)
+                slab = (
+                    weight[gid].narrow(0, tp_rank * 2 * half, 2 * half).to(param.device)
+                )
                 param.data[lid, :half].copy_(slab[0::2])
                 param.data[lid, half:].copy_(slab[1::2])
         else:
