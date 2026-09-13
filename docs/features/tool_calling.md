@@ -321,6 +321,10 @@ For Qwen2.5, the chat template in tokenizer_config.json has already included sup
 
 Flags: `--tool-call-parser hermes`
 
+Known issues:
+
+1. Qwen2.5-**Coder** models (`Qwen/Qwen2.5-Coder-*`) do not follow the Hermes `<tool_call>` format, so the `hermes` parser fails silently for them (tool calls are returned as plain `content` and the `tool_calls` array stays empty). See [#32926](https://github.com/vllm-project/vllm/issues/32926).
+
 ### DeepSeek-V3 Models (`deepseek_v3`)
 
 Supported models:
