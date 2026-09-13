@@ -8,12 +8,84 @@ import pytest
 from PIL import Image
 from transformers import PretrainedConfig
 
+from vllm.model_executor.models.nemotron_vl import LlamaNemotronVLChatModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.processing import BaseMultiModalProcessor
 
 from ....conftest import ImageTestAssets
 from ...utils import build_model_context
+
+
+class _StubChatModel:
+    """Carries only the two attributes the LoRA token helpers read from
+    `self`, so the real methods can be exercised without constructing
+    the full `nn.Module` (vision tower, language model, etc.)."""
+
+    num_image_token: int
+    patch_tokens: int
+
+
+get_num_mm_encoder_tokens = LlamaNemotronVLChatModel.get_num_mm_encoder_tokens
+get_num_mm_connector_tokens = LlamaNemotronVLChatModel.get_num_mm_connector_tokens
+
+
+@pytest.mark.parametrize("model_id", ["nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1"])
+def test_mm_lora_token_counts_match_real_config(model_id):
+    """The helpers must invert each other's tile-level scaling using values
+    derived from the real HF config. Unlike InternVL, the vision features
+    contain no CLS token (`extract_feature` reshapes the full sequence to
+    an h x w grid), so encoder tokens are exactly `patch_tokens` per tile."""
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 1})
+    config = ctx.model_config.hf_config
+
+    image_size = config.force_image_size or config.vision_config.image_size
+    patch_tokens = (image_size // config.vision_config.patch_size) ** 2
+    num_image_token = int(patch_tokens * config.downsample_ratio**2)
+
+    stub = _StubChatModel()
+    stub.patch_tokens = patch_tokens
+    stub.num_image_token = num_image_token
+
+    for num_tiles in (1, 2, 5, 13):
+        num_llm_tokens = num_tiles * num_image_token
+
+        encoder_tokens = get_num_mm_encoder_tokens(stub, num_llm_tokens)
+        assert encoder_tokens == num_tiles * patch_tokens
+
+        connector_tokens = get_num_mm_connector_tokens(stub, encoder_tokens)
+        assert connector_tokens == num_llm_tokens
+
+
+@pytest.mark.parametrize(
+    ("patch_tokens", "num_image_token", "num_tiles"),
+    [
+        (1024, 256, 1),  # Llama-3.1-Nemotron-Nano-VL-8B-V1: (512/16)^2, ratio 0.5
+        (1024, 256, 12),  # max_dynamic_patch tiles + thumbnail
+        (576, 144, 3),  # 24x24 grid (e.g. 336/14 towers), ratio 0.5
+    ],
+)
+def test_mm_lora_token_counts_roundtrip(patch_tokens, num_image_token, num_tiles):
+    stub = _StubChatModel()
+    stub.patch_tokens = patch_tokens
+    stub.num_image_token = num_image_token
+
+    num_llm_tokens = num_tiles * num_image_token
+
+    encoder_tokens = get_num_mm_encoder_tokens(stub, num_llm_tokens)
+    assert encoder_tokens == num_tiles * patch_tokens
+
+    connector_tokens = get_num_mm_connector_tokens(stub, encoder_tokens)
+    assert connector_tokens == num_llm_tokens
+
+
+def test_mm_lora_token_counts_zero():
+    stub = _StubChatModel()
+    stub.patch_tokens = 1024
+    stub.num_image_token = 256
+
+    assert get_num_mm_encoder_tokens(stub, 0) == 0
+    assert get_num_mm_connector_tokens(stub, 0) == 0
 
 
 def _get_expected_num_patches(
