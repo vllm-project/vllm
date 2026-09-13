@@ -41,6 +41,15 @@ def test_sm120_backend_uses_sparse_mqa_for_prefill() -> None:
     assert not impl_cls.supports_dense_mha_prefill
 
 
+def test_sm120_backend_exposes_masked_mha_available_false() -> None:
+    # The prefill dispatcher reads ``impl.masked_mha_available`` for any sparse
+    # impl; SM120 has no masked-MHA prefill kernel, so the attribute must exist
+    # and be False rather than AttributeError at startup. See #51920.
+    impl_cls = FlashInferMLASparseSM120Backend.get_impl_cls()
+
+    assert impl_cls.masked_mha_available is False
+
+
 def test_v32_glm_sm120_backend_accepts_glm_block_size(
     monkeypatch,
 ) -> None:
