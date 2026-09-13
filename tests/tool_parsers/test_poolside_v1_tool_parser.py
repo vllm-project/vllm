@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
 from openai.types.responses.tool_param import FunctionToolParam
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -197,6 +198,48 @@ def test_non_string_arg_still_deserialized() -> None:
     assert args["content"] == "hi"
     # Non-string value is stripped and parsed to its native type.
     assert args["mode"] == 420
+
+
+# ---------------------------------------------------------------------------
+# Bug 3: stray ``arg_key`` tags must not leak into the argument key
+# (same backtracking leak as vllm-project/vllm#54971 / #54678)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw_args",
+    [
+        pytest.param(
+            "<arg_key>content</arg_key></arg_key><arg_value>hi</arg_value>",
+            id="repeated-closing-tag",
+        ),
+        pytest.param(
+            "<arg_key><arg_key>content</arg_key><arg_value>hi</arg_value>",
+            id="repeated-opening-tag",
+        ),
+        pytest.param(
+            "<arg_key>content</arg_key><arg_value>hi</arg_value>",
+            id="well-formed",
+        ),
+    ],
+)
+def test_extract_tool_calls_ignores_stray_arg_key_tags(raw_args: str) -> None:
+    """A stray ``arg_key`` tag must not leak into the parsed key.
+
+    ``func_arg_regex``'s key group used to be a plain ``.*?``, which
+    backtracks past the first ``</arg_key>`` to reach the following
+    ``<arg_value>``, absorbing the stray tag into the key -- the same leak
+    fixed for GLM-4.7 in #54971.
+    """
+    request = _build_chat_request(tool_choice="auto")
+    parser = _make_parser(request)
+    model_output = f"<tool_call>write_file\n{raw_args}\n</tool_call>"
+
+    result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args == {"content": "hi"}
 
 
 def test_responses_extract_tool_calls_with_flat_tools() -> None:
