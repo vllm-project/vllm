@@ -304,7 +304,7 @@ Implement `SecondaryTierManager` (`vllm/v1/kv_offload/tiering/base.py`) in your 
 - For single-tier (CPU-only) setups, set `cpu_bytes_to_use` larger than the aggregate GPU KV cache. Because offloading is immediate, a smaller CPU tier just mirrors what the GPU already holds and adds no hit rate.
 - `block_size` / `blocks_per_chunk`: larger offloaded chunks reduce per-block bookkeeping overhead but increase the granularity of lookups.
 - FS thread counts: tune `n_read_threads` and `n_write_threads` to the parallelism your storage can sustain. Reads are latency-sensitive on the prefill path, so prefer more read threads when prefill hit rates are high.
-- Sharing `root_dir` across runs: runs with the same model, `block_size`, parallelism layout, and dtype share files under the same `<digest>` subdirectory. Changing any of these produces a new subdirectory; old ones are orphaned but harmless. Delete them to reclaim disk.
+- Sharing `root_dir` across runs: runs with the same model, `block_size`, parallelism layout, dtype, and KV cache layout share files under the same `<digest>` subdirectory. Changing any of these produces a new subdirectory. Namespaces created before the KV cache layout was recorded are no longer reused and can be deleted to reclaim storage; namespaces written with the canonical host byte format (`canonical_layout`) keep their previous identity. Across a rolling upgrade, patched and unpatched `p2p` peers compute different compatibility fingerprints and do not share KV until every peer is upgraded.
 
 ## Per-Request Selective Offload
 
