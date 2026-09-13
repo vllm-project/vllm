@@ -15,6 +15,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.spec_decode.utils import eagle_prepare_next_token_padded_kernel, next_power_of_2
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -321,9 +322,9 @@ class ExtractHiddenStatesProposer:
         """
         Prepare next token IDs for speculative decoding.
 
-        Since num_speculative_tokens == 1, sampled_token_ids has shape
-        (batch_size, 1). For each request we either use the sampled token
-        (if valid and not discarded) or a backup token from the request state.
+        When multiple speculative tokens are produced, sampled_token_ids has shape
+        (batch_size, num_speculative_tokens + 1). For each request we find the last
+        valid token across all columns (if not discarded) or use a backup token.
         """
 
         # Precompute backup token IDs for discarded requests.
@@ -333,18 +334,33 @@ class ExtractHiddenStatesProposer:
                 gpu_input_batch.req_ids[i]
             ].get_token_id(gpu_input_batch.num_tokens_no_spec[i] - 1)
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
-        backup_tokens_gpu = self.backup_next_token_ids.gpu[:num_reqs]
+        backup_tokens_gpu = self.backup_next_token_ids.gpu
+
+        batch_size, num_tokens = sampled_token_ids.shape
+        device = sampled_token_ids.device
 
         assert discard_request_mask.dtype == torch.bool
+        assert backup_tokens_gpu.dtype == torch.int32
 
-        # With num_speculative_tokens == 1, there is exactly one token
-        sampled = sampled_token_ids[:, 0]
-        is_valid = (sampled >= 0) & (sampled < gpu_input_batch.vocab_size)
-        valid_sampled_tokens_count = is_valid.to(torch.int32)
+        next_token_ids = torch.empty(batch_size, dtype=torch.int32, device=device)
+        valid_sampled_tokens_count = next_token_ids.new_empty(batch_size)
 
-        use_sampled = is_valid & ~discard_request_mask[:num_reqs]
-        next_token_ids = torch.where(
-            use_sampled, sampled.to(torch.int32), backup_tokens_gpu
+        # Kernel grid: one program per request (row)
+        grid = (batch_size,)
+
+        # Find the next power of 2 for block sizes
+        BLOCK_SIZE_TOKENS = next_power_of_2(num_tokens)
+        eagle_prepare_next_token_padded_kernel[grid](
+            sampled_token_ids,
+            discard_request_mask,
+            backup_tokens_gpu,
+            next_token_ids,
+            valid_sampled_tokens_count,
+            gpu_input_batch.vocab_size,
+            num_tokens,
+            batch_size,
+            sampled_token_ids.stride(0),
+            BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
         )
 
         return next_token_ids, valid_sampled_tokens_count
