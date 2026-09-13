@@ -14,6 +14,7 @@ from openai_harmony import Author, Message, Role, TextContent
 
 from vllm.entrypoints.openai.responses.harmony import (
     harmony_to_response_output,
+    response_input_to_harmony,
     response_previous_input_to_harmony,
 )
 from vllm.exceptions import VLLMValidationError
@@ -102,6 +103,68 @@ class TestResponsePreviousInputToHarmony:
         ) as exc_info:
             response_previous_input_to_harmony(chat_msg)
         assert exc_info.value.parameter == "input"
+
+
+class TestResponseInputToHarmony:
+    """Tests for the Responses API response_input_to_harmony function."""
+
+    @staticmethod
+    def _tool_call() -> ResponseFunctionToolCall:
+        return ResponseFunctionToolCall(
+            type="function_call",
+            call_id="call_1",
+            name="get_weather",
+            arguments='{"city": "Paris"}',
+        )
+
+    def test_function_call_output_with_string_output(self):
+        """Test parsing a function call output with string output."""
+        response_msg = {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "The weather in Paris is sunny, 18°C",
+        }
+
+        msg = response_input_to_harmony(response_msg, [self._tool_call()])
+
+        assert msg.author.role == Role.TOOL
+        assert msg.author.name == "functions.get_weather"
+        assert msg.content[0].text == "The weather in Paris is sunny, 18°C"
+
+    def test_function_call_output_with_list_output(self):
+        """Test parsing a function call output with a content part list.
+
+        The Responses API accepts `output` as either a string or a list of
+        content parts, so the parts must be flattened into a single string
+        before the Harmony message is built.
+        """
+        response_msg = {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": [
+                {"type": "input_text", "text": "The weather in Paris "},
+                {"type": "input_text", "text": "is sunny, 18°C"},
+            ],
+        }
+
+        msg = response_input_to_harmony(response_msg, [self._tool_call()])
+
+        assert msg.author.role == Role.TOOL
+        assert msg.author.name == "functions.get_weather"
+        assert msg.content[0].text == "The weather in Paris is sunny, 18°C"
+
+    def test_function_call_output_with_empty_list_output(self):
+        """Test parsing a function call output with an empty content list."""
+        response_msg = {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": [],
+        }
+
+        msg = response_input_to_harmony(response_msg, [self._tool_call()])
+
+        assert msg.author.role == Role.TOOL
+        assert msg.content[0].text == ""
 
 
 class TestHarmonyToResponseOutput:
