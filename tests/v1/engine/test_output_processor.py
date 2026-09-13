@@ -3,6 +3,7 @@
 
 import math
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -26,6 +27,10 @@ from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
+)
+from vllm.v1.engine.detokenizer import (
+    IncrementalDetokenizer,
+    SlowIncrementalDetokenizer,
 )
 from vllm.v1.engine.output_processor import (
     OutputProcessor,
@@ -58,6 +63,97 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
 
     assert isinstance(output.logprobs, FlatLogprobs if flat_logprobs else list)
     assert len(output.logprobs) == 0
+
+
+def _delta_state(detokenizer: IncrementalDetokenizer, interval: int, offset: int = 0):
+    # fmt: off
+    state = RequestState(
+        "request-0-int", "request-0", None, 0, None, RequestOutputKind.DELTA,
+        "prompt", [1, 2], None,
+        SimpleNamespace(
+            logprobs=[], cumulative_logprob=None, pop_prompt_logprobs=lambda: None
+        ),
+        detokenizer, None, 0.0, None, False, interval
+    )
+    # fmt: on
+    state.sent_tokens_offset = offset
+    return state
+
+
+def test_delta_stream_interval_exact_slow_uses_unread_generated_suffix() -> None:
+    detokenizer = SlowIncrementalDetokenizer.__new__(SlowIncrementalDetokenizer)
+    detokenizer.prompt_len = 2
+    detokenizer.token_ids = [1, 2, 3]
+    detokenizer.get_next_output_text = MagicMock(return_value="")
+    state = _delta_state(detokenizer, interval=3)
+
+    first_output = state.make_request_output([999], None, None, None)
+    assert first_output.outputs[0].token_ids == [3]
+    assert state.sent_tokens_offset == 1
+
+    detokenizer.token_ids.append(4)
+    assert state.make_request_output([4], None, None, None) is None
+    assert state.sent_tokens_offset == 1
+
+    detokenizer.token_ids.extend([5, 6])
+    state.logprobs_processor.logprobs = [
+        {token_id: Logprob(logprob=-0.5, rank=1)} for token_id in [3, 4, 5, 6]
+    ]
+    interval_output = state.make_request_output([4, 5, 6], None, None, None)
+    assert interval_output.outputs[0].token_ids == [4, 5, 6]
+    assert [next(iter(p)) for p in interval_output.outputs[0].logprobs] == [4, 5, 6]
+    assert state.sent_tokens_offset == 4
+
+    detokenizer.token_ids.append(7)
+    state.logprobs_processor.logprobs.append({7: Logprob(logprob=-0.5, rank=1)})
+    finish_output = state.make_request_output([7], None, FinishReason.LENGTH, None)
+    assert finish_output.finished
+    assert finish_output.outputs[0].token_ids == [7]
+    assert [next(iter(p)) for p in finish_output.outputs[0].logprobs] == [7]
+    assert state.sent_tokens_offset == 5
+
+    new_token_ids = [8]
+    state = _delta_state(IncrementalDetokenizer(), interval=1)
+    identity_output = state.make_request_output(new_token_ids, None, None, None)
+    assert identity_output.outputs[0].token_ids is new_token_ids
+
+
+class _OutputTokenIdsProperty:
+    @property
+    def output_token_ids(self) -> list[int]:
+        self.output_token_ids_calls += 1
+        return self.overridden_output_token_ids
+
+
+class _SlowSubclassWithOutputTokenIds(
+    _OutputTokenIdsProperty, SlowIncrementalDetokenizer
+):
+    pass
+
+
+class _IncrementalWithOutputTokenIds(_OutputTokenIdsProperty, IncrementalDetokenizer):
+    pass
+
+
+def test_delta_stream_interval_uses_output_token_ids_for_non_exact_slow() -> None:
+    cases = (
+        (_SlowSubclassWithOutputTokenIds, [1, 2, 3, 4, 5], 2, [9, 8, 7], [8, 7]),
+        (_IncrementalWithOutputTokenIds, [3, 4, 5], 0, [3, 4, 5], [4, 5]),
+    )
+    for detokenizer_cls, token_ids, prompt_len, property_ids, expected in cases:
+        detokenizer = detokenizer_cls.__new__(detokenizer_cls)
+        detokenizer.token_ids = token_ids
+        detokenizer.prompt_len = prompt_len
+        detokenizer.overridden_output_token_ids = property_ids
+        detokenizer.output_token_ids_calls = 0
+        detokenizer.get_next_output_text = MagicMock(return_value="")
+        state = _delta_state(detokenizer, interval=2, offset=1)
+
+        output = state.make_request_output(expected, None, None, None)
+
+        assert output.outputs[0].token_ids == expected
+        assert detokenizer.output_token_ids_calls == 1
+        assert state.sent_tokens_offset == 3
 
 
 def _ref_convert_id_to_token(

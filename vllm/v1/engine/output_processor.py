@@ -29,7 +29,10 @@ from vllm.tracing import (
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
-from vllm.v1.engine.detokenizer import IncrementalDetokenizer
+from vllm.v1.engine.detokenizer import (
+    IncrementalDetokenizer,
+    SlowIncrementalDetokenizer,
+)
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
@@ -314,9 +317,14 @@ class RequestState:
             if self.output_kind == RequestOutputKind.DELTA:
                 # Send tokens from the offset in DELTA mode, otherwise all
                 # tokens are sent.
-                new_token_ids = self.detokenizer.output_token_ids[
-                    self.sent_tokens_offset :
-                ]
+                if type(self.detokenizer) is SlowIncrementalDetokenizer:
+                    new_token_ids = self.detokenizer.token_ids[
+                        self.detokenizer.prompt_len + self.sent_tokens_offset :
+                    ]
+                else:
+                    new_token_ids = self.detokenizer.output_token_ids[
+                        self.sent_tokens_offset :
+                    ]
                 self.sent_tokens_offset = self.detokenizer.num_output_tokens()
 
         external_req_id = self.external_req_id
