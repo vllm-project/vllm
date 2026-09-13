@@ -12,3 +12,22 @@ steps:
   - setup.py
   commands:
   - python3 /vllm-workspace/.buildkite/check-torch-abi.py
+  mirror:
+    amd:
+      label: ":computer: (CPU) Torch Stable ABI Audit"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 35
+      depends_on:
+      - image-build-amd
+      no_gpu: true
+      working_dir: /vllm-workspace/
+      source_file_dependencies:
+      - .buildkite/check-torch-abi.py
+      - csrc/
+      - cmake/
+      - setup.py
+      - vllm/platforms/rocm.py
+      commands:
+      - uv pip install --system torch-abi-audit==0.0.1
+      - python3 /vllm-workspace/.buildkite/check-torch-abi.py

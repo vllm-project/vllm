@@ -44,6 +44,15 @@ ROCM_AITER_UNIFIED_ATTN = pytest.param(
     ),
 )
 
+ROCM_AITER_MLA_ATTN = pytest.param(
+    AttentionBackendCase(backend=AttentionBackendEnum.ROCM_AITER_MLA),
+    id="ROCM_AITER_MLA",
+    marks=pytest.mark.skipif(
+        not current_platform.is_rocm() or not is_aiter_found_and_supported(),
+        reason="ROCM_AITER_MLA only for AMD when AITER is installed",
+    ),
+)
+
 FLASHINFER_MLA_ATTN = pytest.param(
     AttentionBackendCase(backend=AttentionBackendEnum.FLASHINFER_MLA),
     id="FLASHINFER_MLA",
