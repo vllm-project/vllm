@@ -71,19 +71,6 @@ def _pa_gluon_supports(num_heads_q: int, num_heads_kv: int, head_size: int) -> b
 
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
-
-
-def _get_kv_cache_descales(
-    kv_cache_dtype: str,
-    k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
-    descale_shape: tuple[int, int],
-) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-    if not is_quantized_kv_cache(kv_cache_dtype):
-        return None, None
-    return k_scale.expand(descale_shape), v_scale.expand(descale_shape)
-
-
 if current_platform.is_rocm():
     from aiter.ops.triton.gluon.pa_decode_gluon import (
         get_recommended_splits,
@@ -1351,12 +1338,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 assert attn_metadata.decode_metadata is not None
                 decode_max_query_len = attn_metadata.decode_metadata.max_query_len
                 decode_query_len = attn_metadata.decode_metadata.uniform_query_len
-                k_descale, v_descale = _get_kv_cache_descales(
-                    self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
-                    (num_decodes, key_cache.shape[2]),
-                )
+                if is_quantized_kv_cache(self.kv_cache_dtype):
+                    descale_shape = (num_decodes, key_cache.shape[2])
+                    k_descale = layer._k_scale.expand(descale_shape)
+                    v_descale = layer._v_scale.expand(descale_shape)
+                else:
+                    k_descale = None
+                    v_descale = None
 
                 # check if we can use the gluon paged-attention decode kernel
                 use_gluon = (
