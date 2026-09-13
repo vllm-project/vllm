@@ -39,6 +39,7 @@ def _make_bare_scheduler(
         select_transfer_block_ids=lambda block_ids: tuple(block_ids)
     )
     scheduler.load_specs = {}
+    scheduler._load_failure_bypass_req_ids = set()
     scheduler._unfinished_request_ids = {"req-0"}
     scheduler._unfinished_requests = {}
     scheduler._request_trackers = {}
@@ -51,6 +52,28 @@ def _make_bare_scheduler(
     scheduler._pinned_saves = {}
     scheduler._boundary_state_group_ids = frozenset({1})
     return scheduler
+
+
+def test_load_failure_bypasses_external_lookup_until_allocation():
+    scheduler = _make_bare_scheduler()
+    scheduler.load_specs["req-0"] = object()
+    scheduler.on_load_failure({"req-0"})
+    request = SimpleNamespace(request_id="req-0", num_tokens=32, block_hashes=[])
+    scheduler.client = _StubLookupClient(hit_tokens=0)
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert scheduler.client.num_tokens == []
+    assert scheduler._load_failure_bypass_req_ids == {"req-0"}
+    assert scheduler.load_specs == {}
+
+    scheduler.update_state_after_alloc(
+        request, SimpleNamespace(), num_external_tokens=0
+    )
+    assert scheduler._load_failure_bypass_req_ids == set()
+
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (0, False)
+    assert scheduler.client.num_tokens == [32]
 
 
 def _make_connector_block_state(

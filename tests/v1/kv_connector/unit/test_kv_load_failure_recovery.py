@@ -108,6 +108,12 @@ def test_async_load_failure(
             assert request.num_computed_tokens == num_external_computed_tokens
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert scheduler.failed_recving_kv_req_ids == {request2.request_id}
+    if min_invalid_block_idx == 0:
+        scheduler.connector.on_load_failure.assert_called_once_with(
+            {request2.request_id}
+        )
+    else:
+        scheduler.connector.on_load_failure.assert_not_called()
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 3
 
 
@@ -183,6 +189,7 @@ def test_sync_load_failure(
     assert scheduler.running[0].num_computed_tokens == (
         min(invalid_block_idxs) * scheduler.block_size
     )
+    scheduler.connector.on_load_failure.assert_not_called()
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 3
     assert scheduler.connector.request_finished.call_count == 2
 
