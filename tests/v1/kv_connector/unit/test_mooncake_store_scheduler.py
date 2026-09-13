@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     LoadSpec,
     MooncakeLookupResult,
+    MooncakeStoreConnectorMetadata,
     MooncakeStoreWorkerMetadata,
     ReqMeta,
     RequestTracker,
@@ -16,7 +19,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler impor
     MooncakeStoreScheduler,
 )
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.output import KVConnectorBlockState
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    MambaSpec,
+)
 
 
 def _make_bare_scheduler(
@@ -35,9 +47,9 @@ def _make_bare_scheduler(
     scheduler._block_size = 16
     scheduler._hash_block_size = hash_block_size
     scheduler.enable_partial_hash_hits = enable_partial_hash_hits
-    scheduler.kv_cache_config = SimpleNamespace(
-        select_transfer_block_ids=lambda block_ids: tuple(block_ids)
-    )
+    scheduler.kv_cache_config = SimpleNamespace()
+    scheduler._store_group_ids = (0,)
+    scheduler._store_group_id_by_kv_cache_group_id = {0: 0, 1: 1}
     scheduler.load_specs = {}
     scheduler._unfinished_request_ids = {"req-0"}
     scheduler._unfinished_requests = {}
@@ -228,14 +240,82 @@ def test_pending_load_for_non_chosen_connector_is_dropped():
     assert "req-0" not in scheduler._request_trackers
 
 
+def _make_qsa_hybrid_cache_config():
+    full = FullAttentionSpec(block_size=800, num_kv_heads=8, head_size=64, dtype=None)
+    circular = CircularBufferSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=64,
+        head_size_v=0,
+        dtype=torch.float16,
+    )
+    mamba = MambaSpec(
+        block_size=800,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    return KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], full),
+            KVCacheGroupSpec(["qsa"], circular),
+            KVCacheGroupSpec(["mamba"], mamba),
+        ],
+    )
+
+
+def test_scheduler_projects_nonprefix_groups_and_mamba_ids():
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_role="kv_both", kv_connector_extra_config={}
+        ),
+        kv_events_config=None,
+        cache_config=SimpleNamespace(
+            block_size=800, enable_prefix_caching=True, prefix_match_unit=None
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1, world_size=1),
+    )
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+        "scheduler.LookupKeyClient"
+    ):
+        scheduler = MooncakeStoreScheduler(vllm_config, _make_qsa_hybrid_cache_config())
+
+    assert scheduler._store_group_ids == (0, 2)
+    assert scheduler._boundary_state_group_ids == frozenset({1})
+
+
+def test_current_save_block_ids_use_store_group_projection():
+    scheduler = _make_bare_scheduler()
+    scheduler.kv_cache_config = _make_qsa_hybrid_cache_config()
+    scheduler._store_group_ids = (0, 2)
+    meta = MooncakeStoreConnectorMetadata(set(), set())
+    req_meta = ReqMeta(
+        req_id="req-0",
+        token_len_chunk=800,
+        block_ids=(),
+        block_hashes=[b"h0"],
+        can_save=True,
+    )
+    meta.add_request(req_meta)
+    output = SimpleNamespace(
+        kv_connector_block_state=_make_connector_block_state(([10], [80], [30]))
+    )
+
+    scheduler._apply_current_save_block_ids(meta, output)
+
+    assert req_meta.block_ids == ([10], [30])
+
+
 def test_update_state_excludes_nontransfer_groups():
     """Store metadata must match the worker's registered cache groups."""
     scheduler = _make_bare_scheduler()
-    scheduler.kv_cache_config = SimpleNamespace(
-        select_transfer_block_ids=lambda block_ids: (block_ids[0],)
-    )
+    scheduler._store_group_ids = (0,)
     request = SimpleNamespace(request_id="req-1")
-    blocks = SimpleNamespace(get_block_ids=lambda: ([1, 2], [9]))
+    blocks = KVCacheBlocks(([KVCacheBlock(1), KVCacheBlock(2)], [KVCacheBlock(9)]))
 
     scheduler.update_state_after_alloc(request, blocks, num_external_tokens=32)
 
@@ -1003,6 +1083,7 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
 
 def test_finished_partial_tail_is_pre_pinned_as_store_job():
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    scheduler._store_group_ids = (0, 1)
     scheduler.client = SimpleNamespace(discard=lambda *_: None)
     request = SimpleNamespace(
         request_id="req-0",
@@ -1143,6 +1224,20 @@ def _make_offload_only_output(entries, block_ids=([0],)):
     )
 
 
+def test_boundary_state_group_ids_are_remapped_to_store_projection():
+    scheduler = _make_bare_scheduler(hash_block_size=800, enable_partial_hash_hits=True)
+    scheduler.kv_cache_config = _make_qsa_hybrid_cache_config()
+    scheduler._store_group_ids = (0, 2)
+    scheduler._store_group_id_by_kv_cache_group_id = {0: 0, 2: 1}
+    scheduler._boundary_state_group_ids = frozenset({1})
+    _register_offload_request(scheduler, prefill_end_tokens=800, num_prompt_tokens=800)
+    meta = MooncakeStoreConnectorMetadata(set(), set())
+
+    scheduler._handle_boundary_state_offloads({"req-0": [(2, 7, 800)]}, meta)
+
+    assert meta.requests[0].boundary_state_offloads == [(1, 7, 800)]
+
+
 def test_resumed_prefill_claims_boundaries_past_prompt_length():
     # A resumed request re-prefills its previously generated tokens, so its
     # save window (`prefill_end_tokens`) extends past `num_prompt_tokens`.
@@ -1195,6 +1290,7 @@ def test_boundary_state_job_pins_exact_blocks_once():
 
 def test_store_job_pins_current_non_null_non_mamba_blocks():
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    scheduler._store_group_ids = (0, 1)
     request = SimpleNamespace(
         all_token_ids=list(range(48)),
         block_hashes=[bytes([i]) for i in range(12)],
