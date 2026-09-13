@@ -119,6 +119,7 @@ class MultiprocExecutor(Executor):
         # Call self.shutdown at exit to clean up
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
+        self._failure_callback_lock = threading.Lock()
         self.is_failed = False
         self.failure_callback: FailureCallback | None = None
 
@@ -309,7 +310,8 @@ class MultiprocExecutor(Executor):
             if not _self or getattr(_self, "shutting_down", False):
                 logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
                 return
-            _self.is_failed = True
+            with _self._failure_callback_lock:
+                _self.is_failed = True
             proc = next(h.proc for h in workers if h.proc.sentinel == died[0])
             logger.error(
                 "Worker proc %s died unexpectedly (exit code: %s), "
@@ -318,9 +320,10 @@ class MultiprocExecutor(Executor):
                 proc.exitcode,
             )
             _self.shutdown()
-            callback = _self.failure_callback
-            if callback is not None:
+            with _self._failure_callback_lock:
+                callback = _self.failure_callback
                 _self.failure_callback = None
+            if callback is not None:
                 callback()
 
         if not inline:
@@ -332,10 +335,11 @@ class MultiprocExecutor(Executor):
         monitor_workers()
 
     def register_failure_callback(self, callback: FailureCallback):
-        if self.is_failed:
-            callback()
-        else:
-            self.failure_callback = callback
+        with self._failure_callback_lock:
+            if not self.is_failed:
+                self.failure_callback = callback
+                return
+        callback()
 
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
