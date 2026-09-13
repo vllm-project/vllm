@@ -4,7 +4,10 @@
 import pytest
 
 from vllm import SamplingParams
-from vllm.entrypoints.offline_utils import OfflineInferenceMixin
+from vllm.entrypoints.offline_utils import (
+    OfflineInferenceMixin,
+    _can_batch_engine_requests,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
 
@@ -55,3 +58,30 @@ def test_matching_lengths_pass_through(mixin: OfflineInferenceMixin):
     ]
     assert mixin._lora_request_to_seq([lora], num_requests=1) == [lora]
     assert mixin._priority_to_seq([3], num_requests=1) == [3]
+
+
+@pytest.mark.parametrize(
+    "prompts, expected",
+    [
+        ([{"prompt_token_ids": [1]}, {"prompt_token_ids": [2]}], True),
+        ([[1], [2]], True),
+        ([{"prompt_token_ids": [1]}], False),
+        (["first", "second"], False),
+        (
+            [
+                {"prompt_token_ids": [1], "multi_modal_data": {"image": object()}},
+                {"prompt_token_ids": [2]},
+            ],
+            False,
+        ),
+        (
+            [
+                {"prompt_token_ids": [1], "prompt_embeds": object()},
+                {"prompt_token_ids": [2]},
+            ],
+            False,
+        ),
+    ],
+)
+def test_can_batch_engine_requests(prompts, expected):
+    assert _can_batch_engine_requests(prompts) is expected
