@@ -322,6 +322,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and UNO_TAIL_MODE == "exact"
             else None
         )
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "uno"
+        ):
+            logger.info("Uno draft tail mode: %s", UNO_TAIL_MODE)
 
         self.pcp_manager: pcp.PCPManager | None = None
 
