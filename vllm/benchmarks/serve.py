@@ -697,13 +697,14 @@ def calculate_metrics(
                 if 0 <= second_bucket < duration_seconds:
                     tokens_per_second[second_bucket] += 1
 
-            # Track concurrent requests for each second this request was active
+            # Use half-open intervals so a request ending at a bucket boundary
+            # does not overlap with one starting at that same boundary.
             request_start_second = int(output.start_time - min_start_time)
             request_end_second = int(
-                (output.start_time + output.latency) - min_start_time
+                np.ceil(output.start_time + output.latency - min_start_time)
             )
 
-            for second in range(request_start_second, request_end_second + 1):
+            for second in range(request_start_second, request_end_second):
                 concurrent_requests_per_second[second] += 1
 
         # Find the maximum tokens per second and corresponding
