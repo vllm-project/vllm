@@ -246,7 +246,6 @@ steps:
   key: lm-eval-humming-f16-a100
   timeout_in_minutes: 75
   device: a100
-  optional: true
   num_devices: 1
   parallelism: 3
   source_file_dependencies:
@@ -262,7 +261,6 @@ steps:
   key: lm-eval-humming-act-a100
   timeout_in_minutes: 45
   device: a100
-  optional: true
   num_devices: 1
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
@@ -277,7 +275,6 @@ steps:
   key: lm-eval-humming-f16-h100
   timeout_in_minutes: 70
   device: h100
-  optional: true
   num_devices: 1
   parallelism: 3
   source_file_dependencies:
@@ -293,7 +290,6 @@ steps:
   key: lm-eval-humming-act-h100
   timeout_in_minutes: 70
   device: h100
-  optional: true
   num_devices: 1
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
@@ -309,7 +305,6 @@ steps:
   key: lm-eval-humming-deepep-2xh200
   timeout_in_minutes: 60
   device: h200
-  optional: true
   num_devices: 2
   source_file_dependencies:
   - .buildkite/test_areas/lm_eval.yaml
@@ -329,7 +324,6 @@ steps:
   key: lm-eval-humming-f16-b200
   timeout_in_minutes: 50
   device: b200-k8s
-  optional: true
   num_devices: 1
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
@@ -344,7 +338,6 @@ steps:
   key: lm-eval-humming-act-b200
   timeout_in_minutes: 50
   device: b200-k8s
-  optional: true
   num_devices: 1
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
