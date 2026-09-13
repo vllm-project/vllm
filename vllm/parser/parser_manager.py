@@ -31,9 +31,10 @@ class ParserManager:
         from vllm.tool_parsers import ToolParserManager
 
         parser: type[ToolParser] | None = None
-        if not enable_auto_tools or tool_parser_name is None:
+        if tool_parser_name is None:
             return parser
-        logger.info_once('"auto" tool choice has been enabled.')
+        if enable_auto_tools:
+            logger.info_once('"auto" tool choice has been enabled.')
 
         try:
             if (
