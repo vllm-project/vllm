@@ -32,7 +32,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     compute_mm_prefix_range_tensor,
-    get_kv_cache_layout,
     get_num_attention_heads_from_layers,
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
@@ -45,7 +44,6 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVQuantMode,
     get_kv_quant_mode,
-    kv_cache_uses_per_token_head_scales,
 )
 
 logger = init_logger(__name__)
@@ -336,62 +334,6 @@ class TritonAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["TritonAttentionImpl"]:
         return TritonAttentionImpl
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
-        if kv_cache_uses_per_token_head_scales(cache_dtype_str):
-            # Pad the head dim by sizeof(float32)/sizeof(cache_dtype) so the
-            # per-(token, head) scale fits inline after the quantized data;
-            # the backend extracts data[:head_size] and scale[head_size:] via
-            # typed views (see _ensure_scale_caches).  INT4 packs two values
-            # per byte, so the data occupies only head_size // 2 bytes.
-            from vllm.utils.torch_utils import (
-                STR_DTYPE_TO_TORCH_DTYPE,
-                get_dtype_size,
-            )
-
-            cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype_str]
-            scale_pad = get_dtype_size(torch.float32) // get_dtype_size(cache_dtype)
-            if get_kv_quant_mode(cache_dtype_str) == KVQuantMode.INT4_PER_TOKEN_HEAD:
-                data_head_size = head_size // 2
-            else:
-                data_head_size = head_size
-            padded_hs = data_head_size + scale_pad
-            return (num_blocks, num_kv_heads, block_size, 2 * padded_hs)
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        # `stride_order` indicates the permutation that gets us from
-        # `get_kv_cache_shape` (logical (B, H, N, 2*hs)) to the actual memory
-        # layout we want.
-        cache_layout = get_kv_cache_layout()
-        if cache_layout == "NHD" and include_num_layers_dimension:
-            # (num_blocks, num_layers, block_size, num_kv_heads, 2*head_size)
-            return (1, 0, 3, 2, 4)
-        elif cache_layout == "NHD":
-            # (num_blocks, block_size, num_kv_heads, 2*head_size)
-            stride_order = (0, 2, 1, 3)
-        elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, num_kv_heads, num_layers, block_size, 2*head_size)
-            return (1, 2, 0, 3, 4)
-        elif cache_layout == "HND":
-            # (num_blocks, num_kv_heads, block_size, 2*head_size)
-            stride_order = (0, 1, 2, 3)
-        else:
-            raise ValueError(f"Unknown cache layout: {cache_layout}")
-        return stride_order
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:

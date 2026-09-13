@@ -34,7 +34,7 @@ from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -166,7 +166,9 @@ class GraniteSpeechMultiModalProcessor(
         def get_replacement(item_idx: int):
             audios = mm_items.get_items("audio", AudioProcessorItems)
             audio = audios.get(item_idx)
-            audio_length = audio.shape[-1]
+            if audio is None:
+                raise ValueError(f"Missing audio item {item_idx}")
+            audio_length = len(audio) if isinstance(audio, list) else audio.shape[-1]
             num_projector_features = feature_extractor._get_num_audio_features(
                 [audio_length]
             )[0]
@@ -180,12 +182,14 @@ class GraniteSpeechMultiModalProcessor(
             )
         ]
 
-    def _call_hf_processor(
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _preprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])
 
@@ -193,21 +197,23 @@ class GraniteSpeechMultiModalProcessor(
             # GraniteSpeechFeatureExtractor accepts "audio"
             mm_data["audio"] = audios
 
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
+        return mm_data, hf_processor_mm_kwargs
 
+    def _postprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
+    ) -> BatchFeature:
         if "audio" in mm_data:
             # Calculate the number of audio tokens per entry in the batch;
             # This is used to split the batch back out after padding.
             audio_token_index = self.info.get_hf_config().audio_token_index
-            processed_outputs["audio_embed_sizes"] = (
-                processed_outputs["input_ids"] == audio_token_index
+            processed_data["audio_embed_sizes"] = (
+                processed_data["input_ids"] == audio_token_index
             ).sum(-1)
 
-        return processed_outputs
+        return processed_data
 
 
 class GraniteSpeechDummyInputsBuilder(
@@ -221,6 +227,7 @@ class GraniteSpeechDummyInputsBuilder(
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         return {
             "audio": self._get_dummy_audios(
@@ -655,6 +662,9 @@ class GraniteSpeechForConditionalGeneration(
         if input_features is None:
             return None
 
+        if not isinstance(audio_embed_sizes, torch.Tensor):
+            raise ValueError("audio_embed_sizes must be a tensor")
+
         # If we have a batch of variable feature length audio clips, we need
         # to mask the features; usually we would get an input_features_mask
         # from the processor, but we handle rebuilding it here since
@@ -875,7 +885,11 @@ class GraniteSpeechForConditionalGeneration(
         audio_tok = cls.get_placeholder_str("audio", 0)
 
         if task_type == "translate":
-            full_lang_name_to = cls.supported_languages.get(to_language, to_language)
+            full_lang_name_to = (
+                cls.supported_languages.get(to_language, to_language)
+                if to_language is not None
+                else ""
+            )
             user_prompt = f"{audio_tok}translate the speech to {full_lang_name_to}"  # noqa: E501
         elif task_type == "transcribe":
             user_prompt = (

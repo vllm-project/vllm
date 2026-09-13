@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 
 import numpy as np
 import torch
-from typing_extensions import deprecated
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic64Sym,
@@ -23,10 +22,15 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.attention.backends.utils import KVCacheLayoutType
-    from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, KVQuantMode
+    from vllm.v1.hisparse.runtime import HiSparseCacheHandle
+    from vllm.v1.kv_cache_interface import (
+        AttentionSpec,
+        KVCacheLayout,
+        KVCacheSpec,
+        KVQuantMode,
+    )
 
-from vllm.v1.kv_cache_interface import get_kv_quant_mode
+from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
 
 
 class AttentionType(str, Enum):
@@ -82,68 +86,6 @@ class AttentionBackend(ABC):
     @staticmethod
     @abstractmethod
     def get_builder_cls():  # -> Type["AttentionMetadataBuilder"]:
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        raise NotImplementedError
-
-    @classmethod
-    def get_kv_cache_block_dim(
-        cls,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> int:
-        """Discover which tensor dim is the block index, since different
-        backends lay out dims differently."""
-        _S = 1234567
-        shape = cls.get_kv_cache_shape(
-            _S,
-            block_size,
-            num_kv_heads,
-            head_size,
-            cache_dtype_str=cache_dtype_str,
-        )
-        return shape.index(_S)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        """
-        Get the physical (memory layout) ordering of the kv cache dimensions.
-        Standard attention backends pack K and V into the content dim, giving
-        the logical shape [num_blocks, num_heads, block_size, 2 * head_size].
-        e.g. if get_kv_cache_stride_order returns (0, 2, 1, 3) then the physical
-        ordering of dimensions is
-        [num_blocks, block_size, num_heads, 2 * head_size].
-
-        If this function is unimplemented / raises NotImplementedError,
-        the physical layout of the KV cache will match the logical shape.
-
-        Args:
-            include_num_layers_dimension: if True, includes an additional
-                num_layers dimension, which is assumed to be prepended
-                to the logical KV cache shape.
-                With the above example, a return value (1, 0, 3, 2, 4)
-                corresponds to
-                [num_blocks, num_layers, block_size, num_heads, 2 * head_size].
-
-                If an additional dimension is NOT included in the returned
-                tuple, the physical layout will not include a layers dimension.
-
-        Returns:
-            A tuple of ints which is a permutation of range(len(shape)).
-        """
         raise NotImplementedError
 
     @classmethod
@@ -216,38 +158,6 @@ class AttentionBackend(ABC):
         return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
 
     @classmethod
-    def indexes_kv_by_block_stride(cls) -> bool:
-        """Whether the backend reads KV pages by the runtime block stride.
-
-        True when ``num_blocks`` is the outermost physical dimension of the KV
-        cache, so the backend tolerates a non-contiguous block dim. This gates
-        page size padding and cross-layer uniform KV layout.
-
-        Returns:
-            True if the backend's physical KV layout is num-blocks-first. False
-            otherwise, including when the backend does not define a layered
-            stride order.
-        """
-        try:
-            kv_cache_stride_order = cls.get_kv_cache_stride_order(
-                include_num_layers_dimension=False
-            )
-            layered_kv_cache_stride_order = cls.get_kv_cache_stride_order(
-                include_num_layers_dimension=True
-            )
-        except (AttributeError, NotImplementedError):
-            return False
-
-        # Check that attention backend includes a layers dimension.
-        if len(layered_kv_cache_stride_order) != len(kv_cache_stride_order) + 1:
-            return False
-
-        # stride_order[0] == 0 means num_layers stays first in physical
-        # layout (identity permutation), so indexing by block stride is
-        # not supported.
-        return layered_kv_cache_stride_order[0] != 0
-
-    @classmethod
     def is_mla(cls) -> bool:
         return False
 
@@ -313,6 +223,13 @@ class AttentionBackend(ABC):
     def supports_pcp(cls) -> bool:
         try:
             return cls.get_impl_cls().supports_pcp
+        except NotImplementedError:
+            return False
+
+    @classmethod
+    def supports_dcp(cls) -> bool:
+        try:
+            return cls.get_impl_cls().supports_dcp
         except NotImplementedError:
             return False
 
@@ -414,6 +331,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("KV connector not supported")
         if use_pcp and not cls.supports_pcp():
             invalid_reasons.append("PCP not supported")
+        if use_dcp and not cls.supports_dcp():
+            invalid_reasons.append("DCP not supported")
         if (
             use_adaptive_verification
             and not cls.supports_device_cpu_query_lens_mismatch()
@@ -438,7 +357,9 @@ class AttentionBackend(ABC):
         return invalid_reasons
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
+        """Layouts this backend's kernels can consume, most preferred first, or
+        None when the kernels consume any layout and express no preference."""
         return None
 
     @classmethod
@@ -494,8 +415,13 @@ class CommonAttentionMetadata:
     encoder_seq_lens_cpu: np.ndarray | None = None
 
     dcp_local_seq_lens: torch.Tensor | None = None
-    dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
+
+    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
+    """(batch_size,) CPU upper bound on dcp_local_seq_lens. Under PCP+DCP it
+    holds, on every row, the largest shard any DCP rank has of the row's
+    whole request, identical on every PCP rank, so the sparse backends pad
+    their KV gather to it."""
 
     positions: torch.Tensor | None = None
     """(num_actual_tokens,) token positions.  Optional; set when the caller
@@ -512,6 +438,11 @@ class CommonAttentionMetadata:
     and for all rows outside async spec decode; optimistic for async-spec
     decode rows (assumes every draft was accepted). Not safe for kernels
     that need exact per-row context lengths on decode rows."""
+
+    req_idx: np.ndarray | None = None
+    """(batch_size,) index of each row's request in the runner's request
+    table. Rows of one request are adjacent, so equal neighbours are PCP
+    chunks sharing one KV context."""
 
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
     """PrefixLM bidirectional ranges for multimodal tokens. Maps
@@ -531,10 +462,6 @@ class CommonAttentionMetadata:
     at the current decode run's last full-state write. write_pos counts from
     here, so a preemption-resumed request re-anchors past the prompt boundary."""
 
-    # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
-    _seq_lens_cpu: torch.Tensor | None = None
-    _num_computed_tokens_cpu: torch.Tensor | None = None
-
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
 
@@ -547,36 +474,6 @@ class CommonAttentionMetadata:
 
     def replace(self, **kwargs) -> "CommonAttentionMetadata":
         return replace(self, **kwargs)
-
-    @property
-    @deprecated(
-        """
-    Prefer using device seq_lens directly to avoid implicit H<>D sync.
-    If a CPU copy is needed, use `seq_lens.cpu()` instead.
-    Will be removed in a future release, please migrate as soon as possible.
-    """
-    )
-    def seq_lens_cpu(self) -> torch.Tensor:
-        if self._seq_lens_cpu is None:
-            self._seq_lens_cpu = self.seq_lens.to("cpu")
-        return self._seq_lens_cpu
-
-    @property
-    @deprecated(
-        """
-    Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
-    async scheduling. If a CPU copy is needed, it can be derived from 
-    query_start_loc_cpu and seq_lens.
-    Will be removed in a future release, please migrate as soon as possible.
-    """
-    )
-    def num_computed_tokens_cpu(self) -> torch.Tensor:
-        if self._num_computed_tokens_cpu is None:
-            query_seq_lens = (
-                self.query_start_loc_cpu[1:] - self.query_start_loc_cpu[:-1]
-            )
-            self._num_computed_tokens_cpu = self.seq_lens_cpu - query_seq_lens
-        return self._num_computed_tokens_cpu
 
     def compute_num_computed_tokens(self) -> torch.Tensor:
         """Compute num_computed_tokens on device (seq_lens - query_lens)."""
@@ -597,19 +494,21 @@ class CommonAttentionMetadata:
         # Built from the device query_start_loc: adaptive verification decides the
         # per-request draft split on device, so the CPU copy carries the right total
         # but not the right per-request boundaries. Padding requests have a query
-        # length of zero and drop out of the repeat.
+        # length of zero and are skipped by the device boundary search.
         num_mapped_tokens = int(self.query_start_loc_cpu[-1])
-        query_lens = self.query_start_loc[1:] - self.query_start_loc[:-1]
-        assert buffer.shape[0] >= max(num_mapped_tokens, num_tokens)
-        token_to_req_indices = torch.repeat_interleave(
-            torch.arange(query_lens.shape[0], dtype=torch.int32, device=buffer.device),
-            query_lens,
-            output_size=num_mapped_tokens,
+        from vllm.v1.attention.ops.metadata import _token_request_mapping_kernel
+
+        num_output_tokens = max(num_mapped_tokens, num_tokens)
+        assert buffer.shape[0] >= num_output_tokens
+        _token_request_mapping_kernel[((num_output_tokens + 255) // 256,)](
+            self.query_start_loc,
+            buffer,
+            self.query_start_loc.shape[0] - 1,
+            num_mapped_tokens,
+            num_output_tokens,
+            num_warps=4,
         )
-        buffer[:num_mapped_tokens].copy_(token_to_req_indices)
-        if num_mapped_tokens < num_tokens:
-            buffer[num_mapped_tokens:num_tokens].zero_()
-        self._token_to_req_indices_cache = buffer[: max(num_mapped_tokens, num_tokens)]
+        self._token_to_req_indices_cache = buffer[:num_output_tokens]
         return self._token_to_req_indices_cache[:num_tokens]
 
     # TODO(lucas): remove once we have FULL-CG spec-decode support
@@ -621,12 +520,6 @@ class CommonAttentionMetadata:
             query_start_loc=self.query_start_loc[: num_actual_reqs + 1],
             query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
             seq_lens=self.seq_lens[:num_actual_reqs],
-            _seq_lens_cpu=self._seq_lens_cpu[:num_actual_reqs]
-            if self._seq_lens_cpu is not None
-            else None,
-            _num_computed_tokens_cpu=self._num_computed_tokens_cpu[:num_actual_reqs]
-            if self._num_computed_tokens_cpu is not None
-            else None,
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,
@@ -642,8 +535,12 @@ class CommonAttentionMetadata:
             encoder_seq_lens=maybe_slice_reqs(self.encoder_seq_lens),
             encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
-            dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
+            dcp_local_seq_lens_cpu_upper_bound=maybe_slice_reqs(
+                self.dcp_local_seq_lens_cpu_upper_bound
+            ),
+            seq_lens_cpu_upper_bound=maybe_slice_reqs(self.seq_lens_cpu_upper_bound),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
+            req_idx=maybe_slice_reqs(self.req_idx),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
             replayssm_decode_base_cpu=maybe_slice_reqs(self.replayssm_decode_base_cpu),
         )
@@ -698,6 +595,10 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         self.layer_names = layer_names
         self.vllm_config = vllm_config
         self.device = device
+        self.kernel_block_size: int | None = None
+
+    def set_kernel_block_size(self, kernel_block_size: int) -> None:
+        self.kernel_block_size = kernel_block_size
 
     @classmethod
     def get_cudagraph_support(
@@ -894,7 +795,7 @@ class AttentionImplBase(ABC, Generic[T]):
     # Whether the attention impl supports Prefill Context Parallelism.
     supports_pcp: bool = False
     # Whether the attention impl supports Decode Context Parallelism.
-    supports_dcp: bool = True
+    supports_dcp: bool = False
     # Whether the attention impl(or ops) supports MTP
     # when cp_kv_cache_interleave_size > 1
     supports_mtp_with_cp_non_trivial_interleave_size: bool = False
@@ -952,6 +853,9 @@ class AttentionImplBase(ABC, Generic[T]):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         pass
+
+    def prepare_for_batch(self, attn_metadata: T | None) -> None:
+        """Prepare implementation-specific state for the current batch."""
 
 
 class AttentionImpl(AttentionImplBase[T], Generic[T]):
@@ -1071,6 +975,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """MLA attention implementation with forward_mqa and forward_mha methods."""
 
+    hisparse_cache: "HiSparseCacheHandle | None" = None
     supports_pcp: bool = True
 
     @abstractmethod

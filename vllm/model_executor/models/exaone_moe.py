@@ -41,7 +41,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -112,6 +111,7 @@ class ExaoneMoe(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
+        self.shared_experts: ExaoneMoeGatedMLP | None
         if getattr(config, "num_shared_experts", 0) > 0:
             intermediate_size = config.moe_intermediate_size * config.num_shared_experts
             self.shared_experts = ExaoneMoeGatedMLP(
@@ -292,7 +292,7 @@ class ExaoneMoeDecoderLayer(nn.Module):
         config: PretrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        is_mtp: bool = None,
+        is_mtp: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -381,26 +381,19 @@ class ExaoneMoeModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
         self.num_redundant_experts = (
             vllm_config.parallel_config.eplb_config.num_redundant_experts
         )
 
         self.config = config
         self.quant_config = quant_config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
+        self.vocab_size = config.vocab_size
         if get_pp_group().is_first_rank or (
             config.tie_word_embeddings and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
                 quant_config=quant_config,
             )
         else:
@@ -497,10 +490,8 @@ class ExaoneMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config.get_text_config()
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        self.lora_config = lora_config
         self.quant_config = quant_config
 
         self.model = ExaoneMoeModel(
@@ -509,17 +500,9 @@ class ExaoneMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
-            if lora_config:
-                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE
-                # We need bigger padding if using lora for kernel
-                # compatibility
-                if not lora_config
-                else lora_config.lora_vocab_padding_size,
                 quant_config=quant_config,
             )
             if config.tie_word_embeddings:

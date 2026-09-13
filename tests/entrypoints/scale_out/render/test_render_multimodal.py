@@ -29,7 +29,7 @@ def vision_server():
         "0",
     ]
 
-    env_overrides: dict[str, str] = {}
+    env_overrides = {"VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1"}
 
     with RemoteOpenAIServer(
         VISION_MODEL_NAME,

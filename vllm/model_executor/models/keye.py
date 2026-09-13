@@ -59,7 +59,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -1162,15 +1162,8 @@ class KeyeDummyInputsBuilder(KeyeBaseDummyInputsBuilder[KeyeProcessingInfo]):
 
 
 class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # Override to use the text path instead of token path to use the
-        # video-specific logic in processing_keye.py
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
     def _get_prompt_updates(
         self,
@@ -1312,17 +1305,29 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
             )
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
-            # These are all built on the host, so stage them over
-            # non-blocking rather than forcing a sync per transfer.
-            siglip_position_ids = torch.concat(siglip_position_ids, dim=0).to(
-                pixel_values.device, non_blocking=True
-            )
+            # These are all built on the host; concat straight into pinned
+            # buffers so the H2D copies stay non-blocking.
+            siglip_position_ids = torch.concat(
+                siglip_position_ids,
+                dim=0,
+                out=torch.empty(
+                    sum(t.numel() for t in siglip_position_ids),
+                    dtype=torch.int64,
+                    pin_memory=PIN_MEMORY,
+                ),
+            ).to(pixel_values.device, non_blocking=True)
             cu_seqlens = async_tensor_h2d(
                 cu_seqlens, dtype=torch.int32, device=pixel_values.device
             )
-            sample_indices = torch.concat(sample_indices, dim=0).to(
-                pixel_values.device, non_blocking=True
-            )
+            sample_indices = torch.concat(
+                sample_indices,
+                dim=0,
+                out=torch.empty(
+                    sum(t.numel() for t in sample_indices),
+                    dtype=torch.int64,
+                    pin_memory=PIN_MEMORY,
+                ),
+            ).to(pixel_values.device, non_blocking=True)
 
             image_embeds = self.visual(
                 pixel_values=pixel_values,
@@ -1366,16 +1371,29 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
             )
         else:
             pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
-            # These are host-built; stage them over non-blocking.
-            siglip_position_ids = torch.concat(siglip_position_ids, dim=0).to(
-                pixel_values_videos.device, non_blocking=True
-            )
+            # These are host-built; concat straight into pinned buffers so
+            # the H2D copies stay non-blocking.
+            siglip_position_ids = torch.concat(
+                siglip_position_ids,
+                dim=0,
+                out=torch.empty(
+                    sum(t.numel() for t in siglip_position_ids),
+                    dtype=torch.int64,
+                    pin_memory=PIN_MEMORY,
+                ),
+            ).to(pixel_values_videos.device, non_blocking=True)
             cu_seqlens = async_tensor_h2d(
                 cu_seqlens, dtype=torch.int32, device=pixel_values_videos.device
             )
-            sample_indices = torch.concat(sample_indices, dim=0).to(
-                pixel_values_videos.device, non_blocking=True
-            )
+            sample_indices = torch.concat(
+                sample_indices,
+                dim=0,
+                out=torch.empty(
+                    sum(t.numel() for t in sample_indices),
+                    dtype=torch.int64,
+                    pin_memory=PIN_MEMORY,
+                ),
+            ).to(pixel_values_videos.device, non_blocking=True)
 
             video_embeds = self.visual(
                 pixel_values=pixel_values_videos,

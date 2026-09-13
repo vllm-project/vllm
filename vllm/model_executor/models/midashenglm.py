@@ -26,7 +26,7 @@
 import collections
 import collections.abc
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Annotated, Any, TypeAlias, cast
+from typing import Annotated, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -36,7 +36,7 @@ from torch.nn.functional import scaled_dot_product_attention
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
@@ -570,6 +570,7 @@ class MiDashengLMDummyInputsBuilder(BaseDummyInputsBuilder[MiDashengLMProcessing
         num_audios = mm_counts.get("audio", 0)
 
         audio_overrides = mm_options.get("audio")
+        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
 
         return {
             "audio": self._get_dummy_audios(
@@ -583,15 +584,18 @@ class MiDashengLMDummyInputsBuilder(BaseDummyInputsBuilder[MiDashengLMProcessing
 class MiDashengLMMultiModalProcessor(
     BaseMultiModalProcessor[MiDashengLMProcessingInfo]
 ):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, Any],
-    ) -> BatchFeature:
-        audios = mm_data.pop("audios", [])
+    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
 
-        # + Padding
+    def _preprocess_hf_mm_data(
+        self,
+        mm_data: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        mm_data = dict(mm_data)
+        audios = mm_data.pop("audios", [])
+        assert isinstance(audios, list)
+
         min_audio_len = self.info.get_min_audio_len()
         processed_audios = [
             np.pad(
@@ -608,20 +612,7 @@ class MiDashengLMMultiModalProcessor(
         if processed_audios:
             mm_data["audio"] = processed_audios
 
-        if not mm_data.get("audio", []):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        mm_kwargs = dict(
-            **mm_kwargs,
-        )
-
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-        )
+        return mm_data, hf_processor_mm_kwargs
 
     def _get_mm_fields_config(
         self,
@@ -648,6 +639,7 @@ class MiDashengLMMultiModalProcessor(
 
         out_mm_data = out_mm_kwargs.get_data()
         audio_length = out_mm_data.get("audio_length")
+        audio_output_lengths: list[int]
         if audio_length is None:
             audio_output_lengths = []
         else:
@@ -656,10 +648,13 @@ class MiDashengLMMultiModalProcessor(
                 if isinstance(audio_length, torch.Tensor)
                 else audio_length
             )
-            audio_output_lengths = [
-                max(1, calculate_mel_frames_dasheng(int(length)))  # at least one frame
-                for length in audio_length_np
-            ]
+            assert isinstance(audio_length_np, (list, tuple, np.ndarray))
+            audio_output_lengths = []
+            for length in audio_length_np:
+                assert isinstance(length, (int, np.integer))
+                audio_output_lengths.append(
+                    max(1, calculate_mel_frames_dasheng(int(length)))
+                )
 
         def get_replacement_midashenglm(item_idx: int):
             num_features = audio_output_lengths[item_idx]
@@ -673,7 +668,7 @@ class MiDashengLMMultiModalProcessor(
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_midashenglm,
             )
         ]

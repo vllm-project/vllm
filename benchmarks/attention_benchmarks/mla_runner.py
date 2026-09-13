@@ -313,6 +313,9 @@ _BACKEND_PROPERTIES = {
     "FLASHMLA_SPARSE": {
         "query_format": "concat",  # Single concatenated tensor (vs tuple)
     },
+    "FLASHINFER_MLA_SPARSE": {
+        "query_format": "concat",  # Single concatenated tensor (vs tuple)
+    },
 }
 
 
@@ -406,10 +409,6 @@ def _build_attention_metadata(
     seq_lens_cpu = torch.tensor(kv_lens, dtype=torch.int32)
     seq_lens_gpu = seq_lens_cpu.to(device)
 
-    # Build num_computed_tokens (context length for each request)
-    context_lens = [kv_len - q_len for q_len, kv_len in zip(q_lens, kv_lens)]
-    num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
-
     # Build block table
     num_blocks_per_req = [(kv + block_size - 1) // block_size for kv in kv_lens]
     max_num_blocks = max(num_blocks_per_req)
@@ -451,8 +450,6 @@ def _build_attention_metadata(
         query_start_loc_cpu=q_start_cpu,
         seq_lens=seq_lens_gpu,
         seq_lens_cpu_upper_bound=seq_lens_cpu,
-        _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=num_computed_tokens_cpu,
         slot_mapping=slot_mapping,
         block_table_tensor=block_table_gpu,
         dcp_local_seq_lens=None,
@@ -1184,6 +1181,35 @@ def _run_mla_benchmark_batched(
                     )
         # Run each benchmark with the shared impl
         for config, threshold, num_splits in configs_with_params:
+            force_masked_mha = (
+                is_sparse and getattr(config, "sparse_mla_mha_mode", "auto") == "masked"
+            )
+            if force_masked_mha:
+                impl.masked_mha_available = True
+                from vllm.model_executor.layers.attention.sparse_mla_attention import (
+                    GLOBAL_TOPK_MASK_MAX_BYTES,
+                    _topk_mask_shape,
+                )
+
+                requests = parse_batch_spec(config.batch_spec)
+                max_query_len = max(request.q_len for request in requests)
+                mask_shape = _topk_mask_shape(
+                    len(requests), max_query_len, max_query_len
+                )
+                mask_words = max(
+                    GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize,
+                    mask_shape[0] * mask_shape[1] * mask_shape[2],
+                )
+                if (
+                    builder_instance.topk_mask_workspace is None
+                    or builder_instance.topk_mask_workspace.numel() != mask_words
+                ):
+                    builder_instance.topk_mask_workspace = torch.zeros(
+                        mask_words,
+                        dtype=torch.int32,
+                        device=device,
+                    )
+
             # Set threshold for this benchmark (FlashAttn/FlashMLA only)
             original_threshold = None
             effective_threshold = threshold

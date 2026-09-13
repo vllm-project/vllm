@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import TokensPrompt
@@ -12,6 +11,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalKwargsItems
+from vllm.multimodal.processing.processor import (
+    MultiModalProcessingInfo,
+    ProcessorInputs,
+    TimingContext,
+)
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding, SupportsMultiModal, SupportsScoreTemplate
@@ -54,19 +59,40 @@ class JinaVLScorer(nn.Module):
 
 
 class JinaVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
-    def _call_hf_processor(
+    def _cached_apply_hf_processor(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        # NOTE: We should reverse the order of the mm_data because the
-        # query prompt is placed after the document prompt in the score
-        # template for JinaVLForRanking model, but in mm_data they are
-        # stored in the opposite order (query first, then document).
-        for _, value in mm_data.items():
-            value.reverse()
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs)
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalProcessingInfo:
+        mm_info = super()._cached_apply_hf_processor(inputs, timing_ctx)
+
+        # Score inputs are query-first, while the prompt template is document-first.
+        mm_kwargs = MultiModalKwargsItems(
+            {
+                modality: list(reversed(items))
+                for modality, items in mm_info.kwargs.items()
+            }
+        )
+        mm_hashes = {
+            modality: list(reversed(hashes))
+            for modality, hashes in mm_info.hashes.items()
+        }
+        mm_prompt_updates = {
+            modality: [
+                [
+                    self._recompute_cached_prompt_update(update, item_idx)
+                    for update in updates
+                ]
+                for item_idx, updates in enumerate(reversed(item_updates))
+            ]
+            for modality, item_updates in mm_info.prompt_updates.items()
+        }
+
+        return MultiModalProcessingInfo(
+            kwargs=mm_kwargs,
+            hashes=mm_hashes,
+            prompt_updates=mm_prompt_updates,
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(

@@ -207,7 +207,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 from math import lcm
-from typing import ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast
 
 import numpy as np
 import torch
@@ -246,7 +246,10 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization import (
+    QuantizationConfig,
+    resolve_quant_method,
+)
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -262,6 +265,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv, round_down, round_up
 from vllm.utils.torch_utils import (
+    PIN_MEMORY,
     LayerNameType,
     _encode_layer_name,
     _resolve_layer_name,
@@ -280,6 +284,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MLAAttentionImpl,
 )
+from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.prefill import (
     MLAPrefillBackend,
     get_mla_prefill_backend,
@@ -304,6 +309,11 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     get_kv_quant_mode,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.attention.backends.mla.index_group import (
+        SparseMLAIndexGroupBuilder,
+    )
 
 logger = init_logger(__name__)
 
@@ -352,6 +362,10 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
 ) -> CacheDType:
     backend_name = attn_backend.get_name()
     if backend_name == "FLASHMLA_SPARSE" and is_quantized_kv_cache(kv_cache_dtype):
+        # The NVFP4 DS-MLA format is used as-is; any other quantized dtype
+        # (fp8, fp8_e4m3, ...) is served via the fp8_ds_mla format.
+        if kv_cache_dtype == "nvfp4_ds_mla":
+            return kv_cache_dtype
         return "fp8_ds_mla"
     if backend_name == "FLASHINFER_MLA_SPARSE_SM120" and kv_cache_dtype in (
         "auto",
@@ -373,12 +387,18 @@ def _get_kv_b_proj_input_dtype(
         return None
     if weight_dtype == current_platform.fp8_dtype():
         from vllm.model_executor.layers.quantization.modelopt import (
-            ModelOptFp8PbWoLinearMethod,
+            ModelOptLinearMethod,
+        )
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kFp8Static128BlockSym,
         )
 
         quant_method = getattr(kv_b_proj, "quant_method", None)
         # FP8_PB_WO dynamically quantizes BF16/FP16 inputs in the linear method.
-        if isinstance(quant_method, ModelOptFp8PbWoLinearMethod):
+        if (
+            isinstance(quant_method, ModelOptLinearMethod)
+            and quant_method.spec.weight is kFp8Static128BlockSym
+        ):
             return quant_method.input_dtype
         if not use_fp8_prefill:
             return None
@@ -400,6 +420,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     """
 
     supports_dense_mha_prefill: ClassVar[bool] = True
+    # Under PCP+DCP only the decode rows carry an LSE; the base forward
+    # merges a full-batch LSE, so subclasses opt in with their own forward.
+    supports_pcp_dcp: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -419,6 +442,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         use_sparse: bool = False,
         indexer: object | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        index_group_builder: "SparseMLAIndexGroupBuilder | None" = None,
         non_causal_multi_token_decode: bool = False,
         sliding_window: int | None = None,
         prefill_backend_cls: type[MLAPrefillBackend] | None = None,
@@ -524,9 +548,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # explicitly so backbone "skip" layers (indexer=None) still find it.
         if use_sparse:
             extra_impl_args["topk_indices_buffer"] = topk_indices_buffer
+            if index_group_builder is not None:
+                extra_impl_args["index_group_builder"] = index_group_builder
 
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
-        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an MLAAttentionImpl subclass
+        impl = impl_cls(
             num_heads=self.num_heads,
             head_size=self.head_size,
             scale=self.scale,
@@ -548,12 +574,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             indexer=indexer,
             **extra_impl_args,
         )
+        self.impl = impl  # type: ignore[assignment]
+        index_group = getattr(impl, "index_group", None)
+        self.hisparse_cache = (
+            index_group.cache(cast(Any, impl).index_group_index)
+            if isinstance(index_group, HiSparseMLAIndexGroup)
+            else None
+        )
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.is_amx_bmm_enabled = getattr(self.impl, "uses_amx_bmm", False)
-        # AMX reads kv_b_proj's weight directly and never calls it live; the
-        # reference CPU MLA backend calls it but isn't perf-critical. Skip
-        # the packed-kernel dispatch either way.
-        kv_b_proj._cpu_skip_gemm_dispatch = True
+        # MLA reads this weight directly to build W_UK/W_UV, so a backend must
+        # not relayout it at load time.
+        kv_b_proj.skip_weight_relayout = True
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         vllm_config = get_current_vllm_config()
@@ -604,6 +636,37 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.use_sparse = use_sparse
 
+        if vllm_config.kernel_config.enable_jit_warmup:
+            backend_name = self.attn_backend.get_name()
+            if backend_name in (
+                "FLASHMLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE_SM120",
+                "DEEPSEEK_V32_INDEXER",
+            ):
+                from vllm.v1.attention.backends.mla.compressor_utils import (
+                    _COMPRESSED_SLOT_MAPPING_KERNEL,
+                )
+                from vllm.v1.attention.backends.mla.indexer import (
+                    _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+                    _PREPARE_UNIFORM_DECODE_KERNEL,
+                )
+
+                _COMPRESSED_SLOT_MAPPING_KERNEL.register_warmup()
+                _PREPARE_UNIFORM_DECODE_KERNEL.register_warmup()
+                _BUILD_PREFILL_CHUNK_METADATA_KERNEL.register_warmup()
+
+                if backend_name != "DEEPSEEK_V32_INDEXER":
+                    from vllm.v1.attention.backends.mla.sparse_swa import (
+                        _COMPUTE_PREFILL_METADATA_KERNEL,
+                    )
+
+                    _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
+
+        if self.use_pcp and self.impl.dcp_world_size > 1 and not self.supports_pcp_dcp:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not support PCP+DCP."
+            )
         self.dcp_manager: MLADCPManager | None = None
         if self.impl.dcp_world_size > 1:
             query_dtype = (
@@ -649,6 +712,30 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             compile_native=True,
         )
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
+        if (
+            self._vllm_config.kernel_config.enable_jit_warmup
+            and self.attn_backend.get_name()
+            in (
+                "FLASHMLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE",
+                "FLASHINFER_MLA_SPARSE_SM120",
+                "DEEPSEEK_V32_INDEXER",
+            )
+        ):
+            from vllm.v1.attention.backends.mla.sparse_utils import (
+                _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL,
+            )
+
+            row_width = self.kv_cache.shape[-1]
+            assert self.kv_cache.stride(0) % row_width == 0
+            _CONVERT_REQ_INDEX_TO_GLOBAL_INDEX_KERNEL.register_warmup(
+                self._vllm_config,
+                block_stride_rows=self.kv_cache.stride(0) // row_width,
+            )
+
     @property
     def chunked_prefill_workspace_size(self) -> int:
         if self._chunked_prefill_workspace_size is None:
@@ -658,6 +745,61 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             )
         return self._chunked_prefill_workspace_size
+
+    def update_kv_cache(
+        self,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor | None,
+        attn_metadata: "MLACommonMetadata | None",
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor,
+    ) -> None:
+        cache = self.hisparse_cache
+        if slot_mapping is None or (cache is not None and cache.dummy_batch):
+            return
+        kv_c_normed, k_pe, slot_mapping = maybe_gather_mla_latent_cache_inputs(
+            kv_c_normed,
+            k_pe,
+            slot_mapping,
+            attn_metadata.num_decode_tokens if attn_metadata is not None else None,
+            self.use_pcp,
+        )
+        assert slot_mapping is not None
+        if cache is not None:
+            kv_cache, slot_mapping, num_rows = cache.write_target(
+                kv_c_normed.shape[0], slot_mapping.numel()
+            )
+            kv_c_normed = kv_c_normed[:num_rows]
+            k_pe = k_pe[:num_rows]
+        self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+            kv_c_normed,
+            k_pe,
+            kv_cache,
+            slot_mapping,
+            kv_cache_dtype,
+            k_scale,
+        )
+        if cache is not None:
+            mirror_target = cache.mirror_write_target(kv_c_normed.shape[0])
+            if mirror_target is not None:
+                mirror_cache, mirror_slots = mirror_target
+                self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+                    kv_c_normed,
+                    k_pe,
+                    mirror_cache,
+                    mirror_slots,
+                    kv_cache_dtype,
+                    k_scale,
+                )
+
+    def prepare_kv_cache_update(
+        self, attn_metadata: "MLACommonMetadata | None"
+    ) -> None:
+        cache = self.hisparse_cache
+        if cache is not None and cache.runtime.is_group_leader:
+            cache.prepare_group_for_batch(attn_metadata)
 
     def forward(
         self,
@@ -686,25 +828,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
             layer_slot_mapping = slot_mapping.get(self.layer_name)
-            kv_for_cache, kpe_for_cache, layer_slot_mapping = (
-                maybe_gather_mla_latent_cache_inputs(
-                    kv_c_normed,
-                    k_pe,
-                    layer_slot_mapping,
-                    attn_metadata.num_decode_tokens
-                    if attn_metadata is not None
-                    else None,
-                    self.use_pcp,
-                )
-            )
-            self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-                kv_for_cache,
-                kpe_for_cache,
+            self.prepare_kv_cache_update(attn_metadata)
+            self.update_kv_cache(
+                kv_c_normed,
+                k_pe,
                 self_kv_cache,
                 layer_slot_mapping,
+                attn_metadata,
                 self.kv_cache_dtype,
                 self._k_scale,
             )
+            if self.hisparse_cache is not None:
+                self.hisparse_cache.finish_kv_update()
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
             self.forward_impl(
                 q,
@@ -810,7 +945,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
-        if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
+        if fp8_attention and self.kv_cache_dtype not in (
+            # Opaque per-token byte formats stay as raw uint8
+            "fp8_ds_mla",
+            "nvfp4_ds_mla",
+        ):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         assert (
@@ -820,27 +959,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         num_mqa_tokens = attn_metadata.num_decode_tokens
         num_mha_tokens = q.size(0) - num_mqa_tokens
+        use_mha = True
 
         if self.impl.is_sparse and num_mha_tokens > 0:
-            prefill = getattr(attn_metadata, "prefill", None)
-            use_dense_mha = getattr(prefill, "use_dense_mha", False)
-            prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
-            use_masked_mha = (
-                self.prefill_backend is not None
-                and self.impl.masked_mha_available  # type: ignore[attr-defined]
-                and self.impl.dcp_world_size <= 1
-                and prefill is not None
-                and _use_masked_mha(
-                    backend_name=self.attn_backend.get_name(),
-                    tensor_parallel_size=self._vllm_config.parallel_config.tensor_parallel_size,
-                    query_len=prefill.max_query_len,
-                    seq_len=prefill_max_seq_len,
-                )
-                and self.impl.masked_mha_workspace_fits(prefill)  # type: ignore[attr-defined]
-            )
-            use_mha = (use_dense_mha or use_masked_mha) and not (
-                self._vllm_config.attention_config.sparse_mla_force_mqa
-            )
+            use_mha = self._use_sparse_mha(attn_metadata)
             if not use_mha:
                 num_mqa_tokens = q.size(0)
                 num_mha_tokens = 0
@@ -946,14 +1068,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 if self.q_pad_num_heads is not None:
                     mqa_ql_nope = mqa_q_nope.new_empty((self.q_pad_num_heads, B, L))
                     mqa_ql_nope.resize_((N, B, L))
+                    # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+                    torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope)
+                    # Convert from (N, B, L) to (B, N, L)
+                    mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
                 else:
-                    mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
-
-                # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-                torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope)
-
-                # Convert from (N, B, L) to (B, N, L)
-                mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
+                    # Write the (N, B, L) bmm result straight into a
+                    # token-major (B, N, L) buffer so the MQA query is already
+                    # contiguous; a NoPE model (qk_rope_head_dim == 0) then
+                    # needs no concat at all.
+                    mqa_ql_nope = mqa_q_nope.new_empty((B, N, L))
+                    torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope.transpose(0, 1))
 
             if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
@@ -988,16 +1113,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if self.impl.dcp_world_size > 1:
                 assert lse is not None
                 assert self.dcp_manager is not None
-                seq_lens = (
-                    attn_metadata.decode.seq_lens
-                    if attn_metadata.decode is not None
-                    else cast(torch.Tensor, attn_metadata.seq_lens)[  # type: ignore[attr-defined]
-                        : attn_metadata.num_decodes
+                decode_metadata = getattr(attn_metadata, "decode", None)
+                if not use_mha:
+                    seq_lens = cast(torch.Tensor, attn_metadata.seq_lens)  # type: ignore[attr-defined]
+                    query_start_loc = attn_metadata.query_start_loc
+                else:
+                    seq_lens = (
+                        decode_metadata.seq_lens
+                        if decode_metadata is not None
+                        else cast(torch.Tensor, attn_metadata.seq_lens)[  # type: ignore[attr-defined]
+                            : attn_metadata.num_decodes
+                        ]
+                    )
+                    query_start_loc = attn_metadata.query_start_loc[
+                        : attn_metadata.num_decodes + 1
                     ]
-                )
-                query_start_loc = attn_metadata.query_start_loc[
-                    : attn_metadata.num_decodes + 1
-                ]
                 attn_out = self.dcp_manager.combine(
                     attn_out,
                     lse,
@@ -1052,6 +1182,33 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if self.use_pcp and output_padded.shape[0] > num_actual_toks:
             output_padded[num_actual_toks:].zero_()
         return output_padded
+
+    def _use_sparse_mha(self, attn_metadata: "MLACommonMetadata") -> bool:
+        if self.hisparse_cache is not None:
+            return False
+        prefill = attn_metadata.prefill
+        if prefill is None:
+            return False
+        use_masked_mha = (
+            self.prefill_backend is not None
+            and self.impl.masked_mha_available  # type: ignore[attr-defined]
+            and self.impl.dcp_world_size <= 1
+            and _use_masked_mha(
+                backend_name=self.attn_backend.get_name(),
+                tensor_parallel_size=(
+                    self._vllm_config.parallel_config.tensor_parallel_size
+                ),
+                qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                query_len=prefill.max_query_len,
+                seq_len=attn_metadata.prefill_max_seq_len,  # type: ignore[attr-defined]
+                has_context=prefill.chunked_context is not None,
+            )
+            and self.impl.masked_mha_workspace_fits(prefill)  # type: ignore[attr-defined]
+        )
+        return (prefill.use_dense_mha or use_masked_mha) and not (
+            self._vllm_config.attention_config.sparse_mla_force_mqa
+        )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # Let per-backend impls do their own weight packing first (no-op
@@ -1177,7 +1334,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
         # for more details.
         quant_method = (
-            self.quant_config.get_quant_method(self, prefix=self.layer_name)
+            resolve_quant_method(self.quant_config, self, prefix=self.layer_name)
             if self.quant_config
             else None
         )
@@ -1198,9 +1355,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
-            # fp8_ds_mla: 656-byte custom layout (kv_lora_rank=512 +
-            # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
-            state_content_bytes=656 if self.kv_cache_dtype == "fp8_ds_mla" else None,
+            # ds_mla layouts pack NoPE + RoPE + scales into one opaque per-token
+            # blob, so the size is not derivable from head_size.
+            # See flashmla_sparse.py.
+            state_content_bytes={"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}.get(
+                self.kv_cache_dtype
+            ),
         )
         if self.sliding_window is not None:
             return SlidingWindowMLASpec(
@@ -1209,6 +1369,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         return MLAAttentionSpec(
             **common_kwargs,
+            is_index_group_leader=self.indexer is not None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
 
@@ -1262,19 +1423,14 @@ def unified_mla_kv_cache_update(
     attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
         layer_name
     )
+    attn_layer.prepare_kv_cache_update(attn_metadata)
     if layer_slot_mapping is not None:
-        kv_c_normed, k_pe, layer_slot_mapping = maybe_gather_mla_latent_cache_inputs(
-            kv_c_normed,
-            k_pe,
-            layer_slot_mapping,
-            attn_metadata.num_decode_tokens if attn_metadata is not None else None,
-            attn_layer.use_pcp,
-        )
-        attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+        attn_layer.update_kv_cache(
             kv_c_normed,
             k_pe,
             kv_cache,
             layer_slot_mapping,
+            attn_metadata,
             kv_cache_dtype,
             k_scale,
         )
@@ -1322,6 +1478,8 @@ def unified_mla_attention_with_output(
     del kv_cache_dummy_dep
     layer_name = _resolve_layer_name(layer_name)
     attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
+    if layer.hisparse_cache is not None:
+        layer.hisparse_cache.finish_kv_update()
     layer.forward_impl(
         q,
         kv_c_normed,
@@ -1339,29 +1497,10 @@ def unified_mla_attention_with_output(
     )
 
 
-def unified_mla_attention_with_output_fake(
-    q: torch.Tensor,
-    kv_c_normed: torch.Tensor,
-    k_pe: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: LayerNameType,
-    output_scale: torch.Tensor | None = None,
-    output_block_scale: torch.Tensor | None = None,
-    kv_cache_dummy_dep: torch.Tensor | None = None,
-    quant_group_size: int | None = None,
-    quant_scale_ue8m0: bool | None = None,
-    quant_col_major: bool | None = None,
-    quant_tma_aligned: bool | None = None,
-    q_dcp_replicated: torch.Tensor | None = None,
-) -> None:
-    return
-
-
 direct_register_custom_op(
     op_name="unified_mla_attention_with_output",
     op_func=unified_mla_attention_with_output,
     mutates_args=["output", "output_block_scale"],
-    fake_impl=unified_mla_attention_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
     tags=(torch.Tag.flexible_layout,),
 )
@@ -1433,6 +1572,7 @@ class MLACommonBackend(AttentionBackend):
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
         """Per-token-head modes pack an inline fp32 scale pair after the
         latent data (single-sided: ``head_size_v == 0`` for MLA)."""
+        spec = super().customize_spec(spec)
         mode = spec.kv_quant_mode
         if spec.state_content_bytes is not None or not mode.is_per_token_head:
             return spec
@@ -1451,30 +1591,9 @@ class MLACommonBackend(AttentionBackend):
     def get_builder_cls() -> type["MLACommonMetadataBuilder"]:
         return MLACommonMetadataBuilder
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
-
-    @staticmethod
-    def get_kv_cache_stride_order(
-        include_num_layers_dimension: bool = False,
-    ) -> tuple[int, ...]:
-        if include_num_layers_dimension:
-            # Default to identity permutation to signal cross-layer allocation
-            # is unsupported. Each MLA backend must opt in to support cross-layer
-            # allocation by overriding this method.
-            return (0, 1, 2, 3)
-        return (0, 1, 2)
-
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [320, 576]
+        return [320, 512, 576]
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -1502,6 +1621,7 @@ class MLACommonPrefillMetadata:
         max_seq_len: int
         seq_lens: torch.Tensor
         token_to_seq: torch.Tensor
+        all_rows_active: bool
 
         # for mla DCP
         padded_local_seq_lens: list[int] | None = None
@@ -1630,36 +1750,121 @@ def get_mla_dims(model_config: ModelConfig) -> MLADims:
     )
 
 
-_DSV32_MASKED_MHA_THRESHOLDS: dict[str, dict[int, tuple[int | None, ...]]] = {
-    "FLASHMLA_SPARSE": {
-        1: (1536, 4096, None, None, None),
-        2: (512, 1024, 4096, None, None),
-        4: (512, 1024, 1536, 8192, None),
-        8: (512, 512, 1024, 2048, 16384),
+_MaskedMHARanges = tuple[tuple[int, int], ...]
+
+_MASKED_MHA_THRESHOLDS: dict[
+    tuple[int, int],
+    dict[str, dict[int, tuple[_MaskedMHARanges, _MaskedMHARanges | None]]],
+] = {
+    (192, 128): {
+        "FLASHMLA_SPARSE": {
+            1: (((2048, 1536), (4096, 4096)), None),
+            2: (((2048, 512), (4096, 1024), (8192, 4096)), None),
+            4: (
+                ((2048, 512), (4096, 1024), (8192, 1536), (16384, 8192)),
+                None,
+            ),
+            8: (
+                (
+                    (2048, 512),
+                    (4096, 512),
+                    (8192, 1024),
+                    (16384, 2048),
+                    (32768, 16384),
+                ),
+                None,
+            ),
+        },
+        "FLASHINFER_MLA_SPARSE": {
+            8: (
+                (
+                    (2048, 512),
+                    (4096, 1024),
+                    (8192, 1024),
+                    (16384, 2048),
+                    (32768, 32768),
+                ),
+                None,
+            ),
+        },
     },
-    "FLASHINFER_MLA_SPARSE": {
-        8: (512, 1024, 1024, 2048, 32768),
+    (256, 256): {
+        "FLASHMLA_SPARSE": {
+            1: (((8 * 1024, 0),), ()),
+            2: (
+                ((20 * 1024, 0),),
+                ((6 * 1024, 4 * 1024), (10 * 1024, 8 * 1024)),
+            ),
+            4: (
+                ((48 * 1024, 0),),
+                (
+                    (8 * 1024, 4 * 1024),
+                    (16 * 1024, 8 * 1024),
+                    (24 * 1024, 16 * 1024),
+                    (34 * 1024, 32 * 1024),
+                ),
+            ),
+            8: (
+                ((112 * 1024, 0),),
+                (
+                    (8 * 1024, 4 * 1024),
+                    (16 * 1024, 8 * 1024),
+                    (32 * 1024, 16 * 1024),
+                    (48 * 1024, 32 * 1024),
+                ),
+            ),
+        },
+        "FLASHINFER_MLA_SPARSE": {
+            4: (
+                ((36 * 1024, 0),),
+                (
+                    (12 * 1024, 4 * 1024),
+                    (16 * 1024, 8 * 1024),
+                    (24 * 1024, 16 * 1024),
+                    (28 * 1024, 24 * 1024),
+                ),
+            ),
+            8: (
+                ((64 * 1024, 0),),
+                (
+                    (20 * 1024, 4 * 1024),
+                    (24 * 1024, 8 * 1024),
+                    (32 * 1024, 16 * 1024),
+                    (48 * 1024, 32 * 1024),
+                    (56 * 1024, 40 * 1024),
+                    (64 * 1024, 48 * 1024),
+                    (72 * 1024, 56 * 1024),
+                ),
+            ),
+        },
     },
 }
-_DSV32_SEQ_LEN_BUCKETS = (2048, 4096, 8192, 16384, 32768)
 
 
 def _use_masked_mha(
     *,
     backend_name: str,
     tensor_parallel_size: int,
+    qk_head_dim: int,
+    v_head_dim: int,
     query_len: int,
     seq_len: int,
+    has_context: bool,
 ) -> bool:
-    thresholds = _DSV32_MASKED_MHA_THRESHOLDS.get(backend_name, {}).get(
-        tensor_parallel_size
+    thresholds = (
+        _MASKED_MHA_THRESHOLDS.get((qk_head_dim, v_head_dim), {})
+        .get(backend_name, {})
+        .get(tensor_parallel_size)
     )
     if thresholds is None:
         return False
-    for bucket_idx, bucket_seq_len in enumerate(_DSV32_SEQ_LEN_BUCKETS):
-        if seq_len <= bucket_seq_len:
-            min_query_len = thresholds[bucket_idx]
-            return min_query_len is not None and query_len >= min_query_len
+    pure_prefill_ranges, context_ranges = thresholds
+    ranges = pure_prefill_ranges
+    if has_context and context_ranges is not None:
+        ranges = context_ranges
+    for max_seq_len, min_query_len in ranges:
+        if seq_len <= max_seq_len:
+            return query_len >= min_query_len
     return False
 
 
@@ -1957,7 +2162,11 @@ def build_mla_chunked_context_metadata(
         local_token_offset += num_local_tokens
 
     seq_lens_cpu = _flat_int32(seq_lens_flat)
-    starts = _flat_int32(starts_flat).to(device, non_blocking=True)
+    starts_and_context_lens = _flat_int32(starts_flat + context_lens).to(
+        device, non_blocking=True
+    )
+    starts = starts_and_context_lens[: len(starts_flat)]
+    context_lens_gpu = starts_and_context_lens[len(starts_flat) :]
     cu_seq_lens = _flat_int32(cu_seq_lens_flat).to(device, non_blocking=True)
     cu_seqlens_q = _flat_int32(cu_seqlens_q_flat).to(device, non_blocking=True)
     token_to_seq = _flat_int32(np.concatenate(token_to_seq_parts)).to(
@@ -1994,6 +2203,8 @@ def build_mla_chunked_context_metadata(
             max_seq_len=max(plan.seq_lens),
             seq_lens=seq_lens_cpu[request_slice],
             token_to_seq=token_to_seq[token_slice],
+            all_rows_active=all(length > 0 for length in query_lens)
+            and all(length > 0 for length in plan.seq_lens),
             num_local_context_tokens=local_token_slice.stop - local_token_slice.start,
         )
         if use_dcp:
@@ -2010,7 +2221,7 @@ def build_mla_chunked_context_metadata(
         chunks.append(chunk)
 
     return MLACommonPrefillMetadata.ChunkedContextMetadata(
-        context_lens=context_lens_cpu.to(device, non_blocking=True),
+        context_lens=context_lens_gpu,
         workspace=chunked_prefill_workspace,
         chunks=chunks,
         context_lens_list=context_lens,
@@ -2362,8 +2573,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc_cpu[reqs_start + 1 : num_reqs + 1]
                 - query_start_loc_cpu[reqs_start:num_reqs]
             )
-            context_lens_cpu = (
-                seq_lens_cpu[reqs_start:num_reqs] - prefill_query_lens_cpu
+            context_lens_cpu = torch.empty(
+                num_prefills, dtype=seq_lens_cpu.dtype, pin_memory=PIN_MEMORY
+            )
+            torch.subtract(
+                seq_lens_cpu[reqs_start:num_reqs],
+                prefill_query_lens_cpu,
+                out=context_lens_cpu,
             )
             prefill_query_start_loc = (
                 query_start_loc[reqs_start:] - query_start_loc[reqs_start]
@@ -2394,6 +2610,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 output_dtype=self.model_config.dtype,
                 q_data_type=self.q_data_type,
                 prefill_backend=self._prefill_backend,
+                query_lens_cpu=prefill_query_lens_cpu,
             )
 
             self._prefill_backend.prepare_metadata(prefill_metadata)
@@ -2694,21 +2911,33 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         output_lse = None
         for chunk in chunked_context.chunks:
             toks = chunk.num_context_tokens
-            block_table = prefill_metadata.block_table[chunk.request_slice]
+            chunk_block_table = prefill_metadata.block_table[chunk.request_slice]
             if self.kv_cache_dtype == "fp8_ds_mla":
                 ops.cp_gather_and_upconvert_fp8_kv_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace[:toks],
-                    block_table=block_table,
+                    block_table=chunk_block_table,
                     workspace_starts=chunk.cu_seq_lens,
                     batch_size=chunk.num_requests,
                     seq_starts=chunk.starts,
+                )
+            elif current_platform.is_cpu():
+                assert not is_quantized_kv_cache(self.kv_cache_dtype), (
+                    "CPU MLA context gather fallback only supports "
+                    f"non-quantized KV cache, got {self.kv_cache_dtype}"
+                )
+                ops.gather_mla_context_cache_cpu(
+                    src_cache=kv_c_and_k_pe_cache,
+                    dst=workspace[:toks],
+                    block_table=chunk_block_table,
+                    starts=chunk.starts,
+                    cu_seq_lens=chunk.cu_seq_lens,
                 )
             elif not use_fp8_prefill:
                 ops.gather_and_maybe_dequant_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace,
-                    block_table=block_table,
+                    block_table=chunk_block_table,
                     cu_seq_lens=chunk.cu_seq_lens,
                     token_to_seq=chunk.token_to_seq,
                     num_tokens=toks,
@@ -2721,7 +2950,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 ops.cp_gather_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace[:toks],
-                    block_table=block_table,
+                    block_table=chunk_block_table,
                     cu_seq_lens=chunk.cu_seq_lens,
                     batch_size=chunk.num_requests,
                     seq_starts=chunk.starts,
@@ -3064,9 +3293,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         parallel_config = get_current_vllm_config().parallel_config
         # Avoid requiring an initialized DCP group in tests.
         self.dcp_world_size: int = parallel_config.decode_context_parallel_size
-        self.cp_kv_cache_interleave_size: int = (
-            parallel_config.cp_kv_cache_interleave_size
-        )
 
     @abstractmethod
     def forward_mqa(
