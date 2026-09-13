@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+from vllm.distributed.eplb.async_worker import transfer_run_periodically
 from vllm.distributed.eplb.eplb_state import (
+    EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
 )
@@ -159,3 +162,165 @@ def test_commit_eplb_maps_for_layer():
 
     # Layer 1 untouched
     assert torch.equal(model_state.physical_to_logical_map[1], original_phy2log[1])
+
+
+def test_stop_async_loop_joins_worker_before_return():
+    state = EplbState.__new__(EplbState)
+    state.is_async = True
+    state.model_states = {}
+    state.async_worker_stop_event = threading.Event()
+    worker_started = threading.Event()
+    worker_exited = threading.Event()
+
+    def worker_target():
+        worker_started.set()
+        state.async_worker_stop_event.wait()
+        worker_exited.set()
+
+    worker = threading.Thread(target=worker_target)
+    state.async_worker = worker
+    worker.start()
+    assert worker_started.wait(timeout=1.0)
+
+    # Call stop_async_loop() and ensure that it waits for the worker to exit
+    state.stop_async_loop()
+
+    assert worker_exited.is_set()
+    assert not worker.is_alive()
+    assert state.async_worker is None
+
+
+def test_stop_async_loop_prevents_group_access_during_teardown():
+    wait_started = threading.Event()
+    release_wait = threading.Event()
+    group_destroyed = threading.Event()
+    worker_errors: list[Exception] = []
+    group_accesses_after_destroy: list[str] = []
+
+    class ControlledRearrangeEvent:
+        def wait(self, *, stream, stop_event):
+            wait_started.set()
+            assert release_wait.wait(timeout=1.0)
+            return True
+
+    class TeardownGroup:
+        def rank(self):
+            if group_destroyed.is_set():
+                group_accesses_after_destroy.append("rank")
+            return 0
+
+    state = EplbState.__new__(EplbState)
+    state.is_async = True
+    state.model_states = {}
+    state.rearrange_event = ControlledRearrangeEvent()
+    state.async_worker_stop_event = threading.Event()
+    eplb_group = TeardownGroup()
+
+    def worker_target():
+        try:
+            transfer_run_periodically(
+                state=state,
+                cuda_stream=None,
+                stop_event=state.async_worker_stop_event,
+                eplb_group=eplb_group,
+                eplb_cpu_group=eplb_group,
+            )
+        except Exception as exc:
+            worker_errors.append(exc)
+
+    worker = threading.Thread(target=worker_target)
+    state.async_worker = worker
+    worker.start()
+    assert wait_started.wait(timeout=1.0)
+
+    shutdown = threading.Thread(target=state.stop_async_loop)
+    shutdown.start()
+    assert state.async_worker_stop_event.wait(timeout=1.0)
+
+    group_destroyed.set()
+    release_wait.set()
+    shutdown.join(timeout=1.0)
+
+    assert not shutdown.is_alive()
+    assert not worker.is_alive()
+    assert state.async_worker is None
+    assert worker_errors == []
+    assert group_accesses_after_destroy == []
+
+
+def test_stop_async_loop_is_idempotent():
+    state = EplbState.__new__(EplbState)
+    state.async_worker = MagicMock()
+    state.async_worker_stop_event = threading.Event()
+    state.drain_async = MagicMock()
+    worker = state.async_worker
+
+    state.stop_async_loop()
+    state.stop_async_loop()
+
+    state.drain_async.assert_called_once_with()
+    worker.join.assert_called_once_with()
+    assert state.async_worker_stop_event.is_set()
+    assert state.async_worker is None
+
+
+def test_async_loop_can_restart_after_stop(monkeypatch):
+    state = EplbState.__new__(EplbState)
+    state.is_async = True
+    state.model_states = {}
+    state.async_worker_stop_event = threading.Event()
+    worker_started = threading.Event()
+
+    def worker_target():
+        worker_started.set()
+        state.async_worker_stop_event.wait()
+
+    old_worker = threading.Thread(target=worker_target)
+    state.async_worker = old_worker
+    old_worker.start()
+    assert worker_started.wait(timeout=1.0)
+
+    state.stop_async_loop()
+    assert not old_worker.is_alive()
+    assert state.async_worker_stop_event.is_set()
+
+    new_worker = MagicMock()
+
+    def fake_start_async_worker(started_state, stop_event, is_profile):
+        assert started_state is state
+        assert stop_event is state.async_worker_stop_event
+        assert not stop_event.is_set()
+        assert is_profile is False
+        return new_worker
+
+    monkeypatch.setattr(
+        "vllm.distributed.eplb.eplb_state.start_async_worker",
+        fake_start_async_worker,
+    )
+
+    state.start_async_loop()
+
+    assert state.async_worker is new_worker
+
+
+def test_stop_async_loop_drains_inflight_transfer_before_stop():
+    calls: list[str] = []
+    state = EplbState.__new__(EplbState)
+    state.async_worker_stop_event = threading.Event()
+    state.async_worker = MagicMock()
+
+    def drain_async():
+        assert not state.async_worker_stop_event.is_set()
+        calls.append("drain")
+
+    def join_worker():
+        assert state.async_worker_stop_event.is_set()
+        calls.append("join")
+
+    state.drain_async = drain_async
+    state.async_worker.join.side_effect = join_worker
+
+    state.stop_async_loop()
+
+    assert calls == ["drain", "join"]
+    assert state.async_worker is None
