@@ -9,6 +9,17 @@ from contextlib import contextmanager
 from typing import Any
 
 
+def redact_sensitive_namespace(
+    args: argparse.Namespace, fields: tuple[str, ...]
+) -> argparse.Namespace:
+    """Return a copy of CLI arguments with selected values redacted."""
+    redacted_args = argparse.Namespace(**vars(args))
+    for field in fields:
+        if getattr(redacted_args, field, None) is not None:
+            setattr(redacted_args, field, "***")
+    return redacted_args
+
+
 def extract_field(
     args: argparse.Namespace, extra_info: dict[str, Any], field_name: str
 ) -> str:
