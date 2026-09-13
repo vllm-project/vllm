@@ -1717,9 +1717,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_tables,
                 slot_mappings,
                 cg_mode=batch_desc.cg_mode,
-                # Same reason as the non-ubatched branch below: FULL replay
-                # reads capture-time metadata buffers, so a dummy run has to
-                # re-stage them from the zeroed dummy block tables.
                 for_capture=dummy_run and batch_desc.cg_mode == CUDAGraphMode.FULL,
             )
         elif not (dummy_run and skip_attn_for_dummy_run):
@@ -1820,9 +1817,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            # Explicit cudagraph replay, microbatched or not: prepare above
-            # staged this step's inputs into the persistent buffers the graph
-            # reads from, and the descriptor's num_ubatches picked the graph.
+            # Use explicit cudagraph replay for FULL mode.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
