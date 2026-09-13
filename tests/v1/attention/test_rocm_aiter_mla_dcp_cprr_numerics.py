@@ -157,6 +157,32 @@ def _install_fake_groups(dcp_size: int, cp_rank: int, tp_size: int = 1) -> None:
     mla_attention.get_dcp_group = lambda: dcp
 
 
+@pytest.fixture(autouse=True)
+def _restore_parallel_groups():
+    """Undo _install_fake_groups after every test.
+
+    It patches module globals in three modules, so without this the fake DCP
+    group leaks into the rest of the pytest session and silently breaks
+    unrelated tests that expect a real (or absent) group.
+    """
+    import vllm.distributed.parallel_state as ps
+    import vllm.model_executor.layers.attention.mla_attention as mla_attention
+    import vllm.v1.attention.backends.mla.rocm_aiter_mla as backend
+
+    saved = [
+        (mod, name, getattr(mod, name))
+        for mod, name in (
+            (ps, "get_dcp_group"),
+            (ps, "get_tp_group"),
+            (backend, "get_dcp_group"),
+            (mla_attention, "get_dcp_group"),
+        )
+    ]
+    yield
+    for mod, name, value in saved:
+        setattr(mod, name, value)
+
+
 class _PrefillBackendStub:
     """The base builder does ``attention_layer.prefill_backend.clone()``.
 

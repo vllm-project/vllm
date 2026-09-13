@@ -1278,8 +1278,14 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # build the GLOBAL per-request page indptr the cprr asm
         # kernel needs to apply global-position causal masking over this rank's
         # local round-robin KV shard (page_size==1, so pages==tokens).
+        # Only the cprr asm route consumes this, and only that route allocates
+        # the buffer; a DCP run on the segmented route must not enter here.
         g_kv_indptr = None
-        if self.dcp_world_size > 1 and g_tot_seq_lens is not None:
+        if (
+            self._asm_dcp_verify
+            and self.dcp_world_size > 1
+            and g_tot_seq_lens is not None
+        ):
             assert self._g_kv_indptr_buf is not None
             _ngk = g_tot_seq_lens.shape[0]
             g_kv_indptr = self._g_kv_indptr_buf[: _ngk + 1]
