@@ -436,12 +436,12 @@ def _make_sm8x_comparison_case(
     total_blocks = len(seq_lens) * max_blocks + 1
     packed = torch.randn(
         total_blocks,
-        num_kv_heads,
         block_size,
+        num_kv_heads,
         2 * head_dim,
         device="cuda",
         dtype=dtype,
-    )
+    ).transpose(1, 2)
     key_cache, value_cache = packed.transpose(1, 2).split(head_dim, dim=-1)
     block_table = (
         (torch.randperm(total_blocks - 1, device="cuda") + 1)
