@@ -99,6 +99,34 @@ fn find_last_user_render_index(messages: &[ChatMessage], render_offset: isize) -
 
 /// Render one real request message, using `render_offset` to account for any
 /// synthetic tool-only system turn that was already emitted before the loop.
+/// The user turn already wrote `<｜Assistant｜>`, so this text goes before it.
+fn system_folds_into_previous_user_turn(messages: &[ChatMessage], index: usize) -> bool {
+    if index == 0 || index >= messages.len() {
+        return false;
+    }
+    if !matches!(messages[index], ChatMessage::System { .. }) {
+        return false;
+    }
+    if !matches!(
+        messages[index - 1].role(),
+        ChatRole::User | ChatRole::Developer
+    ) {
+        return false;
+    }
+    index + 1 == messages.len() || matches!(messages[index + 1].role(), ChatRole::Assistant)
+}
+
+fn folded_system_content(messages: &[ChatMessage], index: usize) -> Option<&ChatContent> {
+    let next = index + 1;
+    if !system_folds_into_previous_user_turn(messages, next) {
+        return None;
+    }
+    match &messages[next] {
+        ChatMessage::System { content } => Some(content),
+        _ => None,
+    }
+}
+
 fn render_message(
     out: &mut String,
     messages: &[ChatMessage],
@@ -117,17 +145,24 @@ fn render_message(
     let after_or_at_last_user_turn = render_index >= last_user_render_index;
 
     match message {
-        ChatMessage::System { content } => render_system_message(out, Some(content), &[]),
+        ChatMessage::System { content } => {
+            if system_folds_into_previous_user_turn(messages, message_index) {
+                return Ok(());
+            }
+            render_system_message(out, Some(content), &[])
+        }
         ChatMessage::Developer { content, tools } => render_developer_message(
             out,
             content,
             tools.as_deref().unwrap_or(&[]),
             thinking_mode == ThinkingMode::Thinking && opens_thinking,
+            folded_system_content(messages, message_index),
         ),
         ChatMessage::User { content } => render_user_message(
             out,
             content,
             thinking_mode == ThinkingMode::Thinking && opens_thinking,
+            folded_system_content(messages, message_index),
         ),
         ChatMessage::Assistant { content } => render_assistant_message(
             out,
@@ -195,6 +230,7 @@ fn render_developer_message(
     content: &ChatContent,
     tools: &[ChatTool],
     opens_thinking: bool,
+    folded_system: Option<&ChatContent>,
 ) -> Result<()> {
     if content.is_empty() {
         return Err(Error::ChatTemplate(
@@ -209,6 +245,9 @@ fn render_developer_message(
     }
     out.push_str("\n\n# The user's message is: ");
     write_chat_content(out, content)?;
+    if let Some(folded) = folded_system {
+        write_chat_content(out, folded)?;
+    }
     write_user_like_suffix(out, opens_thinking);
     Ok(())
 }
@@ -219,9 +258,13 @@ fn render_user_message(
     out: &mut String,
     content: &ChatContent,
     opens_thinking: bool,
+    folded_system: Option<&ChatContent>,
 ) -> Result<()> {
     out.push_str("<｜User｜>");
     write_chat_content(out, content)?;
+    if let Some(folded) = folded_system {
+        write_chat_content(out, folded)?;
+    }
     write_user_like_suffix(out, opens_thinking);
     Ok(())
 }
