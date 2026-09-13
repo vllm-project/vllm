@@ -565,6 +565,49 @@ def test_aiter_moe_shared_experts_enablement_follows_env(
         assert rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() is expected
 
 
+@pytest.mark.parametrize(
+    ("vllm_flag", "aiter_flag", "expected"),
+    [
+        (True, True, True),
+        (True, False, True),
+        # aiter runs the interleaved a8w4 kernel off its own env var, so vLLM
+        # has to shuffle interleaved too. Before #52442 this combination left
+        # the kernel reading separated weights and silently produced garbage.
+        (False, True, True),
+        (False, False, False),
+    ],
+)
+def test_aiter_moe_situv2_a8w4_follows_both_env_vars(
+    vllm_flag: bool,
+    aiter_flag: bool,
+    expected: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The a8w4 SiTU gate must never disagree with aiter's own env var.
+
+    ``VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4`` drives the weight shuffle and
+    ``gate_mode`` on the vLLM side; ``AITER_SITUV2_A8W4`` drives the kernel
+    aiter picks. If either asks for the interleaved a8w4 path, both layouts
+    have to follow.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _assert_aiter_supported()
+
+    with monkeypatch.context() as mp:
+        mp.setenv("VLLM_ROCM_USE_AITER", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        mp.setenv("VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", "1" if vllm_flag else "0")
+        if aiter_flag:
+            mp.setenv("AITER_SITUV2_A8W4", "1")
+        else:
+            mp.delenv("AITER_SITUV2_A8W4", raising=False)
+        _reload_envs()
+        rocm_aiter_ops.refresh_env_variables()
+
+        assert rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled() is expected
+
+
 @pytest.mark.parametrize("moe_padding", [True, False])
 def test_aiter_moe_padding_env_var(
     moe_padding: bool,
