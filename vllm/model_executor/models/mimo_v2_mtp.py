@@ -45,7 +45,7 @@ from .interfaces import (
     SupportsMultiModal,
     _require_is_multimodal,
 )
-from .mimo_v2 import MiMoV2Attention, MiMoV2MLP
+from .mimo_v2 import MiMoV2Attention, MiMoV2MLP, _shard_fp8_qkv_proj
 from .utils import _merge_multimodal_embeddings, maybe_prefix
 
 # MiMo-V2 checkpoints contain multiple MTP layers, but vLLM currently supports
@@ -266,6 +266,8 @@ class MiMoV2MTP(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        # Buffers the fp8 fused qkv_proj weight/scale pair until both arrive.
+        pending_fp8_qkv_proj: dict[str, dict[str, torch.Tensor]] = {}
 
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -279,13 +281,49 @@ class MiMoV2MTP(nn.Module):
             ):
                 continue
 
-            # Support fused qkv_proj checkpoint (Pro format).
-            # The checkpoint is stored pre-sharded for TP=8 as
-            # [Q_rank0, K_rank0, V_rank0, Q_rank1, ...], so splitting along
-            # dim 0 with chunk(tp_size) gives each rank its Q+K+V slice for
-            # both the FP8 weight and the block weight_scale_inv. This matches
-            # how the main model loads the same layout.
+            # Support fused qkv_proj checkpoint (Pro format). The fused fp8
+            # weight and its block scale are stored as ``num_kv_heads`` stripes
+            # ``[Q | K | V]`` (one per KV head), so a plain ``chunk(tp_size)``
+            # only yields the right per-rank layout when tp_size == num_kv_heads.
+            # Reuse the main model's helper, which de-interleaves the stripes for
+            # any TP size (including tp_size > num_kv_heads, where K/V replicate).
             if "qkv_proj" in name:
+                is_weight = (
+                    name.endswith("qkv_proj.weight")
+                    and loaded_weight.dtype == torch.float8_e4m3fn
+                )
+                is_scale = name.endswith("qkv_proj.weight_scale_inv")
+                if is_weight or is_scale:
+                    prefix, qkv_kind = name.rsplit(".", 1)
+                    entry = pending_fp8_qkv_proj.setdefault(prefix, {})
+                    entry[qkv_kind] = loaded_weight
+                    if "weight" in entry and "weight_scale_inv" in entry:
+                        del pending_fp8_qkv_proj[prefix]
+                        attn = self.get_submodule(prefix.rsplit(".", 1)[0])
+                        w_rank, s_rank = _shard_fp8_qkv_proj(
+                            entry["weight"],
+                            entry["weight_scale_inv"],
+                            num_heads=attn.total_num_heads,
+                            num_kv_heads=attn.total_num_kv_heads,
+                            head_dim=attn.head_dim,
+                            v_head_dim=attn.v_head_dim,
+                            tp_rank=tp_rank,
+                            tp_size=tp_size,
+                        )
+                        for kind, tensor in (
+                            ("weight", w_rank),
+                            ("weight_scale_inv", s_rank),
+                        ):
+                            pname = f"{prefix}.{kind}"
+                            if pname not in params_dict:
+                                continue
+                            param = params_dict[pname]
+                            if tensor.shape[0] > param.shape[0]:
+                                tensor = tensor[: param.shape[0]]
+                            default_weight_loader(param, tensor)
+                            loaded_params.add(pname)
+                    continue
+                # Non-fp8 fused qkv: plain chunk (correct at tp == num_kv_heads).
                 if name in params_dict:
                     param = params_dict[name]
                     loaded_weight = loaded_weight.chunk(tp_size, dim=0)[tp_rank]
