@@ -11,14 +11,19 @@ The map/unmap methods touch only the two id<->id dicts, so we bind them to a
 lightweight stand-in rather than constructing a full scheduler.
 """
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    MoRIIOMode,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     MoRIIOConnectorScheduler,
+    MoRIIOConnectorWorker,
 )
 
 _map = MoRIIOConnectorScheduler.map_request_id
 _unmap = MoRIIOConnectorScheduler.unmap_request_id
+_update_state_after_alloc = MoRIIOConnectorScheduler.update_state_after_alloc
 
 
 def _sched():
@@ -66,3 +71,143 @@ def test_exact_match_preferred_over_transfer_id_fallback():
     _unmap(s, "rid-1", transfer_id="tid-1")
     assert s.request_id_to_transfer_id == {}
     assert s.transfer_id_to_request_id == {}
+
+
+def test_duplicate_transfer_id_keeps_first_owner():
+    s = _sched()
+    assert _map(s, "rid-a", "tid-shared") is True
+    assert _map(s, "rid-b", "tid-shared") is False
+    assert s.transfer_id_to_request_id == {"tid-shared": "rid-a"}
+    assert s.request_id_to_transfer_id == {"rid-a": "tid-shared"}
+
+
+def test_same_request_transfer_id_map_is_idempotent():
+    s = _sched()
+    assert _map(s, "rid-a", "tid-a") is True
+    assert _map(s, "rid-a", "tid-a") is True
+    assert s.transfer_id_to_request_id == {"tid-a": "rid-a"}
+    assert s.request_id_to_transfer_id == {"rid-a": "tid-a"}
+
+
+def test_transfer_id_can_be_reused_after_owner_unmaps():
+    s = _sched()
+    _map(s, "rid-a", "tid-shared")
+    _unmap(s, "rid-a")
+    assert _map(s, "rid-b", "tid-shared") is True
+    assert s.transfer_id_to_request_id == {"tid-shared": "rid-b"}
+    assert s.request_id_to_transfer_id == {"rid-b": "tid-shared"}
+
+
+def test_colliding_unmap_does_not_clear_live_owner():
+    s = _sched()
+    _map(s, "rid-a", "tid-shared")
+    _unmap(s, "rid-b", transfer_id="tid-shared")
+    assert s.transfer_id_to_request_id == {"tid-shared": "rid-a"}
+    assert s.request_id_to_transfer_id == {"rid-a": "tid-shared"}
+
+
+def test_prefixed_colliding_unmap_does_not_clear_live_owner():
+    """A colliding request id that only starts with the owner id is not
+    the input_processor ``-{8 hex}`` suffix and must not unmap the owner."""
+    s = _sched()
+    assert _map(s, "cmpl-owner", "tid-shared") is True
+    assert _map(s, "cmpl-owner-attacker-12345678", "tid-shared") is False
+
+    _unmap(
+        s,
+        "cmpl-owner-attacker-12345678",
+        transfer_id="tid-shared",
+    )
+
+    assert s.transfer_id_to_request_id == {"tid-shared": "cmpl-owner"}
+    assert s.request_id_to_transfer_id == {"cmpl-owner": "tid-shared"}
+
+
+def test_colliding_alloc_does_not_stage_producer_save():
+    s = _sched()
+    s._reqs_need_save = {}
+    s._req_kv_params = {}
+    s.map_request_id = MethodType(_map, s)
+    _map(s, "rid-a", "tid-shared")
+    request = SimpleNamespace(
+        request_id="rid-b",
+        kv_transfer_params={
+            "transfer_id": "tid-shared",
+            "do_remote_decode": True,
+        },
+    )
+    blocks = SimpleNamespace(get_block_ids=lambda: [[7, 8]])
+
+    _update_state_after_alloc(s, request, blocks, 0)
+
+    assert s.transfer_id_to_request_id == {"tid-shared": "rid-a"}
+    assert "rid-b" not in s.request_id_to_transfer_id
+    assert s._reqs_need_save == {}
+    assert s._req_kv_params == {}
+
+
+def test_colliding_alloc_does_not_stage_consumer_recv():
+    s = _sched()
+    s._reqs_need_recv = {}
+    s._req_kv_params = {}
+    s.map_request_id = MethodType(_map, s)
+    _map(s, "rid-a", "tid-shared")
+    request = SimpleNamespace(
+        request_id="rid-b",
+        kv_transfer_params={
+            "transfer_id": "tid-shared",
+            "do_remote_prefill": True,
+            "remote_block_ids": [1, 2],
+            "remote_engine_id": "eng",
+        },
+    )
+    blocks = SimpleNamespace(get_block_ids=lambda: [[1, 2]])
+
+    _update_state_after_alloc(s, request, blocks, 16)
+
+    assert s.transfer_id_to_request_id == {"tid-shared": "rid-a"}
+    assert s._reqs_need_recv == {}
+
+
+def test_unique_transfer_id_still_stages_producer_save():
+    s = _sched()
+    s._reqs_need_save = {}
+    s._req_kv_params = {}
+    s.map_request_id = MethodType(_map, s)
+    request = SimpleNamespace(
+        request_id="rid-a",
+        kv_transfer_params={
+            "transfer_id": "tid-a",
+            "do_remote_decode": True,
+        },
+    )
+    blocks = SimpleNamespace(get_block_ids=lambda: [[7, 8]])
+
+    _update_state_after_alloc(s, request, blocks, 0)
+
+    assert s.transfer_id_to_request_id == {"tid-a": "rid-a"}
+    assert s._reqs_need_save["rid-a"][1] == [7, 8]
+    assert s._req_kv_params["rid-a"]["transfer_id"] == "tid-a"
+
+
+def test_producer_completion_stays_on_first_transfer_owner():
+    class FakeWrapper:
+        def pop_finished_req_ids(self):
+            return ["tid-shared"]
+
+        def shutdown(self):
+            pass
+
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    worker.is_producer = True
+    worker.mode = MoRIIOMode.READ
+    worker.world_size = 1
+    worker.moriio_wrapper = FakeWrapper()
+    worker.transfer_id_to_request_id = {"tid-shared": "rid-a"}
+    worker._consumer_notification_counts = {}
+    worker._completed_consumer_notifications = set()
+    worker._pending_unmapped_acks = []
+
+    done_sending, done_recving = worker.get_finished()
+    assert done_sending == {"rid-a"}
+    assert done_recving == set()
