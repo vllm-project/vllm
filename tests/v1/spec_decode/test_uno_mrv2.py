@@ -1402,6 +1402,14 @@ def test_uno_startup_jit_self_check_uses_the_production_k8_batch_shape(
     assert observed_tokens == [11, 11, 11, 11]
 
 
+def test_uno_self_check_token_count_keeps_fixture_and_production_bounds_distinct():
+    """K=8 production is 11 rows; the 2048-row fixture remains intentional."""
+    from vllm.v1.worker.gpu.warmup import uno_self_check_token_count
+
+    assert uno_self_check_token_count(2048, 9) == 11
+    assert uno_self_check_token_count(2048, 2047) == 2048
+
+
 def test_uno_startup_jit_self_check_cannot_pass_unarmed_or_unreached(monkeypatch):
     """A skipped cycle or missing kernel counter is not a successful check."""
     from vllm.utils import jit_monitor

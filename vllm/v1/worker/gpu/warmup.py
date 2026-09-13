@@ -149,6 +149,17 @@ class UnoJitSelfCheck:
         )
 
 
+def uno_self_check_token_count(max_num_tokens: int, decode_query_len: int) -> int:
+    """Return the production-sized mixed-batch self-check shape.
+
+    The check deliberately adds two rows to the ordinary decode query length,
+    then caps that shape at the scheduler's token budget. For Uno K=8,
+    ``decode_query_len`` is 9, so a 2048-token deployment checks 11 rows; it
+    does not issue a full 2048-row startup request.
+    """
+    return min(max_num_tokens, max(3, decode_query_len + 2))
+
+
 @contextmanager
 def preserve_rng_state(device: torch.device | None) -> Iterator[None]:
     """Restore CPU and Uno CUDA generators after a startup-only operation."""
@@ -412,9 +423,9 @@ def run_uno_served_jit_self_check(
     try:
         with preserve_rng_state(getattr(model_runner, "device", None)):
             with capture_compilations() as compilations:
-                check_tokens = min(
+                check_tokens = uno_self_check_token_count(
                     model_runner.max_num_tokens,
-                    max(3, model_runner.decode_query_len + 2),
+                    model_runner.decode_query_len,
                 )
                 for mode in UNO_SAMPLING_MODES:
                     expected_branch = sampler_branch_for_mode(
