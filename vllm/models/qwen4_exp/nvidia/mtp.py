@@ -19,8 +19,10 @@ import regex as re
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.distributed import get_pp_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.utils import (
     is_model_fused_shared_expert_compatible,
 )
@@ -48,6 +50,7 @@ from vllm.transformers_utils.configs.qwen4_exp import (
     Qwen4ExpTextConfig,
 )
 
+from .fp8_proposal_head import Fp8ProposalHead
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .model import (
@@ -57,6 +60,48 @@ from .model import (
     Qwen4ExpMixtureOfExperts,
     Qwen4ExpSparseMoeBlock,
 )
+
+logger = init_logger(__name__)
+
+
+def _validate_fp8_proposal_head_config(vllm_config: VllmConfig) -> None:
+    model_config = vllm_config.model_config
+    parallel_config = vllm_config.parallel_config
+    unsupported: list[str] = []
+
+    if not vllm_config.use_v2_model_runner:
+        unsupported.append("Model Runner V1")
+    if model_config.dtype != torch.bfloat16:
+        unsupported.append(f"model dtype {model_config.dtype}")
+    if model_config.head_dtype != torch.bfloat16:
+        unsupported.append(f"head dtype {model_config.head_dtype}")
+    if not model_config.enforce_eager:
+        unsupported.append("CUDA graphs/torch compilation")
+    if vllm_config.lora_config is not None:
+        unsupported.append("LoRA")
+    if model_config.enable_sleep_mode:
+        unsupported.append("sleep mode")
+    if vllm_config.weight_transfer_config is not None:
+        unsupported.append("weight transfer")
+    if envs.VLLM_BATCH_INVARIANT:
+        unsupported.append("batch-invariant mode")
+    if parallel_config.pipeline_parallel_size != 1:
+        unsupported.append("pipeline parallelism")
+    if parallel_config.prefill_context_parallel_size != 1:
+        unsupported.append("prefill context parallelism")
+    if parallel_config.decode_context_parallel_size != 1:
+        unsupported.append("decode context parallelism")
+    if parallel_config.tensor_parallel_size not in (1, 2):
+        unsupported.append(
+            f"tensor parallel size {parallel_config.tensor_parallel_size}"
+        )
+
+    if unsupported:
+        raise ValueError(
+            "VLLM_QWEN4_EXP_FP8_DRAFT_HEAD=1 does not support: "
+            + ", ".join(unsupported)
+            + "."
+        )
 
 
 def _remap_ignored_layers(
@@ -379,6 +424,8 @@ class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
         self.vllm_config = vllm_config
+        if envs.VLLM_QWEN4_EXP_FP8_DRAFT_HEAD:
+            _validate_fp8_proposal_head_config(vllm_config)
         cache_config = vllm_config.cache_config
         if cache_config.mamba_cache_mode == "all":
             raise NotImplementedError(
@@ -408,6 +455,7 @@ class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts):
             self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
+        self._fp8_proposal_head: Fp8ProposalHead | None = None
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
@@ -438,9 +486,46 @@ class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts):
     def compute_logits(
         self, hidden_states: torch.Tensor, spec_step_idx: int = 0
     ) -> torch.Tensor | None:
-        return self.logits_processor(self.lm_head, hidden_states)
+        proposal_head = self._fp8_proposal_head
+        return self.logits_processor(
+            self.lm_head if proposal_head is None else proposal_head,
+            hidden_states,
+        )
+
+    def maybe_init_fp8_proposal_head(self) -> None:
+        """Create the opt-in proposal copy after target-head aliasing."""
+        if not envs.VLLM_QWEN4_EXP_FP8_DRAFT_HEAD:
+            return
+        if isinstance(self.lm_head, PPMissingLayer):
+            raise RuntimeError(
+                "The Qwen4Exp FP8 proposal head requires the LM head on this rank."
+            )
+        if self._fp8_proposal_head is not None:
+            return
+
+        proposal_head = Fp8ProposalHead(self.lm_head)
+        self._fp8_proposal_head = proposal_head
+        logger.info_once(
+            "Qwen4Exp MTP proposals use a private rowwise-FP8 LM head "
+            "(%d bytes/rank); target verification retains the BF16 head.",
+            proposal_head.storage_bytes,
+        )
+
+    def before_target_model_reload(self) -> None:
+        """Reject target reloads that would stale the private proposal copy."""
+        if self._fp8_proposal_head is not None:
+            raise RuntimeError(
+                "Cannot reload target weights while the Qwen4Exp FP8 proposal "
+                "head is active. Restart the engine with the new weights."
+            )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        if self._fp8_proposal_head is not None:
+            raise RuntimeError(
+                "Cannot reload Qwen4Exp weights after creating the private FP8 "
+                "proposal head. Restart the engine to rebuild it."
+            )
+
         def remap_weight_names():
             for name, weight in weights:
                 remapped_name = _remap_mtp_weight_name(name)
