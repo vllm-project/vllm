@@ -20,8 +20,10 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     KVCacheConfig,
     MambaSpec,
+    SlidingWindowSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
 )
@@ -306,7 +308,7 @@ class KVCacheManager:
         return blocks, num_new_computed_tokens, shared_prefix_boundary
 
     def get_computed_blocks_for_connector(
-        self, request: Request
+        self, request: Request, *, allow_swa: bool = False
     ) -> tuple[KVCacheBlocks, int, int, bool]:
         """Local prefix-cache lookup for a request scheduled with a KV connector.
 
@@ -320,15 +322,34 @@ class KVCacheManager:
         boundary if the connector supplies it, so the caller must fall back to
         ``get_computed_blocks`` to reconcile when no external tokens are found.
 
-        Non-hybrid models and already-convergent hits use ``get_computed_blocks``.
+        ``allow_swa`` selects the separate SWA capability: only FA/SWA remote
+        prefills with a complete handoff may reuse divergent groups. It must
+        not implicitly opt a connector into the recurrent-state capability.
+        Other requests use ``get_computed_blocks``.
 
         Returns:
             The ``get_computed_blocks`` triple (blocks, number of local computed
             tokens, shared-prefix boundary) plus ``hit_diverged``.
         """
         coordinator = self.coordinator
+        transfer_params = request.kv_transfer_params or {}
+        swa_remote_prefill = (
+            allow_swa
+            and bool(transfer_params.get("do_remote_prefill"))
+            and all(
+                key in transfer_params
+                for key in ("remote_engine_id", "remote_bootstrap_addr", "transfer_id")
+            )
+            and not coordinator.enable_partial_hash_hits
+            and all(
+                isinstance(g.kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec))
+                for g in self.kv_cache_config.kv_cache_groups
+            )
+        )
+        if allow_swa and not swa_remote_prefill:
+            return *self.get_computed_blocks(request), False
         if not (
-            self.kv_cache_config.has_mamba_layers
+            (self.kv_cache_config.has_mamba_layers or swa_remote_prefill)
             and isinstance(coordinator, HybridKVCacheCoordinator)
             and coordinator.full_attention_group_id is not None
         ):
@@ -339,7 +360,9 @@ class KVCacheManager:
 
         fa_group_id = coordinator.full_attention_group_id
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
-            request.block_hashes, request.num_tokens - 1
+            request.block_hashes,
+            request.num_tokens - 1,
+            peek_past_max_length=swa_remote_prefill,
         )
         if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
             # A lagging group hit deeper than full attention means its
@@ -348,6 +371,18 @@ class KVCacheManager:
             return *self.get_computed_blocks(request), False
 
         num_local = per_group_hits[fa_group_id]
+        if swa_remote_prefill:
+            num_local = min(
+                per_group_hits[i]
+                for i, group in enumerate(self.kv_cache_config.kv_cache_groups)
+                if isinstance(group.kv_cache_spec, FullAttentionSpec)
+            )
+            computed = tuple(
+                group_blocks[
+                    : num_local // coordinator.single_type_managers[i].block_size
+                ]
+                for i, group_blocks in enumerate(computed)
+            )
         blocks = self.create_kv_cache_blocks(computed)
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
         return blocks, num_local, 0, min(per_group_hits) < num_local

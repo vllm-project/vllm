@@ -477,6 +477,10 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
+    @property
+    def supports_divergent_local_swa_hits(self) -> bool:
+        return True
+
     def __init__(
         self,
         vllm_config: VllmConfig,

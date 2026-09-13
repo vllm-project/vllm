@@ -220,6 +220,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     @property
+    def supports_divergent_local_swa_hits(self) -> bool:
+        return bool(self._connectors) and all(
+            c.supports_divergent_local_swa_hits for c in self._connectors
+        )
+
+    @property
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)
 
