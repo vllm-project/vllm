@@ -3,9 +3,10 @@
 """
 Hybrid W4A16 kernel: Triton for prefill, HIP skinny for decode.
 
-Routes based on batch size M:
-  M <= MAX_SKINNY_BATCH_SIZE: HIP skinny GEMM (wvSplitK_int4_g)
-  M > MAX_SKINNY_BATCH_SIZE:  Triton W4A16 fused dequant GEMM
+Routes based on the activation shape:
+  M <= MAX_SKINNY_BATCH_SIZE and K*M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:
+      HIP skinny GEMM (wvSplitK_int4_g)
+  otherwise: Triton W4A16 fused dequant GEMM
 
 Stores the weights ONCE as int8 [N, K//2] (ExLlama shuffle packed). Both
 paths read this single buffer: the HIP skinny kernel uses it directly, and
@@ -57,13 +58,14 @@ def _on_gfx1151() -> bool:
     return on_gfx1151()
 
 
-# Maximum batch size M for the HIP skinny kernel path (C++ supports N_in
-# up to 5).  When M is below this AND K*M fits in LDS, the skinny kernel is
-# used; otherwise the Triton prefill path handles the GEMM.
+# Maximum activation rows supported by HIP skinny (Python M maps to C++ N_in).
+# When K*M exceeds regular LDS capacity, the C++ medium kernel caches the
+# prefix in LDS and reads the remaining activation elements from global memory.
 MAX_SKINNY_BATCH_SIZE = 5
 # 64 KiB per-workgroup LDS limit expressed in fp16 elements.
 # (AMD RDNA has 128 KiB total LDS per CU, but 64 KiB per workgroup.)
 LDS_CAPACITY_ELEMENTS = 64 * 1024 // 2  # 32768 fp16 elements
+MEDIUM_SKINNY_LIMIT_ELEMENTS = int(LDS_CAPACITY_ELEMENTS * 1.2)
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +390,7 @@ def _rdna_hybrid_w4a16_apply_impl(
     K = x_2d.shape[1]
     N = w_q.shape[0]
 
-    if M <= MAX_SKINNY_BATCH_SIZE and K * M <= LDS_CAPACITY_ELEMENTS:
+    if M <= MAX_SKINNY_BATCH_SIZE and K * M <= MEDIUM_SKINNY_LIMIT_ELEMENTS:
         # record_function is not torch.compile-safe; use nullcontext when
         # compiling to keep the op traceable.
         ctx = (
