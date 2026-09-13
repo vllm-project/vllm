@@ -66,6 +66,10 @@ struct tinygemm_kernel {
   }
 };
 
+#if defined(ARM_BF16_SUPPORT)
+#include "conv_arm.h"
+#endif
+
 #if defined(CPU_CAPABILITY_AVX512)
 template <int K, int BLOCK_N, bool has_bias, bool has_silu>
 struct tinygemm_kernel<at::BFloat16, K, BLOCK_N, has_bias, has_silu> {
@@ -543,9 +547,17 @@ at::Tensor causal_conv1d_weight_pack(const at::Tensor& weight) {
 
   int64_t dim = weight.size(0);
   int64_t width = weight.size(1);
-  constexpr int64_t BLOCK_N = block_size_n();
+  constexpr int64_t BLOCK_N =
+#if defined(ARM_BF16_SUPPORT)
+      8;// 8 channel blocks for microtile
+#else
+      block_size_n();
+#endif
   TORCH_CHECK(width == 4, "causal_conv1d_weight_pack: support only width of 4");
-  TORCH_CHECK(dim % BLOCK_N == 0, "causal_conv1d_weight_pack: invalid dim size ", dim);
+  TORCH_CHECK(
+      dim % block_size_n() == 0,
+      "causal_conv1d_weight_pack: invalid dim size ",
+      dim);
 
   const int64_t N = dim, K2 = width >> 1;
   const int64_t NB = div_up(N, BLOCK_N);
