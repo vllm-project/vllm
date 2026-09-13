@@ -387,6 +387,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_agent_name=agent_name,
                 )
                 self.xfer_stats.record_failed_notification()
+            # Empty recvs that never registered a transfer (abort-before-
+            # schedule notify-only) must not stay in _recving_metadata: no
+            # handle will complete, and reporting them via get_finished
+            # trips the scheduler assert on a request it is not holding.
+            if request_id not in self._recving_transfers:
+                self._recving_metadata.pop(request_id, None)
             return True
 
         if read_spec.block_ids_by_region:
