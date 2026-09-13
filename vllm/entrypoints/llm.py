@@ -124,6 +124,9 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
             transfer for every forward pass.
+        cpu_offload_params: UVA offloading: Set of parameter name segments to
+            selectively offload. If None or empty, parameters are offloaded
+            non-selectively until `cpu_offload_gb` is reached.
         offload_group_size: Prefetch offloading: Group every N layers
             together. Offload last `offload_num_in_group` layers of each group.
             Default is 0 (disabled).
@@ -197,6 +200,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         seed: int = 0,
         gpu_memory_utilization: float = 0.92,
         cpu_offload_gb: float = 0,
+        cpu_offload_params: set[str] | None = None,
         offload_group_size: int = 0,
         offload_num_in_group: int = 1,
         offload_prefetch_step: int = 1,
@@ -314,6 +318,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             gpu_memory_utilization=gpu_memory_utilization,
             kv_cache_memory_bytes=kv_cache_memory_bytes,
             cpu_offload_gb=cpu_offload_gb,
+            cpu_offload_params=cpu_offload_params or set(),
             offload_group_size=offload_group_size,
             offload_num_in_group=offload_num_in_group,
             offload_prefetch_step=offload_prefetch_step,
