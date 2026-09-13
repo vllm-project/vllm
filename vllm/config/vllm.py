@@ -34,7 +34,7 @@ from .device import DeviceConfig
 from .diffusion import DiffusionConfig
 from .ec_manager_config import EncoderCacheManagerConfig
 from .ec_transfer import ECTransferConfig
-from .engram import EngramConfig
+from .engram import EngramConfig, model_has_engram_layers
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
@@ -381,7 +381,7 @@ class VllmConfig:
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
     engram_config: EngramConfig | None = None
-    """Optional Engram configuration, only valid for supported PLE models."""
+    """N-gram embedding storage and sharding settings."""
     mamba_config: MambaConfig = Field(default_factory=MambaConfig)
     """Mamba configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
@@ -1218,22 +1218,37 @@ class VllmConfig:
             )
 
     def _resolve_and_verify_engram_config(self) -> None:
-        """Resolve legacy offload settings and validate model and parallel configs."""
-        if self.engram_config is None:
-            if not envs.VLLM_PLE_CPU_OFFLOAD:
-                return
-            self.engram_config = EngramConfig()
+        """Resolve defaults and validate n-gram embedding settings."""
+        from vllm.platforms import current_platform
+
         model_config = self.model_config
         speculative_config = self.speculative_config
         # Draft configs inherit the target's communication groups and settings.
-        # Qwen4Exp MTP itself disables PLE, so validate its target instead.
+        # Validate the target because the draft may disable n-gram embeddings.
         if (
             speculative_config is not None
             and model_config is speculative_config.draft_model_config
         ):
             model_config = speculative_config.target_model_config
+        if (
+            model_config is not None
+            and model_config.architecture == "DeepseekV41ForCausalLM"
+            and getattr(model_config.hf_text_config, "engram_layer_ids", None)
+            and self.parallel_config.use_ubatching
+        ):
+            raise ValueError(
+                "DeepSeek V4.1 Engram does not support DBO or microbatching. "
+                "Disable --enable-dbo and set --ubatch-size to 0."
+            )
+        if self.engram_config is None:
+            if not current_platform.is_cuda() or not model_has_engram_layers(
+                model_config
+            ):
+                return
+            self.engram_config = EngramConfig()
         self.engram_config.verify_model_config(model_config)
         self.engram_config.verify_parallel_config(self.parallel_config)
+        self.engram_config.verify_load_config(self.load_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
     def __post_init__(self):
