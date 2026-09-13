@@ -1124,6 +1124,7 @@ class FlashAttentionImpl(AttentionImpl):
             in ("gemma4", "gemma4_unified")
             and vllm_config.parallel_config.decode_context_parallel_size == 1
             and vllm_config.model_config.rswa_window is None
+            and not is_quantized_kv_cache(kv_cache_dtype)
             and (
                 self.fa4_hd256
                 or (
@@ -1409,10 +1410,7 @@ class FlashAttentionImpl(AttentionImpl):
                         )
                     )
                     and causal is True
-                    and sliding_window_size is not None
-                    and mm_mask_mod is None
-                    and rswa_mask_mod_fn is None
-                    and not is_quantized_kv_cache(self.kv_cache_dtype)
+                    and not is_dynamic_causal
                 )
                 flash_attn_fn = (
                     _FA4_DENSE_ATTENTION_KERNEL
