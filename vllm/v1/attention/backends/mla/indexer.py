@@ -25,6 +25,7 @@ from vllm.utils.deep_gemm import (
     has_deep_gemm,
     native_next_n_supported,
 )
+from vllm.utils.math_utils import round_down
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.attention.backend import (
@@ -286,6 +287,7 @@ def build_pcp_global_chunk_plan(
     row_shard_rows: np.ndarray,
     dcp_world_size: int,
     device: torch.device,
+    interleave: int = 1,
 ) -> PCPGlobalChunkPlan:
     """Plan the PCP packing for one chunk from its requests' KV shard rows.
 
@@ -327,10 +329,13 @@ def build_pcp_global_chunk_plan(
     for i in range(len(region_first_row)):
         g = int(region_padded[i]) * dcp_world_size
         t = np.arange(g, dtype=np.int64)
+        local = round_down(t // dcp_world_size, interleave) + t % interleave
+        # Padded positions are outside causal bounds but must remain in-bounds.
+        local = np.minimum(local, region_padded[i] - 1)
         idx_np[region_start[i] : region_start[i] + g] = (
-            (t % dcp_world_size) * padded_total
+            ((t // interleave) % dcp_world_size) * padded_total
             + region_padded_start[i]
-            + t // dcp_world_size
+            + local
         )
 
     cu = async_copy_to_gpu(cu, device=device)
@@ -1268,6 +1273,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                         shard_rows[req_slice],
                         self.dcp_world_size,
                         self.device,
+                        self.cp_kv_cache_interleave_size,
                     )
                 metadata = build_prefill_chunk_metadata(
                     req_slice.start,
