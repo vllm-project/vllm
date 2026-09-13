@@ -37,7 +37,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.qwen2 import Qwen2DecoderLayer
 from vllm.sequence import IntermediateTensors
 
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .interfaces import SupportsPP
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
 
 
 class MiMoMultiTokenPredictorLayer(nn.Module):
@@ -150,7 +156,7 @@ class MiMoMultiTokenPredictor(nn.Module):
         return logits
 
 
-class MiMoMTP(nn.Module):
+class MiMoMTP(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -161,6 +167,11 @@ class MiMoMTP(nn.Module):
             self.config.vocab_size,
             self.config.hidden_size,
             prefix=maybe_prefix(prefix, "lm_head"),
+        )
+        # The drafter is only built on the last PP rank so the SupportsPP-shaped
+        # forward is never called; the factory is here to satisfy the interface.
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.config.hidden_size
         )
         # Checkpoint stores MTP layers 0-indexed and without the `mtp_block`
         # wrapper around the transformer block; remap onto the offset index.
@@ -188,7 +199,7 @@ class MiMoMTP(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,

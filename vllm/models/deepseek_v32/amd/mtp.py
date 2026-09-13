@@ -170,6 +170,11 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         self.model = DeepseekV32MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        # The drafter is only built on the last PP rank so the SupportsPP-shaped
+        # forward is never called; the factory is here to satisfy the interface.
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.config.hidden_size
+        )
         self.set_moe_parameters()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], self.config.hidden_size
