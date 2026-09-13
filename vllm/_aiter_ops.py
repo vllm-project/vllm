@@ -11,6 +11,11 @@ from torch._ops import OpOverload
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_BLOCK_SIZE,
+    MXFP8_SCALE_DTYPE,
+    MXFP8_VALUE_DTYPE,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -1245,6 +1250,84 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     )
 
 
+def _rocm_aiter_rmsnorm_mxfp8_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    import aiter as rocm_aiter
+
+    M, N = x.shape
+    out = torch.empty((M, N), dtype=MXFP8_VALUE_DTYPE, device=x.device)
+    # A 1-byte scale is what routes aiter's dispatch to the E8M0 block-scale
+    # path; a float32 scale would be interpreted as per-token instead.
+    scale = torch.empty(
+        (M, N // MXFP8_BLOCK_SIZE), dtype=MXFP8_SCALE_DTYPE, device=x.device
+    )
+    rocm_aiter.rmsnorm_quant(
+        out, x, scale, weight, variance_epsilon, MXFP8_BLOCK_SIZE, False
+    )
+    return out, scale
+
+
+def _rocm_aiter_rmsnorm_mxfp8_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    return (
+        torch.empty((M, N), dtype=MXFP8_VALUE_DTYPE, device=x.device),
+        torch.empty(
+            (M, N // MXFP8_BLOCK_SIZE), dtype=MXFP8_SCALE_DTYPE, device=x.device
+        ),
+    )
+
+
+def _rocm_aiter_rmsnorm_with_add_mxfp8_quant_impl(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    import aiter as rocm_aiter
+
+    M, N = x.shape
+    out = torch.empty((M, N), dtype=MXFP8_VALUE_DTYPE, device=x.device)
+    scale = torch.empty(
+        (M, N // MXFP8_BLOCK_SIZE), dtype=MXFP8_SCALE_DTYPE, device=x.device
+    )
+    residual_out = torch.empty_like(residual)
+    rocm_aiter.add_rmsnorm_quant(
+        out,
+        x,
+        residual,
+        residual_out,
+        scale,
+        weight,
+        variance_epsilon,
+        MXFP8_BLOCK_SIZE,
+        False,
+    )
+    return out, residual_out, scale
+
+
+def _rocm_aiter_rmsnorm_with_add_mxfp8_quant_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    return (
+        torch.empty((M, N), dtype=MXFP8_VALUE_DTYPE, device=x.device),
+        torch.empty_like(residual),
+        torch.empty(
+            (M, N // MXFP8_BLOCK_SIZE), dtype=MXFP8_SCALE_DTYPE, device=x.device
+        ),
+    )
+
+
 def _rocm_aiter_fused_rms_gated_fp8_group_quant_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -1896,6 +1979,17 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def is_mxfp8_norm_fusion_enabled(cls) -> bool:
+        """Whether the norm can emit MXFP8 directly for the MX GEMM to consume.
+
+        Needs CDNA4, where ``tl.dot_scaled`` takes the E8M0 block scales
+        natively; on other archs the MXFP8 linear falls through to the BF16
+        emulation path and never emits a quant op to fuse with.
+        """
+        return cls._AITER_ENABLED and current_platform.supports_mx()
+
+    @classmethod
+    @if_aiter_supported
     def is_linear_fp8_enabled(cls) -> bool:
         return cls.is_linear_enabled()
 
@@ -2282,6 +2376,20 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_mxfp8_quant",
+                op_func=_rocm_aiter_rmsnorm_mxfp8_quant_impl,
+                fake_impl=_rocm_aiter_rmsnorm_mxfp8_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_with_add_mxfp8_quant",
+                op_func=_rocm_aiter_rmsnorm_with_add_mxfp8_quant_impl,
+                fake_impl=_rocm_aiter_rmsnorm_with_add_mxfp8_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_fused_rms_gated_fp8_group_quant",
                 op_func=_rocm_aiter_fused_rms_gated_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_fused_rms_gated_fp8_group_quant_fake,
@@ -2409,6 +2517,16 @@ class rocm_aiter_ops:
     @staticmethod
     def get_rmsnorm_group_fused_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant.default
+
+    @staticmethod
+    def get_rmsnorm_mxfp8_quant_op() -> OpOverload:
+        """Return the fused RMSNorm + MXFP8 (block-32 E8M0) quant custom op."""
+        return torch.ops.vllm.rocm_aiter_rmsnorm_mxfp8_quant.default
+
+    @staticmethod
+    def get_rmsnorm_with_add_mxfp8_quant_op() -> OpOverload:
+        """Fused residual-add RMSNorm + MXFP8 (block-32 E8M0) quant custom op."""
+        return torch.ops.vllm.rocm_aiter_rmsnorm_with_add_mxfp8_quant.default
 
     @staticmethod
     def get_fused_rms_gated_fp8_group_quant_op() -> OpOverload:
