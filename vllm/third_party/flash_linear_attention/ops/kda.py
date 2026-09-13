@@ -68,7 +68,9 @@ def fused_recurrent_kda_fwd(
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
-    grid = (NK, NV, N * HV)
+    # N * HV goes in gridDim.x: gridDim.z is capped at 65535 and batch x heads exceeds it
+    # (e.g. GLM-5.3-Flash at TP=1: 1024 x 64 = 65536 -> "invalid argument" at CUDA-graph capture).
+    grid = (N * HV, NV, NK)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
         q=q,
         k=k,
