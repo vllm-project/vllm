@@ -157,6 +157,16 @@ def dbo_current_ubatch_id() -> int:
     return _THREAD_ID_TO_CONTEXT[threading.get_ident()]
 
 
+def dbo_select_buffer(buffer: torch.Tensor) -> torch.Tensor:
+    """Select a microbatch's persistent 2D buffer from optional 3D storage.
+
+    A 2D buffer is used unchanged by callers without microbatch-local storage.
+    The selection must happen at use time, including during graph capture,
+    rather than during model construction when no microbatch is active.
+    """
+    return buffer[dbo_current_ubatch_id()] if buffer.ndim == 3 else buffer
+
+
 def _register_ubatch_function(func):
     def wrapper(*args, **kwargs):
         if len(_THREAD_ID_TO_CONTEXT) > 0:
