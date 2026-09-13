@@ -9,8 +9,13 @@ import torch
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
 )
+from vllm.model_executor.models.deepseek_v2 import (
+    _is_deep_gemm_mega_moe_requested,
+    _scale_mega_moe_output_for_deferred_reduce,
+)
 from vllm.models.deepseek_v4.nvidia.dspark import DSparkDeepseekV4ForCausalLM
 from vllm.models.deepseek_v4.nvidia.model import (
+    DeepGemmMegaMoEExperts,
     DeepseekV4ForCausalLM,
     DeepseekV4MegaMoEExperts,
     DeepseekV4MoE,
@@ -25,8 +30,49 @@ from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(),
-    reason="DeepSeek V4 MegaMoE requires CUDA",
+    reason="DeepGEMM MegaMoE requires CUDA",
 )
+
+
+class _TestQuantConfig:
+    packed_modules_mapping: dict[str, list[str]] = {}
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        quant_format: str | None = None,
+        weight_block_size: tuple[int, int] | None = None,
+        ignore: tuple[str, ...] = (),
+    ) -> None:
+        self.name = name
+        self.quant_format = quant_format
+        self.weight_block_size = weight_block_size
+        self.ignore = ignore
+        self.is_checkpoint_fp8_serialized = weight_block_size is not None
+
+    def get_name(self) -> str:
+        return self.name
+
+    def get_scheme_dict(self, _layer, _prefix):
+        return {"format": self.quant_format} if self.quant_format is not None else None
+
+
+def _make_checkpoint_experts(mma_type: str, **source_kwargs) -> DeepGemmMegaMoEExperts:
+    return DeepGemmMegaMoEExperts(
+        SimpleNamespace(
+            scheduler_config=SimpleNamespace(max_num_batched_tokens=4),
+            compilation_config=SimpleNamespace(static_forward_context={}),
+        ),
+        num_experts=1,
+        num_local_experts=1,
+        experts_start_idx=0,
+        top_k=1,
+        hidden_size=128,
+        intermediate_size=512,
+        mma_type=mma_type,
+        **source_kwargs,
+    )
 
 
 @pytest.fixture
@@ -156,6 +202,183 @@ def test_deepseek_v4_moe_preserves_configured_hash_layers(v41_moe_config):
         moe(torch.zeros(1, 128))
 
 
+def test_mega_moe_request_applies_to_mtp_model_config():
+    vllm_config = SimpleNamespace(
+        kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe")
+    )
+
+    assert _is_deep_gemm_mega_moe_requested(vllm_config)
+
+
+@pytest.mark.parametrize(
+    ("is_sequence_parallel", "expected"), [(False, 1.0), (True, 8.0)]
+)
+def test_mega_moe_deferred_reduction_scaling(is_sequence_parallel, expected):
+    output = torch.full((2, 4), 8.0)
+
+    actual = _scale_mega_moe_output_for_deferred_reduce(
+        output,
+        tp_size=8,
+        is_sequence_parallel=is_sequence_parallel,
+        reduce_results=False,
+    )
+
+    assert torch.equal(actual, torch.full_like(output, expected))
+
+
+@pytest.mark.parametrize(
+    ("quant_config", "prefix", "expected_format", "expected_block_size"),
+    [
+        pytest.param(None, "model.layers.0.mlp", None, None, id="bf16"),
+        pytest.param(
+            _TestQuantConfig("fp8", weight_block_size=(128, 128)),
+            "model.layers.0.mlp",
+            None,
+            (128, 128),
+            id="block-fp8",
+        ),
+        pytest.param(
+            _TestQuantConfig("compressed-tensors", quant_format="nvfp4-pack-quantized"),
+            "model.layers.0.mlp",
+            "nvfp4-pack-quantized",
+            None,
+            id="nvfp4",
+        ),
+        pytest.param(
+            _TestQuantConfig("compressed-tensors", quant_format="mxfp4-pack-quantized"),
+            "model.layers.0.mlp",
+            "mxfp4-pack-quantized",
+            None,
+            id="mxfp4",
+        ),
+        pytest.param(
+            _TestQuantConfig(
+                "compressed-tensors",
+                quant_format="nvfp4-pack-quantized",
+                ignore=(r"re:model.layers.1.*",),
+            ),
+            "model.layers.1.mtp_block.mlp",
+            None,
+            None,
+            id="ignored-mtp",
+        ),
+    ],
+)
+def test_mega_moe_checkpoint_format_selection(
+    quant_config, prefix, expected_format, expected_block_size
+):
+    layer = torch.nn.Identity()
+
+    assert (
+        DeepGemmMegaMoEExperts.source_format_from_quant_config(
+            quant_config, layer, prefix
+        )
+        == expected_format
+    )
+    assert (
+        DeepGemmMegaMoEExperts.source_weight_block_size_from_quant_config(
+            quant_config, layer, prefix
+        )
+        == expected_block_size
+    )
+
+
+@pytest.mark.parametrize(
+    ("mma_type", "source_kwargs", "param_name", "dtype", "conversion"),
+    [
+        pytest.param("bf16xbf16", {}, "w13_weight", torch.bfloat16, None, id="bf16"),
+        pytest.param(
+            "bf16xbf16",
+            {"source_weight_block_size": (128, 128)},
+            "w13_weight",
+            torch.float8_e4m3fn,
+            "_dequantize_block_fp8_weights",
+            id="block-fp8",
+        ),
+        pytest.param(
+            "fp8xfp4",
+            {"source_nvfp4": True},
+            "w13_weight_packed",
+            torch.uint8,
+            "_requantize_nvfp4_weights",
+            id="nvfp4",
+        ),
+        pytest.param(
+            "fp8xfp4",
+            {"source_mxfp4": True},
+            "w13_weight_packed",
+            torch.uint8,
+            None,
+            id="mxfp4",
+        ),
+    ],
+)
+def test_mega_moe_checkpoint_loading_and_finalization(
+    monkeypatch, mma_type, source_kwargs, param_name, dtype, conversion
+):
+    experts = _make_checkpoint_experts(mma_type, **source_kwargs)
+    param = getattr(experts, param_name)
+    loaded = torch.ones((512, param.shape[-1]), dtype=dtype)
+
+    assert experts.weight_loader(
+        param,
+        loaded,
+        f"experts.{param_name}",
+        shard_id="w1",
+        expert_id=0,
+        return_success=True,
+    )
+    assert torch.equal(param[0, :512], loaded)
+    if mma_type == "bf16xbf16":
+        expected_l1 = torch.empty(1)
+        expected_l2 = torch.empty(1)
+    else:
+        expected_l1 = (torch.empty(1, dtype=torch.int8), torch.empty(1))
+        expected_l2 = (torch.empty(1, dtype=torch.int8), torch.empty(1))
+
+    monkeypatch.setattr(experts, "_check_runtime_supported", lambda: None)
+    if conversion is not None:
+        monkeypatch.setattr(
+            experts, conversion, lambda *args: (expected_l1, expected_l2)
+        )
+    monkeypatch.setattr(
+        "vllm.utils.deep_gemm._import_deep_gemm",
+        lambda: SimpleNamespace(
+            transform_sf_into_required_layout=lambda sf, *args: sf,
+            transform_weights_for_mega_moe=lambda *args, **kwargs: (
+                expected_l1,
+                expected_l2,
+            ),
+        ),
+    )
+
+    experts.finalize_weights()
+
+    assert experts._transformed_l1_weights is expected_l1
+    assert experts._transformed_l2_weights is expected_l2
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="DeepGEMM MegaMoE requires CUDA SM100",
+)
+def test_mxfp4_checkpoint_finalizes_with_deep_gemm():
+    experts = _make_checkpoint_experts("fp8xfp4", source_mxfp4=True).cuda()
+    assert experts.w13_weight_packed is not None
+    assert experts.w13_weight_scale is not None
+    assert experts.w2_weight_packed is not None
+    assert experts.w2_weight_scale is not None
+    experts.w13_weight_packed.data.fill_(0x11)
+    experts.w13_weight_scale.data.fill_(127)
+    experts.w2_weight_packed.data.fill_(0x11)
+    experts.w2_weight_scale.data.fill_(127)
+
+    experts.finalize_weights()
+
+    assert experts._transformed_l1_weights is not None
+    assert experts._transformed_l2_weights is not None
+
+
 def test_deepseek_v4_mega_moe_expert_mapping():
     mapping = make_deepseek_v4_expert_params_mapping(2)
 
@@ -167,6 +390,42 @@ def test_deepseek_v4_mega_moe_expert_mapping():
         ("experts.w2_", "experts.1.w2.", 1, "w2"),
         ("experts.w13_", "experts.1.w3.", 1, "w3"),
     ]
+    assert make_deepseek_v4_expert_params_mapping(
+        1,
+        ckpt_gate_proj_name="gate_proj",
+        ckpt_down_proj_name="down_proj",
+        ckpt_up_proj_name="up_proj",
+    ) == [
+        ("experts.w13_", "experts.0.gate_proj.", 0, "w1"),
+        ("experts.w2_", "experts.0.down_proj.", 0, "w2"),
+        ("experts.w13_", "experts.0.up_proj.", 0, "w3"),
+    ]
+
+
+def test_kimi_nvfp4_mega_moe_mapping_and_activation():
+    from vllm.models.kimi_k3.nvidia.model import (
+        KimiK3MegaMoEExperts,
+        make_kimi_k3_mega_moe_expert_params_mapping,
+    )
+
+    suffixes = (
+        "weight_packed",
+        "weight_scale",
+        "weight_global_scale",
+        "input_global_scale",
+    )
+    assert make_kimi_k3_mega_moe_expert_params_mapping(1, source_nvfp4=True) == [
+        (f"experts.{target}_{suffix}", f"experts.0.{source}.{suffix}", 0, shard)
+        for target, source, shard in (
+            ("w13", "w1", "w1"),
+            ("w2", "w2", "w2"),
+            ("w13", "w3", "w3"),
+        )
+        for suffix in suffixes
+    ]
+    experts = KimiK3MegaMoEExperts.__new__(KimiK3MegaMoEExperts)
+    experts.activation = "situ"
+    assert experts._transform_weights_kwargs() == {"activation": "situ"}
 
 
 def test_deepseek_v4_mega_moe_ue8m0_uint8_to_float():

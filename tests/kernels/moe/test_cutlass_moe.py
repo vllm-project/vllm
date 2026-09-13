@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsFp8,
     CutlassExpertsMxfp4,
     CutlassExpertsW4A8Fp8,
+    _normalize_cutlass_topk_ids,
     run_cutlass_moe_fp4,
     run_cutlass_moe_fp8,
     run_cutlass_moe_mxfp4,
@@ -64,6 +65,16 @@ MNK_FACTORS = [
 ]
 
 vllm_config = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+
+
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_normalize_cutlass_topk_ids(dtype: torch.dtype):
+    topk_ids = torch.tensor([[0, 1], [2, -1]], dtype=dtype)
+
+    normalized = _normalize_cutlass_topk_ids(topk_ids)
+
+    assert normalized.dtype == torch.int32
+    torch.testing.assert_close(normalized, topk_ids.to(torch.int32))
 
 
 @pytest.mark.parametrize(
@@ -181,8 +192,11 @@ def test_cutlass_moe_permutation_maps_padding_to_zero():
 
 
 @pytest.mark.parametrize("quantization", ["nvfp4", "mxfp4"])
+@pytest.mark.parametrize("topk_id_dtype", [torch.int32, torch.int64])
 @torch.inference_mode()
-def test_cutlass_fp4_moe_padded_routes_do_not_change_valid_output(quantization: str):
+def test_cutlass_fp4_moe_padded_routes_do_not_change_valid_output(
+    quantization: str, topk_id_dtype: torch.dtype
+):
     """Padded routes must not participate in either activation quantization."""
     experts_cls = CutlassExpertsFp4 if quantization == "nvfp4" else CutlassExpertsMxfp4
     if not experts_cls._supports_current_device():
@@ -273,7 +287,7 @@ def test_cutlass_fp4_moe_padded_routes_do_not_change_valid_output(quantization: 
     valid_input = torch.randn((1, k), device=device, dtype=dtype)
     expected = run_moe(
         valid_input,
-        torch.zeros((1, 1), device=device, dtype=torch.int32),
+        torch.zeros((1, 1), device=device, dtype=topk_id_dtype),
         torch.ones((1, 1), device=device, dtype=torch.float32),
         workspace_value=0,
     )
@@ -283,7 +297,7 @@ def test_cutlass_fp4_moe_padded_routes_do_not_change_valid_output(quantization: 
     num_tokens = 4096
     padded_input = torch.zeros((num_tokens, k), device=device, dtype=dtype)
     padded_input[0] = valid_input[0]
-    padded_ids = torch.full((num_tokens, 2), -1, device=device, dtype=torch.int32)
+    padded_ids = torch.full((num_tokens, 2), -1, device=device, dtype=topk_id_dtype)
     padded_ids[0, 0] = 0
     padded_weights = torch.zeros((num_tokens, 2), device=device, dtype=torch.float32)
     padded_weights[0, 0] = 1
