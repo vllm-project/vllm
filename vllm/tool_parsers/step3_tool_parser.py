@@ -78,6 +78,14 @@ class Step3ToolParser(ToolParser):
             params[name] = value.strip()
         return func_name, params
 
+    @staticmethod
+    def _partial_token_suffix_len(text: str, token: str) -> int:
+        """Length of the longest suffix of ``text`` that is a prefix of ``token``."""
+        for size in range(min(len(text), len(token) - 1), 0, -1):
+            if token.startswith(text[-size:]):
+                return size
+        return 0
+
     def _cast_arguments(
         self,
         func_name: str,
@@ -122,17 +130,25 @@ class Step3ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
+        # Everything found in this delta is accumulated instead of returned as
+        # soon as it is parsed: a delta may carry content and a whole tool call
+        # at once, and there is no guarantee another call will follow to emit
+        # the rest in.
+        pending_content = ""
+        delta_tool_calls: list[DeltaToolCall] = []
+
         # The main loop processes the stream from the last known position.
         while True:
             if self.position >= len(current_text):
-                return None  # We've processed the entire stream.
+                break  # We've processed the entire stream.
 
             unprocessed_text = current_text[self.position :]
 
             # STATE: After all tools are done, all subsequent text is content.
             if self.tool_block_finished:
                 self.position = len(current_text)
-                return DeltaMessage(content=unprocessed_text)
+                pending_content += unprocessed_text
+                continue
 
             # STATE: Before the tool block has started.
             if not self.tool_block_started:
@@ -143,17 +159,20 @@ class Step3ToolParser(ToolParser):
 
                 start_pos = unprocessed_text.find(self.TOOL_CALLS_BEGIN)
                 if start_pos == -1:
-                    if (
-                        self.TOOL_CALLS_BEGIN.startswith(unprocessed_text.strip())
-                        and unprocessed_text
-                    ):
-                        return None  # It's a prefix, wait.
-                    self.position = len(current_text)
-                    return DeltaMessage(content=unprocessed_text)
+                    # A trailing partial begin token must not be emitted as
+                    # content: hold it back until the rest of it arrives.
+                    partial = self._partial_token_suffix_len(
+                        unprocessed_text, self.TOOL_CALLS_BEGIN
+                    )
+                    content = unprocessed_text[: len(unprocessed_text) - partial]
+                    self.position += len(content)
+                    pending_content += content
+                    break
                 else:
                     content = unprocessed_text[:start_pos]
                     self.position += len(content)
-                    return DeltaMessage(content=content)
+                    pending_content += content
+                    continue
 
             # STATE: Inside the main tool block.
             offset = len(unprocessed_text) - len(unprocessed_text.lstrip())
@@ -184,7 +203,7 @@ class Step3ToolParser(ToolParser):
                     continue
 
                 if self.TOOL_CALL_BEGIN.startswith(unprocessed_text):
-                    return None
+                    break
 
             # STATE: Parsing an active tool call.
             if self.current_tool_id != -1 and not self.prev_tool_call_arr[
@@ -197,35 +216,25 @@ class Step3ToolParser(ToolParser):
                     tool_body = unprocessed_text[:end_tool_pos]
 
                 if end_tool_pos == -1 and self.TOOL_CALL_END.startswith(tool_body):
-                    return None
+                    break
 
                 function_name, arguments = self._parse_steptml_invoke(tool_body)
                 if not function_name:
-                    return None
+                    break
 
                 tool_call_arr = {"name": function_name, "parameters": arguments or {}}
-
-                # Send the function name as soon as it's parsed.
-                if not self.current_tool_name_sent:
-                    self.current_tool_name_sent = True
-                    self.prev_tool_call_arr[self.current_tool_id].update(tool_call_arr)
-                    return DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                type="function",
-                                id=f"chatcmpl-tool-{random_uuid()}",
-                                function=DeltaFunctionCall(name=function_name),
-                            )
-                        ]
-                    )
 
                 # Update our internal state with the latest parsed arguments.
                 self.prev_tool_call_arr[self.current_tool_id].update(  # noqa: E501
                     tool_call_arr
                 )
 
-                # Only send arguments when the tool call is complete.
+                send_name = not self.current_tool_name_sent
+
+                # Arguments are only sent once the tool call is complete, so
+                # they have to be able to go out with the name: a delta may
+                # carry the whole call and be the last one.
+                final_args_json = None
                 if end_tool_pos != -1:
                     self.position += end_tool_pos + len(self.TOOL_CALL_END)
                     self.prev_tool_call_arr[self.current_tool_id]["finished"] = True
@@ -236,21 +245,38 @@ class Step3ToolParser(ToolParser):
                     )
                     if final_args:
                         final_args_json = json.dumps(final_args, ensure_ascii=False)
-                        return DeltaMessage(
-                            tool_calls=[
-                                DeltaToolCall(
-                                    index=self.current_tool_id,
-                                    function=DeltaFunctionCall(
-                                        arguments=final_args_json
-                                    ),
-                                )
-                            ]
+
+                if send_name:
+                    self.current_tool_name_sent = True
+                    delta_tool_calls.append(
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            type="function",
+                            id=f"chatcmpl-tool-{random_uuid()}",
+                            function=DeltaFunctionCall(
+                                name=function_name, arguments=final_args_json
+                            ),
                         )
+                    )
+                elif final_args_json is not None:
+                    delta_tool_calls.append(
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            function=DeltaFunctionCall(arguments=final_args_json),
+                        )
+                    )
 
-                # If tool is not finished, return None to wait for more tokens.
-                return None
+                if end_tool_pos == -1:
+                    break  # Wait for the rest of the tool call.
+                continue
 
+            break
+
+        if not pending_content and not delta_tool_calls:
             return None
+        return DeltaMessage(
+            content=pending_content or None, tool_calls=delta_tool_calls
+        )
 
     def extract_tool_calls(
         self,
