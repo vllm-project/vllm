@@ -800,6 +800,7 @@ class IsaacForConditionalGeneration(
     }
 
     supports_encoder_tp_data = True
+    supports_tower_connector_lora = True
 
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
@@ -1020,6 +1021,14 @@ class IsaacForConditionalGeneration(
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="vision_embedding.linear_fc2",  # The final linear layer
-            tower_model="vision_embedding",
+            connector=["vision_embedding.linear_fc1", "vision_embedding.linear_fc2"],
+            tower_model="vision_embedding.transformer",
         )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        merge_size = self.config.vision_config.pixel_shuffle_scale_factor
+        return num_image_tokens * merge_size**2
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        merge_size = self.config.vision_config.pixel_shuffle_scale_factor
+        return num_vision_tokens // merge_size**2
