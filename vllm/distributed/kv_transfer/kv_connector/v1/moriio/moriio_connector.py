@@ -413,6 +413,7 @@ class MoRIIOConnectorScheduler:
         self._reqs_need_save: dict[ReqId, tuple[Request, list[int]]] = {}
         # Snapshot of kv_transfer_params for chunked prefill recovery.
         self._req_kv_params: dict[ReqId, dict] = {}
+        self._completed_write_recvs: set[ReqId] = set()
 
         # For chunked prefill, we perform layer-wise access within the final chunk.
         # TODO: Perform transfer at end chunk.
@@ -502,6 +503,8 @@ class MoRIIOConnectorScheduler:
         token_ids = request.prompt_token_ids or []
         if self.mode == MoRIIOMode.WRITE:
             # MoriiO in write mode, no remote prefill
+            if request.request_id in self._completed_write_recvs:
+                return 0, False
 
             return len(token_ids) - num_computed_tokens, True
 
@@ -912,6 +915,7 @@ class MoRIIOConnectorScheduler:
         # Producer: must keep the mapping until we get notification that blocks can
         #   be freed, which may be several scheduler steps later.
         if not self.is_producer:
+            self._completed_write_recvs.discard(request_id)
             transfer_id = params.get("transfer_id") if params else None
             self.unmap_request_id(request_id, transfer_id=transfer_id)
         logger.debug(
@@ -1014,6 +1018,10 @@ class MoRIIOConnectorScheduler:
         no-op for them.
         """
         if not self.is_producer:
+            if self.mode == MoRIIOMode.WRITE:
+                self._completed_write_recvs.update(
+                    connector_output.finished_recving or ()
+                )
             return
 
         incoming = set(connector_output.finished_sending or ())
