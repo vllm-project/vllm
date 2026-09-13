@@ -4,9 +4,9 @@
 import torch.nn as nn
 
 from vllm.config import ModelConfig, VllmConfig, replace
-from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 
 logger = init_logger(__name__)
 
@@ -18,9 +18,9 @@ def _resolve_dspark_attention_backend(
 ) -> AttentionBackendEnum | None:
     if draft_backend is not None:
         return draft_backend
-    # DeepSeek-V4 draft layers share the target's KV-cache layout. Other
+    # DeepSeek-V4(.1) draft layers share the target's KV-cache layout. Other
     # DSpark architectures may use a different attention kind.
-    if draft_model_config.hf_config.model_type == "deepseek_v4":
+    if draft_model_config.hf_config.model_type in ("deepseek_v4", "deepseek_v41"):
         if target_backend is not None:
             logger.info_once(
                 "Using the target model's %s attention backend for the "
@@ -43,6 +43,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
         _should_share,
         get_target_lm_head,
+        maybe_share_target_embed,
     )
 
     draft_attention_backend = _resolve_dspark_attention_backend(
@@ -53,6 +54,13 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
 
     draft_vllm_config = replace(
         vllm_config,
+        parallel_config=replace(
+            vllm_config.parallel_config,
+            pipeline_parallel_size=1,
+            tensor_parallel_size=(
+                speculative_config.draft_parallel_config.tensor_parallel_size
+            ),
+        ),
         attention_config=replace(
             vllm_config.attention_config,
             use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
@@ -66,6 +74,7 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             if speculative_config.kv_cache_dtype is not None
             else vllm_config.cache_config
         ),
+        load_config=get_pp_safe_draft_load_config(vllm_config.load_config),
     )
     # VllmConfig post-init restores the target's quant config because the target
     # config is retained for DSpark's target-layer metadata, so we must override it.
@@ -76,9 +85,6 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             vllm_config=draft_vllm_config, model_config=draft_model_config
         )
 
-    if get_pp_group().world_size != 1:
-        raise NotImplementedError("DSpark does not support pipeline parallelism.")
-
     target_language_model = (
         target_model.get_language_model()
         if hasattr(target_model, "get_language_model")
@@ -88,18 +94,8 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     draft_inner = draft_model.model
     target_vocab_size = vllm_config.model_config.get_vocab_size()
 
-    target_embed = getattr(target_inner, "embed_tokens", None)
-    draft_embed = getattr(draft_inner, "embed_tokens", None)
-    if (
-        target_embed is not None
-        and draft_model_config.get_vocab_size() <= target_vocab_size
-        and _should_share(
-            draft_model, "has_own_embed_tokens", draft_embed, target_embed
-        )
-    ):
-        if draft_embed is not None:
-            del draft_inner.embed_tokens
-        draft_inner.embed_tokens = target_embed
+    if draft_model_config.get_vocab_size() <= target_vocab_size:
+        maybe_share_target_embed(draft_model, draft_inner, target_inner)
 
     target_lm_head = get_target_lm_head(target_model, target_language_model)
     draft_lm_head = getattr(draft_model, "lm_head", None)

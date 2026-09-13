@@ -175,6 +175,15 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         projection_size = self.head_dim * self.num_heads
         self.local_projection_size = divide(projection_size, self.tp_size)
 
+        _, recurrent_state_shape = self.get_state_shape()
+        _, recurrent_state_dtype = self.get_state_dtype()
+        scatter_states.register_warmup(
+            state_shape=recurrent_state_shape,
+            state_dtype=recurrent_state_dtype,
+            indices_dtype=torch.int32,
+            max_num_tokens=vllm_config.scheduler_config.max_num_seqs,
+        )
+
         # Merge q, k, v, b, f_a, g_a projections into one GEMM (6→1 launches).
         # Order matches checkpoint's fused_qkvbfg_a_proj convention.
         # Shards 4 (f_a) and 5 (g_a) are replicated across TP ranks.
