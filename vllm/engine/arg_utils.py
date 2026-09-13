@@ -693,6 +693,9 @@ class EngineArgs:
     )
     jit_monitor_mode: Literal["warn", "error"] = ObservabilityConfig.jit_monitor_mode
     jit_monitor_verbose: bool = ObservabilityConfig.jit_monitor_verbose
+    jit_monitor_triton: bool = ObservabilityConfig.jit_monitor_triton
+    jit_monitor_cutedsl: bool = ObservabilityConfig.jit_monitor_cutedsl
+    jit_monitor_tilelang: bool = ObservabilityConfig.jit_monitor_tilelang
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
@@ -1540,6 +1543,18 @@ class EngineArgs:
             **observability_kwargs["per_request_spec_decode_metrics"],
         )
         observability_group.add_argument(
+            "--jit-monitor-triton",
+            **observability_kwargs["jit_monitor_triton"],
+        )
+        observability_group.add_argument(
+            "--jit-monitor-cutedsl",
+            **observability_kwargs["jit_monitor_cutedsl"],
+        )
+        observability_group.add_argument(
+            "--jit-monitor-tilelang",
+            **observability_kwargs["jit_monitor_tilelang"],
+        )
+        observability_group.add_argument(
             "--kv-cache-metrics", **observability_kwargs["kv_cache_metrics"]
         )
         observability_group.add_argument(
@@ -2035,6 +2050,9 @@ class EngineArgs:
             enable_logging_iteration_details=self.enable_logging_iteration_details,
             jit_monitor_mode=self.jit_monitor_mode,
             jit_monitor_verbose=self.jit_monitor_verbose,
+            jit_monitor_triton=self.jit_monitor_triton,
+            jit_monitor_cutedsl=self.jit_monitor_cutedsl,
+            jit_monitor_tilelang=self.jit_monitor_tilelang,
         )
 
     def create_engine_config(
