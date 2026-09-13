@@ -63,6 +63,12 @@ class NixlBaseConnectorScheduler:
         kv_cache_config: "KVCacheConfig",
     ):
         self.vllm_config = vllm_config
+        parallel_config = vllm_config.parallel_config
+        # TP1 PCP+DCP exposes its DCP shards as transfer ranks.
+        self.transfer_tp_size = max(
+            parallel_config.tensor_parallel_size,
+            parallel_config.decode_context_parallel_size,
+        )
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
