@@ -999,6 +999,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self._k_scale,
                 output=mha_output[num_mqa_tokens:num_actual_toks],
                 output_scale=mha_output_scale,
+                kv_b_proj_lora=self.kv_b_proj,
+                token_lora_mapping=self._kv_b_proj_lora_mapping(
+                    num_mqa_tokens, num_actual_toks
+                ),
             )
 
         if num_mqa_tokens > 0:
@@ -1080,6 +1084,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     mqa_ql_nope = mqa_q_nope.new_empty((B, N, L))
                     torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope.transpose(0, 1))
 
+            apply_q_lora = getattr(self.kv_b_proj, "apply_mla_kv_b_lora_q", None)
+            mqa_lora_mapping = self._kv_b_proj_lora_mapping(0, num_mqa_tokens)
+            if apply_q_lora is not None and mqa_lora_mapping is not None:
+                apply_q_lora(
+                    mqa_q_nope.transpose(0, 1),
+                    mqa_ql_nope,
+                    mqa_lora_mapping,
+                    self.v_head_dim,
+                )
+
             if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
@@ -1138,7 +1152,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     attn_out = finalize_mla_pcp_decode(attn_out, self.num_heads)
 
             # v_up projection
-            self._v_up_proj(attn_out, out=mqa_output_slice)
+            self._v_up_proj(
+                attn_out,
+                out=mqa_output_slice,
+                token_lora_mapping=mqa_lora_mapping,
+            )
 
         if quant_key is not None:
             quant_idx = num_mqa_tokens if mha_use_quant_output else num_actual_toks
@@ -1373,9 +1391,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
 
-    def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
+    def _kv_b_proj_lora_mapping(self, start: int, end: int) -> torch.Tensor | None:
+        punica_wrapper = getattr(self.kv_b_proj, "punica_wrapper", None)
+        if punica_wrapper is None:
+            return None
+        return punica_wrapper.token_lora_indices[start:end]
+
+    def _v_up_proj(
+        self,
+        x: torch.Tensor,
+        out: torch.Tensor,
+        token_lora_mapping: torch.Tensor | None = None,
+    ):
         # Convert from (B, N, L) to (N, B, L)
-        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        latent_output = x.view(-1, self.num_heads, self.kv_lora_rank)
+        x = latent_output.transpose(0, 1)
         out = out.view(-1, self.num_heads, self.v_head_dim)
         if self.is_aiter_triton_fp4_bmm_enabled:
             out = rocm_aiter_ops.batched_gemm_a16wfp4(
@@ -1406,6 +1436,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         else:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
+
+        apply_v_lora = getattr(self.kv_b_proj, "apply_mla_kv_b_lora_v", None)
+        if apply_v_lora is not None and token_lora_mapping is not None:
+            apply_v_lora(
+                latent_output,
+                out,
+                token_lora_mapping,
+                self.qk_nope_head_dim,
+            )
 
 
 def unified_mla_kv_cache_update(
@@ -2895,6 +2934,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
+        kv_b_proj_lora: object | None,
+        request_lora_mapping: torch.Tensor | None,
     ):
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
@@ -2969,6 +3010,15 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
+            apply_lora = getattr(kv_b_proj_lora, "apply_mla_kv_b_lora_linear", None)
+            if apply_lora is not None and request_lora_mapping is not None:
+                apply_lora(
+                    kv_c_normed,
+                    kv_nope,
+                    request_lora_mapping[chunk.request_slice][
+                        chunk.token_to_seq[:toks].long()
+                    ],
+                )
 
             # To Do: Use epilogue of kv_b_proj to generate fp8 kv_nope.
             if use_fp8_prefill:
@@ -3012,6 +3062,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
         dcp_world_size: int,
+        kv_b_proj_lora: object | None,
+        request_lora_mapping: torch.Tensor | None,
     ):
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
@@ -3106,6 +3158,17 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
+            apply_lora = getattr(kv_b_proj_lora, "apply_mla_kv_b_lora_linear", None)
+            if apply_lora is not None and request_lora_mapping is not None:
+                context_lora_mapping = request_lora_mapping[chunk.request_slice][
+                    chunk.token_to_seq[: chunk.num_context_tokens].long()
+                ]
+                assert context_lora_mapping.shape[0] == kv_c_normed.shape[0]
+                apply_lora(
+                    kv_c_normed,
+                    kv_nope,
+                    context_lora_mapping,
+                )
             if use_fp8_prefill:
                 kv_nope = kv_nope.to(prefill_metadata.q_data_type)
                 k_pe = k_pe.to(prefill_metadata.q_data_type)
@@ -3149,6 +3212,8 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
+        kv_b_proj_lora: object | None = None,
+        token_lora_mapping: torch.Tensor | None = None,
     ) -> None:
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
@@ -3167,6 +3232,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
+        apply_lora = getattr(kv_b_proj_lora, "apply_mla_kv_b_lora_linear", None)
+        if apply_lora is not None and token_lora_mapping is not None:
+            apply_lora(kv_c_normed, kv_nope, token_lora_mapping)
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
@@ -3189,6 +3257,11 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
         if has_context:
             assert prefill_metadata.chunked_context is not None
+            request_lora_mapping = None
+            if token_lora_mapping is not None:
+                request_lora_mapping = token_lora_mapping[
+                    prefill_metadata.query_start_loc[:-1].long()
+                ]
             suffix_output, suffix_lse = output_prefill
             if self.dcp_world_size > 1:
                 context_output, context_lse = (
@@ -3198,11 +3271,18 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                         attn_metadata,
                         k_scale=k_scale,
                         dcp_world_size=self.dcp_world_size,
+                        kv_b_proj_lora=kv_b_proj_lora,
+                        request_lora_mapping=request_lora_mapping,
                     )
                 )
             else:
                 context_output, context_lse = self._compute_prefill_context(
-                    q, kv_c_and_k_pe_cache, attn_metadata, k_scale
+                    q,
+                    kv_c_and_k_pe_cache,
+                    attn_metadata,
+                    k_scale,
+                    kv_b_proj_lora,
+                    request_lora_mapping,
                 )
 
             context_output = context_output[..., : self.v_head_dim]
