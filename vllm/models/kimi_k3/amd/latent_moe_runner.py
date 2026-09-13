@@ -6,6 +6,7 @@ import torch
 
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
@@ -33,7 +34,7 @@ class ROCmLatentMoERunner(MoERunner):
 
         transform = self.routed_output_transform
         up_proj = getattr(transform, "up_proj", None)
-        tp_size = self.moe_config.tp_size
+        tp_size = get_tensor_model_parallel_world_size()
 
         self._up_proj_shard_size = 0
         self._tail_shardable = (
