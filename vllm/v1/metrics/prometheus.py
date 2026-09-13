@@ -62,9 +62,14 @@ def unregister_vllm_metrics():
     global registry.
     """
     registry = REGISTRY
-    # Unregister any existing vLLM collectors
+    # Unregister any existing vLLM collectors, including the OTel GenAI
+    # semantic convention mirrors (`gen_ai_*`), which don't carry the
+    # `vllm:` prefix.
     for collector in list(registry._collector_to_names):
-        if hasattr(collector, "_name") and collector._name.startswith("vllm:"):
+        name = getattr(collector, "_name", None)
+        if name is not None and (
+            name.startswith("vllm:") or name.startswith("gen_ai_")
+        ):
             registry.unregister(collector)
 
 
