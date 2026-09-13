@@ -111,6 +111,17 @@ vllm-rs \
   --ssl-certfile /path/to/cert.pem --ssl-keyfile /path/to/key.pem
 ```
 
+To build and run the standalone Docker image:
+
+```bash
+docker buildx bake -f docker/docker-bake.hcl rust-renderer
+
+docker run --rm -p 8000:8000 \
+  -v vllm-rust-renderer-cache:/home/vllm/.cache/huggingface \
+  local/vllm-rust-renderer:dev \
+  render Qwen/Qwen3-32B --host 0.0.0.0 --max-model-len 32768
+```
+
 The render endpoints return the public token-in `GenerateRequest` consumed by
 the Rust `/inference/v1/generate` endpoint. A chat render response, or one item
 from a completion render response, can be submitted to that endpoint without

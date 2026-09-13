@@ -51,6 +51,23 @@ curl http://localhost:8000/v1/responses/render \
 
 For the post processing counterpart that turns generated token IDs back into OpenAI compatible responses, see the [Derenderer APIs](derenderer.md).
 
+## Standalone Docker image
+
+The Rust renderer can run as a standalone Docker image without Python, PyTorch,
+CUDA, model weights, or vLLM kernels:
+
+```bash
+docker buildx bake -f docker/docker-bake.hcl rust-renderer
+
+docker run --rm -p 8000:8000 \
+    -v vllm-rust-renderer-cache:/home/vllm/.cache/huggingface \
+    local/vllm-rust-renderer:dev \
+    render Qwen/Qwen3-32B --host 0.0.0.0 --max-model-len 32768
+```
+
+The container entrypoint is `vllm-rs`, so additional `render` flags can be
+passed after the image name.
+
 ## Multimodal Render Features
 
 Multimodal render responses include a `features` object with per-modality
