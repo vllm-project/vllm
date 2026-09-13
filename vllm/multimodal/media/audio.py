@@ -3,6 +3,7 @@
 import math
 from collections.abc import Callable
 from io import BytesIO
+from itertools import chain
 from pathlib import Path
 
 import numpy as np
@@ -145,22 +146,35 @@ def load_audio_pyav(
             rel_tol=0.0,
             abs_tol=1e-6,
         )
-        resampler = (
-            av.AudioResampler(format="fltp", layout="mono", rate=sr)
-            if needs_resampling
-            else None
-        )
+        # Normalize integer PCM to float while keeping the resampler output
+        # packed. Exporting planar frames with many channels can crash inside
+        # PyAV, so deinterleave the packed ndarray explicitly below.
+        resampler: av.AudioResampler | None = None
         try:
-            for frame in container.decode(stream):
-                if needs_resampling:
-                    assert resampler is not None
-                    for out_frame in resampler.resample(frame):
-                        arr = out_frame.to_ndarray()
-                        total_samples += arr.shape[-1]
-                        total_decode_bytes += arr.nbytes
-                        chunks.append(arr)
+            frames = chain(container.decode(stream), (None,))
+            for frame in frames:
+                if (
+                    frame is not None
+                    and not needs_resampling
+                    and frame.format.name in {"flt", "fltp"}
+                ):
+                    out_frames = (frame,)
+                elif frame is None and resampler is None:
+                    continue
                 else:
-                    arr = frame.to_ndarray()
+                    if resampler is None:
+                        assert frame is not None
+                        resampler = av.AudioResampler(
+                            format="flt",
+                            layout=frame.layout.name,
+                            rate=sr,
+                        )
+                    out_frames = resampler.resample(frame)
+
+                for out_frame in out_frames:
+                    arr = out_frame.to_ndarray()
+                    if not out_frame.format.is_planar:
+                        arr = arr.reshape(out_frame.samples, -1).T
                     total_samples += arr.shape[-1]
                     total_decode_bytes += arr.nbytes
                     chunks.append(arr)
