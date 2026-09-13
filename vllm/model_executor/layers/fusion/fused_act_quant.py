@@ -33,6 +33,9 @@ from vllm.utils.math_utils import round_up
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
+# Counter for tracking manual fusion activations (for testing/debugging)
+_manual_fusion_count: int = 0
+
 
 def _silu_and_mul_fp8_static(
     x: torch.Tensor, linear: LinearBase
@@ -164,9 +167,22 @@ def maybe_fused_act_quant(
     Returns a QuantizedActivation when a fused kernel matches
     (act_fn, linear.input_quant_key), else the plain activated tensor.
     """
+    global _manual_fusion_count
     key = getattr(linear, "input_quant_key", None)
     if key is not None:
         producer = _FUSED_ACT_QUANT.get((type(act_fn), key))
         if producer is not None:
+            _manual_fusion_count += 1
             return producer(x, linear)
     return act_fn(x)
+
+
+def get_manual_fusion_count() -> int:
+    """Return the current manual fusion count (for testing)."""
+    return _manual_fusion_count
+
+
+def reset_manual_fusion_count() -> None:
+    """Reset the manual fusion count (for testing)."""
+    global _manual_fusion_count
+    _manual_fusion_count = 0
