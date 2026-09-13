@@ -684,7 +684,7 @@ class IndexerQFp8Kernel(VllmCuTeDSLJitKernel["IndexerQFp8Kernel.CompileKey"]):
             q,
             cos_sin_cache,
             weights,
-            q_fp8,
+            q_fp8.view(torch.uint8),
             weights_out,
             float(weights_softmax_scale * weights_head_scale),
         )

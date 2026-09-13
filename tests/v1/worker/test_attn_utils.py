@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import vllm.v1.hisparse.binding as attn_utils_module
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
@@ -237,6 +238,87 @@ def test_get_kv_sharing_fast_prefill_eligible_layers(monkeypatch: pytest.MonkeyP
         cache_config=SimpleNamespace(kv_sharing_fast_prefill=False)
     )
     assert attn_utils.get_kv_sharing_fast_prefill_eligible_layers(vllm_config) == set()
+
+
+class _FakeSharedHostRegion:
+    def __init__(self) -> None:
+        self.cleanup_calls = 0
+        self.base_tensor = torch.empty(1, dtype=torch.int8)
+
+    def cleanup(self) -> None:
+        self.cleanup_calls += 1
+
+
+def test_profiling_cleanup_releases_tp_shared_region_once(monkeypatch):
+    """TP-shared profiling pools must use region-aware chunk cleanup."""
+    region = _FakeSharedHostRegion()
+    runtime = SimpleNamespace(
+        _host_cache=object(),
+        registered_host_pool=region.base_tensor,
+        hot_backing=object(),
+        shared_host_region=region,
+    )
+    forward_context = {
+        "layer": SimpleNamespace(
+            hisparse_cache=SimpleNamespace(runtime=runtime),
+        )
+    }
+    released = []
+
+    def release_pinned_state(runtimes, pinned_host_pools, shared_host_region):
+        released.append((runtimes, pinned_host_pools, shared_host_region))
+
+    monkeypatch.setattr(
+        attn_utils_module,
+        "release_pinned_state",
+        release_pinned_state,
+    )
+
+    attn_utils_module.release_hisparse_profiling_cache(forward_context)
+
+    assert released == [([runtime], [], region)]
+
+
+@pytest.mark.parametrize("failure_phase", ["allocation", "binding", "buffers"])
+def test_init_hisparse_rolls_back_shared_region(monkeypatch, failure_phase):
+    """A failure after mmap allocation must not leak the shared registration."""
+    region = _FakeSharedHostRegion()
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.BLHNC
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=1, max_num_batched_tokens=1),
+    )
+
+    def allocate(*args):
+        args[-1].shared_region = region
+        if failure_phase == "allocation":
+            raise RuntimeError("initialization failed")
+        return {}
+
+    def bind(**kwargs):
+        if failure_phase == "binding":
+            raise RuntimeError("initialization failed")
+        return []
+
+    def buffers(*args, **kwargs):
+        raise RuntimeError("initialization failed")
+
+    monkeypatch.setattr(attn_utils_module, "allocate_hisparse_kv_caches", allocate)
+    monkeypatch.setattr(attn_utils_module, "bind_hisparse_kv_caches", bind)
+    monkeypatch.setattr(
+        attn_utils_module, "initialize_hisparse_runtime_buffers", buffers
+    )
+    with pytest.raises(RuntimeError, match="initialization failed"):
+        attn_utils_module.init_hisparse_kv_cache(
+            SimpleNamespace(),
+            torch.device("cpu"),
+            [],
+            vllm_config,
+            {},
+            SimpleNamespace(),
+        )
+    assert region.cleanup_calls == 1
 
 
 def test_reshape_padded_kv_cache_strides_by_padded_page():

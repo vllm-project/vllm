@@ -289,16 +289,16 @@ def test_cutedsl_indexer_q_writes_stay_within_num_tokens(use_fp4, n_head):
             dtype=torch.uint8,
             device=device,
         )
-        mod.fused_indexer_q_rope_quant_mxfp4_cutedsl(
-            positions[:num_tokens],
-            q[:num_tokens],
-            cos_sin_cache,
-            weights[:num_tokens],
-            1.0,
-            1.0,
-            outputs["q_packed"][:num_tokens],
-            outputs["q_scale"][:num_tokens],
-            weights_out[:num_tokens],
+        mod._INDEXER_Q_MXFP4_KERNEL(
+            positions=positions[:num_tokens],
+            q=q[:num_tokens],
+            cos_sin_cache=cos_sin_cache,
+            weights=weights[:num_tokens],
+            weights_softmax_scale=1.0,
+            weights_head_scale=1.0,
+            q_packed=outputs["q_packed"][:num_tokens],
+            q_scale=outputs["q_scale"][:num_tokens],
+            weights_out=weights_out[:num_tokens],
         )
     else:
         outputs["q_fp8"] = torch.full(
@@ -307,15 +307,15 @@ def test_cutedsl_indexer_q_writes_stay_within_num_tokens(use_fp4, n_head):
             dtype=torch.uint8,
             device=device,
         )
-        mod.fused_indexer_q_rope_quant_fp8_cutedsl(
-            positions[:num_tokens],
-            q[:num_tokens],
-            cos_sin_cache,
-            weights[:num_tokens],
-            1.0,
-            1.0,
-            outputs["q_fp8"][:num_tokens].view(torch.float8_e4m3fn),
-            weights_out[:num_tokens],
+        mod._INDEXER_Q_FP8_KERNEL(
+            positions=positions[:num_tokens],
+            q=q[:num_tokens],
+            cos_sin_cache=cos_sin_cache,
+            weights=weights[:num_tokens],
+            weights_softmax_scale=1.0,
+            weights_head_scale=1.0,
+            q_fp8=outputs["q_fp8"][:num_tokens].view(torch.float8_e4m3fn),
+            weights_out=weights_out[:num_tokens],
         )
     torch.accelerator.synchronize()
 

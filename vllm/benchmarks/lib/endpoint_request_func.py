@@ -235,8 +235,7 @@ async def async_request_openai_completions(
                                 # First token
                                 if not first_chunk_received:
                                     first_chunk_received = True
-                                    ttft = time.perf_counter() - st
-                                    output.ttft = ttft
+                                    output.ttft = timestamp - st
 
                                 # Decoding phase
                                 else:
@@ -415,12 +414,13 @@ async def async_request_openai_chat_completions(
                                     output.itl.append(timestamp - most_recent_timestamp)
 
                                 generated_text += content or ""
+                                # Only token chunks advance the request end;
+                                # the trailing usage chunk carries no token.
+                                most_recent_timestamp = timestamp
                             elif usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
                                 if (pt := usage.get("prompt_tokens")) is not None:
                                     output.prompt_len = pt
-
-                            most_recent_timestamp = timestamp
 
                 output.generated_text = generated_text
                 if first_chunk_received:
@@ -540,12 +540,14 @@ async def async_request_openai_audio(
                                         )
 
                                     generated_text += content or ""
+                                    # Only token chunks advance the request
+                                    # end; the trailing usage chunk carries no
+                                    # token.
+                                    most_recent_timestamp = timestamp
                                 elif usage := data.get("usage"):
                                     output.output_tokens = usage.get(
                                         "completion_tokens"
                                     )
-
-                                most_recent_timestamp = timestamp
 
                     output.generated_text = generated_text
                     if first_chunk_received:

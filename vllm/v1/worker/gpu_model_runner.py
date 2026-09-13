@@ -498,6 +498,7 @@ class ExecuteModelState(NamedTuple):
 class GPUModelRunner(
     LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ECConnectorModelRunnerMixin
 ):
+    @JitWarmupRegistry.capture
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -514,7 +515,6 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
-        self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -750,36 +750,35 @@ class GPUModelRunner(
             self.parallel_config.cp_kv_cache_interleave_size
         )
         # Capture warmup providers registered by the initial placeholder InputBatch
-        with self.jit_warmup_registry.activate():
-            self.input_batch = InputBatch(
-                max_num_reqs=self.max_num_reqs,
-                # We need to use the encoder length for encoder-decoder
-                # because of KV cache for cross-attention.
-                max_model_len=max(self.max_model_len, self.max_encoder_len),
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=[placeholder_block_size],
-                kernel_block_sizes=[placeholder_block_size],
-                max_num_blocks_per_req=[placeholder_max_num_blocks],
-                num_spec_tokens=self.num_spec_tokens,
-                logitsprocs=build_logitsprocs(
-                    self.vllm_config,
-                    self.device,
-                    PIN_MEMORY,
-                    self.is_pooling_model,
-                    custom_logitsprocs,
-                ),
-                # We currently don't know whether a particular custom logits processor
-                # uses output token ids so we set this conservatively. Thinking-budget
-                # tracking is requested dynamically when a budgeted request is in the
-                # batch.
-                logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
-                is_pooling_model=self.is_pooling_model,
-                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
-                reasoning_config=self.vllm_config.reasoning_config,
-                use_replayssm=self.cache_config.use_replayssm,
-            )
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            # We need to use the encoder length for encoder-decoder
+            # because of KV cache for cross-attention.
+            max_model_len=max(self.max_model_len, self.max_encoder_len),
+            max_num_batched_tokens=self.max_num_tokens,
+            device=self.device,
+            vocab_size=self.model_config.get_vocab_size(),
+            block_sizes=[placeholder_block_size],
+            kernel_block_sizes=[placeholder_block_size],
+            max_num_blocks_per_req=[placeholder_max_num_blocks],
+            num_spec_tokens=self.num_spec_tokens,
+            logitsprocs=build_logitsprocs(
+                self.vllm_config,
+                self.device,
+                PIN_MEMORY,
+                self.is_pooling_model,
+                custom_logitsprocs,
+            ),
+            # We currently don't know whether a particular custom logits processor
+            # uses output token ids so we set this conservatively. Thinking-budget
+            # tracking is requested dynamically when a budgeted request is in the
+            # batch.
+            logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
+            is_pooling_model=self.is_pooling_model,
+            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+            reasoning_config=self.vllm_config.reasoning_config,
+            use_replayssm=self.cache_config.use_replayssm,
+        )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
@@ -2486,7 +2485,7 @@ class GPUModelRunner(
             self.dcp_local_seq_lens.copy_to_gpu(num_reqs_padded)
 
             cm_base.dcp_local_seq_lens = self.dcp_local_seq_lens.gpu[:num_reqs_padded]
-            cm_base.dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[
+            cm_base.dcp_local_seq_lens_cpu_upper_bound = self.dcp_local_seq_lens.cpu[
                 :num_reqs_padded
             ]
 
@@ -5332,7 +5331,7 @@ class GPUModelRunner(
                     self.load_config.load_format = "dummy"
                 model_loader = get_model_loader(self.load_config)
                 # Capture warmup providers selected while constructing the model.
-                with self.jit_warmup_registry.activate():
+                with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
                     self.model = model_loader.load_model(
                         vllm_config=self.vllm_config, model_config=self.model_config
                     )
@@ -7304,7 +7303,7 @@ class GPUModelRunner(
                 self.parallel_config.cp_kv_cache_interleave_size
             )
             # Capture warmup providers registered after final KV-cache geometry is known
-            with self.jit_warmup_registry.activate():
+            with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
                 self.input_batch = InputBatch(
                     max_num_reqs=self.max_num_reqs,
                     max_model_len=max_model_len,
@@ -7454,7 +7453,7 @@ class GPUModelRunner(
         # Reinitialize need to after initialize_attn_backend
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
         # Capture warmup providers that depend on allocated KV-cache strides.
-        with self.jit_warmup_registry.activate():
+        with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
             kv_caches = self.initialize_kv_cache_tensors(
                 kv_cache_config,
                 kernel_block_sizes,
