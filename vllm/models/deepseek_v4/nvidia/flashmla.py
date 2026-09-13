@@ -30,6 +30,10 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
 )
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    rocm_sparse_attn_decode,
+    rocm_sparse_attn_prefill,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -53,6 +57,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV4FlashMLABackend
     swa_backend_cls = DeepseekSparseSWAFlashMLABackend
+    use_triton_sparse_attn = False
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -208,6 +213,29 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
         swa_indices = swa_metadata.decode_swa_indices
         swa_lens = swa_metadata.decode_swa_lens
+
+        if self.use_triton_sparse_attn:
+            rocm_sparse_attn_decode(
+                q=q,
+                kv_cache=kv_cache,
+                swa_k_cache=self.swa_cache_layer.kv_cache,
+                swa_only=swa_only,
+                topk_indices=topk_indices,
+                topk_lens=topk_lens,
+                swa_indices=swa_indices,
+                swa_lens=swa_lens,
+                swa_ragged_indices=None,
+                swa_ragged_indptr=None,
+                topk_ragged_indices=None,
+                topk_ragged_indptr=None,
+                attn_sink=self.attn_sink,
+                scale=self.scale,
+                head_dim=self.head_dim,
+                nope_head_dim=self.nope_head_dim,
+                rope_head_dim=self.rope_head_dim,
+                output=output,
+            )
+            return
 
         # We treat queries in the same seq as different queries
         # and later we only attend by generated indices.
@@ -387,12 +415,32 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 ),
                 max_image_tokens=self.max_image_tokens,
             )
-            flash_mla_sparse_fwd(
-                q=q[query_start:query_end],
-                kv=kv.view(-1, 1, q.shape[-1]),
-                indices=combined_indices.unsqueeze(1),
-                sm_scale=self.scale,
-                attn_sink=self.attn_sink,
-                topk_length=combined_lens,
-                out=output[query_start:query_end],
-            )
+            if self.use_triton_sparse_attn:
+                rocm_sparse_attn_prefill(
+                    q=q[query_start:query_end],
+                    kv=kv.view(-1, 1, q.shape[-1]),
+                    indices=combined_indices.unsqueeze(1),
+                    topk_length=combined_lens,
+                    scale=self.scale,
+                    head_dim=self.head_dim,
+                    nope_head_dim=self.nope_head_dim,
+                    rope_head_dim=self.rope_head_dim,
+                    attn_sink=self.attn_sink,
+                    output=output[query_start:query_end],
+                )
+            else:
+                flash_mla_sparse_fwd(
+                    q=q[query_start:query_end],
+                    kv=kv.view(-1, 1, q.shape[-1]),
+                    indices=combined_indices.unsqueeze(1),
+                    sm_scale=self.scale,
+                    attn_sink=self.attn_sink,
+                    topk_length=combined_lens,
+                    out=output[query_start:query_end],
+                )
+
+
+class DeepseekV4TritonMLAAttention(DeepseekV4FlashMLAAttention):
+    """Portable sparse-MLA attention for CUDA architectures below SM90."""
+
+    use_triton_sparse_attn = True
