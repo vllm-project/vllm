@@ -28,11 +28,14 @@ def _create_vllm_config_for_dsd(
     cudagraph_mode: str = "FULL_AND_PIECEWISE",
     use_dynamic_sd: bool = True,
     num_spec_per_batch_size: list[tuple[int, int, int]] | None = None,
+    cudagraph_capture_sizes: list[int] | None = None,
 ) -> MagicMock:
     """Create a minimal config that exercises DSD cudagraph dispatch.
 
-    The test uses an exact capture-size grid so that every valid uniform decode
-    shape has a directly matching FULL graph candidate.
+    By default the test uses an exact capture-size grid so that every valid
+    uniform decode shape has a directly matching FULL graph candidate.
+    ``cudagraph_capture_sizes`` overrides that with an explicit ladder, which
+    is what a served config actually gets.
 
     ``num_spec_per_batch_size`` lets a test supply an explicit DSD schedule of
     ``(range_start, range_end, num_speculative_tokens)`` tuples. When omitted,
@@ -41,11 +44,15 @@ def _create_vllm_config_for_dsd(
     """
 
     max_decode_query_len = max_spec_tokens + 1
-    max_capture_tokens = max_num_seqs * max_decode_query_len
+    if cudagraph_capture_sizes is None:
+        cudagraph_capture_sizes = list(
+            range(1, max_num_seqs * max_decode_query_len + 1)
+        )
+    max_capture_tokens = cudagraph_capture_sizes[-1]
 
     compilation_config = CompilationConfig(
         cudagraph_mode=cudagraph_mode,
-        cudagraph_capture_sizes=list(range(1, max_capture_tokens + 1)),
+        cudagraph_capture_sizes=cudagraph_capture_sizes,
     )
     compilation_config.max_cudagraph_capture_size = max_capture_tokens
     compilation_config.post_init_cudagraph_sizes()
@@ -431,4 +438,81 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
                 assert desc.uniform_token_count is None
                 assert desc.num_tokens == num_tokens
                 assert desc.num_reqs is None
+            assert desc.num_active_loras == 0
+
+
+def test_dynamic_sd_tier_is_not_shadowed_on_a_strided_capture_ladder(monkeypatch):
+    """A tier's decode batch must not be shadowed by another tier's graph.
+
+    Candidate ranges are laddered per uniform_token_count. The other tests here
+    pin an exact capture-size grid, where every uniform decode shape is captured
+    outright; a served config gets a strided ladder instead, so the nearest
+    captured size for one tier's batch often belongs to a different tier. With
+    a shared ladder that batch reaches only the other tier's descriptor, fails
+    the uniform_token_count check in _is_compatible, and drops to the mixed
+    PIECEWISE graph -- paying eager attention every decode step even though a
+    FULL decode graph for its own query length was captured and is wide enough
+    to serve it after request padding.
+    """
+
+    max_num_seqs = 128
+    max_spec_tokens = 6
+    max_decode_query_len = max_spec_tokens + 1
+    # (range_start, range_end, num_speculative_tokens): query lengths 7, 5, 4.
+    schedule = [(1, 8, 6), (9, 32, 4), (33, 128, 3)]
+    # The strided ladder a default config builds: 1, 2, 4, then step 8, then 16.
+    capture_sizes = sorted({1, 2, 4} | set(range(8, 256, 8)) | set(range(256, 513, 16)))
+
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+
+    vllm_config = _create_vllm_config_for_dsd(
+        max_num_seqs=max_num_seqs,
+        max_spec_tokens=max_spec_tokens,
+        num_spec_per_batch_size=schedule,
+        cudagraph_capture_sizes=capture_sizes,
+    )
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_len=max_decode_query_len,
+    )
+    manager._graphs_captured = True
+
+    captured = manager._capture_descs[CUDAGraphMode.FULL]
+    for range_start, range_end, num_spec in schedule:
+        query_len = num_spec + 1
+        for num_reqs in range(range_start, range_end + 1):
+            num_tokens = num_reqs * query_len
+            # Only assert on shapes this config actually captured a graph for;
+            # the ladder's ceiling is a separate concern.
+            servable = [
+                desc
+                for desc in captured
+                if desc.uniform_token_count == query_len
+                and desc.num_reqs >= num_reqs
+                and desc.num_tokens >= num_tokens
+            ]
+            if not servable:
+                continue
+
+            desc = manager.dispatch(
+                num_reqs=num_reqs,
+                num_tokens=num_tokens,
+                uniform_token_count=query_len,
+                num_active_loras=0,
+            )
+
+            assert desc.cg_mode == CUDAGraphMode.FULL, (
+                f"{num_reqs} requests at query length {query_len} "
+                f"({num_tokens} tokens) fell back to {desc.cg_mode} despite "
+                f"{len(servable)} captured FULL graphs able to serve it"
+            )
+            assert desc.uniform_token_count == query_len
+            assert desc.num_tokens >= num_tokens
+            assert desc.num_reqs >= num_reqs
             assert desc.num_active_loras == 0

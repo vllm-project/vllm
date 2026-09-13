@@ -331,15 +331,25 @@ class CudaGraphManager:
                 lora_descs = [
                     d for d in mode_descs if d.num_active_loras == num_active_loras
                 ]
-                current_range_start = 0
-                # Dynamic speculative decoding can produce multiple graphs with the same
-                # num_tokens. Group them so each graph covers the same candidate range.
-                for num_tokens, group in groupby(lora_descs, lambda d: d.num_tokens):
-                    matching = list(group)
-                    for i in range(current_range_start, num_tokens + 1):
-                        key = (i, num_active_loras)
-                        self._candidates.setdefault(key, []).extend(matching)
-                    current_range_start = num_tokens + 1
+                # A descriptor only serves a matching uniform_token_count, so
+                # each one needs its own ladder: dynamic SD puts several in a
+                # mode, and a shared ladder lets the nearest graph belong to
+                # another tier and shadow the one that fits.
+                by_token_count: defaultdict[
+                    int | None, list[BatchExecutionDescriptor]
+                ] = defaultdict(list)
+                for desc in lora_descs:
+                    by_token_count[desc.uniform_token_count].append(desc)
+                for token_count_descs in by_token_count.values():
+                    current_range_start = 0
+                    for num_tokens, group in groupby(
+                        token_count_descs, lambda d: d.num_tokens
+                    ):
+                        matching = list(group)
+                        for i in range(current_range_start, num_tokens + 1):
+                            key = (i, num_active_loras)
+                            self._candidates.setdefault(key, []).extend(matching)
+                        current_range_start = num_tokens + 1
 
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
