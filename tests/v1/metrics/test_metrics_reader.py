@@ -125,3 +125,45 @@ def test_vector_metric(test_registry, num_engines):
         assert m.labels["model"] == "llama"
         assert m.labels["engine_index"] in engine_labels
         engine_labels.remove(m.labels["engine_index"])
+
+
+def test_unsupported_metric_type_is_skipped(test_registry):
+    """A metric type the reader cannot represent must not break the snapshot.
+
+    prometheus_client ships summary, info and stateset collectors beyond the
+    three types this reader digests, and any custom collector may return one.
+    Both public callers of get_metrics_snapshot() - LLM.get_metrics() and the
+    ORCA endpoint-load-metrics header - would previously raise on such a
+    metric, over a type neither of them reads.
+    """
+    prometheus_client.Summary(
+        "vllm:test_summary",
+        "Test summary metric",
+        registry=test_registry,
+    ).observe(1.0)
+    g = prometheus_client.Gauge(
+        "vllm:test_gauge",
+        "Test gauge metric",
+        labelnames=["model"],
+        registry=test_registry,
+    )
+    g.labels(model="foo").set(98.5)
+
+    metrics = get_metrics_snapshot()
+
+    # The gauge survives; the summary is dropped rather than taking the call
+    # down with it.
+    assert [m.name for m in metrics] == ["vllm:test_gauge"]
+    assert isinstance(metrics[0], Gauge)
+    assert metrics[0].value == 98.5
+
+
+def test_unsupported_metric_type_alone_yields_empty_snapshot(test_registry):
+    """The degenerate case: nothing representable, and still no exception."""
+    prometheus_client.Info(
+        "vllm:test_info",
+        "Test info metric",
+        registry=test_registry,
+    ).info({"version": "test"})
+
+    assert get_metrics_snapshot() == []
