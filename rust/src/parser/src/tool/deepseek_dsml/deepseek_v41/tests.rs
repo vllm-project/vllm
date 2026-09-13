@@ -111,3 +111,83 @@ fn structural_tag_ignores_parameter_schemas_and_strict() {
         }
     }
 }
+
+#[test]
+fn spaced_dsml_streaming_emits_arguments_before_invoke_closes() {
+    let mut parser = DeepSeekV41ToolParser::create(&tools()).unwrap();
+    let mut output = crate::tool::ToolParserOutput::default();
+    parser
+        .parse_into(
+            concat!(
+                "<｜DSML｜ calls>\n",
+                "<｜DSML｜ invoke name=\"lookup\">\n",
+                "<｜DSML｜ parameter name=\"query\" string=\"true\">hello",
+                "</｜DSML｜ parameter>\n",
+            ),
+            &mut output,
+        )
+        .unwrap();
+
+    let calls = output.calls();
+    assert!(calls.iter().any(|call| call.name.as_deref() == Some("lookup")));
+    let arguments = calls.iter().map(|call| call.arguments.as_str()).collect::<String>();
+    assert_eq!(arguments, r#"{"query":"hello""#);
+    assert!(parser.finish().is_err());
+}
+
+#[test]
+fn spaced_dsml_streaming_matches_pr42879_mixed_argument_semantics() {
+    let tool = Tool {
+        name: "plan_trip".into(),
+        description: None,
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer"},
+                "flexible": {"type": "boolean"},
+                "cities": {"type": "array", "items": {"type": "string"}},
+                "notes": {"type": "string"}
+            }
+        }),
+        strict: None,
+    };
+    let wire = concat!(
+        "<｜DSML｜ calls>\n",
+        "<｜DSML｜ invoke name=\"plan_trip\">\n",
+        "<｜DSML｜ parameter name=\"days\" string=\"false\">3</｜DSML｜ parameter>\n",
+        "<｜DSML｜ parameter name=\"flexible\" string=\"false\">false</｜DSML｜ parameter>\n",
+        "<｜DSML｜ parameter name=\"cities\" string=\"false\">[\"Beijing\",\"Shanghai\",\"Tokyo\",\"New York\"]</｜DSML｜ parameter>\n",
+        "<｜DSML｜ parameter name=\"notes\" string=\"true\">靠窗座位</｜DSML｜ parameter>\n",
+        "</｜DSML｜ invoke>\n",
+        "</｜DSML｜ calls>",
+    );
+    let chunks = crate::tool::test_utils::split_by_chars(wire, 4);
+    let mut parser = DeepSeekV41ToolParser::create(&[tool]).unwrap();
+    let mut output = crate::tool::ToolParserOutput::default();
+    let mut non_empty_argument_deltas = 0;
+    for chunk in chunks {
+        let before = output.events.len();
+        parser.parse_into(chunk, &mut output).unwrap();
+        non_empty_argument_deltas += output.events[before..]
+            .iter()
+            .filter(|event| match event {
+                crate::tool::ToolParserEvent::ToolCall(call) => !call.arguments.is_empty(),
+                crate::tool::ToolParserEvent::Text(_) => false,
+            })
+            .count();
+    }
+    output.append(parser.finish().unwrap());
+    let output = output.coalesce();
+
+    assert!(non_empty_argument_deltas > 2);
+    assert_eq!(output.calls().len(), 1);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output.calls()[0].arguments).unwrap(),
+        json!({
+            "days": 3,
+            "flexible": false,
+            "cities": ["Beijing", "Shanghai", "Tokyo", "New York"],
+            "notes": "靠窗座位"
+        })
+    );
+}

@@ -21,7 +21,7 @@ use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutp
 /// </｜DSML｜tool_calls>
 /// ```
 ///
-/// Arguments are emitted only after a full `invoke` block is parsed.
+/// Stable argument fragments are emitted incrementally while the `invoke` block is parsed.
 ///
 /// V4 reuses the V3.2 DSML invoke/parameter grammar but wraps calls in
 /// `<｜DSML｜tool_calls>` instead of `<｜DSML｜function_calls>`.
