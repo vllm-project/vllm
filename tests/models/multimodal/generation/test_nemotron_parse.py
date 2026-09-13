@@ -105,7 +105,16 @@ def run_test(
         )
 
 
-@pytest.mark.parametrize("model", ["nvidia/NVIDIA-Nemotron-Parse-v1.2"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "nvidia/NVIDIA-Nemotron-Parse-v1.2",
+        # v2.0's checkpoint ties lm_head to the decoder's input embeddings
+        # instead of shipping a separate lm_head.weight tensor; this
+        # exercises that path (see tie_weights() in nemotron_parse.py).
+        "nvidia/NVIDIA-Nemotron-Parse-2.0",
+    ],
+)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
