@@ -121,6 +121,7 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
+    FusedInputNorm,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
@@ -623,6 +624,7 @@ class Glm4vVisionTransformer(nn.Module):
         vision_config: Glm4vVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -648,6 +650,9 @@ class Glm4vVisionTransformer(nn.Module):
             temporal_patch_size=temporal_patch_size,
             in_channels=in_channels,
             hidden_size=self.hidden_size,
+        )
+        self.input_norm = (
+            input_norm if input_norm is not None else FusedInputNorm.identity()
         )
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
@@ -931,7 +936,7 @@ class Glm4vVisionTransformer(nn.Module):
             encoder_metadata = self.prepare_encoder_metadata(grid_thw)
 
         # patchify
-        x = x.to(device=self.device, dtype=self.dtype)
+        x = self.input_norm(x.to(device=self.device), self.dtype)
         x = self.patch_embed(x)
         x = self.post_conv_layernorm(x)
 
@@ -1780,6 +1785,7 @@ class Glm4vForConditionalGeneration(
 
     supports_encoder_tp_data = True
     supports_tower_connector_lora = True
+    supports_mm_device_do_normalize = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -1811,6 +1817,7 @@ class Glm4vForConditionalGeneration(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-5),
                 quant_config=quant_config,
+                input_norm=FusedInputNorm.from_model_config(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
@@ -1892,10 +1899,13 @@ class Glm4vForConditionalGeneration(
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
-            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            pixel_values = image_input["pixel_values"]
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw.tolist(), rope_type="rope_3d"
+                    self.visual,
+                    pixel_values.type(self.visual.dtype),
+                    grid_thw.tolist(),
+                    rope_type="rope_3d",
                 )
             else:
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
@@ -1913,13 +1923,11 @@ class Glm4vForConditionalGeneration(
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
-            pixel_values_videos = video_input["pixel_values_videos"].type(
-                self.visual.dtype
-            )
+            pixel_values_videos = video_input["pixel_values_videos"]
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual,
-                    pixel_values_videos,
+                    pixel_values_videos.type(self.visual.dtype),
                     grid_thw.tolist(),
                     rope_type="rope_3d",
                 )
