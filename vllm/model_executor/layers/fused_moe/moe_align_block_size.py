@@ -159,7 +159,7 @@ def batched_moe_align_block_size(
       The gemm kernel using this sorted_token_ids is expected to skip the
       gemm computation when it encounters this invalid index.
 
-      expert_ids will be [0, 1, 3, 3, 4, 5, 5, -1, -1, (rest all -1) ...]
+      expert_ids will be [0, 1, 3, 3, 4, 4, -1, -1, (rest all -1) ...]
       Here, -1 represents an invalid expert. The gemm kernel using this
       expert_ids is expected to skip the gemm computation when it encounters
       an expert of id -1.
