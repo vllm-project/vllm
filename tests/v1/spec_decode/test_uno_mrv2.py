@@ -748,7 +748,9 @@ def test_uno_served_launches_cover_sampler_flags_and_integer_buckets(use_flashin
             "chunked_or_mixed",
         }
     branches = {
-        warmup.mode.name: warmup.sampler_branch for warmup in plan.sampler_warmups
+        warmup.mode.name: warmup.sampler_branch
+        for warmup in plan.sampler_warmups
+        if warmup.sampler_branch != "native_verification"
     }
     expected_branches = {
         "top_p_only": "flashinfer" if use_flashinfer else "triton",
@@ -757,29 +759,19 @@ def test_uno_served_launches_cover_sampler_flags_and_integer_buckets(use_flashin
         "neither": "triton",
     }
     assert branches == expected_branches
-    if use_flashinfer:
-        assert plan.sampler_keys == frozenset()
-        assert plan.served_sampler_keys == frozenset()
-        assert len(plan.sampler_warmups) == 4
-    else:
-        assert len(plan.sampler_keys) == 46
-        assert ("_topp_sb_stats_kernel", False, 32) in plan.sampler_keys
-        assert ("_topp_sb_stats_kernel", True, 32) in plan.sampler_keys
-        assert (
-            "_topk_topp_kernel",
-            "one",
-            True,
-            False,
-            False,
-        ) in plan.sampler_keys
-        assert (
-            "_topk_topp_kernel",
-            "multiple_of_16",
-            True,
-            True,
-            True,
-        ) in plan.sampler_keys
-        assert plan.served_sampler_keys == plan.sampler_keys
+    assert len(plan.sampler_keys) == 46
+    for has_k in (False, True):
+        assert ("_topp_sb_stats_kernel", has_k, 32) in plan.sampler_keys
+        assert ("_topp_sb_stats_kernel", has_k, 4) in plan.sampler_keys
+    assert ("_topk_topp_kernel", "one", True, False, False) in plan.sampler_keys
+    assert (
+        "_topk_topp_kernel",
+        "multiple_of_16",
+        True,
+        True,
+        True,
+    ) in plan.sampler_keys
+    assert plan.served_sampler_keys == plan.sampler_keys
 
 
 @pytest.mark.parametrize(
@@ -795,6 +787,222 @@ def test_uno_served_launch_enumerator_rejects_unbounded_axes(kwargs):
 
     with pytest.raises(ValueError):
         enumerate_uno_served_launches(**kwargs, num_sm=82, use_flashinfer=False)
+
+
+@pytest.mark.parametrize(
+    "max_num_reqs,k,max_num_tokens,max_model_len",
+    [
+        (4, 8, 2048, 4),
+        (16, 8, 2048, 4096),
+        (4, 3, 7, 32),
+    ],
+)
+def test_uno_served_sampler_shapes_bound_every_axis(
+    max_num_reqs, k, max_num_tokens, max_model_len
+):
+    """A new shape axis must acquire an explicit bound in this contract."""
+    from vllm.v1.worker.gpu.spec_decode.uno import _served_sampler_shapes
+
+    bounds = dict(
+        max_num_reqs=max_num_reqs,
+        k=k,
+        max_num_tokens=max_num_tokens,
+        max_model_len=max_model_len,
+    )
+    assert set(inspect.signature(_served_sampler_shapes).parameters) == set(bounds)
+    for num_reqs, num_rows, _source in _served_sampler_shapes(**bounds):
+        assert 1 <= num_reqs <= max_num_reqs
+        assert num_reqs <= num_rows <= max_num_tokens
+        largest_request = (num_rows + num_reqs - 1) // num_reqs
+        assert largest_request <= k + 1
+        assert largest_request <= max_model_len
+
+
+def test_warmup_kernels_runs_two_full_verifications(monkeypatch):
+    """CPU_OBSERVED/CUDA_UNVERIFIED: C=2/K=8 must reach 18 sampler rows."""
+    from vllm.v1.worker.gpu import warmup
+
+    runner = SimpleNamespace(
+        num_speculative_steps=8,
+        decode_query_len=9,
+        max_model_len=4096,
+        adaptive_verification=None,
+        is_pooling_model=False,
+        is_encoder_decoder=False,
+        is_last_pp_rank=True,
+        model_config=SimpleNamespace(get_vocab_size=lambda: 64),
+        model_state=SimpleNamespace(max_encoder_len=0),
+        scheduler_config=SimpleNamespace(max_num_seqs=4, max_num_batched_tokens=2048),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[], num_blocks=1024),
+        vllm_config=SimpleNamespace(num_lookahead_tokens=8, is_mm_encoder_only=False),
+        kv_block_zeroer=None,
+        kv_connector=SimpleNamespace(set_disabled=lambda _: None),
+    )
+    steps = []
+    monkeypatch.setattr(warmup.torch.accelerator, "synchronize", lambda: None)
+    warmup.warmup_kernels(runner, steps.append, lambda _: None)
+    assert any(
+        len(step.scheduled_spec_decode_tokens) == 2
+        and step.total_num_scheduled_tokens == 18
+        and all(
+            len(drafts) == 8 for drafts in step.scheduled_spec_decode_tokens.values()
+        )
+        for step in steps
+    ), "startup must execute the two-request full-verification sampler extent"
+
+
+@pytest.mark.parametrize("top_k", [None, 50])
+@pytest.mark.parametrize("use_flashinfer", [False, True])
+def test_uno_warmup_executes_native_verification_s4(monkeypatch, top_k, use_flashinfer):
+    """CPU_OBSERVED/CUDA_UNVERIFIED: drive real rejection/filter launch callers.
+
+    CUDA-labelled CPU storage reaches the production CUDA launch selector;
+    only device kernels are replaced with recorders, so this proves dispatch
+    and all five round launches, not device arithmetic or compilation.
+    """
+    from vllm.v1.sample.ops import topk_topp_sampler, topk_topp_triton
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.sample.sampler import Sampler
+    from vllm.v1.worker.gpu.sample.states import SamplingStates
+    from vllm.v1.worker.gpu.spec_decode import rejection_sampler as rejection_module
+    from vllm.v1.worker.gpu.spec_decode.uno import enumerate_uno_served_launches
+
+    plan = enumerate_uno_served_launches(
+        max_num_reqs=4,
+        k=8,
+        max_num_tokens=2048,
+        max_model_len=4096,
+        num_sm=82,
+        use_flashinfer=use_flashinfer,
+    )
+    warmup = next(
+        (
+            w
+            for w in plan.sampler_warmups
+            if w.sampler_branch == "native_verification"
+            and w.num_reqs == 2
+            and w.num_rows == 18
+            and w.mode.top_k == top_k
+            and w.mode.top_p is not None
+        ),
+        None,
+    )
+    assert warmup is not None, "verification must warm S=4 independently of FlashInfer"
+
+    class CudaLabelledTensor(torch.Tensor):
+        @property
+        def device(self):
+            return torch.device("cuda", 0)
+
+    class ArrayState:
+        def __init__(self, values, dtype):
+            self.np = np.asarray(values, dtype=dtype)
+
+        @property
+        def gpu(self):
+            return torch.from_numpy(self.np)
+
+    states = object.__new__(SamplingStates)
+    states.vocab_size = 64
+    states.temperature = ArrayState([1.0, 1.0], np.float32)
+    states.top_k = ArrayState([64, 64], np.int32)
+    states.top_p = ArrayState([1.0, 1.0], np.float32)
+    states.min_p = ArrayState([0.0, 0.0], np.float32)
+    states.seeds = ArrayState([19, 23], np.int64)
+    states.seeds_set = np.asarray([True, False])
+    states.num_logprobs = np.asarray([-1, -1])
+    states.apply_staged_writes = lambda: None
+    states.apply_temperature = lambda *_: None
+    sampler = object.__new__(Sampler)
+    sampler.use_flashinfer = use_flashinfer
+    sampler.compute_nans = False
+    sampler.logprobs_mode = "raw_logprobs"
+    sampler.use_fp64_gumbel = False
+    sampler.needs_logits_processing = np.zeros(2, dtype=bool)
+    sampler.sampling_states = states
+    sampler.req_states = SimpleNamespace(
+        prefill_len=SimpleNamespace(gpu=torch.zeros(2))
+    )
+    for attribute, method in (
+        ("logit_bias_state", "apply_logit_bias"),
+        ("penalties_state", "apply_penalties"),
+        ("bad_words_state", "apply_bad_words"),
+        ("thinking_budget_state", "apply"),
+    ):
+        setattr(sampler, attribute, SimpleNamespace(**{method: lambda *_: None}))
+    rejection = object.__new__(rejection_module.RejectionSampler)
+    rejection.sampler = sampler
+    rejection.num_speculative_steps = 8
+    rejection.enable_adaptive_verification = False
+    rejection.synthetic_conditional_rates = None
+    rejection.use_block_verification = False
+    runner = object.__new__(GPUModelRunner)
+    runner.sampler = sampler
+    runner.rejection_sampler = rejection
+    runner.device = torch.device("cpu")
+    runner.input_buffers = InputBuffers(2, 18, runner.device)
+    runner.model = SimpleNamespace(
+        compute_logits=lambda hidden: torch.ones((hidden.shape[0], 64)).as_subclass(
+            CudaLabelledTensor
+        )
+    )
+
+    launches = []
+
+    class LaunchRecorder:
+        def __init__(self, name):
+            self.name = name
+
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                launches.append((self.name, args, kwargs))
+
+            return launch
+
+    for name in (
+        "_topk_topp_kernel",
+        "_topp_sb_stats_kernel",
+        "_topp_sb_step_kernel",
+        "_topp_sb_mask_kernel",
+    ):
+        monkeypatch.setattr(topk_topp_triton, name, LaunchRecorder(name))
+    monkeypatch.setattr(topk_topp_sampler, "HAS_TRITON", True)
+    monkeypatch.setattr(topk_topp_triton, "num_compute_units", lambda _: 82)
+    for name in ("_TRITON_SPLIT_CACHE", "_TRITON_BUFFER_CACHE", "_TRITON_TABLE_CACHE"):
+        monkeypatch.setattr(topk_topp_triton, name, {})
+    monkeypatch.setattr(
+        rejection_module,
+        "rejection_sample",
+        lambda *_a, **_k: (
+            torch.zeros((2, 9), dtype=torch.int64),
+            torch.ones(2, dtype=torch.int32),
+        ),
+    )
+    monkeypatch.setattr(
+        rejection_module,
+        "get_num_sampled_and_rejected",
+        lambda num_sampled, *_: (num_sampled, torch.full((2,), 8)),
+    )
+
+    assert runner._warm_up_uno_sampler(torch.empty((2, 3)), warmup=warmup) == (
+        "native_verification"
+    )
+    split_launches = [(name, args, kw) for name, args, kw in launches if "_sb_" in name]
+    assert {name for name, _, _ in split_launches} == {
+        "_topp_sb_stats_kernel",
+        "_topp_sb_step_kernel",
+        "_topp_sb_mask_kernel",
+    }
+    assert all(
+        kw["S"] == 4 and kw["HAS_K"] == (top_k is not None)
+        for _, _, kw in split_launches
+    )
+    assert [args[6] for name, args, _ in split_launches if "_step_" in name] == list(
+        range(5)
+    )
+    assert sampler.use_flashinfer is use_flashinfer
+    assert states.seeds_set.tolist() == [True, False]
+    assert states.top_k.np.tolist() == [64, 64]
 
 
 def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
@@ -836,8 +1044,8 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
                 18,
                 UnoSamplingMode("top_k_top_p", 50, 0.9),
                 "verification",
-                "triton",
-                (("_topp_sb_stats_kernel", True, 16),),
+                "native_verification",
+                (("_topp_sb_stats_kernel", True, 4),),
             ),
             UnoSamplerWarmup(
                 3,
@@ -899,13 +1107,13 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
                 3,
                 {
                     "top_p_only": "triton",
-                    "top_k_top_p": "triton",
+                    "verification/top_k_top_p": "native_verification",
                     "top_k_only": "triton",
                     "neither": "triton",
                 },
                 {
                     "top_p_only": ("_topp_sb_stats_kernel",),
-                    "top_k_top_p": ("_topp_sb_stats_kernel",),
+                    "verification/top_k_top_p": ("_topp_sb_stats_kernel",),
                     "top_k_only": ("_topk_topp_kernel",),
                     "neither": (),
                 },
@@ -915,6 +1123,36 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
         assert proposer._step == 0
     finally:
         torch.random.set_rng_state(prior_state)
+
+
+def test_profile_run_preserves_ordinary_dummy_sampler_dispatch(monkeypatch):
+    """The other production dummy-sampler caller must remain non-speculative."""
+    from vllm.v1.worker.gpu import model_runner as model_runner_module
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    runner = object.__new__(GPUModelRunner)
+    runner.supports_mm_inputs = False
+    runner.max_num_tokens = 3
+    runner.is_last_pp_rank = True
+    runner.pooling_runner = None
+    runner.device = torch.device("cpu")
+    runner.input_buffers = InputBuffers(3, 3, runner.device)
+    runner._dummy_run = lambda *_a, **_kw: (None, torch.ones((3, 4)))
+    runner.model = SimpleNamespace(compute_logits=lambda hidden: hidden)
+    runner.sampler = Mock()
+    runner.rejection_sampler = Mock()
+    runner.reset_encoder_cache = lambda: None
+    monkeypatch.setattr(
+        model_runner_module.torch.accelerator, "synchronize", lambda: None
+    )
+
+    runner.profile_run()
+
+    runner.sampler.assert_called_once()
+    _, batch = runner.sampler.call_args.args
+    assert batch.num_reqs == batch.num_tokens == 3
+    assert batch.num_draft_tokens == 0
+    runner.rejection_sampler.assert_not_called()
 
 
 def test_draft_warmup_skips_a_speculator_that_does_not_ask_for_it():

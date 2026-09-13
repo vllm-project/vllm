@@ -947,7 +947,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def _dummy_sampler_run(
-        self, hidden_states: torch.Tensor, *, num_reqs: int | None = None
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        num_reqs: int | None = None,
+        native_verification: bool = False,
     ) -> None:
         """Run the production sampler over a dummy row layout.
 
@@ -990,13 +994,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             dummy_input_batch.logits_indices = torch.arange(
                 num_rows, dtype=torch.int64, device=self.device
             )
+            if native_verification:
+                dummy_input_batch.num_draft_tokens = num_rows - num_reqs
+                dummy_input_batch.num_draft_tokens_per_req = row_counts - 1
 
         # NOTE(woosuk): During the initial memory profiling, the sampler may skip
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
         # during actual execution.
         assert self.sampler is not None
         with launch_key_phase("warmup"):
-            self.sampler(logits, dummy_input_batch)
+            if native_verification:
+                assert self.rejection_sampler is not None
+                self.rejection_sampler(logits, dummy_input_batch)
+            else:
+                self.sampler(logits, dummy_input_batch)
 
     @torch.inference_mode()
     def _warm_up_uno_sampler(
@@ -1050,13 +1061,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             row_count_tensor = torch.from_numpy(
                 self._sampler_row_counts(num_reqs, num_rows)
             ).to(self.device)
+            native_verification = warmup.sampler_branch == "native_verification"
             with (
-                capture_sampler_branches(self.sampler) as observed_branches,
+                capture_sampler_branches(
+                    self.sampler,
+                    self.rejection_sampler if native_verification else None,
+                ) as observed_branches,
                 record_topk_topp_launches(),
             ):
+                kwargs = {"native_verification": True} if native_verification else {}
                 self._dummy_sampler_run(
                     sample_hidden_states.repeat_interleave(row_count_tensor, dim=0),
                     num_reqs=num_reqs,
+                    **kwargs,
                 )
         finally:
             self.sampler.needs_logits_processing[:num_reqs] = saved_needs_processing
@@ -1182,9 +1199,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                             )
                             executed_sampler_calls += 1
                             executed_sampler_keys.update(warmup.kernel_keys)
-                            executed_sampler_branches[warmup.mode.name] = branch
+                            mode_name = warmup.mode.name
+                            if branch == "native_verification":
+                                mode_name = f"verification/{mode_name}"
+                            executed_sampler_branches[mode_name] = branch
                             kernels = executed_sampler_kernels.setdefault(
-                                warmup.mode.name, set()
+                                mode_name, set()
                             )
                             if branch == "flashinfer":
                                 kernels.add("flashinfer_sample")

@@ -277,7 +277,10 @@ def _served_sampler_shapes(
     shapes: dict[tuple[int, int], str] = {}
 
     def add(num_reqs: int, num_rows: int, source: str) -> None:
-        if num_rows <= max_rows:
+        if num_rows <= min(max_rows, num_reqs * min(k + 1, max_model_len)):
+            assert 1 <= num_reqs <= max_num_reqs
+            assert num_reqs <= num_rows <= max_num_tokens
+            assert (num_rows + num_reqs - 1) // num_reqs <= min(k + 1, max_model_len)
             shapes.setdefault((num_reqs, num_rows), source)
 
     for num_reqs in range(1, max_num_reqs + 1):
@@ -304,7 +307,7 @@ def _sampler_kernel_keys(
     """Return the real top-k/top-p kernel keys selected for one call."""
     if sampler_branch == "flashinfer":
         return ()
-    if sampler_branch != "triton":
+    if sampler_branch not in ("triton", "native_verification"):
         raise ValueError(f"unknown Uno sampler branch: {sampler_branch!r}")
     # Use the production split arithmetic and branch threshold rather than
     # recreating either in a CPU-only test.
@@ -363,52 +366,43 @@ def enumerate_uno_served_launches(
         raise ValueError("Uno sampler launch enumeration requires positive num_sm")
 
     prepare_counts = tuple(draft_warmup_request_counts(max_num_reqs))
-    shapes = _served_sampler_shapes(
-        max_num_reqs, k, max_num_tokens, max_model_len
-    )
-    served_sampler_keys = frozenset(
-        key
-        for _num_reqs, num_rows, _source in shapes
-        for mode in UNO_SAMPLING_MODES
-        for key in _sampler_kernel_keys(
-            mode,
+    shapes = _served_sampler_shapes(max_num_reqs, k, max_num_tokens, max_model_len)
+    # Verification always applies native filters in RejectionSampler._verify,
+    # even when ordinary sampling selects FlashInfer. Keep both callers in the
+    # plan so backend capability cannot erase the verification launch domain.
+    candidates = [
+        UnoSamplerWarmup(
+            num_reqs,
             num_rows,
-            num_sm,
+            mode,
+            source,
+            branch,
+            _sampler_kernel_keys(mode, num_rows, num_sm, branch),
+        )
+        for mode in UNO_SAMPLING_MODES
+        for branch in (
             sampler_branch_for_mode(mode, use_flashinfer=use_flashinfer),
+            "native_verification",
         )
+        for num_reqs, num_rows, source in shapes
+    ]
+    served_sampler_keys = frozenset(
+        key for candidate in candidates for key in candidate.kernel_keys
     )
-    covered: set[tuple[object, ...]] = set()
+    covered: dict[str, set[tuple[object, ...]]] = {}
     selected: list[UnoSamplerWarmup] = []
+    selected_modes: set[tuple[str, str]] = set()
+    for candidate in candidates:
+        branch_keys = covered.setdefault(candidate.sampler_branch, set())
+        mode_key = (candidate.mode.name, candidate.sampler_branch)
+        if set(candidate.kernel_keys).difference(branch_keys) or (
+            not candidate.kernel_keys and mode_key not in selected_modes
+        ):
+            selected.append(candidate)
+            branch_keys.update(candidate.kernel_keys)
+            selected_modes.add(mode_key)
 
-    for mode in UNO_SAMPLING_MODES:
-        mode_selected = False
-        sampler_branch = sampler_branch_for_mode(
-            mode, use_flashinfer=use_flashinfer
-        )
-        for num_reqs, num_rows, source in shapes:
-            kernel_keys = _sampler_kernel_keys(
-                mode, num_rows, num_sm, sampler_branch
-            )
-            new_keys = set(kernel_keys).difference(covered)
-            # The no-filter path launches no top-k/top-p kernel, but must still
-            # execute once so the self-check can prove that branch is reached.
-            if new_keys or (not kernel_keys and not mode_selected):
-                selected.append(
-                    UnoSamplerWarmup(
-                        num_reqs,
-                        num_rows,
-                        mode,
-                        source,
-                        sampler_branch,
-                        kernel_keys,
-                    )
-                )
-                covered.update(kernel_keys)
-                mode_selected = True
-
-    selected_keys = frozenset(
-        key for warmup in selected for key in warmup.kernel_keys
-    )
+    selected_keys = frozenset(key for warmup in selected for key in warmup.kernel_keys)
     missing = served_sampler_keys.difference(selected_keys)
     if missing:
         raise RuntimeError(

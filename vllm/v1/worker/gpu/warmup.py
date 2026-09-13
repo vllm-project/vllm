@@ -94,8 +94,10 @@ def capture_topk_topp_launches() -> Iterator[dict[str, int]]:
 
 
 @contextmanager
-def capture_sampler_branches(sampler: Any | None) -> Iterator[list[str]]:
-    """Observe real ``Sampler._sample_random`` backend decisions temporarily."""
+def capture_sampler_branches(
+    sampler: Any | None, rejection_sampler: Any | None = None
+) -> Iterator[list[str]]:
+    """Observe ordinary sampling and native rejection verification calls."""
     branches: list[str] = []
     if sampler is None:
         yield branches
@@ -114,10 +116,25 @@ def capture_sampler_branches(sampler: Any | None) -> Iterator[list[str]]:
         branches.append("flashinfer" if use_flashinfer else "triton")
         return original(*args, **kwargs)
 
+    if rejection_sampler is not None:
+        original_verify = rejection_sampler._verify
+        had_verify_override = "_verify" in vars(rejection_sampler)
+
+        def captured_verify(*args: Any, **kwargs: Any) -> Any:
+            branches.append("native_verification")
+            return original_verify(*args, **kwargs)
+
     try:
         sampler._sample_random = captured_sample_random
+        if rejection_sampler is not None:
+            rejection_sampler._verify = captured_verify
         yield branches
     finally:
+        if rejection_sampler is not None:
+            if had_verify_override:
+                rejection_sampler._verify = original_verify
+            else:
+                del rejection_sampler._verify
         if had_instance_override:
             sampler._sample_random = instance_override
         else:
@@ -559,7 +576,7 @@ def _warmup_kernels(
     # Upper bound on the decode steps built in `decode_steps` below.
     num_decode_steps = 1
     if not model_runner.is_pooling_model:
-        num_decode_steps = 5 if num_spec_steps > 0 else 3
+        num_decode_steps = 6 if num_spec_steps > 0 else 4
     # Size the block allocation for the worst case: every request advancing
     # decode_query_len tokens on every decode step.
     decode_len = prompt_len + num_decode_steps * decode_query_len
@@ -729,6 +746,7 @@ def _warmup_kernels(
             (all_indices, [use_spec_decode] * num_reqs),
         ]
         if num_reqs >= 2:
+            decode_steps.append(([0, 1], [use_spec_decode, use_spec_decode]))
             # Mixed spec / non-spec: GDN and KDA reclassify the non-spec decode
             # as a prefill and split the batch into spec/non-spec token indices.
             decode_steps.append(([0, 1], [use_spec_decode, False]))
