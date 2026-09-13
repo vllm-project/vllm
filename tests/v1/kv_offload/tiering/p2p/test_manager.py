@@ -1427,6 +1427,37 @@ class TestPollOnce:
         assert mgr._finished_jobs == [JobResult(job_id=5, success=False)]
         assert "req-5" in mgr._failed_req_ids
 
+    def test_load_transfer_time_propagates_to_job_result(self):
+        """Propagate load transfer time to the promotion latency metric."""
+        mgr = _make_manager()
+        peer = "10.0.0.1:8000"
+        sess = _FakeSession(
+            peer_id=peer,
+            alive=True,
+            connected=True,
+            loads=[
+                LoadResult(
+                    job_id=6,
+                    kv_request_id="req-6",
+                    success=True,
+                    transfer_time=0.05,
+                )
+            ],
+        )
+        mgr._sessions[peer] = sess  # type: ignore[assignment]
+
+        class _Ctrl:
+            def poll(self_inner):
+                return []
+
+        mgr._control = _Ctrl()  # type: ignore[assignment]
+
+        mgr._poll_once()
+
+        assert mgr._finished_jobs == [
+            JobResult(job_id=6, success=True, transfer_time=0.05)
+        ]
+
 
 # ---------------------------------------------------------------------------
 # drain_jobs

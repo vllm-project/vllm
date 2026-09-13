@@ -765,7 +765,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             result = session.poll()
             for lr in result.loads:
                 self._finished_jobs.append(
-                    JobResult(job_id=lr.job_id, success=lr.success)
+                    JobResult(
+                        job_id=lr.job_id,
+                        success=lr.success,
+                        transfer_time=lr.transfer_time,
+                    )
                 )
                 if not lr.success:
                     self._failed_req_ids.add(lr.kv_request_id)
