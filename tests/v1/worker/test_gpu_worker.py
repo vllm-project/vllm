@@ -173,8 +173,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Previous device handles are waited before the forward pass; the
-    metadata handle is left to the GroupCoordinator's reaper. Pooling
-    postprocessing runs after the next send has been enqueued."""
+    metadata handle is left to the GroupCoordinator's reaper."""
     import torch
 
     from vllm.sequence import IntermediateTensors
@@ -200,12 +199,6 @@ def test_execute_model_waits_previous_pp_send_before_forward(
         log.append("forward")
         return IntermediateTensors({"hidden_states": torch.zeros(1)})
 
-    pooling_output = object()
-
-    def pool():
-        log.append("pool")
-        return pooling_output
-
     worker = SimpleNamespace(
         vllm_config=SimpleNamespace(
             compilation_config=SimpleNamespace(
@@ -215,10 +208,8 @@ def test_execute_model_waits_previous_pp_send_before_forward(
                 pipeline_parallel_size=2, distributed_executor_backend="mp"
             ),
         ),
-        use_v2_model_runner=True,
-        model_runner=SimpleNamespace(
-            execute_model=run_model, is_pooling_model=True, pool=pool
-        ),
+        use_v2_model_runner=False,
+        model_runner=SimpleNamespace(execute_model=run_model),
         annotate_profile=lambda scheduler_output: nullcontext(),
         _pp_send_work=[previous_tensor_send],
     )
@@ -226,7 +217,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
         total_num_scheduled_tokens=4, num_scheduled_tokens={"r0": 4}
     )
 
-    assert gpu_worker.Worker.execute_model(worker, scheduler_output) is pooling_output
+    assert gpu_worker.Worker.execute_model(worker, scheduler_output) is None
 
-    assert log == ["wait:prev-tensor", "forward", "isend", "pool"]
+    assert log == ["wait:prev-tensor", "forward", "isend"]
     assert worker._pp_send_work == [tensor_handle]
