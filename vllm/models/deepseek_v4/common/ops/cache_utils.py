@@ -239,7 +239,7 @@ class DequantizeAndGatherKCacheKernel(
 
     @dataclass(frozen=True)
     class CompileKey:
-        max_blocks_per_seq: int
+        block_table_stride: int
         cache_block_size: int
         block_stride: int
         use_fnuz: bool
@@ -255,10 +255,10 @@ class DequantizeAndGatherKCacheKernel(
         k_cache_ptr,
         seq_lens_ptr,
         block_table_ptr,
+        block_table_stride,
         offset,
         gather_lens_ptr,
         # Constants
-        max_blocks_per_seq: tl.constexpr,
         fp8_dim: tl.constexpr,  # 448
         bf16_dim: tl.constexpr,  # 64
         scale_dim: tl.constexpr,  # 8
@@ -292,7 +292,7 @@ class DequantizeAndGatherKCacheKernel(
             pos_in_block = pos % cache_block_size
 
             # Get physical block index from block table
-            block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
+            block_table_row_ptr = block_table_ptr + batch_idx * block_table_stride
             physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)  # int32
 
             # int64: physical_block_idx * block_stride can exceed 2^31 with many
@@ -381,8 +381,10 @@ class DequantizeAndGatherKCacheKernel(
         block_stride = ((unpadded + token_stride - 1) // token_stride) * token_stride
         return self.CompileKey(
             **compile_key_fields,
-            max_blocks_per_seq=(max_model_len + block_table_block_size - 1)
-            // block_table_block_size,
+            block_table_stride=triton_scalar_specialization_rep(
+                (max_model_len + block_table_block_size - 1)
+                // block_table_block_size
+            ),
             cache_block_size=cache_block_size,
             block_stride=block_stride,
             offset=triton_scalar_specialization_rep(offset),
@@ -458,7 +460,7 @@ class DequantizeAndGatherKCacheKernel(
             gather_lens=(int32_ptr if compile_key.has_gather_lens else None),
             block_table=TritonWarmupTensor(
                 torch.int32,
-                shape=(1, compile_key.max_blocks_per_seq),
+                shape=(1, compile_key.block_table_stride),
             ),
             block_size=compile_key.cache_block_size,
             offset=compile_key.offset,
@@ -482,7 +484,7 @@ class DequantizeAndGatherKCacheKernel(
         return (num_reqs, self.NUM_WORKERS), dict(
             out_stride0=out.stride(0),
             out_stride1=out.stride(1),
-            max_blocks_per_seq=block_table.shape[-1],
+            block_table_stride=block_table.stride(0),
             fp8_dim=448,
             bf16_dim=64,
             scale_dim=8,
