@@ -172,6 +172,35 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         kwargs["tokenize"] = True
         return self.get_tokenizer().apply_chat_template(conversation, **kwargs)
 
+    def _generation_prefix_len(
+        self,
+        conversation: list[dict[str, Any]],
+        params: ChatParams,
+        full_token_ids: list[int],
+    ) -> int:
+        """Return the number of trailing generation-prefix tokens in
+        ``full_token_ids`` that the chat template appended after the last
+        user/assistant turn (e.g. the K3 channel-open stub).
+
+        Computed as ``len(full) - len(without_generation_prompt)`` so the
+        model still conditions on the full sequence; only the reported
+        ``usage.prompt_tokens`` is adjusted.  Returns 0 when
+        ``add_generation_prompt`` is False or when the re-render fails.
+        """
+        kwargs = params.get_apply_chat_template_kwargs()
+        if not kwargs.get("add_generation_prompt", True):
+            return 0
+        try:
+            kwargs_no_prefix = {**kwargs, "add_generation_prompt": False}
+            _apply_k3_thinking_kwargs(kwargs_no_prefix)
+            kwargs_no_prefix["tokenize"] = True
+            no_prefix_ids: list[int] = self.get_tokenizer().apply_chat_template(
+                conversation, **kwargs_no_prefix
+            )
+            return max(0, len(full_token_ids) - len(no_prefix_ids))
+        except Exception:
+            return 0
+
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
@@ -186,9 +215,13 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         )
 
         rendered_conversation = _normalize_k3_tool_messages(conversation)
-        prompt = parse_dec_only_prompt(
-            self._apply_chat_template(rendered_conversation, params)
+        token_ids = self._apply_chat_template(rendered_conversation, params)
+        prompt = parse_dec_only_prompt(token_ids)
+        gen_prefix_len = self._generation_prefix_len(
+            rendered_conversation, params, token_ids
         )
+        if gen_prefix_len:
+            prompt["generation_prefix_len"] = gen_prefix_len
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
@@ -212,6 +245,11 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
         rendered_conversation = _normalize_k3_tool_messages(conversation)
         token_ids = await self._apply_chat_template_async(rendered_conversation, params)
         prompt = parse_dec_only_prompt(token_ids)
+        gen_prefix_len = self._generation_prefix_len(
+            rendered_conversation, params, token_ids
+        )
+        if gen_prefix_len:
+            prompt["generation_prefix_len"] = gen_prefix_len
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
