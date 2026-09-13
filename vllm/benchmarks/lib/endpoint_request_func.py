@@ -101,8 +101,25 @@ class RequestFuncOutput:
     start_time: float = 0.0
     # Time spent awaiting the benchmark client concurrency semaphore.
     client_queue_time: float = 0.0
+    server_queue_time: float | None = None
+    server_ttft: float | None = None
     input_audio_duration: float = 0.0  # in seconds
     num_input_sequences: int = 1
+
+
+def _update_server_metrics(
+    output: RequestFuncOutput,
+    data: dict[str, Any],
+) -> None:
+    metrics = data.get("metrics")
+    if not isinstance(metrics, dict):
+        return
+
+    def to_seconds(value: Any) -> float | None:
+        return value / 1000.0 if type(value) in (int, float) else None
+
+    output.server_queue_time = to_seconds(metrics.get("queue_time_ms"))
+    output.server_ttft = to_seconds(metrics.get("time_to_first_token_ms"))
 
 
 class RequestFunc(Protocol):
@@ -223,6 +240,7 @@ async def async_request_openai_completions(
 
                         if chunk != "[DONE]":
                             data = json.loads(chunk)
+                            _update_server_metrics(output, data)
 
                             # NOTE: Some completion API might have a last
                             # usage summary response without a token so we
@@ -402,6 +420,7 @@ async def async_request_openai_chat_completions(
                         if chunk != "[DONE]":
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
+                            _update_server_metrics(output, data)
 
                             if choices := data.get("choices"):
                                 content = choices[0]["delta"].get("content")
