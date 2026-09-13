@@ -158,6 +158,11 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
     assert rel_diff < 0.001
 
 
+@pytest.mark.parametrize("M", [1, 24, 128, 2048, 8192])
+def test_qwen35_gdn_in_proj_ba_block_fp8_matmul(M):
+    test_w8a8_block_fp8_matmul(M, 32, 1024, [128, 128], torch.bfloat16, 0)
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
 )
