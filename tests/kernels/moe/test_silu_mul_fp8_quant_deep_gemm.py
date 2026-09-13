@@ -150,7 +150,7 @@ def pack_scales(x: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tenso
 
     # Add i32_padding here so we can view it as a i32 tensor later on.
     i32_padding = round_up(G, 4) - G
-    ref_s_i8 = torch.empty((E, T, G + i32_padding), dtype=torch.uint8, device=DEVICE)
+    ref_s_i8 = torch.zeros((E, T, G + i32_padding), dtype=torch.uint8, device=DEVICE)
     for e in range(E):
         nt = tokens_per_expert[e].item()
         ref_s_i8[e, :nt, :G] = x[e, :nt].view(torch.int32) >> 23
@@ -229,6 +229,9 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
         dtype=torch.int32,
         device=DEVICE,
     )
+    tokens_per_expert[0] = T
+    if E > 1:
+        tokens_per_expert[1] = 0
 
     # Input tensor of shape (E, T, 2*H)
     y = token_random(E, T, 2 * H, tokens_per_expert)
@@ -286,6 +289,11 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
         )
         assert y_s.dtype == expected_scale_dtype
         assert ref_y_s.dtype == expected_scale_dtype
+        if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
+            G = H // group_size
+            packed_G = cdiv(G, 4)
+            assert y_s.shape == (E, T, packed_G)
+            assert y_s.stride() == (T * packed_G, 1, T)
 
         for e in range(E):
             nt = tokens_per_expert[e].item()
@@ -308,10 +316,9 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
                 )
 
             if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
-                G = H // group_size
                 y_s_sliced = as_uint8(y_s[e])
                 ref_s_sliced = as_uint8(ref_y_s[e])
-                torch.testing.assert_close(y_s_sliced[:nt, :G], ref_s_sliced[:nt, :G])
+                torch.testing.assert_close(y_s_sliced, ref_s_sliced)
                 if dg_scales is not None:
                     dg_sliced = as_uint8(dg_scales[e])
                     torch.testing.assert_close(y_s_sliced[:nt, :G], dg_sliced[:nt, :G])
