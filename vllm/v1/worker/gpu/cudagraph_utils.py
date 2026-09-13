@@ -691,11 +691,12 @@ def prepare_inputs_to_capture(
     input_batch = InputBatch.make_dummy(
         num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
     )
-    input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
-    slot_mapping_provider: BlockTables | PCPManager = block_tables
     if pcp_manager is not None:
-        slot_mapping_provider = pcp_manager
-    slot_mappings = slot_mapping_provider.get_dummy_slot_mappings(num_tokens)
+        input_batch = pcp_manager.prepare_inputs_to_capture(input_batch)
+
+    block_table_provider = pcp_manager or block_tables
+    input_block_tables = block_table_provider.get_dummy_block_tables(num_reqs)
+    slot_mappings = block_table_provider.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )
