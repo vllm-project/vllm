@@ -15,8 +15,15 @@ use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
 use crate::transport::ConnectedEngine;
 
-pub type OutputSender = mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>;
-pub type OutputReceiver = mpsc::UnboundedReceiver<Result<EngineCoreStreamOutput>>;
+/// Maximum unread engine outputs buffered for one request.
+///
+/// The output dispatcher never awaits the HTTP consumer. Without a bound, a
+/// slow SSE client can retain finished token and logprob payloads after the
+/// request has left scheduler accounting.
+pub(crate) const MAX_QUEUED_OUTPUTS_PER_REQUEST: usize = 256;
+
+pub type OutputSender = mpsc::Sender<Result<EngineCoreStreamOutput>>;
+pub type OutputReceiver = mpsc::Receiver<Result<EngineCoreStreamOutput>>;
 pub type UtilitySender = oneshot::Sender<Result<UtilityOutput>>;
 pub type UtilityReceiver = oneshot::Receiver<Result<UtilityOutput>>;
 
@@ -133,7 +140,7 @@ impl RequestRegistry {
         }
 
         let engine_id = self.choose_engine_for_request(data_parallel_rank)?;
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(MAX_QUEUED_OUTPUTS_PER_REQUEST);
         let lora = lora_name.map(|adapter_name| LoraRequestState {
             adapter_name,
             phase: LoraPhase::Waiting,
@@ -322,7 +329,7 @@ impl RequestRegistry {
                     ..EngineCoreOutput::default()
                 },
             };
-            let _ = sender.send(Ok(output));
+            let _ = sender.try_send(Ok(output));
             aborted.push(request_id.clone());
         }
         aborted
@@ -457,8 +464,10 @@ mod tests {
 
     use crate::EngineId;
     use crate::client::state::{
-        EngineLoadSnapshot, EngineRoutingState, RequestRegistry, UtilityRegistry,
+        EngineLoadSnapshot, EngineRoutingState, MAX_QUEUED_OUTPUTS_PER_REQUEST, RequestRegistry,
+        UtilityRegistry,
     };
+    use crate::client::stream::EngineCoreStreamOutput;
     use crate::mock_engine::default_ready_response;
     use crate::protocol::output::{
         EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
@@ -930,5 +939,90 @@ mod tests {
         registry.unregister_many([call_id, 42, 9999]);
 
         assert!(!registry.contains(call_id));
+    }
+
+    fn queued_stream_output(request_id: &str) -> EngineCoreStreamOutput {
+        EngineCoreStreamOutput {
+            engine_index: 0,
+            timestamp: 0.0,
+            output: EngineCoreOutput {
+                request_id: request_id.to_string(),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn request_output_channel_rejects_unread_overflow() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        let (_, mut rx) = registry.register("req-slow".to_string(), None, None).unwrap();
+        let sender = registry
+            .sender_for_output(&EngineCoreOutput {
+                request_id: "req-slow".to_string(),
+                ..Default::default()
+            })
+            .expect("active request");
+
+        for _ in 0..MAX_QUEUED_OUTPUTS_PER_REQUEST {
+            sender
+                .try_send(Ok(queued_stream_output("req-slow")))
+                .expect("queue should accept up to the bound");
+        }
+        let overflow = sender
+            .try_send(Ok(queued_stream_output("req-slow")))
+            .expect_err("bound must reject further unread items");
+        assert!(matches!(
+            overflow,
+            tokio::sync::mpsc::error::TrySendError::Full(_)
+        ));
+        assert!(registry.contains("req-slow"));
+
+        let removed = registry.remove("req-slow");
+        assert!(removed.is_some());
+        drop(sender);
+        drop(removed);
+
+        let mut drained = 0usize;
+        while rx.try_recv().is_ok() {
+            drained += 1;
+        }
+        assert_eq!(drained, MAX_QUEUED_OUTPUTS_PER_REQUEST);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn abort_many_does_not_block_when_output_queue_is_full() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        let (_, mut rx) = registry.register("req-slow".to_string(), None, None).unwrap();
+        let sender = registry
+            .sender_for_output(&EngineCoreOutput {
+                request_id: "req-slow".to_string(),
+                ..Default::default()
+            })
+            .expect("active request");
+
+        for _ in 0..MAX_QUEUED_OUTPUTS_PER_REQUEST {
+            sender
+                .try_send(Ok(queued_stream_output("req-slow")))
+                .expect("queue should accept up to the bound");
+        }
+
+        let aborted = registry.abort_many([&"req-slow".to_string()], 1.0);
+        assert_eq!(aborted, vec!["req-slow".to_string()]);
+        assert!(!registry.contains("req-slow"));
+        drop(sender);
+
+        let mut drained = 0usize;
+        while rx.try_recv().is_ok() {
+            drained += 1;
+        }
+        assert_eq!(drained, MAX_QUEUED_OUTPUTS_PER_REQUEST);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 }
