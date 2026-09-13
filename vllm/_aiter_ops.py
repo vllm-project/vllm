@@ -1024,6 +1024,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
     weight: torch.Tensor,
     epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fused AllReduce + RMSNorm + per-group FP8 quant."""
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
@@ -1040,9 +1041,13 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
         group_size=group_size,
         registered=torch.cuda.is_current_stream_capturing(),
         use_1stage=use_1stage,
+        transpose_scale=transpose_scale,
     )
     assert result is not None
-    return result[0], result[1], result[2]
+    out, res_out, scale = result[0], result[1], result[2]
+    if transpose_scale:
+        scale = scale.transpose(0, 1).view(scale.shape)
+    return out, res_out, scale
 
 
 def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_fake(
@@ -1051,6 +1056,7 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_fake(
     weight: torch.Tensor,
     epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     hidden_dim = input_.shape[-1]
     num_groups = hidden_dim // group_size
@@ -1172,6 +1178,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
 
@@ -1185,6 +1192,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
         group_size=group_size,
         dtype_quant=FP8_DTYPE,
         res1=residual,
+        transpose_scale=transpose_scale,
     )
     return (
         x_quant,
@@ -1199,6 +1207,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     M, N = x.shape
     scale_shape = (M, (N + group_size - 1) // group_size)
@@ -1214,6 +1223,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
 
@@ -1227,6 +1237,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
         group_size=group_size,
         dtype_quant=FP8_DTYPE,
         res1=None,
+        transpose_scale=transpose_scale,
     )
     return (x_quant, x_quant_scales)
 
@@ -1236,6 +1247,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
     scale_shape = (M, (N + group_size - 1) // group_size)
@@ -1324,7 +1336,20 @@ def _rocm_aiter_group_fp8_quant_fake(
 def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
     x: torch.Tensor,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if transpose_scale:
+        # The Triton act_mul_and_fp8_group_quant kernel has no transposed-scale mode; 
+        # the HIP silu_and_mul_quant kernel uses shuffle_scale
+        from aiter import silu_and_mul_quant
+
+        m, n2 = x.shape
+        n = n2 // 2
+        out = torch.empty((m, n), dtype=FP8_DTYPE, device=x.device)
+        scale = torch.empty((m, n // group_size), dtype=torch.float32, device=x.device)
+        silu_and_mul_quant(out, x, scale, group_size, 0.0, True)
+        return out, scale
+
     from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
 
     return act_mul_and_fp8_group_quant(
@@ -1338,6 +1363,7 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
 def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
     x: torch.Tensor,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
     assert N % 2 == 0
