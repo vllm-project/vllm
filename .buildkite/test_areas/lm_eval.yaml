@@ -84,7 +84,7 @@ steps:
       label: ":amd: (MI355) LM Eval Small Models Distributed"
       dind: false
       device: mi355_2
-      timeout_in_minutes: 45
+      timeout_in_minutes: 180
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -97,8 +97,14 @@ steps:
       - tests/evals/gsm8k/configs/models-mi3xx-fp8-and-mixed.txt
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
+      - tests/evals/gsm8k/
+      - tests/utils.py
+      - vllm/distributed/
+      - vllm/transformers_utils/configs/diffusion_gemma.py
+      - vllm/v1/attention/ops/
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
 
 - label: ":nvidia: (B200) LM Eval PCP"
   key: lm-eval-pcp-4xb200
@@ -172,10 +178,10 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode.txt
   mirror:
     amd:
-      label: ":amd: (MI355) LM Eval Spec Decode"
+      label: ":amd: (MI355) LM Eval Spec Decode (Fixed-length FP8)"
       dind: false
       device: mi355_4
-      timeout_in_minutes: 120
+      timeout_in_minutes: 180
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -208,6 +214,9 @@ steps:
       - vllm/v1/worker/
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
+      - tests/evals/gsm8k/
+      - tests/utils.py
+      - vllm/distributed/
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode-rocm.txt
 
@@ -395,6 +404,24 @@ steps:
   - vllm/v1/attention/ops/triton_turboquant_store.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant.txt
+  mirror:
+    amd:
+      label: ":amd: (MI300) LM Eval TurboQuant KV Cache"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 180
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - vllm/model_executor/layers/quantization/turboquant/
+      - vllm/v1/attention/backends/turboquant_attn.py
+      - vllm/v1/attention/ops/triton_turboquant_decode.py
+      - vllm/v1/attention/ops/triton_turboquant_store.py
+      - tests/evals/gsm8k/test_gsm8k_correctness.py
+      - tests/evals/gsm8k/configs/models-turboquant.txt
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H100) GPQA Eval (GPT-OSS)"
   key: gpqa-eval-gpt-oss-2xh100
@@ -510,6 +537,22 @@ steps:
   - tests/evals/gsm8k/test_gsm8k_offloading.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "nemotron-h-8b or gemma-4-e4b-it"
+  mirror:
+    amd:
+      label: ":amd: (MI300) LM Eval KV-Offload"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 180
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+      - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+      - vllm/v1/kv_offload/
+      - vllm/v1/simple_kv_offload/
+      - tests/evals/gsm8k/test_gsm8k_offloading.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H100) LM Eval KV-Offload Medium"
   key: kv-offload-medium
@@ -524,6 +567,22 @@ steps:
   - tests/evals/gsm8k/test_gsm8k_offloading.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "qwen3.5-35b or deepseek-v2-lite"
+  mirror:
+    amd:
+      label: ":amd: (MI300) LM Eval KV-Offload Medium"
+      dind: false
+      device: mi300_2
+      timeout_in_minutes: 180
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+      - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+      - vllm/v1/kv_offload/
+      - vllm/v1/simple_kv_offload/
+      - tests/evals/gsm8k/test_gsm8k_offloading.py
+      - vllm/platforms/rocm.py
 
 - label: ":nvidia: (H100) LM Eval KV-Offload Large"
   key: kv-offload-large
@@ -538,6 +597,24 @@ steps:
   - tests/evals/gsm8k/test_gsm8k_offloading.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"
+  mirror:
+    amd:
+      label: ":amd: (MI300) LM Eval KV-Offload Large"
+      dind: false
+      device: mi300_4
+      timeout_in_minutes: 180
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      source_file_dependencies:
+      - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+      - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
+      - vllm/v1/kv_offload/
+      - vllm/v1/simple_kv_offload/
+      - tests/evals/gsm8k/test_gsm8k_offloading.py
+      - vllm/platforms/rocm.py
+      commands:
+      - VLLM_ROCM_USE_AITER=1 pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"
 
 - label: ":nvidia: (H200 MIG 35GB) MRCR Eval Small Models"
   key: mrcr-eval-small-models

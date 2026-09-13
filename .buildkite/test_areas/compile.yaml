@@ -181,6 +181,47 @@ steps:
     # Run all models and attn backends but only Inductor partition and native custom ops
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
+  mirror:
+    amd:
+      label: ":amd: (MI355) Fusion E2E TP2 Quick (AITER subset)"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 180
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/
+      source_file_dependencies:
+      - csrc/quantization/
+      - vllm/compilation/
+      - vllm/distributed/
+      - vllm/model_executor/
+      - vllm/v1/attention/
+      - tests/compile/fusions_e2e/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+      - >-
+        VLLM_ROCM_USE_AITER=1
+        VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+        pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
+        -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
+        not +quant_fp8 and not +rms_norm and Llama-3 and
+        ROCM_AITER_UNIFIED_ATTN'
+      - >-
+        VLLM_ROCM_USE_AITER=1
+        VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+        pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
+        -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
+        +quant_fp8 and +rms_norm and qwen3 and
+        ROCM_AITER_UNIFIED_ATTN'
+      - >-
+        VLLM_ROCM_USE_AITER=1
+        VLLM_ROCM_USE_AITER_CUSTOM_AR=1
+        pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py
+        -k 'test_tp2_ar_rms_fp8_fusions and inductor_partition and
+        not +quant_fp8 and not +rms_norm and DeepSeek-Coder and
+        ROCM_AITER_MLA'
 
 - label: ":nvidia: (H100) Fusion E2E TP2 AR-RMS Config Sweep"
   key: fusion-e2e-tp2-ar-rms-config-sweep-h100
