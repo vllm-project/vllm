@@ -22,6 +22,9 @@ import torch
 from vllm.models.inkling.common.triton_rel_attention import (
     inkling_triton_rel_attention,
 )
+from vllm.models.inkling.common.triton_rel_attention_decode import (
+    use_split_kv_decode,
+)
 from vllm.models.inkling.nvidia.attention import (
     InklingAttention,
     _use_sm8x_triton_attention,
@@ -91,6 +94,27 @@ def test_sm8x_triton_attention_selection(monkeypatch, major, expected):
         assert _use_sm8x_triton_attention() is expected
     finally:
         _use_sm8x_triton_attention.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("is_cuda", "enabled", "expected"),
+    [(True, "1", True), (True, "0", False), (False, "1", False)],
+)
+def test_sm8x_triton_long_local_decode_dispatch(
+    monkeypatch, is_cuda, enabled, expected
+):
+    """Avoid a full-prefix scan on CUDA without changing ROCm's small-page choice."""
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
+    monkeypatch.setenv("INKLING_SPLIT_KV", enabled)
+    assert (
+        use_split_kv_decode(
+            max_query_len=1,
+            max_kv_len=131072,
+            page_size=16,
+            window_left=511,
+        )
+        is expected
+    )
 
 
 def _make_flex_score_mod(

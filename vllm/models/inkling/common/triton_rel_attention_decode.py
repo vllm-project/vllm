@@ -58,6 +58,9 @@ def use_split_kv_decode(
         return False
     if max_query_len != 1:
         return False
+    # Avoid scanning an entire long prefix for small-page local decode on CUDA.
+    if current_platform.is_cuda() and max_kv_len >= 8192:
+        return True
     if page_size >= 64:
         return True
     if window_left >= 0:
