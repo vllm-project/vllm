@@ -92,7 +92,7 @@ FA4_DENSE_MAX_SEQLEN_K = 8192
 
 
 class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"]):
-    """Warm Gemma4's paged, causal FA4 on Blackwell and Hopper."""
+    """Warm paged, causal FA4 on Blackwell and Hopper."""
 
     @dataclass(frozen=True)
     class CompileKey:
