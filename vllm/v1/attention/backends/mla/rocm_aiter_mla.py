@@ -464,6 +464,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._decode_num_heads
         )
         kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
+        # cache_config is global, but the cache dtype is a per-group property:
+        # a draft model may run kv_cache_dtype "auto" under a server started
+        # with --kv-cache-dtype fp8. Trusting the global value there sizes the
+        # persistent metadata and selects the fp8 asm kernels for a cache that
+        # is really bf16, so the kernel reads it at the wrong element size and
+        # faults. Defer to the group's own spec whenever it is unquantized.
+        if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2") and (
+            kv_cache_spec.dtype in (torch.float16, torch.bfloat16)
+        ):
+            kv_cache_dtype_str = "auto"
         if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             kv_cache_dtype_str = "fp8"
             kv_dtype = dtypes.fp8
