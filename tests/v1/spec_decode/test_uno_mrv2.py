@@ -1174,13 +1174,12 @@ def test_uno_launch_key_debug_is_gated_and_scoped_to_uno_prepare():
     assert "if record_triton_launch is not None:" in prepare_source
 
 
-def test_uno_prefill_queues_its_draft_proposal_after_output_handoff(monkeypatch):
-    """No dummy run can interleave between the handoff and Uno's proposal.
+def test_uno_prefill_preserves_base_output_before_proposal_order(monkeypatch):
+    """This pins the pre-existing base output-before-proposal order.
 
     ``AsyncOutput`` records the copy-stream wait before this code reaches
-    ``propose``. The proposal is then queued in the same turn and published
-    before returning, eliminating the deferred tuple that retained target
-    tensors and could have been overtaken by a DP dummy run.
+    ``propose``. It is an upstream ordering regression test, not evidence of
+    a Uno hand-off optimization or a separate served-path change.
     """
     from vllm.v1.worker.gpu import model_runner as model_runner_module
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
