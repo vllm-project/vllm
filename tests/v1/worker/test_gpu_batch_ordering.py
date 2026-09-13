@@ -12,6 +12,7 @@ batch's shape, and must not be classified as a uniform decode batch.
 """
 
 import ast
+import random
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,6 +20,7 @@ from typing import Any
 import numpy as np
 import torch
 
+import vllm.v1.worker.gpu.model_runner as model_runner
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner, sort_batch_req_ids
@@ -79,6 +81,182 @@ def _uniform_token_count(
     runner = _make_runner(req_states, decode_query_len=query_len)
     _, uniform_tok_count = runner.gather_batch_req_state(scheduler_output, dummy_run)
     return uniform_tok_count
+
+
+def _make_scheduler_output(
+    num_tokens_per_req: dict[str, int],
+    draft_tokens: dict[str, list[int]] | None = None,
+) -> Any:
+    return SimpleNamespace(
+        num_scheduled_tokens=num_tokens_per_req,
+        total_num_scheduled_tokens=sum(num_tokens_per_req.values()),
+        scheduled_spec_decode_tokens=draft_tokens or {},
+    )
+
+
+def _assert_batch_state_order(
+    batch_state: Any,
+    runner: Any,
+    num_tokens_per_req: dict[str, int],
+    expected_req_ids: list[str],
+) -> None:
+    assert batch_state.req_ids == expected_req_ids
+    np.testing.assert_array_equal(
+        batch_state.num_scheduled_tokens,
+        np.array(
+            [num_tokens_per_req[req_id] for req_id in expected_req_ids],
+            dtype=np.int32,
+        ),
+    )
+    np.testing.assert_array_equal(
+        batch_state.idx_mapping_np,
+        np.array(
+            [runner.req_states.req_id_to_index[req_id] for req_id in expected_req_ids],
+            dtype=np.intp,
+        ),
+    )
+
+
+def _track_sort_calls(
+    monkeypatch: Any,
+) -> list[tuple[dict[str, int], dict[str, list[int]], int]]:
+    calls = []
+
+    def tracking_sort(
+        num_tokens_per_req: dict[str, int],
+        draft_tokens: dict[str, list[int]],
+        decode_query_len: int,
+    ) -> list[str]:
+        calls.append((num_tokens_per_req, draft_tokens, decode_query_len))
+        return sort_batch_req_ids(num_tokens_per_req, draft_tokens, decode_query_len)
+
+    monkeypatch.setattr(model_runner, "sort_batch_req_ids", tracking_sort)
+    return calls
+
+
+def test_constant_key_batch_order_bypass_matches_stable_sort(monkeypatch):
+    rng = random.Random(20260913)
+
+    def fail_sort(*_args: Any, **_kwargs: Any) -> list[str]:
+        raise AssertionError("constant-key batch must not call sort_batch_req_ids")
+
+    monkeypatch.setattr(model_runner, "sort_batch_req_ids", fail_sort)
+
+    for query_len in (1, 5):
+        for num_reqs in (1, 3, 17):
+            req_ids = [f"q{query_len}_r{i}" for i in range(num_reqs)]
+            rng.shuffle(req_ids)
+            num_tokens_per_req = {req_id: query_len for req_id in req_ids}
+            expected_req_ids = sort_batch_req_ids(num_tokens_per_req, {}, query_len)
+            assert expected_req_ids == req_ids
+
+            runner = _make_runner(
+                {req_id: (100, 100) for req_id in req_ids},
+                decode_query_len=query_len,
+            )
+            batch_state, uniform_tok_count = runner.gather_batch_req_state(
+                _make_scheduler_output(num_tokens_per_req),
+                dummy_run=False,
+            )
+
+            _assert_batch_state_order(
+                batch_state, runner, num_tokens_per_req, expected_req_ids
+            )
+            assert batch_state.num_tokens == query_len * num_reqs
+            assert uniform_tok_count == query_len
+
+
+def test_constant_key_bypass_is_key_only_not_prefill_semantic(monkeypatch):
+    req_ids = ["prefill_b", "prefill_a", "prefill_c"]
+    query_len = 5
+    num_tokens_per_req = {req_id: query_len for req_id in req_ids}
+    expected_req_ids = sort_batch_req_ids(num_tokens_per_req, {}, query_len)
+
+    def fail_sort(*_args: Any, **_kwargs: Any) -> list[str]:
+        raise AssertionError("constant-key batch must not call sort_batch_req_ids")
+
+    monkeypatch.setattr(model_runner, "sort_batch_req_ids", fail_sort)
+
+    runner = _make_runner(
+        {req_id: (0, 20) for req_id in req_ids},
+        decode_query_len=query_len,
+    )
+    batch_state, uniform_tok_count = runner.gather_batch_req_state(
+        _make_scheduler_output(num_tokens_per_req),
+        dummy_run=False,
+    )
+
+    _assert_batch_state_order(batch_state, runner, num_tokens_per_req, expected_req_ids)
+    assert batch_state.has_prefill
+    assert uniform_tok_count is None
+
+
+def test_batch_order_falls_back_to_sort_for_nonempty_draft(monkeypatch):
+    calls = _track_sort_calls(monkeypatch)
+    query_len = 5
+    num_tokens_per_req = {"plain_a": 5, "draft": 5, "plain_b": 5}
+    draft_tokens = {"draft": [11, 12]}
+    expected_req_ids = sort_batch_req_ids(num_tokens_per_req, draft_tokens, query_len)
+    runner = _make_runner(
+        {req_id: (100, 100) for req_id in num_tokens_per_req},
+        decode_query_len=query_len,
+    )
+
+    batch_state, uniform_tok_count = runner.gather_batch_req_state(
+        _make_scheduler_output(num_tokens_per_req, draft_tokens),
+        dummy_run=False,
+    )
+
+    assert len(calls) == 1
+    _assert_batch_state_order(batch_state, runner, num_tokens_per_req, expected_req_ids)
+    assert batch_state.num_tokens == sum(num_tokens_per_req.values())
+    assert uniform_tok_count == query_len
+
+
+def test_batch_order_falls_back_to_sort_for_nonuniform_counts(monkeypatch):
+    calls = _track_sort_calls(monkeypatch)
+    query_len = 5
+    num_tokens_per_req = {"tail": 1, "decode_b": 5, "prefill": 9, "decode_a": 5}
+    expected_req_ids = sort_batch_req_ids(num_tokens_per_req, {}, query_len)
+    runner = _make_runner(
+        {req_id: (100, 100) for req_id in num_tokens_per_req},
+        decode_query_len=query_len,
+    )
+
+    batch_state, uniform_tok_count = runner.gather_batch_req_state(
+        _make_scheduler_output(num_tokens_per_req),
+        dummy_run=False,
+    )
+
+    assert len(calls) == 1
+    _assert_batch_state_order(batch_state, runner, num_tokens_per_req, expected_req_ids)
+    assert batch_state.num_tokens == sum(num_tokens_per_req.values())
+    assert uniform_tok_count is None
+
+
+def test_batch_order_falls_back_to_sort_for_mixed_gate_false_shape(monkeypatch):
+    calls = _track_sort_calls(monkeypatch)
+    query_len = 5
+    num_tokens_per_req = {"decode": 5, "prefill_tail": 4, "prefill_full": 12}
+    expected_req_ids = sort_batch_req_ids(num_tokens_per_req, {}, query_len)
+    runner = _make_runner(
+        {
+            "decode": (100, 100),
+            "prefill_tail": (0, 20),
+            "prefill_full": (0, 20),
+        },
+        decode_query_len=query_len,
+    )
+
+    batch_state, uniform_tok_count = runner.gather_batch_req_state(
+        _make_scheduler_output(num_tokens_per_req),
+        dummy_run=False,
+    )
+
+    assert len(calls) == 1
+    _assert_batch_state_order(batch_state, runner, num_tokens_per_req, expected_req_ids)
+    assert batch_state.has_prefill
+    assert uniform_tok_count is None
 
 
 def test_spec_decode_batch_is_uniform_decode():
