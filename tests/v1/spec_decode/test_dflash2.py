@@ -6,7 +6,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
+from vllm.model_executor.models.qwen3_dflash2 import (
+    _grouped_conv,
+    _reduce_norm,
+    _score_edges,
+)
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
 
@@ -69,6 +73,36 @@ def test_selector_edges_match_sequential_reference():
         )
 
     torch.testing.assert_close(actual, expected)
+
+
+def test_reduce_norm_reduces_before_residual_add(monkeypatch):
+    events = []
+
+    class FakeNorm(torch.nn.Module):
+        def forward(self, hidden_states, residual):
+            events.append("norm")
+            return hidden_states + residual, hidden_states
+
+    def fake_all_reduce(hidden_states):
+        events.append("all_reduce")
+        return hidden_states + 10
+
+    monkeypatch.setattr(
+        "vllm.model_executor.models.qwen3_dflash2.get_tensor_model_parallel_world_size",
+        lambda: 2,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.models.qwen3_dflash2.tensor_model_parallel_all_reduce",
+        fake_all_reduce,
+    )
+
+    hidden_states = torch.tensor([[1.0, 2.0]])
+    residual = torch.tensor([[3.0, 4.0]])
+    normed, new_residual = _reduce_norm(FakeNorm(), hidden_states, residual)
+
+    assert events == ["all_reduce", "norm"]
+    assert torch.equal(normed, hidden_states + 10 + residual)
+    assert torch.equal(new_residual, hidden_states + 10)
 
 
 def _stub_base(monkeypatch, draft_logits):
@@ -231,3 +265,5 @@ def test_dflash2_model_decoder_layer_cls(monkeypatch):
     # 4. Assert that the layers are DFlash2Qwen3DecoderLayer (the subclass)
     assert len(model.layers) == 2
     assert isinstance(model.layers[0], DFlash2Qwen3DecoderLayer)
+    assert not model.layers[0].self_attn.o_proj.reduce_results
+    assert not model.layers[0].mlp.down_proj.reduce_results
