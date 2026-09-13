@@ -15,6 +15,11 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _is_sparse_mla_enabled(hf_config: "PretrainedConfig") -> bool:
+    index_topk = getattr(hf_config, "index_topk", None)
+    return index_topk is not None and index_topk != 0
+
+
 class VerifyAndUpdateConfig:
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -31,7 +36,7 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
         hf_config = vllm_config.model_config.hf_config
 
         # Mirror the check in vllm/model_executor/models/deepseek_v2.py
-        is_v32 = hasattr(hf_config, "index_topk")
+        is_v32 = _is_sparse_mla_enabled(hf_config)
         assert is_v32
 
         cache_config = vllm_config.cache_config
@@ -43,6 +48,22 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
 class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
+        hf_config = vllm_config.model_config.hf_config
+        if current_platform.is_cpu():
+            if _is_sparse_mla_enabled(hf_config):
+                raise ValueError(
+                    "GLM-Moe-DSA sparse attention is not supported on CPU. "
+                    "To use dense MLA instead, pass "
+                    "--hf-overrides '{\"index_topk\": 0}'."
+                )
+            if getattr(hf_config, "index_topk", None) == 0:
+                logger.warning(
+                    "GLM-Moe-DSA sparse attention is disabled because index_topk "
+                    "is 0. Falling back to dense MLA."
+                )
+
         # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
         # in most cases.
         vllm_config.parallel_config.set_dcp_defaults(
