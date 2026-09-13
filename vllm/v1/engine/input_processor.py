@@ -182,6 +182,20 @@ class InputProcessor:
         sampling_params.stop_token_ids = []
         sampling_params._all_stop_token_ids = set()
 
+    @staticmethod
+    def _validate_routed_experts_prompt_start(
+        sampling_params: SamplingParams, prompt_len: int
+    ) -> None:
+        """Reject routed-experts prompt offsets beyond the rendered prompt."""
+        prompt_start = sampling_params.routed_experts_prompt_start
+        if prompt_start > prompt_len:
+            raise VLLMValidationError(
+                "`routed_experts_prompt_start` cannot exceed the prompt length "
+                f"of {prompt_len} tokens.",
+                parameter="routed_experts_prompt_start",
+                value=prompt_start,
+            )
+
     def _validate_lora(self, lora_request: LoRARequest | None) -> None:
         if lora_request is None:
             return
@@ -354,12 +368,15 @@ class InputProcessor:
         if isinstance(params, SamplingParams):
             # TODO: can we avoid cloning here in multiproc case?
             sampling_params = params.clone()
+            prompt_len = length_from_prompt_token_ids_or_embeds(
+                prompt_token_ids, prompt_embeds
+            )
+            self._validate_routed_experts_prompt_start(sampling_params, prompt_len)
             # If unset max tokens, then generate up to the max_model_len.
             if sampling_params.max_tokens is None:
-                seq_len = length_from_prompt_token_ids_or_embeds(
-                    prompt_token_ids, prompt_embeds
+                sampling_params.max_tokens = (
+                    self.model_config.max_model_len - prompt_len
                 )
-                sampling_params.max_tokens = self.model_config.max_model_len - seq_len
 
             sampling_params.update_from_generation_config(
                 self.generation_config_fields,
@@ -370,9 +387,7 @@ class InputProcessor:
             if sampling_params.trace_decode_token_ids:
                 self._normalize_trace_replay_params(
                     sampling_params,
-                    length_from_prompt_token_ids_or_embeds(
-                        prompt_token_ids, prompt_embeds
-                    ),
+                    prompt_len,
                 )
         else:
             pooling_params = params.clone()
