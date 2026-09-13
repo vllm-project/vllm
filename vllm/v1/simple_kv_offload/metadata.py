@@ -42,13 +42,15 @@ class SimpleCPUOffloadMetadata(KVConnectorMetadata):
 class SimpleCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
     """Worker -> Scheduler metadata for completed store events.
 
-    Each worker reports {event_idx: 1} for newly completed stores.
+    Each worker reports {event_idx: 1} for newly completed stores, including
+    failures whose DMA has drained. Any rank's failure prevents caching.
     ``aggregate()`` sums counts across workers within a step.
     The scheduler-side manager accumulates across steps and processes
     a store completion only when count reaches ``world_size``.
     """
 
     completed_store_events: dict[int, int]
+    failed_store_events: set[int] = field(default_factory=set)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -57,4 +59,7 @@ class SimpleCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
         merged = dict(self.completed_store_events)
         for k, v in other.completed_store_events.items():
             merged[k] = merged.get(k, 0) + v
-        return SimpleCPUOffloadWorkerMetadata(completed_store_events=merged)
+        return SimpleCPUOffloadWorkerMetadata(
+            completed_store_events=merged,
+            failed_store_events=self.failed_store_events | other.failed_store_events,
+        )
