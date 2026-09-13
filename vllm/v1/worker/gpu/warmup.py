@@ -230,6 +230,64 @@ def warmup_kernels(
         model_runner.adaptive_verification = adaptive_verification
 
 
+@torch.inference_mode()
+def run_uno_served_jit_self_check(
+    model_runner: GPUModelRunner,
+    worker_execute_model: Callable[[SchedulerOutput], Any],
+    worker_sample_tokens: Callable[[GrammarOutput | None], Any],
+) -> bool:
+    """Fail startup if a scheduler-realistic Uno serving cycle compiles.
+
+    This runs after ordinary warmup and after the JIT monitor is active.  The
+    mixed cycle enters through the normal worker methods, including a prefill
+    sample and the following input turn that drains Uno's deferred proposal.
+    It is intentionally separate from launch-key receipts: it is a no-compile
+    assertion, not a substitute for recording the first customer request.
+    """
+    # Avoid a module-level import cycle through model_runner.
+    from vllm.utils.jit_monitor import capture_compilations, raise_on_compilations
+    from vllm.v1.worker.gpu.spec_decode.uno import UnoSpeculator
+
+    if not isinstance(getattr(model_runner, "speculator", None), UnoSpeculator):
+        return False
+
+    # Match normal warmup's fixed verification shape.  The self-check is about
+    # launch coverage, not adaptive cost calibration.
+    adaptive_verification = model_runner.adaptive_verification
+    model_runner.adaptive_verification = None
+    try:
+        with capture_compilations() as compilations:
+            check_tokens = min(
+                model_runner.max_num_tokens,
+                max(3, model_runner.decode_query_len + 2),
+            )
+            ran = run_mixed_prefill_decode_warmup(
+                model_runner,
+                worker_execute_model,
+                worker_sample_tokens,
+                check_tokens,
+                req_id_prefix="_uno_jit_self_check",
+            )
+            if not ran:
+                # A one-request deployment cannot form the mixed cycle.  Use
+                # the established scheduler-realistic warmup as a conservative
+                # fallback rather than silently leaving the guard disabled.
+                warmup_kernels(
+                    model_runner,
+                    worker_execute_model,
+                    worker_sample_tokens,
+                )
+            # The next customer step must not inherit queued self-check work
+            # on the main stream after the worker has announced readiness.
+            torch.accelerator.synchronize()
+    finally:
+        model_runner.adaptive_verification = adaptive_verification
+
+    raise_on_compilations(compilations, context="Uno startup JIT self-check")
+    logger.info("Uno startup JIT self-check completed without compilation.")
+    return True
+
+
 def _warmup_kernels(
     model_runner: GPUModelRunner,
     worker_execute_model: Callable[[SchedulerOutput], Any],

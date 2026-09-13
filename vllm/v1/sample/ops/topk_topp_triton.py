@@ -893,6 +893,14 @@ _SPLIT_ROUNDS = 5
 _TRITON_SPLIT_CACHE: dict[torch.device, dict[str, torch.Tensor]] = {}
 
 
+def _topp_split_count(batch_size: int, num_sm: int) -> int:
+    """Return the split-row specialization selected for this sampler extent."""
+    splits = 1
+    while splits < _SPLIT_MAX_SPLITS and splits * 2 * batch_size <= num_sm:
+        splits *= 2
+    return splits
+
+
 @triton.jit
 def _topp_sb_stats_kernel(
     LOGITS,
@@ -1323,9 +1331,7 @@ def _apply_topp_split(
 ) -> None:
     """Split-row top-p pipeline for small batches; masks logits in place."""
     batch_size, vocab_size = logits.shape
-    splits = 1
-    while splits < _SPLIT_MAX_SPLITS and splits * 2 * batch_size <= num_sm:
-        splits *= 2
+    splits = _topp_split_count(batch_size, num_sm)
 
     ws = _TRITON_SPLIT_CACHE.get(logits.device)
     if ws is None:

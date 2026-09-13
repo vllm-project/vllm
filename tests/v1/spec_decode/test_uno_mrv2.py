@@ -803,6 +803,268 @@ def test_draft_warmup_skips_a_speculator_that_does_not_ask_for_it(monkeypatch):
     assert ran == [] and reported == []
 
 
+def _cpu_launch_contract(
+    kernel: str,
+    tensors: dict[str, torch.Tensor],
+    scalars: dict[str, object],
+    runtime_scalars: tuple[str, ...],
+) -> tuple[dict[str, tuple[str, tuple[int, ...], tuple[int, ...]]], tuple]:
+    """Build a non-data-bearing launch record and its binder contract.
+
+    The record includes each tensor's dtype, logical shape and stride.  The
+    key mirrors Triton's distinction between pointer layout and logical view
+    extent: dynamic scalar bounds are excluded only when the kernel declares
+    them ``do_not_specialize``; fixed capacities remain in ``scalars``.
+    """
+    arguments = {
+        name: (str(tensor.dtype), tuple(tensor.shape), tuple(tensor.stride()))
+        for name, tensor in tensors.items()
+    }
+    key = (
+        kernel,
+        tuple((name, dtype, stride) for name, (dtype, _shape, stride) in arguments.items()),
+        tuple(
+            sorted(
+                (name, repr(value))
+                for name, value in scalars.items()
+                if name not in runtime_scalars
+            )
+        ),
+    )
+    return arguments, key
+
+
+def test_uno_warmup_key_set_covers_served_prepare_and_sampler_shapes():
+    """CPU_OBSERVED/CUDA_UNVERIFIED contract for the five affected kernels.
+
+    This is a no-GPU binder model, not a substitute for Probe 0's actual
+    Triton receipts.  It feeds the same tensor dtype/shape/stride facts and
+    constexprs into both sides, then asserts the warmup key set covers every
+    C=1..16 served bucket on the RTX 3090's 82-SM split policy.
+    """
+    from vllm.v1.sample.ops.topk_topp_triton import (
+        _SPLIT_FANOUT,
+        _SPLIT_ROUNDS,
+        _topp_split_count,
+    )
+    from vllm.v1.worker.gpu.spec_decode.uno_prepare import (
+        UNO_PREPARE_RUNTIME_SCALARS,
+        _prepare_uno_specialization_kwargs,
+    )
+
+    max_reqs, k, vocab, num_sms = 16, 8, 151936, 82
+    buffers = InputBuffers(max_reqs, 2048, torch.device("cpu"))
+    slot_mapping = torch.empty(2048, dtype=torch.int64)
+    sample_idx = torch.empty(max_reqs * k, dtype=torch.int32)
+    block_table = torch.empty((max_reqs, 256), dtype=torch.int32)
+    persistent = {
+        "last_sampled": torch.empty((max_reqs, 1), dtype=torch.int64),
+        "next_prefill_tokens": torch.empty((1, max_reqs), dtype=torch.int32),
+        "seeds": torch.empty(max_reqs, dtype=torch.int64),
+        "block_table": block_table,
+        "out_input_ids": buffers.input_ids,
+        "out_positions": buffers.positions,
+        "out_slot_mapping": slot_mapping,
+        "out_sample_idx_mapping": sample_idx,
+        "out_seq_lens": buffers.seq_lens,
+        "out_query_start_loc": buffers.query_start_loc,
+    }
+
+    def uno_key(num_reqs: int, target_rows: int, step: int):
+        target_query = torch.empty(num_reqs + 1, dtype=torch.int32)
+        target_positions = torch.empty(target_rows, dtype=torch.int64)
+        constexprs = _prepare_uno_specialization_kwargs(
+            buffers,
+            slot_mapping,
+            sample_idx,
+            block_table,
+            num_reqs=num_reqs,
+            k=k,
+            state_capacity=max_reqs,
+            block_size=16,
+            max_model_len=4096,
+            noise_seed=0,
+            noise_high=vocab - 267,
+            has_rejected=True,
+            block=256,
+        )
+        return _cpu_launch_contract(
+            "_prepare_uno_inputs_kernel",
+            {
+                "idx_mapping": torch.empty(num_reqs, dtype=torch.int64),
+                "num_sampled": torch.empty(num_reqs, dtype=torch.int32),
+                "num_rejected": torch.empty(num_reqs, dtype=torch.int32),
+                "target_query_start_loc": target_query,
+                "target_positions": target_positions,
+                **persistent,
+            },
+            {
+                "step": step,
+                "target_query_len": target_query.numel(),
+                "target_position_len": target_positions.numel(),
+                "block_table_stride": block_table.stride(0),
+                **constexprs,
+            },
+            UNO_PREPARE_RUNTIME_SCALARS,
+        )
+
+    def sampler_keys(rows: int) -> set[tuple]:
+        # Meta tensors preserve the actual layout facts without CPU allocation.
+        logits = torch.empty((rows, vocab), dtype=torch.float32, device="meta")
+        top_k = torch.empty(rows, dtype=torch.int32, device="meta")
+        top_p = torch.empty(rows, dtype=torch.float32, device="meta")
+        programs = min(rows, num_sms)
+        buffer = torch.empty((programs, vocab), dtype=torch.float32, device="meta")
+        stats = torch.empty((64 * 32, 4), dtype=torch.float32, device="meta")
+        parts = torch.empty(
+            (64, _SPLIT_ROUNDS, 32, _SPLIT_FANOUT, 3),
+            dtype=torch.float32,
+            device="meta",
+        )
+        common = {"logits": logits, "top_k": top_k, "top_p": top_p}
+        split = _topp_split_count(rows, num_sms)
+        keys = {
+            _cpu_launch_contract(
+                "_topk_topp_kernel",
+                {
+                    **common,
+                    "buffer": buffer,
+                    "percentile_table": torch.empty(200, device="meta"),
+                    "normal_cdf_table": torch.empty(200, device="meta"),
+                },
+                {
+                    "LOGITS_STRIDE_0": logits.stride(0),
+                    "BATCH_SIZE": rows,
+                    "MASK_VALUE": float("-inf"),
+                    "VOCAB_SIZE": vocab,
+                    "BLOCK_SIZE": 8192,
+                    "BLOCK_SIZE_TRUNC": 4096,
+                    "TOPK_ENABLED": True,
+                    "TOPP_ENABLED": True,
+                    "SPLIT_COVERS_PONLY": True,
+                    "num_warps": 8,
+                },
+                ("LOGITS_STRIDE_0", "BATCH_SIZE"),
+            )[1],
+            _cpu_launch_contract(
+                "_topp_sb_stats_kernel",
+                {**common, "stats": stats},
+                {
+                    "LOGITS_STRIDE_0": logits.stride(0),
+                    "HAS_K": True,
+                    "VOCAB_SIZE": vocab,
+                    "S": split,
+                    "BLOCK": 8192,
+                    "num_warps": 8,
+                },
+                ("LOGITS_STRIDE_0",),
+            )[1],
+            _cpu_launch_contract(
+                "_topp_sb_mask_kernel",
+                {**common, "stats": stats, "parts": parts},
+                {
+                    "LOGITS_STRIDE_0": logits.stride(0),
+                    "HAS_K": True,
+                    "MASK_VALUE": float("-inf"),
+                    "S": split,
+                    "F": _SPLIT_FANOUT,
+                    "NUM_ROUNDS": _SPLIT_ROUNDS,
+                    "VOCAB_SIZE": vocab,
+                    "BLOCK": 8192,
+                    "num_warps": 8,
+                },
+                ("LOGITS_STRIDE_0",),
+            )[1],
+        }
+        for round_i in range(_SPLIT_ROUNDS):
+            # ROUND is a regular integer argument, but the Triton binder may
+            # specialize values such as 1. Keep all five values as keys.
+            keys.add(
+                _cpu_launch_contract(
+                    "_topp_sb_step_kernel",
+                    {**common, "stats": stats, "parts": parts},
+                    {
+                        "LOGITS_STRIDE_0": logits.stride(0),
+                        "ROUND": round_i,
+                        "HAS_K": True,
+                        "S": split,
+                        "F": _SPLIT_FANOUT,
+                        "NUM_ROUNDS": _SPLIT_ROUNDS,
+                        "VOCAB_SIZE": vocab,
+                        "BLOCK": 2048,
+                        "num_warps": 8,
+                    },
+                    ("LOGITS_STRIDE_0",),
+                )[1]
+            )
+        return keys
+
+    proposer = object.__new__(UnoSpeculator)
+    proposer.k, proposer.max_num_reqs = k, max_reqs
+    warmup_shapes = proposer.draft_sampler_warmup_shapes()
+    served_shapes = [(n, n * k) for n in range(1, max_reqs + 1)]
+    assert warmup_shapes == served_shapes
+    assert UNO_PREPARE_RUNTIME_SCALARS == (
+        "step",
+        "target_query_len",
+        "target_position_len",
+    )
+
+    warmup_keys: set[tuple] = set()
+    served_keys: set[tuple] = set()
+    split_counts: set[int] = set()
+    for num_reqs, rows in served_shapes:
+        warm_args, warm_key = uno_key(num_reqs, num_reqs, step=7)
+        served_args, served_key = uno_key(num_reqs, 32 + num_reqs, step=99)
+        assert warm_args["target_positions"][1] != served_args["target_positions"][1]
+        assert warm_key == served_key
+        assert "target_position_len" not in dict(warm_key[2])
+        warmup_keys.add(warm_key)
+        served_keys.add(served_key)
+        warmup_keys.update(sampler_keys(rows))
+        served_keys.update(sampler_keys(rows))
+        split_counts.add(_topp_split_count(rows, num_sms))
+
+    assert {1, 2, 4, 8} <= split_counts
+    assert served_keys <= warmup_keys
+
+
+def test_uno_startup_jit_self_check_reports_the_compiled_kernel(monkeypatch):
+    """The post-warmup guard makes any observed specialization fatal."""
+    from vllm.utils import jit_monitor
+    from vllm.v1.worker.gpu import warmup
+
+    runner = SimpleNamespace(
+        speculator=object.__new__(UnoSpeculator),
+        adaptive_verification="saved-adaptive-state",
+        max_num_tokens=32,
+        decode_query_len=9,
+    )
+
+    def emit_compile(*_args, **_kwargs):
+        jit_monitor._handle_jit_event(
+            backend="Triton",
+            event="kernel JIT compilation",
+            fn_name="_prepare_uno_inputs_kernel",
+            detail="constexprs={K=8}; key=uno-served-key",
+        )
+        return True
+
+    monkeypatch.setattr(warmup, "run_mixed_prefill_decode_warmup", emit_compile)
+    monkeypatch.setattr(warmup.torch.accelerator, "synchronize", lambda: None)
+    monkeypatch.setattr(jit_monitor, "_mode", "error")
+    warning = Mock()
+    monkeypatch.setattr(jit_monitor.logger, "warning", warning)
+    with pytest.raises(RuntimeError, match="Uno startup JIT self-check"):
+        warmup.run_uno_served_jit_self_check(runner, Mock(), Mock())
+    assert runner.adaptive_verification == "saved-adaptive-state"
+    assert warning.call_count == 1
+    warning_args = warning.call_args.args
+    assert "kernel=%s" in warning_args[0]
+    assert warning_args[4] == "_prepare_uno_inputs_kernel"
+    assert warning_args[5] == "constexprs={K=8}; key=uno-served-key"
+
+
 def test_uno_prefill_returns_before_its_draft_proposal(monkeypatch):
     """Uno's K-row continuation must not sit on the sampled-token handoff.
 

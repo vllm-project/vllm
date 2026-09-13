@@ -24,9 +24,17 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.launch_key_debug import record_triton_launch
 
 
-@triton.jit(
-    do_not_specialize=["step", "target_query_len", "target_position_len"]
+# Keep this contract shared with the CPU launch-key test.  These arguments
+# describe live target views rather than a Triton program shape, so changing
+# them must never create a distinct specialization.
+UNO_PREPARE_RUNTIME_SCALARS = (
+    "step",
+    "target_query_len",
+    "target_position_len",
 )
+
+
+@triton.jit(do_not_specialize=list(UNO_PREPARE_RUNTIME_SCALARS))
 def _prepare_uno_inputs_kernel(
     # Request state and target batch inputs.
     idx_mapping_ptr,
@@ -476,4 +484,4 @@ def prepare_uno_inputs_fused(
     )
 
 
-__all__ = ["prepare_uno_inputs_fused"]
+__all__ = ["UNO_PREPARE_RUNTIME_SCALARS", "prepare_uno_inputs_fused"]

@@ -97,7 +97,7 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
-from .gpu.warmup import warmup_kernels
+from .gpu.warmup import run_uno_served_jit_self_check, warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
@@ -916,13 +916,18 @@ class Worker(WorkerBase):
 
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
-        mark_launch_key_serving_ready()
         from vllm.utils.jit_monitor import activate as activate_jit_monitor
 
         activate_jit_monitor(
             mode=self.observability_config.jit_monitor_mode,
             verbose=self.observability_config.jit_monitor_verbose,
         )
+        # Run the Uno-only startup assertion while the monitor is armed but
+        # before launch-key receipts begin labeling customer work as served.
+        run_uno_served_jit_self_check(
+            self.model_runner, self.execute_model, self.sample_tokens
+        )
+        mark_launch_key_serving_ready()
 
         # Freeze the worker heap so the GC won't scan static objects
         # (model weights, KV caches, CUDA graphs) during inference.
