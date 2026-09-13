@@ -7,6 +7,7 @@ import pytest
 import torch
 
 import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
+import vllm.models.deepseek_v32.attention as deepseek_attention
 from vllm.config import CUDAGraphMode
 from vllm.models.deepseek_v32 import attention as deepseek_v32_attention
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
@@ -14,6 +15,51 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 
 INDEXER_LAYER = "model.layers.0.self_attn.indexer.k_cache"
 MLA_LAYER = "model.layers.0.self_attn.attn"
+
+
+def test_sparse_attention_refreshes_batch_state_inside_eager_segment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = SimpleNamespace(num_actual_tokens=1)
+
+    class BatchStateRefreshed(Exception):
+        pass
+
+    def refresh_batch_state(attn_metadata):
+        assert attn_metadata is metadata
+        raise BatchStateRefreshed
+
+    layer = SimpleNamespace(
+        indexer=None,
+        skip_topk=True,
+        layer_name=MLA_LAYER,
+        impl=SimpleNamespace(
+            prepare_for_batch=refresh_batch_state,
+            record_logical_topk_ready=lambda: None,
+        ),
+    )
+    monkeypatch.setattr(
+        deepseek_attention,
+        "get_attention_context",
+        lambda layer_name: (metadata, None, torch.empty(1), None),
+    )
+
+    with pytest.raises(BatchStateRefreshed):
+        DeepseekV32Attention._sparse_indexer_and_attn(
+            layer,
+            torch.empty(1, dtype=torch.long),
+            torch.empty(1, 1),
+            torch.empty(1, 1, 1),
+            torch.empty(1, 1, 1),
+            None,
+            None,
+            None,
+            None,
+            None,
+            torch.empty(1, 1, 1),
+            torch.empty(1, 1, 1),
+            torch.empty(1, 1),
+        )
 
 
 def make_indexer_metadata(
@@ -246,6 +292,10 @@ def test_deepseek_v32_dispatches_selected_mha(
         _fp8_query=fp8_query,
         _use_sparse_mha=lambda _: True,
         rotary_emb=lambda _positions, q: (q + 1, None),
+        impl=SimpleNamespace(
+            record_logical_topk_ready=lambda: None,
+            prepare_for_batch=lambda _: None,
+        ),
         forward_impl=record_forward_impl,
     )
     q_nope = torch.randn(2, 1, 2)
