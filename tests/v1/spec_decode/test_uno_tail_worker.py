@@ -352,8 +352,15 @@ def test_tail_draft_retrieval_masks_rows_without_changing_collective_shape(
         assert broadcasts[0].tolist() == [[88, 89], [98, 99]]
 
 
-def test_execute_model_timing_captures_late_tail_and_its_followup(monkeypatch):
-    """The engagement record must include length-tail GPU stages after step three."""
+@pytest.mark.parametrize("tail_mode", ["early", "exact"])
+def test_execute_model_timing_captures_late_tail_and_its_followup(
+    monkeypatch, tail_mode
+):
+    """Exact diagnostics start events before an unknown late terminal sample."""
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu import uno_step_timing
+
+    monkeypatch.setattr(uno_step_timing, "UNO_TAIL_MODE", tail_mode, raising=False)
     tracer = UnoStepTimingTracer(capture_cuda_events=False)
     runner, _, _, _ = _uno_sample_tokens_runner(monkeypatch)
     runner._uno_step_timing = tracer
@@ -379,15 +386,11 @@ def test_execute_model_timing_captures_late_tail_and_its_followup(monkeypatch):
         raise BeforeDeviceDispatch
 
     runner.gather_batch_req_state = stop_before_device_dispatch
-    output = SimpleNamespace(
-        debug_uno_step_id=1,
-        debug_schedule_wall_ms=0.5,
-        num_scheduled_tokens={"request-0": 1},
-        skip_speculator_proposal=False,
-        zero_next_draft_req_ids=set(),
-        scheduled_spec_decode_tokens={},
-        total_num_scheduled_tokens=1,
-    )
+    output = SchedulerOutput.make_empty()
+    output.debug_uno_step_id = 1
+    output.debug_schedule_wall_ms = 0.5
+    output.num_scheduled_tokens = {"request-0": 1}
+    output.total_num_scheduled_tokens = 1
 
     def execute_until_dispatch():
         with pytest.raises(BeforeDeviceDispatch):
@@ -396,7 +399,10 @@ def test_execute_model_timing_captures_late_tail_and_its_followup(monkeypatch):
 
     for _ in range(3):
         assert execute_until_dispatch() is not None
-    assert execute_until_dispatch() is None
+    late_trace = execute_until_dispatch()
+    assert (late_trace is not None) is (tail_mode == "exact"), (
+        "exact diagnostics must trace verification before a late finish is known"
+    )
     output.zero_next_draft_req_ids = {"request-0"}
     output.skip_speculator_proposal = True
 
@@ -408,3 +414,62 @@ def test_execute_model_timing_captures_late_tail_and_its_followup(monkeypatch):
         assert payload["current_draft_counts"] == (0,)
         assert payload["request_steps"] == (expected_step,)
         assert payload["proposal_skipped_terminal"]
+
+    output.debug_uno_step_id = None
+    assert execute_until_dispatch() is None, "debug-off steps create no trace"
+
+
+@pytest.mark.parametrize("all_finished", [False, True])
+def test_exact_tail_trace_records_post_sample_skip_without_zero_draft_claim(
+    monkeypatch, all_finished
+):
+    """A K=8 terminal sample updates actual skip without becoming a K=0 trace."""
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu import model_runner
+
+    runner, _, events, _ = _uno_sample_tokens_runner(monkeypatch, num_reqs=2)
+    _enable_exact_tail(runner, outputs=[0, 0], caps=[5, 5 if all_finished else 128])
+    sampled, counts, _ = runner.sample(None, None, None)
+    sampled.sampled_token_ids = torch.full((2, 9), 7, dtype=torch.int64)
+    counts.fill_(9)
+    tracer = UnoStepTimingTracer(capture_cuda_events=False)
+    output = SchedulerOutput.make_empty()
+    output.debug_uno_step_id = 1
+    output.num_scheduled_tokens = {"request-0": 9, "request-1": 9}
+    output.total_num_scheduled_tokens = 18
+    output.scheduled_spec_decode_tokens = {
+        "request-0": [7] * 8,
+        "request-1": [7] * 8,
+    }
+    trace = tracer.begin(output, 2)
+    assert trace is not None
+    runner.execute_model_state = runner.execute_model_state._replace(
+        uno_step_trace=trace
+    )
+    runner._uno_step_timing = tracer
+    published = []
+    monkeypatch.setattr(tracer, "_log", lambda trace: published.append(trace.payload()))
+    worker_logs = []
+    monkeypatch.setattr(model_runner, "UNO_STEP_TIMING_DEBUG", True)
+    monkeypatch.setattr(
+        model_runner.logger,
+        "info",
+        lambda message, *args: worker_logs.append(message % args),
+    )
+
+    runner.sample_tokens(None)
+
+    assert ("propose-step-7" not in events) is all_finished
+    payload = published[0]
+    assert payload["proposal_skipped_terminal"] is all_finished
+    assert payload["tail_mode_rows"] == 0
+    assert payload["current_draft_counts"] == (8, 8)
+    expected_finished = 2 if all_finished else 1
+    assert (
+        f"UNO_TAIL_STEP proposals_skipped={int(all_finished)} tail_mode_rows=0 "
+        f"post_sample_finished_rows={expected_finished} scheduled_rows=2"
+    ) in worker_logs, "the engagement line must distinguish finishing K=8 from K=0"
+    assert payload["post_sample_finished_rows"] == expected_finished
+    assert payload["finish_check_ms"] >= 0
+    assert ("propose" not in trace.wall_ms) is all_finished
+    assert events[:3] == ["output", "postprocess", "copy-ready"]

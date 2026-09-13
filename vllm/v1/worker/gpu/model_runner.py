@@ -2371,6 +2371,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and bool(input_batch.req_ids)
             and all(req_id in zero_next_draft_req_ids for req_id in input_batch.req_ids)
         )
+        tail_mode_rows = (
+            sum(req_id in zero_next_draft_req_ids for req_id in input_batch.req_ids)
+            if UNO_STEP_TIMING_DEBUG
+            else 0
+        )
+        post_sample_finished_rows = 0
         if self.pcp_manager is not None and aux_hidden_states is not None:
             aux_hidden_states = [
                 self.pcp_manager.restore_hidden_states(states)
@@ -2464,12 +2470,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             uno_step_trace.end_stage("output_publish")
 
         if is_uno and self._uno_tail is not None:
-            zero_next_draft_req_ids = zero_next_draft_req_ids | self._uno_tail.observe(
-                async_output
-            )
+            if uno_step_trace is not None:
+                uno_step_trace.start_wall("finish_check")
+            post_sample_finished = self._uno_tail.observe(async_output)
+            if uno_step_trace is not None:
+                uno_step_trace.end_wall("finish_check")
+                uno_step_trace.post_sample_finished_rows = len(post_sample_finished)
+            post_sample_finished_rows = len(post_sample_finished)
+            zero_next_draft_req_ids = zero_next_draft_req_ids | post_sample_finished
             skip_speculator_proposal = bool(input_batch.req_ids) and all(
                 req_id in zero_next_draft_req_ids for req_id in input_batch.req_ids
             )
+        if uno_step_trace is not None:
+            uno_step_trace.proposal_skipped_terminal = skip_speculator_proposal
 
         if self.speculator is not None and not skip_speculator_proposal:
             assert self.sampler is not None
@@ -2508,11 +2521,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if is_uno and UNO_STEP_TIMING_DEBUG:
             logger.info(
                 "UNO_TAIL_STEP proposals_skipped=%d tail_mode_rows=%d "
-                "scheduled_rows=%d",
+                "post_sample_finished_rows=%d scheduled_rows=%d",
                 int(skip_speculator_proposal),
-                sum(
-                    req_id in zero_next_draft_req_ids for req_id in input_batch.req_ids
-                ),
+                tail_mode_rows,
+                post_sample_finished_rows,
                 len(input_batch.req_ids),
             )
 
