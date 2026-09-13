@@ -8,11 +8,29 @@
 
 namespace vllm {
 
-// Logic: one thread block per (token, group) pair
+// One logical 32-lane warp owns each (token, group) pair. Four groups share a
+// 128-thread block. Keeping the logical warp width at 32 preserves the CUDA
+// mapping on ROCm wave64 while the explicit mask below isolates each half-wave.
+constexpr int kWarpsPerBlock = 4;
+constexpr int kLogicalWarpSize = 32;
+constexpr int kThreadsPerBlock = kWarpsPerBlock * kLogicalWarpSize;
+
+#ifdef USE_ROCM
+__device__ __forceinline__ unsigned long long logical_warp_mask_32(int tid) {
+  return warpSize == kLogicalWarpSize
+             ? 0xffffffffULL
+             : (0xffffffffULL << (tid & kLogicalWarpSize));
+}
+#else
+__device__ __forceinline__ unsigned logical_warp_mask_32(int) {
+  return 0xffffffffu;
+}
+#endif
 
 template <typename scalar_t, typename scalar_out_t, bool is_scale_transposed,
           int32_t group_size>
-__global__ void silu_and_mul_per_block_quant_kernel(
+__global__ void
+__launch_bounds__(kThreadsPerBlock) silu_and_mul_per_block_quant_kernel(
     scalar_out_t* __restrict__ out,  // Output: [num_tokens, hidden_size] in
                                      // FP8/INT8
     float* __restrict__ scales,      // Output: [num_tokens, hidden_size /
@@ -25,81 +43,80 @@ __global__ void silu_and_mul_per_block_quant_kernel(
   static_assert((group_size & (group_size - 1)) == 0,
                 "group_size must be a power of 2 for correct reduction");
 
-  // Grid: (num_tokens, num_groups)
-  int64_t const token_idx = blockIdx.x;
-  int const group_idx = blockIdx.y;
-  int const tid = threadIdx.x;  // tid in [0, group_size)
-  int const num_tokens = gridDim.x;
+  static_assert(group_size % kLogicalWarpSize == 0,
+                "group_size must be a multiple of the logical warp size");
+  constexpr int EPT = group_size / kLogicalWarpSize;
 
-  // Input layout: [gate || up] concatenated along last dimension
+  int const tid = threadIdx.x;
+  int const warp_id = tid / kLogicalWarpSize;
+  int const lane_id = tid & (kLogicalWarpSize - 1);
+  int64_t const token_idx = blockIdx.x;
+  int const num_tokens = gridDim.x;
+  int const num_groups = hidden_size / group_size;
+  int const group_idx = blockIdx.y * kWarpsPerBlock + warp_id;
+  if (group_idx >= num_groups) return;
+
+  // Input layout: [gate || up] concatenated along the last dimension. Each
+  // lane owns EPT contiguous values, enabling one wide load/store per lane.
   int const input_stride = hidden_size * 2;
   int const group_start = group_idx * group_size;
+  int const lane_base = group_start + lane_id * EPT;
 
-  // Pointers to this token's data
   scalar_t const* token_input_gate =
-      input + token_idx * input_stride + group_start;
+      input + token_idx * input_stride + lane_base;
   scalar_t const* token_input_up = token_input_gate + hidden_size;
-  scalar_out_t* token_output = out + token_idx * hidden_size + group_start;
+  scalar_out_t* token_output = out + token_idx * hidden_size + lane_base;
 
   // Scale pointer for this group
-  int const num_groups = gridDim.y;
   float* group_scale_ptr = is_scale_transposed
                                ? scales + group_idx * num_tokens + token_idx
                                : scales + token_idx * num_groups + group_idx;
 
-  // Shared memory for reduction (compile-time sized)
-  __shared__ float shared_max[group_size];
+  struct alignas(sizeof(scalar_t) * EPT) InVec {
+    scalar_t v[EPT];
+  };
+  InVec const gate_v = *reinterpret_cast<InVec const*>(token_input_gate);
+  InVec const up_v = *reinterpret_cast<InVec const*>(token_input_up);
 
-  // Step 1: Each thread loads one element, computes SiLU, stores in register
-  float gate = static_cast<float>(token_input_gate[tid]);
-  float up = static_cast<float>(token_input_up[tid]);
-
-  // Compute SiLU(gate) * up
-  float sigmoid_gate = 1.0f / (1.0f + expf(-gate));
-  float silu_gate = gate * sigmoid_gate;
-  float result = silu_gate * up;  // Keep in register
-
-  // Step 2: Reduce to find group max
-  shared_max[tid] = fabsf(result);
-  __syncthreads();
-
-// Power-of-2 reduction (group_size guaranteed to be power of 2)
+  float result[EPT];
+  float thread_max = 0.0f;
 #pragma unroll
-  for (int stride = group_size / 2; stride > 0; stride >>= 1) {
-    if (tid < stride) {
-      shared_max[tid] = fmaxf(shared_max[tid], shared_max[tid + stride]);
-    }
-    __syncthreads();
+  for (int k = 0; k < EPT; ++k) {
+    float gate = static_cast<float>(gate_v.v[k]);
+    float up = static_cast<float>(up_v.v[k]);
+    float sigmoid_gate = 1.0f / (1.0f + expf(-gate));
+    float silu_gate = gate * sigmoid_gate;
+    result[k] = silu_gate * up;
+    thread_max = fmaxf(thread_max, fabsf(result[k]));
   }
 
-  // Step 3: Compute scale (thread 0), broadcast via shared memory
-  if (tid == 0) {
-    float group_max = shared_max[0];
+  auto const warp_mask = logical_warp_mask_32(tid);
+#pragma unroll
+  for (int offset = kLogicalWarpSize / 2; offset > 0; offset >>= 1) {
+    thread_max = fmaxf(thread_max, __shfl_xor_sync(warp_mask, thread_max,
+                                                   offset, kLogicalWarpSize));
+  }
 
-    float const quant_range = quant_type_max_v<scalar_out_t>;
-    float group_scale = group_max / quant_range;
-
-    // Apply scale upper bound if provided
-    if (scale_ub != nullptr) {
-      group_scale = fminf(group_scale, *scale_ub);
-    }
-
-    // Use minimum safe scaling factor
-    group_scale = fmaxf(group_scale, min_scaling_factor<scalar_out_t>::val());
-
-    // Store scale to global memory
+  float const quant_range = quant_type_max_v<scalar_out_t>;
+  float group_scale = thread_max / quant_range;
+  if (scale_ub != nullptr) {
+    group_scale = fminf(group_scale, *scale_ub);
+  }
+  group_scale = fmaxf(group_scale, min_scaling_factor<scalar_out_t>::val());
+  if (lane_id == 0) {
     *group_scale_ptr = group_scale;
-
-    // Reuse shared_max[0] to broadcast scale
-    shared_max[0] = group_scale;
   }
-  __syncthreads();
 
-  float group_scale = shared_max[0];
-
-  // Step 4: Quantize and write output
-  token_output[tid] =
-      vllm::ScaledQuant<scalar_out_t, false>::quant_fn(result, group_scale);
+  struct alignas(sizeof(scalar_out_t) * EPT) OutVec {
+    scalar_out_t q[EPT];
+  };
+  OutVec out_v;
+#pragma unroll
+  for (int k = 0; k < EPT; ++k) {
+    out_v.q[k] = vllm::ScaledQuant<scalar_out_t, false>::quant_fn(result[k],
+                                                                  group_scale);
+  }
+  *reinterpret_cast<OutVec*>(token_output) = out_v;
 }
 
 }  // namespace vllm
@@ -142,8 +159,9 @@ void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
       input.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
 
-  dim3 grid(num_tokens, num_groups);
-  dim3 block(group_size);
+  dim3 grid(num_tokens,
+            (num_groups + vllm::kWarpsPerBlock - 1) / vllm::kWarpsPerBlock);
+  dim3 block(vllm::kThreadsPerBlock);
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "silu_and_mul_per_block_quant", [&] {
