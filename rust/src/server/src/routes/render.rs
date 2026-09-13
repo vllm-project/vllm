@@ -31,8 +31,8 @@ pub(crate) fn build_router(state: Arc<RenderState>) -> Router {
         .route("/health", get(health))
         .route("/ping", get(health).post(health))
         .route("/v1/models", get(list_models))
-        .route("/v1/chat/completions/render", post(render_chat))
-        .route("/v1/completions/render", post(render_completion))
+        .route("/v1/chat/completions/render", post(render_chat_impl))
+        .route("/v1/completions/render", post(render_completion_impl))
         .with_state(state)
         .layer(DefaultBodyLimit::max(DEFAULT_REQUEST_BODY_LIMIT_BYTES))
 }
@@ -111,7 +111,7 @@ fn lower_render_request(
     Ok(request)
 }
 
-async fn render_chat(
+async fn render_chat_impl(
     State(state): State<Arc<RenderState>>,
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
@@ -135,7 +135,7 @@ async fn render_chat(
     )?))
 }
 
-async fn render_completion(
+async fn render_completion_impl(
     State(state): State<Arc<RenderState>>,
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
@@ -158,4 +158,31 @@ async fn render_completion(
         stream,
         stream_options,
     )?]))
+}
+
+// Handlers that work with AppState for the main API server
+use crate::state::AppState;
+
+pub(crate) async fn render_chat(
+    State(_state): State<Arc<AppState>>,
+    _headers: HeaderMap,
+    ValidatedJson(_body): ValidatedJson<ChatCompletionRequest>,
+) -> Result<Json<GenerateRequest>, ApiError> {
+    Err(ApiError::not_implemented(
+        "Render endpoints are not yet implemented in the Rust frontend. \
+         Use VLLM_USE_RUST_FRONTEND=0 or deploy a dedicated render server.",
+        None,
+    ))
+}
+
+pub(crate) async fn render_completion(
+    State(_state): State<Arc<AppState>>,
+    _headers: HeaderMap,
+    ValidatedJson(_body): ValidatedJson<CompletionRequest>,
+) -> Result<Json<Vec<GenerateRequest>>, ApiError> {
+    Err(ApiError::not_implemented(
+        "Render endpoints are not yet implemented in the Rust frontend. \
+         Use VLLM_USE_RUST_FRONTEND=0 or deploy a dedicated render server.",
+        None,
+    ))
 }
