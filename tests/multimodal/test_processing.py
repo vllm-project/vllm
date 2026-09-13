@@ -967,6 +967,31 @@ def test_hf_processor_call_kwargs(
     assert result == expected_kwargs
 
 
+@pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])  # Dummy
+def test_hf_processor_call_kwargs_does_not_remerge_merged_kwargs(model_id):
+    ctx = InputProcessingContext(
+        model_config=ModelConfig(
+            model_id,
+            mm_processor_kwargs={"c": 1},
+        ),
+        tokenizer=None,
+    )
+
+    processor = ctx.get_hf_processor(DummyProcessor)  # type: ignore[arg-type]
+
+    merged_kwargs = ctx.get_merged_mm_kwargs({"a": 2})
+    merged_kwargs.pop("c")
+
+    result = ctx.call_hf_processor(
+        processor,
+        {},
+        merged_kwargs,
+        mm_kwargs_are_merged=True,
+    )
+
+    assert result == {"a": 2, "c": 0}
+
+
 def test_apply_matches_no_match_exits_quickly():
     """
     Test that _apply_matches exits quickly when no matches are found.

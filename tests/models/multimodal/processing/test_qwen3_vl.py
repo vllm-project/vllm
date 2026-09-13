@@ -187,6 +187,66 @@ def test_processor_kwargs_videos_kwargs_does_not_leak_into_image_budget(
 
 
 @pytest.mark.parametrize("model_id", [MODEL_ID])
+def test_processor_kwargs_videos_kwargs_partial_size_runtime(
+    model_id: str,
+) -> None:
+    """A partial ``videos_kwargs.size`` must work in the runtime path.
+
+    The scoped size is resolved against the video processor defaults and
+    forwarded to Transformers without also passing the same kwarg flat.
+    """
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    mm_data = _build_video_mm_data(num_frames=8)
+    hf_mm_kwargs = {
+        "videos_kwargs": {
+            "size": {
+                "longest_edge": _LONG_VIDEO_SIZE["longest_edge"],
+            }
+        }
+    }
+
+    processed = processor._apply_hf_processor_main(
+        processor.info.parse_mm_data(mm_data),
+        hf_mm_kwargs,
+    )
+
+    assert len(processed["video_grid_thw"]) == 1
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+def test_processor_kwargs_images_kwargs_partial_size_runtime(
+    model_id: str,
+) -> None:
+    """A partial ``images_kwargs.size`` must work in the runtime path."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 1, "video": 0},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    image = np.zeros((128, 128, 3), dtype=np.uint8)
+    hf_mm_kwargs = {
+        "images_kwargs": {
+            "size": {
+                "longest_edge": 16_777_216,
+            }
+        }
+    }
+
+    processed = processor._apply_hf_processor_main(
+        processor.info.parse_mm_data({"image": [image]}),
+        hf_mm_kwargs,
+    )
+
+    assert len(processed["image_grid_thw"]) == 1
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
 @pytest.mark.parametrize(
     "hf_mm_kwargs",
     [{"num_frames": [8, 16]}, {"fps": [2.0, 4.0]}],
