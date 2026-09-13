@@ -57,8 +57,11 @@ pub enum ChatContentPart {
     },
     // ImageData...
     // VideoData...
-    // ImageEmbeds...
-}
+    // ImageEmbeds..
+    ImageEmbeds {
+        image_embeds: serde_json::Value,
+        uuid: Option<String>,
+    },}
 
 impl ChatContentPart {
     /// Construct one text content part with plain string content.
@@ -100,6 +103,13 @@ impl ChatContentPart {
         }
     }
 
+    /// Construct one image embed content part with the given base64 string.
+    pub fn image_embeds_string(image_embeds: impl Into<String>) -> Self {
+        Self::ImageEmbeds {
+            image_embeds: serde_json::Value::String(image_embeds.into()),
+            uuid: None,
+        }
+    }
     /// Return the text content of this part when it's a text block, or an
     /// "unsupported multimodal content" error otherwise.
     pub(crate) fn as_text(&self) -> Result<&str> {
@@ -109,7 +119,7 @@ impl ChatContentPart {
             Self::VideoUrl { .. } => Err(Error::UnsupportedMultimodalContent("video_url")),
             Self::InputAudio { .. } => Err(Error::UnsupportedMultimodalContent("input_audio")),
             Self::AudioUrl { .. } => Err(Error::UnsupportedMultimodalContent("audio_url")),
-        }
+            Self::ImageEmbeds { .. } => Err(Error::UnsupportedMultimodalContent("image_embeds")),        }
     }
 
     /// Return whether this part is a text block with empty content.
@@ -124,7 +134,8 @@ impl ChatContentPart {
             Self::ImageUrl { .. }
             | Self::VideoUrl { .. }
             | Self::InputAudio { .. }
-            | Self::AudioUrl { .. } => true,
+            | Self::AudioUrl { .. } 
+            | Self::ImageEmbeds { .. }=> true,
         }
     }
 }
@@ -723,7 +734,7 @@ impl ChatRole {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{json, to_value};
+    use serde_json::{json, to_value, Value};
 
     use super::{
         ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
@@ -970,5 +981,71 @@ mod tests {
             Err(Error::ChatTemplate(message))
                 if message.contains("`thinking` and `enable_thinking` must match")
         ));
+    }
+
+    #[test]
+    fn chat_content_image_embeds_string_part_round_trips_through_serde() {
+        let content = ChatContent::Parts(vec![ChatContentPart::ImageEmbeds {
+            image_embeds: json!("AAAA"),
+            uuid: Some("image-1".to_string()),
+        }]);
+
+        let value = to_value(&content).unwrap();
+        assert_eq!(
+            value,
+            json!([{
+                "type": "image_embeds",
+                "image_embeds": "AAAA",
+                "uuid": "image-1",
+            }])
+        );
+        let decoded: ChatContent = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, content);
+    }
+
+    #[test]
+    fn chat_content_image_embeds_dict_part_round_trips_through_serde() {
+        let content = ChatContent::Parts(vec![ChatContentPart::ImageEmbeds {
+            image_embeds: json!({
+                "image_embeds": "AAAA",
+                "image_grid_thw": "BBBB",
+            }),
+            uuid: None,
+        }]);
+
+        let value = to_value(&content).unwrap();
+        assert_eq!(
+            value,
+            json!([{
+                "type": "image_embeds",
+                "image_embeds": { "image_embeds": "AAAA", "image_grid_thw": "BBBB" },
+            }])
+        );
+        let decoded: ChatContent = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, content);
+    }
+
+    #[test]
+    fn chat_content_image_embeds_accepts_null_payload() {
+        let content: ChatContent = serde_json::from_value(json!([{
+            "type": "image_embeds",
+            "image_embeds": null,
+        }]))
+        .unwrap();
+
+        assert_eq!(
+            content,
+            ChatContent::Parts(vec![ChatContentPart::ImageEmbeds {
+                image_embeds: Value::Null,
+                uuid: None,
+            }])
+        );
+    }
+
+    #[test]
+    fn chat_content_part_image_embeds_is_multimodal_and_not_text() {
+        let part = ChatContentPart::image_embeds_string("AAAA");
+        assert!(part.is_multimodal());
+        assert!(part.as_text().is_err());
     }
 }
