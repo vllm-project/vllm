@@ -12,6 +12,9 @@ correctly handles this mismatch.
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEParameterLoadSpec,
+)
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
 from .utils import make_dummy_moe_config
@@ -441,6 +444,152 @@ class TestLoadWeightsExpertBias:
         weights = [(expert_name, torch.zeros(self.NUM_EXPERTS, 1))]
         with pytest.raises(AttributeError, match=param_name.replace(".", r"\.")):
             list(RoutedExperts.load_weights(experts, weights))
+
+
+class _LayerFusedQuantMethod:
+    PARAMETER_NAMES = ("w13_weight", "w2_weight")
+
+    def get_fused_parameter_load_specs(
+        self, layer: torch.nn.Module
+    ) -> tuple[FusedMoEParameterLoadSpec, ...]:
+        return tuple(
+            FusedMoEParameterLoadSpec(
+                checkpoint_name=name,
+                parameter_name=name,
+                shape=tuple(getattr(layer, name).shape),
+                dtype=getattr(layer, name).dtype,
+                sharding="rank_local",
+            )
+            for name in self.PARAMETER_NAMES
+        )
+
+
+class _LayerFusedExperts(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layer_name = "model.layers.0.mlp.experts"
+        self.quant_config = None
+        self.quant_method = _LayerFusedQuantMethod()
+        self.loader_calls: list[str] = []
+        for name in self.quant_method.PARAMETER_NAMES:
+            param = torch.nn.Parameter(torch.zeros(2, 3, 4), requires_grad=False)
+            param.weight_loader = self.weight_loader
+            self.register_parameter(name, param)
+
+    def weight_loader(self, *args, **kwargs):
+        self.loader_calls.append(kwargs["weight_name"])
+        return RoutedExperts.weight_loader(self, *args, **kwargs)
+
+    def get_expert_mapping(self, **_):
+        return []
+
+    def load_weights(self, weights):
+        return RoutedExperts.load_weights(self, weights)
+
+
+@pytest.mark.skip_global_cleanup
+class TestLayerFusedWeightLoading:
+    def _weights(self, layer: _LayerFusedExperts):
+        return [
+            (name, torch.full_like(getattr(layer, name), index + 1))
+            for index, name in enumerate(layer.quant_method.PARAMETER_NAMES)
+        ]
+
+    def test_complete_bundle_loads_each_destination_once(self):
+        layer = _LayerFusedExperts()
+        weights = self._weights(layer)
+
+        loaded = list(layer.load_weights(weights))
+
+        assert loaded == list(layer.quant_method.PARAMETER_NAMES)
+        assert layer.loader_calls == list(layer.quant_method.PARAMETER_NAMES)
+        for name, weight in weights:
+            assert torch.equal(getattr(layer, name), weight)
+
+    def test_duplicate_destination_is_rejected(self):
+        layer = _LayerFusedExperts()
+        weights = self._weights(layer)
+        duplicate = [weights[0], weights[0], weights[1]]
+
+        with pytest.raises(ValueError, match="duplicate fused MoE weight"):
+            list(layer.load_weights(duplicate))
+
+    def test_incomplete_bundle_is_rejected(self):
+        layer = _LayerFusedExperts()
+        weights = self._weights(layer)[:1]
+
+        with pytest.raises(ValueError, match="incomplete fused MoE load"):
+            list(layer.load_weights(weights))
+
+    @pytest.mark.parametrize("fused_first", [True, False])
+    def test_mixed_granularity_is_rejected(self, fused_first: bool):
+        layer = _LayerFusedExperts()
+        fused = self._weights(layer)[0]
+        legacy = ("0.down_proj.weight", torch.zeros(3, 4))
+        weights = [fused, legacy] if fused_first else [legacy, fused]
+
+        with pytest.raises(ValueError, match="mixes fused and per-expert"):
+            list(layer.load_weights(weights))
+
+    @pytest.mark.parametrize("mismatch", ["shape", "dtype"])
+    def test_destination_contract_mismatch_is_rejected(self, mismatch: str):
+        layer = _LayerFusedExperts()
+        weights = self._weights(layer)
+        name, weight = weights[0]
+        weight = weight[:, :, :2] if mismatch == "shape" else weight.to(torch.float64)
+        weights[0] = (name, weight)
+
+        with pytest.raises(ValueError, match=mismatch):
+            list(layer.load_weights(weights))
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("use_global_sf", [False, True])
+def test_modelopt_nvfp4_declares_layer_fused_parameter_specs(use_global_sf):
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4FusedMoE,
+    )
+
+    names_and_domains = (
+        ("w13_weight", None),
+        ("w13_weight_scale", "weight"),
+        ("w13_weight_scale_2", "weight"),
+        ("w13_input_scale", "input"),
+        ("w2_weight", None),
+        ("w2_weight_scale", "weight"),
+        ("w2_weight_scale_2", "weight"),
+        ("w2_input_scale", "input"),
+    )
+    layer = torch.nn.Module()
+    for index, (name, _) in enumerate(names_and_domains, start=1):
+        layer.register_parameter(
+            name,
+            torch.nn.Parameter(torch.empty(2, index), requires_grad=False),
+        )
+
+    method = object.__new__(ModelOptNvFp4FusedMoE)
+    method.use_global_sf = use_global_sf
+    specs = method.get_fused_parameter_load_specs(layer)
+
+    assert [spec.checkpoint_name for spec in specs] == [
+        name for name, _ in names_and_domains
+    ]
+    assert [spec.parameter_name for spec in specs] == [
+        name for name, _ in names_and_domains
+    ]
+    assert [spec.scale_domain for spec in specs] == [
+        domain for _, domain in names_and_domains
+    ]
+    for spec in specs:
+        param = getattr(layer, spec.parameter_name)
+        assert spec.shape == tuple(param.shape)
+        assert spec.dtype == param.dtype
+        expected_sharding = (
+            "global_experts"
+            if use_global_sf and spec.scale_domain == "input"
+            else "rank_local"
+        )
+        assert spec.sharding == expected_sharding
 
 
 class TestPerTensorScaleCoercion:
