@@ -18,7 +18,6 @@ import torch
 from torch import nn
 
 from vllm.config.speculative import (
-    DEFAULT_MARKOV_TOPK,
     resolve_markov_bias_topk,
     resolve_markov_topk,
 )
@@ -81,9 +80,9 @@ def _case(
         target_ids = torch.randperm(vocab, generator=gen)[:draft_vocab].sort().values
         d2t = (target_ids - torch.arange(draft_vocab)).to(device)
 
-    anchor = torch.randint(
-        0, vocab, (num_reqs,), generator=gen, dtype=torch.int32
-    ).to(device)
+    anchor = torch.randint(0, vocab, (num_reqs,), generator=gen, dtype=torch.int32).to(
+        device
+    )
     rows = torch.arange(num_reqs, device=device).unsqueeze(-1)
     steps = torch.arange(1, num_steps + 1, device=device).unsqueeze(0)
     sample_pos = (rows * 1000 + steps).expand(num_reqs, num_steps).reshape(-1)
@@ -92,8 +91,10 @@ def _case(
         .repeat_interleave(num_steps)
         .to(torch.int32)
     )
-    temperature = torch.full((num_reqs,), temperature, dtype=torch.float32, device=device)
-    seeds = (torch.arange(num_reqs, dtype=torch.int64, device=device) * 104729 + 7)
+    temperature = torch.full(
+        (num_reqs,), temperature, dtype=torch.float32, device=device
+    )
+    seeds = torch.arange(num_reqs, dtype=torch.int64, device=device) * 104729 + 7
     return SimpleNamespace(
         base=base,
         w1=w1,
@@ -154,10 +155,14 @@ def _run_walk(
         device=case.device,
     )
     cand_ids = torch.empty(
-        (case.num_reqs, case.num_steps, case.top_k), dtype=torch.int64, device=case.device
+        (case.num_reqs, case.num_steps, case.top_k),
+        dtype=torch.int64,
+        device=case.device,
     )
     # Candidate order is irrelevant, mirroring sorted=False at runtime.
-    torch.topk(base_logits, case.top_k, dim=-1, sorted=False, out=(cand_values, cand_ids))
+    torch.topk(
+        base_logits, case.top_k, dim=-1, sorted=False, out=(cand_values, cand_ids)
+    )
 
     draft_tokens = torch.zeros(
         (case.num_reqs, case.num_steps), dtype=torch.int64, device=case.device
@@ -184,7 +189,8 @@ def _run_walk(
     )
     embeds = (
         torch.empty(
-            (case.num_reqs, case.num_steps, case.rank), dtype=case.w1.dtype,
+            (case.num_reqs, case.num_steps, case.rank),
+            dtype=case.w1.dtype,
             device=case.device,
         )
         if store_embeds
@@ -226,9 +232,7 @@ def _run_walk(
     )
 
 
-def _dense_scores_on_chain(
-    case: SimpleNamespace, out: SimpleNamespace
-) -> torch.Tensor:
+def _dense_scores_on_chain(case: SimpleNamespace, out: SimpleNamespace) -> torch.Tensor:
     """Full-vocab Markov projection evaluated on the walk's own chain.
 
     Pruning can legitimately pick a different token than the dense argmax once
@@ -276,9 +280,7 @@ def _dense_gumbel_tokens(
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("top_k", [4, 16, 64])
 @pytest.mark.parametrize("num_steps,rank", [(3, 8), (8, 192)])
-def test_candidate_logits_match_full_vocab_head(
-    dtype, top_k, num_steps, rank
-):
+def test_candidate_logits_match_full_vocab_head(dtype, top_k, num_steps, rank):
     """Pruned-head candidate logits == full-vocab projection at those candidates."""
     case = _case(
         num_reqs=5,
@@ -325,8 +327,12 @@ def test_eager_candidate_scores_match_dense_bias(scale):
 def test_full_candidate_set_matches_dense_reference(num_reqs, num_steps, vocab, rank):
     """With k == V the pruned walk is the original full-vocab Markov head."""
     case = _case(
-        num_reqs=num_reqs, num_steps=num_steps, vocab=vocab, rank=rank,
-        top_k=vocab, seed=2,
+        num_reqs=num_reqs,
+        num_steps=num_steps,
+        vocab=vocab,
+        rank=rank,
+        top_k=vocab,
+        seed=2,
     )
     ref_tokens, dense_logits = _dense_reference(case)
     out = _run_walk(case, probabilistic=True)
@@ -341,18 +347,18 @@ def test_full_candidate_set_matches_dense_reference(num_reqs, num_steps, vocab, 
 @pytest.mark.parametrize("top_k", [1, 4, 16])
 def test_greedy_walk_is_argmax_within_candidates(top_k):
     """The walk's selection is exactly the argmax over the corrected candidates."""
-    case = _case(
-        num_reqs=4, num_steps=8, vocab=512, rank=64, top_k=top_k, seed=9
-    )
+    case = _case(num_reqs=4, num_steps=8, vocab=512, rank=64, top_k=top_k, seed=9)
     out = _run_walk(case)
     head = _head(case.w1, case.w2)
     prev = case.anchor.long()
     for step in range(case.num_steps):
         values = case.base[:, step].gather(1, out.cand_ids[:, step])
         scores = head.candidate_scores(head.embed(prev), values, out.cand_ids[:, step])
-        chosen = out.cand_ids[:, step].gather(
-            1, scores.argmax(dim=-1, keepdim=True)
-        ).squeeze(-1)
+        chosen = (
+            out.cand_ids[:, step]
+            .gather(1, scores.argmax(dim=-1, keepdim=True))
+            .squeeze(-1)
+        )
         torch.testing.assert_close(chosen, out.draft_tokens[:, step])
         prev = chosen
 
@@ -371,16 +377,23 @@ def test_reduced_vocab_walk_returns_target_ids():
     # vocabulary for the tokens the d2t map relocates.
     assert out.draft_tokens.max().item() >= case.draft_vocab
     expected_targets = out.cand_ids + case.d2t[out.cand_ids]
-    assert torch.equal(expected_targets.sort().values.unique().max(),
-                       case.d2t.max() + case.draft_vocab - 1)
+    assert torch.equal(
+        expected_targets.sort().values.unique().max(),
+        case.d2t.max() + case.draft_vocab - 1,
+    )
 
 
 @requires_cuda
 def test_probabilistic_walk_matches_dense_gumbel_sampler():
     """Sampling agrees bitwise with the dense Gumbel sampler on the same set."""
     case = _case(
-        num_reqs=4, num_steps=8, vocab=256, rank=64, top_k=16,
-        temperature=0.9, seed=4,
+        num_reqs=4,
+        num_steps=8,
+        vocab=256,
+        rank=64,
+        top_k=16,
+        temperature=0.9,
+        seed=4,
     )
     case.seeds = torch.arange(4, dtype=torch.int64, device="cuda") * 1234 + 7
     out = _run_walk(case, probabilistic=True)
@@ -393,9 +406,7 @@ def test_probabilistic_walk_matches_dense_gumbel_sampler():
         device=case.device,
     )
     truncated.scatter_(2, out.cand_ids, out.realized)
-    torch.testing.assert_close(
-        out.draft_tokens, _dense_gumbel_tokens(case, truncated)
-    )
+    torch.testing.assert_close(out.draft_tokens, _dense_gumbel_tokens(case, truncated))
 
     # The cache published for the verifier is exactly that distribution, so
     # acceptance testing and full-vocab rejection correction are unchanged.
@@ -406,7 +417,9 @@ def test_probabilistic_walk_matches_dense_gumbel_sampler():
         device=case.device,
     )
     cached_ids = torch.zeros(
-        (case.num_reqs, case.num_steps, case.top_k), dtype=torch.int64, device=case.device
+        (case.num_reqs, case.num_steps, case.top_k),
+        dtype=torch.int64,
+        device=case.device,
     )
     cache_markov_candidates(
         draft_logits=draft_logits,
@@ -424,8 +437,14 @@ def test_probabilistic_walk_matches_dense_gumbel_sampler():
 def test_probabilistic_walk_reduced_vocab_cache_is_in_target_space():
     """With d2t, cached probabilities sit at the real target ids."""
     case = _case(
-        num_reqs=2, num_steps=3, vocab=200, draft_vocab=101, rank=16, top_k=8,
-        temperature=1.0, seed=5,
+        num_reqs=2,
+        num_steps=3,
+        vocab=200,
+        draft_vocab=101,
+        rank=16,
+        top_k=8,
+        temperature=1.0,
+        seed=5,
     )
     out = _run_walk(case, probabilistic=True)
     draft_logits = torch.full(
@@ -435,7 +454,9 @@ def test_probabilistic_walk_reduced_vocab_cache_is_in_target_space():
         device=case.device,
     )
     cached_ids = torch.zeros(
-        (case.num_reqs, case.num_steps, case.top_k), dtype=torch.int64, device=case.device
+        (case.num_reqs, case.num_steps, case.top_k),
+        dtype=torch.int64,
+        device=case.device,
     )
     cache_markov_candidates(
         draft_logits=draft_logits,
@@ -466,7 +487,9 @@ def test_cache_rewrite_leaves_only_current_candidates():
         device=case.device,
     )
     cached_ids = torch.zeros(
-        (case.num_reqs, case.num_steps, case.top_k), dtype=torch.int64, device=case.device
+        (case.num_reqs, case.num_steps, case.top_k),
+        dtype=torch.int64,
+        device=case.device,
     )
     gen = torch.Generator(device="cuda").manual_seed(0)
     for trial in range(3):
@@ -502,7 +525,9 @@ def test_inert_rows_are_neither_sampled_nor_cached():
     case = _case(
         num_reqs=3, num_steps=2, vocab=40, rank=8, top_k=6, temperature=1.0, seed=7
     )
-    case.idx_mapping = torch.tensor([0, 0, -1, -1, 2, 2], dtype=torch.int32, device="cuda")
+    case.idx_mapping = torch.tensor(
+        [0, 0, -1, -1, 2, 2], dtype=torch.int32, device="cuda"
+    )
     out = _run_walk(case, probabilistic=True)
     draft_logits = torch.full(
         (case.num_reqs, case.num_steps, case.vocab),
@@ -511,7 +536,9 @@ def test_inert_rows_are_neither_sampled_nor_cached():
         device=case.device,
     )
     cached_ids = torch.zeros(
-        (case.num_reqs, case.num_steps, case.top_k), dtype=torch.int64, device=case.device
+        (case.num_reqs, case.num_steps, case.top_k),
+        dtype=torch.int64,
+        device=case.device,
     )
     cache_markov_candidates(
         draft_logits=draft_logits,
@@ -556,20 +583,20 @@ def test_walk_is_supported_rejects_sharded_and_odd_weights():
 @pytest.mark.parametrize(
     ("markov_topk", "legacy", "hf_markov_topk", "archs", "expected"),
     [
-        (None, None, None, ["Qwen3DSparkModel"], DEFAULT_MARKOV_TOPK),
+        # Unset resolves to 0 (full-vocab head): candidate pruning is opt-in.
+        (None, None, None, ["Qwen3DSparkModel"], 0),
         (16, None, None, ["Qwen3DSparkModel"], 16),
         (0, None, None, ["Qwen3DSparkModel"], 0),
         (32, 8, None, ["Qwen3DSparkModel"], 32),
         (None, 8, None, ["Qwen3DSparkModel"], 8),
         (None, None, 64, ["Qwen3DSparkModel"], 64),
         (None, None, 0, ["Qwen3DSparkModel"], 0),
-        (None, None, None, ["Qwen3OmniDSparkModel"], DEFAULT_MARKOV_TOPK),
-        # Architectures without the fused walk keep the full-vocab head.
+        (None, None, None, ["Qwen3OmniDSparkModel"], 0),
         (None, None, None, ["Gemma4DSparkModel"], 0),
     ],
 )
 def test_resolve_markov_topk(markov_topk, legacy, hf_markov_topk, archs, expected):
-    """0 falls back to the full-vocab projection; 16 is the default budget."""
+    """Unset or explicit 0 keeps the full-vocab projection; pruning is opt-in."""
     hf_config = SimpleNamespace(
         **({"markov_topk": hf_markov_topk} if hf_markov_topk is not None else {})
     )
@@ -639,9 +666,7 @@ def test_compute_markov_bias_top_ids_follows_negative_scale(tmp_path):
 
 
 @pytest.mark.parametrize("num_steps,rank,vocab", [(4, 16, 128), (8, 64, 512)])
-def test_union_with_full_bigram_table_equals_dense_reference(
-    num_steps, rank, vocab
-):
+def test_union_with_full_bigram_table_equals_dense_reference(num_steps, rank, vocab):
     """A union covering the vocabulary must reproduce the dense chain exactly.
 
     Exercises the bigram half end to end: the ``[V, m]`` lookup keyed by the
@@ -694,7 +719,9 @@ def test_union_covers_what_logit_only_candidates_miss():
         if int((winner_base_rank >= case.top_k).sum()) > 0:
             found = True
             break
-    assert found, "Could not find a seed where the bias pushes a winner outside base top-k"
+    assert found, (
+        "Could not find a seed where the bias pushes a winner outside base top-k"
+    )
 
     base_only = _run_walk(case)
     base_misses = int((base_only.draft_tokens != dense_tokens).sum())
@@ -782,7 +809,10 @@ def test_probabilistic_union_publishes_truncated_distribution():
     # The deduplicated cache (which is what the verifier actually reads)
     # normalizes to 1 over its finite entries.
     torch.testing.assert_close(
-        published.sum(dim=-1), torch.ones_like(published.sum(dim=-1)), rtol=1e-5, atol=1e-5
+        published.sum(dim=-1),
+        torch.ones_like(published.sum(dim=-1)),
+        rtol=1e-5,
+        atol=1e-5,
     )
     # Every non-candidate column holds exactly zero probability.
     outside = published.clone()
@@ -793,15 +823,17 @@ def test_probabilistic_union_publishes_truncated_distribution():
 @pytest.mark.parametrize(
     "markov_topk,markov_bias_topk,hf_bias_topk,expected",
     [
-        (16, None, None, 16),       # default mirrors the base budget
-        (16, 0, None, 0),           # explicit 0 = logit-only candidates
-        (16, 64, 32, 64),           # the knob beats the checkpoint
-        (16, None, 32, 32),         # checkpoint value is honored
-        (0, 64, None, 0),           # full-vocab head has no candidate set
+        (16, None, None, 16),  # default mirrors the base budget
+        (16, 0, None, 0),  # explicit 0 = logit-only candidates
+        (16, 64, 32, 64),  # the knob beats the checkpoint
+        (16, None, 32, 32),  # checkpoint value is honored
+        (0, 64, None, 0),  # full-vocab head has no candidate set
         (256, None, None, 16),
     ],
 )
-def test_resolve_markov_bias_topk(markov_topk, markov_bias_topk, hf_bias_topk, expected):
+def test_resolve_markov_bias_topk(
+    markov_topk, markov_bias_topk, hf_bias_topk, expected
+):
     hf_config = SimpleNamespace(architectures=["Qwen3DSparkModel"])
     if hf_bias_topk is not None:
         hf_config.markov_bias_topk = hf_bias_topk
