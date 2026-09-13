@@ -1339,6 +1339,8 @@ class Worker(WorkerBase):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
+            # Start capture in lockstep once the DP ranks agreed this step.
+            self._maybe_start_synced_profile()
             if (
                 self.use_v2_model_runner
                 and self.model_runner.is_pooling_model
@@ -1392,32 +1394,27 @@ class Worker(WorkerBase):
 
         if is_start:
             validate_profile_prefix(profile_prefix)
-
-            # Generate the trace name by combining prefix with comprehensive rank suffix
-            from vllm.distributed.utils import get_worker_rank_suffix
-
-            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
-
-            # Build the full trace name
-            if profile_prefix:
-                trace_name = f"{profile_prefix}_{rank_suffix}"
-            else:
-                trace_name = rank_suffix
-
-            # Create the profiler wrapper only on the first start call
-            if self.profiler is None:
-                self.profiler = create_worker_profiler(
-                    self.profiler_config,
-                    worker_name=trace_name,
-                    local_rank=self.local_rank,
-                )
-
-            self.profiler.set_output_name(trace_name)
-            self.profiler.start(
-                delay_iterations=delay_iterations,
-                max_iterations=max_iterations,
+            self._create_profiler(profile_prefix)
+            assert self.profiler is not None
+            dp_profiler_sync = getattr(
+                getattr(self, "model_runner", None), "dp_profiler_sync", None
             )
+            if dp_profiler_sync is not None:
+                self._synced_profile_bounds = (delay_iterations, max_iterations)
+                dp_profiler_sync.request_start()
+            else:
+                self.profiler.start(
+                    delay_iterations=delay_iterations,
+                    max_iterations=max_iterations,
+                )
         else:
+            vars(self).pop("_synced_profile_bounds", None)
+            dp_profiler_sync = getattr(
+                getattr(self, "model_runner", None), "dp_profiler_sync", None
+            )
+            if dp_profiler_sync is not None:
+                # Drop a request that never reached consensus yet.
+                dp_profiler_sync.cancel()
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
                 return
@@ -1441,11 +1438,61 @@ class Worker(WorkerBase):
 
     def execute_dummy_batch(self) -> None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
+        if self.profiler is not None:
+            self.profiler.step()
         self.model_runner._dummy_run(
             num_tokens,
             uniform_decode=True,
             randomize_inputs=self.randomize_dummy_inputs,
         )
+        self._maybe_start_synced_profile()
+
+    def _create_profiler(self, profile_prefix: str | None = None) -> None:
+        """Create a profiler on ranks reached only by DP start consensus."""
+        validate_profile_prefix(profile_prefix)
+        from vllm.distributed.utils import get_worker_rank_suffix
+
+        rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
+        trace_name = (
+            f"{profile_prefix}_{rank_suffix}" if profile_prefix else rank_suffix
+        )
+
+        if self.profiler is None:
+            self.profiler = create_worker_profiler(
+                self.profiler_config,
+                worker_name=trace_name,
+                local_rank=self.local_rank,
+            )
+        self.profiler.set_output_name(trace_name)
+
+    def _maybe_start_synced_profile(self) -> None:
+        """Start capture once all DP ranks agree on the start step; builds
+        the profiler lazily for ranks that never got /start_profile."""
+        dp_profiler_sync = getattr(
+            getattr(self, "model_runner", None), "dp_profiler_sync", None
+        )
+        if dp_profiler_sync is None:
+            return
+        if dp_profiler_sync.consume_start():
+            if self.profiler is None:
+                if (
+                    self.profiler_config is None
+                    or self.profiler_config.profiler is None
+                ):
+                    logger.warning(
+                        "Synced profile start requested but profiling is not "
+                        "configured on this rank; skipping."
+                    )
+                    return
+                self._create_profiler()
+            assert self.profiler is not None
+            delay_iterations, max_iterations = vars(self).pop(
+                "_synced_profile_bounds", (None, None)
+            )
+            self.profiler.start(
+                delay_iterations=delay_iterations,
+                max_iterations=max_iterations,
+            )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

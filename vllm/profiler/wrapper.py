@@ -296,7 +296,7 @@ class TorchProfilerWrapper(WorkerProfiler):
             profile_memory=profiler_config.torch_profiler_with_memory,
             with_stack=profiler_config.torch_profiler_with_stack,
             with_flops=profiler_config.torch_profiler_with_flops,
-            on_trace_ready=trace_handler,
+            on_trace_ready=self._async_trace_handler(trace_handler),
         )
         self.profiler: torch.profiler.profile
 
@@ -320,13 +320,31 @@ class TorchProfilerWrapper(WorkerProfiler):
         self._worker_name = worker_name
         if self._custom_trace_handler:
             return
-        self._profiler_kwargs["on_trace_ready"] = (
-            torch.profiler.tensorboard_trace_handler(
-                self._torch_profiler_trace_dir,
-                worker_name=worker_name,
-                use_gzip=self._torch_profiler_use_gzip,
-            )
+        trace_handler = torch.profiler.tensorboard_trace_handler(
+            self._torch_profiler_trace_dir,
+            worker_name=worker_name,
+            use_gzip=self._torch_profiler_use_gzip,
         )
+        self._profiler_kwargs["on_trace_ready"] = self._async_trace_handler(
+            trace_handler
+        )
+
+    @staticmethod
+    def _async_trace_handler(
+        trace_handler: Callable[[torch.profiler.profile], None],
+    ) -> Callable[[torch.profiler.profile], None]:
+        def on_trace_ready(prof: torch.profiler.profile) -> None:
+            def export() -> None:
+                try:
+                    trace_handler(prof)
+                except Exception as e:
+                    logger.warning("Failed to export profiler trace: %s", e)
+
+            threading.Thread(
+                target=export, name="vllm-profiler-trace-export", daemon=True
+            ).start()
+
+        return on_trace_ready
 
     def _build_profiler_table(
         self,
