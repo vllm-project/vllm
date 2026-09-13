@@ -337,7 +337,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
 
     group = MagicMock(world_size=2)
     monkeypatch.setattr(dcp_manager, "get_dcp_group", lambda: group)
-    direct_a2a = MagicMock()
+    direct_a2a = MagicMock(max_num_tokens=16)
     direct_query = MagicMock()
     direct_kv = MagicMock()
     monkeypatch.setattr(
@@ -373,7 +373,8 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
     gathered_kv, local_kv = torch.empty(4, 8), torch.empty(2, 8)
     manager.kv_gather(gathered_kv, local_kv)
     direct_kv.gather.assert_called_once_with(gathered_kv, local_kv)
-    output, lse = torch.empty(1), torch.empty(1)
+    output = torch.empty(1, 2, 8)
+    lse = torch.empty(1, 2)
     seq_lens = torch.ones(1, dtype=torch.int32)
     query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
     manager.combine(
@@ -388,6 +389,40 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
         seq_lens=seq_lens,
         query_start_loc=query_start_loc,
         is_lse_base_on_e=False,
+    )
+
+
+def test_mla_dcp_manager_falls_back_for_strided_output(monkeypatch):
+    import vllm.v1.attention.ops.dcp as dcp_manager
+
+    manager = object.__new__(dcp_manager.MLADCPManager)
+    manager.group = MagicMock(world_size=2)
+    direct_a2a = MagicMock(max_num_tokens=16)
+    fallback_combine = MagicMock(return_value=torch.empty(1))
+    monkeypatch.setattr(dcp_manager, "dcp_a2a_lse_reduce", fallback_combine)
+
+    # A head-major view is valid for the generic A2A pack kernel but violates
+    # the direct kernel's packed-head stride requirement.
+    storage = torch.empty(4, 2, 8)
+    partial_output = storage.permute(1, 0, 2)
+    partial_lse = torch.empty(2, 4)
+
+    result = manager._direct_workspace_combine(
+        direct_a2a,
+        partial_output,
+        partial_lse,
+        is_lse_base_on_e=True,
+    )
+
+    assert result is fallback_combine.return_value
+    direct_a2a.lse_reduce.assert_not_called()
+    fallback_combine.assert_called_once_with(
+        partial_output,
+        partial_lse,
+        cp_group=manager.group,
+        is_lse_base_on_e=True,
+        seq_lens=None,
+        query_start_loc=None,
     )
 
 
