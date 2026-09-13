@@ -40,6 +40,7 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
+    UNO_STEP_TIMING_DEBUG,
     CachedRequestData,
     GrammarOutput,
     KVConnectorBlockState,
@@ -102,6 +103,7 @@ class Scheduler(SchedulerInterface):
         self.spec_decode_metrics_level = (
             self.observability_config.per_request_spec_decode_metrics
         )
+        self._uno_step_timing_next_id = 0
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
         if self.observability_config.kv_cache_metrics:
             self.kv_metrics_collector = KVCacheMetricsCollector(
@@ -561,6 +563,7 @@ class Scheduler(SchedulerInterface):
         return max(num_new_tokens, 0)
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+        schedule_start = time.perf_counter() if UNO_STEP_TIMING_DEBUG else None
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -1449,6 +1452,20 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+        if schedule_start is not None:
+            self._uno_step_timing_next_id += 1
+            scheduler_output.debug_uno_step_id = self._uno_step_timing_next_id
+            scheduler_output.debug_schedule_wall_ms = (
+                time.perf_counter() - schedule_start
+            ) * 1000
+            logger.info(
+                "UNO_STEP_TIMING_SCHEDULE step_id=%d schedule_wall_ms=%.3f "
+                "scheduled_request_count=%d finished_before_step_count=%d",
+                scheduler_output.debug_uno_step_id,
+                scheduler_output.debug_schedule_wall_ms,
+                len(scheduler_output.num_scheduled_tokens),
+                len(scheduler_output.finished_req_ids),
+            )
         return scheduler_output
 
     def _build_kv_connector_meta(
@@ -2190,6 +2207,16 @@ class Scheduler(SchedulerInterface):
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
             self.skipped_waiting.remove_requests(stopped_preempted_reqs)
+
+        if UNO_STEP_TIMING_DEBUG and scheduler_output.debug_uno_step_id is not None:
+            logger.info(
+                "UNO_STEP_TIMING_FINISH step_id=%d finished_this_step_count=%d "
+                "finished_running_count=%d finished_preempted_count=%d",
+                scheduler_output.debug_uno_step_id,
+                len(stopped_running_reqs) + len(stopped_preempted_reqs),
+                len(stopped_running_reqs),
+                len(stopped_preempted_reqs),
+            )
 
         error_req_ids = set(self.grammar_compile_error_reqs)
         self.grammar_compile_error_reqs.clear()

@@ -1578,6 +1578,29 @@ def test_uno_launch_key_debug_is_gated_and_has_no_generic_serving_wrapper():
     assert "record_topk_topp_launches" in inspect.getsource(launch_key_debug)
 
 
+def test_uno_step_timing_debug_flag_is_launch_only_and_tracks_three_steps():
+    """The TTFT tracer never reads request data as configuration."""
+    from vllm.v1.core.sched.output import parse_uno_step_timing_debug
+    from vllm.v1.worker.gpu.uno_step_timing import UnoStepTimingTracer
+
+    assert not parse_uno_step_timing_debug(None)
+    assert not parse_uno_step_timing_debug("0")
+    assert parse_uno_step_timing_debug("1")
+    with pytest.raises(ValueError, match="VLLM_UNO_STEP_TIMING_DEBUG"):
+        parse_uno_step_timing_debug("enabled")
+
+    tracer = UnoStepTimingTracer(capture_cuda_events=False)
+    output = SimpleNamespace(
+        debug_uno_step_id=7,
+        debug_schedule_wall_ms=0.5,
+        num_scheduled_tokens={"internal-request": 1},
+    )
+    assert tracer.begin(output, running_count=1) is not None
+    assert tracer.begin(output, running_count=1) is not None
+    assert tracer.begin(output, running_count=1) is not None
+    assert tracer.begin(output, running_count=1) is None
+
+
 def test_uno_launch_key_debug_records_sampler_launches_only_in_startup_scope(
     monkeypatch,
 ):

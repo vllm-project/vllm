@@ -66,7 +66,11 @@ from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.core.sched.output import (
+    UNO_STEP_TIMING_DEBUG,
+    GrammarOutput,
+    SchedulerOutput,
+)
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     KVCacheConfig,
@@ -184,6 +188,10 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchState,
     maybe_build_ubatch_runner,
 )
+from vllm.v1.worker.gpu.uno_step_timing import (
+    UnoStepTimingTrace,
+    UnoStepTimingTracer,
+)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
     KVBlockZeroer,
@@ -214,6 +222,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         self.device = device
+        # Normal serving creates no timing object, CUDA events, or diagnostic
+        # threads. This launch-only tracer is for the Uno TTFT investigation.
+        self._uno_step_timing = UnoStepTimingTracer() if UNO_STEP_TIMING_DEBUG else None
         self.dtype = self.model_config.dtype
         self.kv_cache_dtype = self.dtype
         if self.cache_config.cache_dtype != "auto":
@@ -1884,6 +1895,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         context_len: int = 0,
         valid_dummy_state_slots: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        uno_step_trace: UnoStepTimingTrace | None = None
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -1898,7 +1910,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 return self._merge_ec_connector_no_forward(
                     scheduler_output, empty_output
                 )
+            if self._uno_step_timing is not None and isinstance(
+                self.speculator, UnoSpeculator
+            ):
+                uno_step_trace = self._uno_step_timing.begin(
+                    scheduler_output, self.req_states.num_reqs
+                )
 
+        if uno_step_trace is not None:
+            uno_step_trace.start_wall("prepare_inputs")
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
         num_toks = scheduler_output.total_num_scheduled_tokens
@@ -1948,6 +1968,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if batch_desc.num_tokens == 0:
             # All DP ranks have zero tokens to run.
             empty_output = self.kv_connector.no_forward(scheduler_output)
+            if uno_step_trace is not None:
+                uno_step_trace.end_wall("prepare_inputs")
+                assert self._uno_step_timing is not None
+                self._uno_step_timing.publish(uno_step_trace)
             return self._merge_ec_connector_no_forward(scheduler_output, empty_output)
 
         cudagraph_stats = None
@@ -2131,6 +2155,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.step_timing.record_batch(
             input_batch, batch_desc.cg_mode == CUDAGraphMode.FULL
         )
+        if uno_step_trace is not None:
+            uno_step_trace.end_wall("prepare_inputs")
+            uno_step_trace.start_stage("model_forward")
         self.step_timing.forward_start()
 
         # Run model.
@@ -2181,6 +2208,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     # Eager (NONE): call the raw model directly.
                     model_output = self.model(**model_inputs)
 
+        if uno_step_trace is not None:
+            uno_step_trace.end_stage("model_forward")
+
         if self.is_last_pp_rank:
             if self.use_aux_hidden_state_outputs:
                 assert isinstance(model_output, tuple)
@@ -2213,12 +2243,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ec_connector_output=ec_connector_output,
             routed_experts=routed_experts,
             cudagraph_stats=cudagraph_stats,
+            uno_step_trace=uno_step_trace,
         )
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
             assert output_intermediate_tensors is not None
             assert self.pp_handler is not None
+            if uno_step_trace is not None:
+                assert self._uno_step_timing is not None
+                self._uno_step_timing.publish(uno_step_trace)
             return self.pp_handler.relay_aux_hidden_states(
                 model_inputs["intermediate_tensors"], output_intermediate_tensors
             )
@@ -2244,6 +2278,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         routed_experts = self.execute_model_state.routed_experts
         cudagraph_stats = self.execute_model_state.cudagraph_stats
+        uno_step_trace = self.execute_model_state.uno_step_trace
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2278,9 +2313,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 for states in aux_hidden_states
             ]
 
+        if uno_step_trace is not None:
+            uno_step_trace.start_stage("sample")
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
+        if uno_step_trace is not None:
+            uno_step_trace.end_stage("sample")
 
         if self.pp_handler is not None:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
@@ -2314,6 +2353,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Start the async output copy before postprocessing. The proposal is
         # queued below, after this copy-stream handoff, so it can overlap the
         # token copy without retaining a prior turn's tensors.
+        if uno_step_trace is not None:
+            uno_step_trace.start_stage("output_publish")
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
             sampler_output=sampler_output,
@@ -2348,6 +2389,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_rejected,
             input_batch.query_start_loc,
         )
+        if uno_step_trace is not None:
+            uno_step_trace.end_stage("output_publish")
 
         if self.speculator is not None:
             assert self.sampler is not None
@@ -2364,6 +2407,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # handoff; the main-stream work cannot delay the already-recorded
             # token copy, and no proposal inputs must survive into another
             # worker turn.
+            if uno_step_trace is not None:
+                uno_step_trace.start_stage("propose")
             self._run_speculator_proposal(
                 input_batch,
                 attn_metadata,
@@ -2375,10 +2420,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 dp_sync,
                 mm_inputs,
             )
+            if uno_step_trace is not None:
+                uno_step_trace.end_stage("propose")
 
         # Spec-decode and diffusion LLMs both use draft tokens but the latter does
         # not have a speculator (i.e. self.speculator is None).
         self._publish_draft_tokens(input_batch)
+        if uno_step_trace is not None:
+            assert self._uno_step_timing is not None
+            self._uno_step_timing.publish(uno_step_trace)
 
         # Post-step KV connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
@@ -2445,6 +2495,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
+        if self._uno_step_timing is not None:
+            self._uno_step_timing.flush()
         torch.accelerator.synchronize()
         self.cudagraph_manager = None
         self.fast_prefill = None
@@ -2520,6 +2572,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     routed_experts: RoutedExpertsTensors | None
     cudagraph_stats: CUDAGraphStat | None
+    uno_step_trace: UnoStepTimingTrace | None = None
 
 
 class BatchReqState(NamedTuple):
