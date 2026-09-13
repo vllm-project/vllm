@@ -1496,6 +1496,9 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
+        # KV cache is freed and will be recomputed (and re-compressed)
+        # from scratch.
+        request.num_kv_discarded = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
         # Async scheduling: mark all in-flight output as stale. Its tokens are
@@ -1899,6 +1902,19 @@ class Scheduler(SchedulerInterface):
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
+
+        # Apply KV compression results (KeyDiff): the model runner reports
+        # how many KV cache entries were discarded per request this step.
+        # This only affects block allocation accounting; the runner keeps
+        # its own authoritative copy for slot mapping and attention bounds.
+        if model_runner_output.kv_compression_discarded:
+            for (
+                req_id,
+                num_discarded,
+            ) in model_runner_output.kv_compression_discarded.items():
+                req = self.requests.get(req_id)
+                if req is not None:
+                    req.num_kv_discarded += num_discarded
 
         failed_kv_load_req_ids: set[str] = set()
         if kv_connector_output and kv_connector_output.failed_recving:

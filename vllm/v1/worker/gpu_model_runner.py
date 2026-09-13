@@ -220,6 +220,7 @@ from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
+from vllm.v1.worker.kv_compression import KVCompressionManager
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.ubatch_utils import (
@@ -619,6 +620,17 @@ class GPUModelRunner(
 
         # Encoder CUDA graph manager (initialized after model load if enabled)
         self.encoder_cudagraph_manager: EncoderCudaGraphManager | None = None
+
+        # Opt-in KV cache compression (KeyDiff). KV caches are bound in
+        # initialize_kv_cache_tensors.
+        self.kv_compression_mgr: KVCompressionManager | None = None
+        self._kv_compression_discarded: dict[str, int] | None = None
+        if self.cache_config.kv_compression_algorithm is not None:
+            self.kv_compression_mgr = KVCompressionManager(
+                algorithm=self.cache_config.kv_compression_algorithm,
+                compression_ratio=self.cache_config.kv_compression_ratio,
+                compression_interval=self.cache_config.kv_compression_interval,
+            )
 
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
@@ -1469,6 +1481,13 @@ class GPUModelRunner(
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
+                # The KV cache was freed on preemption; the request will be
+                # recomputed (and re-compressed/re-filtered) from scratch.
+                if self.kv_compression_mgr is not None:
+                    req_state.num_kv_discarded = 0
+                    req_state.kv_compressed = False
+                    req_state.kv_filter_lengths = None
+                    req_state.kv_last_compaction_total = 0
 
             if req_index is None:
                 # The request is not in the persistent batch.
@@ -2105,7 +2124,9 @@ class GPUModelRunner(
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
 
         # Record which requests should not be sampled,
-        # so that we could clear the sampled tokens before returning
+        # so that we could clear the sampled tokens before returning.
+        # This must use the logical sequence length, before any KV
+        # compression adjustment below.
         self.discard_request_mask.np[:num_reqs] = (
             self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
         )
@@ -2201,11 +2222,41 @@ class GPUModelRunner(
         )
         self.seq_lens[num_reqs:].fill_(0)
 
-        self.input_batch.block_table.compute_slot_mapping(
-            num_reqs,
-            self.query_start_loc.gpu[: num_reqs + 1],
-            self.positions[:total_num_scheduled_tokens],
-        )
+        # KV compression (KeyDiff): logical positions (self.positions,
+        # used for RoPE) and physical cache positions diverge by the
+        # per-request count of discarded KV entries. Slot mapping and
+        # attention seq_lens must use physical cache positions.
+        kv_discarded_gpu: torch.Tensor | None = None
+        if self.kv_compression_mgr is not None:
+            kv_discarded_np = np.array(
+                [
+                    self.requests[req_id].num_kv_discarded
+                    for req_id in self.input_batch.req_ids
+                ],
+                dtype=np.int64,
+            )
+            if kv_discarded_np.any():
+                kv_discarded_gpu = torch.from_numpy(kv_discarded_np).to(
+                    device=self.device, non_blocking=True
+                )
+
+        if kv_discarded_gpu is not None:
+            self.seq_lens[:num_reqs] -= kv_discarded_gpu.to(self.seq_lens.dtype)
+            adjusted_positions = (
+                self.positions[:total_num_scheduled_tokens]
+                - kv_discarded_gpu[req_indices_gpu]
+            )
+            self.input_batch.block_table.compute_slot_mapping(
+                num_reqs,
+                self.query_start_loc.gpu[: num_reqs + 1],
+                adjusted_positions,
+            )
+        else:
+            self.input_batch.block_table.compute_slot_mapping(
+                num_reqs,
+                self.query_start_loc.gpu[: num_reqs + 1],
+                self.positions[:total_num_scheduled_tokens],
+            )
 
         # Copy the tensors to the GPU.
         self._prepare_input_ids(
@@ -4468,6 +4519,17 @@ class GPUModelRunner(
                 **model_kwargs,
             )
 
+        if self.kv_compression_mgr is not None:
+            # KV compression (KeyDiff) runs after the forward pass: all
+            # layers' K/V for this step are in the cache, and this step's
+            # attention has already used the uncompressed cache.
+            with record_function_or_nullcontext("gpu_model_runner: kv_compression"):
+                self._kv_compression_discarded = (
+                    self.kv_compression_mgr.run_post_forward(
+                        self.input_batch, self.requests, scheduler_output
+                    )
+                )
+
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
                 # True when EAGLE 3 is used.
@@ -4791,7 +4853,9 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
+                kv_compression_discarded=self._kv_compression_discarded or None,
             )
+            self._kv_compression_discarded = None
 
         if not self.use_async_scheduling:
             if self.routed_experts_initialized:
@@ -7383,6 +7447,12 @@ class GPUModelRunner(
             num_attn_module,
             kv_cache_groups=kv_cache_config.kv_cache_groups,
         )
+
+        if self.kv_compression_mgr is not None:
+            self.kv_compression_mgr.bind_kv_caches(
+                kv_caches, self.shared_kv_cache_layers, kv_cache_config
+            )
+
         return kv_caches
 
     def maybe_add_kv_sharing_layers_to_kv_cache_groups(

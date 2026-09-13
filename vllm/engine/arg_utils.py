@@ -70,6 +70,7 @@ from vllm.config import (
 )
 from vllm.config.cache import (
     CacheDType,
+    KVCompressionAlgorithm,
     KVOffloadingBackend,
     MambaCacheMode,
     MambaDType,
@@ -768,6 +769,11 @@ class EngineArgs:
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
+    kv_compression_algorithm: KVCompressionAlgorithm | None = (
+        CacheConfig.kv_compression_algorithm
+    )
+    kv_compression_ratio: float = CacheConfig.kv_compression_ratio
+    kv_compression_interval: int = CacheConfig.kv_compression_interval
     tokens_only: bool = False
 
     shutdown_timeout: int = 0
@@ -1316,6 +1322,15 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--kv-offloading-backend", **cache_kwargs["kv_offloading_backend"]
+        )
+        cache_group.add_argument(
+            "--kv-compression-algorithm", **cache_kwargs["kv_compression_algorithm"]
+        )
+        cache_group.add_argument(
+            "--kv-compression-ratio", **cache_kwargs["kv_compression_ratio"]
+        )
+        cache_group.add_argument(
+            "--kv-compression-interval", **cache_kwargs["kv_compression_interval"]
         )
 
         # Model weight offload related configs
@@ -2078,6 +2093,15 @@ class EngineArgs:
             self.kv_cache_dtype, model_config
         )
 
+        if self.kv_compression_algorithm is not None:
+            if self.enable_prefix_caching:
+                logger.warning(
+                    "KV cache compression (%s) is incompatible with prefix "
+                    "caching; disabling prefix caching.",
+                    self.kv_compression_algorithm,
+                )
+            self.enable_prefix_caching = False
+
         assert self.enable_prefix_caching is not None, (
             "enable_prefix_caching must be set by this point"
         )
@@ -2107,6 +2131,9 @@ class EngineArgs:
             use_replayssm=self.use_replayssm,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
+            kv_compression_algorithm=self.kv_compression_algorithm,
+            kv_compression_ratio=self.kv_compression_ratio,
+            kv_compression_interval=self.kv_compression_interval,
         )
 
         if resolved_cache_dtype.startswith("turboquant_"):

@@ -58,6 +58,20 @@ class CachedRequestState:
     # Used when both async_scheduling and spec_decode are enabled.
     prev_num_draft_len: int = 0
 
+    # KV compression (KeyDiff) state. num_kv_discarded is the runner's
+    # authoritative count of cache entries discarded for this request;
+    # physical cache position = logical position - num_kv_discarded.
+    num_kv_discarded: int = 0
+    # Whether full-replacement compaction already ran for this request.
+    kv_compressed: bool = False
+    # Filtering algorithm: per-(layer, head) valid lengths
+    # [num_layers, num_kv_heads] on the cache device (kvpress PaddedTensor
+    # semantics). None until the first filtered decode step.
+    kv_filter_lengths: torch.Tensor | None = None
+    # Logical token count at the last retroactive compaction (drives the
+    # kv_compression_interval trigger).
+    kv_last_compaction_total: int = 0
+
     # for pooling models
     pooling_params: PoolingParams | None = None
     pooling_states: PoolingStates | None = None

@@ -1343,6 +1343,47 @@ class VllmConfig:
                 "`--enable-mamba-cache-stochastic-rounding`."
             )
 
+        if self.cache_config.kv_compression_algorithm is not None:
+            if self.speculative_config is not None:
+                raise ValueError(
+                    "KV cache compression is not compatible with speculative decoding."
+                )
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "KV cache compression requires pipeline_parallel_size=1."
+                )
+            if (
+                self.parallel_config.decode_context_parallel_size > 1
+                or self.parallel_config.prefill_context_parallel_size > 1
+            ):
+                raise ValueError(
+                    "KV cache compression is not compatible with context parallelism."
+                )
+            if (
+                self.cache_config.kv_compression_algorithm == "filtering"
+                and self.parallel_config.tensor_parallel_size > 1
+            ):
+                # Filtering decisions are data-dependent per rank; with TP the
+                # per-rank decisions could diverge and corrupt cache metadata.
+                raise ValueError(
+                    "kv_compression_algorithm='filtering' requires "
+                    "tensor_parallel_size=1."
+                )
+            if self.model_config is not None and (
+                self.model_config.runner_type == "pooling"
+                or self.model_config.is_encoder_decoder
+            ):
+                raise ValueError(
+                    "KV cache compression only supports decoder-only generative models."
+                )
+            if self.cache_config.enable_prefix_caching:
+                logger.warning_once(
+                    "Disabling prefix caching: it is incompatible with "
+                    "KV cache compression.",
+                    scope="local",
+                )
+                self.cache_config.enable_prefix_caching = False
+
         if self.quant_config is None and self.model_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config
