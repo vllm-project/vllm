@@ -687,6 +687,10 @@ class ParallelEngramEmbedding(nn.Module):
                 },
             )
         if cpu_offload:
+            # Constant dummy values avoid randomizing huge CPU lookup tables.
+            set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
+            # The ue8m0 encoding of scale 1.0 is exponent byte 127.
+            set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": 127})
             logger.info(
                 "Engram table offloaded to pinned host memory: %d rows x %d, "
                 "%.2f GiB per rank",
