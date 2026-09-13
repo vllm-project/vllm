@@ -26,7 +26,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.fa_utils import (
     FA4_HD256_PAGE_SIZE,
-    compile_flash_attn_varlen_func_from_specs,
     flash_attn_supports_kv_cache_dtype,
     flash_attn_supports_quant_query_input,
     get_flash_attn_version,
@@ -48,6 +47,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 if is_flash_attn_varlen_func_available():
     from vllm.v1.attention.backends.fa_utils import (
+        compile_flash_attn_varlen_func_from_specs,
         flash_attn_supports_sinks,
         flash_attn_varlen_func,
         get_scheduler_metadata,
@@ -649,14 +649,15 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = get_flash_attn_version() == 3
+        head_size_v = getattr(kv_cache_spec, "head_size_v", None)
         fa_version = get_flash_attn_version(
             head_size=self.headdim,
-            head_size_v=kv_cache_spec.head_size_v,
+            head_size_v=head_size_v,
             kv_cache_block_size=self.block_size,
             supports_fa4_hd256=True,
         )
         self.fa4_hd256 = fa_version == 4 and uses_fa4_hd256_kernel(
-            self.headdim, kv_cache_spec.head_size_v
+            self.headdim, head_size_v
         )
 
         if (
