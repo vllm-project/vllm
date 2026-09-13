@@ -910,6 +910,7 @@ def test_creator_memory_check_runs_only_for_creator(iid):
             kv_bytes_per_chunk=PAGE_SIZE,
             cpu_page_size=PAGE_SIZE,
             creator_memory_check=checked_sizes.append,
+            unlink_owner=False,
         )
         assert checked_sizes == [4 * PAGE_SIZE]
     finally:
@@ -1101,6 +1102,7 @@ def test_setup_failure_before_barrier_releases_peers(iid, monkeypatch, failure_p
             barrier=barrier,
             creator_memory_check=memory_check,
             populate_only_on_creator=True,
+            unlink_owner=True,
         )
 
     barrier.assert_called_once_with()

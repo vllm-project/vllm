@@ -16,6 +16,7 @@ import torch
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tp_group
+from vllm.distributed.parallel_state import is_local_first_rank
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -356,6 +357,7 @@ def allocate_hisparse_host_pools(
         barrier=get_tp_group().barrier,
         creator_memory_check=check_hisparse_host_memory,
         populate_only_on_creator=True,
+        unlink_owner=is_local_first_rank(),
     )
     try:
         for start, end in _hisparse_registration_ranges(
@@ -369,7 +371,7 @@ def allocate_hisparse_host_pools(
             region.create_next_canonical_view(size).view(-1) for size in tensor_sizes
         ]
     except Exception:
-        region.cleanup()
+        region.abort_startup_cleanup()
         raise
     return pools, [], region
 

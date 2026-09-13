@@ -114,7 +114,6 @@ class SharedOffloadRegion:
         self.rank = rank
         self.mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
         self._is_unlink_owner = unlink_owner
-        self._creator = False
         self.fd: int | None = None
         self.mmap_obj: mmap.mmap | None = None
         self._base: torch.Tensor | None = None
@@ -142,7 +141,6 @@ class SharedOffloadRegion:
                 # Creator path. We won O_EXCL, so we own the file: any
                 # failure here must clean up so concurrent joiners don't
                 # land on a 0-byte stub and spin in _wait_for_file_size.
-                self._creator = True
                 created_path = True
                 if creator_memory_check is not None:
                     creator_memory_check(self.total_size_bytes)
@@ -160,14 +158,13 @@ class SharedOffloadRegion:
                 flags=mmap.MAP_SHARED,
                 prot=mmap.PROT_READ | mmap.PROT_WRITE,
             )
-            if populate_only_on_creator and self._creator:
+            if populate_only_on_creator and created_path:
                 populate_write_fn = _get_populate_write_fn(self.mmap_obj)
                 populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
         except Exception:
             if created_path:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(self.mmap_path)
-                self._creator = False
             if hasattr(self, "mmap_obj") and self.mmap_obj is not None:
                 self.mmap_obj.close()
                 self.mmap_obj = None
@@ -213,9 +210,9 @@ class SharedOffloadRegion:
             logger.info("Unlinked mmap file %s", self.mmap_path)
 
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
-        self._views: list[torch.Tensor] = []
+        self._views = []
         self._canonical_offset = 0
-        self.is_pinned: bool = False
+        self.is_pinned = False
         self.pinned_addresses: list[int] = []
 
         if populate_only_on_creator:
