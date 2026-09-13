@@ -20,6 +20,7 @@ import regex as re
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
@@ -27,6 +28,8 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -184,6 +187,19 @@ class Glm47MoeParser(ParserEngine):
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         thinking = chat_kwargs.get("thinking", None)
         enable_thinking = chat_kwargs.get("enable_thinking", None)
+        template = getattr(tokenizer, "chat_template", None)
+        if (
+            enable_thinking is False
+            and isinstance(template, str)
+            and "enable_thinking" not in template
+        ):
+            logger.warning_once(
+                "Ignoring chat_template_kwargs 'enable_thinking': the model's "
+                "chat template does not declare it, so reasoning is always "
+                "enabled and the flag would leak reasoning into the content. "
+                "Use 'reasoning_effort' to control the thinking budget."
+            )
+            enable_thinking = None
         self.thinking_enabled = (
             True
             if thinking is None and enable_thinking is None
