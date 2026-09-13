@@ -40,6 +40,7 @@ class FileMapper:
         parallel_agnostic: bool = False,
         replicated_layout: bool = False,
         canonical_format: str | None = None,
+        model_config_hash: str | None = None,
     ):
         """
         Initialize the file mapper. Each worker constructs its own, but
@@ -63,6 +64,8 @@ class FileMapper:
             "kv_cache_groups": kv_cache_groups or [],
             "inference_engine": inference_engine,
         }
+        if model_config_hash is not None:
+            self.fields["model_config_hash"] = model_config_hash
         if not parallel_agnostic:
             self.fields["parallel_agnostic"] = False
         # Only written when True so existing deployments' hashed fields are
@@ -86,6 +89,11 @@ class FileMapper:
     ) -> "FileMapper":
         """Build a FileMapper from an OffloadingSpec."""
         config = offloading_spec.config
+        if not config.model.config_hash:
+            raise ValueError(
+                "Persistent KV offloading requires a model configuration hash "
+                "from EngineCore."
+            )
         kv_cache_groups = [
             {
                 "tokens_per_block": group.tokens_per_block,
@@ -116,6 +124,7 @@ class FileMapper:
             ),
             replicated_layout=(parallel_agnostic and config.replicated_layout),
             canonical_format=canonical_format,
+            model_config_hash=config.model.config_hash,
         )
 
     def get_file_name(self, key: OffloadKey) -> str:

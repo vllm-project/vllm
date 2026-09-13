@@ -12,6 +12,7 @@ import mmap
 import os
 import threading
 import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -35,6 +36,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
+from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
@@ -71,7 +73,9 @@ def _make_offloading_spec(
         enable_kv_cache_events=enable_kv_cache_events,
         extra_config={},
         engine_id="test-engine",
-        model=OffloadingModelConfig(name="test-model", dtype="float32"),
+        model=OffloadingModelConfig(
+            name="test-model", dtype="float32", config_hash="test-model-config"
+        ),
         cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
         parallel=OffloadingParallelConfig(
             rank=rank,
@@ -217,6 +221,25 @@ def test_lookup_empty_tier(fs_tier):
     tier, _ = fs_tier
     results = lookup_and_wait(tier, [key(1), key(2)])
     assert results == [LookupResult.MISS, LookupResult.MISS]
+
+
+def test_legacy_blocks_are_not_reused_without_model_identity(fs_tier, tmp_path):
+    tier, tensor = fs_tier
+    legacy_fields = tier.file_mapper.get_run_config()
+    legacy_fields.pop("model_config_hash")
+    legacy_mapper = FileMapper(root_dir=str(tmp_path), rank=0, **legacy_fields)
+    legacy_path = Path(legacy_mapper.get_file_name(key(1)))
+    legacy_path.parent.mkdir(parents=True)
+    legacy_data = tensor[0].numpy().tobytes()
+    legacy_path.write_bytes(legacy_data)
+
+    assert lookup_and_wait(tier, [key(1)]) == [LookupResult.MISS]
+    tier.on_request_finished(_CTX)
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(result.success for result in drain(tier))
+    assert lookup_and_wait(tier, [key(1)]) == [LookupResult.HIT]
+    assert Path(tier.file_mapper.get_file_name(key(1))) != legacy_path
+    assert legacy_path.read_bytes() == legacy_data
 
 
 def test_store_creates_file_and_lookup_succeeds(fs_tier):

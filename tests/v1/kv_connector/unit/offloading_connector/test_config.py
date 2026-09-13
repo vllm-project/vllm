@@ -2,11 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for translating vLLM cache metadata to native offloading config."""
 
+import copy
+from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from transformers import PretrainedConfig
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import MockOffloadingSpec
 from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
@@ -17,6 +21,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     SchedulerOffloadConfig,
 )
 from vllm.platforms import current_platform
+from vllm.v1.core.kv_cache_utils import (
+    get_kv_cache_model_config_hash,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -32,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
+from vllm.v1.kv_offload.file_mapper import FileMapper
 
 
 def _make_vllm_config(
@@ -92,6 +100,270 @@ def _make_kv_cache_config() -> KVCacheConfig:
         kv_cache_tensors=[kv_tensor],
         kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
     )
+
+
+def _make_identity_config() -> VllmConfig:
+    config = _make_vllm_config()
+    config.model_config.hf_text_config = PretrainedConfig(
+        max_position_embeddings=16,
+        rope_parameters={
+            "full_attention": {
+                "rope_type": "linear",
+                "factor": 1.0,
+                "rope_theta": 10000.0,
+                "partial_rotary_factor": 1.0,
+            },
+            "sliding_attention": None,
+        },
+    )
+    config.model_config.dtype = torch.bfloat16
+    config.model_config.max_model_len = 16
+    return config
+
+
+def _identity_mapper(config: VllmConfig, kv_config: KVCacheConfig) -> FileMapper:
+    return FileMapper.from_offloading_spec(
+        "/tmp/cache",
+        MockOffloadingSpec(build_offloading_config(config, kv_config)),
+    )
+
+
+@pytest.mark.parametrize(
+    "path,value",
+    [
+        (("rope_parameters", "full_attention", "factor"), 2.0),
+        (("rope_parameters", "full_attention", "rope_theta"), 20000.0),
+        (("rope_parameters", "full_attention", "partial_rotary_factor"), 0.5),
+        (
+            ("rope_parameters", "sliding_attention"),
+            {"rope_type": "default", "rope_theta": 10000.0},
+        ),
+        (("max_position_embeddings",), 32),
+    ],
+)
+def test_model_config_changes_isolate_persisted_blocks(path, value):
+    config = _make_identity_config()
+    first = _make_kv_cache_config()
+    first.model_config_hash = get_kv_cache_model_config_hash(config.model_config)
+    old_path = _identity_mapper(config, first).base_path
+
+    hf_config = config.model_config.hf_text_config
+    if len(path) == 1:
+        setattr(hf_config, path[0], value)
+    else:
+        target = getattr(hf_config, path[0])
+        for name in path[1:-1]:
+            target = target[name]
+        target[path[-1]] = value
+    changed = _make_kv_cache_config()
+    changed.model_config_hash = get_kv_cache_model_config_hash(config.model_config)
+    assert _identity_mapper(config, changed).base_path != old_path
+
+
+def test_model_dtype_isolates_blocks_with_the_same_kv_dtype():
+    config = _make_identity_config()
+    first = _make_kv_cache_config()
+    first.model_config_hash = get_kv_cache_model_config_hash(config.model_config)
+    config.model_config.dtype = torch.float16
+    changed = _make_kv_cache_config()
+    changed.model_config_hash = get_kv_cache_model_config_hash(config.model_config)
+    first_mapper = _identity_mapper(config, first)
+    changed_mapper = _identity_mapper(config, changed)
+    assert first_mapper.fields["dtype"] == changed_mapper.fields["dtype"]
+    assert first_mapper.base_path != changed_mapper.base_path
+
+
+def test_metadata_and_mapping_order_preserve_model_identity():
+    config = _make_identity_config()
+    serialized = config.model_config.hf_text_config.to_dict()
+    metadata = {
+        "_name_or_path": "old-path",
+        "_commit_hash": "old-revision",
+        "transformers_version": "old-version",
+    }
+    serialized.update(metadata)
+    serialized["decoder"] = {**metadata, "hidden_size": 8}
+    # PretrainedConfig.to_dict itself drops or rewrites some metadata. Return
+    # the serialized values directly to exercise our own metadata filtering.
+    config.model_config.hf_text_config = SimpleNamespace(to_dict=lambda: serialized)
+    before = copy.deepcopy(serialized)
+    expected = get_kv_cache_model_config_hash(config.model_config)
+    assert serialized == before
+
+    for name in metadata:
+        serialized[name] = "new-value"
+        serialized["decoder"][name] = "new-nested-value"
+    serialized["rope_parameters"] = dict(
+        reversed(serialized["rope_parameters"].items())
+    )
+    full = serialized["rope_parameters"]["full_attention"]
+    serialized["rope_parameters"]["full_attention"] = dict(reversed(full.items()))
+    assert get_kv_cache_model_config_hash(config.model_config) == expected
+
+
+def test_engine_propagates_snapshot_after_model_loading_and_auto_fit():
+    from vllm.v1.engine.core import EngineCore
+
+    config = _make_identity_config()
+    snapshot = get_kv_cache_model_config_hash(config.model_config)
+    workers = [_make_kv_cache_config(), _make_kv_cache_config()]
+    executor = MagicMock()
+    executor.get_kv_cache_specs.return_value = [
+        {"layer": worker.kv_cache_groups[0].kv_cache_spec} for worker in workers
+    ]
+    executor.determine_available_memory.return_value = [1 << 20] * len(workers)
+    engine = SimpleNamespace(
+        model_executor=executor,
+        _kv_cache_model_config_hash=snapshot,
+        available_gpu_memory_for_kv_cache=-1,
+        collective_rpc=executor.collective_rpc,
+    )
+    config.compilation_config.compilation_time = 0
+    config.compilation_config.encoder_compilation_time = 0
+    config.cache_config.kv_cache_layout = "LBNHC"
+
+    # Model loading may rewrite RoPE types; auto-fit may shorten the context.
+    config.model_config.hf_text_config.rope_parameters["full_attention"][
+        "rope_type"
+    ] = "deepseek_yarn"
+
+    def auto_fit(vllm_config, specs, available_memory):
+        vllm_config.model_config.max_model_len = 8
+        return workers
+
+    with (
+        patch("vllm.v1.engine.core.register_all_kvcache_specs"),
+        patch(
+            "vllm.v1.engine.core.resolve_kv_cache_layout",
+            return_value=SimpleNamespace(name="LBNHC"),
+        ),
+        patch("vllm.v1.engine.core.get_kv_cache_configs", side_effect=auto_fit),
+        patch("vllm.v1.engine.core.update_kv_cache_capacity"),
+    ):
+        scheduler_config = EngineCore._initialize_kv_caches(engine, config)
+
+    remote_configs = executor.initialize_from_config.call_args.args[0]
+    assert len(remote_configs) == len(workers)
+    assert scheduler_config is not workers[0]
+    assert config.model_config.max_model_len == 8
+    assert get_kv_cache_model_config_hash(config.model_config) != snapshot
+    for retained in [*remote_configs, scheduler_config]:
+        assert retained.model_config_hash == snapshot
+        assert (
+            _identity_mapper(config, retained).fields["model_config_hash"] == snapshot
+        )
+
+
+@pytest.mark.parametrize(
+    "connector,should_snapshot",
+    [
+        pytest.param("OffloadingConnector", True, id="native"),
+        pytest.param(["NixlConnector", "OffloadingConnector"], True, id="mixed-multi"),
+        pytest.param(
+            ["NixlConnector", ["LMCacheConnectorV1", "OffloadingConnector"]],
+            True,
+            id="nested-native",
+        ),
+        pytest.param(None, False, id="no-connector"),
+        pytest.param("NixlConnector", False, id="nixl-with-unrelated-extra-config"),
+        pytest.param("LMCacheConnectorV1", False, id="lmcache"),
+        pytest.param(
+            ["NixlConnector", ["LMCacheConnectorV1"]], False, id="nested-unrelated"
+        ),
+    ],
+)
+def test_engine_snapshots_identity_before_model_loading(connector, should_snapshot):
+    from vllm.v1.engine.core import EngineCore
+
+    def connector_options(name_or_children):
+        if isinstance(name_or_children, list):
+            return {
+                "kv_connector": "MultiConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "connectors": [connector_options(c) for c in name_or_children]
+                },
+            }
+        return {"kv_connector": name_or_children, "kv_role": "kv_both"}
+
+    config = _make_identity_config()
+    config.kv_transfer_config = (
+        KVTransferConfig(**connector_options(connector))
+        if connector is not None
+        else None
+    )
+    if connector == "NixlConnector":
+        config.kv_transfer_config.kv_connector_extra_config = {
+            "connectors": [{"kv_connector": "OffloadingConnector"}]
+        }
+    expected = (
+        get_kv_cache_model_config_hash(config.model_config) if should_snapshot else None
+    )
+    engine = EngineCore.__new__(EngineCore)
+
+    def load_model(vllm_config):
+        vllm_config.model_config.hf_text_config.rope_parameters["full_attention"][
+            "rope_type"
+        ] = "deepseek_yarn"
+        return MagicMock()
+
+    with (
+        patch("vllm.plugins.load_general_plugins"),
+        (
+            nullcontext()
+            if should_snapshot
+            else patch.object(
+                config.model_config.hf_text_config,
+                "to_dict",
+                side_effect=AssertionError(
+                    "Unrelated connectors must not snapshot HF config"
+                ),
+            )
+        ),
+        patch.object(
+            EngineCore, "_initialize_kv_caches", side_effect=RuntimeError("stop init")
+        ),
+        pytest.raises(RuntimeError, match="stop init"),
+    ):
+        EngineCore.__init__(engine, config, load_model, log_stats=False)
+
+    assert engine._kv_cache_model_config_hash == expected
+    if should_snapshot:
+        assert get_kv_cache_model_config_hash(config.model_config) != expected
+
+
+def test_longrope_runtime_choice_changes_keys_and_persistent_identity():
+    from vllm.model_executor.layers.rotary_embedding.phi3_long_rope_scaled_rope import (  # noqa: E501
+        Phi3LongRoPEScaledRotaryEmbedding,
+    )
+
+    config = _make_identity_config()
+    config.model_config.hf_text_config.rope_parameters = {
+        "rope_type": "longrope",
+        "short_factor": [1.0] * 4,
+        "long_factor": [2.0] * 4,
+        "original_max_position_embeddings": 8,
+    }
+    paths, keys = [], []
+    for max_model_len in (8, 16):
+        config.model_config.max_model_len = max_model_len
+        kv_config = _make_kv_cache_config()
+        kv_config.model_config_hash = get_kv_cache_model_config_hash(
+            config.model_config
+        )
+        paths.append(_identity_mapper(config, kv_config).base_path)
+        with patch(
+            "vllm.model_executor.layers.rotary_embedding."
+            "phi3_long_rope_scaled_rope.get_current_vllm_config",
+            return_value=config,
+        ):
+            rope = Phi3LongRoPEScaledRotaryEmbedding(
+                8, 8, 16, 8, 10000.0, True, torch.float32, [1.0] * 4, [2.0] * 4
+            )
+        _, key = rope(torch.arange(8), torch.ones(8, 8), torch.ones(8, 8))
+        keys.append(key)
+    assert not torch.equal(keys[0], keys[1])
+    assert paths[0] != paths[1]
 
 
 def _make_sizing_kv_cache_config(packed: bool) -> KVCacheConfig:
