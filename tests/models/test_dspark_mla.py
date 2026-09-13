@@ -8,6 +8,8 @@ import torch
 import torch.nn as nn
 
 from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+from vllm.config import CompilationMode
+from vllm.config.compilation import CompilationConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.model_executor.models.registry import ModelRegistry
@@ -15,9 +17,9 @@ from vllm.models.kimi_k3.nvidia import dspark_mla
 from vllm.models.kimi_k3.nvidia.dspark_mla import K3DSparkForCausalLM, K3DSparkModel
 
 
-def test_dspark_mla_uses_compile_free_model_entrypoint():
+def test_dspark_mla_model_supports_torch_compile():
     assert ModelRegistry._try_load_model_cls("K3DSparkModel") is K3DSparkForCausalLM
-    assert not issubclass(K3DSparkModel, TorchCompileWithNoGuardsWrapper)
+    assert issubclass(K3DSparkModel, TorchCompileWithNoGuardsWrapper)
 
 
 @pytest.mark.parametrize(
@@ -143,6 +145,7 @@ def test_k3_dspark_uses_replicated_markov_head(monkeypatch: pytest.MonkeyPatch):
             draft_model_config=SimpleNamespace(hf_config=config)
         ),
         scheduler_config=SimpleNamespace(max_num_batched_tokens=16),
+        compilation_config=CompilationConfig(mode=CompilationMode.NONE),
     )
 
     K3DSparkModel(vllm_config=vllm_config, start_layer_id=0, prefix="model")
