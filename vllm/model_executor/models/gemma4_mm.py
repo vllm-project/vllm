@@ -1281,6 +1281,33 @@ class Gemma4ForConditionalGeneration(
         cost = patches_per_item * 4 * position_embedding_size * 8
         return max(1, budget // cost) if cost > 0 else 1
 
+    @staticmethod
+    def _accelerator_memory_info() -> tuple[int, int]:
+        """Free/total accelerator memory in bytes, or ``(0, 0)`` if unknown.
+
+        ``torch.accelerator.get_memory_info()`` only works when PyTorch
+        itself drives the current accelerator. On out-of-tree platforms
+        that execute torch models through a non-PyTorch runtime — e.g.
+        vLLM's TPU backend (vllm-project/tpu-inference), where this model
+        runs via torchax on JAX — there is no PyTorch accelerator behind
+        the device and the call raises (``RuntimeError: PyTorch is not
+        linked with support for jax devices``), which previously killed
+        the whole engine on the first image request. Report "unknown"
+        ``(0, 0)`` instead: ``_encoder_chunk`` treats a zero budget as
+        its minimal, always-memory-safe chunk size of 1, trading encoder
+        batching for correctness on platforms where the heuristic has no
+        data.
+        """
+        try:
+            return torch.accelerator.get_memory_info()
+        except RuntimeError:
+            logger.warning_once(
+                "torch.accelerator.get_memory_info() is not supported on "
+                "this platform; multimodal encoder inputs will be encoded "
+                "in chunks of 1 (memory-based chunk sizing disabled)."
+            )
+            return (0, 0)
+
     # ------------------------------------------------------------------ #
     # Image processing
     # ------------------------------------------------------------------ #
@@ -1364,7 +1391,7 @@ class Gemma4ForConditionalGeneration(
             if self._enable_mm_lora:
                 max_batch_size = len(items)
             else:
-                free, total = torch.accelerator.get_memory_info()
+                free, total = self._accelerator_memory_info()
                 max_batch_size = min(
                     len(items),
                     self._encoder_chunk(
@@ -1481,7 +1508,7 @@ class Gemma4ForConditionalGeneration(
             fc_list = list(frame_counts)
 
         total_frames = pixel_values.shape[0]
-        free, total = torch.accelerator.get_memory_info()
+        free, total = self._accelerator_memory_info()
         max_batch_size = min(
             total_frames,
             self._encoder_chunk(
