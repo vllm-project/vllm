@@ -3,9 +3,10 @@
 
 from typing import TYPE_CHECKING
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from typing_extensions import Self
 
+import vllm.envs as envs
 from vllm.config.utils import config, get_hash_factors, hash_factors
 
 if TYPE_CHECKING:
@@ -22,6 +23,10 @@ _NGRAM_LAYER_FIELDS = {
 }
 
 
+def _default_cpu_offload() -> bool:
+    return envs.VLLM_PLE_CPU_OFFLOAD
+
+
 def model_has_engram_layers(model_config: "ModelConfig | None") -> bool:
     """Whether the model carries n-gram embedding layers."""
     if model_config is None:
@@ -36,27 +41,25 @@ def model_has_engram_layers(model_config: "ModelConfig | None") -> bool:
 class EngramConfig:
     """Configuration for Engram embedding storage and sharding."""
 
-    cpu_offload: bool = True
-    """Store embedding weights in pinned CPU memory for UVA lookup by default.
-    Set --engram-config.cpu_offload false to keep the weights on the GPU."""
+    cpu_offload: bool = Field(default_factory=_default_cpu_offload)
+    """Store embedding weights in pinned CPU memory for UVA lookup.
+    Defaults to VLLM_PLE_CPU_OFFLOAD, which is enabled by default. An explicit
+    value takes precedence over the environment variable."""
 
     embedding_across_dp: bool = False
-    """Shard Qwen4Exp embeddings across TP and all DP ranks when enabled.
+    """Shard embeddings across TP and all DP ranks when enabled.
     Otherwise, each DP rank has a separate TP-sharded embedding replica."""
 
-    enable_engram_dp_sharding: bool = True
-    """Shard DeepSeek V4.1 hash heads across node-local DP replicas.
-    Set to false to keep a separate TP-sharded table per replica.
-    Independent of embedding_across_dp; DP shared memory takes precedence."""
-
-    enable_engram_dp_shared_memory: bool = False
-    """Share DeepSeek V4.1 CPU-offloaded weights across node-local DP replicas.
-    Requires shared IPC. TP sharding is unchanged."""
+    dp_shared_memory: bool = False
+    """Share CPU-offloaded embedding weights between co-located
+    DP replicas. Each node stores one copy of every TP shard, reducing host
+    memory without per-step Engram DP collectives. Requires sufficient
+    /dev/shm capacity and a shared IPC namespace."""
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
-        if self.enable_engram_dp_shared_memory and not self.cpu_offload:
-            raise ValueError("enable_engram_dp_shared_memory requires cpu_offload=True")
+        if self.dp_shared_memory and not self.cpu_offload:
+            raise ValueError("dp_shared_memory requires cpu_offload=True")
         return self
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
@@ -76,22 +79,16 @@ class EngramConfig:
         ):
             raise ValueError(
                 "EngramConfig requires a model with supported Engram "
-                "embeddings. Currently only the CUDA Qwen4Exp and DeepSeek "
-                "V4.1 implementations with non-empty n-gram layer ids are "
-                "supported."
+                "embeddings, non-empty n-gram layer ids, and CUDA."
             )
 
     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
         """Reject unsupported embedding parallel topologies."""
-        if self.enable_engram_dp_shared_memory:
+        if self.dp_shared_memory:
             if parallel_config.data_parallel_size <= 1:
-                raise ValueError(
-                    "enable_engram_dp_shared_memory requires data_parallel_size > 1."
-                )
+                raise ValueError("dp_shared_memory requires data_parallel_size > 1.")
             if parallel_config.enable_elastic_ep:
-                raise ValueError(
-                    "enable_engram_dp_shared_memory is not supported with elastic EP."
-                )
+                raise ValueError("dp_shared_memory is not supported with elastic EP.")
         if (
             self.embedding_across_dp
             and parallel_config.data_parallel_size > 1
@@ -103,13 +100,13 @@ class EngramConfig:
 
     def verify_load_config(self, load_config: "LoadConfig") -> None:
         """Shared tables require a loader that invokes parameter weight callbacks."""
-        if self.enable_engram_dp_shared_memory and load_config.load_format not in (
+        if self.dp_shared_memory and load_config.load_format not in (
             "auto",
             "safetensors",
             "pt",
         ):
             raise ValueError(
-                "enable_engram_dp_shared_memory requires load_format 'auto', "
+                "dp_shared_memory requires load_format 'auto', "
                 f"'safetensors' or 'pt'; got {load_config.load_format!r}."
             )
 

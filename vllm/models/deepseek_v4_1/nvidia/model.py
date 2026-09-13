@@ -469,8 +469,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # layer need it.
         self.engram_hash: NgramHashState | None = None
         self.engram_dp_shared_memory = bool(
-            vllm_config.engram_config
-            and vllm_config.engram_config.enable_engram_dp_shared_memory
+            vllm_config.engram_config and vllm_config.engram_config.dp_shared_memory
         )
         self.engram_swa_prefix: str | None = None
         if self.engram_layout is not None:
@@ -600,9 +599,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     swa_metadata.slot_mapping,
                     swa_metadata.block_table,
                 )
-            elif get_engram_dp_size() > 1:
-                # The lookup is collective once DP replicas share a table, so
-                # a replica skipping the hash still has to reach it.
+            elif not self.engram_dp_shared_memory and get_engram_dp_size() > 1:
+                # DP-sharded lookups are collective, so a replica skipping the
+                # hash still has to reach them.
                 engram_hashes, engram_mask = self.engram_hash.dummy_hashes(input_ids)
             if engram_hashes is not None:
                 # Gather all Engram rows before entering the decoder layers.

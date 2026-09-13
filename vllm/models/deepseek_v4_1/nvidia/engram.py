@@ -232,12 +232,10 @@ class ParallelEngramEmbedding(BaseParallelEngramEmbedding):
         self.dp_size = get_engram_dp_size()
         if dp_shared_memory:
             if not cpu_offload:
-                raise ValueError(
-                    "enable_engram_dp_shared_memory requires cpu_offload=True"
-                )
+                raise ValueError("dp_shared_memory requires cpu_offload=True")
             if self.dp_size <= 1:
                 raise ValueError(
-                    "enable_engram_dp_shared_memory requires a node-local Engram DP "
+                    "dp_shared_memory requires a node-local Engram DP "
                     f"group with size > 1; effective Engram DP size is {self.dp_size}. "
                     "Check that the node layout and rank placement allow complete "
                     "DP replicas to be co-located."
@@ -359,7 +357,7 @@ class Engram(BaseEngram):
             layout.head_dim,
             tuple(size for order in layout.primes[layer_hash_index] for size in order),
             cpu_offload=engram_config.cpu_offload,
-            dp_shared_memory=engram_config.enable_engram_dp_shared_memory,
+            dp_shared_memory=engram_config.dp_shared_memory,
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:

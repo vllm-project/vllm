@@ -2096,8 +2096,7 @@ def initialize_model_parallel(
             group_name="etp",
         )
 
-    # Build the engram embedding group: the DP replicas that shard one n-gram
-    # table between them, or share its host storage. It never spans nodes.
+    # Build the node-local DP group used to shard or share an Engram table.
     global _ENGRAM_DP
     assert _ENGRAM_DP is None, "engram data parallel group is already initialized"
     engram_dp_size = 1
@@ -2107,10 +2106,6 @@ def initialize_model_parallel(
         and config.model_config is not None
         and config.model_config.architecture == "DeepseekV41ForCausalLM"
         and not enable_elastic_ep
-        and (
-            engram_config.enable_engram_dp_sharding
-            or engram_config.enable_engram_dp_shared_memory
-        )
     ):
         engram_dp_size = _engram_dp_shard_size(
             world_size,

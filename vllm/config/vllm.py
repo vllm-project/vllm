@@ -374,7 +374,7 @@ class VllmConfig:
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
     engram_config: EngramConfig | None = None
-    """Engram storage settings; supported models default to CPU offload."""
+    """N-gram embedding storage and sharding settings."""
     mamba_config: MambaConfig = Field(default_factory=MambaConfig)
     """Mamba configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
@@ -1211,13 +1211,13 @@ class VllmConfig:
             )
 
     def _resolve_and_verify_engram_config(self) -> None:
-        """Default supported models to CPU offload and validate Engram settings."""
+        """Resolve defaults and validate n-gram embedding settings."""
         from vllm.platforms import current_platform
 
         model_config = self.model_config
         speculative_config = self.speculative_config
         # Draft configs inherit the target's communication groups and settings.
-        # Qwen4Exp MTP itself disables PLE, so validate its target instead.
+        # Validate the target because the draft may disable n-gram embeddings.
         if (
             speculative_config is not None
             and model_config is speculative_config.draft_model_config

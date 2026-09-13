@@ -96,21 +96,6 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
     "architecture,options,edp_ranks,etp_ranks",
     [
         ("DeepseekV41ForCausalLM", {}, [0, 2], [0, 1]),
-        (
-            "DeepseekV41ForCausalLM",
-            {"enable_engram_dp_sharding": False},
-            None,
-            [0, 1],
-        ),
-        (
-            "DeepseekV41ForCausalLM",
-            {
-                "enable_engram_dp_sharding": False,
-                "enable_engram_dp_shared_memory": True,
-            },
-            [0, 2],
-            [0, 1],
-        ),
         ("Qwen4ExpForCausalLM", {}, None, [0, 1]),
         (
             "Qwen4ExpForCausalLM",
@@ -124,9 +109,6 @@ def _reference(weight, scale_inv, ids) -> torch.Tensor:
 def test_engram_group_creation_honors_model_and_options(
     monkeypatch, architecture, options, edp_ranks, etp_ranks
 ):
-    """Disabling DS sharding removes EDP unless storage sharing needs it;
-    Qwen uses ETP alone. Exercise initialization without GPU communicators.
-    """
     config = SimpleNamespace(
         model_config=SimpleNamespace(architecture=architecture, is_moe=False),
         parallel_config=ParallelConfig(
@@ -369,7 +351,7 @@ def _check_table(
             component_config = SimpleNamespace(
                 engram_config=EngramConfig(
                     cpu_offload=cpu_offload,
-                    enable_engram_dp_shared_memory=dp_shared_memory,
+                    dp_shared_memory=dp_shared_memory,
                 ),
                 scheduler_config=vllm_config.scheduler_config,
                 load_config=load_config,
@@ -448,28 +430,55 @@ def _check_table(
 
         if (
             cpu_offload
-            and not dp_shared_memory
             and n_heads == 7
             and not sequence_parallel
+            and (not dp_shared_memory or tp_size == 1)
         ):
             _check_dummy_hash_model_forward(
-                vllm_config, engram, head_sizes, weight, scale_inv
+                vllm_config,
+                engram,
+                head_sizes,
+                weight,
+                scale_inv,
+                dp_shared_memory,
             )
 
+        replay = n_heads == 7 and (
+            (dp_shared_memory and sequence_parallel == (tp_size > 1))
+            or (
+                cpu_offload
+                and not dp_shared_memory
+                and sequence_parallel == (tp_size > 1)
+            )
+        )
+        if replay:
+            captures = ("full", "breakable")
+            for capture in captures:
+                _check_prefetch_replay(
+                    engram,
+                    head_sizes,
+                    weight,
+                    scale_inv,
+                    dp_shared_memory,
+                    capture,
+                )
         if dp_shared_memory and n_heads == 7 and sequence_parallel == (tp_size > 1):
-            _check_shared_prefetch_replay(engram, head_sizes, weight, scale_inv)
             with m.context() as storage_patch:
                 storage_patch.setattr(layer.weight, "data", layer.weight.data.clone())
                 with pytest.raises(RuntimeError, match="storage must not be replaced"):
                     layer(ids)
 
 
-def _check_dummy_hash_model_forward(vllm_config, engram, head_sizes, weight, scales):
-    """A replica without attention metadata must join its peers' real DP lookups."""
+def _check_dummy_hash_model_forward(
+    vllm_config, engram, head_sizes, weight, scales, dp_shared_memory
+):
+    """A metadata-less replica joins DP sharding but skips a shared lookup."""
     from vllm.models.deepseek_v4_1.common.engram import NgramHashState
     from vllm.models.deepseek_v4_1.nvidia import model as model_ops
 
     dp_rank = vllm_config.parallel_config.data_parallel_rank
+    if dp_shared_memory and dp_rank != 1:
+        return
     tokens = 4
     ids = _make_ids(head_sizes, tokens, seed=300 + dp_rank)
     state = NgramHashState.__new__(NgramHashState)
@@ -484,18 +493,25 @@ def _check_dummy_hash_model_forward(vllm_config, engram, head_sizes, weight, sca
     class Decoder(SimpleNamespace):
         def __call__(self, hidden, positions, input_ids, *args):
             hashes, keep = args[-2:]
-            assert hashes is not None and keep is not None
-            assert bool(keep.all()) == (dp_rank != 1)
-            if dp_rank == 1:
-                assert torch.all(hashes == engram_ops.DEAD_ID)
-            return engram.embed(hashes[:, 0]), None, None, None, None
+            if dp_shared_memory and dp_rank == 1:
+                assert hashes is None and keep is None
+                output = hidden.new_zeros(
+                    tokens, len(head_sizes), DIM, dtype=torch.bfloat16
+                )
+            else:
+                assert hashes is not None and keep is not None
+                assert bool(keep.all()) == (dp_rank != 1)
+                if dp_rank == 1:
+                    assert torch.all(hashes == engram_ops.DEAD_ID)
+                output = engram.embed(hashes[:, 0])
+            return output, None, None, None, None
 
     model = SimpleNamespace(
         use_mega_moe=False,
         use_sequence_parallel=False,
         engram_hash=state,
         engram_swa_prefix="swa",
-        engram_dp_shared_memory=False,
+        engram_dp_shared_memory=dp_shared_memory,
         layers=[Decoder(engram=engram)],
         start_layer=0,
         end_layer=1,
@@ -588,8 +604,10 @@ def _load_shared_multithread(layer, weight, scale_inv, load_config):
         )
 
 
-def _check_shared_prefetch_replay(engram, head_sizes, weight, scale_inv):
-    """Shared host lookups must read new IDs on each breakable graph replay."""
+def _check_prefetch_replay(
+    engram, head_sizes, weight, scale_inv, dp_shared_memory, capture
+):
+    """DP-sharded and shared prefetches must replay with new IDs."""
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
     ids = _make_ids(head_sizes, 8, seed=501)
@@ -600,26 +618,34 @@ def _check_shared_prefetch_replay(engram, head_sizes, weight, scale_inv):
     )
 
     def step():
-        engram.prepare_embeddings(ids.clone())
+        gathered = gather_engram_hashes(ids.clone(), dp_shared_memory=dp_shared_memory)
+        engram.prepare_embeddings(gathered)
         output.copy_(engram.embed(ids))
 
-    warmup = torch.cuda.Stream()
-    warmup.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(warmup):
-        step()
-    graph = BreakableCUDAGraphCapture()
-    with torch.cuda.stream(warmup), graph:
-        step()
-    torch.cuda.current_stream().wait_stream(warmup)
-    assert graph.num_eager_breaks == 2
-    for iteration in range(2):
-        ids.copy_(_make_ids(head_sizes, 8, seed=600 + iteration))
-        graph.replay()
-        expected = _reference(weight.cuda(), scale_inv.cuda(), ids)
-        if engram.use_sequence_parallel:
-            expected = expected[tp_rank * tokens : (tp_rank + 1) * tokens]
-        torch.testing.assert_close(output, expected, atol=0, rtol=0)
-    torch.accelerator.synchronize()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(engram_ops, "engram_gathered_num_tokens", lambda: 8)
+        warmup = torch.cuda.Stream()
+        warmup.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup):
+            step()
+        if capture == "breakable":
+            graph = BreakableCUDAGraphCapture()
+            with torch.cuda.stream(warmup), graph:
+                step()
+            assert graph.num_eager_breaks == 2
+        else:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=warmup):
+                step()
+        torch.cuda.current_stream().wait_stream(warmup)
+        for iteration in range(2):
+            ids.copy_(_make_ids(head_sizes, 8, seed=600 + iteration))
+            graph.replay()
+            expected = _reference(weight.cuda(), scale_inv.cuda(), ids)
+            if engram.use_sequence_parallel:
+                expected = expected[tp_rank * tokens : (tp_rank + 1) * tokens]
+            torch.testing.assert_close(output, expected, atol=0, rtol=0)
+        torch.accelerator.synchronize()
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")

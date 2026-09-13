@@ -91,27 +91,23 @@ def test_watermark_config_cli():
     [
         [
             "--engram-config",
-            '{"cpu_offload": false, "embedding_across_dp": true, '
-            '"enable_engram_dp_sharding": false}',
+            '{"cpu_offload": false, "embedding_across_dp": true}',
         ],
         [
             "--engram-config.cpu_offload",
             "false",
             "--engram-config.embedding_across_dp",
             "true",
-            "--engram-config.enable_engram_dp_sharding",
-            "false",
         ],
     ],
 )
 def test_engram_config_cli(options):
-    """JSON and dotted CLI options independently control offload and sharding."""
+    """JSON and dotted CLI options independently control Engram settings."""
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = EngineArgs.from_cli_args(parser.parse_args(options))
     assert args.engram_config is not None
     assert args.engram_config.cpu_offload is False
     assert args.engram_config.embedding_across_dp is True
-    assert args.engram_config.enable_engram_dp_sharding is False
 
 
 @pytest.mark.parametrize(
@@ -120,11 +116,11 @@ def test_engram_config_cli(options):
         ([], False, False),
         (["--engram-config", "{}"], True, False),
         (
-            ["--engram-config", '{"enable_engram_dp_shared_memory": true}'],
+            ["--engram-config", '{"dp_shared_memory": true}'],
             True,
             True,
         ),
-        (["--engram-config.enable_engram_dp_shared_memory", "true"], True, True),
+        (["--engram-config.dp_shared_memory", "true"], True, True),
     ],
 )
 def test_engram_config_cli_optional(options, provided, dp_shared_memory):
@@ -134,8 +130,7 @@ def test_engram_config_cli_optional(options, provided, dp_shared_memory):
     assert (args.engram_config is not None) == provided
     if provided:
         assert args.engram_config.cpu_offload is True
-        assert args.engram_config.enable_engram_dp_sharding is True
-        assert args.engram_config.enable_engram_dp_shared_memory is dp_shared_memory
+        assert args.engram_config.dp_shared_memory is dp_shared_memory
 
 
 @pytest.mark.parametrize(

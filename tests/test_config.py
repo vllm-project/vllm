@@ -1154,9 +1154,7 @@ def test_engram_tensor_parallel_size(dp_size: int, across_dp: bool, expected: in
     assert config.get_parallel_size(parallel) == expected
 
 
-@pytest.mark.parametrize(
-    "option", ["embedding_across_dp", "enable_engram_dp_shared_memory"]
-)
+@pytest.mark.parametrize("option", ["embedding_across_dp", "dp_shared_memory"])
 def test_engram_rejects_elastic_cross_dp(option):
     parallel = ParallelConfig(
         tensor_parallel_size=4,
@@ -1170,7 +1168,7 @@ def test_engram_rejects_elastic_cross_dp(option):
 
 def test_engram_dp_shared_memory_requires_cpu_offload():
     with pytest.raises(ValueError, match="requires cpu_offload"):
-        EngramConfig(cpu_offload=False, enable_engram_dp_shared_memory=True)
+        EngramConfig(cpu_offload=False, dp_shared_memory=True)
 
 
 @pytest.mark.parametrize(
@@ -1197,7 +1195,7 @@ def test_engram_dp_shared_memory_config_validation(
                 hf_text_config=SimpleNamespace(engram_layer_ids=[1]),
             ),
             speculative_config=None,
-            engram_config=EngramConfig(enable_engram_dp_shared_memory=True),
+            engram_config=EngramConfig(cpu_offload=True, dp_shared_memory=True),
             parallel_config=ParallelConfig(data_parallel_size=dp_size),
             load_config=LoadConfig(
                 load_format=load_format,
@@ -1267,41 +1265,22 @@ def test_engram_model_support(monkeypatch, architecture, ple_layers, cuda, suppo
         assert resolved.engram_config.cpu_offload is True
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"), [(None, True), ("0", False), ("1", True)]
+)
+def test_engram_cpu_offload_environment_default(monkeypatch, value, expected):
+    monkeypatch.delenv("VLLM_PLE_CPU_OFFLOAD", raising=False)
+    if value is not None:
+        monkeypatch.setenv("VLLM_PLE_CPU_OFFLOAD", value)
+    assert EngramConfig().cpu_offload is expected
+    assert EngramConfig(cpu_offload=False).cpu_offload is False
+    assert EngramConfig(cpu_offload=True).cpu_offload is True
+
+
 def test_engram_config_defaults_to_none():
     config = VllmConfig()
     assert config.engram_config is None
     assert config.compute_hash()
-
-
-@pytest.mark.parametrize(
-    "architecture",
-    [
-        "Qwen4ExpForCausalLM",
-        "Qwen4ExpForConditionalGeneration",
-        "DeepseekV41ForCausalLM",
-    ],
-)
-@pytest.mark.parametrize("cpu_offload", [False, True])
-def test_engram_explicit_offload_is_preserved(monkeypatch, architecture, cpu_offload):
-    """Both model families honor an explicit override of the shared default."""
-    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
-    explicit = EngramConfig(cpu_offload=cpu_offload)
-    config = cast(
-        VllmConfig,
-        SimpleNamespace(
-            model_config=SimpleNamespace(
-                architecture=architecture,
-                hf_text_config=SimpleNamespace(ple_layer_ids=[1], engram_layer_ids=[1]),
-            ),
-            speculative_config=None,
-            engram_config=explicit,
-            parallel_config=ParallelConfig(),
-            load_config=LoadConfig(load_format="dummy"),
-        ),
-    )
-    VllmConfig._resolve_and_verify_engram_config(config)
-    assert config.engram_config is explicit
-    assert config.engram_config.cpu_offload is cpu_offload
 
 
 @pytest.mark.parametrize("explicit", [False, True])
@@ -1366,18 +1345,14 @@ def test_engram_draft_config_validates_target(monkeypatch, target_has_ple, expli
             assert config.engram_config.cpu_offload is True
 
 
-def test_engram_hash_tracks_storage_and_sharding():
+def test_engram_hash_tracks_execution_options():
     configs = [
-        EngramConfig(
-            cpu_offload=offload,
-            embedding_across_dp=across_dp,
-            enable_engram_dp_sharding=dp_sharding,
-        )
-        for offload in (False, True)
-        for across_dp in (False, True)
-        for dp_sharding in (False, True)
+        EngramConfig(cpu_offload=True),
+        EngramConfig(cpu_offload=False),
+        EngramConfig(cpu_offload=True, embedding_across_dp=True),
+        EngramConfig(cpu_offload=True, dp_shared_memory=True),
     ]
-    assert len({config.compute_hash() for config in configs}) == 8
+    assert len({config.compute_hash() for config in configs}) == len(configs)
 
 
 @pytest.mark.parametrize("port", [1, 29550, 65535])
