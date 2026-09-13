@@ -6,7 +6,10 @@ import torch
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
-from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
+from vllm.v1.worker.gpu.sample.gumbel import (
+    apply_temperature,
+    register_gumbel_warmup,
+)
 from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 
 NO_LOGPROBS = -1
@@ -18,6 +21,7 @@ class SamplingStates:
     def __init__(self, max_num_reqs: int, vocab_size: int):
         self.max_num_reqs = max_num_reqs
         self.vocab_size = vocab_size
+        register_gumbel_warmup()
 
         self.temperature = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.top_k = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
