@@ -7,6 +7,7 @@ reordering without advancing request state. Unit tests directly exercise its
 preparation and adapter scope; model/sampler/graph numerics require GPU tests.
 """
 
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
@@ -800,6 +801,128 @@ def test_draft_warmup_skips_a_speculator_that_does_not_ask_for_it(monkeypatch):
     )
     runner._warm_up_draft_kernels()
     assert ran == [] and reported == []
+
+
+def test_uno_prefill_returns_before_its_draft_proposal(monkeypatch):
+    """Uno's K-row continuation must not sit on the sampled-token handoff.
+
+    The next worker turn drains the saved proposal before it can prepare input
+    tensors from ``draft_tokens``.  This test keeps the target/sampler work on
+    CPU and checks the observable boundary: sampling builds its AsyncOutput,
+    postprocesses the token, and returns with the Uno proposal still pending.
+    Restoring the former inline proposal makes the first assertion fail.
+    """
+    from vllm.v1.worker.gpu import model_runner as model_runner_module
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    events: list[str] = []
+
+    class FakeAsyncOutput:
+        def __init__(self, **kwargs) -> None:
+            self.model_runner_output = kwargs["model_runner_output"]
+            events.append("output")
+
+    monkeypatch.setattr(model_runner_module, "AsyncOutput", FakeAsyncOutput)
+    monkeypatch.setattr(
+        model_runner_module.pcp,
+        "maybe_restore_pcp_for_sampling",
+        lambda _manager, hidden_states, input_batch: (hidden_states, input_batch),
+    )
+    monkeypatch.setattr(
+        model_runner_module,
+        "use_workspace_lane",
+        lambda _lane: nullcontext(),
+    )
+
+    runner = object.__new__(GPUModelRunner)
+    input_batch = SimpleNamespace(
+        req_ids=["request-0"],
+        idx_mapping=torch.tensor([0]),
+        query_start_loc=torch.tensor([0, 1]),
+    )
+    target_hidden = torch.tensor([[1.0, 2.0]])
+    runner.execute_model_state = SimpleNamespace(
+        input_batch=input_batch,
+        attn_metadata={},
+        slot_mappings_by_layer={},
+        hidden_states=target_hidden,
+        aux_hidden_states=None,
+        dp_sync=None,
+        finished_req_ids=set(),
+        ec_connector_output=None,
+        routed_experts=None,
+        cudagraph_stats=None,
+    )
+    runner.is_last_pp_rank = True
+    runner.pcp_manager = None
+    runner.pp_handler = None
+    runner.check_ep_fault = False
+    runner.main_stream = object()
+    runner.output_copy_stream = object()
+    runner.eplb = SimpleNamespace(step=lambda **_kwargs: None)
+    runner._draft_workspace_lane = 0
+    runner._pending_uno_proposal = None
+    runner.model = SimpleNamespace(compute_logits=object())
+    runner.model_state = SimpleNamespace()
+    runner.prompt_logprobs_worker = SimpleNamespace(
+        compute_prompt_logprobs=lambda *_args: {}
+    )
+    runner.sampler = SimpleNamespace(
+        sampling_states=SimpleNamespace(
+            temperature=SimpleNamespace(gpu=torch.ones(1)),
+            seeds=SimpleNamespace(gpu=torch.zeros(1, dtype=torch.int64)),
+        )
+    )
+    runner.req_states = SimpleNamespace(
+        draft_tokens=torch.zeros((1, 2), dtype=torch.int64),
+        last_sampled_tokens=torch.zeros((1, 1), dtype=torch.int64),
+        next_prefill_tokens=torch.zeros((1, 1), dtype=torch.int64),
+        all_token_ids=SimpleNamespace(gpu=torch.zeros((1, 2), dtype=torch.int64)),
+        num_computed_tokens=SimpleNamespace(gpu=torch.zeros(1, dtype=torch.int64)),
+        prompt_len=SimpleNamespace(np=torch.ones(1, dtype=torch.int64).numpy()),
+    )
+    sampler_output = SimpleNamespace(sampled_token_ids=torch.tensor([[7]]))
+    runner.sample = lambda *_args: (
+        sampler_output,
+        torch.ones(1, dtype=torch.int32),
+        torch.zeros(1, dtype=torch.int32),
+    )
+    runner.postprocess_sampled = lambda *_args: events.append("postprocess")
+    runner.num_speculative_steps = 2
+    runner.draft_tokens_handler = SimpleNamespace(
+        set_draft_tokens=lambda _batch, _tokens: events.append("publish"),
+        get_draft_tokens=lambda: "drafts",
+    )
+    runner.kv_connector = SimpleNamespace(
+        post_forward=lambda _finished: events.append("kv")
+    )
+    runner.adaptive_verification = None
+
+    proposer = object.__new__(UnoSpeculator)
+    proposer.supports_mm_inputs = False
+    proposer.draft_token_confidence_probs = None
+
+    def propose(*args, **kwargs):
+        assert args[3] is target_hidden
+        assert kwargs == {"dp_sync": None, "mm_inputs": None}
+        events.append("propose")
+        return torch.tensor([[8, 9]], dtype=torch.int64)
+
+    proposer.propose = propose
+    runner.speculator = proposer
+
+    output = runner.sample_tokens(None)
+
+    assert isinstance(output, FakeAsyncOutput)
+    assert events == ["output", "postprocess", "kv"]
+    assert runner._pending_uno_proposal is not None
+    assert runner.req_states.draft_tokens.tolist() == [[0, 0]]
+
+    runner._flush_deferred_uno_proposal()
+
+    assert events == ["output", "postprocess", "kv", "propose", "publish"]
+    assert runner._pending_uno_proposal is None
+    assert runner.req_states.draft_tokens.tolist() == [[8, 9]]
 
 
 @pytest.mark.skip_global_cleanup
