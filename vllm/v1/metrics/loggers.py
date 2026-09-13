@@ -1196,6 +1196,16 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
+        if (
+            self.kv_connector_prom is not None
+            and self.kv_connector_prom.prom_metrics is not None
+            and hasattr(self.kv_connector_prom.prom_metrics, "record_config_info")
+        ):
+            for engine_idx in self.engine_indexes:
+                self.kv_connector_prom.prom_metrics.record_config_info(
+                    self.vllm_config, engine_idx
+                )
+
 
 class StatLoggerManager:
     """
