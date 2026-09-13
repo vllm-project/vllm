@@ -54,7 +54,12 @@ endif()
 message(STATUS "[QUTLASS] QuTLASS is available at ${qutlass_SOURCE_DIR}")
 
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-  cuda_archs_loose_intersection(QUTLASS_SM120_ARCHS "12.0f" "${CUDA_ARCHS}")
+  # Pin to plain "12.0" instead of the "12.0f" family target: QuTLASS's MXFP4
+  # kernels hit the same ptxas "Instruction 'cvt with .e2m1x2' not supported"
+  # failure as the main NVFP4 kernels above when the family-fallback in
+  # cuda_archs_loose_intersection picks up 12.1 (see CMakeLists.txt FP4_SM120_ARCHS
+  # for the full explanation). Building sm_120 matches today's published behavior.
+  cuda_archs_loose_intersection(QUTLASS_SM120_ARCHS "12.0" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.4)
     cuda_archs_loose_intersection(QUTLASS_SM100_ARCHS "10.0f;10.7f" "${CUDA_ARCHS}")
   else()
