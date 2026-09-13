@@ -113,7 +113,7 @@ def test_freeze_gc_after_clean_rocm_engine_core_shutdown(
         raise SystemExit(exit_code)
 
     proc.run_busy_loop = run_busy_loop
-    proc.shutdown = lambda: calls.append("shutdown")
+    proc.shutdown = lambda *, process_exiting: calls.append("shutdown")
     parallel_config = SimpleNamespace(
         data_parallel_size=1,
         numa_bind=False,
