@@ -42,6 +42,7 @@ from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
 from openai.types.responses.response import IncompleteDetails, ToolChoice
+from openai.types.responses.response_item import AdditionalTools
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
@@ -604,8 +605,35 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_tool_usage(cls, data):
+        """Promote input tools and validate tool choice against effective tools."""
         if not isinstance(data, dict):
             return data
+
+        input_data = data.get("input")
+        if input_data is not None and not isinstance(input_data, (list, str, bytes)):
+            try:
+                input_data = list(input_data)
+            except TypeError:
+                pass
+            else:
+                data["input"] = input_data
+        if isinstance(input_data, list):
+            input_items = []
+            additional_tools = []
+            for item in input_data:
+                if isinstance(item, AdditionalTools):
+                    additional_tools.extend(item.tools)
+                elif isinstance(item, dict) and item.get("type") == "additional_tools":
+                    try:
+                        additional_tools.extend(AdditionalTools(**item).tools)
+                    except ValidationError:
+                        input_items.append(item)
+                else:
+                    input_items.append(item)
+
+            if len(input_items) != len(input_data):
+                data["input"] = input_items
+                data["tools"] = [*(data.get("tools") or []), *additional_tools]
 
         tools = data.get("tools")
         tool_choice = data.get("tool_choice", "auto")
