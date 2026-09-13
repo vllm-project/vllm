@@ -768,6 +768,105 @@ def test_draft_warmup_skips_a_speculator_that_does_not_ask_for_it(monkeypatch):
     assert ran == [] and reported == []
 
 
+def test_attention_config_leaves_the_version_to_the_platform():
+    """Unset means the platform chooses, which is the whole point of round 21.
+
+    Both e2e engines pinned FlashAttention 2, so the module could never
+    exercise FA3: the platform prefers FA3 on SM90 only while the version is
+    unset, and an explicit 2 overrides that preference. Uno's Hopper support
+    was therefore never covered by Uno's own tests. The backend stays pinned,
+    because a test that silently ran on another backend would be measuring
+    something else.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    assert budget.resolve_attention_config(None) == {"backend": "FLASH_ATTN"}
+    assert "flash_attn_version" not in budget.resolve_attention_config(None)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("2", 2), ("3", 3), ("  3  ", 3), ("\t2\n", 2)],
+)
+def test_attention_config_honours_an_explicit_pin(raw, expected):
+    """A reproducibility study can pin the version back, whitespace and all."""
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    config = budget.resolve_attention_config(raw)
+    assert config == {"backend": "FLASH_ATTN", "flash_attn_version": expected}
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "4", "fa3", "2.0", "23", "-2", "0"])
+def test_attention_config_refuses_what_it_cannot_honour(raw):
+    """A value this module cannot honour fails loudly, not silently.
+
+    Accepting 4 would be the dangerous case: it is a different kernel family
+    with its own downgrade rules, so a run asking for it and quietly getting
+    the platform default would report a version it never exercised.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    with pytest.raises(ValueError, match="must be '2' or '3'"):
+        budget.resolve_attention_config(raw)
+
+
+def test_attention_receipt_names_the_built_version_not_the_request():
+    """The receipt reports what the engine built, and says what was asked.
+
+    With the version unset the request is silent and the platform decides, so
+    a receipt that echoed the request would say nothing at all on exactly the
+    runs this change exists to observe.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    hopper = {"backends": ["FlashAttentionImpl"], "flash_attn_versions": [3]}
+    line = budget.format_attention_receipt(hopper, None)
+    assert "FlashAttention version 3" in line
+    assert "platform default" in line
+    assert "FlashAttentionImpl" in line
+
+    pinned = budget.format_attention_receipt(
+        {"backends": ["FlashAttentionImpl"], "flash_attn_versions": [2]}, 2
+    )
+    assert "FlashAttention version 2" in pinned and "pinned 2" in pinned
+
+
+def test_attention_receipt_reports_silence_and_disagreement():
+    """Neither an empty reading nor a mixed build is reported as a version.
+
+    A build whose layers resolved different versions is a finding, and one
+    that reported none means the probe read the wrong object. Both would be
+    hidden by taking the first entry.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    silent = budget.format_attention_receipt({}, None)
+    assert "unreported" in silent
+
+    mixed = budget.format_attention_receipt(
+        {"backends": ["FlashAttentionImpl"], "flash_attn_versions": [2, 3]}, None
+    )
+    assert "layers disagree" in mixed and "[2, 3]" in mixed
+
+
+def test_survivor_receipt_names_the_attention_kernel():
+    """The survivor gate is forked, so this can only live in the receipt.
+
+    A printed line never reaches the log or the JUnit attachment from a forked
+    child, which is the failure the round-10 receipt work closed. The kernel
+    the gate validated belongs with the rest of the evidence.
+    """
+    from tests.v1.e2e.spec_decode.test_uno import _MixedPhase, _render_receipt
+
+    phase = _MixedPhase()
+    assert phase.attention == "unmeasured"
+    assert "attention=unmeasured" in _render_receipt(phase, "geometry", "metrics")
+
+    phase.attention = "FlashAttention version 3 (requested: platform default)"
+    rendered = _render_receipt(phase, "geometry", "metrics")
+    assert "attention=FlashAttention version 3" in rendered
+
+
 @pytest.mark.parametrize(
     ("k", "expected_active_loras"),
     [(1, 0), (8, 2)],

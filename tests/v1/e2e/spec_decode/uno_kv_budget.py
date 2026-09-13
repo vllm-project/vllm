@@ -16,7 +16,7 @@ module, which already requires the model, cross-checks the literals against
 
 from collections.abc import Iterable, Mapping, Sequence
 from itertools import combinations
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from vllm.utils.math_utils import cdiv
 
@@ -249,6 +249,61 @@ def mixed_growth_blocks(
         max(0, blocks_for_tokens(prompt + cap) - prefix_blocks)
         for prompt, cap in zip(prompt_tokens, max_tokens)
     )
+
+
+TEST_FA_VERSION_ENV = "VLLM_UNO_TEST_FA_VERSION"
+
+
+def resolve_attention_config(raw: str | None) -> dict[str, object]:
+    """The e2e attention config, with the FlashAttention version left open.
+
+    Both e2e engines used to pin ``flash_attn_version=2``, which meant the
+    module could never exercise FlashAttention 3 on any card: the platform
+    prefers FA3 on SM90 only when the version is unset, and an explicit 2 wins
+    over that preference. Uno's Hopper support was therefore never covered by
+    its own tests. The backend stays pinned -- Uno requires FlashAttention and
+    a test that silently ran on another backend would be measuring something
+    else -- while the version follows the platform: FA3 on Hopper, FA4 on
+    SM100, FA2 elsewhere, so Ampere and the GB10 keep the behaviour they were
+    validated with.
+
+    ``VLLM_UNO_TEST_FA_VERSION`` pins a version back for a reproducibility
+    study. Only 2 and 3 are accepted: 4 is a different kernel family with its
+    own downgrade rules, and a value this module cannot honour must fail
+    loudly rather than be ignored into the platform default.
+    """
+    config: dict[str, object] = {"backend": "FLASH_ATTN"}
+    if raw is None:
+        return config
+    text = raw.strip()
+    if text not in ("2", "3"):
+        raise ValueError(
+            f"{TEST_FA_VERSION_ENV} must be '2' or '3' (got {raw!r}); leave it "
+            "unset to use the platform default"
+        )
+    config["flash_attn_version"] = int(text)
+    return config
+
+
+def format_attention_receipt(state: Mapping[str, Any], requested: int | None) -> str:
+    """One line naming the FlashAttention version the engine actually built.
+
+    Read from the built engine rather than from the request, because the
+    request is usually silent: with the version unset the platform chooses,
+    and the choice is what the receipt has to record. A run that resolved no
+    version, or more than one across layers, says so instead of reporting the
+    first.
+    """
+    versions = sorted(int(v) for v in state.get("flash_attn_versions", []))
+    backends = sorted(str(b) for b in state.get("backends", []))
+    if len(versions) == 1:
+        resolved = f"FlashAttention version {versions[0]}"
+    elif not versions:
+        resolved = "FlashAttention version unreported"
+    else:
+        resolved = f"FlashAttention versions {versions} (layers disagree)"
+    asked = "platform default" if requested is None else f"pinned {requested}"
+    return f"{resolved} (requested: {asked}), impls={backends or ['unreported']}"
 
 
 def token_agreement(

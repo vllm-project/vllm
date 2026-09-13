@@ -49,10 +49,12 @@ from .uno_kv_budget import (
     SURVIVOR_MAX_MODEL_LEN,
     SURVIVOR_NUM_SPECULATIVE_TOKENS,
     SURVIVOR_PROMPT_TOKENS,
+    TEST_FA_VERSION_ENV,
     TIE_MARGIN_NATS,
     MatrixArm,
     allocatable_blocks,
     engine_minimum_kv_bytes,
+    format_attention_receipt,
     format_divergences,
     format_ties,
     kv_bytes_per_block,
@@ -63,6 +65,7 @@ from .uno_kv_budget import (
     mixed_growth_blocks,
     prompt_token_ids_are_pairwise_content_distinct,
     qwen3_geometry,
+    resolve_attention_config,
     resolve_internal_request_ids,
     survivor_kv_budget,
     text_agreement,
@@ -217,6 +220,7 @@ def _render_receipt(mixed: "_MixedPhase", geometry: str, metrics: str) -> str:
     lines = [
         geometry,
         metrics,
+        f"attention={mixed.attention}",
         f"steps={mixed.steps}, peer_visible_steps={mixed.peer_visible_steps}",
         f"peak_kv_cache_usage={mixed.peak_kv_cache_usage:.3%}, "
         f"min_free_blocks={mixed.min_free_blocks}",
@@ -273,6 +277,36 @@ def _auto_config_geometry() -> tuple[int, int, int]:
             text_config.hidden_size // text_config.num_attention_heads,
         ),
     )
+
+
+def _resolved_attention_state(worker) -> dict:
+    """What the engine built, not what the test asked for.
+
+    With ``flash_attn_version`` unset the platform picks per device, so the
+    request says nothing about which kernel ran. The implementation object
+    records the resolved version once the layers exist, and reading every
+    layer catches a mixed build rather than reporting whichever came first.
+    """
+    from vllm.config import get_layers_from_vllm_config
+    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+
+    runner = worker.model_runner
+    layers = get_layers_from_vllm_config(runner.vllm_config, AttentionLayerBase)
+    versions: set[int] = set()
+    backends: set[str] = set()
+    for layer in layers.values():
+        impl = getattr(layer, "impl", None)
+        if impl is None:
+            continue
+        backends.add(type(impl).__name__)
+        version = getattr(impl, "vllm_flash_attn_version", None)
+        if version is not None:
+            versions.add(int(version))
+    return {
+        "backends": sorted(backends),
+        "flash_attn_versions": sorted(versions),
+        "requested": runner.vllm_config.attention_config.flash_attn_version,
+    }
 
 
 def _uno_execution_state(worker) -> dict:
@@ -398,6 +432,11 @@ class _MixedPhase:
     # preemption at zero generated tokens is a prefill recompute and does not
     # satisfy the gate.
     preemption_events: list[tuple[str, int]] = field(default_factory=list)
+    # The attention kernel the engine actually built, named in the receipt
+    # because the survivor gate is forked: a printed line would be lost, and a
+    # run on a card whose platform default differs must say which kernel it
+    # validated.
+    attention: str = "unmeasured"
     # Highest scheduler-reported KV occupancy observed during the mixed phase.
     peak_kv_cache_usage: float = 0.0
     # Free blocks at the fullest step, so the peak can be read in blocks.
@@ -955,7 +994,7 @@ def test_uno_continuous_batching_survivor_matches_solo(
         enforce_eager=True,
         compilation_config={"cudagraph_capture_sizes": [16]},
         async_scheduling=True,
-        attention_config={"backend": "FLASH_ATTN", "flash_attn_version": 2},
+        attention_config=resolve_attention_config(os.environ.get(TEST_FA_VERSION_ENV)),
         max_model_len=max_model_len,
         max_num_seqs=4,
         **memory_options,
@@ -992,6 +1031,10 @@ def test_uno_continuous_batching_survivor_matches_solo(
             },
         ) as runner:
             engine = runner.llm.llm_engine
+            resolved_attention = engine.collective_rpc(_resolved_attention_state)[0]
+            mixed.attention = format_attention_receipt(
+                resolved_attention, resolved_attention["requested"]
+            )
             # Read the two settings the arithmetic assumes from the engine that was
             # actually built, rather than trusting the literals passed above: a
             # platform default or a config validator that flipped either of them
@@ -1246,7 +1289,7 @@ def test_uno_greedy_matches_base_model(
         enforce_eager=enforce_eager,
         compilation_config={"cudagraph_capture_sizes": capture_sizes},
         async_scheduling=True,
-        attention_config={"backend": "FLASH_ATTN", "flash_attn_version": 2},
+        attention_config=resolve_attention_config(os.environ.get(TEST_FA_VERSION_ENV)),
         max_model_len=MATRIX_MAX_MODEL_LEN,
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=prefill_budget,
@@ -1281,7 +1324,16 @@ def test_uno_greedy_matches_base_model(
     second_control_engine = (
         os.environ.get(_CONTROL_ENGINES_ENV) == "2" or representative_case
     )
+    # Filled once the reference engine exists; the receipt renders on the
+    # failure path too, so it must read something before any engine is built.
+    attention_line: list[str] = ["unmeasured"]
     with vllm_runner("Qwen/Qwen3-8B", **common) as reference:
+        ref_attention = reference.llm.llm_engine.collective_rpc(
+            _resolved_attention_state
+        )[0]
+        attention_line[0] = format_attention_receipt(
+            ref_attention, ref_attention["requested"]
+        )
         ref_outputs = [reference.llm.chat(batch, **chat_kwargs) for batch in batches]
         # Two further passes through the SAME engine: no build cost, and they
         # catch a plain engine that cannot reproduce itself within one process.
@@ -1356,6 +1408,7 @@ def test_uno_greedy_matches_base_model(
             "control_divergences="
             f"{[format_divergences(sorted(batch)) for batch in control_divergences]}"
             f", prompts_per_batch={[len(batch) for batch in ref_outputs]}"
+            f", attention={attention_line[0]}"
             f", tie_margin_nats={tie_margin:g}"
             f", ties={[format_ties(batch) for batch in batch_ties]}"
         )
@@ -1431,6 +1484,20 @@ def test_uno_greedy_matches_base_model(
                 required_matches=0,
                 context="adapter-disabled (diagnostics only; judged below)",
             )
+        spec_attention = speculative.llm.llm_engine.collective_rpc(
+            _resolved_attention_state
+        )[0]
+        # Both arms must have built the same attention kernel, or the greedy
+        # comparison is between two different computations before Uno is even
+        # considered. The platform default is per device, not per engine, so a
+        # disagreement here means the two configurations diverged.
+        assert (
+            spec_attention["flash_attn_versions"]
+            == ref_attention["flash_attn_versions"]
+        ), (
+            "the reference and Uno engines resolved different FlashAttention "
+            f"versions: reference {ref_attention}, Uno {spec_attention}"
+        )
         states = speculative.llm.llm_engine.collective_rpc(_uno_execution_state)
         assert all(state["shared_model"] for state in states)
         assert all(
@@ -1478,6 +1545,10 @@ def test_uno_greedy_matches_base_model(
             control_divergences[batch_index].update(divergences)
 
     print(instrument_receipt())
+    # Its own line, so a reader grepping a Hopper log for the kernel does not
+    # have to parse the receipt: the module pinned FlashAttention 2 until
+    # round 21 and therefore never exercised FA3 on any card.
+    print(f"uno greedy instrument: {attention_line[0]}")
     if any(control_divergences):
         # Not a skip: acceptance, graph state, the LoRA plan cache and the
         # adapter-disabled arm are still evidence. Only the exact-token
