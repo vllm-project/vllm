@@ -1025,17 +1025,20 @@ def test_decode_index_topk_correctness(
         "expected",
     ),
     [
-        (0, 24, 1, 16, True, (2, False, False)),
-        (1, 1, 1, 16, True, (16, True, True)),
-        (512, 4, 1, 16, True, (16, True, True)),
-        (513, 24, 4, 16, True, (16, True, True)),
-        (2760, 5, 2, 16, True, (16, True, True)),
-        (8192, 64, 4, 16, True, (16, True, True)),
-        (8193, 4, 1, 16, True, (16, False, False)),
-        (8193, 16, 1, 16, True, (4, False, False)),
-        (65534, 64, 1, 16, True, (1, False, False)),
-        (513, 16, 1, 13, True, (4, False, False)),
-        (513, 16, 4, 16, False, (1, False, False)),
+        (0, 24, 1, 16, True, (2, 512, 8, 2, False, False)),
+        (1, 1, 1, 16, True, (1, 128, 2, 1, True, True)),
+        (74, 4, 1, 16, True, (1, 128, 2, 1, True, True)),
+        (128, 4, 1, 16, True, (1, 128, 2, 1, True, True)),
+        (129, 4, 1, 16, True, (16, 512, 4, 2, True, True)),
+        (512, 4, 1, 16, True, (16, 512, 4, 2, True, True)),
+        (513, 24, 4, 16, True, (16, 512, 4, 2, True, True)),
+        (2760, 5, 2, 16, True, (16, 512, 4, 2, True, True)),
+        (8192, 64, 4, 16, True, (16, 512, 4, 2, True, True)),
+        (8193, 4, 1, 16, True, (16, 512, 8, 2, False, False)),
+        (8193, 16, 1, 16, True, (4, 512, 8, 2, False, False)),
+        (65534, 64, 1, 16, True, (1, 512, 8, 2, False, False)),
+        (513, 16, 1, 13, True, (4, 512, 8, 2, False, False)),
+        (513, 16, 4, 16, False, (1, 512, 8, 2, False, False)),
     ],
 )
 def test_amd_decode_topk_launch_policy(
@@ -1044,9 +1047,9 @@ def test_amd_decode_topk_launch_policy(
     num_idx_heads: int,
     topk: int,
     is_gfx950: bool,
-    expected: tuple[int, bool, bool],
+    expected: tuple[int, int, int, int, bool, bool],
 ):
-    """All supported head and query layouts use adaptive selection."""
+    """The short-context specialization has strict dispatch boundaries."""
     from vllm.models.minimax_m3.amd.ops.index_topk import (
         _decode_topk_launch_policy,
     )
@@ -1073,19 +1076,23 @@ def test_amd_decode_topk_launch_policy(
         "single_tile_guaranteed",
         "adaptive_final_merge",
         "max_blocks",
+        "block_size_k",
+        "num_warps",
+        "num_stages",
         "topk",
         "num_idx_heads",
     ),
     [
-        (1, False, False, 65534, 16, 1),
-        (2, False, False, 8193, 16, 1),
-        (4, False, False, 8193, 16, 1),
-        (8, False, False, 8193, 16, 1),
-        (16, False, False, 8193, 16, 1),
-        (16, False, False, 65534, 16, 1),
-        (2, True, False, 513, 13, 1),
-        (4, False, True, 8192, 16, 2),
-        (16, True, True, 8192, 16, 4),
+        (1, False, False, 65534, 512, 8, 2, 16, 1),
+        (2, False, False, 8193, 512, 8, 2, 16, 1),
+        (4, False, False, 8193, 512, 8, 2, 16, 1),
+        (8, False, False, 8193, 512, 8, 2, 16, 1),
+        (16, False, False, 8193, 512, 8, 2, 16, 1),
+        (16, False, False, 65534, 512, 8, 2, 16, 1),
+        (2, True, False, 513, 512, 8, 2, 13, 1),
+        (4, False, True, 8192, 512, 4, 2, 16, 2),
+        (16, True, True, 8192, 512, 4, 2, 16, 4),
+        (1, True, True, 74, 128, 2, 1, 16, 1),
     ],
 )
 def test_amd_decode_fused_topk_total_order_and_replay(
@@ -1093,10 +1100,13 @@ def test_amd_decode_fused_topk_total_order_and_replay(
     single_tile_guaranteed: bool,
     adaptive_final_merge: bool,
     max_blocks: int,
+    block_size_k: int,
+    num_warps: int,
+    num_stages: int,
     topk: int,
     num_idx_heads: int,
 ):
-    """Atomic multi-chunk selection is ordered and resets graph state."""
+    """Selector specializations preserve ordering and graph state."""
     from vllm.models.minimax_m3.amd.ops.index_topk import (
         SPARSE_BLOCK_SIZE,
         _decode_topk_fused_kernel,
@@ -1104,18 +1114,25 @@ def test_amd_decode_fused_topk_total_order_and_replay(
 
     set_random_seed(0)
     block_size_t = 1 << (topk - 1).bit_length()
+    block_counts = tuple(
+        count
+        for count in (
+            15,
+            16,
+            17,
+            block_size_k // 2 - 1,
+            block_size_k // 2,
+            block_size_k // 2 + 1,
+            block_size_k - 1,
+            block_size_k,
+            block_size_k + 1,
+        )
+        if count <= max_blocks
+    )
     long_seq_lens_list = [
         0,
         1,
-        15 * SPARSE_BLOCK_SIZE,
-        16 * SPARSE_BLOCK_SIZE,
-        17 * SPARSE_BLOCK_SIZE,
-        255 * SPARSE_BLOCK_SIZE,
-        256 * SPARSE_BLOCK_SIZE,
-        257 * SPARSE_BLOCK_SIZE,
-        511 * SPARSE_BLOCK_SIZE,
-        512 * SPARSE_BLOCK_SIZE,
-        513 * SPARSE_BLOCK_SIZE,
+        *(blocks * SPARSE_BLOCK_SIZE for blocks in block_counts),
         max_blocks * SPARSE_BLOCK_SIZE,
     ]
     short_seq_lens_list = [0, 1, 127, 128, 129, 0, 1, 128, 129, 0, 1, 129]
@@ -1126,12 +1143,13 @@ def test_amd_decode_fused_topk_total_order_and_replay(
         boundary_limit = 4
     if boundary_limit:
         boundary_blocks = [
-            (active_chunks - 1) * 512 + 1
+            (active_chunks - 1) * block_size_k + 1
             for active_chunks in range(3, boundary_limit + 1)
         ]
-        assert [(num_blocks + 511) // 512 for num_blocks in boundary_blocks] == list(
-            range(3, boundary_limit + 1)
-        )
+        assert [
+            (num_blocks + block_size_k - 1) // block_size_k
+            for num_blocks in boundary_blocks
+        ] == list(range(3, boundary_limit + 1))
         long_seq_lens_list.extend(
             num_blocks * SPARSE_BLOCK_SIZE for num_blocks in boundary_blocks
         )
@@ -1139,6 +1157,8 @@ def test_amd_decode_fused_topk_total_order_and_replay(
             num_blocks * SPARSE_BLOCK_SIZE for num_blocks in reversed(boundary_blocks)
         )
     batch = len(long_seq_lens_list)
+    repeats = (batch + len(short_seq_lens_list) - 1) // len(short_seq_lens_list)
+    short_seq_lens_list = (short_seq_lens_list * repeats)[:batch]
     score = torch.randn((num_idx_heads, batch, max_blocks), device="cuda")
     score[:, :, 0] = float("nan")
     score[:, :, 1] = float("inf")
@@ -1147,8 +1167,9 @@ def test_amd_decode_fused_topk_total_order_and_replay(
     score[:, :, 4] = -0.0
     score[:, :, 5] = 7.0
     score[:, :, 6] = -1e30
-    score[:, :, 256] = 7.0
-    score[:, :, 512] = 7.0
+    for index in (block_size_k // 2, block_size_k):
+        if index < max_blocks:
+            score[:, :, index] = 7.0
 
     seq_lens = torch.empty(batch, device="cuda", dtype=torch.int32)
     partial = torch.full(
@@ -1198,13 +1219,13 @@ def test_amd_decode_fused_topk_total_order_and_replay(
             pages_per_sparse_block=8,
             block_page_stride=8,
             NUM_TOPK_CHUNKS=num_topk_chunks,
-            BLOCK_SIZE_K=512,
+            BLOCK_SIZE_K=block_size_k,
             BLOCK_SIZE_T=block_size_t,
             EMIT_SPARSE_TABLE=False,
             SINGLE_TILE_GUARANTEED=single_tile_guaranteed,
             ADAPTIVE_FINAL_MERGE=adaptive_final_merge,
-            num_warps=4 if adaptive_final_merge else 8,
-            num_stages=2,
+            num_warps=num_warps,
+            num_stages=num_stages,
         )
 
     score_cpu = score.cpu()
@@ -1251,6 +1272,7 @@ def test_amd_decode_fused_topk_total_order_and_replay(
         (16, False, False, 8193),
         (4, False, True, 8192),
         (16, True, True, 8192),
+        (1, True, True, 74),
     ):
         graph = torch.cuda.CUDAGraph()
         torch.accelerator.synchronize()
