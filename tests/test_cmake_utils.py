@@ -35,6 +35,40 @@ endif()
     subprocess.run([_get_cmake_bin(), "-P", script], check=True)
 
 
+def test_plain_arch_kept_when_suffixed_variant_also_requested(tmp_path: Path):
+    """TORCH_CUDA_ARCH_LIST commonly lists both a plain arch and its ``a``
+    variant, e.g. ``10.0 10.0a``. Matching ``10.0a`` must not consume the
+    plain ``10.0`` source entry, or the generic kernels end up with sm_100a
+    cubins only and fail to load on CC 10.3 (B300). A target that requests
+    only the suffixed variant must still get exactly that variant."""
+    repo_root = Path(__file__).parents[1]
+    script = tmp_path / "test_plain_and_suffixed.cmake"
+    script.write_text(
+        f"""
+cmake_minimum_required(VERSION 3.26)
+include("{repo_root / "cmake" / "utils.cmake"}")
+cuda_archs_loose_intersection(
+  actual "7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0"
+         "7.5;8.0;8.6;8.7;8.9;9.0a;10.0;10.0a;12.0;12.1")
+foreach(expected 7.5 8.0 8.6 8.7 8.9 9.0a 10.0 10.0a 12.0)
+  if(NOT "${{expected}}" IN_LIST actual)
+    message(FATAL_ERROR "Expected '${{expected}}' in '${{actual}}'")
+  endif()
+endforeach()
+# 9.0a was requested without a plain 9.0, so the plain arch must not appear.
+if("9.0" IN_LIST actual)
+  message(FATAL_ERROR "Did not expect plain '9.0' in '${{actual}}'")
+endif()
+list(LENGTH actual actual_len)
+if(NOT actual_len EQUAL 9)
+  message(FATAL_ERROR "Expected 9 entries, got '${{actual}}'")
+endif()
+"""
+    )
+
+    subprocess.run([_get_cmake_bin(), "-P", script], check=True)
+
+
 def test_extract_archs_prefers_sass_target_over_corrupted_virtual_arch(
     tmp_path: Path,
 ):
