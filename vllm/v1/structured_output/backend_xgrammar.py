@@ -282,6 +282,13 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
         ):
             return True
 
+        # xgrammar enforces `allOf` only when it has a single branch. For
+        # multiple branches it silently compiles to an "accept anything" rule,
+        # dropping every constraint without surfacing an error.
+        allof = obj.get("allOf")
+        if isinstance(allof, list) and len(allof) > 1:
+            return True
+
         # Recursively check all nested objects and arrays
         for value in obj.values():
             if isinstance(value, dict):
