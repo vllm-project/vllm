@@ -154,6 +154,160 @@ def causal_conv1d_opcheck_fn(
     bias = bias.contiguous() if bias is not None else None
 
 
+def causal_conv1d_fp32_product_ref(
+    x: torch.Tensor, weight: torch.Tensor, initial_state: torch.Tensor
+) -> torch.Tensor:
+    """Reference that promotes BF16 operands before every accumulation."""
+    width = weight.shape[1]
+    history = torch.cat([initial_state, x], dim=-1)
+    out = torch.empty_like(x)
+    for token_idx in range(x.shape[-1]):
+        acc = torch.zeros(x.shape[:-1], device=x.device, dtype=torch.float32)
+        for tap_idx in range(width):
+            acc += history[..., token_idx + tap_idx].to(torch.float32) * weight[
+                :, tap_idx
+            ].to(torch.float32)
+        out[..., token_idx] = acc.to(x.dtype)
+    return out
+
+
+@pytest.mark.parametrize("use_forward_kernel", [False, True])
+def test_causal_conv1d_bf16_products_are_promoted_before_accumulation(
+    use_forward_kernel: bool,
+):
+    """Prevent BF16 products from being rounded before FP32 accumulation."""
+    dim, width, seqlen = 8, 4, 5
+    device = DEVICE
+    x = (torch.arange(dim * seqlen, device=device).reshape(1, dim, seqlen) / 7).to(
+        torch.bfloat16
+    )
+    weight = (torch.arange(dim * width, device=device).reshape(dim, width) / 11).to(
+        torch.bfloat16
+    )
+    state = (
+        torch.arange(dim * (width - 1), device=device).reshape(1, dim, width - 1) / 13
+    ).to(torch.bfloat16)
+    conv_states = torch.cat([torch.zeros_like(state), state], dim=0)
+    state_indices = torch.tensor([1], device=device, dtype=torch.int32)
+    expected = causal_conv1d_fp32_product_ref(x, weight, state)
+
+    if use_forward_kernel:
+        actual = causal_conv1d_fn(
+            x.squeeze(0),
+            weight,
+            bias=None,
+            conv_states=conv_states.clone(),
+            query_start_loc=torch.tensor([0, seqlen], device=device, dtype=torch.int32),
+            cache_indices=state_indices,
+            has_initial_state=torch.tensor([True], device=device),
+            activation=None,
+        ).unsqueeze(0)
+    else:
+        actual = causal_conv1d_update(
+            x,
+            conv_states.clone(),
+            weight,
+            bias=None,
+            activation=None,
+            conv_state_indices=state_indices,
+        )
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "mode", ["packed_prefill", "packed_varlen_decode", "speculative_decode"]
+)
+def test_causal_conv1d_bf16_promotion_in_scheduling_paths(mode: str):
+    """Check the promoted product in packed and speculative scheduling paths."""
+    dim, width = 8, 4
+    device = DEVICE
+    weight = (torch.arange(dim * width, device=device).reshape(dim, width) / 11).to(
+        torch.bfloat16
+    )
+    state = (
+        torch.arange(dim * (width - 1), device=device).reshape(1, dim, width - 1) / 13
+    ).to(torch.bfloat16)
+
+    if mode == "packed_prefill":
+        x = (torch.arange(dim * 5, device=device).reshape(dim, 5) / 7).to(
+            torch.bfloat16
+        )
+        conv_states = torch.cat([torch.zeros_like(state), state, state + 1], dim=0)
+        expected = torch.cat(
+            [
+                causal_conv1d_fp32_product_ref(x[:, :2].unsqueeze(0), weight, state),
+                causal_conv1d_fp32_product_ref(
+                    x[:, 2:].unsqueeze(0), weight, state + 1
+                ),
+            ],
+            dim=-1,
+        ).squeeze(0)
+        actual = causal_conv1d_fn(
+            x,
+            weight,
+            bias=None,
+            conv_states=conv_states,
+            query_start_loc=torch.tensor([0, 2, 5], device=device, dtype=torch.int32),
+            cache_indices=torch.tensor([1, 2], device=device, dtype=torch.int32),
+            has_initial_state=torch.tensor([True, True], device=device),
+            activation=None,
+        )
+    elif mode == "packed_varlen_decode":
+        x = (torch.arange(3 * dim, device=device).reshape(3, dim) / 7).to(
+            torch.bfloat16
+        )
+        conv_states = torch.cat([torch.zeros_like(state), state, state + 1], dim=0)
+        expected = torch.cat(
+            [
+                causal_conv1d_fp32_product_ref(x[:2].T.unsqueeze(0), weight, state)
+                .squeeze(0)
+                .T,
+                causal_conv1d_fp32_product_ref(x[2:].T.unsqueeze(0), weight, state + 1)
+                .squeeze(0)
+                .T,
+            ]
+        )
+        actual = causal_conv1d_update(
+            x,
+            conv_states,
+            weight,
+            bias=None,
+            activation=None,
+            conv_state_indices=torch.tensor([1, 2], device=device, dtype=torch.int32),
+            query_start_loc=torch.tensor([0, 2, 3], device=device, dtype=torch.int32),
+            max_query_len=2,
+        )
+    else:
+        seqlen, accepted_tokens = 3, 2
+        x = (torch.arange(dim * seqlen, device=device).reshape(1, dim, seqlen) / 7).to(
+            torch.bfloat16
+        )
+        conv_states = torch.cat(
+            [
+                torch.zeros(1, dim, 5, device=device, dtype=x.dtype),
+                torch.arange(dim * 5, device=device).reshape(1, dim, 5).to(x.dtype)
+                / 13,
+            ]
+        )
+        expected = causal_conv1d_fp32_product_ref(
+            x, weight, conv_states[1:, :, accepted_tokens - 1 : accepted_tokens + 2]
+        )
+        actual = causal_conv1d_update(
+            x,
+            conv_states,
+            weight,
+            bias=None,
+            activation=None,
+            conv_state_indices=torch.tensor([1], device=device, dtype=torch.int32),
+            num_accepted_tokens=torch.tensor(
+                [accepted_tokens], device=device, dtype=torch.int32
+            ),
+        )
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("itype", [torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [False, True])
 @pytest.mark.parametrize("has_bias", [False, True])
