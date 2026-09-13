@@ -46,10 +46,19 @@ class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
                 return False, "CUDA compute capability is unavailable"
             compute_capability = capability.to_int()
 
-        if compute_capability not in (100, 103) and not (
-            compute_capability >= 120 and compute_capability < 130
-        ):
-            return False, "FlashInfer CuTe-DSL W4A16 requires sm_100 or sm_12x"
+        # Restrict to SM100/103. On SM12x the un-tuned CuTe-DSL W4A16 kernel
+        # uses its heuristic fallback tactic, which is several times slower than
+        # the CUTLASS kernel at prefill shapes (mirrors the b12x GEMM, which vLLM
+        # deliberately keeps behind CUTLASS because its heuristic fallback is up
+        # to 3.6x slower at prefill shapes). Its autotune is also unusable on
+        # 32 GiB consumer GPUs: every tactic JIT-compiles a cubin and captures a
+        # CUDA graph that empty_cache() cannot reclaim, accumulating ~7 GiB and
+        # OOMing KV cache allocation. The W4A16 force-path in
+        # init_nvfp4_linear_kernel already limits CuTe-DSL to SM100/103; keep
+        # is_supported consistent so auto registry selection cannot pick it on
+        # SM12x either.
+        if compute_capability not in (100, 103):
+            return False, "FlashInfer CuTe-DSL W4A16 requires sm_100 or sm_103"
         if not has_flashinfer_bf16_fp4():
             return False, "FlashInfer CuTe-DSL BF16 x FP4 GEMM is unavailable"
         return True, None
