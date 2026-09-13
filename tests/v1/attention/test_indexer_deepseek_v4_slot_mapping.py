@@ -212,6 +212,7 @@ def test_index_conversion_warmup_uses_physical_block_stride():
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
             cp_kv_cache_interleave_size=1,
         ),
     )

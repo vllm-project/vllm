@@ -28,7 +28,9 @@ def _make_config(cudagraph_mode: CUDAGraphMode):
     return SimpleNamespace(
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=2,
+            decode_context_parallel_size=1,
             pipeline_parallel_size=1,
+            dcp_comm_backend="ag_rs",
         ),
         model_config=SimpleNamespace(
             use_mla=True,
@@ -251,6 +253,155 @@ def test_dummy_context_updates_pcp_local_block_tables():
     assert torch.all(global_block_table == -1)
 
 
+def _rank_rows(
+    pcp_rank: int,
+    pcp_world_size: int,
+    num_scheduled_tokens: np.ndarray,
+    num_computed_tokens: np.ndarray,
+    is_prefilling: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """One PCP+DCP rank's rows as (global request, extent)."""
+    manager = PCPManager(
+        pcp_world_size=pcp_world_size,
+        pcp_rank=pcp_rank,
+        device=torch.device("cpu"),
+        dcp_world_size=2,
+    )
+    query_start_loc_np = np.concatenate([[0], np.cumsum(num_scheduled_tokens)]).astype(
+        np.int32
+    )
+    segments = manager._get_rank_segments(
+        pcp_rank, num_scheduled_tokens, is_prefilling, query_start_loc_np
+    )
+    rows = np.array([segment.global_batch_req_idx for segment in segments])
+    extents = (num_computed_tokens + num_scheduled_tokens)[rows]
+    return rows, extents
+
+
+@pytest.mark.parametrize(
+    ("num_scheduled_tokens", "num_computed_tokens"),
+    [
+        ([32, 32], [0, 0]),
+        ([32, 32, 32, 32], [0, 0, 0, 0]),
+        ([32, 32], [100, 0]),  # one continued, one fresh
+        ([64, 32, 48], [0, 512, 0]),  # ragged lengths and mixed contexts
+        # A replicated prefill BEHIND a split one. Sorting replicated rows first
+        # put request 1 ahead of request 0.
+        ([64, 3], [0, 0]),
+        ([64, 3, 64], [0, 0, 0]),
+    ],
+)
+@pytest.mark.parametrize("pcp_world_size", [2, 4])
+def test_published_row_order_is_identical_on_every_pcp_rank(
+    num_scheduled_tokens, num_computed_tokens, pcp_world_size
+):
+    """Every rank must map its rows to the same global requests, in the same order."""
+    num_scheduled_tokens = np.array(num_scheduled_tokens, dtype=np.int32)
+    num_computed_tokens = np.array(num_computed_tokens, dtype=np.int32)
+    is_prefilling = np.ones(len(num_scheduled_tokens), dtype=np.bool_)
+
+    orders = [
+        _rank_rows(
+            rank,
+            pcp_world_size,
+            num_scheduled_tokens,
+            num_computed_tokens,
+            is_prefilling,
+        )[0]
+        for rank in range(pcp_world_size)
+    ]
+    for rank, order in enumerate(orders[1:], start=1):
+        assert np.array_equal(orders[0], order), (
+            f"rank {rank} rows map to {order.tolist()}, rank 0 to {orders[0].tolist()}"
+        )
+    # Grouped by request and ascending: what the indexer plan indexes by.
+    assert np.all(np.diff(orders[0]) >= 0)
+
+
+def test_published_row_order_puts_every_decode_before_every_prefill():
+    """split_decodes_and_prefills takes the FIRST prefilling row as the boundary."""
+    # req 0 is a continued prefill, req 1 is a decode.
+    req_idx, _ = _rank_rows(
+        pcp_rank=0,
+        pcp_world_size=2,
+        num_scheduled_tokens=np.array([32, 1], dtype=np.int32),
+        num_computed_tokens=np.array([100, 20], dtype=np.int32),
+        is_prefilling=np.array([True, False], dtype=np.bool_),
+    )
+    # The decode (request 1) must be row 0.
+    assert req_idx[0] == 1
+
+
+def test_split_prefill_rows_repeat_the_request_and_its_full_extent():
+    """Equal adjacent request indices are what let a backend share a KV region."""
+    req_idx, extents = _rank_rows(
+        pcp_rank=1,
+        pcp_world_size=2,
+        num_scheduled_tokens=np.array([64, 3], dtype=np.int32),
+        num_computed_tokens=np.array([100, 0], dtype=np.int32),
+        is_prefilling=np.ones(2, dtype=np.bool_),
+    )
+    assert req_idx.tolist() == [0, 0, 1]
+    assert extents.tolist() == [164, 164, 3]
+
+
+@pytest.mark.parametrize("query_len", [1, 2, 3, 5, 6, 9])
+def test_dcp_replicates_prefills_too_short_to_split(query_len):
+    """A prefill that cannot fill 2*pcp chunks is replicated, not split."""
+    pcp_world_size = 2
+    num_scheduled_tokens = np.array([query_len], dtype=np.int32)
+    is_prefilling = np.ones(1, dtype=np.bool_)
+
+    rows_per_rank = []
+    for rank in range(pcp_world_size):
+        manager = PCPManager(
+            pcp_world_size=pcp_world_size,
+            pcp_rank=rank,
+            device=torch.device("cpu"),
+            dcp_world_size=2,
+        )
+        assert manager.replicated_requests(num_scheduled_tokens, is_prefilling)[0]
+        rows = list(
+            manager._iter_rank_chunks(rank, num_scheduled_tokens, is_prefilling)
+        )
+        assert rows == [(0, 0, query_len)]
+        rows_per_rank.append(rows)
+    assert rows_per_rank[0] == rows_per_rank[1]
+
+
+@pytest.mark.parametrize("pcp_world_size", [2, 4, 8])
+@pytest.mark.parametrize(
+    "query_len", [16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 1000, 4097]
+)
+def test_pcp_first_chunk_row_is_never_short(pcp_world_size, query_len):
+    num_scheduled_tokens = np.array([query_len], dtype=np.int32)
+    is_prefilling = np.ones(1, dtype=np.bool_)
+
+    charged_per_rank = []
+    for rank in range(pcp_world_size):
+        manager = PCPManager(
+            pcp_world_size=pcp_world_size,
+            pcp_rank=rank,
+            device=torch.device("cpu"),
+            dcp_world_size=pcp_world_size,
+        )
+        chunk_lens = [
+            chunk_len
+            for _, _, chunk_len in manager._iter_rank_chunks(
+                rank, num_scheduled_tokens, is_prefilling
+            )
+        ]
+        assert chunk_lens, f"rank {rank} got no rows for {query_len=}"
+        assert chunk_lens[0] == max(chunk_lens), (
+            f"rank {rank} emitted a short first chunk for {query_len=}: {chunk_lens}"
+        )
+        charged_per_rank.append(len(chunk_lens) * chunk_lens[0])
+
+    assert len(set(charged_per_rank)) == 1, (
+        f"ranks would chunk differently for {query_len=}: {charged_per_rank}"
+    )
+
+
 def _make_global_decode_batch(
     num_computed_tokens: list[int], buffers: InputBuffers, device: torch.device
 ) -> InputBatch:
@@ -327,6 +478,14 @@ def test_partition_defers_dcp_metadata_to_post_partition_batch():
 
     assert local_batch.dcp_local_seq_lens is None
     assert local_batch.seq_lens.tolist() == [17, 25, 0, 0]
+    assert local_batch.dcp_local_seq_lens_cpu_upper_bound is not None
+    expected_dcp_upper_bound = get_dcp_local_seq_lens(
+        torch.tensor([17, 25], dtype=torch.int32), 2, 0, 1
+    )
+    assert torch.equal(
+        local_batch.dcp_local_seq_lens_cpu_upper_bound,
+        torch.cat([expected_dcp_upper_bound, torch.zeros(2, dtype=torch.int32)]),
+    )
 
     # What execute_model does next: derive DCP metadata from the final batch
     # on the PCP-owned buffers.
