@@ -3239,6 +3239,23 @@ def test_qwen3_omni_dspark_allows_smaller_input_vocabulary():
     _validate_qwen3_omni_dspark(target_config, draft_config, 7)
 
 
+def test_heterogeneous_vocab_rejects_local_argmax_reduction():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+    )
+    speculative_config.method = "draft_model"
+    speculative_config.use_heterogeneous_vocab = True
+    speculative_config.use_local_argmax_reduction = True
+
+    with pytest.raises(
+        ValueError,
+        match="use_heterogeneous_vocab and use_local_argmax_reduction cannot "
+        "be used together",
+    ):
+        speculative_config._verify_args()
+
+
 def test_ir_op_priority_default():
     """Test that IR op priority defaults are set correctly."""
     from vllm.config.kernel import IrOpPriorityConfig
