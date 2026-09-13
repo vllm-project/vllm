@@ -375,7 +375,10 @@ class MoRIIOConnectorScheduler:
             "kv_transfer_config must be set for MoRIIOConnector"
         )
         self.kv_transfer_config = vllm_config.kv_transfer_config
-        self.block_size = vllm_config.cache_config.block_size
+        self.block_size = (
+            vllm_config.cache_config.block_size
+            * vllm_config.parallel_config.decode_context_parallel_size
+        )
         self.engine_id: EngineId = engine_id
         self.mode = get_moriio_mode(self.kv_transfer_config)
         self.host_ip = resolve_host_ip(
