@@ -7,9 +7,17 @@ import msgspec
 import pytest
 
 from vllm.distributed.kv_events import (
+    MEDIUM_CPU,
+    MEDIUM_GPU,
+    AllBlocksCleared,
+    BlockRemoved,
+    BlockStored,
     EventBatch,
     EventPublisherFactory,
+    KVEventBatch,
     NullEventPublisher,
+    ZmqEventPublisher,
+    _KVCacheState,
 )
 
 DP_RANK = 0
@@ -36,6 +44,38 @@ def create_test_events(count: int) -> SampleBatch:
     """Create a batch of test events"""
     events = [EventSample(id=i, value=f"test-{i}") for i in range(count)]
     return SampleBatch(ts=time.time(), events=events)
+
+
+def create_stored_event(
+    block_hashes: list[int],
+    *,
+    parent_block_hash: int | None = None,
+    medium: str = MEDIUM_GPU,
+    group_idx: int = 0,
+    locality: str | None = None,
+    ownership: str | None = None,
+    session_id: str | None = None,
+) -> BlockStored:
+    block_size = 4
+    return BlockStored(
+        block_hashes=block_hashes,
+        parent_block_hash=parent_block_hash,
+        token_ids=list(range(len(block_hashes) * block_size)),
+        block_size=block_size,
+        lora_id=None,
+        medium=medium,
+        lora_name=None,
+        group_idx=group_idx,
+        locality=locality,
+        ownership=ownership,
+        session_id=session_id,
+    )
+
+
+def snapshot_stores(state: _KVCacheState) -> list[BlockStored]:
+    return [
+        event for event in state.snapshot_events() if isinstance(event, BlockStored)
+    ]
 
 
 def test_basic_publishing(publisher, subscriber):
@@ -112,6 +152,352 @@ def test_replay_includes_topic(publisher, subscriber, publisher_config):
     assert len(replayed) == 5, f"Expected 5 replayed messages, got {len(replayed)}"
     seqs = [seq for seq, _ in replayed]
     assert seqs == list(range(5)), "Replayed sequences should be 0-4"
+
+
+def test_snapshot_recovers_state_after_replay_buffer_expires(publisher_config):
+    publisher_config.buffer_steps = 2
+    publisher = EventPublisherFactory.create(publisher_config, DP_RANK)
+    assert isinstance(publisher, ZmqEventPublisher)
+    publisher.SNAPSHOT_BATCH_SIZE = 2
+
+    from .conftest import MockSubscriber
+
+    subscriber = MockSubscriber(
+        publisher_config.endpoint,
+        publisher_config.replay_endpoint,
+        publisher_config.topic,
+        decode_type=KVEventBatch,
+    )
+
+    try:
+        time.sleep(0.1)
+        batches = [
+            KVEventBatch(
+                ts=time.time(),
+                events=[create_stored_event([101, 102, 103])],
+            ),
+            KVEventBatch(
+                ts=time.time(),
+                events=[
+                    BlockRemoved(
+                        block_hashes=[102],
+                        medium=MEDIUM_GPU,
+                        group_idx=0,
+                    )
+                ],
+            ),
+            KVEventBatch(
+                ts=time.time(),
+                events=[create_stored_event([104])],
+            ),
+            KVEventBatch(ts=time.time(), events=[]),
+            KVEventBatch(ts=time.time(), events=[]),
+        ]
+        for batch in batches:
+            publisher.publish(batch)
+            assert subscriber.receive_one(timeout=1000) is not None
+
+        subscriber.request_replay(0)
+        assert [seq for seq, _ in subscriber.receive_replay()] == [3, 4]
+
+        subscriber.request_snapshot()
+        snapshot = subscriber.receive_replay()
+        assert snapshot
+        assert len(snapshot) == 2
+        assert {seq for seq, _ in snapshot} == {5}
+        assert all(batch.data_parallel_rank == DP_RANK for _, batch in snapshot)
+
+        active_blocks: set[int] = set()
+        snapshot_events = [event for _, batch in snapshot for event in batch.events]
+        assert isinstance(snapshot_events[0], AllBlocksCleared)
+        for event in snapshot_events:
+            if isinstance(event, AllBlocksCleared):
+                active_blocks.clear()
+            elif isinstance(event, BlockStored):
+                active_blocks.update(event.block_hashes)
+            elif isinstance(event, BlockRemoved):
+                active_blocks.difference_update(event.block_hashes)
+        assert active_blocks == {101, 103, 104}
+
+        publisher.publish(KVEventBatch(ts=time.time(), events=[AllBlocksCleared()]))
+        assert subscriber.receive_one(timeout=1000) is not None
+        subscriber.request_snapshot()
+        cleared_snapshot = subscriber.receive_replay()
+        cleared_events = [
+            event for _, batch in cleared_snapshot for event in batch.events
+        ]
+        assert len(cleared_events) == 1
+        assert isinstance(cleared_events[0], AllBlocksCleared)
+    finally:
+        publisher.shutdown()
+        subscriber.close()
+
+
+def test_snapshot_tracks_blocks_by_medium(publisher_config):
+    publisher = EventPublisherFactory.create(publisher_config, DP_RANK)
+    assert isinstance(publisher, ZmqEventPublisher)
+
+    from .conftest import MockSubscriber
+
+    subscriber = MockSubscriber(
+        publisher_config.endpoint,
+        publisher_config.replay_endpoint,
+        publisher_config.topic,
+        decode_type=KVEventBatch,
+    )
+
+    try:
+        time.sleep(0.1)
+        publisher.publish(
+            KVEventBatch(
+                ts=time.time(),
+                events=[
+                    create_stored_event([101], medium=MEDIUM_GPU),
+                    create_stored_event([101], medium=MEDIUM_CPU),
+                ],
+            )
+        )
+        assert subscriber.receive_one(timeout=1000) is not None
+        publisher.publish(
+            KVEventBatch(
+                ts=time.time(),
+                events=[
+                    BlockRemoved(
+                        block_hashes=[101],
+                        medium=MEDIUM_GPU,
+                        group_idx=0,
+                    )
+                ],
+            )
+        )
+        assert subscriber.receive_one(timeout=1000) is not None
+
+        subscriber.request_snapshot()
+        snapshot_events = [
+            event for _, batch in subscriber.receive_replay() for event in batch.events
+        ]
+        stored_events = [
+            event for event in snapshot_events if isinstance(event, BlockStored)
+        ]
+        assert len(stored_events) == 1
+        assert stored_events[0].medium == MEDIUM_CPU
+    finally:
+        publisher.shutdown()
+        subscriber.close()
+
+
+def test_snapshot_orders_dependencies_across_batches(publisher_config):
+    publisher = EventPublisherFactory.create(publisher_config, DP_RANK)
+    assert isinstance(publisher, ZmqEventPublisher)
+    publisher.SNAPSHOT_BATCH_SIZE = 1
+
+    from .conftest import MockSubscriber
+
+    subscriber = MockSubscriber(
+        publisher_config.endpoint,
+        publisher_config.replay_endpoint,
+        publisher_config.topic,
+        decode_type=KVEventBatch,
+    )
+
+    try:
+        time.sleep(0.1)
+        publisher.publish(
+            KVEventBatch(
+                ts=time.time(),
+                events=[
+                    create_stored_event([101]),
+                    create_stored_event([102], parent_block_hash=101),
+                    create_stored_event([101], session_id="restored-parent"),
+                ],
+            )
+        )
+        assert subscriber.receive_one(timeout=1000) is not None
+
+        subscriber.request_snapshot()
+        snapshot = subscriber.receive_replay()
+        assert len(snapshot) == 3
+        snapshot_events = [event for _, batch in snapshot for event in batch.events]
+
+        assert isinstance(snapshot_events[0], AllBlocksCleared)
+        assert isinstance(snapshot_events[1], BlockStored)
+        assert snapshot_events[1].block_hashes == [101]
+        assert isinstance(snapshot_events[2], BlockStored)
+        assert snapshot_events[2].block_hashes == [102]
+    finally:
+        publisher.shutdown()
+        subscriber.close()
+
+
+def test_snapshot_orders_restored_parent_before_existing_child():
+    state = _KVCacheState()
+    state.update(
+        [
+            create_stored_event([101]),
+            create_stored_event([102], parent_block_hash=101),
+            create_stored_event([101], session_id="restored-parent"),
+        ]
+    )
+
+    stores = snapshot_stores(state)
+    parent_idx = next(i for i, event in enumerate(stores) if 101 in event.block_hashes)
+    child_idx = next(i for i, event in enumerate(stores) if 102 in event.block_hashes)
+
+    assert parent_idx < child_idx
+    assert stores[parent_idx].session_id == "restored-parent"
+
+
+def test_snapshot_retains_removed_parent_for_active_child():
+    state = _KVCacheState()
+    state.update(
+        [
+            create_stored_event([101]),
+            create_stored_event([102], parent_block_hash=101),
+        ]
+    )
+    state.update(
+        [
+            BlockRemoved(
+                block_hashes=[101],
+                medium=MEDIUM_GPU,
+                group_idx=0,
+            )
+        ]
+    )
+
+    events = state.snapshot_events()
+    parent_idx = next(
+        i
+        for i, event in enumerate(events)
+        if isinstance(event, BlockStored) and 101 in event.block_hashes
+    )
+    child_idx = next(
+        i
+        for i, event in enumerate(events)
+        if isinstance(event, BlockStored) and 102 in event.block_hashes
+    )
+    remove_parent_idx = next(
+        i
+        for i, event in enumerate(events)
+        if isinstance(event, BlockRemoved) and 101 in event.block_hashes
+    )
+
+    assert parent_idx < child_idx < remove_parent_idx
+
+
+def test_snapshot_does_not_remove_restored_part_of_multiblock_store():
+    state = _KVCacheState()
+    state.update(
+        [
+            create_stored_event([101, 102]),
+            create_stored_event([101], session_id="restored"),
+        ]
+    )
+
+    events = state.snapshot_events()
+    removed_hashes = {
+        block_hash
+        for event in events
+        if isinstance(event, BlockRemoved)
+        for block_hash in event.block_hashes
+    }
+
+    assert 101 not in removed_hashes
+
+
+def test_snapshot_discards_fully_removed_dependency_chain():
+    state = _KVCacheState()
+    state.update(
+        [
+            create_stored_event([101]),
+            create_stored_event([102], parent_block_hash=101),
+        ]
+    )
+    state.update(
+        [
+            BlockRemoved(
+                block_hashes=[101, 102],
+                medium=MEDIUM_GPU,
+                group_idx=0,
+            )
+        ]
+    )
+
+    events = state.snapshot_events()
+
+    assert len(events) == 1
+    assert isinstance(events[0], AllBlocksCleared)
+
+
+def test_snapshot_rejects_missing_parent():
+    state = _KVCacheState()
+    state.update([create_stored_event([102], parent_block_hash=101)])
+
+    with pytest.raises(ValueError, match="parent block 101 is unavailable"):
+        state.snapshot_events()
+
+
+def test_snapshot_rejects_dependency_cycle():
+    state = _KVCacheState()
+    state.update(
+        [
+            create_stored_event([101], parent_block_hash=102),
+            create_stored_event([102], parent_block_hash=101),
+        ]
+    )
+
+    with pytest.raises(ValueError, match="cyclic dependencies"):
+        state.snapshot_events()
+
+
+def test_snapshot_scopes_removal_by_ownership():
+    state = _KVCacheState()
+    state.update(
+        [
+            create_stored_event([101], ownership="primary"),
+            create_stored_event([101], ownership="secondary"),
+            BlockRemoved(
+                block_hashes=[101],
+                medium=MEDIUM_GPU,
+                group_idx=0,
+                ownership="primary",
+            ),
+        ]
+    )
+
+    stores = snapshot_stores(state)
+
+    assert len(stores) == 1
+    assert stores[0].ownership == "secondary"
+
+
+def test_snapshot_treats_none_ownership_as_primary():
+    state = _KVCacheState()
+    state.update(
+        [
+            create_stored_event([101]),
+            create_stored_event([101], ownership="secondary"),
+            BlockRemoved(
+                block_hashes=[101],
+                medium=MEDIUM_GPU,
+                group_idx=0,
+            ),
+        ]
+    )
+
+    stores = snapshot_stores(state)
+
+    assert len(stores) == 1
+    assert stores[0].ownership == "secondary"
+
+
+def test_snapshot_preserves_session_id():
+    state = _KVCacheState()
+    state.update([create_stored_event([101], session_id="session-1")])
+
+    [store] = snapshot_stores(state)
+
+    assert store.session_id == "session-1"
 
 
 def test_buffer_limit(publisher, subscriber, publisher_config):
