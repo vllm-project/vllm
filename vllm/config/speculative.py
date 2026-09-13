@@ -94,9 +94,6 @@ _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # Draft architectures whose Markov head implements the candidate-pruned walk.
 _MARKOV_TOPK_ARCHITECTURES = ("Qwen3DSparkModel", _QWEN3_OMNI_DSPARK_ARCHITECTURE)
 
-DEFAULT_MARKOV_TOPK = 16
-"""Default DSpark Markov-head base-logit candidate budget; 0 = full vocab."""
-
 DEFAULT_MARKOV_BIAS_TOPK = 16
 """Default DSpark bigram-side candidate budget (0 = base-logit candidates only)."""
 
@@ -104,7 +101,9 @@ DEFAULT_MARKOV_BIAS_TOPK = 16
 def supports_markov_topk(speculative_config: "SpeculativeConfig") -> bool:
     """Whether the draft architecture can run the candidate-pruned Markov head."""
     architectures = speculative_config.draft_model_config.architectures
-    return any(architecture in architectures for architecture in _MARKOV_TOPK_ARCHITECTURES)
+    return any(
+        architecture in architectures for architecture in _MARKOV_TOPK_ARCHITECTURES
+    )
 
 
 def resolve_markov_bias_topk(speculative_config: "SpeculativeConfig") -> int:
@@ -133,10 +132,9 @@ def resolve_markov_topk(speculative_config: "SpeculativeConfig") -> int:
     """Resolve the effective DSpark Markov candidate budget (0 = full vocab).
 
     Precedence: the ``markov_topk`` knob, its legacy ``dspark_draft_topk`` alias,
-    the checkpoint's own ``markov_topk`` / ``dspark_draft_topk``, and finally
-    :data:`DEFAULT_MARKOV_TOPK` for architectures that implement the pruned walk.
-    Unsupported architectures resolve to 0 so the default cannot silently change
-    how other DSpark models draft.
+    then the checkpoint's own ``markov_topk`` / ``dspark_draft_topk``. When none
+    of them is set the pruned walk stays off (0): candidate pruning is strictly
+    opt-in and the default keeps the original full-vocab Markov projection.
     """
     hf_config = speculative_config.draft_model_config.hf_config
     for value in (
@@ -147,7 +145,7 @@ def resolve_markov_topk(speculative_config: "SpeculativeConfig") -> int:
     ):
         if value is not None:
             return int(value)
-    return DEFAULT_MARKOV_TOPK if supports_markov_topk(speculative_config) else 0
+    return 0
 
 
 def _is_qwen3_omni_target(model_config: ModelConfig) -> bool:
@@ -662,9 +660,9 @@ class SpeculativeConfig:
     `[B, k, rank] @ [B, rank, 1]` and selection/sampling happen inside the
     candidate set, so no per-position full-vocab tensor is materialized. The
     trained weights are reused unchanged (no retraining); k only trades a little
-    acceptance length for draft latency. Unset means 16 for DSpark checkpoints
-    that implement the pruned walk; pass 0 to keep the original full-vocab
-    Markov projection. Requires draft tensor parallel size 1."""
+    acceptance length for draft latency. Unset (and no checkpoint-level value)
+    keeps the original full-vocab Markov projection: candidate pruning is
+    opt-in. Requires draft tensor parallel size 1."""
 
     markov_bias_topk: int | None = Field(default=None, ge=0)
     """Additional candidate budget taken from the Markov head's own bigram

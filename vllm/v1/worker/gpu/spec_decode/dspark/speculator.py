@@ -18,16 +18,16 @@ Differences from DFlash:
   * Sequential Markov sampling: instead of DFlash's single parallel sample, we
     sample left-to-right, adding a prefix-dependent Markov bias derived from the
     previously sampled token at each step.
-  * Candidate pruning (``markov_topk``, default 16): that bias is evaluated only
+  * Candidate pruning (``markov_topk``, opt-in): that bias is evaluated only
     for a small candidate set per position, shrinking the projection from
     ``[B, rank] @ [rank, V]`` to ``[B, k, rank] @ [B, rank, 1]`` and keeping
     selection/sampling inside the candidate set. The candidates are the union of
     the ``markov_topk`` highest base logits and the ``markov_bias_topk`` bigram
     top-m of the previously sampled token (precomputed once from the trained
     weights): the backbone sees a mask token in every draft slot, so the base
-    logits alone keep missing what the Markov head actually predicts. Set
-    ``markov_topk=0`` for the original full-vocab Markov projection; both paths
-    reuse the trained weights unchanged.
+    logits alone keep missing what the Markov head actually predicts. Unset (or
+    ``markov_topk=0``) keeps the original full-vocab Markov projection; both
+    paths reuse the trained weights unchanged.
 
 CUDA graphs (FULL, mirroring DFlash) cover the whole draft step: the parallel
 backbone forward AND the sequential Markov sampling.
@@ -47,7 +47,6 @@ from vllm.v1.worker.gpu.spec_decode.dspark.topk_markov import (
     cache_markov_candidates,
     compute_markov_bias_top_ids,
     markov_walk_topk,
-    walk_is_supported,
 )
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
@@ -354,9 +353,7 @@ class DSparkSpeculator(DFlashSpeculator):
         rejection correction needs no change.
         """
         assert self._markov_walk_enabled
-        assert (
-            self._base_cand_values is not None and self._base_cand_ids is not None
-        )
+        assert self._base_cand_values is not None and self._base_cand_ids is not None
         assert self._markov_walk_w1 is not None and self._markov_walk_w2 is not None
         n_spec = self.num_speculative_steps
         num_sample = num_reqs * n_spec
