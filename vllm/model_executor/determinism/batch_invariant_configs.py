@@ -100,20 +100,20 @@ _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS: dict[
             ),
         ),
     },
-    "hopper": {
+    "hopper_nvl": {
         (12288, 2048): _MatmulShapeConfig(
             block_k=128,
             m_buckets=(
                 (1, _MatmulMConfig(16, 256, 4, 3)),
-                (4, _MatmulMConfig(16, 256, 4, 4)),
-                (8, _MatmulMConfig(16, 64, 4, 4)),
-                (16, _MatmulMConfig(16, 64, 4, 4)),
+                (4, _MatmulMConfig(16, 256, 4, 3)),
+                (8, _MatmulMConfig(16, 256, 4, 3)),
+                (16, _MatmulMConfig(16, 256, 4, 3)),
                 (32, _MatmulMConfig(32, 64, 8, 5)),
-                (64, _MatmulMConfig(64, 64, 4, 4)),
-                (256, _MatmulMConfig(64, 128, 4, 3)),
+                (64, _MatmulMConfig(32, 256, 4, 3)),
+                (256, _MatmulMConfig(128, 128, 8, 3)),
                 (512, _MatmulMConfig(128, 128, 8, 3)),
-                (1024, _MatmulMConfig(128, 256, 8, 2)),
-                (2048, _MatmulMConfig(128, 256, 8, 2)),
+                (1024, _MatmulMConfig(128, 128, 8, 3)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
             ),
         ),
         (2048, 6144): _MatmulShapeConfig(
@@ -124,11 +124,11 @@ _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS: dict[
                 (8, _MatmulMConfig(16, 64, 4, 4)),
                 (16, _MatmulMConfig(16, 32, 4, 3)),
                 (32, _MatmulMConfig(32, 32, 8, 3)),
-                (64, _MatmulMConfig(64, 32, 4, 5)),
-                (256, _MatmulMConfig(64, 128, 4, 3)),
-                (512, _MatmulMConfig(128, 128, 4, 3)),
-                (1024, _MatmulMConfig(64, 64, 4, 5)),
-                (2048, _MatmulMConfig(64, 128, 4, 4)),
+                (64, _MatmulMConfig(32, 64, 4, 4)),
+                (256, _MatmulMConfig(128, 64, 8, 3)),
+                (512, _MatmulMConfig(128, 64, 8, 3)),
+                (1024, _MatmulMConfig(128, 64, 8, 3)),
+                (2048, _MatmulMConfig(128, 64, 8, 3)),
             ),
         ),
         (4096, 2048): _MatmulShapeConfig(
@@ -136,44 +136,44 @@ _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS: dict[
             m_buckets=(
                 (1, _MatmulMConfig(16, 64, 8, 5)),
                 (4, _MatmulMConfig(16, 64, 4, 5)),
-                (8, _MatmulMConfig(16, 128, 4, 3)),
+                (8, _MatmulMConfig(16, 128, 4, 4)),
                 (16, _MatmulMConfig(16, 64, 4, 5)),
                 (32, _MatmulMConfig(16, 64, 4, 4)),
                 (64, _MatmulMConfig(64, 32, 4, 3)),
-                (256, _MatmulMConfig(64, 256, 4, 2)),
-                (512, _MatmulMConfig(64, 64, 4, 3)),
-                (1024, _MatmulMConfig(64, 128, 4, 3)),
-                (2048, _MatmulMConfig(64, 64, 4, 4)),
+                (256, _MatmulMConfig(128, 128, 8, 3)),
+                (512, _MatmulMConfig(128, 128, 8, 3)),
+                (1024, _MatmulMConfig(128, 128, 8, 3)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
             ),
         ),
         (151936, 2048): _MatmulShapeConfig(
             block_k=128,
             m_buckets=(
-                (1, _MatmulMConfig(16, 256, 4, 4)),
-                (4, _MatmulMConfig(16, 256, 4, 4)),
+                (1, _MatmulMConfig(16, 256, 4, 3)),
+                (4, _MatmulMConfig(16, 256, 4, 3)),
                 (8, _MatmulMConfig(16, 256, 4, 3)),
                 (16, _MatmulMConfig(16, 256, 4, 3)),
                 (32, _MatmulMConfig(32, 256, 8, 3)),
-                (64, _MatmulMConfig(64, 128, 4, 3)),
-                (256, _MatmulMConfig(64, 128, 4, 3)),
+                (64, _MatmulMConfig(32, 256, 4, 3)),
+                (256, _MatmulMConfig(128, 128, 8, 3)),
                 (512, _MatmulMConfig(128, 128, 8, 3)),
-                (1024, _MatmulMConfig(128, 256, 8, 2)),
-                (2048, _MatmulMConfig(128, 256, 8, 2)),
+                (1024, _MatmulMConfig(128, 128, 8, 3)),
+                (2048, _MatmulMConfig(128, 128, 8, 3)),
             ),
         ),
         (2048, 2048): _MatmulShapeConfig(
             block_k=128,
             m_buckets=(
                 (1, _MatmulMConfig(16, 64, 4, 5)),
-                (4, _MatmulMConfig(16, 128, 8, 3)),
-                (8, _MatmulMConfig(16, 32, 4, 3)),
+                (4, _MatmulMConfig(16, 64, 4, 4)),
+                (8, _MatmulMConfig(16, 64, 4, 4)),
                 (16, _MatmulMConfig(32, 64, 8, 5)),
-                (32, _MatmulMConfig(16, 128, 4, 5)),
-                (64, _MatmulMConfig(32, 64, 4, 2)),
+                (32, _MatmulMConfig(16, 64, 4, 4)),
+                (64, _MatmulMConfig(32, 64, 4, 4)),
                 (256, _MatmulMConfig(128, 64, 4, 4)),
-                (512, _MatmulMConfig(64, 256, 4, 2)),
-                (1024, _MatmulMConfig(64, 64, 4, 3)),
-                (2048, _MatmulMConfig(64, 128, 4, 3)),
+                (512, _MatmulMConfig(128, 64, 8, 3)),
+                (1024, _MatmulMConfig(128, 64, 8, 3)),
+                (2048, _MatmulMConfig(128, 64, 8, 3)),
             ),
         ),
     },
@@ -268,7 +268,7 @@ def _get_tuned_matmul_arch_family(capability: DeviceCapability | None) -> str | 
     if capability.major == 10:
         return "blackwell"
     if capability.major == 9:
-        return "hopper"
+        return "hopper_nvl"
     if capability.major == 8 and capability.minor == 9:
         return "ada"
     return None
