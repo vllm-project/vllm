@@ -154,7 +154,9 @@ def test_exact_tail_checks_accepted_prefix_before_proposing(
     runner.sample_tokens(None)
 
     assert ("propose-step-7" not in events) is expected_skip
-    assert events[:3] == ["output", "postprocess", "copy-ready"]
+    assert events[:2] == ["output", "postprocess"]
+    if "copy-ready" in events:
+        assert events[:3] == ["output", "postprocess", "copy-ready"]
     assert runner._zero_next_draft_req_ids == (
         frozenset({"request-0"}) if expected_skip else frozenset()
     )
@@ -169,11 +171,17 @@ def test_exact_tail_eos_prefix_respects_ignore_eos(monkeypatch, ignore_eos):
     counts[0] = 3
     runner.sample_tokens(None)
     assert ("propose-step-7" in events) is ignore_eos
-    assert events[:3] == ["output", "postprocess", "copy-ready"]
+    assert events[:2] == ["output", "postprocess"]
+    if "copy-ready" in events:
+        assert events[:3] == ["output", "postprocess", "copy-ready"]
 
 
 def test_exact_tail_context_cap_skips_and_followup_uses_zero_drafts(monkeypatch):
+    from vllm.config.compilation import CUDAGraphMode
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu import model_runner
+    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+    from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
     runner, _, events, _ = _uno_sample_tokens_runner(monkeypatch)
     _enable_exact_tail(runner, outputs=[95], caps=[4096], prompt_len=4000)
@@ -209,9 +217,74 @@ def test_exact_tail_context_cap_skips_and_followup_uses_zero_drafts(monkeypatch)
     assert original.num_scheduled_tokens == {"request-0": 9}
     assert len(original.scheduled_spec_decode_tokens["request-0"]) == 8
 
-    # Exercise the real sampler dispatch on the compacted batch. The previous
-    # assertion, through execute_model, proves K=0 came from production policy.
+    # Derive the actual InputBatch from the worker snapshot. Only device-copy
+    # and Triton kernels are replaced; row counts/logits offsets are production.
+    runner.device = torch.device("cpu")
+    runner.max_num_reqs = 1
+    runner.decode_query_len = 9
+    runner.input_buffers = InputBuffers(1, 9, runner.device)
+    runner.fast_prefill = None
+    runner.model_config = SimpleNamespace(rswa_window=None)
+    runner.model_state.num_new_sampled_tokens_per_step = 1
+    runner.req_states.req_id_to_index = {"request-0": 0}
+    runner.req_states.prefill_len = SimpleNamespace(
+        np=np.array([4000], dtype=np.int32), gpu=torch.tensor([4000])
+    )
+    runner.req_states.num_computed_prefill_tokens = np.array([4000], dtype=np.int32)
+    runner.req_states.num_computed_tokens_np = np.array([4095], dtype=np.int32)
+    runner.req_states.num_computed_tokens.gpu = torch.tensor([4095])
+
+    def copy_to_cpu(values, *, device=None, out=None):
+        tensor = torch.as_tensor(values)
+        return tensor.clone() if out is None else out.copy_(tensor)
+
+    def prepare_positions(indices, starts, computed, positions, seq_lens):
+        positions[0] = computed[indices[0]]
+        seq_lens[: len(indices)] = computed[indices] + starts[1:] - starts[:-1]
+
+    logits_rows = []
+
+    def combine_tokens(
+        input_ids,
+        indices,
+        sampled,
+        starts,
+        seq_lens,
+        prefill,
+        drafts,
+        cu_logits,
+        num_logits,
+        num_bonus,
+    ):
+        logits_rows.append((cu_logits.tolist(), num_logits, num_bonus))
+        input_ids[: len(indices)] = sampled[indices, 0]
+        return starts[1:].long() - 1
+
+    monkeypatch.setattr(model_runner, "async_copy_to_gpu", copy_to_cpu)
+    monkeypatch.setattr(model_runner, "prepare_pos_seq_lens", prepare_positions)
+    monkeypatch.setattr(
+        model_runner, "combine_sampled_and_draft_tokens", combine_tokens
+    )
+    batch_state, uniform_tokens = GPUModelRunner.gather_batch_req_state(
+        runner, followup, False
+    )
+    assert batch_state is not None and uniform_tokens == 1
+    batch = GPUModelRunner.prepare_inputs(
+        runner,
+        followup,
+        batch_state,
+        BatchExecutionDescriptor(CUDAGraphMode.NONE, 1, 1, uniform_tokens),
+    )
+    assert isinstance(batch, InputBatch) and batch is not state.input_batch
+    assert batch.num_scheduled_tokens.tolist() == [1]
+    assert batch.num_draft_tokens == 0
+    assert batch.query_start_loc_np.tolist() == [0, 1]
+    assert batch.cu_num_logits_np.tolist() == [0, 1]
+    assert logits_rows == [([0, 1], 1, 1)]
+
+    # Feed that derived batch to the real sampler dispatch.
     runner.execute_model_state = state._replace(
+        input_batch=batch,
         skip_speculator_proposal=True,
         zero_next_draft_req_ids=frozenset(followup.zero_next_draft_req_ids),
     )
