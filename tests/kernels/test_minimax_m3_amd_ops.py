@@ -424,6 +424,65 @@ def test_mxfp8_linear_emulation_bf16_at_load(
     assert _relerr(out.float(), out_ref.float()) < 2e-2
 
 
+# --------------------------------------------------------------------------- #
+# Native MXFP8 linear: the K % 128 != 0 weight is dequantized once at load
+# --------------------------------------------------------------------------- #
+@requires_gfx950
+@pytest.mark.parametrize("shape", [(256, 2080), (256, 2048)])
+@torch.inference_mode()
+def test_mxfp8_rocm_native_unaligned_k_dequantizes_at_load(shape):
+    """``dot_scaled`` tiles K by 128, so an unaligned weight must not reach it.
+
+    ``process_weights_after_loading`` converts those to BF16 once; a weight that
+    never went through it has to fall back per step rather than take the
+    invalid path, which is what keying the dispatch on the weight dtype alone
+    would do.
+    """
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+    from vllm.model_executor.kernels.linear.mxfp8.Mxfp8LinearKernel import (
+        Mxfp8LinearLayerConfig,
+    )
+
+    N, K = shape
+    aligned = K % 128 == 0
+    torch.manual_seed(0)
+    w_bf16 = torch.randn(N, K, device=DEVICE, dtype=torch.bfloat16) * 0.1
+    w_fp8, w_scale = _mxfp8_e4m3_quantize_torch(w_bf16, is_sf_swizzled_layout=False)
+    x = torch.randn(7, K, device=DEVICE, dtype=torch.bfloat16) * 0.5
+    out_ref = torch.nn.functional.linear(x, dequant_mxfp8_to_bf16(w_fp8, w_scale))
+    # dot_scaled re-quantizes the activation, the dequant paths do not.
+    tol = 5e-2 if aligned else 2e-3
+
+    def make_layer():
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(w_fp8.clone(), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(w_scale.clone(), requires_grad=False)
+        return layer
+
+    kernel = rocm_native.RocmDotScaledMxfp8LinearKernel(Mxfp8LinearLayerConfig())
+    layer = make_layer()
+    kernel.process_weights_after_loading(layer)
+    assert (layer.weight.element_size() >= 2) is not aligned
+    assert _relerr(kernel.apply_weights(layer, x).float(), out_ref.float()) < tol
+
+    # An unaligned weight that is still FP8 must not reach dot_scaled.
+    unprocessed = make_layer()
+    unprocessed.weight_scale = torch.nn.Parameter(
+        w_scale[:N, : K // 32].contiguous(), requires_grad=False
+    )
+    calls = []
+    real = rocm_native._mxfp8_dot_scaled_linear
+    rocm_native._mxfp8_dot_scaled_linear = lambda *a, **k: (
+        calls.append(1) or real(*a, **k)
+    )
+    try:
+        out = kernel.apply_weights(unprocessed, x)
+    finally:
+        rocm_native._mxfp8_dot_scaled_linear = real
+    assert bool(calls) is aligned
+    assert _relerr(out.float(), out_ref.float()) < tol
+
+
 # ── EP expert_mask handling for the FlyDSL (AITER_MXFP8) MoE ────────────────
 # The map/mask choice lives in ``RoutedExperts.expert_map``: it hands AITER
 # experts (``consumes_expert_mask``) the precomputed 0/1 ``expert_mask`` and
