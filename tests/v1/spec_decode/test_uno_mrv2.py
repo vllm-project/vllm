@@ -764,9 +764,9 @@ def test_uno_served_launches_cover_sampler_flags_and_integer_buckets(use_flashin
     for has_k in (False, True):
         assert ("_topp_sb_stats_kernel", has_k, 32) in plan.sampler_keys
         assert ("_topp_sb_stats_kernel", has_k, 4) in plan.sampler_keys
-    assert (
-        ("_topk_topp_kernel", "one", True, False, False) in plan.sampler_keys
-    ) is (not use_flashinfer)
+    assert (("_topk_topp_kernel", "one", True, False, False) in plan.sampler_keys) is (
+        not use_flashinfer
+    )
     assert (
         "_topk_topp_kernel",
         "multiple_of_16",
@@ -938,11 +938,14 @@ def test_warmup_kernels_runs_two_full_verifications(
         for step in decode_steps
     ] == expected
     if speculator_kind == "uno" and num_reqs >= 2:
-        assert sum(
-            len(step.scheduled_spec_decode_tokens) == 2
-            and step.total_num_scheduled_tokens == 18
-            for step in decode_steps
-        ) == 1, "startup must execute the two-request full verification exactly once"
+        assert (
+            sum(
+                len(step.scheduled_spec_decode_tokens) == 2
+                and step.total_num_scheduled_tokens == 18
+                for step in decode_steps
+            )
+            == 1
+        ), "startup must execute the two-request full verification exactly once"
 
 
 @pytest.mark.parametrize("top_k", [None, 50])
@@ -1411,9 +1414,9 @@ def test_uno_sampler_warmup_keeps_the_served_sampler_backend(
     runner.device = torch.device("cpu")
 
     def dummy_sampler_run(_hidden, *, num_reqs):
-        has_filters = (
-            states.top_k.np[:num_reqs] < states.vocab_size
-        ).any() or (states.top_p.np[:num_reqs] < 1.0).any()
+        has_filters = (states.top_k.np[:num_reqs] < states.vocab_size).any() or (
+            states.top_p.np[:num_reqs] < 1.0
+        ).any()
         sampler._sample_random(
             None,
             None,
@@ -1477,8 +1480,10 @@ def test_sampler_selects_flashinfer_without_an_explicit_seed(
     monkeypatch.setattr(
         sampler_module,
         "flashinfer_sample",
-        lambda logits, _top_k, _top_p: calls.append("flashinfer")
-        or torch.zeros(logits.shape[0], dtype=torch.int64),
+        lambda logits, _top_k, _top_p: (
+            calls.append("flashinfer")
+            or torch.zeros(logits.shape[0], dtype=torch.int64)
+        ),
     )
     monkeypatch.setattr(
         sampler_module,
@@ -1488,8 +1493,10 @@ def test_sampler_selects_flashinfer_without_an_explicit_seed(
     monkeypatch.setattr(
         sampler_module,
         "gumbel_sample",
-        lambda logits, *_args, **_kwargs: calls.append("triton_sample")
-        or torch.zeros(logits.shape[0], dtype=torch.int64),
+        lambda logits, *_args, **_kwargs: (
+            calls.append("triton_sample")
+            or torch.zeros(logits.shape[0], dtype=torch.int64)
+        ),
     )
 
     subject.sample(
@@ -1629,9 +1636,7 @@ def _run_self_check_sampler_branch(runner, sampling_params):
     use_flashinfer = runner.sampler.use_flashinfer and (
         sampling_params.top_k != -1 or sampling_params.top_p != 1.0
     )
-    runner.sampler._sample_random(
-        None, None, None, None, None, None, use_flashinfer
-    )
+    runner.sampler._sample_random(None, None, None, None, None, None, use_flashinfer)
 
 
 def test_uno_startup_jit_self_check_reports_compile_without_forcing_warn_abort(
@@ -1696,9 +1701,9 @@ def test_uno_startup_jit_self_check_reports_compile_without_forcing_warn_abort(
     assert runner.speculator._step == 0
     assert not result.passed
     assert result.monitor_armed
-    assert result.sampler_calls == {name: 1 for name in (
-        "top_p_only", "top_k_top_p", "top_k_only", "neither"
-    )}
+    assert result.sampler_calls == {
+        name: 1 for name in ("top_p_only", "top_k_top_p", "top_k_only", "neither")
+    }
     assert len(result.compilations) == 4
     assert any(
         "kernel=%s" in call.args[0]
@@ -1896,9 +1901,7 @@ def test_uno_self_check_launch_counter_only_records_an_armed_scope(monkeypatch):
 
             return launch
 
-    monkeypatch.setattr(
-        topk_topp_triton, "_topk_topp_kernel", FakeTritonKernel("topk")
-    )
+    monkeypatch.setattr(topk_topp_triton, "_topk_topp_kernel", FakeTritonKernel("topk"))
     monkeypatch.setattr(
         topk_topp_triton, "_topp_sb_step_kernel", FakeTritonKernel("step")
     )
@@ -1986,13 +1989,19 @@ def test_uno_launch_key_debug_records_sampler_launches_only_in_startup_scope(
 def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
     """Build CPU collaborators around the production sample_tokens entry."""
     from vllm.v1.worker.gpu import model_runner as model_runner_module
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+    from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
 
     events: list[str] = []
 
     class FakeAsyncOutput:
         def __init__(self, **kwargs) -> None:
             self.model_runner_output = kwargs["model_runner_output"]
+            self.sampled_token_ids = kwargs["sampler_output"].sampled_token_ids.numpy()
+            self.num_sampled_tokens_np = kwargs["num_sampled_tokens"].numpy()
+            self.copy_event = SimpleNamespace(
+                synchronize=lambda: events.append("copy-ready")
+            )
             events.append("output")
 
     monkeypatch.setattr(model_runner_module, "AsyncOutput", FakeAsyncOutput)
@@ -2008,16 +2017,12 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
     )
 
     runner = object.__new__(GPUModelRunner)
-    input_batch = SimpleNamespace(
-        req_ids=[f"request-{i}" for i in range(num_reqs)],
-        num_reqs=num_reqs,
-        num_draft_tokens=0,
-        logits_indices=torch.arange(num_reqs),
-        idx_mapping=torch.arange(num_reqs),
-        query_start_loc=torch.arange(num_reqs + 1),
+    input_batch = InputBatch.make_dummy(
+        num_reqs, num_reqs, InputBuffers(num_reqs, num_reqs, torch.device("cpu"))
     )
+    input_batch.req_ids = [f"request-{i}" for i in range(num_reqs)]
     target_hidden = torch.tensor([[1.0, 2.0]]).repeat(num_reqs, 1)
-    runner.execute_model_state = SimpleNamespace(
+    runner.execute_model_state = ExecuteModelState(
         input_batch=input_batch,
         attn_metadata={},
         slot_mappings_by_layer={},
@@ -2033,6 +2038,7 @@ def _uno_sample_tokens_runner(monkeypatch, num_reqs=1):
         uno_step_trace=None,
     )
     runner.is_last_pp_rank = True
+    runner._uno_tail = None
     runner.pcp_manager = None
     runner.pp_handler = None
     runner.check_ep_fault = False
@@ -2108,9 +2114,12 @@ def test_uno_prefill_preserves_base_output_before_proposal_order(
 ):
     """D2H is issued before postprocessing, with or without a tail proposal."""
     runner, proposer, events, output_type = _uno_sample_tokens_runner(monkeypatch)
-    runner.execute_model_state.skip_speculator_proposal = skip_proposal
-    if skip_proposal:
-        runner.execute_model_state.zero_next_draft_req_ids = frozenset({"request-0"})
+    runner.execute_model_state = runner.execute_model_state._replace(
+        skip_speculator_proposal=skip_proposal,
+        zero_next_draft_req_ids=(
+            frozenset({"request-0"}) if skip_proposal else frozenset()
+        ),
+    )
 
     output = runner.sample_tokens(None)
 

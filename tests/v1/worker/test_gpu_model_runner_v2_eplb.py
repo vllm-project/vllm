@@ -173,7 +173,7 @@ def test_v2_setup_eplb_from_mapping_rebuilds_state(monkeypatch):
 def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
     events = []
     runner = _make_runner(is_last_pp_rank=False, num_speculative_steps=0)
-    runner.execute_model_state = SimpleNamespace(
+    runner.execute_model_state = mrv2.ExecuteModelState(
         input_batch=SimpleNamespace(
             num_reqs=2, idx_mapping=torch.zeros(2, dtype=torch.int32)
         ),

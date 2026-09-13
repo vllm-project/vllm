@@ -68,6 +68,7 @@ from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import (
     UNO_STEP_TIMING_DEBUG,
+    UNO_TAIL_MODE,
     GrammarOutput,
     SchedulerOutput,
 )
@@ -192,6 +193,7 @@ from vllm.v1.worker.gpu.uno_step_timing import (
     UnoStepTimingTrace,
     UnoStepTimingTracer,
 )
+from vllm.v1.worker.gpu.uno_tail import UnoTailState, trim_finished_grammar
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
     KVBlockZeroer,
@@ -313,6 +315,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
         self._zero_next_draft_req_ids: frozenset[str] = frozenset()
+        self._uno_tail = (
+            UnoTailState(self.max_model_len)
+            if self.speculative_config is not None
+            and self.speculative_config.method == "uno"
+            and UNO_TAIL_MODE == "exact"
+            else None
+        )
 
         self.pcp_manager: pcp.PCPManager | None = None
 
@@ -1363,6 +1372,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return cuda_graph_size
 
     def _remove_request(self, req_id: str) -> bool:
+        if self._uno_tail is not None:
+            self._uno_tail.remove_request(req_id)
         # Call model_state.remove_request *before* req_states.remove_request
         # so the model_state can still look up the slot index.
         self.model_state.remove_request(req_id)
@@ -1428,6 +1439,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
             )
+            if self._uno_tail is not None:
+                self._uno_tail.add_request(new_req_data)
             req_index = self.req_states.req_id_to_index[req_id]
             if self.adaptive_verification is not None:
                 self.adaptive_verification.add_request(req_index)
@@ -1927,6 +1940,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         valid_dummy_state_slots: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         uno_step_trace: UnoStepTimingTrace | None = None
+        uno_original_drafts: dict[str, int] = {}
         if not dummy_run:
             # Update the request states.
             self.update_pp_decode_requests()
@@ -1935,6 +1949,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
+            if self._uno_tail is not None:
+                scheduler_output, uno_original_drafts = self._uno_tail.prepare_followup(
+                    scheduler_output
+                )
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
@@ -2276,6 +2294,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_stats=cudagraph_stats,
             skip_speculator_proposal=scheduler_output.skip_speculator_proposal,
             zero_next_draft_req_ids=frozenset(scheduler_output.zero_next_draft_req_ids),
+            uno_original_drafts=uno_original_drafts,
             uno_step_trace=uno_step_trace,
         )
 
@@ -2314,6 +2333,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         skip_speculator_proposal = self.execute_model_state.skip_speculator_proposal
         zero_next_draft_req_ids = self.execute_model_state.zero_next_draft_req_ids
         uno_step_trace = self.execute_model_state.uno_step_trace
+        uno_original_drafts = self.execute_model_state.uno_original_drafts
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2359,6 +2379,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if uno_step_trace is not None:
             uno_step_trace.start_stage("sample")
+        if uno_original_drafts:
+            counts = input_batch.num_draft_tokens_per_req
+            grammar_output = trim_finished_grammar(
+                grammar_output,
+                uno_original_drafts,
+                dict(zip(input_batch.req_ids, counts)) if counts is not None else {},
+            )
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
@@ -2435,6 +2462,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         if uno_step_trace is not None:
             uno_step_trace.end_stage("output_publish")
+
+        if is_uno and self._uno_tail is not None:
+            zero_next_draft_req_ids = zero_next_draft_req_ids | self._uno_tail.observe(
+                async_output
+            )
+            skip_speculator_proposal = bool(input_batch.req_ids) and all(
+                req_id in zero_next_draft_req_ids for req_id in input_batch.req_ids
+            )
 
         if self.speculator is not None and not skip_speculator_proposal:
             assert self.sampler is not None
@@ -2638,6 +2673,7 @@ class ExecuteModelState(NamedTuple):
     cudagraph_stats: CUDAGraphStat | None
     skip_speculator_proposal: bool = False
     zero_next_draft_req_ids: frozenset[str] = frozenset()
+    uno_original_drafts: dict[str, int] | None = None
     uno_step_trace: UnoStepTimingTrace | None = None
 
 
