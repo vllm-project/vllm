@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 import vllm._custom_ops as ops
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
     causal_conv1d_fn_cpu as causal_conv1d_torch,
@@ -23,6 +24,8 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+
+logger = init_logger(__name__)
 
 _CPU_GDN_ATTENTION_OPS_REGISTERED = False
 
@@ -421,6 +424,21 @@ def _spec_forward(
         and num_spec_decodes > 0
         and bool(torch.all(seq_lens == seq_lens[0]).item())
         and int(seq_lens[0].item()) > 0
+        # The C++ multi-token kernel validates each sequence's num_accepted
+        # against [1, seqlen] and the history window against state_len
+        # (the TORCH_CHECK contract in conv.cpp). Constrained decoding can
+        # reject every draft or shrink a step below the reported num_accepted,
+        # so any sequence outside the contract routes the batch through the
+        # fallback loop, which clamps instead of crashing (#56419 retest).
+        and bool(
+            (
+                (num_accepted[:num_spec_decodes] >= 1)
+                & (num_accepted[:num_spec_decodes] <= int(seq_lens[0].item()))
+                & (num_accepted[:num_spec_decodes] <= state_len - width + 2)
+            )
+            .all()
+            .item()
+        )
     )
     if can_use_native_conv:
         q_i = int(seq_lens[0].item())
@@ -445,9 +463,30 @@ def _spec_forward(
             q_i = int(seq_lens[i].item())
             if q_i == 0:
                 continue
+            acc_i = int(num_acc_cpu[i].item())
+            # Only the tokens actually produced this step can be committed:
+            # constrained decoding can reject every draft (acc == 0) or shrink
+            # a step below the reported num_accepted, and the C++ kernel's
+            # [1, seqlen] check then rejects the whole batch. Clamp to what
+            # exists instead of crashing (#56419 retest), and log the shrink
+            # once so the real values are visible in the field.
+            acc_eff = min(max(acc_i, 0), q_i)
+            if acc_i > q_i:
+                logger.warning_once(
+                    "GDN CPU spec path: num_accepted=%d exceeds the step's "
+                    "query length %d; committing only the produced tokens",
+                    acc_i,
+                    q_i,
+                )
+            # acc == 0 (or a clamped-out step) must not move the history
+            # window (mirrors the GPU/SSM tl.maximum(acc - 1, 0) guard), and
+            # the window never reads past the buffer.
+            offset = max(acc_eff - 1, 0)
+            offset = (
+                min(offset, max(state_len - (width - 1), 0)) if acc_eff > 0 else offset
+            )
             start = int(seq_starts[i].item())
             slot0 = int(col0[i].item())
-            offset = int(num_acc_cpu[i].item()) - 1
             B = conv_buf[slot0]  # (dim, state_len)
             x_seq = mixed_qkv_spec[start : start + q_i].transpose(0, 1).to(B.dtype)
             prior = B[:, offset : offset + (width - 1)]
@@ -456,11 +495,13 @@ def _spec_forward(
             if silu:
                 out = F.silu(out)
             conv_out[start : start + q_i] = out.transpose(0, 1).to(conv_out.dtype)
-            # Roll the buffer: drop the accepted history from the front, append
-            # the new draft tokens, keep total length == state_len.
-            keep = B[:, offset + 1 : offset + 1 + (state_len - q_i)]
-            new_B = torch.cat([keep, x_seq], dim=-1)
-            B.copy_(new_B)
+            if acc_eff > 0:
+                # Roll the buffer: drop the accepted history from the front,
+                # append the new draft tokens, keep total length == state_len.
+                q_eff = min(q_i, state_len)
+                keep = B[:, offset + 1 : offset + 1 + (state_len - q_eff)]
+                new_B = torch.cat([keep, x_seq[:, q_i - q_eff :]], dim=-1)
+                B.copy_(new_B)
 
     # ---- 2. Recurrent (multi-slot SSM state) ----
     # Single fused kernel call: it runs the recurrence over each sequence's
