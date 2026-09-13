@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import bisect
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -8,10 +9,13 @@ import torch
 
 from vllm.models.deepseek_v4_1.common import engram as engram_ops
 from vllm.models.deepseek_v4_1.common.engram import (
-    Engram,
-    NgramHashState,
-    ParallelEngramEmbedding,
+    Engram as CommonEngram,
 )
+from vllm.models.deepseek_v4_1.common.engram import (
+    NgramHashState,
+)
+from vllm.models.deepseek_v4_1.nvidia import engram as nvidia_engram_ops
+from vllm.models.deepseek_v4_1.nvidia.engram import Engram, ParallelEngramEmbedding
 from vllm.platforms import current_platform
 
 
@@ -107,7 +111,7 @@ def test_fused_engram_post_wkv_matches_reference(
     )
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: tp_rank)
 
-    module = Engram.__new__(Engram)
+    module = CommonEngram.__new__(CommonEngram)
     torch.nn.Module.__init__(module)
     module.dim = dim
     module.hc_mult = hc_mult
@@ -116,7 +120,7 @@ def test_fused_engram_post_wkv_matches_reference(
     module.use_sequence_parallel = use_sequence_parallel
     module.embed_tokens = torch.nn.Identity()
     # `forward` reads rows staged by `prepare_embeddings`, so inject kv there.
-    module.embed_tokens.tp_size = 1
+    module.embed_tokens.tp_size = module.embed_tokens.n_hash_cols = 1
     module.staged_rows = kv.unsqueeze(1)
     if use_sequence_parallel:
         padded = torch.nn.functional.pad(kv, (0, 0, 0, (-num_kv_tokens) % tp_size))
@@ -149,6 +153,25 @@ def _hash_state(use_slot_cache: bool) -> NgramHashState:
     state.swa_cache_module = torch.nn.Module()
     state.swa_cache_module.kv_cache = torch.empty(0)
     return state
+
+
+@pytest.mark.parametrize("num_tokens", [0, 7])
+def test_engram_dummy_hashes_leave_history_untouched(num_tokens):
+    """Dummy forwards have no valid table IDs and do not alter cached history."""
+    state = _hash_state(use_slot_cache=True)
+    state.multipliers = torch.empty(2, 4, dtype=torch.int64)
+    state.primes = torch.empty(2, 3, 8, dtype=torch.int64)
+    state._cache = torch.arange(16, dtype=torch.int32)
+    history = state._cache.clone()
+
+    hashes, keep = state.dummy_hashes(torch.arange(num_tokens))
+
+    assert hashes.shape == (num_tokens, 2, 24)
+    assert hashes.dtype == torch.int32
+    assert torch.all(hashes == engram_ops.DEAD_ID)
+    assert keep.shape == (num_tokens,) and keep.dtype == torch.bool
+    assert not keep.any()
+    torch.testing.assert_close(state._cache, history)
 
 
 @pytest.mark.parametrize("num_blocks", [4, 100])
@@ -533,9 +556,11 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
     layer = ParallelEngramEmbedding.__new__(ParallelEngramEmbedding)
     torch.nn.Module.__init__(layer)
     layer.dim, layer.block_size, layer.tp_size = dim, block, 1
+    layer.dp_size = 1
     layer.n_hash_cols = layer.part_n_hash_cols = 24
     layer.head_start = 0
     layer.cpu_offload = cpu_offload
+    layer.dp_shared_memory = False
     layer.part_num_embeddings = rows
     # A window strictly inside the table, so unowned rows are exercised too.
     layer.vocab_start_idx, layer.vocab_end_idx = rows // 4, rows // 4 + rows // 2
@@ -559,12 +584,27 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
     return layer
 
 
+@pytest.mark.parametrize(
+    "tp_size,dp_size,n_heads", [(1, 4, 5), (2, 2, 5), (4, 1, 6), (8, 1, 6)]
+)
+def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch):
+    """Reject empty owners before allocating weights or accessing CUDA."""
+    monkeypatch.setattr(
+        engram_ops, "get_tensor_model_parallel_world_size", lambda: tp_size
+    )
+    monkeypatch.setattr(nvidia_engram_ops, "get_engram_dp_size", lambda: dp_size)
+    monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(nvidia_engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
+    with pytest.raises(AssertionError, match="ranks without hash heads"):
+        ParallelEngramEmbedding(n_heads * 17, 64, (17,) * n_heads)
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("cpu_offload", [False, True])
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
 def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeypatch):
     """Keep complete buckets and reconstruct head order, including TP padding."""
-    head_sizes = (17, 19, 23, 29, 31, 37)
+    head_sizes = (17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73)
     num_rows, dim = sum(head_sizes), 64
     torch.manual_seed(0)
     weight = torch.randn(num_rows + 7, dim).to(torch.float8_e4m3fn)
@@ -623,7 +663,7 @@ def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeyp
     module.staged_rows = torch.empty_like(shards[0])
     module.prepare_embeddings(ids)
     torch.testing.assert_close(module.embed(ids), expected, rtol=0, atol=0)
-    # Slicing before head reordering must preserve padded heads and empty owners.
+    # Slicing before head reordering must preserve padded heads and tokens.
     module.use_sequence_parallel = True
     chunk = (len(ids) + tp_size - 1) // tp_size
     padded = torch.nn.functional.pad(expected, (0, 0, 0, 0, 0, (-len(ids)) % tp_size))
@@ -634,6 +674,31 @@ def test_engram_head_shards_reconstruct_checkpoint(cpu_offload, tp_size, monkeyp
         torch.testing.assert_close(
             module.embed(ids), padded[rank * chunk : (rank + 1) * chunk], rtol=0, atol=0
         )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+def test_engram_lookup_reuses_jit_across_token_shapes():
+    """Runtime token counts and launch grids must share one JIT variant."""
+    layer = _make_embedding(cpu_offload=False)
+    kernel = engram_ops._engram_lookup_kernel
+    kernel_cache = kernel.device_caches[torch.accelerator.current_device_index()][0]
+    kernel_cache.clear()
+
+    cache_sizes = []
+    for background in (False, True):
+        for num_tokens in (1, 7, 256):
+            ids = torch.zeros(num_tokens, 24, dtype=torch.int32, device="cuda")
+            out = torch.empty(
+                num_tokens,
+                24,
+                layer.dim,
+                dtype=torch.bfloat16,
+                device="cuda",
+            )
+            layer.lookup(ids, out, background=background)
+            cache_sizes.append(len(kernel_cache))
+
+    assert cache_sizes == [1] * len(cache_sizes)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
@@ -660,19 +725,147 @@ def test_engram_lookup_matches_torch(cpu_offload, background, num_tokens):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-@pytest.mark.parametrize("cpu_offload", [False, True])
+@pytest.mark.parametrize(
+    "backend,cpu_offload", [("nvidia", None), ("nvidia", False), ("common", False)]
+)
+def test_engram_constructor_honors_offload(monkeypatch, backend, cpu_offload):
+    """Default offload uses pinned storage and a side stream; False uses HBM."""
+    from vllm.config import EngramConfig
+
+    config = SimpleNamespace(hidden_size=16, hc_mult=1, rms_norm_eps=1e-6)
+    layout = SimpleNamespace(
+        num_embeddings=(72,),
+        head_dim=32,
+        max_ngram_size=2,
+        n_heads=24,
+        primes=(((3,) * 24,),),
+    )
+    vllm_config = SimpleNamespace(
+        engram_config=EngramConfig()
+        if cpu_offload is None
+        else EngramConfig(cpu_offload=cpu_offload),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+    )
+    offloaded = backend == "nvidia" and vllm_config.engram_config.cpu_offload
+    if backend == "common":
+        vllm_config.engram_config = None
+    monkeypatch.setattr(engram_ops, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(
+        nvidia_engram_ops, "get_current_vllm_config", lambda: vllm_config
+    )
+    monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(
+        engram_ops, "ReplicatedLinear", lambda *a, **k: torch.nn.Identity()
+    )
+    with torch.device("cuda"):
+        cls = Engram if backend == "nvidia" else CommonEngram
+        module = cls(config, None, layout, 0, False, "engram")
+    layer = module.embed_tokens
+    if offloaded:
+        assert layer.weight.device.type == "cpu" and layer.weight.is_pinned()
+    else:
+        assert layer.weight.device.type == "cuda"
+    layer.weight.data.copy_(torch.randn(layer.weight.shape).to(torch.float8_e4m3fn))
+    layer.weight_scale_inv.data.fill_(127)
+    streams = []
+    lookup = layer.lookup
+
+    def track_lookup(ids, out, background=False):
+        streams.append(torch.cuda.current_stream())
+        lookup(ids, out, background=background)
+
+    layer.lookup = track_lookup
+    main = torch.cuda.current_stream()
+    ids = torch.randint(
+        layer.vocab_start_idx,
+        layer.vocab_end_idx,
+        (8, 24),
+        device="cuda",
+        dtype=torch.int32,
+    )
+    module.prepare_embeddings(ids)
+    expected = _reference_lookup(
+        layer.weight.cuda(),
+        layer.weight_scale_inv.cuda(),
+        ids,
+        layer.vocab_start_idx,
+        layer.vocab_end_idx,
+    )
+    torch.testing.assert_close(module.embed(ids), expected, atol=0, rtol=0)
+    if offloaded:
+        assert streams == [module._prefetch_stream]
+        assert streams[0] != main
+    else:
+        assert streams == [main]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "cpu_offload,delay",
+    [(False, None), (True, None), (True, "producer"), (True, "lookup")],
+)
 @pytest.mark.parametrize("capture", ["eager", "full", "breakable"])
-def test_engram_prepared_rows_survive_graph_breaks(cpu_offload, capture):
-    """Consume early lookup results after a break, with fresh IDs each replay."""
-    _run_engram_prepared_rows(cpu_offload, capture)
+def test_engram_prepared_rows_survive_graph_breaks(cpu_offload, capture, delay):
+    """Temporary lookup IDs survive allocator reuse and graph replay."""
+    _run_engram_prepared_rows(cpu_offload, capture, delay=delay)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "missing_dependency", ["record_stream", "producer_wait", "consumer_wait"]
+)
+def test_engram_prefetch_detects_missing_dependency(monkeypatch, missing_dependency):
+    """Negative controls must expose incorrect rows when a dependency is removed."""
+    if (
+        missing_dependency == "record_stream"
+        and torch.cuda.memory.get_allocator_backend() != "native"
+    ):
+        pytest.skip(
+            "The allocator reuse negative control requires the native allocator"
+        )
+
+    def start(self, hash_ids, rows, stream):
+        if missing_dependency != "producer_wait":
+            stream.wait_stream(torch.cuda.current_stream())
+        if missing_dependency != "record_stream":
+            hash_ids.record_stream(stream)
+        with torch.cuda.stream(stream):
+            self.embed_tokens.lookup(hash_ids, rows, background=True)
+
+    def finish(self, stream):
+        pass
+
+    monkeypatch.setattr(Engram, "_start_prefetch", start)
+    if missing_dependency == "consumer_wait":
+        monkeypatch.setattr(Engram, "_finish_prefetch", finish)
+    delay = "producer" if missing_dependency == "producer_wait" else "lookup"
+    try:
+        with pytest.raises(
+            AssertionError, match=r"Tensor-likes are not (?:equal|close)!"
+        ):
+            _run_engram_prepared_rows(True, "eager", delay=delay)
+    finally:
+        torch.accelerator.synchronize()
 
 
 def _run_engram_prepared_rows(
-    cpu_offload, capture, tp_size=1, rank=0, use_sequence_parallel=False
+    cpu_offload, capture, tp_size=1, rank=0, use_sequence_parallel=False, delay=None
 ):
-    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
+    from vllm.compilation.breakable_cudagraph import (
+        BreakableCUDAGraphCapture,
+        eager_break_during_capture,
+    )
 
     layer = _make_embedding(cpu_offload)
+    if delay == "lookup":
+        lookup = layer.lookup
+
+        def delayed_lookup(indices, out, background=False):
+            torch.cuda._sleep(2_000_000)
+            lookup(indices, out, background=background)
+
+        layer.lookup = delayed_lookup
     cols, num_tokens = (23, 65) if use_sequence_parallel else (24, 64)
     layer.n_hash_cols = cols
     layer.tp_size = tp_size
@@ -681,6 +874,17 @@ def _run_engram_prepared_rows(
     engram = Engram.__new__(Engram)
     torch.nn.Module.__init__(engram)
     engram.embed_tokens = layer
+    engram._prefetch_stream = torch.cuda.Stream() if cpu_offload else None
+    # Exercise the production eager boundaries even when the test process
+    # imported Engram before breakable graphs were enabled.
+    if capture == "breakable":
+        import vllm.envs as envs
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(envs, "VLLM_USE_BREAKABLE_CUDAGRAPH", True)
+            for name in ("_start_prefetch", "_finish_prefetch"):
+                fn = eager_break_during_capture(inspect.unwrap(getattr(Engram, name)))
+                setattr(engram, name, fn.__get__(engram, Engram))
     engram.use_sequence_parallel = use_sequence_parallel
     engram.staged_rows = torch.empty(
         num_tokens,
@@ -709,7 +913,12 @@ def _run_engram_prepared_rows(
         embed = torch.compile(embed, backend="eager", fullgraph=True, dynamic=True)
 
     def step(cap=None):
-        engram.prepare_embeddings(src)
+        if delay == "producer":
+            torch.cuda._sleep(2_000_000)
+        # Drop the last reference to a non-contiguous input after launching lookup.
+        engram.prepare_embeddings(hashes.clone()[:, 1])
+        # Exercise same-size allocator reuse before consuming the prefetched rows.
+        torch.empty_like(hashes).fill_(layer.part_num_embeddings - 1)
         if cap is not None:
             cap.add_eager(lambda: None)
         out.copy_(embed(src))
@@ -730,9 +939,12 @@ def _run_engram_prepared_rows(
         with torch.cuda.stream(warmup), graph:
             step(graph)
         torch.cuda.current_stream().wait_stream(warmup)
-        assert graph.num_graphs == 2
+        assert graph.num_eager_breaks == (3 if cpu_offload else 1)
 
     for _ in range(3):
+        # Eager prefill can overwrite staging rows between decode replays.
+        hashes.random_(0, layer.part_num_embeddings)
+        step()
         hashes.random_(0, layer.part_num_embeddings)
         if graph is None:
             step()
