@@ -444,6 +444,36 @@ class DelegatingParser(Parser):
         state.history_tool_call_cnt += 1
         return tool_call_id
 
+    def _is_auto_tool_choice(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+        enable_auto_tools: bool,
+    ) -> bool:
+        """Determine whether automatic tool-call parsing should be used.
+
+        Returns True when tool calling is enabled and the request specifies
+        'auto' tool choice (or no explicit tool choice), or when fallback to auto
+        parsing is necessary because named/required tool choices are unsupported.
+        """
+        tool_parser = self._tool_parser
+        if tool_parser is None:
+            return False
+
+        supports_required_and_named = tool_parser.supports_required_and_named
+        is_named_tool_choice = request.tool_choice and isinstance(
+            request.tool_choice,
+            (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+        )
+        is_required_tool_choice = request.tool_choice == "required"
+        return enable_auto_tools and (
+            request.tool_choice == "auto"
+            or request.tool_choice is None
+            or (
+                not supports_required_and_named
+                and (is_named_tool_choice or is_required_tool_choice)
+            )
+        )
+
     def _extract_tool_calls(
         self,
         content: str | None,
@@ -466,14 +496,7 @@ class DelegatingParser(Parser):
             (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
         )
         is_required_tool_choice = request.tool_choice == "required"
-        is_auto_tool_choice = enable_auto_tools and (
-            request.tool_choice == "auto"
-            or request.tool_choice is None
-            or (
-                not supports_required_and_named
-                and (is_named_tool_choice or is_required_tool_choice)
-            )
-        )
+        is_auto_tool_choice = self._is_auto_tool_choice(request, enable_auto_tools)
 
         tool_calls = list[FunctionCall]()
         if is_named_tool_choice and supports_required_and_named:
@@ -834,6 +857,23 @@ class DelegatingParser(Parser):
             request=request,
             enable_auto_tools=enable_auto_tools,
         )
+        # If no tool calls were found in content, check if the reasoning region
+        # contains tool calls (e.g. model emitted tool calls inside <think>).
+        # Restrict to automatic tool-call parsing to avoid treating reasoning
+        # text as arguments for named or required tool choices.
+        if (
+            not tool_calls
+            and reasoning
+            and self._is_auto_tool_choice(request, enable_auto_tools)
+        ):
+            reasoning_tool_calls, remaining_reasoning = self._extract_tool_calls(
+                content=reasoning,
+                request=request,
+                enable_auto_tools=enable_auto_tools,
+            )
+            if reasoning_tool_calls:
+                tool_calls = reasoning_tool_calls
+                reasoning = remaining_reasoning.strip() if remaining_reasoning else None
         return reasoning, content, tool_calls
 
     def parse_delta(
