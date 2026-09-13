@@ -343,6 +343,9 @@ class Fp8PerBlockOnlineLinearMethod(OnlineLinearBase):
         replace_parameter(layer, "weight", qweight.data)
         replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
 
+        if self.requantization_source is not None and hasattr(layer, "weight_scale"):
+            del layer.weight_scale
+
         self.fp8_linear.process_weights_after_loading(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)

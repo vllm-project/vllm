@@ -106,6 +106,7 @@ from vllm.model_executor.models.granitemoe import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx942, on_gfx950
@@ -320,6 +321,40 @@ def test_online_prequantized_compatibility(
         assert layer.quant_method.requantization_source is None
 
 
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_rocm())
+    or not is_quant_method_supported("fp8"),
+    reason="Requires FP8 support on CUDA or ROCm.",
+)
+def test_online_block_fp8_requantization_removes_source_scales(
+    default_vllm_config, dist_init, workspace_init
+) -> None:
+    """Blockwise FP8 replaces MXFP8 scales with its own scale parameter."""
+    default_vllm_config.model_config = ModelConfig(dtype="bfloat16")
+    quant_config = _fully_quantized_modelopt_mxfp8_config()
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(linear="fp8_per_block")
+    )
+    with set_default_torch_dtype(torch.bfloat16), torch.device(DEVICE):
+        layer = ColumnParallelLinear(
+            input_size=256,
+            output_size=256,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+            prefix="model.layers.0.self_attn.o_proj",
+            disable_tp=True,
+        )
+        with torch.no_grad():
+            layer.weight.fill_(1)
+            layer.weight_scale.fill_(127)  # E8M0 encoding of scale 1.
+
+        layer.quant_method.process_weights_after_loading(layer)
+
+        assert not hasattr(layer, "weight_scale")
+        assert layer.weight_scale_inv.numel() > 0
+
+
 def test_online_ignore_keeps_checkpoint_quantization_linear(
     default_vllm_config, dist_init, monkeypatch
 ):
@@ -350,14 +385,19 @@ def test_online_ignore_keeps_checkpoint_quantization_linear(
 
 
 def test_online_quantization_rejects_prequantized_moe(
-    default_vllm_config, dist_init
+    default_vllm_config, dist_init, monkeypatch
 ) -> None:
-    """Online linear and MoE quantization reject a pre-quantized MoE layer."""
+    """Reject pre-quantized MoE before constructing an online target backend."""
     default_vllm_config.model_config = ModelConfig()
     prefix = "model.layers.0.mlp.experts"
     quant_config = _fully_quantized_quark_config()
     quant_config.online_quantization_config = OnlineQuantizationConfig(
         QuantizationConfigArgs(linear="mxfp4", moe="mxfp4")
+    )
+    monkeypatch.setattr(
+        quant_config.online_quantization_config,
+        "get_quant_method",
+        lambda *args: pytest.fail("unsupported online backend must not be constructed"),
     )
 
     with pytest.raises(

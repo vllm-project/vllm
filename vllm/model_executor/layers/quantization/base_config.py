@@ -292,9 +292,6 @@ def resolve_quant_method(
         UnquantizedLinearMethod,
     )
     from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
-    from vllm.model_executor.layers.quantization.online.moe_base import (
-        OnlineMoEMethodBase,
-    )
 
     base_quant_method = quant_config.get_quant_method(layer, prefix)
     if quant_config.online_quantization_config is None:
@@ -321,6 +318,11 @@ def resolve_quant_method(
             # The checkpoint quant method is applied as there is no online override.
             return base_quant_method
 
+        if isinstance(layer, RoutedExperts):
+            raise NotImplementedError(
+                "Requantizing checkpoint-quantized MoE layers is not supported."
+            )
+
         online_quant_method = quant_config.online_quantization_config.get_quant_method(
             layer, prefix
         )
@@ -329,7 +331,7 @@ def resolve_quant_method(
             base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
         )
 
-        assert isinstance(online_quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
+        assert isinstance(online_quant_method, OnlineLinearBase)
         online_quant_method.set_requantization_source(base_quant_method)
 
         # The online method dequantizes the checkpoint method before requantizing.
