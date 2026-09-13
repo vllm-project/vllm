@@ -15,6 +15,17 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.plamo3 import (
+    BEGIN_TOOL_ARGUMENTS,
+    BEGIN_TOOL_NAME,
+    BEGIN_TOOL_REQUEST,
+    BEGIN_TOOL_REQUESTS,
+    END_TOOL_ARGUMENTS,
+    END_TOOL_NAME,
+    END_TOOL_REQUEST,
+    END_TOOL_REQUESTS,
+    EOT,
+)
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.deepseekv3_tool_parser import DeepSeekV3ToolParser
 from vllm.tool_parsers.deepseekv4_engine_tool_parser import DeepSeekV4EngineToolParser
@@ -28,6 +39,7 @@ from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 from vllm.tool_parsers.kimi_k3_tool_parser import KimiK3ToolParser
 from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
 from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
+from vllm.tool_parsers.plamo3_engine_tool_parser import Plamo3EngineToolParser
 from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
@@ -226,6 +238,129 @@ def test_hermes_required_tool_calls_use_empty_separator():
 
     assert tag is not None
     assert tag.format.separator == ""
+
+
+def _plamo3_call(name: str, arguments: str) -> str:
+    return (
+        BEGIN_TOOL_REQUEST
+        + BEGIN_TOOL_NAME
+        + name
+        + END_TOOL_NAME
+        + BEGIN_TOOL_ARGUMENTS
+        + arguments
+        + END_TOOL_ARGUMENTS
+        + END_TOOL_REQUEST
+    )
+
+
+def _plamo3_requests(*calls: str, eot: bool = False) -> str:
+    return (
+        BEGIN_TOOL_REQUESTS + "".join(calls) + END_TOOL_REQUESTS + (EOT if eot else "")
+    )
+
+
+def _plamo3_grammar(tool_choice, tools):
+    tag = get_model_structural_tag(
+        model="plamo3",
+        tools=tools,
+        tool_choice=tool_choice,
+        reasoning=False,
+    )
+    assert isinstance(tag, StructuralTag)
+    return Grammar.from_structural_tag(tag)
+
+
+def _plamo3_tools() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        ),
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_time",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"timezone": {"type": "string"}},
+                    "required": ["timezone"],
+                },
+            },
+        ),
+    ]
+
+
+def test_plamo3_registered_as_vllm_structural_tag_model():
+    assert "plamo3" in VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
+    assert Plamo3EngineToolParser.structural_tag_model == "plamo3"
+    assert Plamo3EngineToolParser.supports_required_and_named is False
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _plamo3_requests(_plamo3_call("get_weather", '{"city":"Tokyo"}')),
+        _plamo3_requests(
+            _plamo3_call("get_weather", '{"city":"Tokyo"}'),
+            _plamo3_call("get_time", '{"timezone":"Asia/Tokyo"}'),
+            eot=True,
+        ),
+    ],
+)
+def test_plamo3_required_accepts_complete_request_blocks(body: str):
+    assert _is_grammar_accept_string(_plamo3_grammar("required", _plamo3_tools()), body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _plamo3_requests(_plamo3_call("unknown", '{"city":"Tokyo"}')),
+        _plamo3_requests(_plamo3_call("get_weather", "{}")),
+        BEGIN_TOOL_REQUESTS + _plamo3_call("get_weather", '{"city":"Tokyo"}'),
+    ],
+)
+def test_plamo3_required_rejects_invalid_request_blocks(body: str):
+    assert not _is_grammar_accept_string(
+        _plamo3_grammar("required", _plamo3_tools()),
+        body,
+    )
+
+
+def test_plamo3_auto_allows_text_or_a_tool_request_block(sample_tools_strict):
+    grammar = _plamo3_grammar("auto", sample_tools_strict)
+
+    assert _is_grammar_accept_string(grammar, "Plain response")
+    assert _is_grammar_accept_string(
+        grammar,
+        _plamo3_requests(_plamo3_call("get_weather", '{"city":"Tokyo"}')),
+    )
+
+
+def test_plamo3_forced_stops_after_the_named_tool_call():
+    tools = _plamo3_tools()
+    tool_choice = ChatCompletionNamedToolChoiceParam(
+        function=ChatCompletionNamedFunction(name="get_weather")
+    )
+    grammar = _plamo3_grammar(tool_choice, tools)
+
+    assert _is_grammar_accept_string(
+        grammar,
+        _plamo3_requests(_plamo3_call("get_weather", '{"city":"Tokyo"}')),
+    )
+    assert not _is_grammar_accept_string(
+        grammar,
+        _plamo3_requests(
+            _plamo3_call("get_weather", '{"city":"Tokyo"}'),
+            _plamo3_call("get_time", '{"timezone":"Asia/Tokyo"}'),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
