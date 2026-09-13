@@ -17,7 +17,6 @@ Key components:
 import atexit
 import concurrent
 import copy
-import hashlib
 import os
 import queue
 import signal
@@ -49,6 +48,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.common import (
     HF3FSRequestMetadata,
     LoadBlockInfo,
     RequestSchedulingState,
+    external_block_keys,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.gather_scatter_helper import (  # noqa: E501
     CopyBufferAllocator,
@@ -64,6 +64,7 @@ from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.utils import create_metric_per_engine
@@ -482,7 +483,13 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         # Core configuration
         self._vllm_config = vllm_config
         self._role = role
-        self._block_size = vllm_config.cache_config.block_size
+        # Block ids are indexed at the scheduler block size and Request.block_hashes
+        # at the hash block size; the two differ from cache_config.block_size for
+        # hybrid models and when decode_context_parallel_size > 1. Resolve both, the
+        # way MooncakeStoreScheduler and SimpleCPUOffloadConnector do.
+        self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
+        )
         self._use_mla = vllm_config.model_config.use_mla
         self._model_config = vllm_config.model_config
 
@@ -625,7 +632,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                 continue
 
             skip_blocks = request.save_block_op.skip_leading_blocks
-            block_hashes = self._generate_block_hashes(request.token_ids, skip_blocks)
+            block_hashes = request.block_keys[skip_blocks:]
             block_ids = request.block_ids[skip_blocks : skip_blocks + len(block_hashes)]
 
             for i in range(0, len(block_ids), self._max_device_buffer_count):
@@ -647,9 +654,8 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
             load_op = request.load_block_op
             block_ids = request.block_ids[: load_op.num_blocks_to_load]
-            block_hashes = self._generate_block_hashes(
-                request.token_ids, load_op.num_computed_blocks, len(block_ids)
-            )
+            start = load_op.num_computed_blocks
+            block_hashes = request.block_keys[start : start + len(block_ids)]
 
             for i in range(0, len(block_ids), self._max_device_buffer_count):
                 batch_block_ids = block_ids[i : i + self._max_device_buffer_count]
@@ -710,8 +716,12 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                 )
                 return 0, False
 
-            token_ids_to_check = request.prompt_token_ids[:num_tokens_to_check]
-            block_hashes = self._generate_block_hashes(token_ids_to_check, 0)
+            block_hashes = external_block_keys(
+                request,
+                self._hash_block_size,
+                self._block_size,
+                num_tokens_to_check // self._block_size,
+            )
 
             # Check existence
             exists_results = self._metadata_client.batch_key_exists(block_hashes)
@@ -817,7 +827,11 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             state.allocated_block_ids = state.load_op.need_fetch_block_ids.copy()
 
             request_metadata = HF3FSRequestMetadata.from_scheduling_state(
-                state, self._block_size, state.load_op, num_cached_blocks
+                state,
+                self._block_size,
+                self._hash_block_size,
+                state.load_op,
+                num_cached_blocks,
             )
 
             if request_metadata:
@@ -848,7 +862,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                 )
 
             request_metadata = HF3FSRequestMetadata.from_scheduling_state(
-                state, self._block_size, None, num_cached_blocks
+                state, self._block_size, self._hash_block_size, None, num_cached_blocks
             )
 
             if request_metadata:
@@ -876,7 +890,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
 
             # Create save metadata
             request_metadata = HF3FSRequestMetadata.from_scheduling_state(
-                state, self._block_size, None
+                state, self._block_size, self._hash_block_size, None
             )
 
             if request_metadata:
@@ -949,35 +963,6 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         state.allocated_block_ids = unfolded_block_ids
         state.num_saved_blocks = 0
 
-    def _generate_block_hashes(
-        self,
-        token_ids: list[int],
-        start_block_id: int,
-        max_blocks_count: int | None = None,
-    ) -> list[str]:
-        """Generate block hashes for token sequence."""
-        block_hashes = []
-        previous_hash = ""
-
-        for start_idx in range(0, len(token_ids), self._block_size):
-            if start_idx + self._block_size > len(token_ids):
-                break
-
-            end_idx = start_idx + self._block_size
-            block_hash = self._compute_prefix_hash(
-                token_ids[start_idx:end_idx], previous_hash
-            )
-
-            block_index = start_idx // self._block_size
-            if block_index >= start_block_id:
-                block_hashes.append(block_hash)
-
-            if max_blocks_count and len(block_hashes) >= max_blocks_count:
-                break
-            previous_hash = block_hash
-
-        return block_hashes
-
     def _gather_or_scatter_kv_caches(
         self, block_ids: list[int], block_buffers, operation: str
     ):
@@ -1006,13 +991,6 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                     self._content_dim,
                     self._kv_cache_strides,
                 )
-
-    def _compute_prefix_hash(
-        self, token_ids: list[int], previous_hash: str = ""
-    ) -> str:
-        """Compute prefix hash for token block."""
-        combined_string = f"{previous_hash}_{token_ids}"
-        return hashlib.md5(combined_string.encode()).hexdigest()
 
     def _align_to_block_size(self, num_tokens: int) -> int:
         """Align token count to block size."""
