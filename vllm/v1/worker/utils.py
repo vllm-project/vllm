@@ -533,23 +533,31 @@ def sanity_check_mm_encoder_outputs(
 
 def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:
     """
-    Calculate the amount of memory required by vLLM, then validate
-    that the current amount of free memory is sufficient for that.
+    Calculate the amount of memory vLLM may use on this device.
+
+    The budget is ``total_memory * gpu_memory_utilization``, clamped to
+    ``free_memory * gpu_memory_utilization`` when the device is shared
+    with another process, preserving the same proportional safety margin.
     """
-    requested_memory = math.ceil(
-        init_snapshot.total_memory * cache_config.gpu_memory_utilization
-    )
+    util = cache_config.gpu_memory_utilization
+    requested_memory = math.ceil(init_snapshot.total_memory * util)
 
     if init_snapshot.free_memory < requested_memory:
-        raise ValueError(
-            f"Free memory on device {init_snapshot.device_} "
-            f"({format_gib(init_snapshot.free_memory)}/"
-            f"{format_gib(init_snapshot.total_memory)} GiB) on startup "
-            f"is less than desired GPU memory utilization "
-            f"({cache_config.gpu_memory_utilization}, "
-            f"{format_gib(requested_memory)} GiB). Decrease GPU memory "
-            f"utilization or reduce GPU memory used by other processes."
+        clamped = math.ceil(init_snapshot.free_memory * util)
+        logger.warning(
+            "Free memory on device %s (%s/%s GiB) is less than "
+            "gpu_memory_utilization=%.4f would request (%s GiB). "
+            "Clamping memory budget to %s GiB (%.4f of free memory). "
+            "This is expected when sharing a GPU with another process.",
+            init_snapshot.device_,
+            format_gib(init_snapshot.free_memory),
+            format_gib(init_snapshot.total_memory),
+            util,
+            format_gib(requested_memory),
+            format_gib(clamped),
+            util,
         )
+        requested_memory = clamped
 
     return requested_memory
 
