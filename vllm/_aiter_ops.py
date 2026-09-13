@@ -1018,6 +1018,44 @@ def _rocm_aiter_fused_allreduce_rmsnorm_fake(
     return torch.empty_like(input_), torch.empty_like(residual)
 
 
+def _rocm_aiter_fused_allreduce_gemma_rmsnorm_impl(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gemma-style variant of ``_rocm_aiter_fused_allreduce_rmsnorm_impl``.
+
+    ``weight`` is the raw GemmaRMSNorm gamma; the ``gemma_norm=True`` flag makes
+    the kernel apply ``(1 + weight)`` internally, so callers must pass the
+    original gamma (not ``weight + 1``).
+    """
+    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+    assert aiter_ar is not None, "aiter allreduce must be initialized"
+    ca = aiter_ar.aiter_ca
+    use_1stage = aiter_ar.use_1stage_fused_ar_rms(input_)
+
+    result = ca.custom_fused_ar_rms(
+        input_,
+        residual,
+        weight,
+        epsilon,
+        use_1stage=use_1stage,
+        gemma_norm=True,
+    )
+    assert result is not None
+    return result[0], result[1]
+
+
+def _rocm_aiter_fused_allreduce_gemma_rmsnorm_fake(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(input_), torch.empty_like(residual)
+
+
 def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
     input_: torch.Tensor,
     residual: torch.Tensor,
@@ -2364,6 +2402,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_allreduce_gemma_rmsnorm",
+                op_func=_rocm_aiter_fused_allreduce_gemma_rmsnorm_impl,
+                fake_impl=_rocm_aiter_fused_allreduce_gemma_rmsnorm_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_fused_allreduce_rmsnorm_quant_per_group",
                 op_func=(_rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl),
                 fake_impl=(_rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_fake),
@@ -2442,6 +2486,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_allreduce_rmsnorm_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm.default
+
+    @staticmethod
+    def get_fused_allreduce_gemma_rmsnorm_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_fused_allreduce_gemma_rmsnorm.default
 
     @staticmethod
     def get_fused_allreduce_rmsnorm_quant_per_group_op() -> OpOverload:
