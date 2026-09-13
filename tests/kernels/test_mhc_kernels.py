@@ -15,8 +15,12 @@ from vllm.model_executor.kernels.mhc.tilelang import (
 )
 from vllm.model_executor.kernels.mhc.tilelang_kernels import (
     _HC_PRENORM_GEMM_TILELANG_KERNEL,
+    mhc_fused_post_pre_split_config,
 )
-from vllm.model_executor.kernels.mhc.torch import mhc_pre_delayed_torch
+from vllm.model_executor.kernels.mhc.torch import (
+    mhc_post_torch,
+    mhc_pre_delayed_torch,
+)
 from vllm.model_executor.kernels.mhc.triton import hc_collapse_triton
 from vllm.model_executor.layers.mhc import (
     HAS_AITER_MHC,
@@ -235,6 +239,142 @@ def test_deepseek_v41_mhc_pre_delayed(
         torch.testing.assert_close(actual[2], expected[2], atol=1.6e-2, rtol=1e-2)
 
 
+def mhc_fused_post_pre_delayed_ref(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_layer_mix: torch.Tensor,
+    comb_res_mix: torch.Tensor,
+    *mix_args,
+    pre_mix: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Project the post result before it is rounded to BF16.
+
+    The fused kernel keeps the updated residual streams in registers, so its
+    projection sees the FP32 post result while the streams it stores are the
+    BF16 rounding of it.
+    """
+    post = torch.einsum("tij,tih->tjh", comb_res_mix, residual.float())
+    post = post + post_layer_mix * x.float().unsqueeze(-2)
+    return mhc_pre_delayed_torch(
+        post.bfloat16(), *mix_args, pre_mix=pre_mix, x=post.flatten(1)
+    )
+
+
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("num_tokens", [0, 1, 8, 128])
+@pytest.mark.parametrize("hidden_size", [4096, 7168])
+@pytest.mark.parametrize("carried", [False, True])
+def test_deepseek_v41_mhc_fused_post_pre_delayed(num_tokens, hidden_size, carried):
+    """Fold the post block into the delayed pre without changing its outputs."""
+    set_random_seed(0)
+    hc_mult = 4
+    mix_size = hc_mult * (hc_mult + 2)
+    x = torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    residual = torch.randn(
+        num_tokens, hc_mult, hidden_size, dtype=torch.bfloat16, device=DEVICE
+    )
+    post_layer_mix = torch.rand(num_tokens, hc_mult, 1, device=DEVICE)
+    comb_res_mix = torch.rand(num_tokens, hc_mult, hc_mult, device=DEVICE)
+    fn = torch.randn(mix_size, hc_mult * hidden_size, device=DEVICE) * 0.02
+    scale = torch.tensor([0.5, 0.25, 1.0], device=DEVICE)
+    base = torch.randn(mix_size, device=DEVICE)
+    pre_mix = torch.rand(num_tokens, hc_mult, device=DEVICE) if carried else None
+    weight = torch.empty(hidden_size, dtype=torch.bfloat16, device=DEVICE)
+    weight.uniform_(0.5, 1.5)
+    mix_args = (fn, scale, base, 1e-20, 1e-6, 1e-6, 2.0, 20)
+
+    residual_cur, post, comb, layer_input, next_pre = (
+        torch.ops.vllm.mhc_fused_post_pre_delayed_tilelang(
+            x, residual, post_layer_mix, comb_res_mix, *mix_args, pre_mix, weight, 1e-6
+        )
+    )
+    assert [
+        residual_cur.shape,
+        post.shape,
+        comb.shape,
+        layer_input.shape,
+        next_pre.shape,
+    ] == [
+        (num_tokens, hc_mult, hidden_size),
+        (num_tokens, hc_mult, 1),
+        (num_tokens, hc_mult, hc_mult),
+        (num_tokens, hidden_size),
+        (num_tokens, hc_mult),
+    ]
+    if num_tokens == 0:
+        return
+
+    # The post mapping and the collapse are what the unfused kernels produce.
+    residual_ref = torch.ops.vllm.mhc_post_tilelang(
+        x, residual, post_layer_mix, comb_res_mix
+    )
+    layer_input_ref = mhc_pre_delayed_tilelang(
+        residual_ref, *mix_args, pre_mix=pre_mix, norm_weight=weight, norm_eps=1e-6
+    )[2]
+    torch.testing.assert_close(residual_cur, residual_ref, atol=0, rtol=0)
+    torch.testing.assert_close(layer_input, layer_input_ref, atol=0, rtol=0)
+
+    post_ref, comb_ref, _, next_pre_ref = mhc_fused_post_pre_delayed_ref(
+        x, residual, post_layer_mix, comb_res_mix, *mix_args, pre_mix=pre_mix
+    )
+    # Above the fused kernel's token count the projection falls back to a
+    # split-k TF32 GEMM over the stored BF16 streams.
+    tol = (
+        1e-5
+        if mhc_fused_post_pre_split_config(num_tokens, hidden_size, hc_mult) is not None
+        else 5e-3
+    )
+    for actual, expected in (
+        (post, post_ref),
+        (comb, comb_ref),
+        (next_pre, next_pre_ref),
+    ):
+        torch.testing.assert_close(actual, expected, atol=tol, rtol=tol)
+
+    # Decode replays this op from a captured graph.
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = torch.ops.vllm.mhc_fused_post_pre_delayed_tilelang(
+            x, residual, post_layer_mix, comb_res_mix, *mix_args, pre_mix, weight, 1e-6
+        )
+    graph.replay()
+    eager = (residual_cur, post, comb, layer_input, next_pre)
+    for replayed, expected in zip(captured, eager, strict=True):
+        torch.testing.assert_close(replayed, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("carried", [False, True])
+def test_mhc_fused_post_pre_delayed_custom_op_supports_compile(carried):
+    set_random_seed(0)
+    x = torch.randn(2, 5120, dtype=torch.bfloat16, device=DEVICE)
+    residual = torch.randn(2, 4, 5120, dtype=torch.bfloat16, device=DEVICE)
+    post_layer_mix = torch.rand(2, 4, 1, device=DEVICE)
+    comb_res_mix = torch.rand(2, 4, 4, device=DEVICE)
+    fn = torch.randn(24, 20480, device=DEVICE) * 0.02
+    pre_mix = torch.rand(2, 4, device=DEVICE) if carried else None
+    scale = torch.ones(3, device=DEVICE)
+    base = torch.zeros(24, device=DEVICE)
+    torch.library.opcheck(
+        torch.ops.vllm.mhc_fused_post_pre_delayed_tilelang.default,
+        (
+            x,
+            residual,
+            post_layer_mix,
+            comb_res_mix,
+            fn,
+            scale,
+            base,
+            1e-20,
+            1e-6,
+            1e-6,
+            2.0,
+            20,
+            pre_mix,
+        ),
+    )
+
+
 @pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
 @pytest.mark.parametrize("entry", ["broadcast", "pipeline", "residual", "engram"])
 def test_deepseek_v41_decoder_mixes_match_torch(
@@ -295,9 +435,17 @@ def test_deepseek_v41_decoder_mixes_match_torch(
         post, res, collapsed, pre = mhc_pre_delayed_torch(*args, **kwargs)
         return post, res, decoder.attn_norm(collapsed), pre
 
+    def fused_reference(x, residual, post_mix, res_mix, *args, **kwargs):
+        residual = mhc_post_torch(x, residual, post_mix, res_mix)
+        return residual, *reference(residual, *args, **kwargs)
+
     monkeypatch.setattr(
         "vllm.models.deepseek_v4_1.nvidia.model.mhc_pre_delayed_tilelang",
         reference,
+    )
+    monkeypatch.setattr(
+        "vllm.models.deepseek_v4_1.nvidia.model.mhc_fused_post_pre_delayed_tilelang",
+        fused_reference,
     )
     expected = decoder(x, positions, None, **kwargs)
     for result, ref in zip(actual, expected, strict=True):
