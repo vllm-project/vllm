@@ -801,7 +801,8 @@ class Worker(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            cuda_graph_memory_bytes = self.model_runner.capture_model()
+            with self._get_cudagraph_capture_context():
+                cuda_graph_memory_bytes = self.model_runner.capture_model()
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (
@@ -939,6 +940,35 @@ class Worker(WorkerBase):
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
         )
+
+    def _get_cudagraph_capture_context(self) -> AbstractContextManager[None]:
+        """Prepare annotations for CUDA graph capture."""
+        if not self.use_v2_model_runner:
+            return nullcontext()
+        if self.profiler is None and not (
+            self.profiler_config.profiler == "proton"
+            and self.profiler_config.proton_graph_attribution
+        ):
+            return nullcontext()
+        cudagraph_manager = getattr(self.model_runner, "cudagraph_manager", None)
+        assert cudagraph_manager is not None
+        model_state = getattr(self.model_runner, "model_state", None)
+        assert model_state is not None
+        capture_encoder = (
+            model_state.supports_mm_inputs
+            and model_state.encoder_runner.has_cudagraph()
+        )
+        if not capture_encoder and not cudagraph_manager.needs_capture():
+            return nullcontext()
+
+        if self.profiler is None:
+            from vllm.distributed.utils import get_worker_rank_suffix
+
+            self.profiler = ProtonProfilerWrapper(
+                self.profiler_config,
+                worker_name=get_worker_rank_suffix(global_rank=self.rank),
+            )
+        return self.profiler.capture_cuda_graphs()
 
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()
@@ -1239,6 +1269,9 @@ class Worker(WorkerBase):
             else:
                 trace_name = rank_suffix
 
+            if profiler_type == "proton" and self.profiler is not None:
+                self.profiler.set_output_name(trace_name)
+
             # Create the profiler wrapper only on the first start call
             if self.profiler is None:
                 if profiler_type == "torch":
@@ -1275,7 +1308,9 @@ class Worker(WorkerBase):
             try:
                 self.profiler.stop()
             finally:
-                if self.profiler_config.profiler == "proton":
+                if self.profiler_config.profiler == "proton" and not (
+                    self.profiler.has_cuda_graph_session
+                ):
                     # Proton output names are fixed when the wrapper is constructed.
                     # Recreate it so the next profile_prefix is honored.
                     self.profiler = None
