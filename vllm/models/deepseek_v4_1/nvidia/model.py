@@ -76,6 +76,7 @@ from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 from ..common.engram import Engram, EngramLayout, NgramHashState
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
+from ..common.pipeline import get_sharing_dependencies, validate_local_sharing
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -391,6 +392,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        from vllm.distributed.utils import get_pp_indices
+
+        pp_size = get_pp_group().world_size
+        stage_ranges = [
+            get_pp_indices(config.num_hidden_layers, rank, pp_size)
+            for rank in range(pp_size)
+        ]
+        validate_local_sharing(get_sharing_dependencies(config, stage_ranges))
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
