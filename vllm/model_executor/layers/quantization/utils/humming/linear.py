@@ -108,6 +108,10 @@ def prepare_humming_linear_layer_config(
         input_schema=input_schema,
         param_dtype=layer.params_dtype,
     )
+    for name in ("input_scale", "input_scale_2"):
+        if name != input_schema.static_tensor_scale_name:
+            tensors.pop(name, None)
+            input_tensors.pop(name, None)
 
     # Step 2: transform weight (humming standard format) for forwarding.
     config = prepare_layer_config(
@@ -152,6 +156,11 @@ def apply_humming_linear(
 ) -> torch.Tensor:
     from vllm.utils.humming import humming_forward
 
+    mode = layer_config.input_quant_mode
+    input_scale = getattr(layer, "input_scale", None) if mode.should_quantize else None
+    input_scale_2 = (
+        getattr(layer, "input_scale_2", None) if mode.has_secondary_scale else None
+    )
     flatten_inputs = x.reshape(-1, x.size(-1))
     output = humming_forward(
         layer_config,
@@ -161,8 +170,8 @@ def apply_humming_linear(
         zero_point=getattr(layer, "zero_point", None),
         bias=getattr(layer, "bias", None),
         weight_scale_2=getattr(layer, "weight_scale_2", None),
-        input_scale=getattr(layer, "input_scale", None),
-        input_scale_2=getattr(layer, "input_scale_2", None),
+        input_scale=input_scale,
+        input_scale_2=input_scale_2,
         hadamard_block_size=layer.weight_schema.hadamard_block_size,
         locks=locks,
         compute_config=compute_config,

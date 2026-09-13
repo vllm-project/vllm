@@ -416,6 +416,9 @@ def _prepare_and_transform_sublayer(
         device=getattr(layer, f"{sublayer_name}_weight").device,
     )
     source_tensors = _extract_sublayer_tensors(layer, sublayer_name)
+    for name in ("input_scale", "input_scale_2"):
+        if name != input_schema.static_tensor_scale_name:
+            source_tensors.pop(name, None)
     tensors = transform_humming_tensors(config, source_tensors)
     for name in ("input_scale", "input_scale_2"):
         if name in source_tensors:
