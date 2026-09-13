@@ -47,6 +47,8 @@ All2AllBackend = Literal[
     "deepep_v2",
     "mori_high_throughput",
     "mori_low_latency",
+    "nccl_ep_low_latency",
+    "nccl_ep_high_throughput",
     "nixl_ep",
     "allgather_reducescatter",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
@@ -202,6 +204,8 @@ class ParallelConfig:
     - "deepep_low_latency": Use deepep low-latency kernels
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
+    - "nccl_ep_low_latency": Use NCCL EP low-latency kernels
+    - "nccl_ep_high_throughput": Use NCCL EP high-throughput kernels
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl"""
@@ -722,6 +726,8 @@ class ParallelConfig:
                 "flashinfer_nvlink_one_sided",
                 "mori_high_throughput",
                 "mori_low_latency",
+                "nccl_ep_low_latency",
+                "nccl_ep_high_throughput",
                 "nixl_ep",
             )
             and self.enable_expert_parallel
@@ -743,6 +749,7 @@ class ParallelConfig:
             self.all2all_backend
             in (
                 "deepep_low_latency",
+                "nccl_ep_low_latency",
                 "nixl_ep",
             )
             and self.enable_expert_parallel
@@ -884,6 +891,10 @@ class ParallelConfig:
             self.world_size *= self.data_parallel_size
 
         if self.enable_elastic_ep:
+            if self.all2all_backend.startswith("nccl_ep_"):
+                raise ValueError(
+                    "The nccl_ep backend does not support elastic expert parallelism."
+                )
             if not self.enable_eplb:
                 raise ValueError("Elastic EP is only supported with enable_eplb=True.")
             if self.pipeline_parallel_size > 1:
@@ -906,6 +917,12 @@ class ParallelConfig:
                         "package. Either install NIXL or set "
                         "--eplb-config.use_async=false."
                     )
+
+        if self.enable_fault_tolerance and self.all2all_backend.startswith("nccl_ep_"):
+            raise ValueError(
+                "The nccl_ep Python API does not expose the mask operations "
+                "required by vLLM fault tolerance."
+            )
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.

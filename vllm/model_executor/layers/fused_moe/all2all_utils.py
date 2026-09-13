@@ -36,6 +36,7 @@ from vllm.utils.import_utils import (
     has_deep_ep,
     has_deep_ep_v2,
     has_mori,
+    has_nccl_ep,
     has_nixl_ep,
 )
 
@@ -102,6 +103,11 @@ if current_platform.is_cuda_alike():
         from .prepare_finalize.nixl_ep import (
             NIXL_EP_QUANT_BLOCK_SHAPE,
             NixlEPPrepareAndFinalize,
+        )
+    if has_nccl_ep():
+        from .prepare_finalize.nccl_ep import (
+            NcclEPHTPrepareAndFinalize,
+            NcclEPLLPrepareAndFinalize,
         )
 
 
@@ -346,6 +352,61 @@ def maybe_make_prepare_finalize(
             use_monolithic=use_monolithic,
             is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
             num_dispatchers=all2all_manager.world_size,
+        )
+
+    elif moe.use_nccl_ep_ll_kernels:
+        assert quant_config is not None
+        global_to_physical = physical_to_global = local_expert_global_ids = None
+        if routing_tables is not None:
+            (
+                global_to_physical,
+                physical_to_global,
+                local_expert_global_ids,
+            ) = routing_tables
+        all_to_all_args = dict(
+            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+            token_hidden_size=moe.hidden_dim,
+            token_dtype=moe.in_dtype,
+            num_topk=moe.experts_per_token,
+            num_ep_ranks=all2all_manager.world_size,
+            num_global_experts=moe.num_experts,
+        )
+        state = all2all_manager.get_handle(all_to_all_args)
+        prepare_finalize = NcclEPLLPrepareAndFinalize(
+            state,
+            num_dispatchers=all2all_manager.world_size,
+            global_to_physical=global_to_physical,
+            physical_to_global=physical_to_global,
+            local_expert_global_ids=local_expert_global_ids,
+        )
+
+    elif moe.use_nccl_ep_ht_kernels:
+        assert quant_config is not None
+        global_to_physical = physical_to_global = None
+        if routing_tables is not None:
+            global_to_physical, physical_to_global, _ = routing_tables
+        all_to_all_args = dict(
+            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+            token_hidden_size=moe.hidden_dim,
+            token_dtype=moe.in_dtype,
+            num_topk=moe.experts_per_token,
+            num_ep_ranks=all2all_manager.world_size,
+            num_global_experts=moe.num_experts,
+        )
+        state = all2all_manager.get_handle(all_to_all_args)
+        use_fp8_dispatch = (
+            quant_config.quant_dtype == current_platform.fp8_dtype()
+            and quant_config.is_block_quantized
+        )
+        prepare_finalize = NcclEPHTPrepareAndFinalize(
+            state,
+            num_dispatchers=all2all_manager.world_size,
+            rank_expert_offset=all2all_manager.rank * state.num_local_experts,
+            num_experts=moe.num_experts,
+            num_ubatches=get_current_vllm_config().parallel_config.num_ubatches,
+            use_fp8_dispatch=use_fp8_dispatch,
+            global_to_physical=global_to_physical,
+            physical_to_global=physical_to_global,
         )
 
     elif moe.use_nixl_ep_kernels:
