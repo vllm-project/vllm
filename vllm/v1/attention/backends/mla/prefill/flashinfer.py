@@ -45,6 +45,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
             v_head_dim=128,
         ),
     ]
+    supports_query_quantization: ClassVar[bool] = True
 
     @staticmethod
     def get_name() -> str:
