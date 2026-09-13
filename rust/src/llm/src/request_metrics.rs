@@ -128,11 +128,11 @@ impl RequestMetricsTracker {
             self.observe_events(events);
         }
 
-        // Only outputs that actually carry tokens drive token-timing metrics.
-        // A terminal output with no new tokens (e.g. the synthesized abort
+        // Only outputs that carry tokens or a pooling tensor drive output-timing metrics.
+        // A terminal output with neither (e.g. the synthesized abort
         // output) must not log a stray time-to-first-token or inter-token
         // sample.
-        if !output.new_token_ids.is_empty() {
+        if !output.new_token_ids.is_empty() || output.pooling_output.is_some() {
             if self.is_prefilling {
                 if let Some(prefill_stats) = &output.prefill_stats {
                     self.record_prompt_tokens(prefill_stats);

@@ -14,6 +14,7 @@ use super::utility::UtilityOutput;
 use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
+use crate::protocol::tensor::WireTensor;
 use crate::protocol::{OpaqueValue, decode_msgpack};
 
 /// The stop reason associated with a finished output.
@@ -91,7 +92,7 @@ pub struct EngineCoreOutput {
     #[serde(default)]
     pub new_prompt_logprobs_tensors: Option<MaybeWireLogprobs>,
     #[serde(default)]
-    pub pooling_output: Option<OpaqueValue>,
+    pub pooling_output: Option<WireTensor>,
     #[serde(default)]
     pub finish_reason: Option<EngineCoreFinishReason>,
     #[serde(default)]
@@ -148,6 +149,11 @@ impl EngineCoreOutput {
         self.new_prompt_logprobs_tensors = (self.new_prompt_logprobs_tensors.take())
             .map(|value| value.resolve(frames, "new_prompt_logprobs_tensors"))
             .transpose()?;
+        if let Some(pooling_output) = &mut self.pooling_output {
+            pooling_output
+                .resolve_aux_frame(frames)
+                .map_err(|message| ext_value_decode!("pooling_output: {message}"))?;
+        }
         Ok(())
     }
 }
@@ -374,6 +380,7 @@ mod tests {
 
     use super::*;
     use crate::protocol::output::EngineCoreOutput;
+    use crate::protocol::tensor::{WireArrayData, WireNdArray};
     use crate::protocol::{decode_msgpack, encode_msgpack};
 
     #[test]
@@ -401,6 +408,35 @@ mod tests {
         assert_eq!(
             decoded.finished_requests,
             Some(BTreeSet::from(["req-1".to_string()]))
+        );
+    }
+
+    #[test]
+    fn engine_core_outputs_resolve_multipart_pooling_tensor() {
+        let raw = [0.25_f32, -0.5].into_iter().flat_map(f32::to_ne_bytes).collect::<Vec<_>>();
+        let outputs: EngineCoreOutputs = RequestBatchOutputs {
+            outputs: vec![EngineCoreOutput {
+                request_id: "embed-1".to_string(),
+                pooling_output: Some(WireNdArray {
+                    dtype: "float32".to_string(),
+                    shape: vec![2],
+                    data: WireArrayData::AuxIndex(1),
+                }),
+                finish_reason: Some(EngineCoreFinishReason::Stop),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .into();
+        let first_frame = Bytes::from(encode_msgpack(&outputs).expect("encode outputs"));
+
+        let decoded =
+            decode_engine_core_outputs(&[first_frame, Bytes::from(raw)]).expect("decode outputs");
+        let output = &decoded.as_request_batch().expect("request batch").outputs[0];
+
+        assert_eq!(
+            output.pooling_output.as_ref().unwrap().to_f32_vec().unwrap(),
+            vec![0.25, -0.5]
         );
     }
 

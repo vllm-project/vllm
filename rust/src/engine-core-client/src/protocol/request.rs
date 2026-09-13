@@ -9,6 +9,7 @@ use serde_default::DefaultFromSerde;
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use crate::protocol::multimodal::MmFeatures;
+use crate::protocol::pooling::EngineCorePoolingParams;
 use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::{OpaqueValue, lora};
 use crate::{Error, Result};
@@ -77,9 +78,7 @@ pub struct EngineCoreRequest {
     /// Multimodal features attached to the request.
     pub mm_features: Option<MmFeatures>,
     pub sampling_params: Option<EngineCoreSamplingParams>,
-    /// Pooling parameters are preserved in the schema but not yet strongly
-    /// typed.
-    pub pooling_params: Option<OpaqueValue>,
+    pub pooling_params: Option<EngineCorePoolingParams>,
     pub arrival_time: f64,
     #[serde(default)]
     pub lora_request: Option<lora::LoraRequest>,
