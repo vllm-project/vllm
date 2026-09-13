@@ -10,6 +10,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.triton_attention_helpers import (
+    apply_softcap,
     compute_tile_loop_bounds,
 )
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
@@ -898,3 +899,40 @@ def test_triton_unified_attn_use_td_tile_clamp(
         soft_cap=None,
         seq_threshold_3D=0,
     )
+
+
+@triton.jit
+def _softcap_probe_kernel(
+    scores_ptr,
+    out_ptr,
+    numel,
+    soft_cap,
+    BLOCK: tl.constexpr,
+):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < numel
+    scores = tl.load(scores_ptr + offs, mask=mask, other=0.0)
+    tl.store(out_ptr + offs, apply_softcap(scores, soft_cap), mask=mask)
+
+
+@torch.inference_mode()
+def test_softcap_does_not_overflow_on_large_scores() -> None:
+    """Scores above ~88 * soft_cap must not overflow to inf/NaN.
+
+    The exp-based softcap computes ``(exp(y) - exp(-y)) / (exp(y) + exp(-y))``
+    with ``y = S / soft_cap``. For ``|y| > ~88`` the exponentials overflow to
+    ``inf`` and the ratio becomes ``inf / inf = NaN``, poisoning the whole
+    attention row. Gemma-2 style models use ``attn_logit_softcapping = 50``,
+    so scores above 4400 are in range for their large attention logits.
+    """
+    soft_cap = 50.0
+    scores = torch.tensor(
+        [1.0, 100.0, 1000.0, 3000.0, 5000.0, 10000.0, -1.0, -10000.0, 4400.0],
+        device=DEVICE_TYPE,
+        dtype=torch.float32,
+    )
+    out = torch.empty_like(scores)
+    _softcap_probe_kernel[(1,)](scores, out, scores.numel(), soft_cap, BLOCK=16)
+    ref = soft_cap * torch.tanh(scores / soft_cap)
+    assert torch.isfinite(out).all(), out
+    torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)
