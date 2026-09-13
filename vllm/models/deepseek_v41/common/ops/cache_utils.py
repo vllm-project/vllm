@@ -33,7 +33,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
-from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.math_utils import cdiv, next_power_of_2
 
 # Per-token byte width of the two paged fp8 records. Both put a page's whole
 # data region ahead of its whole scale region, so ``k_cache.shape[-1]`` -- the
@@ -566,6 +566,22 @@ def _dequantize_and_gather_k_nvfp4_kernel(
         tl.store(output_row_ptr + d, dequant.to(tl.bfloat16))
 
 
+# The per-token loop is a chain of dependent loads, so the grid has to hold
+# enough chains in flight to cover the latency. The cap binds above 64k tokens,
+# where a worker takes more than the eight steps this aims for.
+_GATHER_STEPS_PER_WORKER = 8
+_GATHER_MIN_WORKERS = 128
+_GATHER_MAX_WORKERS = 8192
+
+
+def gather_num_workers(max_gather_len: int | None) -> int:
+    """Grid width for a gather of at most ``max_gather_len`` tokens."""
+    if max_gather_len is None:
+        return _GATHER_MIN_WORKERS
+    workers = cdiv(max_gather_len, _GATHER_STEPS_PER_WORKER)
+    return max(_GATHER_MIN_WORKERS, min(_GATHER_MAX_WORKERS, workers))
+
+
 def dequantize_and_gather_k_cache_triton(
     # [num_reqs, max_num_tokens, head_size]
     out: torch.Tensor,
@@ -580,6 +596,7 @@ def dequantize_and_gather_k_cache_triton(
     block_size: int,
     offset: int,
     use_fnuz: bool = False,
+    max_gather_len: int | None = None,
 ) -> None:
     num_reqs = seq_lens.shape[0]
     NUM_WORKERS = 128
@@ -629,7 +646,8 @@ def dequantize_and_gather_k_cache_triton(
     FP8_MAX = 448.0
     TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2
 
-    _dequantize_and_gather_k_kernel[(num_reqs, NUM_WORKERS)](
+    gather_workers = gather_num_workers(max_gather_len)
+    _dequantize_and_gather_k_kernel[(num_reqs, gather_workers)](
         out,
         out.stride(0),
         out.stride(1),
@@ -667,6 +685,7 @@ def dequantize_and_gather_k_cache(
     block_size: int,
     offset: int,
     use_fnuz: bool = False,
+    max_gather_len: int | None = None,
 ) -> None:
     """Dequantize and gather a paged DSv4 K cache.
 
@@ -707,6 +726,7 @@ def dequantize_and_gather_k_cache(
         block_table,
         block_size,
         offset,
+        max_gather_len=max_gather_len,
         use_fnuz=use_fnuz,
     )
 
