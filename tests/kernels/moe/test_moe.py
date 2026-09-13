@@ -1305,7 +1305,7 @@ def _make_humming_indexed_experts(activation: MoEActivation):
     from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
         HummingIndexedExperts,
     )
-    from vllm.model_executor.layers.quantization.utils import humming_utils
+    from vllm.model_executor.layers.quantization.utils import humming as humming_utils
     from vllm.utils import humming
 
     top_k, num_experts = 6, 12
@@ -1510,43 +1510,41 @@ def test_humming_delegates_to_instance_activation():
 def test_humming_grouped_apply_forwards_valid_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    from types import MethodType, SimpleNamespace
+    from types import SimpleNamespace
     from unittest.mock import Mock
 
     import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming
     from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
-        HummingExpertsBase,
         HummingGroupedExperts,
     )
 
-    activation_func = Mock()
     buffers = {
         "gate_up_output": torch.empty(6, 4),
-        "activation_output": torch.empty(6, 2),
+        "quanted_down_input": torch.empty(6, 2),
         "down_output": torch.empty(6, 4),
     }
     experts = SimpleNamespace(
-        activation=activation_func,
         num_experts=2,
         estimate_local_valid_shape_m=lambda _: 6,
         prepare_buffers=lambda *_: buffers,
         _get_permute_scratch=lambda _: None,
-        quantize_input=lambda _, *, inputs, input_scale=None, quanted_input: (
-            inputs,
-            input_scale,
+        quantize_input=Mock(
+            side_effect=lambda _, **kwargs: (
+                kwargs["inputs"],
+                kwargs.get("input_scale"),
+                None,
+            )
         ),
         humming_forward=Mock(),
         compute_config_str="",
         w13_tuning_config_str="",
         w2_tuning_config_str="",
     )
-    experts.apply_activation = MethodType(HummingExpertsBase.apply_activation, experts)
 
     hidden_states = torch.empty(3, 4)
     output = torch.empty_like(hidden_states)
     topk_ids = torch.zeros((3, 2), dtype=torch.int64)
     topk_weights = torch.ones_like(topk_ids, dtype=torch.float32)
-    expected_counts = torch.tensor([4], dtype=torch.int32)
     expert_offsets = torch.tensor([0, 2, 4], dtype=torch.int64)
     monkeypatch.setattr(
         humming,
@@ -1580,12 +1578,11 @@ def test_humming_grouped_apply_forwards_valid_prefix(
         apply_router_weight_on_input=False,
     )
 
-    activation_func.assert_called_once()
-    call_kwargs = activation_func.call_args.kwargs
+    call_kwargs = experts.quantize_input.call_args.kwargs
     assert call_kwargs["activation"] == MoEActivation.SITU
-    assert call_kwargs["input"].shape == (6, 4)
-    assert call_kwargs["output"].shape == (6, 2)
-    torch.testing.assert_close(call_kwargs["valid_token_counts"], expected_counts)
+    assert call_kwargs["inputs"].shape == (6, 4)
+    assert call_kwargs["quanted_input"].shape == (6, 2)
+    torch.testing.assert_close(call_kwargs["expert_layout"], expert_offsets)
 
 
 def test_batched_marlin_activation_uses_expert_token_counts(
@@ -1704,13 +1701,21 @@ def test_humming_gated_non_gated_shape_contract(activation: MoEActivation):
         activation=moe_config.activation,
     )
     assert buffer_metas["gate_up_output"]["shape"][-1] == gate_up_size
-    assert buffer_metas["activation_output"]["shape"][-1] == intermediate_size
+    assert "activation_output" not in buffer_metas
+    assert buffer_metas["quanted_down_input"]["shape"][-1] == intermediate_size
     assert experts.moe_problem_size(
         a1=torch.empty(1, hidden_size),
         w1=torch.empty(num_experts, 1),
         w2=torch.empty(num_experts, 1),
         topk_ids=torch.empty(1, top_k, dtype=torch.long),
     ) == (num_experts, 1, intermediate_size, hidden_size, top_k)
+
+    # Quantized batched input storage must cover every dispatcher's token slots.
+    experts.is_batched = lambda: True
+    experts.max_num_tokens = 17
+    experts.num_dispatchers = 2
+    batched_metas, _ = experts.get_buffer_metas(17, top_k, activation)
+    assert batched_metas["quanted_gate_up_input"]["shape"][0] == num_experts * 17 * 2
 
 
 def test_humming_indexed_writes_supplied_output_buffer():

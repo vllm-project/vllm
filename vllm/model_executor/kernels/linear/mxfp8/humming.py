@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.humming_utils import (
+from vllm.model_executor.layers.quantization.utils.humming import (
     apply_humming_linear,
     convert_linear_layer_to_humming_standard,
     get_humming_linear_compute_config,
@@ -50,7 +50,15 @@ class HummingMxfp8LinearKernel(Mxfp8LinearKernel):
         }
 
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
-        self.layer_config = prepare_humming_linear_layer_config(layer, quant_config)
+        input_quant_config = {
+            "quant_method": "humming",
+            "dtype": "float8e4m3",
+            "scale_dtype": "float8e8m0",
+            "group_size": 32,
+        }
+        self.layer_config = prepare_humming_linear_layer_config(
+            layer, quant_config, input_quant_config
+        )
         self.compute_config = get_humming_linear_compute_config()
         self.locks = torch.zeros(1024, dtype=torch.int32, device=layer.weight.device)
 
