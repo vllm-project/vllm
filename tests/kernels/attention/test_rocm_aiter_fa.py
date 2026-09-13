@@ -687,6 +687,154 @@ def test_aiter_fa_sliding_window_matches_reference():
     torch.testing.assert_close(output, ref, atol=atol, rtol=rtol)
 
 
+@pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
+@pytest.mark.parametrize(
+    "shuffle,sliding_window", [(False, None), (False, 16), (True, None)]
+)
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("batch", ["prefill", "extend", "mixed"])
+def test_aiter_fa_shared_kv_matches_reference(
+    monkeypatch, shuffle, sliding_window, kv_cache_dtype, batch
+):
+    """Shared layers read cached K/V for prefill and extend without modifying it."""
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_standard_kv_cache_spec,
+        create_vllm_config,
+    )
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import set_current_vllm_config
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionBackend,
+        AiterFlashAttentionMetadataBuilder,
+    )
+
+    _assert_aiter_supported()
+    monkeypatch.setattr(rocm_aiter_ops, "_SHUFFLE_KV_CACHE_ENABLED", shuffle)
+    set_random_seed(42)
+    batch_spec = {
+        "prefill": BatchSpec(seq_lens=[32, 24], query_lens=[32, 24]),
+        "extend": BatchSpec(seq_lens=[80, 56], query_lens=[32, 24]),
+        "mixed": BatchSpec(seq_lens=[48, 80, 24], query_lens=[1, 32, 24]),
+    }[batch]
+    config = create_vllm_config(
+        model_name="Qwen/Qwen3-0.6B",
+        dtype="bfloat16",
+        max_num_batched_tokens=1024,
+    )
+    config.cache_config.cache_dtype = kv_cache_dtype
+    num_heads = config.model_config.get_num_attention_heads(config.parallel_config)
+    num_kv_heads = config.model_config.get_num_kv_heads(config.parallel_config)
+    head_size = config.model_config.get_head_size()
+    scale = head_size**-0.5
+    with set_current_vllm_config(config):
+        target = Attention(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            cache_config=config.cache_config,
+            per_layer_sliding_window=sliding_window,
+            prefix="target",
+            attn_backend=AiterFlashAttentionBackend,
+        )
+        layer = Attention(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            cache_config=config.cache_config,
+            per_layer_sliding_window=sliding_window,
+            kv_sharing_target_layer_name="target",
+            prefix="shared",
+            attn_backend=AiterFlashAttentionBackend,
+        )
+        builder = AiterFlashAttentionMetadataBuilder(
+            create_standard_kv_cache_spec(config),
+            ["target", "shared"],
+            config,
+            torch.device("cuda"),
+        )
+        common = create_common_attn_metadata(
+            batch_spec, BLOCK_SIZE, torch.device("cuda"), max_block_idx=32
+        )
+        cache_dtype = (
+            current_platform.fp8_dtype() if kv_cache_dtype == "fp8" else torch.bfloat16
+        )
+        kv_cache = (
+            torch.empty(
+                2, 32, BLOCK_SIZE, num_kv_heads * head_size, dtype=cache_dtype
+            ).transpose(0, 1)
+            if shuffle
+            else torch.empty(
+                32, num_kv_heads, BLOCK_SIZE, 2 * head_size, dtype=cache_dtype
+            )
+        )
+        target.kv_cache = kv_cache
+        layer.kv_cache = kv_cache
+        k_scale = 0.5 if kv_cache_dtype == "fp8" and not shuffle else 1.0
+        v_scale = 0.25 if kv_cache_dtype == "fp8" and not shuffle else 1.0
+        for attn_layer in (target, layer):
+            attn_layer._k_scale.fill_(k_scale)
+            attn_layer._v_scale.fill_(v_scale)
+        key = torch.randn(
+            32 * BLOCK_SIZE, num_kv_heads, head_size, dtype=torch.bfloat16
+        )
+        value = torch.randn_like(key)
+        target.impl.do_kv_cache_update(
+            target,
+            key,
+            value,
+            kv_cache,
+            torch.arange(32 * BLOCK_SIZE, dtype=torch.int64),
+        )
+        key_cache = ((key / k_scale).to(cache_dtype).to(key.dtype) * k_scale).reshape(
+            32, BLOCK_SIZE, num_kv_heads, head_size
+        )
+        value_cache = (
+            (value / v_scale).to(cache_dtype).to(value.dtype) * v_scale
+        ).reshape(32, BLOCK_SIZE, num_kv_heads, head_size)
+        with torch.device("cpu"):
+            metadata = builder.build(0, common)
+        cache_before = kv_cache.view(torch.uint8).clone()
+        query = torch.randn(
+            batch_spec.compute_num_tokens(),
+            num_heads,
+            head_size,
+            dtype=torch.bfloat16,
+        )
+        output = torch.empty_like(query)
+        layer.impl.forward(layer, query, None, None, kv_cache, metadata, output)
+        expected = ref_paged_attn(
+            query,
+            key_cache.contiguous(),
+            value_cache.contiguous(),
+            batch_spec.query_lens,
+            batch_spec.seq_lens,
+            common.block_table_tensor,
+            scale,
+            sliding_window,
+        )
+        num_decode_tokens = metadata.num_decode_tokens
+        if kv_cache_dtype == "fp8" and num_decode_tokens:
+            # Use the established FP8 decode tolerance; gathered prefill and
+            # extend tokens must still satisfy the tighter BF16 tolerance.
+            torch.testing.assert_close(
+                output[:num_decode_tokens],
+                expected[:num_decode_tokens],
+                atol=6e-2,
+                rtol=1e-1,
+            )
+            output = output[num_decode_tokens:]
+            expected = expected[num_decode_tokens:]
+        torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+        torch.testing.assert_close(
+            kv_cache.view(torch.uint8), cache_before, atol=0, rtol=0
+        )
+
+
 # Decode path test --------------------------------------------------------
 @pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
 @pytest.mark.parametrize(

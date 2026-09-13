@@ -17,6 +17,7 @@ import glob
 import os
 import tempfile
 import time
+from collections.abc import Callable
 
 from vllm.logger import init_logger
 
@@ -34,7 +35,11 @@ def _path_backed_by_fd(path: str, fd: int) -> bool:
     return (st.st_ino, st.st_dev) == (fst.st_ino, fst.st_dev)
 
 
-def _create_region_file(path: str, size: int) -> int | None:
+def _create_region_file(
+    path: str,
+    size: int,
+    creator_memory_check: Callable[[int], None] | None = None,
+) -> int | None:
     """Build a sized, locked region file and publish it atomically at `path`.
 
     Returns its fd, or None if another process published first and this one
@@ -52,6 +57,8 @@ def _create_region_file(path: str, size: int) -> int | None:
     published = False
     try:
         fcntl.flock(fd, fcntl.LOCK_SH)
+        if creator_memory_check is not None:
+            creator_memory_check(size)
         check_shm_free_space(size)
         os.ftruncate(fd, size)
         try:
@@ -74,7 +81,11 @@ def _create_region_file(path: str, size: int) -> int | None:
 
 
 def open_region_file(
-    path: str, size: int, timeout: float = _OPEN_TIMEOUT
+    path: str,
+    size: int,
+    timeout: float = _OPEN_TIMEOUT,
+    *,
+    creator_memory_check: Callable[[int], None] | None = None,
 ) -> tuple[int, bool]:
     """Create or join the shared region file at `path`, sized `size` bytes.
 
@@ -82,6 +93,13 @@ def open_region_file(
     which is what reap_orphaned_region_files keys liveness on; the caller
     owns it and must close it. Every path that does not return an fd closes
     it, so a failure never leaves the region locked and unreclaimable.
+
+    Args:
+        path: Final path of the region file.
+        size: Required size in bytes.
+        timeout: Seconds to keep retrying lost creation races.
+        creator_memory_check: Called with `size` on the creating process only,
+            before the region is sized, to reject regions the host cannot back.
     """
     deadline = time.monotonic() + timeout
     while True:
@@ -93,7 +111,7 @@ def open_region_file(
         try:
             fd = os.open(path, os.O_RDWR)
         except FileNotFoundError:
-            created = _create_region_file(path, size)
+            created = _create_region_file(path, size, creator_memory_check)
             if created is None:
                 continue
             logger.info(
