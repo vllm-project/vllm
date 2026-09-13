@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 from collections.abc import Iterable
 from functools import partial
@@ -35,7 +34,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from .contract import ConceptLMBackendConfig
+from .contract import NCPOlmo3BackendConfig
 from .weights import required_checkpoint_shards, resolve_checkpoint_weight
 
 
@@ -46,41 +45,12 @@ def _config_value(config: Any, name: str) -> Any:
     return value
 
 
-def _yarn_mscale(factor: float, multiplier: float) -> float:
-    if factor <= 1.0:
-        return 1.0
-    return 0.1 * multiplier * math.log(factor) + 1.0
-
-
-def _rope_parameters(config: Any, *, apply_yarn: bool) -> dict[str, Any]:
-    parameters: dict[str, Any] = {
+def _rope_parameters(config: Any) -> dict[str, Any]:
+    return {
+        "rope_type": "default",
         "rope_theta": float(_config_value(config, "rotary_base")),
         "partial_rotary_factor": float(_config_value(config, "rotary_percent")),
     }
-    if not apply_yarn:
-        parameters["rope_type"] = "default"
-        return parameters
-
-    factor = float(_config_value(config, "yarn_rotary_scaling_factor"))
-    mscale = float(_config_value(config, "yarn_mscale"))
-    mscale_all_dim = float(_config_value(config, "yarn_mscale_all_dim"))
-    desired_mscale = _yarn_mscale(factor, mscale) / _yarn_mscale(factor, mscale_all_dim)
-    parameters.update(
-        {
-            "rope_type": "yarn",
-            "factor": factor,
-            "original_max_position_embeddings": int(
-                _config_value(config, "yarn_original_max_position_embeddings")
-            ),
-            "beta_fast": float(_config_value(config, "yarn_beta_fast")),
-            "beta_slow": float(_config_value(config, "yarn_beta_slow")),
-            "attn_factor": desired_mscale / _yarn_mscale(factor, 1.0),
-            "truncate": bool(
-                _config_value(config, "yarn_correction_range_round_to_int")
-            ),
-        }
-    )
-    return parameters
 
 
 def _sliding_window(config: Any, layer_number: int) -> int | None:
@@ -99,31 +69,6 @@ def _sliding_window(config: Any, layer_number: int) -> int | None:
     return int(window_size[0])
 
 
-def _extend_yarn_cache(rotary_emb: nn.Module, required_positions: int) -> None:
-    """Extend vLLM's YaRN lookup table without changing YaRN frequencies.
-
-    vLLM 0.13 sizes the table as ``original_length * factor`` and ignores the
-    separately requested runtime maximum.  Explicit extrapolation beyond that
-    trained window therefore indexes past the table even though the scheduler
-    and KV cache admit the request.  Reusing the module's existing inverse
-    frequencies preserves the configured YaRN factor while extending only the
-    lookup domain.
-    """
-
-    cache = rotary_emb.cos_sin_cache
-    if int(cache.shape[0]) >= int(required_positions):
-        return
-    scaling_factor = float(rotary_emb.scaling_factor)
-    inv_freq = rotary_emb._compute_inv_freq(scaling_factor)
-    positions = torch.arange(int(required_positions), dtype=torch.float32)
-    frequencies = torch.einsum("i,j -> ij", positions, inv_freq)
-    extended = torch.cat((frequencies.cos(), frequencies.sin()), dim=-1)
-    extended = extended * float(rotary_emb.mscale)
-    rotary_emb.cos_sin_cache = extended.to(dtype=rotary_emb.dtype)
-    if int(rotary_emb.cos_sin_cache.shape[0]) < int(required_positions):
-        raise RuntimeError("failed to extend the vLLM YaRN rotary cache")
-
-
 class ConceptLMOlmo3Attention(nn.Module):
     """OLMo3 MHA using vLLM Attention and fused runtime parameters."""
 
@@ -131,7 +76,7 @@ class ConceptLMOlmo3Attention(nn.Module):
         self,
         *,
         vllm_config: VllmConfig,
-        backend_config: ConceptLMBackendConfig,
+        backend_config: NCPOlmo3BackendConfig,
         layer_number: int,
         prefix: str,
     ) -> None:
@@ -175,13 +120,12 @@ class ConceptLMOlmo3Attention(nn.Module):
             quant_config=vllm_config.quant_config,
             prefix=f"{prefix}.linear_qkv",
         )
-        self.qk_norm_mode = backend_config.qk_norm_mode
         self.q_layernorm = RMSNorm(
-            backend_config.qk_norm_weight_size,
+            hidden_size,
             eps=float(_config_value(raw_config, "layernorm_epsilon")),
         )
         self.k_layernorm = RMSNorm(
-            backend_config.qk_norm_weight_size,
+            hidden_size,
             eps=float(_config_value(raw_config, "layernorm_epsilon")),
         )
 
@@ -196,20 +140,12 @@ class ConceptLMOlmo3Attention(nn.Module):
             per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.core_attention",
         )
-        use_yarn = str(
-            _config_value(raw_config, "position_embedding_type")
-        ) == "yarn" and (
-            sliding_window is None
-            or not bool(_config_value(raw_config, "yarn_full_attn_layers_only"))
-        )
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=backend_config.max_model_len,
-            is_neox_style=not bool(_config_value(raw_config, "rotary_interleaved")),
-            rope_parameters=_rope_parameters(raw_config, apply_yarn=use_yarn),
+            is_neox_style=True,
+            rope_parameters=_rope_parameters(raw_config),
         )
-        if use_yarn:
-            _extend_yarn_cache(self.rotary_emb, backend_config.max_model_len)
         self.linear_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -223,16 +159,6 @@ class ConceptLMOlmo3Attention(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.qk_norm_mode == "per_head":
-            query_shape = query.shape
-            key_shape = key.shape
-            query = self.q_layernorm(
-                query.reshape(*query_shape[:-1], self.num_heads, self.head_dim)
-            ).reshape(query_shape)
-            key = self.k_layernorm(
-                key.reshape(*key_shape[:-1], self.num_kv_heads, self.head_dim)
-            ).reshape(key_shape)
-            return query, key
         if self.tp_size > 1:
             query = tensor_model_parallel_all_gather(query.contiguous())
             key = tensor_model_parallel_all_gather(key.contiguous())
@@ -273,7 +199,7 @@ class ConceptLMOlmo3MLP(nn.Module):
         self,
         *,
         vllm_config: VllmConfig,
-        backend_config: ConceptLMBackendConfig,
+        backend_config: NCPOlmo3BackendConfig,
         prefix: str,
     ) -> None:
         super().__init__()
@@ -330,7 +256,7 @@ class ConceptLMOlmo3Layer(nn.Module):
         self,
         *,
         vllm_config: VllmConfig,
-        backend_config: ConceptLMBackendConfig,
+        backend_config: NCPOlmo3BackendConfig,
         layer_number: int,
         prefix: str,
     ) -> None:
@@ -382,7 +308,7 @@ class ConceptLMOlmo3Tower(nn.Module):
         self,
         *,
         vllm_config: VllmConfig,
-        backend_config: ConceptLMBackendConfig,
+        backend_config: NCPOlmo3BackendConfig,
         num_layers: int,
         final_layernorm: bool,
         prefix: str,
@@ -429,7 +355,7 @@ class ConceptLMOlmo3Tower(nn.Module):
 class ConceptLMEmbedding(nn.Module):
     """Megatron-compatible word embedding wrapper."""
 
-    def __init__(self, *, backend_config: ConceptLMBackendConfig, prefix: str) -> None:
+    def __init__(self, *, backend_config: NCPOlmo3BackendConfig, prefix: str) -> None:
         super().__init__()
         self.word_embeddings = VocabParallelEmbedding(
             backend_config.vocab_size,
@@ -444,19 +370,19 @@ class ConceptLMEmbedding(nn.Module):
 
 
 class ConceptLMTokenBackbone(nn.Module):
-    """Token-only NCP-OLMo backbone loaded from split pure-HF tensors."""
+    """Token-only NCP-ArchPreview backbone loaded from split pure-HF tensors."""
 
     def __init__(
         self,
         *,
         vllm_config: VllmConfig,
-        backend_config: ConceptLMBackendConfig,
+        backend_config: NCPOlmo3BackendConfig,
         prefix: str = "",
     ) -> None:
         super().__init__()
         if vllm_config.quant_config is not None:
             raise NotImplementedError(
-                "NCP-OLMo pure-HF weights are initially supported unquantized"
+                "NCP-ArchPreview pure-HF weights are initially supported unquantized"
             )
         root = f"{prefix}." if prefix else ""
         self.backend_config = backend_config
@@ -487,7 +413,7 @@ class ConceptLMTokenBackbone(nn.Module):
         self.logits_processor = LogitsProcessor(backend_config.vocab_size)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """Apply NCP-OLMo token embeddings."""
+        """Apply NCP-ArchPreview token embeddings."""
 
         return self.embedding(input_ids)
 

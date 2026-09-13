@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Tests for NCP-OLMo mean-subtracting LayerNorm compatibility."""
+"""Tests for NCP-ArchPreview mean-subtracting LayerNorm compatibility."""
 
 import pytest
 import torch

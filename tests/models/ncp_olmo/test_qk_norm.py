@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Q/K normalization tests shared by the token tower and HLM attention."""
+"""Full-hidden Q/K normalization tests for token and HLM attention."""
 
 from __future__ import annotations
 
@@ -40,48 +40,37 @@ if nn is not None:
 
 
 @unittest.skipIf(torch is None, "torch is not installed in the host-only environment")
-class TestQKNormModes(unittest.TestCase):
+class TestQKNorm(unittest.TestCase):
     @staticmethod
-    def _make_attention(cls: type[nn.Module], *, per_head: bool) -> nn.Module:
+    def _make_attention(cls: type[nn.Module]) -> nn.Module:
         module = cls.__new__(cls)  # type: ignore[call-overload]
         nn.Module.__init__(module)
-        module.qk_norm_mode = "per_head" if per_head else "full_hidden"
         module.num_heads = 4
         module.num_kv_heads = 4
         module.head_dim = 3
         module.tp_size = 1
         module.tp_rank = 0
-        norm_size = 3 if per_head else 12
-        module.q_layernorm = ReferenceRMSNorm(norm_size)
-        module.k_layernorm = ReferenceRMSNorm(norm_size)
+        module.q_layernorm = ReferenceRMSNorm(12)
+        module.k_layernorm = ReferenceRMSNorm(12)
         return module
 
-    def _check_modes(self, cls: type[nn.Module]) -> None:
+    def _check_full_hidden(self, cls: type[nn.Module]) -> None:
         torch.manual_seed(42)
         query = torch.randn(2, 12)
         key = torch.randn(2, 12)
 
-        per_head = self._make_attention(cls, per_head=True)
-        actual_q, actual_k = per_head._apply_qk_norm(query, key)
-        expected_q = per_head.q_layernorm(query.reshape(2, 4, 3)).reshape(2, 12)
-        expected_k = per_head.k_layernorm(key.reshape(2, 4, 3)).reshape(2, 12)
-        torch.testing.assert_close(actual_q, expected_q)
-        torch.testing.assert_close(actual_k, expected_k)
-        self.assertEqual(tuple(per_head.q_layernorm.weight.shape), (3,))
-        self.assertEqual(tuple(per_head.k_layernorm.weight.shape), (3,))
-
-        full_hidden = self._make_attention(cls, per_head=False)
+        full_hidden = self._make_attention(cls)
         actual_q, actual_k = full_hidden._apply_qk_norm(query, key)
         torch.testing.assert_close(actual_q, full_hidden.q_layernorm(query))
         torch.testing.assert_close(actual_k, full_hidden.k_layernorm(key))
         self.assertEqual(tuple(full_hidden.q_layernorm.weight.shape), (12,))
         self.assertEqual(tuple(full_hidden.k_layernorm.weight.shape), (12,))
 
-    def test_token_tower_qk_norm_modes(self) -> None:
-        self._check_modes(ConceptLMOlmo3Attention)
+    def test_token_tower_qk_norm(self) -> None:
+        self._check_full_hidden(ConceptLMOlmo3Attention)
 
-    def test_hlm_qk_norm_modes(self) -> None:
-        self._check_modes(ConceptLMHLMIncrementalAttention)
+    def test_hlm_qk_norm(self) -> None:
+        self._check_full_hidden(ConceptLMHLMIncrementalAttention)
 
 
 if __name__ == "__main__":

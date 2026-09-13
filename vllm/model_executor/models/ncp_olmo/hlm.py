@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Incremental request-scoped HLM for the first Stage3 ConceptLM backend."""
+"""Incremental request-scoped HLM for the NCP-ArchPreview backend."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
-from .contract import ConceptLMBackendConfig
+from .contract import NCPOlmo3BackendConfig
 from .state import ConceptRequestState, HLMKVState, append_tensor_buffer
 from .token_tower import (
     ConceptLMOlmo3MLP,
@@ -348,30 +348,8 @@ class ConceptLMSelfDD(nn.Module):
         )
 
 
-class ConceptLMSelfCumsumDD(nn.Module):
-    """Single-state depth recurrence used by cumsum checkpoints."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.alpha = nn.Parameter(torch.empty(()))
-
-    def forward(
-        self,
-        current_hidden: torch.Tensor,
-        previous_state: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the routed hidden state and the next depth state."""
-
-        alpha = torch.tanh(self.alpha).to(
-            dtype=current_hidden.dtype,
-            device=current_hidden.device,
-        )
-        next_state = current_hidden + alpha * previous_state
-        return next_state, next_state
-
-
 class ConceptLMDiagResidualRoute(nn.Module):
-    """Softmax source mixer followed by the Stage3 diagonal residual add."""
+    """Softmax source mixer followed by the NCP diagonal residual add."""
 
     def __init__(self, *, hidden_size: int, num_sources: int) -> None:
         super().__init__()
@@ -406,32 +384,6 @@ class ConceptLMDiagResidualRoute(nn.Module):
         return target_hidden + residual_update
 
 
-class ConceptLMCrossCumsumRoute(nn.Module):
-    """Read only the final normalized source with a trained scalar beta."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.beta = nn.Parameter(torch.empty(()))
-
-    def forward(
-        self,
-        target_hidden: torch.Tensor,
-        normalized_sources: torch.Tensor,
-        residual_scale: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Apply the cumsum checkpoint's final-source residual route."""
-
-        if normalized_sources.ndim < 2 or normalized_sources.shape[-2] == 0:
-            return target_hidden
-        update = normalized_sources[..., -1, :] * self.beta.to(
-            dtype=target_hidden.dtype,
-            device=target_hidden.device,
-        )
-        if residual_scale is not None:
-            update = update * residual_scale.to(update.dtype)
-        return target_hidden + update.to(target_hidden.dtype)
-
-
 class ConceptLMHLMIncrementalAttention(nn.Module):
     """One-token causal attention over a request-owned dense HLM K/V cache."""
 
@@ -439,7 +391,7 @@ class ConceptLMHLMIncrementalAttention(nn.Module):
         self,
         *,
         vllm_config: Any,
-        backend_config: ConceptLMBackendConfig,
+        backend_config: NCPOlmo3BackendConfig,
         layer_number: int,
         prefix: str,
     ) -> None:
@@ -492,27 +444,20 @@ class ConceptLMHLMIncrementalAttention(nn.Module):
             prefix=f"{prefix}.linear_qkv",
         )
         epsilon = float(_config_value(raw_config, "layernorm_epsilon"))
-        self.qk_norm_mode = backend_config.qk_norm_mode
         self.q_layernorm = RMSNorm(
-            backend_config.qk_norm_weight_size,
+            backend_config.hidden_size,
             eps=epsilon,
         )
         self.k_layernorm = RMSNorm(
-            backend_config.qk_norm_weight_size,
+            backend_config.hidden_size,
             eps=epsilon,
         )
         self.sliding_window = _sliding_window(raw_config, layer_number)
-        use_yarn = str(
-            _config_value(raw_config, "position_embedding_type")
-        ) == "yarn" and (
-            self.sliding_window is None
-            or not bool(_config_value(raw_config, "yarn_full_attn_layers_only"))
-        )
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=backend_config.max_model_len,
-            is_neox_style=not bool(_config_value(raw_config, "rotary_interleaved")),
-            rope_parameters=_rope_parameters(raw_config, apply_yarn=use_yarn),
+            is_neox_style=True,
+            rope_parameters=_rope_parameters(raw_config),
         )
         self.linear_proj = RowParallelLinear(
             backend_config.hidden_size,
@@ -527,16 +472,6 @@ class ConceptLMHLMIncrementalAttention(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.qk_norm_mode == "per_head":
-            query_shape = query.shape
-            key_shape = key.shape
-            query = self.q_layernorm(
-                query.reshape(*query_shape[:-1], self.num_heads, self.head_dim)
-            ).reshape(query_shape)
-            key = self.k_layernorm(
-                key.reshape(*key_shape[:-1], self.num_kv_heads, self.head_dim)
-            ).reshape(key_shape)
-            return query, key
         return self.q_layernorm(query), self.k_layernorm(key)
 
     def forward(
@@ -773,7 +708,7 @@ class ConceptLMHLMIncrementalLayer(nn.Module):
         self,
         *,
         vllm_config: Any,
-        backend_config: ConceptLMBackendConfig,
+        backend_config: NCPOlmo3BackendConfig,
         layer_number: int,
         prefix: str,
     ) -> None:
@@ -905,7 +840,7 @@ class ConceptLMHLMBlock(nn.Module):
         self,
         *,
         vllm_config: Any,
-        backend_config: ConceptLMBackendConfig,
+        backend_config: NCPOlmo3BackendConfig,
         prefix: str,
     ) -> None:
         super().__init__()
@@ -932,13 +867,13 @@ class ConceptLMHLMBlock(nn.Module):
 
 
 class ConceptLMConceptPredictor(nn.Module):
-    """Stage3 HLM, DD, encoder-read routes, and VQ prediction heads."""
+    """NCP-ArchPreview HLM, DD, encoder-read routes, and VQ prediction heads."""
 
     def __init__(
         self,
         *,
         vllm_config: Any,
-        backend_config: ConceptLMBackendConfig,
+        backend_config: NCPOlmo3BackendConfig,
         prefix: str,
     ) -> None:
         super().__init__()
@@ -960,25 +895,19 @@ class ConceptLMConceptPredictor(nn.Module):
                 for _ in range(backend_config.num_codebooks)
             ]
         )
-        if backend_config.dd_self_mode == "cumsum":
-            self.concept_self_dd = ConceptLMSelfCumsumDD()
-            self.concept_read_encoder_routes = nn.ModuleList(
-                [ConceptLMCrossCumsumRoute() for _ in range(backend_config.hlm_layers)]
-            )
-        else:
-            self.concept_self_dd = ConceptLMSelfDD(
-                hidden_size=hidden_size,
-                num_layers=backend_config.hlm_layers,
-            )
-            self.concept_read_encoder_routes = nn.ModuleList(
-                [
-                    ConceptLMDiagResidualRoute(
-                        hidden_size=hidden_size,
-                        num_sources=backend_config.encoder_layers - 1,
-                    )
-                    for _ in range(backend_config.hlm_layers)
-                ]
-            )
+        self.concept_self_dd = ConceptLMSelfDD(
+            hidden_size=hidden_size,
+            num_layers=backend_config.hlm_layers,
+        )
+        self.concept_read_encoder_routes = nn.ModuleList(
+            [
+                ConceptLMDiagResidualRoute(
+                    hidden_size=hidden_size,
+                    num_sources=backend_config.encoder_layers - 1,
+                )
+                for _ in range(backend_config.hlm_layers)
+            ]
+        )
         self.concept_read_encoder_shared_source_norm = nn.LayerNorm(
             hidden_size,
             eps=epsilon,
@@ -1017,7 +946,7 @@ class ConceptLMHighLevelBranch(nn.Module):
         self,
         *,
         vllm_config: Any,
-        backend_config: ConceptLMBackendConfig,
+        backend_config: NCPOlmo3BackendConfig,
     ) -> None:
         super().__init__()
         if vllm_config.quant_config is not None:
@@ -1029,7 +958,6 @@ class ConceptLMHighLevelBranch(nn.Module):
             )
         )
         self.backend_config = backend_config
-        self.cumsum_routes = backend_config.dd_self_mode == "cumsum"
         self.concept_vq_input_norm = nn.LayerNorm(
             backend_config.hidden_size,
             eps=epsilon,
@@ -1065,20 +993,11 @@ class ConceptLMHighLevelBranch(nn.Module):
         layer_index: int,
         raw_output: torch.Tensor,
         history_states: torch.Tensor,
-        cumsum_state: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Apply either the legacy DD mixer or the cumsum depth recurrence."""
+    ) -> torch.Tensor:
+        """Apply the checkpoint's depth-dynamic mixer."""
 
-        if self.cumsum_routes:
-            if cumsum_state is None:
-                raise RuntimeError("HLM cumsum route state is missing")
-            route = self.concept_predictor.concept_self_dd
-            return route(raw_output, cumsum_state)
         route = self.concept_predictor.concept_self_dd
-        return (
-            route.depth_dds[layer_index](raw_output, history_states),
-            cumsum_state,
-        )
+        return route.depth_dds[layer_index](raw_output, history_states)
 
     def advance(
         self,
@@ -1117,7 +1036,6 @@ class ConceptLMHighLevelBranch(nn.Module):
             )
         )
         dd_history[..., 0, :].copy_(hidden_states)
-        cumsum_state = hidden_states if self.cumsum_routes else None
         raw_layer_states = []
         concept_position = request_state.predicted_concepts.length
         for layer_index, layer in enumerate(self.concept_predictor.hlm_block.layers):
@@ -1135,11 +1053,10 @@ class ConceptLMHighLevelBranch(nn.Module):
                 minimum_capacity=16,
             )
             dd_history[..., layer_index + 1, :].copy_(raw_output)
-            hidden_states, cumsum_state = self._route_concept_layer(
+            hidden_states = self._route_concept_layer(
                 layer_index=layer_index,
                 raw_output=raw_output,
                 history_states=dd_history[..., : layer_index + 2, :],
-                cumsum_state=cumsum_state,
             )
             hidden_states = self.concept_predictor.concept_read_encoder_routes[
                 layer_index
@@ -1214,7 +1131,6 @@ class ConceptLMHighLevelBranch(nn.Module):
             )
         )
         dd_history[..., 0, :].copy_(hidden_states)
-        cumsum_state = hidden_states if self.cumsum_routes else None
         raw_layer_states = []
         for layer_index, layer in enumerate(self.concept_predictor.hlm_block.layers):
             self._record_stage(f"hlm.input.{layer_index}", hidden_states)
@@ -1235,11 +1151,10 @@ class ConceptLMHighLevelBranch(nn.Module):
                     minimum_capacity=16,
                 )
             dd_history[..., layer_index + 1, :].copy_(raw_output)
-            hidden_states, cumsum_state = self._route_concept_layer(
+            hidden_states = self._route_concept_layer(
                 layer_index=layer_index,
                 raw_output=raw_output,
                 history_states=dd_history[..., : layer_index + 2, :],
-                cumsum_state=cumsum_state,
             )
             hidden_states = self.concept_predictor.concept_read_encoder_routes[
                 layer_index
@@ -1307,7 +1222,6 @@ class ConceptLMHighLevelBranch(nn.Module):
             )
         )
         dd_history[..., 0, :].copy_(hidden_states)
-        cumsum_state = hidden_states if self.cumsum_routes else None
         raw_layer_states = []
         concept_position = request_state.predicted_concepts.length
         for layer_index, layer in enumerate(self.concept_predictor.hlm_block.layers):
@@ -1325,11 +1239,10 @@ class ConceptLMHighLevelBranch(nn.Module):
                 minimum_capacity=16,
             )
             dd_history[..., layer_index + 1, :].copy_(raw_output)
-            hidden_states, cumsum_state = self._route_concept_layer(
+            hidden_states = self._route_concept_layer(
                 layer_index=layer_index,
                 raw_output=raw_output,
                 history_states=dd_history[..., : layer_index + 2, :],
-                cumsum_state=cumsum_state,
             )
             hidden_states = self.concept_predictor.concept_read_encoder_routes[
                 layer_index

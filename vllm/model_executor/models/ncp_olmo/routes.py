@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Stage3 encoder, decoder, concept, and residual-flow routes."""
+"""NCP-ArchPreview encoder, decoder, concept, and residual-flow routes."""
 
 from __future__ import annotations
 
@@ -12,12 +12,10 @@ import torch.nn as nn
 
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from .contract import ConceptLMBackendConfig
+from .contract import NCPOlmo3BackendConfig
 from .hlm import (
-    ConceptLMCrossCumsumRoute,
     ConceptLMDepthDD,
     ConceptLMDiagResidualRoute,
-    ConceptLMSelfCumsumDD,
     ConceptLMSelfDD,
     apply_ncp_layer_norm,
 )
@@ -40,25 +38,6 @@ class ConceptLMFinalConceptRoute(nn.Module):
     ) -> torch.Tensor:
         update = apply_ncp_layer_norm(self.concept_norm, final_concept)
         update = update * self.final_diag.to(update.dtype)
-        return hidden_states + update * scale.to(update.dtype)
-
-
-class ConceptLMFinalConceptCumsumRoute(nn.Module):
-    """LayerNorm plus the scalar final-concept route used by cumsum models."""
-
-    def __init__(self, *, hidden_size: int, epsilon: float) -> None:
-        super().__init__()
-        self.concept_norm = nn.LayerNorm(hidden_size, eps=epsilon)
-        self.final_beta = nn.Parameter(torch.empty(()))
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        final_concept: torch.Tensor,
-        scale: torch.Tensor,
-    ) -> torch.Tensor:
-        update = apply_ncp_layer_norm(self.concept_norm, final_concept)
-        update = update * self.final_beta.to(update.dtype)
         return hidden_states + update * scale.to(update.dtype)
 
 
@@ -94,89 +73,45 @@ class ConceptLMDDTwoRouteAdd(nn.Module):
         )
 
 
-class ConceptLMCumsumTwoRouteAdd(nn.Module):
-    """Decoder cumsum recurrence and final-concept scalar routes."""
+class NCPOlmo3Routes(nn.Module):
+    """All non-HLM NCP-ArchPreview routes and fusion parameters."""
 
     def __init__(
         self,
         *,
-        hidden_size: int,
-        decoder_layers: int,
-        epsilon: float,
-    ) -> None:
-        super().__init__()
-        self.decoder_cumsum_dd = ConceptLMSelfCumsumDD()
-        self.concept_routes = nn.ModuleList(
-            [
-                ConceptLMFinalConceptCumsumRoute(
-                    hidden_size=hidden_size,
-                    epsilon=epsilon,
-                )
-                for _ in range(decoder_layers)
-            ]
-        )
-
-
-class ConceptLMStage3Routes(nn.Module):
-    """All non-HLM Stage3 routes and fusion parameters."""
-
-    def __init__(
-        self,
-        *,
-        backend_config: ConceptLMBackendConfig,
+        backend_config: NCPOlmo3BackendConfig,
         epsilon: float,
     ) -> None:
         super().__init__()
         hidden_size = backend_config.hidden_size
         self.backend_config = backend_config
-        self.cumsum_routes = backend_config.dd_self_mode == "cumsum"
-        if self.cumsum_routes:
-            self.dd_encoder_self_dd = ConceptLMSelfCumsumDD()
-            self.dd_two_route_add = ConceptLMCumsumTwoRouteAdd(
-                hidden_size=hidden_size,
-                decoder_layers=backend_config.decoder_layers,
-                epsilon=epsilon,
-            )
-            self.decoder_read_encoder_routes = nn.ModuleList(
-                [
-                    ConceptLMCrossCumsumRoute()
-                    for _ in range(backend_config.decoder_layers)
-                ]
-            )
-            self.decoder_read_concept_routes = nn.ModuleList(
-                [
-                    ConceptLMCrossCumsumRoute()
-                    for _ in range(backend_config.decoder_layers)
-                ]
-            )
-        else:
-            self.dd_encoder_self_dd = ConceptLMSelfDD(
-                hidden_size=hidden_size,
-                num_layers=backend_config.encoder_layers,
-            )
-            self.dd_two_route_add = ConceptLMDDTwoRouteAdd(
-                hidden_size=hidden_size,
-                decoder_layers=backend_config.decoder_layers,
-                epsilon=epsilon,
-            )
-            self.decoder_read_encoder_routes = nn.ModuleList(
-                [
-                    ConceptLMDiagResidualRoute(
-                        hidden_size=hidden_size,
-                        num_sources=backend_config.encoder_layers,
-                    )
-                    for _ in range(backend_config.decoder_layers)
-                ]
-            )
-            self.decoder_read_concept_routes = nn.ModuleList(
-                [
-                    ConceptLMDiagResidualRoute(
-                        hidden_size=hidden_size,
-                        num_sources=backend_config.hlm_layers,
-                    )
-                    for _ in range(backend_config.decoder_layers)
-                ]
-            )
+        self.dd_encoder_self_dd = ConceptLMSelfDD(
+            hidden_size=hidden_size,
+            num_layers=backend_config.encoder_layers,
+        )
+        self.dd_two_route_add = ConceptLMDDTwoRouteAdd(
+            hidden_size=hidden_size,
+            decoder_layers=backend_config.decoder_layers,
+            epsilon=epsilon,
+        )
+        self.decoder_read_encoder_routes = nn.ModuleList(
+            [
+                ConceptLMDiagResidualRoute(
+                    hidden_size=hidden_size,
+                    num_sources=backend_config.encoder_layers,
+                )
+                for _ in range(backend_config.decoder_layers)
+            ]
+        )
+        self.decoder_read_concept_routes = nn.ModuleList(
+            [
+                ConceptLMDiagResidualRoute(
+                    hidden_size=hidden_size,
+                    num_sources=backend_config.hlm_layers,
+                )
+                for _ in range(backend_config.decoder_layers)
+            ]
+        )
         self.decoder_read_encoder_shared_source_norm = nn.LayerNorm(
             hidden_size,
             eps=epsilon,
@@ -197,20 +132,12 @@ class ConceptLMStage3Routes(nn.Module):
         layer_index: int,
         raw_output: torch.Tensor,
         history_states: torch.Tensor,
-        cumsum_state: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> torch.Tensor:
         """Apply encoder self-DD after saving the raw layer output."""
 
-        if self.cumsum_routes:
-            if cumsum_state is None:
-                raise RuntimeError("encoder cumsum route state is missing")
-            return self.dd_encoder_self_dd(raw_output, cumsum_state)
-        return (
-            self.dd_encoder_self_dd.depth_dds[layer_index](
-                raw_output,
-                history_states,
-            ),
-            cumsum_state,
+        return self.dd_encoder_self_dd.depth_dds[layer_index](
+            raw_output,
+            history_states,
         )
 
     def fuse(
@@ -238,22 +165,13 @@ class ConceptLMStage3Routes(nn.Module):
         encoder_sources: torch.Tensor,
         concept_sources: torch.Tensor,
         gate: torch.Tensor,
-        cumsum_state: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> torch.Tensor:
         """Apply decoder DD, concept route, and both residual-flow reads."""
 
-        if self.cumsum_routes:
-            if cumsum_state is None:
-                raise RuntimeError("decoder cumsum route state is missing")
-            hidden_states, cumsum_state = self.dd_two_route_add.decoder_cumsum_dd(
-                raw_output,
-                cumsum_state,
-            )
-        else:
-            hidden_states = self.dd_two_route_add.decoder_dds[layer_index](
-                raw_output,
-                history_states,
-            )
+        hidden_states = self.dd_two_route_add.decoder_dds[layer_index](
+            raw_output,
+            history_states,
+        )
         hidden_states = self.dd_two_route_add.concept_routes[layer_index](
             hidden_states,
             final_concepts,
@@ -268,7 +186,7 @@ class ConceptLMStage3Routes(nn.Module):
             concept_sources,
             residual_scale=gate[1],
         )
-        return hidden_states, cumsum_state
+        return hidden_states
 
     def decoder_gates(self) -> torch.Tensor:
         """Compute all two-way decoder gates in one softmax launch."""
@@ -296,7 +214,7 @@ class ConceptLMStage3Routes(nn.Module):
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
-        """Load all Stage3 route and fusion parameters."""
+        """Load all NCP-ArchPreview route and fusion parameters."""
 
         params = dict(self.named_parameters(remove_duplicate=False))
         loaded: set[str] = set()
@@ -311,7 +229,7 @@ class ConceptLMStage3Routes(nn.Module):
                 )
             if target.parameter_name in loaded:
                 raise ValueError(
-                    "duplicate Stage3 route checkpoint target: "
+                    "duplicate NCP-ArchPreview route checkpoint target: "
                     f"{checkpoint_name} -> {target.parameter_name}"
                 )
             parameter = params[target.parameter_name]
@@ -325,6 +243,7 @@ class ConceptLMStage3Routes(nn.Module):
         missing = sorted(set(params) - loaded)
         if missing:
             raise ValueError(
-                "missing Stage3 route checkpoint parameters: " + ", ".join(missing)
+                "missing NCP-ArchPreview route checkpoint parameters: "
+                + ", ".join(missing)
             )
         return loaded

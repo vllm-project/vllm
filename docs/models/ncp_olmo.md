@@ -1,33 +1,40 @@
-# NCP-OLMo
+# NCP-ArchPreview
 
-NCP-OLMo is a decoder-only language model with token-level encoder and decoder
-towers around a chunk-level high-level model (HLM).
+NCP-ArchPreview is a decoder-only language model with token-level encoder and
+decoder towers around a chunk-level high-level model (HLM).
 
 ## Checkpoint contract
 
-The first implementation accepts pure Hugging Face checkpoints with:
+The implementation accepts pure Hugging Face checkpoints with:
 
 - `architectures: ["NCPOlmo3ForCausalLM"]`
 - `model_type: "ncp_olmo3"`
 - `weight_key_format: "huggingface_state_dict"`
+- `conceptlm_chunk_merge_method: "meanpooling"`
+- `conceptlm_layer_norm_option: "normed_add"`
+- `conceptlm_hlm_attention_mode: "backbone_window"`
+- `conceptlm_v22_vq_merge_mode: "raw_logits"`
+- `conceptlm_v21_dd_self_dd_mode: "dd"`
+- `qk_layernorm: true` with full-hidden Q/K normalization
+- `position_embedding_type: "rope"` and `rotary_interleaved: false`
+- `conceptlm_shift_feature: true` and `conceptlm_hlm_ffn_hidden_size: null`
 - split `q_proj`, `k_proj`, `v_proj` tensors
 - split `gate_proj` and `up_proj` tensors
 
-Native Megatron/DCP state-dict keys and the historical
-`ConceptLMV22VQForCausalLM` export identity are intentionally not accepted.
-Convert a training checkpoint into this standalone HF schema before loading it
-with vLLM.
+Native Megatron/DCP state-dict keys are intentionally not accepted. Convert a
+training checkpoint into this standalone HF schema before loading it with vLLM.
 
-Public reference checkpoints are available for
-[Stage 1](https://huggingface.co/ArchSpace-Collection/NCP_ArchPreview_dolma3_8.9B_Stage1)
-and
-[Stage 2 v1](https://huggingface.co/ArchSpace-Collection/NCP_ArchPreview_dolma3_8.9B_Stage2_v1).
+All non-DFlash checkpoints in the public
+[NCP-ArchPreview collection](https://huggingface.co/collections/ArchSpace-Collection/ncp-archpreview)
+are supported, including Stage 1 (and its intermediate checkpoints) and Stage 2
+v1/v2/v3. DFlash checkpoints require the separate DFlash integration.
 The model-registry initialization test uses the Stage 2 v1 configuration with
 a contract-preserving layer-count override and vLLM's dummy loader; a separate
 dummy-weight checkpoint is not required.
 
 The loader maps those tensors into vLLM fused QKV and SwiGLU parameters. The
-weight-loading test checks every tensor in the NCP-OLMo Stage3 graph.
+weight-loading test checks every tensor in the NCP-ArchPreview graph shared by
+the published Stage 1 and Stage 2 checkpoints.
 
 ## Attention backends
 
@@ -42,7 +49,7 @@ top-k/top-p kernels with `VLLM_USE_FLASHINFER_SAMPLER=1` or use the offline
 example's `--flashinfer-sampler` option. The FlashInfer package and AOT kernel
 cache must match the vLLM CUDA and PyTorch build.
 
-NCP-OLMo interleaves full and sliding-window attention. On Hopper (SM90), vLLM
+NCP-ArchPreview interleaves full and sliding-window attention. On Hopper (SM90), vLLM
 currently rejects FlashInfer attention for sliding-window groups because that
 combination is not reliable. A supported mixed configuration keeps
 sliding-window groups on FlashAttention 3 and assigns only full-attention
@@ -119,8 +126,3 @@ overrides. Before opening a pull request, run:
 - chunked-prefill and preemption/recompute tests
 - GPU confirmation of the selected PagedAttention/FlashAttention backend
 - FlashInfer-sampler parity and mixed-backend parity on a sliding-window model
-
-The architecture and checkpoint contract are based on the Concept OLMo
-reference implementation in `Liu-yuliang/concept_olmo`. The pull request must
-identify any code adapted from that repository and preserve the applicable
-source notices.

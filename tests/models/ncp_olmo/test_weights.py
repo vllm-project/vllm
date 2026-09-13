@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Unit tests for pure-HF NCP-OLMo weight mapping."""
+"""Unit tests for pure-HF NCP-ArchPreview weight mapping."""
 
 from __future__ import annotations
 
@@ -24,17 +24,17 @@ else:
     NCPOlmo3ForCausalLM = None
 
 from vllm.model_executor.models.ncp_olmo.weights import (
-    Stage3WeightConfig,
+    NCPOlmo3WeightConfig,
     TokenWeightConfig,
-    audit_stage3_weight_shapes,
+    audit_ncp_olmo3_weight_shapes,
     audit_token_weight_shapes,
-    expected_stage3_weight_shapes,
+    expected_ncp_olmo3_weight_shapes,
     expected_token_weight_shapes,
     resolve_checkpoint_weight,
 )
 
 
-def token_config(*, qk_norm_weight_size: int | None = None) -> TokenWeightConfig:
+def token_config() -> TokenWeightConfig:
     """Return a small full-MHA token-tower shape contract."""
 
     return TokenWeightConfig(
@@ -45,7 +45,6 @@ def token_config(*, qk_norm_weight_size: int | None = None) -> TokenWeightConfig
         num_key_value_heads=2,
         encoder_layers=2,
         decoder_layers=2,
-        qk_norm_weight_size=qk_norm_weight_size,
     )
 
 
@@ -226,9 +225,9 @@ class TestCheckpointKeyResolution(unittest.TestCase):
         self.assertEqual(target.parameter_name, parameter)
 
 
-class TestStage3WeightAudit(unittest.TestCase):
-    def test_stage3_dimensions_define_722_parameters(self) -> None:
-        config = Stage3WeightConfig(
+class TestNCPOlmo3WeightAudit(unittest.TestCase):
+    def test_ncp_olmo3_dimensions_define_722_parameters(self) -> None:
+        config = NCPOlmo3WeightConfig(
             token=TokenWeightConfig(
                 hidden_size=4096,
                 intermediate_size=11008,
@@ -243,21 +242,21 @@ class TestStage3WeightAudit(unittest.TestCase):
             num_codebooks=32,
         )
 
-        self.assertEqual(len(expected_stage3_weight_shapes(config)), 722)
+        self.assertEqual(len(expected_ncp_olmo3_weight_shapes(config)), 722)
 
     def test_pure_hf_full_manifest_has_722_parameters(self) -> None:
-        config = Stage3WeightConfig(
+        config = NCPOlmo3WeightConfig(
             token=token_config(),
             hlm_layers=2,
             codebook_size=4,
             num_codebooks=2,
         )
-        expected = expected_stage3_weight_shapes(config)
+        expected = expected_ncp_olmo3_weight_shapes(config)
         manifest = pure_hf_manifest(expected, config.token)
         manifest["model.decoder.norm._extra_state"] = (0,)
         manifest["model.concept_predictor.hlm_block.norm._extra_state"] = (0,)
 
-        report = audit_stage3_weight_shapes(manifest, config)
+        report = audit_ncp_olmo3_weight_shapes(manifest, config)
 
         self.assertTrue(report.ok)
         self.assertEqual(report.expected_parameter_count, 114)
@@ -265,72 +264,20 @@ class TestStage3WeightAudit(unittest.TestCase):
         self.assertEqual(len(report.ignored_metadata), 2)
 
     def test_hf_wrapped_full_manifest_has_complete_route_coverage(self) -> None:
-        config = Stage3WeightConfig(
+        config = NCPOlmo3WeightConfig(
             token=token_config(), hlm_layers=2, codebook_size=4, num_codebooks=2
         )
-        expected = expected_stage3_weight_shapes(config)
+        expected = expected_ncp_olmo3_weight_shapes(config)
         manifest = {
             f"wrapper.{name}": shape
             for name, shape in pure_hf_manifest(expected, config.token).items()
         }
 
-        report = audit_stage3_weight_shapes(manifest, config)
+        report = audit_ncp_olmo3_weight_shapes(manifest, config)
 
         self.assertTrue(report.ok, report.to_dict())
         self.assertEqual(report.matched_parameter_count, 114)
         self.assertEqual(report.ignored_metadata, ())
-
-    def test_cumsum_manifest_uses_scalar_route_contract(self) -> None:
-        config = Stage3WeightConfig(
-            token=token_config(),
-            hlm_layers=2,
-            codebook_size=4,
-            num_codebooks=2,
-            dd_self_mode="cumsum",
-        )
-
-        expected = expected_stage3_weight_shapes(config)
-
-        self.assertIn("dd_encoder_self_dd.alpha", expected)
-        self.assertIn("concept_predictor.concept_self_dd.alpha", expected)
-        self.assertIn("dd_two_route_add.decoder_cumsum_dd.alpha", expected)
-        self.assertIn("concept_predictor.concept_read_encoder_routes.1.beta", expected)
-        self.assertIn("decoder_read_encoder_routes.1.beta", expected)
-        self.assertIn("decoder_read_concept_routes.1.beta", expected)
-        self.assertIn("dd_two_route_add.concept_routes.1.final_beta", expected)
-        self.assertNotIn("dd_encoder_self_dd.depth_dds.0.static_a", expected)
-        self.assertNotIn("dd_two_route_add.concept_routes.1.final_diag", expected)
-
-        report = audit_stage3_weight_shapes(
-            pure_hf_manifest(expected, config.token), config
-        )
-        self.assertTrue(report.ok, report.to_dict())
-
-    def test_per_head_cumsum_manifest_uses_head_dim_qk_norms(self) -> None:
-        config = Stage3WeightConfig(
-            token=token_config(qk_norm_weight_size=4),
-            hlm_layers=2,
-            codebook_size=4,
-            num_codebooks=2,
-            dd_self_mode="cumsum",
-        )
-
-        expected = expected_stage3_weight_shapes(config)
-
-        self.assertEqual(
-            expected["encoder.layers.0.self_attention.q_layernorm.weight"],
-            (4,),
-        )
-        self.assertEqual(
-            expected[
-                "concept_predictor.hlm_block.layers.0.self_attention.k_layernorm.weight"
-            ],
-            (4,),
-        )
-        report = audit_stage3_weight_shapes(
-            pure_hf_manifest(expected, config.token), config
-        )
-        self.assertTrue(report.ok, report.to_dict())
 
 
 @unittest.skipIf(
@@ -379,7 +326,6 @@ class TestModelHFWeightLoading(unittest.TestCase):
     class _BackendConfig:
         num_attention_heads = 2
         num_key_value_heads = 2
-        dd_self_mode = "dd"
 
     class _Model:
         token_backbone: object
@@ -448,7 +394,7 @@ class TestModelHFWeightLoading(unittest.TestCase):
         return hf_name
 
     def test_full_standard_hf_manifest_loads_all_722_parameters(self) -> None:
-        config = Stage3WeightConfig(
+        config = NCPOlmo3WeightConfig(
             token=TokenWeightConfig(
                 hidden_size=4096,
                 intermediate_size=11008,
@@ -462,7 +408,7 @@ class TestModelHFWeightLoading(unittest.TestCase):
             codebook_size=128,
             num_codebooks=32,
         )
-        names = expected_stage3_weight_shapes(config)
+        names = expected_ncp_olmo3_weight_shapes(config)
         model, params = self._build_fake_model(names)
 
         weights = []
@@ -498,36 +444,8 @@ class TestModelHFWeightLoading(unittest.TestCase):
         self.assertEqual(qkv.shards, ["q", "k", "v"])
         self.assertEqual(fc1.shards, [0, 1])
 
-    def test_full_cumsum_manifest_loads_every_parameter(self) -> None:
-        config = Stage3WeightConfig(
-            token=TokenWeightConfig(
-                hidden_size=32,
-                intermediate_size=12,
-                vocab_size=32,
-                num_attention_heads=2,
-                num_key_value_heads=2,
-                encoder_layers=16,
-                decoder_layers=16,
-            ),
-            hlm_layers=8,
-            codebook_size=4,
-            num_codebooks=32,
-            dd_self_mode="cumsum",
-        )
-        names = expected_stage3_weight_shapes(config)
-        model, _ = self._build_fake_model(names)
-        model.backend_config.dd_self_mode = "cumsum"
-
-        loaded = NCPOlmo3ForCausalLM.load_weights(
-            model,
-            self._pure_hf_weights(names, config.token),
-        )
-
-        self.assertEqual(len(loaded), len(names))
-        self.assertEqual(len(names), 525)
-
     def test_native_megatron_checkpoint_keys_are_rejected(self) -> None:
-        config = Stage3WeightConfig(
+        config = NCPOlmo3WeightConfig(
             token=TokenWeightConfig(
                 hidden_size=32,
                 intermediate_size=12,
@@ -541,7 +459,7 @@ class TestModelHFWeightLoading(unittest.TestCase):
             codebook_size=4,
             num_codebooks=32,
         )
-        shapes = expected_stage3_weight_shapes(config)
+        shapes = expected_ncp_olmo3_weight_shapes(config)
         model, _ = self._build_fake_model(shapes)
 
         with self.assertRaisesRegex(ValueError, "unexpected ConceptLM checkpoint"):

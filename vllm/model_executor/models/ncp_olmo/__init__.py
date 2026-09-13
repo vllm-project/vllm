@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""NCP-OLMo model implementation for pure Hugging Face checkpoints."""
+"""NCP-ArchPreview model implementation for pure Hugging Face checkpoints."""
 
 from typing import TYPE_CHECKING, Any
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""V2 runner state adapter for request-scoped NCP-OLMo HLM tensors."""
+"""V2 runner state adapter for request-scoped NCP-ArchPreview HLM tensors."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from .state import ConceptRequestStateStore
 
 
 class NCPOlmoModelState(DefaultModelState):
-    """Connect NCP-OLMo HLM state to the V2 runner request lifecycle."""
+    """Connect NCP-ArchPreview HLM state to the V2 runner request lifecycle."""
 
     def __init__(
         self,
@@ -33,7 +33,9 @@ class NCPOlmoModelState(DefaultModelState):
         super().__init__(vllm_config, model, encoder_cache, device)
         request_states = getattr(model, "request_states", None)
         if not isinstance(request_states, ConceptRequestStateStore):
-            raise TypeError("NCP-OLMo model is missing its HLM request state store")
+            raise TypeError(
+                "NCP-ArchPreview model is missing its HLM request state store"
+            )
         self.request_states = request_states
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
@@ -71,7 +73,7 @@ class NCPOlmoModelState(DefaultModelState):
         ]
         if missing_runner_requests:
             raise RuntimeError(
-                "NCP-OLMo received a mixed real/dummy V2 batch: "
+                "NCP-ArchPreview received a mixed real/dummy V2 batch: "
                 f"{missing_runner_requests!r} are absent from RequestState"
             )
         model_inputs["request_segments"] = self.request_states.resolve_segments(

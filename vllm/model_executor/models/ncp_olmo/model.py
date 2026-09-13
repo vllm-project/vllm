@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""vLLM model entry point for ConceptLM V2.2-VQ."""
+"""vLLM model entry point for NCP-ArchPreview."""
 
 from __future__ import annotations
 
@@ -18,9 +18,9 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import HasInnerState
 
-from .contract import ConceptLMBackendConfig
+from .contract import NCPOlmo3BackendConfig
 from .hlm import ConceptLMHighLevelBranch
-from .routes import ConceptLMStage3Routes
+from .routes import NCPOlmo3Routes
 from .state import (
     ConceptRequestState,
     ConceptRequestStateStore,
@@ -31,8 +31,8 @@ from .state import (
 )
 from .token_tower import ConceptLMTokenBackbone, _config_value
 from .weights import (
-    Stage3WeightConfig,
-    expected_stage3_weight_shapes,
+    NCPOlmo3WeightConfig,
+    expected_ncp_olmo3_weight_shapes,
     required_checkpoint_shards,
     resolve_checkpoint_weight,
 )
@@ -58,29 +58,32 @@ def _chunk_mean(values: torch.Tensor, chunk_size: int) -> torch.Tensor:
 
 
 class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
-    """Native NCP-OLMo model backed by vLLM paged token attention."""
+    """Native NCP-ArchPreview model backed by vLLM paged token attention."""
 
     backend_status = "full_forward_parity_gated"
 
     def __init__(self, *, vllm_config: Any, prefix: str = "") -> None:
         super().__init__()
         if prefix:
-            raise NotImplementedError("the first ConceptLM backend requires PP=1")
+            raise NotImplementedError("the first NCP-ArchPreview backend requires PP=1")
         if get_tensor_model_parallel_world_size() != 1:
-            raise NotImplementedError("the first ConceptLM backend requires TP=1")
+            raise NotImplementedError("the first NCP-ArchPreview backend requires TP=1")
         if vllm_config.parallel_config.pipeline_parallel_size != 1:
-            raise NotImplementedError("the first ConceptLM backend requires PP=1")
+            raise NotImplementedError("the first NCP-ArchPreview backend requires PP=1")
         if not vllm_config.use_v2_model_runner:
-            raise ValueError("NCP-OLMo request state requires the V2 model runner")
+            raise ValueError(
+                "NCP-ArchPreview request state requires the V2 model runner"
+            )
         if not vllm_config.model_config.enforce_eager:
             raise ValueError(
-                "the first NCP-OLMo V2 backend requires enforce_eager=True; "
+                "the first NCP-ArchPreview V2 backend requires enforce_eager=True; "
                 "CUDA graph capture has not been validated with request-scoped "
                 "HLM state"
             )
         if vllm_config.cache_config.enable_prefix_caching:
             raise ValueError(
-                "ConceptLM request-scoped HLM requires prefix caching to be disabled"
+                "NCP-ArchPreview request-scoped HLM requires prefix caching to be "
+                "disabled"
             )
         if vllm_config.speculative_config is not None:
             raise NotImplementedError(
@@ -88,7 +91,8 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
             )
         if vllm_config.quant_config is not None:
             raise NotImplementedError(
-                "quantized NCP-OLMo checkpoints are not enabled in the first backend"
+                "quantized NCP-ArchPreview checkpoints are not enabled in the "
+                "first backend"
             )
 
         hf_config = vllm_config.model_config.hf_config
@@ -97,12 +101,8 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
             if hasattr(hf_config, "to_dict")
             else dict(vars(hf_config))
         )
-        self.backend_config = ConceptLMBackendConfig.from_mapping(raw_config)
-        self.stage3_weight_config = Stage3WeightConfig.from_mapping(raw_config)
-        if self.backend_config.chunk_merge_method != "meanpooling":
-            raise NotImplementedError(
-                "the first Stage3 backend requires meanpooling chunks"
-            )
+        self.backend_config = NCPOlmo3BackendConfig.from_mapping(raw_config)
+        self.ncp_weight_config = NCPOlmo3WeightConfig.from_mapping(raw_config)
         epsilon = float(_config_value(hf_config, "layernorm_epsilon"))
         self.token_backbone = ConceptLMTokenBackbone(
             vllm_config=vllm_config,
@@ -112,7 +112,7 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
             vllm_config=vllm_config,
             backend_config=self.backend_config,
         )
-        self.routes = ConceptLMStage3Routes(
+        self.routes = NCPOlmo3Routes(
             backend_config=self.backend_config,
             epsilon=epsilon,
         )
@@ -275,10 +275,7 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
             )
 
     def _concept_index_for_position(self, position: int) -> int | None:
-        if self.backend_config.shift_feature:
-            shifted_chunk = (position + 1) // self.backend_config.chunk_size
-        else:
-            shifted_chunk = position // self.backend_config.chunk_size
+        shifted_chunk = (position + 1) // self.backend_config.chunk_size
         return shifted_chunk - 1 if shifted_chunk > 0 else None
 
     def _request_concept_at(
@@ -390,19 +387,15 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
             )
         )
         encoder_history[..., 0, :].copy_(hidden_states)
-        encoder_cumsum_state = (
-            hidden_states if self.backend_config.dd_self_mode == "cumsum" else None
-        )
         for layer_index, layer in enumerate(self.token_backbone.encoder.layers):
             record_stage(f"encoder.input.{layer_index}", hidden_states)
             raw_output = layer(positions, hidden_states)
             record_stage(f"encoder.raw.{layer_index}", raw_output)
             encoder_history[..., layer_index + 1, :].copy_(raw_output)
-            hidden_states, encoder_cumsum_state = self.routes.encoder_after_layer(
+            hidden_states = self.routes.encoder_after_layer(
                 layer_index,
                 raw_output,
                 encoder_history[..., : layer_index + 2, :],
-                encoder_cumsum_state,
             )
             record_stage(f"encoder.routed.{layer_index}", hidden_states)
         encoder_hidden = hidden_states
@@ -445,15 +438,12 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
             )
         )
         decoder_history[..., 0, :].copy_(hidden_states)
-        decoder_cumsum_state = (
-            hidden_states if self.backend_config.dd_self_mode == "cumsum" else None
-        )
         for layer_index, layer in enumerate(self.token_backbone.decoder.layers):
             record_stage(f"decoder.input.{layer_index}", hidden_states)
             raw_output = layer(positions, hidden_states)
             record_stage(f"decoder.raw.{layer_index}", raw_output)
             decoder_history[..., layer_index + 1, :].copy_(raw_output)
-            hidden_states, decoder_cumsum_state = self.routes.decoder_after_layer(
+            hidden_states = self.routes.decoder_after_layer(
                 layer_index=layer_index,
                 raw_output=raw_output,
                 history_states=decoder_history[..., : layer_index + 2, :],
@@ -461,7 +451,6 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
                 encoder_sources=encoder_sources,
                 concept_sources=concept_sources,
                 gate=decoder_gates[layer_index],
-                cumsum_state=decoder_cumsum_state,
             )
             record_stage(f"decoder.routed.{layer_index}", hidden_states)
         final_layernorm = self.token_backbone.decoder.final_layernorm
@@ -514,16 +503,16 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
                     raise RuntimeError(f"duplicate internal parameter name: {name}")
                 params[name] = (f"{module_name}.{name}", parameter)
 
-        stage3_weight_config = getattr(self, "stage3_weight_config", None)
+        ncp_weight_config = getattr(self, "ncp_weight_config", None)
         expected_parameter_count = (
-            len(expected_stage3_weight_shapes(stage3_weight_config))
-            if stage3_weight_config is not None
+            len(expected_ncp_olmo3_weight_shapes(ncp_weight_config))
+            if ncp_weight_config is not None
             else len(params)
         )
         if len(params) != expected_parameter_count:
             raise RuntimeError(
-                "constructed Stage3 model parameter count does not match its "
-                f"{self.backend_config.dd_self_mode} weight contract: "
+                "constructed NCP-ArchPreview model parameter count does not match its "
+                "weight contract: "
                 f"expected {expected_parameter_count}, got {len(params)}"
             )
 
@@ -600,7 +589,8 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
             )
         if len(ignored_metadata) not in (0, 2):
             raise ValueError(
-                "Stage3 checkpoint must contain zero or two _extra_state tensors, "
+                "NCP-ArchPreview checkpoint must contain zero or two _extra_state "
+                "tensors, "
                 f"got {sorted(ignored_metadata)}"
             )
         loaded_model_names = {params[name][0] for name in complete_parameters}

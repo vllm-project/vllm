@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .contract import BackendContractError, normalize_qk_norm_config
+from .contract import BackendContractError
 
 _LAYER_SHAPES = (
     ("self_attention.linear_qkv.weight", "qkv"),
@@ -138,7 +138,6 @@ class TokenWeightConfig:
     num_key_value_heads: int
     encoder_layers: int
     decoder_layers: int
-    qk_norm_weight_size: int | None = None
 
     @classmethod
     def from_mapping(
@@ -180,11 +179,6 @@ class TokenWeightConfig:
                 "num_layers must equal encoder_layers + decoder_layers for "
                 "token weights"
             )
-        _, qk_norm_weight_size = normalize_qk_norm_config(
-            config,
-            hidden_size=hidden_size,
-            num_attention_heads=num_attention_heads,
-        )
         return cls(
             hidden_size=hidden_size,
             intermediate_size=_positive_int(config, "ffn_hidden_size"),
@@ -193,7 +187,6 @@ class TokenWeightConfig:
             num_key_value_heads=num_key_value_heads,
             encoder_layers=resolved_encoder_layers,
             decoder_layers=resolved_decoder_layers,
-            qk_norm_weight_size=qk_norm_weight_size,
         )
 
 
@@ -228,26 +221,20 @@ class TokenWeightAudit:
 
 
 @dataclass(frozen=True)
-class Stage3WeightConfig:
-    """Dimensions and route mode for a fully supported Stage3 graph."""
+class NCPOlmo3WeightConfig:
+    """Dimensions for the supported NCP-OLMo graph."""
 
     token: TokenWeightConfig
     hlm_layers: int
     codebook_size: int
     num_codebooks: int
-    dd_self_mode: str = "dd"
 
     @classmethod
-    def from_mapping(cls, config: Mapping[str, Any]) -> Stage3WeightConfig:
+    def from_mapping(cls, config: Mapping[str, Any]) -> NCPOlmo3WeightConfig:
         """Validate the route layout that determines all non-token shapes."""
 
-        dd_self_mode = config.get("conceptlm_v21_dd_self_dd_mode")
-        if dd_self_mode not in {"dd", "cumsum"}:
-            raise BackendContractError(
-                "conceptlm_v21_dd_self_dd_mode must be 'dd' or 'cumsum', "
-                f"got {dd_self_mode!r}"
-            )
         exact_values = {
+            "conceptlm_v21_dd_self_dd_mode": "dd",
             "conceptlm_v21_dd_encoder_self_dd": True,
             "conceptlm_v21_dd_encoder_self_dd_every_n_layers": 1,
             "conceptlm_v21_dd_encoder_self_dd_hidden_size": 0,
@@ -284,8 +271,8 @@ class Stage3WeightConfig:
         ]
         if mismatches:
             raise BackendContractError(
-                "the full-weight contract requires the supported Stage3 graph: "
-                + "; ".join(mismatches)
+                "the full-weight contract requires the supported NCP-ArchPreview "
+                "graph: " + "; ".join(mismatches)
             )
         return cls(
             token=TokenWeightConfig.from_mapping(config),
@@ -298,7 +285,6 @@ class Stage3WeightConfig:
                 config,
                 "conceptlm_v22_vq_num_codebooks",
             ),
-            dd_self_mode=str(dd_self_mode),
         )
 
 
@@ -342,16 +328,11 @@ def expected_token_weight_shapes(
         )
     key_value_size = config.num_key_value_heads * head_dim
     query_size = config.num_attention_heads * head_dim
-    qk_norm_weight_size = (
-        hidden_size
-        if config.qk_norm_weight_size is None
-        else config.qk_norm_weight_size
-    )
     shape_by_kind = {
         "qkv": (query_size + 2 * key_value_size, hidden_size),
         "hidden_hidden": (hidden_size, hidden_size),
-        "query": (qk_norm_weight_size,),
-        "key_value": (qk_norm_weight_size,),
+        "query": (hidden_size,),
+        "key_value": (hidden_size,),
         "fc1": (2 * config.intermediate_size, hidden_size),
         "fc2": (hidden_size, config.intermediate_size),
         "hidden": (hidden_size,),
@@ -403,26 +384,21 @@ def _add_residual_route_shapes(
         result[f"{layer_prefix}.w2.weight"] = (num_sources, num_sources)
 
 
-def expected_stage3_weight_shapes(
-    config: Stage3WeightConfig,
+def expected_ncp_olmo3_weight_shapes(
+    config: NCPOlmo3WeightConfig,
 ) -> dict[str, tuple[int, ...]]:
-    """Return exact global shapes for the selected Stage3 route graph."""
+    """Return exact global shapes for the selected NCP-ArchPreview route graph."""
 
     result = expected_token_weight_shapes(config.token)
     hidden_size = config.token.hidden_size
     head_dim = hidden_size // config.token.num_attention_heads
     query_size = config.token.num_attention_heads * head_dim
     key_value_size = config.token.num_key_value_heads * head_dim
-    qk_norm_weight_size = (
-        hidden_size
-        if config.token.qk_norm_weight_size is None
-        else config.token.qk_norm_weight_size
-    )
     hlm_shape_by_kind = {
         "qkv": (query_size + 2 * key_value_size, hidden_size),
         "hidden_hidden": (hidden_size, hidden_size),
-        "query": (qk_norm_weight_size,),
-        "key_value": (qk_norm_weight_size,),
+        "query": (hidden_size,),
+        "key_value": (hidden_size,),
         "fc1": (2 * config.token.intermediate_size, hidden_size),
         "fc2": (hidden_size, config.token.intermediate_size),
         "hidden": (hidden_size,),
@@ -449,58 +425,46 @@ def expected_stage3_weight_shapes(
     result["concept_vq_input_norm.weight"] = (hidden_size,)
     result["concept_vq_input_norm.bias"] = (hidden_size,)
 
-    if config.dd_self_mode == "cumsum":
-        result["dd_encoder_self_dd.alpha"] = ()
-        result["concept_predictor.concept_self_dd.alpha"] = ()
-        result["dd_two_route_add.decoder_cumsum_dd.alpha"] = ()
-        for layer_index in range(config.hlm_layers):
-            result[
-                f"concept_predictor.concept_read_encoder_routes.{layer_index}.beta"
-            ] = ()
-        for layer_index in range(config.token.decoder_layers):
-            result[f"decoder_read_encoder_routes.{layer_index}.beta"] = ()
-            result[f"decoder_read_concept_routes.{layer_index}.beta"] = ()
-    else:
-        _add_depth_dd_shapes(
-            result,
-            prefix="dd_encoder_self_dd.depth_dds",
-            num_layers=config.token.encoder_layers,
-            hidden_size=hidden_size,
-        )
-        _add_depth_dd_shapes(
-            result,
-            prefix="concept_predictor.concept_self_dd.depth_dds",
-            num_layers=config.hlm_layers,
-            hidden_size=hidden_size,
-        )
-        _add_depth_dd_shapes(
-            result,
-            prefix="dd_two_route_add.decoder_dds",
-            num_layers=config.token.decoder_layers,
-            hidden_size=hidden_size,
-        )
+    _add_depth_dd_shapes(
+        result,
+        prefix="dd_encoder_self_dd.depth_dds",
+        num_layers=config.token.encoder_layers,
+        hidden_size=hidden_size,
+    )
+    _add_depth_dd_shapes(
+        result,
+        prefix="concept_predictor.concept_self_dd.depth_dds",
+        num_layers=config.hlm_layers,
+        hidden_size=hidden_size,
+    )
+    _add_depth_dd_shapes(
+        result,
+        prefix="dd_two_route_add.decoder_dds",
+        num_layers=config.token.decoder_layers,
+        hidden_size=hidden_size,
+    )
 
-        _add_residual_route_shapes(
-            result,
-            prefix="concept_predictor.concept_read_encoder_routes",
-            num_layers=config.hlm_layers,
-            num_sources=config.token.encoder_layers - 1,
-            hidden_size=hidden_size,
-        )
-        _add_residual_route_shapes(
-            result,
-            prefix="decoder_read_encoder_routes",
-            num_layers=config.token.decoder_layers,
-            num_sources=config.token.encoder_layers,
-            hidden_size=hidden_size,
-        )
-        _add_residual_route_shapes(
-            result,
-            prefix="decoder_read_concept_routes",
-            num_layers=config.token.decoder_layers,
-            num_sources=config.hlm_layers,
-            hidden_size=hidden_size,
-        )
+    _add_residual_route_shapes(
+        result,
+        prefix="concept_predictor.concept_read_encoder_routes",
+        num_layers=config.hlm_layers,
+        num_sources=config.token.encoder_layers - 1,
+        hidden_size=hidden_size,
+    )
+    _add_residual_route_shapes(
+        result,
+        prefix="decoder_read_encoder_routes",
+        num_layers=config.token.decoder_layers,
+        num_sources=config.token.encoder_layers,
+        hidden_size=hidden_size,
+    )
+    _add_residual_route_shapes(
+        result,
+        prefix="decoder_read_concept_routes",
+        num_layers=config.token.decoder_layers,
+        num_sources=config.hlm_layers,
+        hidden_size=hidden_size,
+    )
     for name in (
         "concept_predictor.concept_read_encoder_shared_source_norm",
         "decoder_read_encoder_shared_source_norm",
@@ -513,10 +477,7 @@ def expected_stage3_weight_shapes(
         prefix = f"dd_two_route_add.concept_routes.{layer_index}"
         result[f"{prefix}.concept_norm.weight"] = (hidden_size,)
         result[f"{prefix}.concept_norm.bias"] = (hidden_size,)
-        if config.dd_self_mode == "cumsum":
-            result[f"{prefix}.final_beta"] = ()
-        else:
-            result[f"{prefix}.final_diag"] = (hidden_size,)
+        result[f"{prefix}.final_diag"] = (hidden_size,)
 
     for name in ("fusion_tok_norm", "fusion_hl_norm"):
         result[f"{name}.weight"] = (hidden_size,)
@@ -678,12 +639,12 @@ def audit_token_weight_shapes(
     )
 
 
-def audit_stage3_weight_shapes(
-    tensor_shapes: Mapping[str, Sequence[int]], config: Stage3WeightConfig
+def audit_ncp_olmo3_weight_shapes(
+    tensor_shapes: Mapping[str, Sequence[int]], config: NCPOlmo3WeightConfig
 ) -> FullWeightAudit:
-    """Compare a SafeTensors manifest with the complete Stage3 contract."""
+    """Compare a SafeTensors manifest with the complete NCP-ArchPreview contract."""
 
-    expected = expected_stage3_weight_shapes(config)
+    expected = expected_ncp_olmo3_weight_shapes(config)
     resolved = _audit_resolved_shapes(tensor_shapes, expected, config.token)
     missing = sorted(set(expected) - resolved.addressed_parameters)
     matched_count = len(resolved.complete_parameters)
@@ -733,7 +694,7 @@ def read_safetensors_shapes(model_dir: Path) -> dict[str, tuple[int, ...]]:
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Audit pure-HF NCP-OLMo keys and global tensor shapes"
+        description="Audit pure-HF NCP-ArchPreview keys and global tensor shapes"
     )
     parser.add_argument("model_dir", type=Path)
     return parser.parse_args(argv)
@@ -745,9 +706,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     raw_config = json.loads((args.model_dir / "config.json").read_text())
     tensor_shapes = read_safetensors_shapes(args.model_dir)
-    report = audit_stage3_weight_shapes(
+    report = audit_ncp_olmo3_weight_shapes(
         tensor_shapes,
-        Stage3WeightConfig.from_mapping(raw_config),
+        NCPOlmo3WeightConfig.from_mapping(raw_config),
     )
     print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
     return 0 if report.ok else 2
