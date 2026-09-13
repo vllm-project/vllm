@@ -7,6 +7,8 @@ import pytest
 import torch
 import torch.distributed
 
+import vllm.distributed.eplb.eplb_communicator as eplb_comm
+import vllm.utils.gpu_sync_debug as gsd
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.eplb.eplb_communicator import (
     create_eplb_communicator,
@@ -23,6 +25,29 @@ from vllm.distributed.parallel_state import (
 )
 
 from .eplb_utils import distributed_run, set_env_vars_and_device
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_gloo_receive_staging_does_not_force_gpu_sync(monkeypatch):
+    """Gloo receives must reach the GPU without an implicit pageable copy."""
+    monkeypatch.setattr(gsd, "_SYNC_CHECK_MODE", "error")
+    monkeypatch.setattr(gsd, "_sync_check_enabled", True)
+    gsd._install_copy_checkers()
+    monkeypatch.setattr(eplb_comm, "is_local_first_rank", lambda: False)
+
+    monkeypatch.setattr(eplb_comm, "P2POp", lambda op, tensor, peer, group: tensor)
+
+    def receive(tensors):
+        for tensor in tensors:
+            tensor.fill_(7)
+        return []
+
+    monkeypatch.setattr(eplb_comm, "batch_isend_irecv", receive)
+    communicator = eplb_comm.TorchDistGlooStagedEplbCommunicator(cpu_group=None)
+    dst = torch.empty(32, device="cuda")
+    communicator.add_recv([dst], src_rank=1, expert_id=0)
+    gsd.with_gpu_sync_check(communicator.execute)()
+    torch.testing.assert_close(dst.cpu(), torch.full((32,), 7.0))
 
 
 def create_expert_indices_with_redundancy(

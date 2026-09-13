@@ -4,17 +4,33 @@
 from dataclasses import field
 from typing import Any, Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from vllm.config.utils import config
-from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-logger = init_logger(__name__)
-
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
+
+
+@config
+class HiSparseConfig:
+    """Configuration for HiSparse sparse-MLA KV offloading."""
+
+    device_buffer_size: int | None = Field(default=None, gt=0)
+    """Total per-request GPU hot-buffer rows, including the newest-token slot.
+
+    Defaults to one top-k per decode query plus one top-k of LRU slack. The
+    physical allocation is rounded up to the GPU cache block size selected
+    from the active backends.
+    """
+
+    eager_host_mirror: bool = True
+    """Mirror decode-written KV rows to the host pool during the forward so
+    page spills complete without moving data. When disabled, decode rows stay
+    resident-only and evicted pages are copied to host at spill time. Prefill
+    rows are always mirrored during the forward."""
 
 
 @config
@@ -64,15 +80,15 @@ class AttentionConfig:
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
 
-    use_fp4_indexer_cache: bool | None = None
-    """Deprecated alias for `indexer_kv_dtype`; use that instead. True maps to
-    `mxfp4`, False is a no-op (it selected the model default already)."""
-
     indexer_kv_dtype: IndexerKVDType = "auto"
     """Data type for the sparse-attention indexer K cache. "auto" picks the
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
     indexer). Quantized formats (fp8, mxfp4, nvfp4) require indexer kernel
     support in the backend."""
+
+    hisparse_config: HiSparseConfig | None = None
+    """HiSparse host-resident KV configuration. Setting this enables experimental
+    Model Runner V2-only HiSparse sparse-MLA decode hot-buffering."""
 
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
@@ -116,20 +132,6 @@ class AttentionConfig:
             # layers still use the platform's normal automatic backend.
             self.backend = None
 
-        if self.use_fp4_indexer_cache is not None:
-            logger.warning(
-                "use_fp4_indexer_cache is deprecated and will be removed in "
-                "v0.29. Use indexer_kv_dtype instead (True -> 'mxfp4')."
-            )
-            if self.use_fp4_indexer_cache:
-                if self.indexer_kv_dtype not in ("auto", "mxfp4"):
-                    raise ValueError(
-                        "use_fp4_indexer_cache=True conflicts with "
-                        f"indexer_kv_dtype={self.indexer_kv_dtype!r}. Set only "
-                        "indexer_kv_dtype."
-                    )
-                self.indexer_kv_dtype = "mxfp4"
-
     def resolve_indexer_kv_dtype(self, default: IndexerKVDType) -> IndexerKVDType:
         """Resolve `indexer_kv_dtype`, substituting `default` for "auto"."""
         if self.indexer_kv_dtype == "auto":
@@ -146,9 +148,7 @@ class AttentionConfig:
         """
         from vllm.config.utils import get_hash_factors, hash_factors
 
-        # Folded into indexer_kv_dtype by __post_init__.
-        ignored_factors: set[str] = {"use_fp4_indexer_cache"}
-        factors = get_hash_factors(self, ignored_factors)
+        factors = get_hash_factors(self, set())
         return hash_factors(factors)
 
     @field_validator("backend", mode="before")

@@ -796,6 +796,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
     ),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
+    "BailingMoeV3VLForConditionalGeneration": _HfExamplesInfo(
+        "inclusionAI/Ling-3.0-flash-VL",
+        trust_remote_code=True,
+        is_available_online=True,
+        use_original_num_layers=True,
+        hf_overrides={
+            "text_config": {
+                "num_hidden_layers": 6,
+                "layer_types": ["linear_attention"] * 5 + ["full_attention"],
+            }
+        },
+    ),
     "BeeForConditionalGeneration": _HfExamplesInfo(
         "Open-Bee/Bee-8B-RL",
         trust_remote_code=True,
@@ -845,6 +857,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "DeepseekV4ForConditionalGeneration": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp",
+    ),
+    "DeepseekV41ForCausalLM": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4.1-Flash",
     ),
     "Dots3NoteForCausalLM": _HfExamplesInfo(
         "dots-studio/dots3-note-prev",
@@ -951,6 +966,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "HCXVisionV2ForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
         trust_remote_code=True,
+        revision="a6cdfd3464d1b767259cad23e164eaf39d3e3960",
     ),
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
         "tencent/HunyuanOCR",
@@ -1521,6 +1537,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "DSparkDraftModel": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Pro-DSpark",
         speculative_model="deepseek-ai/DeepSeek-V4-Pro-DSpark",  # draft in mtp.*
+        is_available_online=False,
+        use_original_num_layers=True,  # DSpark has >1 draft block
+    ),
+    "DSparkV41DraftModel": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4.1-Flash",
+        speculative_model="deepseek-ai/DeepSeek-V4.1-Flash",  # draft in mtp.*
         is_available_online=False,
         use_original_num_layers=True,  # DSpark has >1 draft block
     ),

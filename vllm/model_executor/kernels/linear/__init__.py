@@ -109,6 +109,9 @@ from vllm.model_executor.kernels.linear.mxfp8 import (
 from vllm.model_executor.kernels.linear.mxfp8.b12x import (
     B12xMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.deep_gemm import (
+    DeepGemmMxfp8BmmLinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8.emulation import (
     EmulationMxfp8LinearKernel,
 )
@@ -175,6 +178,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
     AiterInt8ScaledMMLinearKernel,
     AiterPerTokenFp8ScaledMMLinearKernel,
+    AiterPreshuffledFp8BlockScaledMMKernel,
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
@@ -301,6 +305,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     },
     "deep_gemm": {
         DeepGemmFp8BlockScaledMMKernel,
+        DeepGemmMxfp8BmmLinearKernel,
     },
     "torch": {
         PerTensorTorchFP8ScaledMMLinearKernel,
@@ -312,6 +317,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "aiter": {
         AiterInt8ScaledMMLinearKernel,
         AiterFp8BlockScaledMMKernel,
+        AiterPreshuffledFp8BlockScaledMMKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
         AiterMxfp4LinearKernel,
@@ -452,6 +458,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
+        AiterPreshuffledFp8BlockScaledMMKernel,
         AiterFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
     ],
@@ -851,13 +858,21 @@ def choose_mp_linear_kernel(
     )
 
 
-def init_mxfp8_linear_kernel() -> Mxfp8LinearKernel:
+def init_mxfp8_linear_kernel(*, bmm_batch_size: int | None = None) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
     current platform."""
-    config = Mxfp8LinearLayerConfig()
+    config = Mxfp8LinearLayerConfig(bmm_batch_size=bmm_batch_size)
 
     platform = current_platform._enum
-    possible = list(_POSSIBLE_MXFP8_KERNELS.get(platform, []))
+    possible: list[type[Mxfp8LinearKernel]]
+    if bmm_batch_size is not None:
+        possible = (
+            [DeepGemmMxfp8BmmLinearKernel, EmulationMxfp8LinearKernel]
+            if current_platform.is_cuda()
+            else []
+        )
+    else:
+        possible = list(_POSSIBLE_MXFP8_KERNELS.get(platform, []))
 
     # Apply --linear-backend filtering when set.
     possible = _resolve_backend_kernels(possible, "MXFP8")
@@ -1198,6 +1213,7 @@ __all__ = [
     "ScaledMMLinearLayerConfig",
     "AiterHipbMMPerTokenFp8ScaledMMLinearKernel",
     "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
+    "AiterPreshuffledFp8BlockScaledMMKernel",
     "AiterPerTokenFp8ScaledMMLinearKernel",
     "NvFp4LinearKernel",
     "NvFp4LinearLayerConfig",

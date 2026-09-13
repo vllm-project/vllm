@@ -7,10 +7,11 @@ use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::reasoning::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
-    DeepSeekV4ReasoningParser, Glm45ReasoningParser, Glm47ReasoningParser, KimiK2ReasoningParser,
-    KimiReasoningParser, MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser,
-    NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningError,
-    ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser, Step3p5ReasoningParser,
+    DeepSeekV4ReasoningParser, DeepSeekV41ReasoningParser, Glm45ReasoningParser,
+    Glm47ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser, MiniMaxM2ReasoningParser,
+    MiniMaxM3ReasoningParser, NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta,
+    ReasoningError, ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser,
+    Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -22,6 +23,7 @@ pub mod names {
     pub const DEEPSEEK_R1: &str = "deepseek_r1";
     pub const DEEPSEEK_V3: &str = "deepseek_v3";
     pub const DEEPSEEK_V4: &str = "deepseek_v4";
+    pub const DEEPSEEK_V41: &str = "deepseek_v41";
     pub const GLM45: &str = "glm45";
     pub const GLM47: &str = "glm47";
     pub const KIMI: &str = "kimi";
@@ -62,6 +64,7 @@ impl ReasoningParserFactory {
             .register_parser::<DeepSeekR1ReasoningParser>(names::DEEPSEEK_R1)
             .register_parser::<DeepSeekV3ReasoningParser>(names::DEEPSEEK_V3)
             .register_parser::<DeepSeekV4ReasoningParser>(names::DEEPSEEK_V4)
+            .register_parser::<DeepSeekV41ReasoningParser>(names::DEEPSEEK_V41)
             .register_parser::<Glm45ReasoningParser>(names::GLM45)
             .register_parser::<Glm47ReasoningParser>(names::GLM47)
             .register_parser::<KimiReasoningParser>(names::KIMI)
@@ -76,6 +79,7 @@ impl ReasoningParserFactory {
 
         factory
             .register_pattern("deepseek-r1", names::DEEPSEEK_R1)
+            .register_pattern("deepseek-v4.1", names::DEEPSEEK_V41)
             .register_pattern("deepseek-v4", names::DEEPSEEK_V4)
             .register_pattern("deepseek_v4", names::DEEPSEEK_V4)
             .register_pattern("deepseek-v3", names::DEEPSEEK_V3)

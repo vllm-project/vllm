@@ -112,3 +112,192 @@ def test_fused_q_kv_rmsnorm_launches_past_grid_y_cap(num_tokens: int):
             rtol=1e-2,
             atol=1e-2,
         )
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100), reason="MXFP8 needs Blackwell"
+)
+@pytest.mark.parametrize("num_tokens", [0, 1, 17, 128, 129, 1024])
+@pytest.mark.parametrize("q_size", [384, 1280, 1344])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_fused_q_kv_rmsnorm_quant_matches_separate(num_tokens, q_size, dtype):
+    """Preserve native MXFP8 rounding and all swizzled scale padding bytes."""
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+    from vllm.models.deepseek_v4_1.common.ops.query_quant import (
+        fused_q_kv_rmsnorm_quant,
+    )
+
+    torch.manual_seed(0)
+    kv_size = 512
+    x = torch.randn(num_tokens, q_size + kv_size, device="cuda", dtype=dtype)
+    x[:1] = 0
+    x[1:2] *= 1e-30
+    qr, kv = x.split([q_size, kv_size], -1)
+    qw = torch.randn(q_size, device="cuda", dtype=x.dtype)
+    kvw = torch.randn(kv_size, device="cuda", dtype=x.dtype)
+    eps = 1e-20
+    result = fused_q_kv_rmsnorm_quant(qr, kv, qw, kvw, eps)
+    assert result[0].orig_dtype == dtype
+    assert result[0].orig_shape == qr.shape
+    if not num_tokens:
+        assert result[0].data.shape == qr.shape
+        assert result[0].scale.numel() == 0
+        assert result[1].shape == kv.shape
+        return
+    qr_ref, kv_ref = fused_q_kv_rmsnorm(qr, kv, qw, kvw, eps)
+    q_ref, scale_ref = mxfp8_e4m3_quantize(qr_ref, is_sf_swizzled_layout=True)
+    for replay in (False, True):
+        if replay:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                result = fused_q_kv_rmsnorm_quant(qr, kv, qw, kvw, eps)
+            graph.replay()
+        torch.testing.assert_close(
+            result[0].data.view(torch.uint8), q_ref.view(torch.uint8), rtol=0, atol=0
+        )
+        torch.testing.assert_close(result[0].scale, scale_ref, rtol=0, atol=0)
+        torch.testing.assert_close(result[1], kv_ref, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100), reason="MXFP8 needs Blackwell"
+)
+@pytest.mark.parametrize("backend", ["cute-dsl", "cutlass"])
+@pytest.mark.parametrize("num_tokens", [1, 17, 256])
+@pytest.mark.parametrize("projection", ["attention", "indexer"])
+@pytest.mark.parametrize("bias", [False, True])
+def test_shared_query_quant_preserves_projection(
+    num_tokens, backend, projection, bias, monkeypatch
+):
+    """The native-checkpoint projection keeps identical GEMM outputs."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from vllm.config import (
+        CompilationConfig,
+        CompilationMode,
+        VllmConfig,
+        set_current_vllm_config,
+    )
+    from vllm.model_executor.kernels.linear.mxfp8 import Mxfp8LinearLayerConfig
+    from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+        FlashInferCutedslMxfp8LinearKernel,
+        FlashInferCutlassMxfp8LinearKernel,
+    )
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        expose_input_quant_key,
+    )
+    from vllm.model_executor.layers.linear import ColumnParallelLinear, ReplicatedLinear
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptLinearMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
+    from vllm.models.deepseek_v4_1.attention import (
+        DeepseekV4Attention,
+        DeepseekV4Indexer,
+    )
+    from vllm.models.deepseek_v4_1.common.ops.query_quant import (
+        can_fuse_query_quant,
+        fused_q_kv_rmsnorm_quant,
+    )
+    from vllm.models.deepseek_v4_1.quant_config import DeepseekV4FP8Config
+
+    cls: (
+        type[FlashInferCutedslMxfp8LinearKernel]
+        | type[FlashInferCutlassMxfp8LinearKernel]
+    )
+    if backend == "cute-dsl":
+        cls = FlashInferCutedslMxfp8LinearKernel
+    else:
+        cls = FlashInferCutlassMxfp8LinearKernel
+    supported, reason = cls.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    torch.manual_seed(0)
+    with set_current_vllm_config(
+        VllmConfig(compilation_config=CompilationConfig(mode=CompilationMode.NONE))
+    ):
+        kernel = cls(Mxfp8LinearLayerConfig())
+        # Match the checkpoint's TP4 attention and replicated indexer widths.
+        if projection == "attention":
+            linear = ColumnParallelLinear.__new__(ColumnParallelLinear)
+            output_size = 8192
+        else:
+            linear = ReplicatedLinear.__new__(ReplicatedLinear)
+            output_size = 4096
+        torch.nn.Module.__init__(linear)
+        linear.bias = (
+            torch.nn.Parameter(
+                torch.randn(output_size, device="cuda", dtype=torch.bfloat16)
+            )
+            if bias
+            else None
+        )
+        linear.skip_bias_add = False
+        linear.return_bias = projection == "indexer"
+        linear.gather_output = False
+        w, ws = mxfp8_e4m3_quantize(
+            torch.randn(output_size, 1280, device="cuda", dtype=torch.bfloat16)
+        )
+        linear.weight = torch.nn.Parameter(w, requires_grad=False)
+        linear.weight_scale = torch.nn.Parameter(ws, requires_grad=False)
+        quant_config = DeepseekV4FP8Config.from_config(
+            {
+                "quant_method": "fp8",
+                "activation_scheme": "dynamic",
+                "weight_block_size": [32, 32],
+                "scale_fmt": "ue8m0",
+                "expert_dtype": "fp4",
+            }
+        )
+        method = quant_config.get_quant_method(linear, "model.layers.2.attn.wq_b")
+        assert type(method) is ModelOptLinearMethod
+        method.out_dtype = torch.bfloat16
+        method.kernel = kernel
+        linear.quant_method = method
+        kernel.process_weights_after_loading(linear)
+        expose_input_quant_key(linear, kernel)
+        assert can_fuse_query_quant([linear, linear])
+        x = torch.randn(num_tokens, 1792, device="cuda", dtype=torch.bfloat16)
+        qr, kv = x.split([1280, 512], -1)
+        qw = torch.randn(1280, device="cuda", dtype=x.dtype)
+        kvw = torch.randn(512, device="cuda", dtype=x.dtype)
+        qr_ref, _ = fused_q_kv_rmsnorm(qr, kv, qw, kvw, 1e-20)
+        q, _ = fused_q_kv_rmsnorm_quant(qr, kv, qw, kvw, 1e-20)
+        owner = cast(Any, SimpleNamespace(wq_b=linear))
+        project = (
+            DeepseekV4Attention._wq_b_proj
+            if projection == "attention"
+            else DeepseekV4Indexer._wq_b_proj
+        )
+        expected = project(owner, qr_ref)
+
+        def reject_requantization(*args, **kwargs):
+            raise AssertionError("pre-quantized input must skip quantization")
+
+        monkeypatch.setattr(
+            "vllm.model_executor.kernels.linear.mxfp8.flashinfer.mxfp8_e4m3_quantize",
+            reject_requantization,
+        )
+        actual = project(owner, q)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = project(owner, q)
+        graph.replay()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert not can_fuse_query_quant(
+            [linear, torch.nn.Linear(1280, 256, bias=False)]
+        )
+        reshaped = project(
+            owner, replace(q, orig_shape=torch.Size((1, num_tokens, 1280)))
+        )
+        torch.testing.assert_close(reshaped, expected.unsqueeze(0), rtol=0, atol=0)
+        with pytest.raises(AssertionError, match="consumer kernel"):
+            linear(replace(q, quant_key=kNvfp4Dynamic))

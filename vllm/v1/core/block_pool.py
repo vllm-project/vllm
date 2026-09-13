@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -157,6 +157,7 @@ class BlockPool:
             actual block size can be a multiple of hash_block_size.
         enable_kv_cache_events: Whether to enable kv cache events.
         metrics_collector: Optional metrics collector for tracking block residency.
+        medium: Storage medium reported in KV cache events.
     """
 
     def __init__(
@@ -166,14 +167,16 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        medium: str = MEDIUM_GPU,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
+        self.medium = medium
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
-            KVCacheBlock(idx) for idx in range(num_gpu_blocks)
+            KVCacheBlock(idx, pool=self) for idx in range(num_gpu_blocks)
         ]
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
@@ -194,6 +197,9 @@ class BlockPool:
         self.kv_event_queue: list[KVCacheEvent] = []
 
         self.metrics_collector = metrics_collector
+        # Callbacks for blocks released with ``unpin_blocks`` whose contents
+        # are still being read until the pool reuses them.
+        self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -364,7 +370,7 @@ class BlockPool:
             token_ids=request.all_token_ids[start_token_idx:end_token_idx],
             block_size=block_size,
             lora_id=request.lora_request.adapter_id if request.lora_request else None,
-            medium=MEDIUM_GPU,
+            medium=self.medium,
             lora_name=request.lora_request.name if request.lora_request else None,
             extra_keys=extra_keys_list if extra_keys_list else None,
             group_idx=kv_cache_group_id,
@@ -543,7 +549,7 @@ class BlockPool:
                     lora_id=request.lora_request.adapter_id
                     if request.lora_request
                     else None,
-                    medium=MEDIUM_GPU,
+                    medium=self.medium,
                     lora_name=request.lora_request.name
                     if request.lora_request
                     else None,
@@ -610,7 +616,7 @@ class BlockPool:
             self.kv_event_queue.append(
                 BlockRemoved(
                     block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
-                    medium=MEDIUM_GPU,
+                    medium=self.medium,
                     group_idx=get_group_id(block_hash),
                 )
             )
@@ -671,6 +677,9 @@ class BlockPool:
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
+        if self._reuse_watchers:
+            self._notify_reuse(ret)
+
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
             for block in ret:
@@ -686,6 +695,33 @@ class BlockPool:
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         return ret
+
+    def _notify_reuse(self, blocks: Iterable[KVCacheBlock]) -> None:
+        for block in blocks:
+            watcher = self._reuse_watchers.pop(block.block_id, None)
+            if watcher is not None:
+                watcher(block)
+
+    def unpin_blocks(
+        self,
+        blocks: Iterable[KVCacheBlock],
+        on_reuse: Callable[[KVCacheBlock], None],
+    ) -> None:
+        """Release references to blocks that stay readable until reused.
+
+        The blocks become last-resort eviction candidates regardless of prefix
+        caching: they join the tail of the free queue and count as free.
+        ``on_reuse`` fires when ``get_new_blocks`` hands a block out (or the
+        cache is reset), so the caller can stop reading it.
+        """
+        released: list[KVCacheBlock] = []
+        for block in blocks:
+            assert block.ref_cnt > 0 and not block.is_null
+            block.ref_cnt -= 1
+            self._reuse_watchers[block.block_id] = on_reuse
+            if block.ref_cnt == 0:
+                released.append(block)
+        self.free_block_queue.append_n(released)
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
         """
@@ -742,7 +778,11 @@ class BlockPool:
         # Identify blocks with hash (LRU cache) and without it (never match APC)
         blocks_to_evict_last = []
         blocks_to_evict_first = []
+        other_pools: dict[BlockPool, list[KVCacheBlock]] = {}
         for block in ordered_blocks:
+            if block.pool is not None and block.pool is not self:
+                other_pools.setdefault(block.pool, []).append(block)
+                continue
             block.ref_cnt -= 1
             if block.ref_cnt == 0 and not block.is_null:
                 if block.block_hash is None or not self.enable_caching:
@@ -756,6 +796,8 @@ class BlockPool:
         self.free_block_queue.prepend_n(blocks_to_evict_first)
         # Blocks to reuse last are appended to the end of the free queue.
         self.free_block_queue.append_n(blocks_to_evict_last)
+        for pool, blocks in other_pools.items():
+            pool.free_blocks(blocks)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
@@ -797,6 +839,10 @@ class BlockPool:
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
         self.cached_block_hashes_by_block.clear()
+        if self._reuse_watchers:
+            self._notify_reuse(
+                [self.blocks[block_id] for block_id in list(self._reuse_watchers)]
+            )
 
         # Remove all hashes from all blocks.
         for block in self.blocks:

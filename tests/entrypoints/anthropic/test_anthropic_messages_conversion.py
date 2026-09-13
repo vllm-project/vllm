@@ -1610,6 +1610,32 @@ class TestStopSequenceReason:
         assert msg_deltas[0]["delta"]["stop_reason"] == "stop_sequence"
         assert msg_deltas[0]["delta"]["stop_sequence"] == "</tool>"
 
+    @pytest.mark.asyncio
+    async def test_streaming_no_stop_string_emits_explicit_null_stop_sequence(self):
+        """exclude_unset=True drops stop_sequence unless it is set explicitly."""
+
+        async def sse_input():
+            yield _make_stream_chunk(delta=DeltaMessage(role="assistant"))
+            yield _make_stream_chunk(delta=DeltaMessage(content="hi"))
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=5, total_tokens=8, completion_tokens=3),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+
+        events = _parse_sse_events(output)
+        msg_deltas = [data for ev_type, data in events if ev_type == "message_delta"]
+        assert len(msg_deltas) == 1
+        assert msg_deltas[0]["delta"]["stop_reason"] == "end_turn"
+        assert "stop_sequence" in msg_deltas[0]["delta"]
+        assert msg_deltas[0]["delta"]["stop_sequence"] is None
+
 
 # ======================================================================
 # Client-caused errors are 4xx, not 500 (Issue #52088)
