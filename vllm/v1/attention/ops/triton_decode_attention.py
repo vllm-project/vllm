@@ -29,6 +29,7 @@ Memory-efficient attention for decoding.
 It supports page size >= 1.
 """
 
+import functools
 import logging
 
 import torch
@@ -38,6 +39,42 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 is_hip_ = current_platform.is_rocm()
+
+_FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
+
+# Shared memory the MLA grouped-decode tile (BLOCK_DMODEL=512 + BLOCK_DPE=64)
+# needs at num_stages=2 with an fp8 KV cache, measured with triton 3.7.0.
+# Devices whose opt-in per-block limit is below this cannot pipeline that
+# configuration; see _decode_grouped_att_m_fwd.
+_MLA_FP8_NUM_STAGES_2_SMEM_BYTES = 102400
+
+
+@functools.cache
+def _shared_memory_per_block_optin(device_index: int) -> int | None:
+    """Opt-in shared memory a single block may use, or None if unknown."""
+    try:
+        return torch.cuda.get_device_properties(
+            device_index
+        ).shared_memory_per_block_optin
+    except Exception:  # noqa: BLE001 - non-CUDA or property unavailable
+        return None
+
+
+def _mla_fp8_tile_overflows_smem(is_mla: bool, kv_dtype, device) -> bool:
+    """True when the MLA tile with an fp8 KV cache cannot fit at num_stages=2.
+
+    Returns False when the device's limit cannot be determined, preserving the
+    previous behaviour rather than pessimizing an unknown platform.
+    """
+    if not is_mla or kv_dtype not in _FP8_DTYPES:
+        return False
+    limit = _shared_memory_per_block_optin(
+        device.index if device.index is not None else torch.cuda.current_device()
+    )
+    if limit is None:
+        return False
+    return limit < _MLA_FP8_NUM_STAGES_2_SMEM_BYTES
+
 
 logger = logging.getLogger(__name__)
 
@@ -525,10 +562,23 @@ def _decode_grouped_att_m_fwd(
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
         extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
         num_stages = 1
-    elif not is_hip_ and BLOCK_DMODEL >= 1024:
-        # Avoid shared memory overflow on NVIDIA when BLOCK_DMODEL is large
-        # like non-MLA D_QK=576, BLOCK_DMODEL=1024, BLOCK_H=16
-        # exceeds 101376 bytes limit
+    elif not is_hip_ and (
+        BLOCK_DMODEL >= 1024
+        or _mla_fp8_tile_overflows_smem(is_mla, k_buffer.dtype, q.device)
+    ):
+        # Avoid shared memory overflow on NVIDIA.
+        #
+        # BLOCK_DMODEL >= 1024: non-MLA D_QK=576 gives BLOCK_DMODEL=1024 with
+        # BLOCK_H=16, which exceeds the 101376 bytes limit.
+        #
+        # MLA pins BLOCK_DMODEL=512 + BLOCK_DPE=64 above. That tile fits at
+        # num_stages=2 with a bf16 KV cache, but an fp8 KV cache adds dequant
+        # staging and does not. Measured on GB10 (sm_121, 101376 bytes opt-in
+        # limit) with triton 3.7.0:
+        #     bf16 KV, num_stages=2 ->  63488 bytes (fits)
+        #     fp8  KV, num_stages=2 -> 102400 bytes (1024 over -> launch fails)
+        #     fp8  KV, num_stages=1 ->  83968 bytes (fits)
+        # Datacenter parts have a larger opt-in limit and keep the extra stage.
         num_stages = 1
 
     _fwd_grouped_kernel_stage1[grid](
