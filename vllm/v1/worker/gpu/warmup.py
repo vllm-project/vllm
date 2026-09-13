@@ -391,10 +391,17 @@ def warmup_kernels(
     # fixed draft counts here, then restore the manager for capture and serving.
     adaptive_verification = model_runner.adaptive_verification
     model_runner.adaptive_verification = None
+    # Synthetic requests must exercise every planned shape even after their
+    # small output cap would make the serving finish tracker suppress drafts.
+    uno_tail = getattr(model_runner, "_uno_tail", None)
+    if uno_tail is not None:
+        model_runner._uno_tail = None
     try:
         _warmup_kernels(model_runner, worker_execute_model, worker_sample_tokens)
     finally:
         model_runner.adaptive_verification = adaptive_verification
+        if uno_tail is not None:
+            model_runner._uno_tail = uno_tail
 
 
 @torch.inference_mode()
@@ -431,6 +438,9 @@ def run_uno_served_jit_self_check(
     # launch coverage, not adaptive cost calibration.
     adaptive_verification = model_runner.adaptive_verification
     model_runner.adaptive_verification = None
+    uno_tail = getattr(model_runner, "_uno_tail", None)
+    if uno_tail is not None:
+        model_runner._uno_tail = None
     sampler_calls: dict[str, int] = {}
     sampler_launches: dict[str, dict[str, int]] = {}
     sampler_branches: dict[str, tuple[str, ...]] = {}
@@ -520,6 +530,8 @@ def run_uno_served_jit_self_check(
                         )
     finally:
         model_runner.adaptive_verification = adaptive_verification
+        if uno_tail is not None:
+            model_runner._uno_tail = uno_tail
         speculator._step = 0
 
     for compilation in compilations:

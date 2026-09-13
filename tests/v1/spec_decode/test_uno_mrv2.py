@@ -887,9 +887,11 @@ def test_warmup_kernels_runs_two_full_verifications(
     speculator = None if speculator_kind == "none" else object()
     if speculator_kind == "uno":
         speculator = object.__new__(UnoSpeculator)
+    uno_tail = object() if speculator_kind == "uno" else None
     runner = SimpleNamespace(
         num_speculative_steps=k,
         speculator=speculator,
+        _uno_tail=uno_tail,
         decode_query_len=k + 1,
         max_model_len=4096,
         adaptive_verification=None,
@@ -919,8 +921,14 @@ def test_warmup_kernels_runs_two_full_verifications(
         kv_connector=SimpleNamespace(set_disabled=lambda _: None),
     )
     steps = []
+
+    def record_step(output):
+        assert runner._uno_tail is None, "finish tracking must not trim warmup shapes"
+        steps.append(output)
+
     monkeypatch.setattr(warmup.torch.accelerator, "synchronize", lambda: None)
-    warmup.warmup_kernels(runner, steps.append, lambda _: None)
+    warmup.warmup_kernels(runner, record_step, lambda _: None)
+    assert runner._uno_tail is uno_tail
     assert len(steps[0].scheduled_new_reqs) == num_reqs
     decode_steps = steps[1:-1]
     expected = [(num_reqs, num_reqs if k else 0)]
@@ -1723,11 +1731,13 @@ def test_uno_startup_jit_self_check_uses_the_production_k8_batch_shape(
     runner = SimpleNamespace(
         speculator=object.__new__(UnoSpeculator),
         adaptive_verification=None,
+        _uno_tail=object(),
         max_num_tokens=2048,
         decode_query_len=9,
         device=torch.device("cpu"),
         sampler=_self_check_sampler(),
     )
+    uno_tail = runner._uno_tail
     observed_tokens: list[int] = []
 
     @contextmanager
@@ -1740,6 +1750,7 @@ def test_uno_startup_jit_self_check_uses_the_production_k8_batch_shape(
         }
 
     def sampled(*args, **kwargs):
+        assert runner._uno_tail is None, "the self-check must retain its planned shapes"
         observed_tokens.append(args[3])
         _run_self_check_sampler_branch(runner, kwargs["sampling_params"])
         args[2](None)
@@ -1754,6 +1765,48 @@ def test_uno_startup_jit_self_check_uses_the_production_k8_batch_shape(
 
     assert result.passed
     assert observed_tokens == [11, 11, 11, 11]
+    assert runner._uno_tail is uno_tail
+
+
+@pytest.mark.parametrize("entrypoint", ["kernels", "self_check"])
+def test_uno_startup_restores_tail_tracker_after_callback_error(
+    monkeypatch, entrypoint
+):
+    """Both startup callers restore the serving tracker when a worker raises."""
+    from vllm.utils import jit_monitor
+    from vllm.v1.worker.gpu import warmup
+
+    uno_tail = object()
+    adaptive = object()
+    runner = SimpleNamespace(
+        speculator=object.__new__(UnoSpeculator),
+        adaptive_verification=adaptive,
+        _uno_tail=uno_tail,
+        max_num_tokens=2048,
+        decode_query_len=9,
+        device=torch.device("cpu"),
+        sampler=_self_check_sampler(),
+    )
+
+    class CallbackFailed(Exception):
+        pass
+
+    def fail(*_args, **_kwargs):
+        assert runner._uno_tail is None, "startup must disable exact finish detection"
+        assert runner.adaptive_verification is None
+        raise CallbackFailed
+
+    if entrypoint == "kernels":
+        monkeypatch.setattr(warmup, "_warmup_kernels", fail)
+        invoke = warmup.warmup_kernels
+    else:
+        monkeypatch.setattr(jit_monitor, "_active", True)
+        monkeypatch.setattr(warmup, "run_mixed_prefill_decode_warmup", fail)
+        invoke = warmup.run_uno_served_jit_self_check
+    with pytest.raises(CallbackFailed):
+        invoke(runner, Mock(), Mock())
+    assert runner._uno_tail is uno_tail
+    assert runner.adaptive_verification is adaptive
 
 
 def test_uno_self_check_token_count_keeps_fixture_and_production_bounds_distinct():
