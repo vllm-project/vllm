@@ -5,6 +5,7 @@ Roundtrip tests for multimodal serde used by the
 token_in_token_out generate endpoint.
 """
 
+import pytest
 import torch
 from pydantic import ValidationError
 
@@ -239,6 +240,50 @@ def test_metadata_only_generate_requires_ec_transfer_params():
     item = merged["image"][0]
     assert item is not None
     assert set(item) == {"image_grid_thw"}
+
+
+@pytest.mark.parametrize("modality", ["image", "video"])
+@pytest.mark.parametrize(
+    ("has_metadata", "has_ec"),
+    [(True, False), (True, True), (False, False)],
+    ids=["metadata-without-ec", "metadata-with-ec", "cache-hit-without-ec"],
+)
+def test_mixed_items_require_ec_only_for_metadata_only(
+    modality: str, has_metadata: bool, has_ec: bool
+):
+    """A full item must not bypass the EC requirement for another item."""
+    engine_input, _, image_grid_thw = _image_engine_input()
+    rendered = extract_mm_features(engine_input)
+    assert rendered is not None
+    features = rendered.model_dump()
+    metadata = (
+        encode_mm_kwargs_item(
+            MultiModalKwargsItem({f"{modality}_grid_thw": image_grid_thw})
+        )
+        if has_metadata
+        else None
+    )
+    second_item = {
+        "mm_hashes": "second-item",
+        "mm_placeholders": {"offset": 2, "length": 1},
+        "kwargs_data": None,
+        "mm_metadata": metadata,
+    }
+    for key, value in second_item.items():
+        features[key].setdefault(modality, []).append(value)
+    payload = {
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 1},
+        "features": features,
+    }
+    if has_ec:
+        payload["ec_transfer_params"] = {"second-item": {"peer_host": "10.0.0.1"}}
+
+    if has_metadata and not has_ec:
+        with pytest.raises(ValidationError, match="ec_transfer_params"):
+            GenerateRequest.model_validate(payload)
+    else:
+        GenerateRequest.model_validate(payload)
 
 
 def test_kwargs_and_metadata_generate_does_not_require_ec():

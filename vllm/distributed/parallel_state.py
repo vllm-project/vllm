@@ -673,11 +673,11 @@ class GroupCoordinator:
         else:
             stream = graph_capture_context.stream
 
-        # only cuda uses this function,
+        # only cuda/rocm uses this function,
         # so we don't abstract it into the base class
         maybe_ca_context = nullcontext()
         maybe_fi_pcie_ipc_context: AbstractContextManager[Any] = nullcontext()
-        maybe_aiter_context = nullcontext()
+        maybe_aiter_ar_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
         )
@@ -698,12 +698,10 @@ class GroupCoordinator:
                 if fi_pcie_ipc_ar_comm is not None:
                     maybe_fi_pcie_ipc_context = fi_pcie_ipc_ar_comm.capture()
 
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            if rocm_aiter_ops.is_enabled():
-                aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
-                if aiter_ar is not None:
-                    maybe_aiter_context = aiter_ar.capture()  # type: ignore
+            # Capture each group's own comm. A global lookup would double-capture
+            aiter_ar_comm = getattr(self.device_communicator, "aiter_ar_comm", None)
+            if aiter_ar_comm is not None:
+                maybe_aiter_ar_context = aiter_ar_comm.capture()  # type: ignore
 
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
@@ -715,7 +713,7 @@ class GroupCoordinator:
             torch.cuda.stream(stream),
             maybe_ca_context,
             maybe_fi_pcie_ipc_context,
-            maybe_aiter_context,
+            maybe_aiter_ar_context,
         ):
             yield graph_capture_context
 
@@ -1640,7 +1638,11 @@ def graph_capture(
     context = graph_capture_context or GraphCaptureContext(
         torch.cuda.Stream(device=device)
     )
-    with get_tp_group().graph_capture(context), get_pp_group().graph_capture(context):
+    with (
+        get_tp_group().graph_capture(context),
+        get_pp_group().graph_capture(context),
+        get_dp_group().graph_capture(context),
+    ):
         yield context
 
 
@@ -1917,6 +1919,20 @@ def init_distributed_environment(
             _INNER_DP_WORLD = _WORLD
 
 
+def _elastic_join_warmup_ctx() -> AbstractContextManager[Any]:
+    """Defer communicator warm-up when joining a live elastic-EP cluster on ROCm.
+
+    The existing ranks defer their matching warm-up in create_standby_groups(),
+    so a joining worker must too or the warm-up collective has no peers. Both
+    sides warm up at commit.
+    """
+    from vllm.distributed.device_communicators.pynccl import defer_comm_warmup_on_rocm
+
+    if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+        return defer_comm_warmup_on_rocm()
+    return nullcontext()
+
+
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -2099,13 +2115,14 @@ def initialize_model_parallel(
     group_ranks = all_ranks.transpose(1, 4).reshape(-1, data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     if enable_elastic_ep:
-        _DP = _init_stateless_group(
-            group_ranks,
-            "dp",
-            parallel_config.data_parallel_master_ip,
-            backend,
-            coord_store=coord_store,
-        )
+        with _elastic_join_warmup_ctx():
+            _DP = _init_stateless_group(
+                group_ranks,
+                "dp",
+                parallel_config.data_parallel_master_ip,
+                backend,
+                coord_store=coord_store,
+            )
     else:
         _DP = init_model_parallel_group(
             group_ranks, get_world_group().local_rank, backend, group_name="dp"
@@ -2128,14 +2145,15 @@ def initialize_model_parallel(
         group_ranks = [x.tolist() for x in group_ranks]
         use_all2all = parallel_config.use_all2all
         if enable_elastic_ep:
-            _EP = _init_stateless_group(
-                group_ranks,
-                "ep",
-                parallel_config.data_parallel_master_ip,
-                backend,
-                coord_store=coord_store,
-                use_all2all=use_all2all,
-            )
+            with _elastic_join_warmup_ctx():
+                _EP = _init_stateless_group(
+                    group_ranks,
+                    "ep",
+                    parallel_config.data_parallel_master_ip,
+                    backend,
+                    coord_store=coord_store,
+                    use_all2all=use_all2all,
+                )
         else:
             _EP = init_model_parallel_group(
                 group_ranks,
@@ -2153,13 +2171,14 @@ def initialize_model_parallel(
         assert _EPLB is None, "EPLB group is already initialized"
         if config.parallel_config.enable_eplb:
             if enable_elastic_ep:
-                _EPLB = _init_stateless_group(
-                    group_ranks,
-                    "eplb",
-                    parallel_config.data_parallel_master_ip,
-                    backend,
-                    coord_store=coord_store,
-                )
+                with _elastic_join_warmup_ctx():
+                    _EPLB = _init_stateless_group(
+                        group_ranks,
+                        "eplb",
+                        parallel_config.data_parallel_master_ip,
+                        backend,
+                        coord_store=coord_store,
+                    )
             else:
                 _EPLB = init_model_parallel_group(
                     group_ranks,
@@ -2357,6 +2376,12 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     from vllm.platforms import current_platform
 
     if not current_platform.is_cpu():
+        from vllm.triton_utils import HAS_TRITON
+
+        if HAS_TRITON:
+            from vllm.v1.sample.ops.topk_topp_triton import reset_buffer_cache
+
+            reset_buffer_cache()
         torch.accelerator.empty_cache()
         try:
             torch.accelerator.empty_host_cache()

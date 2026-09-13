@@ -5,7 +5,10 @@ from typing import Literal
 
 import numpy as np
 import numpy.typing as npt
+import torch
 
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import PlaceholderModule, check_torchcodec_available
 
 from .base import (
@@ -21,6 +24,8 @@ except (ImportError, RuntimeError):
         "decoders.VideoDecoder"
     )
 
+logger = init_logger(__name__)
+
 
 def decode_torchcodec(
     loader_cls,
@@ -30,12 +35,14 @@ def decode_torchcodec(
     *,
     num_ffmpeg_threads: int = 0,
     seek_mode: Literal["exact", "approximate"] = "exact",
-) -> tuple[npt.NDArray, VideoSourceMetadata, list[int], list[int]]:
+    device: str = "cpu",
+) -> tuple[npt.NDArray | torch.Tensor, VideoSourceMetadata, list[int], list[int]]:
     check_torchcodec_available()
     decoder = TorchCodecVideoBackendMixin.make_torchcodec_decoder(
         data,
         num_ffmpeg_threads=num_ffmpeg_threads,
         seek_mode=seek_mode,
+        device=device,
     )
     check_frame_pixel_limit(
         decoder.metadata.width or 0,
@@ -48,7 +55,7 @@ def decode_torchcodec(
         source=source, target=target, **sampling_kwargs
     )
     frames, valid = TorchCodecVideoBackendMixin.decode_torchcodec_frames(
-        decoder, frame_idx
+        decoder, frame_idx, device=device
     )
     return frames, source, frame_idx, valid
 
@@ -67,7 +74,19 @@ class TorchCodecVideoBackendMixin:
         *,
         num_ffmpeg_threads: int = 0,
         seek_mode: Literal["exact", "approximate"] = "exact",
+        device: str = "cpu",
     ) -> "VideoDecoder":
+        torch_device = torch.device(device)
+        if torch_device.type == "cuda" and not current_platform.is_cuda():
+            raise ValueError(
+                f"torchcodec video decoding on device {device!r} requires "
+                "a CUDA-capable platform."
+            )
+        elif torch_device.type not in ("cpu", "cuda"):
+            raise ValueError(
+                f"torchcodec video decoding only supports 'cpu' and 'cuda' "
+                f"devices, got {device!r}."
+            )
         # NHWC matches the (num_frames, H, W, 3) uint8 RGB layout the rest
         # of the pipeline expects, avoiding a transpose.
         return VideoDecoder(
@@ -75,6 +94,7 @@ class TorchCodecVideoBackendMixin:
             dimension_order="NHWC",
             num_ffmpeg_threads=num_ffmpeg_threads,
             seek_mode=seek_mode,
+            device=device,
         )
 
     @staticmethod
@@ -91,10 +111,23 @@ class TorchCodecVideoBackendMixin:
     def decode_torchcodec_frames(
         decoder: "VideoDecoder",
         frame_indices: list[int],
-    ) -> tuple[npt.NDArray, list[int]]:
+        *,
+        device: str = "cpu",
+    ) -> tuple[npt.NDArray | torch.Tensor, list[int]]:
         """Decode the requested indices in one batched, index-exact call."""
         if not frame_indices:
             return np.empty((0,), dtype=np.uint8), []
         # Note: torchcodec releases the GIL for the entire call
         batch = decoder.get_frames_at(frame_indices)
-        return batch.data.numpy(), list(frame_indices)
+        frames = batch.data
+        if (
+            torch.device(device).type != "cpu"
+            and (status := getattr(decoder, "cpu_fallback", None)) is not None
+            and bool(status)
+        ):
+            logger.warning_once(
+                "torchcodec could not use NVDEC for this video and "
+                "decoded on CPU instead; check codec support and "
+                "libnvcuvid."
+            )
+        return frames, list(frame_indices)

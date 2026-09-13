@@ -46,9 +46,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
-    register_deepseek_v4_mhc_warmup,
-)
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -145,8 +142,18 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         )
 
         if vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+                _HC_HEAD_FUSED_TILELANG_KERNEL,
+            )
+
             _FUSED_MTP_INPUT_RMSNORM_KERNEL.register_warmup()
             _MTP_SHARED_HEAD_RMSNORM_KERNEL.register_warmup()
+            _HC_HEAD_FUSED_TILELANG_KERNEL.register_warmup(
+                hidden_size=config.hidden_size,
+                hc_mult=self.hc_mult,
+                rms_eps=self.rms_norm_eps,
+                hc_eps=self.hc_eps,
+            )
 
     def forward(
         self,
@@ -296,12 +303,6 @@ class DeepSeekV4MTP(nn.Module):
         ) is not None and not _use_sequence_parallel(vllm_config)
         self.model = DeepSeekV4MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
-        register_deepseek_v4_mhc_warmup(
-            self,
-            vllm_config=vllm_config,
-            include_broadcast=False,
-            include_head=True,
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:

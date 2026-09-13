@@ -15,6 +15,14 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Architecture -> the hf_text_config field naming its n-gram layers. A model is
+# only configurable here if it actually has such layers to store.
+_NGRAM_LAYER_FIELDS = {
+    "DeepseekV41ForCausalLM": "engram_layer_ids",
+    "Qwen4ExpForCausalLM": "ple_layer_ids",
+    "Qwen4ExpForConditionalGeneration": "ple_layer_ids",
+}
+
 
 def _default_cpu_offload() -> bool:
     """Honor the legacy environment variable only when the field is omitted."""
@@ -40,23 +48,25 @@ class EngramConfig:
     Otherwise, each DP rank has a separate TP-sharded embedding replica."""
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
-        """Reject Engram configuration for models without supported embeddings."""
+        """Reject Engram configuration for models without n-gram embeddings."""
         from vllm.platforms import current_platform
 
-        supported_architectures = {
-            "Qwen4ExpForCausalLM",
-            "Qwen4ExpForConditionalGeneration",
-        }
+        field = (
+            _NGRAM_LAYER_FIELDS.get(model_config.architecture)
+            if model_config is not None
+            else None
+        )
         if (
             model_config is None
-            or model_config.architecture not in supported_architectures
+            or field is None
             or not current_platform.is_cuda()
-            or not getattr(model_config.hf_text_config, "ple_layer_ids", None)
+            or not getattr(model_config.hf_text_config, field, None)
         ):
             raise ValueError(
                 "EngramConfig requires a model with supported Engram "
-                "embeddings. Currently only the CUDA Qwen4Exp implementation "
-                "with non-empty ple_layer_ids is supported."
+                "embeddings. Currently only the CUDA Qwen4Exp and DeepSeek "
+                "V4.1 implementations with non-empty n-gram layer ids are "
+                "supported."
             )
 
     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
