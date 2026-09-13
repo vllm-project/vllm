@@ -297,18 +297,10 @@ class FlashAttentionBackend(AttentionBackend):
         if vllm_config is None or vllm_config.model_config is None:
             return None
 
-        model_config = vllm_config.model_config
-        head_size = model_config.get_head_size()
-        overrides = model_config.model_arch_config.per_layer_overrides
-        # The model-wide size is the maximum; Gemma4 may have smaller layers.
+        head_size = vllm_config.model_config.get_head_size()
         if (
-            head_size != 256
-            and overrides
-            and any(layer.get("head_size") == 256 for layer in overrides)
-        ):
-            head_size = 256
-        if uses_fa4_hd256_kernel(head_size, cls.head_size_v) and (
-            get_flash_attn_version(
+            uses_fa4_hd256_kernel(head_size, cls.head_size_v)
+            and get_flash_attn_version(
                 head_size=head_size,
                 head_size_v=cls.head_size_v,
                 supports_fa4_hd256=True,
