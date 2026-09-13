@@ -19,9 +19,12 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
     ok,
     pause,
     resume,
-    server,
+    reusable_server,
     start_stream,
 )
+
+# Parent cleanup runs once after the shared server has fully shut down.
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 @pytest.fixture(scope="module", params=[False, True], ids=["MRV1", "MRV2"])
@@ -37,7 +40,7 @@ def server_url(use_v2):
 
     with (
         patch.dict(os.environ, env_vars),
-        server(
+        reusable_server(
             extra_args=[
                 "--enable-prefix-caching",
                 "--enable-prompt-tokens-details",
@@ -109,8 +112,12 @@ class TestPauseResume:
         new_done = threading.Event()
 
         def _new_request():
-            new_result["response"] = gen(server_url, max_tokens=4, timeout=60)
-            new_done.set()
+            try:
+                new_result["response"] = gen(server_url, max_tokens=4, timeout=60)
+            except Exception as exc:
+                new_result["error"] = exc
+            finally:
+                new_done.set()
 
         new_thread = threading.Thread(target=_new_request)
         try:
@@ -118,7 +125,7 @@ class TestPauseResume:
             assert is_paused(server_url)
 
             if mode in ("abort", "wait"):
-                assert inflight.done.is_set()
+                assert inflight.done.wait(timeout=10)
             else:
                 chunks_after_pause = len(inflight.chunks)
                 assert not inflight.done.wait(timeout=5)
@@ -140,6 +147,7 @@ class TestPauseResume:
         assert inflight.error is None
         assert inflight.finish_reason == inflight_finish_reason
         assert not new_thread.is_alive()
+        assert "error" not in new_result, new_result.get("error")
         assert ok(new_result.get("response"))
 
     def test_clear_cache_preserves_output_and_controls_prefix_cache(self, server_url):
