@@ -7,6 +7,7 @@ from typing import Any
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -758,6 +759,58 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             aux_hidden_states, layer_idx, hidden_states, residual
         )
 
+    def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        super()._set_aux_hidden_state_layers(layers)
+        if self.use_attn_res and self._aux_attn_res_stream:
+            pp = get_pp_group()
+            if not pp.is_last_rank and self.end_layer in self.aux_hidden_state_layers:
+                raise ValueError(
+                    f"Auxiliary layer {self.end_layer} cannot end a non-final PP "
+                    "stage when VLLM_KIMI_K3_AUX_ATTN_RES_STREAM=1"
+                )
+        if self.use_attn_res:
+            logger.info_once(
+                "Kimi-K3 aux hidden capture: layers=%s mode=%s "
+                "(VLLM_KIMI_K3_AUX_ATTN_RES_STREAM=%d)",
+                self.aux_hidden_state_layers,
+                "attn_res_stream" if self._aux_attn_res_stream else "prefix_only",
+                int(self._aux_attn_res_stream),
+            )
+
+    @property
+    def use_attn_res(self) -> bool:
+        return self.config.attn_res_block_size is not None
+
+    @property
+    def _aux_attn_res_stream(self) -> bool:
+        return envs.VLLM_KIMI_K3_AUX_ATTN_RES_STREAM
+
+    def _capture_aux_hidden_stream(
+        self,
+        layer_idx: int,
+        prefix: torch.Tensor,
+        block_residual: torch.Tensor,
+    ) -> torch.Tensor:
+        # The consumer reads the pre-norm mixture over the block bank, not the
+        # prefix the layer forwards; `use_attn_res` builds the weights it needs.
+        if not (self._aux_attn_res_stream and self.use_attn_res):
+            return prefix
+
+        if layer_idx + 1 < self.end_layer:
+            consumer = self.layers[layer_idx + 1]
+            proj = consumer.self_attention_res_proj
+            norm = consumer.self_attention_res_norm
+            num_blocks = consumer.prev_valid_blocks
+        elif get_pp_group().is_last_rank:
+            proj = self.output_attn_res_proj
+            norm = self.output_attn_res_norm
+            num_blocks = cdiv(self.end_layer, self.config.attn_res_block_size)
+        else:
+            # The consumer lives on the next rank; nothing here to mix against.
+            return prefix
+
+        return _apply_attn_res(prefix, block_residual, proj, norm, num_blocks)
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -829,7 +882,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 # AMD attn-res layer already returns prefix_sum + MLP delta as
                 # hidden_states; the override drops the block bank in residual.
                 self._maybe_add_hidden_state(
-                    aux_hidden_states, layer_idx + 1, hidden_states, residual
+                    aux_hidden_states,
+                    layer_idx + 1,
+                    self._capture_aux_hidden_stream(layer_idx, hidden_states, residual),
+                    residual,
                 )
 
         if not get_pp_group().is_last_rank:
