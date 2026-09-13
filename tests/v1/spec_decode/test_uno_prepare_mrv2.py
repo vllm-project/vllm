@@ -11,6 +11,8 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.spec_decode.uno import prepare_uno_inputs_reference
 from vllm.v1.worker.gpu.spec_decode.uno_prepare import (
+    _prepare_uno_specialization_kwargs,
+    _target_input_lengths,
     prepare_uno_inputs_fused,
 )
 
@@ -327,6 +329,56 @@ def test_fused_uno_rejects_cpu_buffers_before_launch():
             100_003,
             37,
         )
+
+
+@pytest.mark.parametrize(
+    ("num_reqs", "served_tokens"),
+    [(1, 32), (4, 2048)],
+)
+def test_uno_prepare_specialization_ignores_dynamic_target_view_lengths(
+    num_reqs, served_tokens
+):
+    """Warmup and serving retain logical bounds without recompiling for views."""
+    device = torch.device("cpu")
+    buffers = InputBuffers(4, 2048, device)
+    slot_mapping = torch.empty(2048, dtype=torch.int64, device=device)
+    sample_idx_mapping = torch.empty(2048, dtype=torch.int32, device=device)
+    block_table = torch.empty((4, 256), dtype=torch.int32, device=device)
+    warmup = SimpleNamespace(
+        query_start_loc=torch.empty(num_reqs + 1, dtype=torch.int32, device=device),
+        positions=torch.empty(num_reqs, dtype=torch.int64, device=device),
+    )
+    served = SimpleNamespace(
+        query_start_loc=torch.empty(num_reqs + 1, dtype=torch.int32, device=device),
+        positions=torch.empty(served_tokens, dtype=torch.int64, device=device),
+    )
+
+    # These are the C=1 and full-chunk C=4 target views respectively.  They
+    # remain runtime bounds, including on a second full-chunk iteration.
+    assert _target_input_lengths(warmup) == (num_reqs + 1, num_reqs)
+    assert _target_input_lengths(served) == (num_reqs + 1, served_tokens)
+
+    kwargs = dict(
+        buffers=buffers,
+        slot_mapping=slot_mapping,
+        sample_idx_mapping=sample_idx_mapping,
+        block_table=block_table,
+        num_reqs=num_reqs,
+        k=8,
+        state_capacity=4,
+        block_size=16,
+        max_model_len=4096,
+        noise_seed=0,
+        noise_high=151_669,
+        has_rejected=True,
+        block=256,
+    )
+    warmup_specialization = _prepare_uno_specialization_kwargs(**kwargs)
+    served_specialization = _prepare_uno_specialization_kwargs(**kwargs)
+
+    assert warmup_specialization == served_specialization
+    assert "TARGET_QUERY_CAP" not in warmup_specialization
+    assert "TARGET_POSITION_CAP" not in warmup_specialization
 
 
 def test_fused_uno_rejects_non_native_last_sampled_layout_on_cpu():

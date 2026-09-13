@@ -24,7 +24,9 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.launch_key_debug import record_triton_launch
 
 
-@triton.jit(do_not_specialize=["step"])
+@triton.jit(
+    do_not_specialize=["step", "target_query_len", "target_position_len"]
+)
 def _prepare_uno_inputs_kernel(
     # Request state and target batch inputs.
     idx_mapping_ptr,
@@ -45,8 +47,11 @@ def _prepare_uno_inputs_kernel(
     out_sample_idx_mapping_ptr,
     out_seq_lens_ptr,
     out_query_start_loc_ptr,
-    # Runtime decode step (not constexpr, so each launch sees the live value).
+    # Runtime scalar bounds.  They describe the active target views without
+    # making every view length a distinct Triton specialization.
     step,
+    target_query_len,
+    target_position_len,
     # Shape and arithmetic constants.
     NUM_REQS: tl.constexpr,
     K: tl.constexpr,
@@ -57,8 +62,6 @@ def _prepare_uno_inputs_kernel(
     SAMPLE_CAP: tl.constexpr,
     SEQ_CAP: tl.constexpr,
     QUERY_CAP: tl.constexpr,
-    TARGET_QUERY_CAP: tl.constexpr,
-    TARGET_POSITION_CAP: tl.constexpr,
     STATE_CAP: tl.constexpr,
     BLOCK_COLS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -109,14 +112,14 @@ def _prepare_uno_inputs_kernel(
 
     target_query_end = tl.load(
         target_query_start_loc_ptr + req + 1,
-        mask=req_valid & ((req + 1) < TARGET_QUERY_CAP),
+        mask=req_valid & ((req + 1) < target_query_len),
         other=0,
     ).to(tl.int64)
     last_position_index = target_query_end - rejected - 1
     target_position_valid = (
         req_valid
         & (last_position_index >= 0)
-        & (last_position_index < TARGET_POSITION_CAP)
+        & (last_position_index < target_position_len)
     )
     last_position = tl.load(
         target_positions_ptr + last_position_index,
@@ -215,7 +218,7 @@ def _prepare_uno_inputs_kernel(
     request_valid = request_row < NUM_REQS
     request_end = tl.load(
         target_query_start_loc_ptr + request_row + 1,
-        mask=request_valid & ((request_row + 1) < TARGET_QUERY_CAP),
+        mask=request_valid & ((request_row + 1) < target_query_len),
         other=0,
     ).to(tl.int64)
     request_rejected = tl.zeros((BLOCK,), dtype=tl.int64)
@@ -229,7 +232,7 @@ def _prepare_uno_inputs_kernel(
     request_position_valid = (
         request_valid
         & (request_last_index >= 0)
-        & (request_last_index < TARGET_POSITION_CAP)
+        & (request_last_index < target_position_len)
     )
     request_last_position = tl.load(
         target_positions_ptr + request_last_index,
@@ -251,6 +254,61 @@ def _prepare_uno_inputs_kernel(
         query_start.to(tl.int32),
         mask=request_row < QUERY_CAP,
     )
+
+
+def _target_input_lengths(input_batch: Any) -> tuple[int, int]:
+    """Return logical target-view lengths as non-specialized kernel scalars."""
+    return (
+        int(input_batch.query_start_loc.numel()),
+        int(input_batch.positions.numel()),
+    )
+
+
+def _prepare_uno_specialization_kwargs(
+    buffers: Any,
+    slot_mapping: torch.Tensor,
+    sample_idx_mapping: torch.Tensor,
+    block_table: torch.Tensor,
+    *,
+    num_reqs: int,
+    k: int,
+    state_capacity: int,
+    block_size: int,
+    max_model_len: int,
+    noise_seed: int,
+    noise_high: int,
+    has_rejected: bool,
+    block: int,
+) -> dict[str, int | bool]:
+    """Build the complete compile-time Uno preparation specialization.
+
+    Target input views are deliberately absent.  Their logical lengths are
+    passed as runtime scalars because both dummy warmup and real serving use
+    the same persistent output buffers but legitimately have different
+    target-view lengths.
+    """
+    return {
+        "NUM_REQS": num_reqs,
+        "K": k,
+        "COUNT": num_reqs * k,
+        "INPUT_CAP": buffers.input_ids.numel(),
+        "POSITION_CAP": buffers.positions.numel(),
+        "SLOT_CAP": slot_mapping.numel(),
+        "SAMPLE_CAP": sample_idx_mapping.numel(),
+        "SEQ_CAP": buffers.seq_lens.numel(),
+        "QUERY_CAP": buffers.query_start_loc.numel(),
+        "STATE_CAP": state_capacity,
+        "BLOCK_COLS": block_table.shape[1],
+        "BLOCK_SIZE": block_size,
+        "MAX_MODEL_LEN": max_model_len,
+        "NOISE_SEED": noise_seed,
+        "NOISE_LOW": 1,
+        "NOISE_HIGH": noise_high,
+        "HAS_REJECTED": has_rejected,
+        "PAD_ID": PAD_SLOT_ID,
+        "BLOCK": block,
+        "num_warps": 4,
+    }
 
 
 def prepare_uno_inputs_fused(
@@ -282,9 +340,9 @@ def prepare_uno_inputs_fused(
     ``prepare_uno_inputs_reference`` oracle in ``uno.py``;
     both paths must preserve the same request-state layouts and row ordering.
 
-    ``step`` is the live decode step passed to the launch.  It is deliberately
-    a runtime scalar rather than a constexpr so shape reuse does not capture a
-    stale step value.
+    ``step`` and the logical target-view lengths are runtime scalars rather
+    than constexprs.  This preserves dynamic bounds while allowing dummy
+    warmup and a real request to reuse the same specialization.
     """
     state_capacity = seeds.numel()
     if (
@@ -353,6 +411,22 @@ def prepare_uno_inputs_fused(
     )
     block = 256
     launch_grid = (triton.cdiv(output_capacity, block),)
+    target_query_len, target_position_len = _target_input_lengths(input_batch)
+    launch_kwargs = _prepare_uno_specialization_kwargs(
+        buffers,
+        slot_mapping,
+        sample_idx_mapping,
+        block_table,
+        num_reqs=num_reqs,
+        k=int(k),
+        state_capacity=state_capacity,
+        block_size=int(block_size),
+        max_model_len=int(max_model_len),
+        noise_seed=int(noise_seed),
+        noise_high=int(noise_high),
+        has_rejected=num_rejected is not None,
+        block=block,
+    )
     record_triton_launch(
         "_prepare_uno_inputs_kernel",
         _prepare_uno_inputs_kernel,
@@ -374,28 +448,9 @@ def prepare_uno_inputs_fused(
         buffers.seq_lens,
         buffers.query_start_loc,
         int(step),
-        NUM_REQS=num_reqs,
-        K=int(k),
-        COUNT=count,
-        INPUT_CAP=buffers.input_ids.numel(),
-        POSITION_CAP=buffers.positions.numel(),
-        SLOT_CAP=slot_mapping.numel(),
-        SAMPLE_CAP=sample_idx_mapping.numel(),
-        SEQ_CAP=buffers.seq_lens.numel(),
-        QUERY_CAP=buffers.query_start_loc.numel(),
-        TARGET_QUERY_CAP=input_batch.query_start_loc.numel(),
-        TARGET_POSITION_CAP=input_batch.positions.numel(),
-        STATE_CAP=state_capacity,
-        BLOCK_COLS=block_table.shape[1],
-        BLOCK_SIZE=int(block_size),
-        MAX_MODEL_LEN=int(max_model_len),
-        NOISE_SEED=int(noise_seed),
-        NOISE_LOW=1,
-        NOISE_HIGH=int(noise_high),
-        HAS_REJECTED=num_rejected is not None,
-        PAD_ID=PAD_SLOT_ID,
-        BLOCK=block,
-        num_warps=4,
+        target_query_len,
+        target_position_len,
+        **launch_kwargs,
     )
     _prepare_uno_inputs_kernel[launch_grid](
         input_batch.idx_mapping,
@@ -415,28 +470,9 @@ def prepare_uno_inputs_fused(
         buffers.seq_lens,
         buffers.query_start_loc,
         int(step),
-        NUM_REQS=num_reqs,
-        K=int(k),
-        COUNT=count,
-        INPUT_CAP=buffers.input_ids.numel(),
-        POSITION_CAP=buffers.positions.numel(),
-        SLOT_CAP=slot_mapping.numel(),
-        SAMPLE_CAP=sample_idx_mapping.numel(),
-        SEQ_CAP=buffers.seq_lens.numel(),
-        QUERY_CAP=buffers.query_start_loc.numel(),
-        TARGET_QUERY_CAP=input_batch.query_start_loc.numel(),
-        TARGET_POSITION_CAP=input_batch.positions.numel(),
-        STATE_CAP=state_capacity,
-        BLOCK_COLS=block_table.shape[1],
-        BLOCK_SIZE=int(block_size),
-        MAX_MODEL_LEN=int(max_model_len),
-        NOISE_SEED=int(noise_seed),
-        NOISE_LOW=1,
-        NOISE_HIGH=int(noise_high),
-        HAS_REJECTED=num_rejected is not None,
-        PAD_ID=PAD_SLOT_ID,
-        BLOCK=block,
-        num_warps=4,
+        target_query_len,
+        target_position_len,
+        **launch_kwargs,
     )
 
 
