@@ -717,6 +717,26 @@ def test_draft_warmup_request_counts_are_independent_of_k():
     assert draft_warmup_request_counts(-1) == []
 
 
+@pytest.mark.parametrize("k", [1, 4, 8])
+def test_uno_sampler_warmup_covers_every_proposal_row_count(k):
+    """The sampler warmup follows Uno's K-row proposal arithmetic.
+
+    A normal sampler warmup has one row per request.  This is deliberately
+    different: every reachable request count has K proposal rows and must go
+    through the sampler's own top-k/top-p path before JIT monitoring begins.
+    """
+    proposer = object.__new__(UnoSpeculator)
+    proposer.k = k
+    proposer.max_num_reqs = 4
+
+    assert proposer.draft_sampler_warmup_shapes() == [
+        (1, k),
+        (2, 2 * k),
+        (3, 3 * k),
+        (4, 4 * k),
+    ]
+
+
 def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
     """The runner warms each shape and says how many it covered.
 
@@ -732,13 +752,25 @@ def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
     reported: list[int] = []
     runner.speculator = SimpleNamespace(
         draft_warmup_token_counts=lambda: [1, 2, 3, 4],
+        draft_sampler_warmup_shapes=lambda: [(1, 8), (2, 16), (3, 24), (4, 32)],
         report_draft_warmup=reported.append,
     )
-    runner._dummy_run = lambda num_tokens: ran.append(num_tokens)
+    sampler_runs: list[tuple[int, int, int]] = []
+
+    def dummy_run(num_tokens):
+        ran.append(num_tokens)
+        return None, torch.empty(num_tokens, 3)
+
+    runner._dummy_run = dummy_run
+    def warm_up_uno_sampler(hidden, *, num_reqs, num_rows):
+        sampler_runs.append((hidden.shape[0], num_reqs, num_rows))
+
+    runner._warm_up_uno_sampler = warm_up_uno_sampler
 
     runner._warm_up_draft_kernels()
 
     assert ran == [1, 2, 3, 4]
+    assert sampler_runs == [(1, 1, 8), (2, 2, 16), (3, 3, 24), (4, 4, 32)]
     assert reported == [4]
 
 
@@ -763,6 +795,7 @@ def test_draft_warmup_skips_a_speculator_that_does_not_ask_for_it(monkeypatch):
     reported: list[int] = []
     runner.speculator = SimpleNamespace(
         draft_warmup_token_counts=lambda: [],
+        draft_sampler_warmup_shapes=lambda: [],
         report_draft_warmup=reported.append,
     )
     runner._warm_up_draft_kernels()

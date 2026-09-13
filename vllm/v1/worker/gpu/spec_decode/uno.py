@@ -324,6 +324,20 @@ class UnoSpeculator(DraftModelSpeculator):
         """
         return draft_warmup_request_counts(self.max_num_reqs)
 
+    def draft_sampler_warmup_shapes(self) -> list[tuple[int, int]]:
+        """Return ``(requests, rows)`` for every Uno sampler warmup.
+
+        Uno proposes ``K`` rows per request.  Its proposal sampler runs at
+        that extent, while the target sampler's top-k/top-p path is reached
+        in the same prefill step and must cover it too.  Keep the request
+        count alongside the row count: the former selects the request-state
+        slots while the latter is the actual sampler launch shape.
+        """
+        return [
+            (num_reqs, num_reqs * self.k)
+            for num_reqs in self.draft_warmup_token_counts()
+        ]
+
     def report_draft_warmup(self, shapes: int) -> None:
         """State once what warmup covered, so a cold serve stays visible.
 

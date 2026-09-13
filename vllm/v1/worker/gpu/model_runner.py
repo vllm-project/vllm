@@ -915,12 +915,43 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return hidden_states, sample_hidden_states
 
     @torch.inference_mode()
-    def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
-        num_reqs = hidden_states.shape[0]
+    def _dummy_sampler_run(
+        self, hidden_states: torch.Tensor, *, num_reqs: int | None = None
+    ) -> None:
+        """Run the production sampler over a dummy row layout.
+
+        The ordinary profile path has one sampler row per request.  Uno's
+        proposal has K rows per request, so its warmup passes the original
+        request count explicitly while expanding the sampler rows below.
+        """
+        num_rows = hidden_states.shape[0]
+        if num_reqs is None:
+            num_reqs = num_rows
+        assert 0 < num_reqs <= num_rows
         logits = self.model.compute_logits(hidden_states)
         dummy_input_batch = InputBatch.make_dummy(
-            num_reqs, num_reqs, self.input_buffers
+            num_reqs, num_rows, self.input_buffers
         )
+
+        if num_rows != num_reqs:
+            # Mirror the proposal layout: K sampler rows share each request
+            # state slot.  The same Sampler.__call__ path now sees the row
+            # extent and the request-local sampling tensors that serving uses.
+            rows_per_req = num_rows // num_reqs
+            assert rows_per_req * num_reqs == num_rows
+            row_ids = torch.arange(num_rows, dtype=torch.int64, device=self.device)
+            dummy_input_batch.expanded_idx_mapping = row_ids.remainder(num_reqs)
+            dummy_input_batch.expanded_local_pos = torch.arange(
+                num_rows, dtype=torch.int32, device=self.device
+            )
+            dummy_input_batch.logits_indices = row_ids
+            dummy_input_batch.cu_num_logits = (
+                torch.arange(num_reqs + 1, dtype=torch.int32, device=self.device)
+                * rows_per_req
+            )
+            dummy_input_batch.cu_num_logits_np = np.arange(
+                num_reqs + 1, dtype=np.int32
+            ) * rows_per_req
 
         # NOTE(woosuk): During the initial memory profiling, the sampler may skip
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
@@ -928,6 +959,60 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert self.sampler is not None
         with launch_key_phase("warmup"):
             self.sampler(logits, dummy_input_batch)
+
+    @torch.inference_mode()
+    def _warm_up_uno_sampler(
+        self,
+        sample_hidden_states: torch.Tensor,
+        *,
+        num_reqs: int,
+        num_rows: int,
+    ) -> None:
+        """Warm Uno's K-row sampler path with the production ``Sampler`` call.
+
+        ``warmup_kernels`` already exercises a normal one-row sampler.  It
+        cannot cover the K rows per request that Uno's proposal produces, nor
+        the split top-p choices they select.  Temporarily install the same
+        top-k/top-p settings as the scheduler-realistic sampler warmup, then
+        restore the persistent request-state slots before serving starts.
+        """
+        assert self.sampler is not None
+        assert sample_hidden_states.shape[0] == num_reqs
+        assert num_rows % num_reqs == 0
+
+        states = self.sampler.sampling_states
+        saved_needs_processing = self.sampler.needs_logits_processing[:num_reqs].copy()
+        saved_temperature = states.temperature.np[:num_reqs].copy()
+        saved_top_k = states.top_k.np[:num_reqs].copy()
+        saved_top_p = states.top_p.np[:num_reqs].copy()
+        saved_min_p = states.min_p.np[:num_reqs].copy()
+        saved_seeds = states.seeds.np[:num_reqs].copy()
+        try:
+            # SamplingParams.for_sampler_warmup(): temperature=0.9,
+            # top_k=50, top_p=0.9, min_p=0.1.  Keep this local rather than
+            # manufacturing a Request, so the warmup uses exactly the runner
+            # sampler call without retaining a fake request.
+            self.sampler.needs_logits_processing[:num_reqs] = True
+            states.temperature.np[:num_reqs] = 0.9
+            states.top_k.np[:num_reqs] = min(50, states.vocab_size)
+            states.top_p.np[:num_reqs] = 0.9
+            states.min_p.np[:num_reqs] = 0.1
+            states.seeds.np[:num_reqs] = np.arange(num_reqs, dtype=np.int64)
+            states.apply_staged_writes()
+
+            rows_per_req = num_rows // num_reqs
+            self._dummy_sampler_run(
+                sample_hidden_states.repeat_interleave(rows_per_req, dim=0),
+                num_reqs=num_reqs,
+            )
+        finally:
+            self.sampler.needs_logits_processing[:num_reqs] = saved_needs_processing
+            states.temperature.np[:num_reqs] = saved_temperature
+            states.top_k.np[:num_reqs] = saved_top_k
+            states.top_p.np[:num_reqs] = saved_top_p
+            states.min_p.np[:num_reqs] = saved_min_p
+            states.seeds.np[:num_reqs] = saved_seeds
+            states.apply_staged_writes()
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
@@ -996,15 +1081,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """
         assert self.speculator is not None
         token_counts = getattr(self.speculator, "draft_warmup_token_counts", None)
+        sampler_shapes = getattr(self.speculator, "draft_sampler_warmup_shapes", None)
         report = getattr(self.speculator, "report_draft_warmup", None)
-        if token_counts is None or report is None:
+        if token_counts is None or sampler_shapes is None or report is None:
             return
         counts = token_counts()
+        sampler_shape_list = sampler_shapes()
         if not counts:
             return
+        if [num_reqs for num_reqs, _ in sampler_shape_list] != counts:
+            raise RuntimeError(
+                "Uno sampler warmup shapes must cover the draft warmup request counts"
+            )
         with launch_key_phase("warmup"):
-            for num_tokens in counts:
-                self._dummy_run(num_tokens)
+            for num_tokens, (num_reqs, num_rows) in zip(
+                counts, sampler_shape_list, strict=True
+            ):
+                _, sample_hidden_states = self._dummy_run(num_tokens)
+                if sample_hidden_states is not None:
+                    self._warm_up_uno_sampler(
+                        sample_hidden_states,
+                        num_reqs=num_reqs,
+                        num_rows=num_rows,
+                    )
         report(len(counts))
 
     @torch.inference_mode()
