@@ -1126,11 +1126,19 @@ def _fastsafetensors_memory_budget(
     return (budget or None), reason
 
 
-def _safetensors_largest_tensor(hf_weights_files: list[str]) -> int:
+def _safetensors_largest_tensor(
+    hf_weights_files: list[str],
+    keep_tensor: Callable[[str], bool] | None = None,
+) -> int:
     """Largest single tensor across the shards, in bytes.
 
     The planner can split a shard but never a tensor, so this is the atomic
     unit a chunk must be able to hold.
+
+    Args:
+        hf_weights_files: Safetensors files to scan.
+        keep_tensor: The predicate the loader filters with, or None. Must be the
+            same predicate: a tensor that is never read cannot constrain a chunk.
     """
     largest = 0
     for path in hf_weights_files:
@@ -1138,6 +1146,8 @@ def _safetensors_largest_tensor(hf_weights_files: list[str]) -> int:
             header = json.loads(f.read(struct.unpack("<Q", f.read(8))[0]))
         for name, meta in header.items():
             if name == "__metadata__":
+                continue
+            if keep_tensor is not None and not keep_tensor(name):
                 continue
             start, end = meta["data_offsets"]
             largest = max(largest, end - start)
@@ -1148,6 +1158,7 @@ def fastsafetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     accumulate_resident: bool = False,
+    local_expert_ids: set[int] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
     using fastsafetensor library.
@@ -1200,6 +1211,24 @@ def fastsafetensors_weights_iterator(
     tqdm_enabled = enable_tqdm(use_tqdm_on_load)
 
     all_local = envs.VLLM_FASTSAFETENSORS_ALL_LOCAL
+
+    # Skip expert weights this rank does not own, as the default path does:
+    # experts are ~85-90% of weight bytes, so under EP this otherwise reads
+    # roughly an order of magnitude more than --load-format auto.
+    keep_tensor: Callable[[str], bool] | None = None
+    if local_expert_ids is not None:
+        def keep_tensor(name: str) -> bool:  # noqa: F811
+            return not should_skip_weight(name, local_expert_ids)
+
+        # A filter is incompatible with broadcast (get_tensor would deliver
+        # tensors this rank never read). Filtering is the larger win, so switch
+        # rather than surface a library ValueError.
+        if not all_local:
+            logger.info(
+                "fastsafetensors: expert filtering requires all_local; "
+                "enabling it (VLLM_FASTSAFETENSORS_ALL_LOCAL=0 ignored)."
+            )
+            all_local = True
     # The planner charges every byte read as resident, which is only accurate
     # when the consumer copies into preallocated parameters. A consumer that
     # keeps less than it reads -- online quantization stores a smaller
@@ -1221,6 +1250,7 @@ def fastsafetensors_weights_iterator(
             nogds=nogds,
             all_local=all_local,
             accumulate_resident=accumulate_resident,
+            tensor_filter=keep_tensor,
         )
         if budget is None:
             return ParallelLoader(**kwargs)
@@ -1234,7 +1264,8 @@ def fastsafetensors_weights_iterator(
                 # checkpoint. The cap only binds where it leaves the plan
                 # feasible, and stops binding once it exceeds the largest
                 # shard, where the plan is whole-file anyway.
-                max_batch_bytes=2 * _safetensors_largest_tensor(hf_weights_files)
+                max_batch_bytes=2
+                * _safetensors_largest_tensor(hf_weights_files, keep_tensor)
                 or None,
                 **kwargs,
             )

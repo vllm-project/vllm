@@ -273,6 +273,7 @@ class DefaultModelLoader(BaseModelLoader):
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
                     accumulate_resident=self.params_materialize_during_load,
+                    local_expert_ids=self.local_expert_ids,
                 )
             elif self.load_config.load_format == "instanttensor":
                 weights_iterator = instanttensor_weights_iterator(
