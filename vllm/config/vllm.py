@@ -110,10 +110,17 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        # Breakable CUDA graphs currently regress performance on ROCm, so no
-        # architecture opts in by default here. Users can still force it with
+        # Breakable CUDA graphs currently regress performance on ROCm for
+        # models that can use torch.compile piecewise graphs instead. Do not
+        # opt those in by default. Users can still force them with
         # VLLM_USE_BREAKABLE_CUDAGRAPH=1.
-        return frozenset()
+        #
+        # DeepseekV41ForCausalLM cannot torch.compile, and the ROCm sparse
+        # SWA backend only reports AttentionCGSupport.UNIFORM_BATCH. Default
+        # FULL_AND_PIECEWISE then dies at capture unless breakable CUDA
+        # graphs are on. Enable this architecture so the published AMD
+        # recipe can start.
+        return frozenset({"DeepseekV41ForCausalLM"})
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 
