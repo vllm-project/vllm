@@ -2,13 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import json
+
 import pytest
 
 from tests.tool_parsers.common_tests import (
     ToolParserTestConfig,
     ToolParserTests,
 )
+from tests.tool_parsers.utils import run_tool_extraction
 from vllm.tokenizers import TokenizerLike, get_tokenizer
+
+NO_NEWLINE_TOOL_CALL_OUTPUT = (
+    "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function"
+    "<｜tool▁sep｜>get_weather```json\n"
+    '{"city": "Tokyo", "unit": "celsius"}\n'
+    "```<｜tool▁call▁end｜><｜tool▁calls▁end｜>"
+)
 
 
 class TestDeepSeekV3ToolParser(ToolParserTests):
@@ -90,3 +100,29 @@ class TestDeepSeekV3ToolParser(ToolParserTests):
                 ),
             },
         )
+
+    def test_no_newline_before_json_nonstreaming(self, tool_parser):
+        content, tool_calls = run_tool_extraction(
+            tool_parser, NO_NEWLINE_TOOL_CALL_OUTPUT, streaming=False
+        )
+
+        assert content is None
+        assert len(tool_calls) == 1
+        assert tool_calls[0].function.name == "get_weather"
+        assert json.loads(tool_calls[0].function.arguments) == {
+            "city": "Tokyo",
+            "unit": "celsius",
+        }
+
+    def test_no_newline_before_json_streaming(self, tool_parser):
+        content, tool_calls = run_tool_extraction(
+            tool_parser, NO_NEWLINE_TOOL_CALL_OUTPUT, streaming=True
+        )
+
+        assert content is None
+        assert len(tool_calls) == 1
+        assert tool_calls[0].function.name == "get_weather"
+        assert json.loads(tool_calls[0].function.arguments) == {
+            "city": "Tokyo",
+            "unit": "celsius",
+        }
