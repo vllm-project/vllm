@@ -180,6 +180,15 @@ def run_dp_sharded_vision_model_vs_direct(
             [1000, 350],
             "unbalanced sizes",
         ),
+        # 5 images / 4 GPUs: the #52654 multi-image DP split (2, 1, 1, 1)
+        (
+            [100, 100, 100, 100, 100],
+            4,
+            [0, 4, 1, 2, 3],
+            [2, 1, 1, 1],
+            [200, 100, 100, 100],
+            "five images four gpus",
+        ),
     ],
 )
 def test_get_load_balance_assignment_cases(
@@ -463,6 +472,64 @@ def run_dp_sharded_mrope_vision_model_uneven_load_worker(
     for i, output in enumerate(output_tuple):
         assert output.shape[0] == expected_output_patches[i]
         assert output.shape[1] == vision_model.out_hidden_size
+
+
+@multi_gpu_test(num_gpus=4)
+def test_run_dp_sharded_mrope_vision_model_five_images_four_gpus():
+    """5 images on 4 GPUs: greedy assignment is 2/1/1/1 (issue #52654)."""
+    world_size = 4
+    mp.spawn(
+        run_dp_sharded_mrope_vision_model_five_images_four_gpus_worker,
+        args=(world_size, get_open_port()),
+        nprocs=world_size,
+    )
+
+
+def run_dp_sharded_mrope_vision_model_five_images_four_gpus_worker(
+    local_rank: int, world_size: int, master_port: int
+):
+    set_random_seed(0)
+    device = f"{current_platform.device_type}:{local_rank}"
+    torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
+
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(master_port),
+        }
+    )
+
+    init_distributed_environment()
+    with ensure_current_vllm_config():
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+    # Five merge-aligned images so greedy TP=4 assignment is 2, 1, 1, 1.
+    grid_thw_list = [[1, 4, 4] for _ in range(5)]
+    pixel_values_list = []
+    for grid_thw in grid_thw_list:
+        image_pixels = torch.randn(math.prod(grid_thw), 768)
+        pixel_values_list.append(image_pixels)
+    pixel_values = torch.cat(pixel_values_list, dim=0)
+    vision_model = SimpleMRopeVisionModel()
+
+    patches_per_image = [math.prod(g) for g in grid_thw_list]
+    _, gpu_sample_counts, _ = get_load_balance_assignment(patches_per_image, world_size)
+    assert gpu_sample_counts == [2, 1, 1, 1]
+
+    with torch.inference_mode():
+        direct_output = vision_model(pixel_values, grid_thw_list)
+        sharded_output = run_dp_sharded_mrope_vision_model(
+            vision_model, pixel_values, grid_thw_list, rope_type="rope_3d"
+        )
+        sharded_output = torch.cat(sharded_output, dim=0)
+
+    if local_rank == 0:
+        assert direct_output.shape == sharded_output.shape
+        assert torch.allclose(direct_output, sharded_output, rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize("spatial_merge_size", [2, 4])
