@@ -33,6 +33,8 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
       This doesn't include ``_tokenizer`` property nor any mutation
       methods like ``add_special_tokens`` or ``add_tokens``.
     - Adjacent method calls could happen on different deep copies.
+    - Calls beyond ``copies`` use temporary deep copies that are not
+      retained in the pool.
     """
     if not isinstance(tokenizer, TokenizersBackend) or isinstance(
         tokenizer, ThreadSafeHFTokenizerMixin
@@ -49,12 +51,16 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
     def _borrow_from_pool():
         try:
             tok = tokenizer_pool.get_nowait()
-            yield tok
+            from_pool = True
         except queue.Empty:
             tok = copy.deepcopy(og_tokenizer)
+            from_pool = False
+
+        try:
             yield tok
         finally:
-            tokenizer_pool.put(tok)
+            if from_pool:
+                tokenizer_pool.put(tok)
 
     class TokenizerPool(tokenizer.__class__, ThreadSafeHFTokenizerMixin):  # type: ignore
         def apply_chat_template(self, *args, **kwargs):
