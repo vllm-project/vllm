@@ -1,3 +1,5 @@
+#include <cstdint>
+
 #include <cuda.h>
 #include <cudaTypedefs.h>
 
@@ -207,8 +209,17 @@ void cutlass_scaled_mm(torch::stable::Tensor& c, torch::stable::Tensor const& a,
   // Check for strides and alignment
   STD_TORCH_CHECK(a.stride(1) == 1 && c.stride(1) == 1);  // Row-major
   STD_TORCH_CHECK(b.stride(0) == 1);                      // Column-major
-  STD_TORCH_CHECK(c.stride(0) % 16 == 0 &&
-                  b.stride(1) % 16 == 0);  // 16 Byte Alignment
+  STD_TORCH_CHECK(a.stride(0) >= a.size(1) && b.stride(1) >= b.size(0) &&
+                      c.stride(0) >= c.size(1),
+                  "leading dimensions must not overlap");
+  STD_TORCH_CHECK(
+      a.stride(0) % 16 == 0 && c.stride(0) % 16 == 0 && b.stride(1) % 16 == 0,
+      "leading strides must be multiples of 16");
+  STD_TORCH_CHECK(
+      reinterpret_cast<std::uintptr_t>(a.data_ptr()) % 16 == 0 &&
+          reinterpret_cast<std::uintptr_t>(b.data_ptr()) % 16 == 0 &&
+          reinterpret_cast<std::uintptr_t>(c.data_ptr()) % 16 == 0,
+      "A, B, and output pointers must be 16-byte aligned");
 
   if (bias) {
     STD_TORCH_CHECK(bias->numel() == b.size(1) && bias->is_contiguous() &&
@@ -396,8 +407,17 @@ void cutlass_scaled_mm_azp(torch::stable::Tensor& c,
   // Check for strides and alignment
   STD_TORCH_CHECK(a.stride(1) == 1 && c.stride(1) == 1);  // Row-major
   STD_TORCH_CHECK(b.stride(0) == 1);                      // Column-major
-  STD_TORCH_CHECK(c.stride(0) % 16 == 0 &&
-                  b.stride(1) % 16 == 0);  // 16 Byte Alignment
+  STD_TORCH_CHECK(a.stride(0) >= a.size(1) && b.stride(1) >= b.size(0) &&
+                      c.stride(0) >= c.size(1),
+                  "leading dimensions must not overlap");
+  STD_TORCH_CHECK(
+      a.stride(0) % 16 == 0 && c.stride(0) % 16 == 0 && b.stride(1) % 16 == 0,
+      "leading strides must be multiples of 16");
+  STD_TORCH_CHECK(
+      reinterpret_cast<std::uintptr_t>(a.data_ptr()) % 16 == 0 &&
+          reinterpret_cast<std::uintptr_t>(b.data_ptr()) % 16 == 0 &&
+          reinterpret_cast<std::uintptr_t>(c.data_ptr()) % 16 == 0,
+      "A, B, and output pointers must be 16-byte aligned");
   STD_TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
 
   // bias, azp, azp_adj are all 1d

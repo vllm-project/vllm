@@ -572,23 +572,126 @@ def test_cutlass_int8_azp(
         )
 
 
-# Test working with a subset of A and B
-def test_cutlass_subset():
-    big_m, big_n, big_k = 1024, 1024, 1024
-    m, n, k = 512, 512, 512
+@pytest.mark.parametrize("padded_tensor", ["a", "b", "out"])
+@pytest.mark.parametrize("input_dtype", ["int8", "fp8"])
+@pytest.mark.parametrize("m", [32, 512])
+def test_cutlass_strided_subsets(padded_tensor: str, input_dtype: str, m: int):
+    if input_dtype == "int8" and capability >= 100:
+        pytest.skip("INT8 scaled_mm is unsupported on SM100+.")
+    if input_dtype == "fp8" and not current_platform.has_device_capability(89):
+        pytest.skip("FP8 is not supported on this GPU type.")
+    if input_dtype == "fp8" and 100 <= capability < 120:
+        pytest.skip("SM100 FP8 caller still builds packed strides; tracked on #55534.")
 
-    whole_a = to_int8(torch.randn((big_m, big_k), device="cuda") * 5)
-    whole_b = to_int8(torch.randn((big_n, big_k), device="cuda").t() * 5)
-    a = whole_a[0:m, 0:k]
-    b = whole_b[0:k, 0:n]
+    big_m, big_n, big_k = 1024, 1024, 1024
+    n, k = 512, 512
+
+    quantize = to_fp8 if input_dtype == "fp8" else to_int8
+    whole_a = quantize(torch.randn((big_m, big_k), device="cuda") * 5)
+    whole_b = quantize(torch.randn((big_n, big_k), device="cuda").t() * 5)
+    a = whole_a[0:m, 0:k].contiguous() if padded_tensor != "a" else whole_a[0:m, 0:k]
+    b = (
+        whole_b[0:k, 0:n].t().contiguous().t()
+        if padded_tensor != "b"
+        else whole_b[0:k, 0:n]
+    )
 
     scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
 
-    out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.bfloat16)
+    if padded_tensor == "out":
+        whole_out = torch.empty((m, big_n), device="cuda", dtype=torch.bfloat16)
+        out = whole_out[0:m, 0:n]
+        torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, None)
+    else:
+        out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16)
     baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype=torch.bfloat16)
 
-    torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
+    if input_dtype == "fp8":
+        torch.testing.assert_close(out, baseline, rtol=5e-1, atol=1.5e-1)
+    else:
+        torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
+
+
+@pytest.mark.skipif(
+    capability >= 100,
+    reason="INT8 scaled_mm is unsupported on SM100+.",
+)
+def test_cutlass_rejects_misaligned_a_leading_stride():
+    m = n = k = 512
+    whole_a = to_int8(torch.randn((m, k + 1), device="cuda") * 5)
+    a = whole_a[:, :k]
+    b = to_int8(torch.randn((n, k), device="cuda").t() * 5)
+    scale_a = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+    scale_b = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+
+    with pytest.raises(RuntimeError, match="leading strides"):
+        ops.cutlass_scaled_mm(a, b, scale_a, scale_b, torch.bfloat16)
+
+
+@pytest.mark.parametrize("misaligned_tensor", ["a", "b", "out"])
+@pytest.mark.skipif(
+    capability >= 100,
+    reason="INT8 scaled_mm is unsupported on SM100+.",
+)
+def test_cutlass_rejects_misaligned_data_pointer(misaligned_tensor: str):
+    m = n = k = 512
+    a = to_int8(torch.randn((m, k), device="cuda") * 5)
+    b = to_int8(torch.randn((n, k), device="cuda").t() * 5)
+    out = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
+
+    if misaligned_tensor == "a":
+        a = to_int8(torch.randn(m * k + 1, device="cuda") * 5)[1:].view(m, k)
+    elif misaligned_tensor == "b":
+        b = to_int8(torch.randn(n * k + 1, device="cuda") * 5)[1:].view(n, k).t()
+    else:
+        out = torch.empty(m * n + 1, device="cuda", dtype=torch.bfloat16)[1:].view(m, n)
+
+    misaligned = {"a": a, "b": b, "out": out}[misaligned_tensor]
+    assert misaligned.data_ptr() % 16 != 0
+
+    scale_a = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+    scale_b = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+
+    with pytest.raises(RuntimeError, match="pointers must be 16-byte aligned"):
+        torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, None)
+
+
+@pytest.mark.parametrize("overlapping_tensor", ["a", "b", "out"])
+@pytest.mark.parametrize("leading_stride", [0, 512 - 16])
+@pytest.mark.skipif(
+    capability >= 100,
+    reason="INT8 scaled_mm is unsupported on SM100+.",
+)
+def test_cutlass_rejects_overlapping_leading_dimension(
+    overlapping_tensor: str, leading_stride: int
+):
+    m = n = k = 512
+    a = to_int8(torch.randn((m, k), device="cuda") * 5)
+    b = to_int8(torch.randn((n, k), device="cuda").t() * 5)
+    out = torch.empty((m, n), device="cuda", dtype=torch.bfloat16)
+
+    if overlapping_tensor == "a":
+        storage_size = (m - 1) * leading_stride + k
+        a = torch.empty(storage_size, device="cuda", dtype=torch.int8).as_strided(
+            (m, k), (leading_stride, 1)
+        )
+    elif overlapping_tensor == "b":
+        storage_size = (n - 1) * leading_stride + k
+        b = torch.empty(storage_size, device="cuda", dtype=torch.int8).as_strided(
+            (k, n), (1, leading_stride)
+        )
+    else:
+        storage_size = (m - 1) * leading_stride + n
+        out = torch.empty(storage_size, device="cuda", dtype=torch.bfloat16).as_strided(
+            (m, n), (leading_stride, 1)
+        )
+
+    scale_a = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+    scale_b = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+
+    with pytest.raises(RuntimeError, match="leading dimensions must not overlap"):
+        torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, None)
 
 
 # Test to make sure cuda graphs work
