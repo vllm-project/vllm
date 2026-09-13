@@ -334,8 +334,11 @@ class RequestState:
             outputs = [output]
         else:
             outputs, finished = self.parent_req.get_outputs(self.request_id, output)
+            if self.stats is not None:
+                self.parent_req.register_child_stats(self.request_id, self.stats)
             if not outputs:
                 return None
+
             external_req_id = self.parent_req.external_req_id
 
         return self._new_request_output(
@@ -377,6 +380,12 @@ class RequestState:
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
 
+        metrics = self.stats
+        if self.parent_req is not None and finished:
+            metrics = self.parent_req.aggregate_stats()
+        elif self.parent_req is not None and not finished:
+            metrics = None
+
         return RequestOutput(
             request_id=external_req_id,  # request_id is what was provided externally
             lora_request=self.lora_request,
@@ -389,7 +398,7 @@ class RequestState:
             ec_transfer_params=ec_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             num_cache_creation_tokens=self.num_cache_creation_tokens,
-            metrics=self.stats,
+            metrics=metrics,
         )
 
     def _new_completion_output(

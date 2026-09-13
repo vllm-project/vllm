@@ -32,7 +32,7 @@ from vllm.v1.engine.output_processor import (
     RequestOutputCollector,
     RequestState,
 )
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import IterationStats, RequestStateStats, SchedulerStats
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])
@@ -1328,6 +1328,68 @@ async def test_request_output_collector():
     # Cumulative logprobs should be the last one.
     cumulative_logprob_expected = 1.0 * num_to_put
     assert output.outputs[0].cumulative_logprob == cumulative_logprob_expected
+
+
+@pytest.mark.asyncio
+async def test_request_output_collector_preserves_merged_metrics():
+    collector = RequestOutputCollector(
+        RequestOutputKind.DELTA, request_id="my-request-id-int"
+    )
+    metrics = RequestStateStats(
+        num_generation_tokens=2,
+        arrival_time=1.0,
+        queued_ts=2.0,
+        scheduled_ts=3.0,
+        first_token_ts=4.0,
+        last_token_ts=5.0,
+        first_token_latency=3.0,
+    )
+    outputs = [
+        RequestOutput(
+            request_id="my-request-id",
+            prompt=None,
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="a",
+                    token_ids=[0],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason=None,
+                )
+            ],
+            finished=False,
+            metrics=None,
+        ),
+        RequestOutput(
+            request_id="my-request-id",
+            prompt=None,
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="b",
+                    token_ids=[1],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason="length",
+                )
+            ],
+            finished=True,
+            metrics=metrics,
+        ),
+    ]
+
+    for output in outputs:
+        collector.put(output)
+
+    output = await collector.get()
+
+    assert output.finished
+    assert output.metrics is metrics
 
 
 @pytest.mark.asyncio

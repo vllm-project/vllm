@@ -7,7 +7,7 @@ from typing import cast
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.metrics.stats import IterationStats, RequestStateStats
 
 
 class ParentRequest:
@@ -21,8 +21,10 @@ class ParentRequest:
     external_req_id: str
     sampling_params: SamplingParams
 
-    # To track the completion of child requests
+    # To track the completion and stats of child requests
     child_requests: set[str]
+    child_request_stats: dict[str, RequestStateStats]
+
 
     # To aggregate child completions when not streaming
     output_aggregator: list[CompletionOutput]
@@ -41,6 +43,7 @@ class ParentRequest:
         self.sampling_params = sampling_params
 
         self.child_requests = set()
+        self.child_request_stats = {}
         self.output_aggregator = (
             [cast(CompletionOutput, None)] * sampling_params.n
             if (sampling_params.output_kind == RequestOutputKind.FINAL_ONLY)
@@ -92,6 +95,35 @@ class ParentRequest:
         child_req_id = f"{index}_{self.request_id}"
         self.child_requests.add(child_req_id)
         return child_req_id, self._get_child_sampling_params(index)
+
+    def register_child_stats(
+        self,
+        child_request_id: str,
+        child_request_stats: RequestStateStats,
+    ) -> None:
+        if child_request_id not in self.child_request_stats:
+            self.child_request_stats[child_request_id] = child_request_stats
+
+    def aggregate_stats(self) -> RequestStateStats | None:
+        if not self.child_request_stats:
+            return None
+
+        child_stats = self.child_request_stats.values()
+        return RequestStateStats(
+            num_generation_tokens=sum(
+                stats.num_generation_tokens for stats in child_stats
+            ),
+            num_preemptions=sum(stats.num_preemptions for stats in child_stats),
+            arrival_time=min(stats.arrival_time for stats in child_stats),
+            queued_ts=min(stats.queued_ts for stats in child_stats),
+            scheduled_ts=min(stats.scheduled_ts for stats in child_stats),
+            first_token_ts=min(stats.first_token_ts for stats in child_stats),
+            last_token_ts=max(stats.last_token_ts for stats in child_stats),
+            first_token_latency=min(
+                stats.first_token_latency for stats in child_stats
+            ),
+            is_corrupted=any(stats.is_corrupted for stats in child_stats),
+        )
 
     @property
     def n(self) -> int:
