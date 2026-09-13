@@ -8,6 +8,7 @@ import os
 import random
 import time
 import warnings
+from contextlib import nullcontext
 from typing import Any
 
 import torch
@@ -22,6 +23,7 @@ from vllm.benchmarks.datasets import (
     add_random_multimodal_dataset_args,
     get_samples,
 )
+from vllm.benchmarks.lib.energy import GpuEnergyMeter
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.inputs import TextPrompt, TokensPrompt
@@ -42,6 +44,7 @@ def run_vllm(
     disable_detokenize: bool = False,
     warmup_requests: list[SampleRequest] | None = None,
     prequeue_requests: bool = False,
+    energy_meter: GpuEnergyMeter | None = None,
 ) -> tuple[float, list[RequestOutput] | None]:
     from vllm import LLM
 
@@ -68,15 +71,17 @@ def run_vllm(
             enable_lora=engine_args.enable_lora,
         )
 
-    return _run_vllm_requests(
-        llm,
-        requests,
-        n,
-        disable_detokenize,
-        do_profile=do_profile,
-        prequeue_requests=prequeue_requests,
-        enable_lora=engine_args.enable_lora,
-    )
+    measurement = energy_meter.measure() if energy_meter is not None else nullcontext()
+    with measurement:
+        return _run_vllm_requests(
+            llm,
+            requests,
+            n,
+            disable_detokenize,
+            do_profile=do_profile,
+            prequeue_requests=prequeue_requests,
+            enable_lora=engine_args.enable_lora,
+        )
 
 
 def _run_vllm_requests(
@@ -194,6 +199,7 @@ def run_vllm_chat(
     disable_detokenize: bool = False,
     warmup_requests: list[SampleRequest] | None = None,
     prequeue_requests: bool = False,
+    energy_meter: GpuEnergyMeter | None = None,
 ) -> tuple[float, list[RequestOutput]]:
     """
     Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
@@ -225,14 +231,16 @@ def run_vllm_chat(
             prequeue_requests=prequeue_requests,
         )
 
-    return _run_vllm_chat_requests(
-        llm,
-        requests,
-        n,
-        disable_detokenize,
-        do_profile=do_profile,
-        prequeue_requests=prequeue_requests,
-    )
+    measurement = energy_meter.measure() if energy_meter is not None else nullcontext()
+    with measurement:
+        return _run_vllm_chat_requests(
+            llm,
+            requests,
+            n,
+            disable_detokenize,
+            do_profile=do_profile,
+            prequeue_requests=prequeue_requests,
+        )
 
 
 def _run_vllm_chat_requests(
@@ -627,9 +635,13 @@ def assign_loras(requests, args):
 
 
 def validate_args(args):
-    """
-    Validate command-line arguments.
-    """
+    """Validate command-line arguments."""
+    if getattr(args, "energy_gpu_ids", None) is not None:
+        if args.backend not in {"vllm", "vllm-chat"} or args.async_engine:
+            raise ValueError(
+                "--energy-gpu-ids requires the synchronous vllm or vllm-chat backend"
+            )
+        GpuEnergyMeter(args.energy_gpu_ids)
 
     # === Deprecation and Defaulting ===
     if args.dataset is not None:
@@ -793,6 +805,16 @@ def validate_args(args):
 
 
 def add_cli_args(parser: FlexibleArgumentParser):
+    parser.add_argument(
+        "--energy-gpu-ids",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Measure whole-device energy for these local physical NVML GPU indices "
+        "(not CUDA_VISIBLE_DEVICES indices). Requires energy-counter support. "
+        "Excludes model loading and warmup; includes request preparation. "
+        "Only supported by synchronous vllm and vllm-chat backends.",
+    )
     parser.add_argument(
         "--backend",
         type=str,
@@ -1024,6 +1046,10 @@ def add_cli_args(parser: FlexibleArgumentParser):
 
 def main(args: argparse.Namespace):
     validate_args(args)
+    energy_gpu_ids = getattr(args, "energy_gpu_ids", None)
+    energy_meter = (
+        GpuEnergyMeter(energy_gpu_ids) if energy_gpu_ids is not None else None
+    )
     if args.seed is None:
         args.seed = 0
     random.seed(args.seed)
@@ -1071,6 +1097,7 @@ def main(args: argparse.Namespace):
                 do_profile=args.profile,
                 warmup_requests=warmup_requests,
                 prequeue_requests=args.prequeue_requests,
+                energy_meter=energy_meter,
             )
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
@@ -1097,6 +1124,7 @@ def main(args: argparse.Namespace):
             do_profile=args.profile,
             warmup_requests=warmup_requests,
             prequeue_requests=args.prequeue_requests,
+            energy_meter=energy_meter,
         )
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
@@ -1141,6 +1169,17 @@ def main(args: argparse.Namespace):
     print(f"Total num prompt tokens:  {total_prompt_tokens}")
     print(f"Total num output tokens:  {total_output_tokens}")
 
+    energy_results = (
+        energy_meter.get_results(total_output_tokens) if energy_meter else {}
+    )
+    if energy_results:
+        print(f"GPU energy: {energy_results['gpu_energy_j']:.3f} J")
+        print(f"Average total GPU power: {energy_results['gpu_avg_power_w']:.3f} W")
+        if (
+            energy_per_token := energy_results["gpu_energy_per_output_token_j"]
+        ) is not None:
+            print(f"GPU energy per output token: {energy_per_token:.6f} J/token")
+
     # Output JSON results if specified
     if args.output_json:
         results = {
@@ -1150,6 +1189,7 @@ def main(args: argparse.Namespace):
             "requests_per_second": len(requests) / elapsed_time,
             "tokens_per_second": total_num_tokens / elapsed_time,
         }
+        results.update(energy_results)
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
         save_to_pytorch_benchmark_format(args, results)
