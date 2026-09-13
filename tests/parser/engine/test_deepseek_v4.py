@@ -163,17 +163,48 @@ class TestArgConverter:
         result = json.loads(_dsml_arg_converter(raw, partial=False))
         assert result == {"city": "Tokyo\n"}
 
-    def test_implicit_close_preserves_malformed_text(self):
+    def test_malformed_dsml_closer_ends_value(self):
+        """The sigil cannot be argument content, so a broken closer is still
+        the closer: it must not stay in the value."""
         raw = (
             f"<{_PARAM_OPEN.format(name='city', is_str='true')}"
             "Tokyo</｜DSML｜parameter\n"
             f"<{_PARAM_OPEN.format(name='unit', is_str='true')}celsius{_PARAM_CLOSE}"
         )
         result = json.loads(_dsml_arg_converter(raw, partial=False))
-        assert result == {
-            "city": "Tokyo</｜DSML｜parameter\n",
-            "unit": "celsius",
-        }
+        assert result == {"city": "Tokyo", "unit": "celsius"}
+
+    def test_misspelled_closer_does_not_swallow_next_parameter(self):
+        """Production shape: `</｜DSML｜>` closes alpha; beta must survive intact
+        instead of being absorbed into alpha's value up to its real closer."""
+        raw = (
+            f"<{_PARAM_OPEN.format(name='alpha', is_str='true')}first</｜DSML｜>\n"
+            f"{_param('beta', 'true', 'second')}"
+        )
+        result = json.loads(_dsml_arg_converter(raw, partial=False))
+        assert result == {"alpha": "first", "beta": "second"}
+
+    def test_misspelled_closer_on_last_parameter(self):
+        raw = f"<{_PARAM_OPEN.format(name='n', is_str='false')}42</｜DSML｜>\n"
+        assert json.loads(_dsml_arg_converter(raw, partial=False)) == {"n": 42}
+
+    def test_closer_without_sigil_stays_in_value(self):
+        """Without the sigil the text could be content, so it is kept; the
+        next parameter is still recovered by the implicit close."""
+        raw = (
+            f"<{_PARAM_OPEN.format(name='alpha', is_str='true')}first</+>\n"
+            f"{_param('beta', 'true', 'second')}"
+        )
+        result = json.loads(_dsml_arg_converter(raw, partial=False))
+        assert result == {"alpha": "first</+>\n", "beta": "second"}
+
+    @pytest.mark.parametrize(
+        "tail", ["</｜DSML｜", "</｜DSML｜>", "</｜DSML｜>\n<｜DSML｜"]
+    )
+    def test_partial_value_stops_at_dsml_tag(self, tail: str):
+        """Streaming must never emit the sigil as part of an argument."""
+        raw = f"<{_PARAM_OPEN.format(name='alpha', is_str='true')}first{tail}"
+        assert json.loads(_dsml_arg_converter(raw, partial=True)) == {"alpha": "first"}
 
     def test_null_string_false(self):
         raw = self._raw(("val", "false", "null"))
@@ -230,6 +261,46 @@ class TestImplicitParameterClose:
             "location": "Paris a<b>",
             "date": "tomorrow",
         }
+
+
+class TestMisspelledParameterCloser:
+    """`</｜DSML｜>` in place of `</｜DSML｜parameter>` must cost nothing but the
+    closer itself: both arguments arrive, and no DSML markup reaches the
+    client, in non-streaming and streaming mode alike."""
+
+    _BODY = (
+        f"{DSML_INVOKE_PREFIX}record_item{DSML_INVOKE_NAME_END}\n"
+        f"<{_PARAM_OPEN.format(name='alpha', is_str='true')}first</｜DSML｜>\n"
+        f"{_param('beta', 'true', 'second')}\n"
+        f"{DSML_INVOKE_END}"
+    )
+
+    def test_non_streaming(self, mock_tokenizer, mock_request):
+        text = f"{DSML_TOOL_START}\n{self._BODY}\n{DSML_TOOL_END}"
+
+        result = DeepSeekV4Parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+
+        assert [tc.function.name for tc in result.tool_calls] == ["record_item"]
+        arguments = result.tool_calls[0].function.arguments
+        assert "DSML" not in arguments
+        assert json.loads(arguments) == {"alpha": "first", "beta": "second"}
+
+    @pytest.mark.parametrize("chunk_size", [1, 4, None], ids=lambda c: f"chunk={c}")
+    def test_streaming(self, mock_tokenizer, mock_request, chunk_size):
+        text = f"{DSML_TOOL_START}\n{self._BODY}\n{DSML_TOOL_END}"
+        chunks = (
+            [text]
+            if chunk_size is None
+            else [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+        )
+
+        results = simulate_tool_streaming(
+            DeepSeekV4Parser(mock_tokenizer), mock_request, chunks
+        )
+
+        arguments = collect_tool_arguments(results)
+        assert "DSML" not in arguments
+        assert json.loads(arguments) == {"alpha": "first", "beta": "second"}
 
 
 # ── Bare </think> absorption and duplicate <think> absorption ─────────

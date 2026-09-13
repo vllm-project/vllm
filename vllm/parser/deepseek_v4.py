@@ -57,15 +57,23 @@ DSML_TOOL_START_VARIANTS: tuple[str, ...] = (
 )
 
 _ESCAPED_DSML = re.escape(_DSML)
+# A parameter value ends at the first DSML tag, in every dialect. The sigil is
+# rendered from special tokens the model cannot emit as content, so whatever
+# `</｜DSML｜...>` follows the value is its closer, well-formed or not
+# (`</｜DSML｜>` is the common production shape); running on to the next
+# well-formed closer instead swallows every parameter in between. A
+# `<｜DSML｜...` opener closes the value implicitly and is left for the next
+# match.
+_PARAM_VALUE = rf"((?:(?!</?{_ESCAPED_DSML}).)*)"
+_PARAM_END = rf"(?:</{_ESCAPED_DSML}[^<>]*>?|(?=<{_ESCAPED_DSML}))"
 _PARAM_RE = re.compile(
     rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"\s+string="(true|false)">'
-    rf"(.*?)"
-    rf"(?:</{_ESCAPED_DSML}parameter>|(?=<{_ESCAPED_DSML}parameter\s+name=))",
+    rf"{_PARAM_VALUE}{_PARAM_END}",
     re.DOTALL,
 )
 _PARTIAL_PARAM_RE = re.compile(
     rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"\s+string="(true|false)">'
-    rf"(.*)$",
+    rf"{_PARAM_VALUE}",
     re.DOTALL,
 )
 
