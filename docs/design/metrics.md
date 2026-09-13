@@ -394,6 +394,28 @@ Encoding a running/waiting counts for multiple adapters in a
 comma-separated string seems quite misguided - we could use labels to
 distinguish between per-adapter counts. This should be revisited.
 
+That metric is now deprecated in favour of three gauges fed by the
+engine notification channel (`vllm/v1/notifications.py`), which the
+worker updates whenever its adapter caches change, including on an
+idle engine with statically configured adapters:
+
+- `vllm:lora_adapter_loaded{adapter_name, level="gpu"|"cpu", pinned, rank}`:
+  one series per resident adapter, present while it is loaded and
+  removed when it is evicted; `rank` is the adapter's LoRA rank, a
+  proxy for its size and load cost.
+- `vllm:num_gpu_loaded_lora_adapters` and
+  `vllm:num_cpu_loaded_lora_adapters`: counts per tier.
+- `vllm:max_gpu_lora_adapters` and `vllm:max_cpu_lora_adapters`: the
+  slot capacity per tier (`max_loras`, `max_cpu_loras`), set at startup
+  so a router can compare occupancy against capacity before the first
+  request; the `max_lora` label on the deprecated gauge above only
+  appears once an adapter has served.
+- `vllm:lora_adapter_load_seconds{transition="load"|"activate"}`: a
+  histogram of how long each adapter transition took on the worker,
+  `load` for disk into the CPU cache and `activate` for the CPU cache
+  into a GPU slot. A router can turn this into the expected cost of
+  sending a request to a server that has to load the adapter first.
+
 Note that `multiprocess_mode="livemostrecent"` is used - the most
 recent metric is used, but only from currently running processes.
 

@@ -329,6 +329,10 @@ class LLMEngine:
 
         # 4) Record stats
         with record_function_or_nullcontext("llm_engine step: record_stats"):
+            if self.logger_manager is not None and outputs.engine_notifications:
+                self.logger_manager.record_engine_notifications(
+                    outputs.engine_notifications
+                )
             if self.logger_manager is not None and outputs.scheduler_stats is not None:
                 # Record even when this step produced no request outputs.
                 self.logger_manager.record(
