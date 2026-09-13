@@ -40,11 +40,21 @@ class XPUWorker(Worker):
         assert current_platform.is_xpu()
 
     def init_device(self):
-        # In DP mode, XPU workers see all visible devices.
-        # Offset local_rank by the local DP shard.
+        affinity_mask = os.environ.get(
+            current_platform.device_control_env_var, ""
+        )
+        affinity_devices = [
+            device for device in affinity_mask.split(",") if device
+        ]
+        worker_is_device_isolated = len(affinity_devices) == 1
+
+        # When this process has already been isolated to one physical XPU
+        # by the parent, DP placement is already resolved and must not be
+        # applied again here.
         parallel_config = self.parallel_config
         if (
-            parallel_config.distributed_executor_backend
+            not worker_is_device_isolated
+            and parallel_config.distributed_executor_backend
             not in ("ray", "external_launcher")
             and parallel_config.data_parallel_backend != "ray"
             and (
@@ -130,12 +140,16 @@ class XPUWorker(Worker):
             and device.type == "xpu"
             and current_platform.is_xpu()
         ):
-            self.device = torch.device(f"xpu:{self.local_rank}")
+            device_index = (
+                0 if worker_is_device_isolated else self.local_rank
+            )
+
+            self.device = torch.device(f"xpu:{device_index}")
             torch.accelerator.set_device_index(self.device)
             current_platform.check_if_supports_dtype(self.model_config.dtype)
             torch.accelerator.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
-                self.local_rank
+                device_index
             ).total_memory
         else:
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
