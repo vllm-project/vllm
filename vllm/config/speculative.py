@@ -12,6 +12,7 @@ from typing_extensions import Self
 from vllm.config import LoadConfig
 from vllm.config.cache import CacheDType
 from vllm.config.kernel import MoEBackend
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
@@ -474,6 +475,8 @@ class SpeculativeConfig:
     """The configuration of the target model."""
     target_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
+    target_kv_transfer_config: SkipValidation[KVTransferConfig] = None  # type: ignore
+    """The KV transfer configuration for the target model."""
 
     # dynamic speculative decoding control
     num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None
@@ -1564,6 +1567,17 @@ class SpeculativeConfig:
         if self.method != "dspark" and self.enable_adaptive_verification:
             raise ValueError("Adaptive verification only supported with DSpark")
 
+        if self.is_dspark_prefill_only():
+            # is_dspark_prefill_only() implies target_kv_transfer_config is set.
+            assert self.target_kv_transfer_config is not None
+            if self.target_kv_transfer_config.has_connector("NixlConnector"):
+                raise NotImplementedError(
+                    "DSpark prefill materialization with pipeline parallelism "
+                    "requires a connector that transfers named per-layer KV "
+                    "regions (e.g. MooncakeConnector). The NIXL connector does "
+                    "not describe packed KV regions per producer stage yet."
+                )
+
         return self
 
     def _validate_suffix_decoding(self):
@@ -1754,6 +1768,26 @@ class SpeculativeConfig:
         )
 
         return draft_parallel_config
+
+    def is_dspark_prefill_only(self) -> bool:
+        kv_transfer_config = self.target_kv_transfer_config
+        return (
+            self.method == "dspark"
+            and self.target_parallel_config is not None
+            and self.target_parallel_config.pipeline_parallel_size > 1
+            and kv_transfer_config is not None
+            and kv_transfer_config.kv_role == "kv_producer"
+        )
+
+    def use_dspark_last_stage_drafter(self) -> bool:
+        # A DSpark drafter under a pipeline-parallel target runs wholly on the
+        # last pipeline stage, so the draft model always uses PP=1. Holds for
+        # both the PD prefill-only producer and aggregated (IFB) serving.
+        return (
+            self.method == "dspark"
+            and self.target_parallel_config is not None
+            and self.target_parallel_config.pipeline_parallel_size > 1
+        )
 
     @field_validator("attention_backend", mode="before")
     @classmethod

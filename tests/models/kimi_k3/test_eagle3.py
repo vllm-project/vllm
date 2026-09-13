@@ -200,3 +200,111 @@ def test_attn_res_stream_capture_receives_the_layer_outputs_in_order(monkeypatch
     assert got_pending is layer_hidden_states
     assert got_residual is block_residual
     torch.testing.assert_close(aux_hidden_states[0], captured)
+
+
+def _make_stage(
+    *,
+    start_layer: int,
+    taps: tuple[int, ...],
+    layer_outputs: list[tuple[torch.Tensor, None, torch.Tensor]],
+) -> KimiLinearModel:
+    model = _make_kimi_linear_model()
+    end_layer = start_layer + len(layer_outputs)
+    object.__setattr__(model, "start_layer", start_layer)
+    object.__setattr__(model, "end_layer", end_layer)
+    # The real model keeps the global layer list and slices [start:end].
+    layers = [Mock() for _ in range(end_layer)]
+    for i, out in enumerate(layer_outputs):
+        layers[start_layer + i] = Mock(return_value=out)
+    object.__setattr__(model, "layers", layers)
+    object.__setattr__(model, "aux_hidden_state_layers", taps)
+    object.__setattr__(model, "config", SimpleNamespace(hidden_size=2))
+    return model
+
+
+def test_kimi_linear_aux_hidden_states_flow_across_pp_stages(monkeypatch):
+    """A tap owned by an earlier PP stage must reach the last stage intact.
+
+    The drafter's taps can reference layers outside the last stage (K3 taps
+    [24, 48, 72, 88, 92]); each stage packs the taps it owns under global
+    per-tap keys (EagleModelMixin.pack_local_aux_hidden_states) and the last
+    stage prepends the collected remote taps to its own.
+    """
+    stage0_hidden = torch.tensor([[1.0, 2.0]])
+    stage0_residual = torch.tensor([[3.0, 4.0]])
+    stage1_hidden = torch.tensor([[5.0, 6.0]])
+    stage1_residual = torch.tensor([[7.0, 8.0]])
+
+    stage0 = _make_stage(
+        start_layer=0,
+        taps=(1, 2),
+        layer_outputs=[(stage0_hidden, None, stage0_residual)],
+    )
+    stage1 = _make_stage(
+        start_layer=1,
+        taps=(1, 2),
+        layer_outputs=[(stage1_hidden, None, stage1_residual)],
+    )
+    # EagleModelMixin caches the PP aux layout in _set_aux_hidden_state_layers;
+    # the stubs set layers directly, so prime the caches by hand.
+    object.__setattr__(stage0, "_aux_slot_base_cached", 0)
+    object.__setattr__(stage1, "_aux_slot_base_cached", 1)
+    object.__setattr__(stage1, "_aux_upstream_total_cached", 1)
+
+    monkeypatch.setattr(
+        kimi_model,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=False),
+    )
+    stage0_out = stage0.forward(
+        input_ids=None,
+        positions=torch.tensor([0]),
+        intermediate_tensors=None,
+        inputs_embeds=torch.zeros(1, 2),
+    )
+
+    # Stage 0 owns the post-layer-1 tap; it rides the wire under its global
+    # slot key.
+    stage0_aux = stage0_hidden + stage0_residual
+    torch.testing.assert_close(stage0_out.tensors["aux_hidden_states_0"], stage0_aux)
+
+    monkeypatch.setattr(
+        kimi_model,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=False, is_last_rank=True),
+    )
+    output, aux_hidden_states = stage1.forward(
+        input_ids=None,
+        positions=torch.tensor([0]),
+        intermediate_tensors=stage0_out,
+    )
+
+    # The boundary tap (position 1 == stage1's start_layer) must not be
+    # duplicated by the stage-entry capture: two taps, in ascending order.
+    assert len(aux_hidden_states) == 2
+    torch.testing.assert_close(aux_hidden_states[0], stage0_aux)
+    torch.testing.assert_close(aux_hidden_states[1], stage1_hidden + stage1_residual)
+    torch.testing.assert_close(output, stage1_hidden + stage1_residual)
+
+
+def test_kimi_linear_first_stage_without_taps_sends_no_aux_buffer(monkeypatch):
+    """No taps captured on the stage -> no aux keys on the wire."""
+    stage0 = _make_stage(
+        start_layer=0,
+        taps=(2,),
+        layer_outputs=[(torch.ones(1, 2), None, torch.zeros(1, 2))],
+    )
+    object.__setattr__(stage0, "_aux_slot_base_cached", 0)
+
+    monkeypatch.setattr(
+        kimi_model,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=False),
+    )
+    out = stage0.forward(
+        input_ids=None,
+        positions=torch.tensor([0]),
+        intermediate_tensors=None,
+        inputs_embeds=torch.zeros(1, 2),
+    )
+    assert not any(key.startswith("aux_hidden_states_") for key in out.tensors)

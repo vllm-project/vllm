@@ -63,6 +63,32 @@ def test_missing_target_embedding_raises_instead_of_running_on_garbage(monkeypat
         )
 
 
+def test_pp_drafter_loading_own_embedding_keeps_it(monkeypatch):
+    """DSv4/K3-style drafters load embed_tokens from their own checkpoint when
+    PP strands the target's table on the first stage; they must neither alias
+    nor raise."""
+    monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp(2))
+    draft_embed = _embed(fill=1.0)
+    draft_inner = _inner(draft_embed)
+    draft = SimpleNamespace(has_own_embed_tokens=False, loads_own_embed_under_pp=True)
+
+    eagle_utils.maybe_share_target_embed(draft, draft_inner, _inner(PPMissingLayer()))
+
+    assert draft_inner.embed_tokens is draft_embed
+
+
+def test_pp_drafter_without_any_embedding_still_raises(monkeypatch):
+    monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp(2))
+    draft_inner = _inner(None)
+    draft_inner.embed_tokens = None
+    draft = SimpleNamespace(has_own_embed_tokens=False, loads_own_embed_under_pp=True)
+
+    with pytest.raises(RuntimeError, match="needs the target input embedding"):
+        eagle_utils.maybe_share_target_embed(
+            draft, draft_inner, _inner(PPMissingLayer())
+        )
+
+
 def test_drafter_with_distinct_weights_keeps_them(monkeypatch):
     monkeypatch.setattr(eagle_utils, "get_pp_group", _fake_pp(2))
     draft_embed = _embed(fill=1.0)

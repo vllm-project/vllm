@@ -21,6 +21,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -52,6 +53,7 @@ from vllm.models.common.ops.sequence_parallel import (
 from .model import (
     DeepseekV4DecoderLayer,
     DeepseekV4Model,
+    _select_dsv4_attn_cls,
     _use_sequence_parallel,
     make_deepseek_v4_expert_params_mapping,
 )
@@ -61,6 +63,34 @@ logger = init_logger(__name__)
 # MoE expert scale suffix differs by expert dtype (mirrors deepseek_v4 loaders):
 # fp4 experts register ``.weight_scale``; block-fp8 experts ``.weight_scale_inv``.
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
+
+
+class _DSparkContextKVAttention(nn.Module):
+    """The subset of a DSV4 draft attention layer needed by prefill."""
+
+    def __init__(self, attn: nn.Module) -> None:
+        super().__init__()
+        self.fused_wqa_wkv = attn.fused_wqa_wkv
+        self.kv_norm = attn.kv_norm
+        self.rotary_emb = attn.rotary_emb
+        self.swa_cache_layer = attn.swa_cache_layer
+        self.q_lora_rank = attn.q_lora_rank
+        self.n_local_heads = attn.n_local_heads
+        self.head_dim = attn.head_dim
+        self.padded_heads = attn.padded_heads
+        self.eps = attn.eps
+        for name in ("_flashinfer_fp8_kv_scale", "_flashinfer_fp8_q_scale_inv"):
+            value = getattr(attn, name, None)
+            if value is not None:
+                self.register_buffer(name, value, persistent=False)
+
+
+class _DSparkContextKVLayer(nn.Module):
+    """A draft layer stripped down to its context-KV projection."""
+
+    def __init__(self, attn: nn.Module) -> None:
+        super().__init__()
+        self.attn = _DSparkContextKVAttention(attn)
 
 
 class DSparkDeepseekV4Model(nn.Module):
@@ -76,15 +106,17 @@ class DSparkDeepseekV4Model(nn.Module):
         self.num_hidden_layers = config.num_hidden_layers
         self.target_layer_ids = tuple(config.dspark_target_layer_ids)
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
+        self.context_kv_only = vllm_config.speculative_config.is_dspark_prefill_only()
 
         self.num_dspark_layers = getattr(config, "n_mtp_layers", None) or 3
 
-        # Shared with the target (aliased by the speculator's loading utility).
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-            prefix=maybe_prefix(prefix, "embed_tokens"),
-        )
+        if not self.context_kv_only:
+            # Shared with the target (aliased by the speculator's loading utility).
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+                prefix=maybe_prefix(prefix, "embed_tokens"),
+            )
 
         self.main_proj = ReplicatedLinear(
             config.hidden_size * len(self.target_layer_ids),
@@ -96,53 +128,76 @@ class DSparkDeepseekV4Model(nn.Module):
         )
         self.main_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        self.topk_indices_buffer = torch.empty(
-            vllm_config.scheduler_config.max_num_batched_tokens,
-            config.index_topk,
-            dtype=torch.int32,
+        self.topk_indices_buffer = (
+            None
+            if self.context_kv_only
+            else torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                config.index_topk,
+                dtype=torch.int32,
+            )
         )
 
         current_vllm_config = get_current_vllm_config()
-        self.layers = nn.ModuleList(
-            [
-                DeepseekV4DecoderLayer(
+        layers: list[nn.Module] = []
+        for i in range(self.num_dspark_layers):
+            layer_prefix = maybe_prefix(prefix, f"layers.{self.num_hidden_layers + i}")
+            if self.context_kv_only:
+                # Only the attention submodule participates in context-KV
+                # materialization; building the full decoder layer would
+                # transiently allocate its MoE experts, norms, and
+                # hyper-connection parameters on the device.
+                attn = _select_dsv4_attn_cls(current_vllm_config)(
                     current_vllm_config,
-                    prefix=maybe_prefix(prefix, f"layers.{self.num_hidden_layers + i}"),
+                    prefix=f"{layer_prefix}.attn",
                     topk_indices_buffer=self.topk_indices_buffer,
                 )
-                for i in range(self.num_dspark_layers)
-            ]
-        )
+                # The full attention object registers itself for metadata lookup,
+                # but only its SWA cache layer participates in materialization.
+                current_vllm_config.compilation_config.static_forward_context.pop(
+                    f"{layer_prefix}.attn", None
+                )
+                layers.append(_DSparkContextKVLayer(attn))
+            else:
+                layers.append(
+                    DeepseekV4DecoderLayer(
+                        current_vllm_config,
+                        prefix=layer_prefix,
+                        topk_indices_buffer=self.topk_indices_buffer,
+                    )
+                )
+        self.layers = nn.ModuleList(layers)
 
-        # Heads: final norm + hc_head, and the Markov + confidence heads
-        # Loaded from the "final" MTP layer weights (mtp.*) in the target checkpoint
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        hc_dim = self.hc_mult * config.hidden_size
-        self.hc_head_fn = nn.Parameter(
-            torch.empty(self.hc_mult, hc_dim, dtype=torch.float32),
-            requires_grad=False,
-        )
-        self.hc_head_base = nn.Parameter(
-            torch.empty(self.hc_mult, dtype=torch.float32), requires_grad=False
-        )
-        self.hc_head_scale = nn.Parameter(
-            torch.empty(1, dtype=torch.float32), requires_grad=False
-        )
-        draft_vocab_size = (
-            getattr(config, "draft_vocab_size", None) or config.vocab_size
-        )
-        self.markov_head = DSparkMarkovHead(
-            config.vocab_size,
-            draft_vocab_size,
-            config.dspark_markov_rank,
-            prefix=maybe_prefix(prefix, "markov_head"),
-        )
-        self.confidence_head: DSparkConfidenceHead | None = None
-        if getattr(config, "enable_confidence_head", True):
-            self.confidence_head = DSparkConfidenceHead(
-                config.hidden_size + config.dspark_markov_rank,
-                prefix=maybe_prefix(prefix, "confidence_head"),
+        if not self.context_kv_only:
+            # Heads: final norm + hc_head, and the Markov + confidence heads
+            # loaded from the final MTP layer in the target checkpoint.
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            hc_dim = self.hc_mult * config.hidden_size
+            self.hc_head_fn = nn.Parameter(
+                torch.empty(self.hc_mult, hc_dim, dtype=torch.float32),
+                requires_grad=False,
             )
+            self.hc_head_base = nn.Parameter(
+                torch.empty(self.hc_mult, dtype=torch.float32), requires_grad=False
+            )
+            self.hc_head_scale = nn.Parameter(
+                torch.empty(1, dtype=torch.float32), requires_grad=False
+            )
+            draft_vocab_size = (
+                getattr(config, "draft_vocab_size", None) or config.vocab_size
+            )
+            self.markov_head = DSparkMarkovHead(
+                config.vocab_size,
+                draft_vocab_size,
+                config.dspark_markov_rank,
+                prefix=maybe_prefix(prefix, "markov_head"),
+            )
+            self.confidence_head: DSparkConfidenceHead | None = None
+            if getattr(config, "enable_confidence_head", True):
+                self.confidence_head = DSparkConfidenceHead(
+                    config.hidden_size + config.dspark_markov_rank,
+                    prefix=maybe_prefix(prefix, "confidence_head"),
+                )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -193,6 +248,8 @@ class DSparkDeepseekV4Model(nn.Module):
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.context_kv_only:
+            raise RuntimeError("The DSpark prefill materializer cannot draft tokens.")
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
         full_num_tokens = positions.shape[0]
@@ -301,8 +358,11 @@ def _insert_context_kv(
 
 class DSparkDeepseekV4ForCausalLM(nn.Module):
     # Draft weights ship in the target checkpoint (mtp.*) without embed/head, so
-    # load_dspark_model always aliases the target's.
+    # load_dspark_model aliases the target's — except under PP, where the
+    # target's table sits on the first stage and the drafter loads its own
+    # copy of the shared embed weight (see load_weights).
     has_own_embed_tokens = False
+    loads_own_embed_under_pp = True
     has_own_lm_head = False
     # Full-vocab draft: draft ids are target ids, no remapping needed.
     draft_id_to_target_id = None
@@ -319,13 +379,14 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         self.model = DSparkDeepseekV4Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        # Shared with the target (aliased by the speculator's load utility).
-        self.lm_head = ParallelLMHead(
-            self.config.vocab_size,
-            self.config.hidden_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
-        self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        if not self.model.context_kv_only:
+            # Shared with the target (aliased by the speculator's load utility).
+            self.lm_head = ParallelLMHead(
+                self.config.vocab_size,
+                self.config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+            self.logits_processor = LogitsProcessor(self.config.vocab_size)
 
     # --- Hooks used by the speculator -------------------------------------
 
@@ -391,6 +452,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         Non-mtp weights (embed/head/main layers) belong to the target model and
         are skipped here. ``embed_tokens``/``lm_head`` are aliased from the target.
         """
+        if self.model.context_kv_only:
+            return self._load_context_kv_weights(weights)
+
         first_layer = self.model.layers[0]
         use_mega_moe = first_layer.ffn.use_mega_moe
         if use_mega_moe:
@@ -429,11 +493,18 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         head_start = n_local_head * tp_rank
         head_end = n_local_head * (tp_rank + 1)
 
+        # Under pipeline parallelism the drafter only exists on the last stage,
+        # where the target's embedding table is a PPMissingLayer placeholder, so
+        # the draft loads its own copy of the shared embedding weight.
+        load_own_embed = get_pp_group().world_size > 1
         for name, loaded_weight in weights:
-            mapped = self._remap_dspark_name(name)
-            if mapped is None:
-                continue
-            name = mapped
+            if load_own_embed and name == "embed.weight":
+                name = "model.embed_tokens.weight"
+            else:
+                mapped = self._remap_dspark_name(name)
+                if mapped is None:
+                    continue
+                name = mapped
             if "confidence_head." in name:
                 loaded_confidence_head = True
 
@@ -510,12 +581,54 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
+    def _load_context_kv_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> set[str]:
+        """Load only weights used to build DSpark prefix KV on a P worker."""
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        for checkpoint_name, loaded_weight in weights:
+            name = self._remap_dspark_name(checkpoint_name)
+            if name is None:
+                continue
+            is_context_param = name.startswith(
+                ("model.main_proj.", "model.main_norm.")
+            ) or (
+                name.startswith("model.layers.")
+                and any(
+                    part in name
+                    for part in (".attn.wq_a.", ".attn.wkv.", ".attn.kv_norm.")
+                )
+            )
+            if not is_context_param:
+                continue
+            if name.endswith(".scale"):
+                name = name.removesuffix(".scale") + ".weight_scale_inv"
+            for weight_name, shard_id in (("attn.wq_a", 0), ("attn.wkv", 1)):
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, "attn.fused_wqa_wkv")
+                param = params_dict[name]
+                param.weight_loader(param, loaded_weight, shard_id)
+                loaded_params.add(name)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+                loaded_params.add(name)
+        logger.info_once(
+            "DSpark context-KV materializer loaded: %d params", len(loaded_params)
+        )
+        return loaded_params
+
     def _finalize_moe(self) -> None:
         for layer in self.model.layers:
             layer.ffn.finalize_mega_moe_weights()
 
     def process_weights_after_loading(self) -> None:
-        self._finalize_moe()
+        if not self.model.context_kv_only:
+            self._finalize_moe()
 
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.
@@ -527,7 +640,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             return None
         stage = int(m.group(1))
         rest = m.group(2)
-        if rest.startswith("confidence_head.") and self.model.confidence_head is None:
+        if (
+            rest.startswith("confidence_head.")
+            and getattr(self.model, "confidence_head", None) is None
+        ):
             return None
         # Head-stack params live at model level (mtp.last), context combiner at
         # model level (mtp.0); everything else is a per-layer decoder block.
