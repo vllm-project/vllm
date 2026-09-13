@@ -304,10 +304,10 @@ def test_multi_example_connector_consistency():
     events = get_connector_events()
     storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
     storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
-    # Initial events bind the block pool, query completion counts, and exchange
+    # Initial events bind the cache manager, query completion counts, and exchange
     # handshake metadata before the request is enqueued.
     assert storage1_scheduler_events[:7] == [
-        "bind_gpu_block_pool",
+        "bind_kv_cache_manager",
         "get_finished_count",
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
@@ -315,8 +315,8 @@ def test_multi_example_connector_consistency():
         "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
-    # First three events are from initialization. During generate(), layer hooks
-    # run before the deferred load is started after the forward pass.
+    # First three events are from initialization. Layer hooks run before the
+    # deferred load starts after the forward pass.
     expected_worker_prefix = [
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
@@ -328,12 +328,12 @@ def test_multi_example_connector_consistency():
     ]
     for connector_name in ("storage1-WORKER", "storage2-WORKER"):
         worker_events = events[connector_name]
-        assert worker_events[:7] == expected_worker_prefix
+        assert worker_events[: len(expected_worker_prefix)] == expected_worker_prefix
         assert worker_events.index("start_load_kv") > worker_events.index(
             "save_kv_layer"
         )
     assert storage2_scheduler_events[:7] == [
-        "bind_gpu_block_pool",
+        "bind_kv_cache_manager",
         "get_finished_count",
         "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
