@@ -59,6 +59,7 @@ def test_humming_fp8_input_schema_to_quant_key(group_size, expected_key):
     from vllm.model_executor.layers.quantization.utils.humming_utils import (
         _humming_input_schema_to_quant_key,
     )
+
     from vllm.utils.humming import HummingInputSchema
     from vllm.utils.humming import dtypes as humming_dtypes
 
@@ -74,6 +75,7 @@ def test_humming_bf16_input_schema_is_unquantized():
     from vllm.model_executor.layers.quantization.utils.humming_utils import (
         _humming_input_schema_to_quant_key,
     )
+
     from vllm.utils.humming import HummingInputSchema
 
     # No a_dtype -> unquantized (bf16/fp16) inputs -> None.
@@ -89,6 +91,7 @@ def test_block_fp8_activation_quant_config_is_block_quantized():
     from vllm.model_executor.layers.quantization.utils.humming_utils import (
         make_humming_moe_quant_config,
     )
+
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
     from vllm.platforms import current_platform
 
@@ -111,6 +114,7 @@ def test_default_activation_quant_config_defers_to_humming():
     from vllm.model_executor.layers.quantization.utils.humming_utils import (
         make_humming_moe_quant_config,
     )
+
     from vllm.platforms import current_platform
 
     qc = make_humming_moe_quant_config(
