@@ -1212,10 +1212,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.counter_generation_tokens[engine_idx].inc(
             iteration_stats.num_generation_tokens
         )
-        self.histogram_iteration_tokens[engine_idx].observe(
+        iteration_tokens = (
             iteration_stats.prompt_token_stats.computed
             + iteration_stats.num_generation_tokens
         )
+        # Scheduler stats may be sent to a different API frontend.
+        if scheduler_stats is not None or iteration_tokens > 0:
+            self.histogram_iteration_tokens[engine_idx].observe(iteration_tokens)
 
         for max_gen_tokens in iteration_stats.max_num_generation_tokens_iter:
             self.histogram_max_num_generation_tokens_request[engine_idx].observe(

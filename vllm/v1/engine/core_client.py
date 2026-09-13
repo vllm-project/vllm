@@ -8,7 +8,7 @@ import uuid
 import weakref
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
@@ -220,6 +220,12 @@ class EngineCoreClient(ABC):
 
     def abort_requests(self, request_ids: list[str]) -> None:
         raise NotImplementedError
+
+    def group_requests_by_engine(
+        self, request_ids: list[str]
+    ) -> dict[int | None, list[str]]:
+        """Group requests by logger engine index; None means ownership is unknown."""
+        return {0: request_ids} if request_ids else {}
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
@@ -1216,6 +1222,15 @@ class AsyncMPClient(MPClient):
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         return await self.call_utility_async("get_supported_tasks")
 
+    def group_requests_by_engine(
+        self, request_ids: list[str]
+    ) -> dict[int | None, list[str]]:
+        engine_idx = int.from_bytes(self.core_engine, "little")
+        return {engine_idx: request_ids} if request_ids else {}
+
+    def acknowledge_finished_requests(self, request_ids: Iterable[str]) -> None:
+        pass
+
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         request.client_index = self.client_index
         await self._send_input(EngineCoreRequestType.ADD, request)
@@ -1522,6 +1537,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         # To route aborts to the correct engine.
         self.reqs_in_flight: dict[str, EngineIdentity] = {}
+        # Keep ownership until terminal outputs have been processed by the frontend.
+        self._finished_request_engines: dict[str, EngineIdentity] = {}
 
         # Exact per-engine count of this client's unfinished requests.
         self.engine_inflight: Counter[EngineIdentity] = Counter()
@@ -1612,9 +1629,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self: "DPLBAsyncMPClient", outputs: EngineCoreOutputs
     ):
         if outputs.finished_requests and self.reqs_in_flight:
+            output_request_ids = {output.request_id for output in outputs.outputs}
             for req_id in outputs.finished_requests:
                 if (engine := self.reqs_in_flight.pop(req_id, None)) is not None:
                     self.engine_inflight[engine] -= 1
+                    if req_id in output_request_ids:
+                        self._finished_request_engines[req_id] = engine
 
     @staticmethod
     async def eep_process_engine_core_notification(
@@ -1662,7 +1682,26 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             )
             self.eep_scaling_cache = None
 
+    def group_requests_by_engine(
+        self, request_ids: list[str]
+    ) -> dict[int | None, list[str]]:
+        by_engine: dict[int | None, list[str]] = defaultdict(list)
+        for request_id in request_ids:
+            engine = self.reqs_in_flight.get(request_id)
+            if engine is None:
+                engine = self._finished_request_engines.get(request_id)
+            engine_idx = (
+                int.from_bytes(engine, "little") if engine is not None else None
+            )
+            by_engine[engine_idx].append(request_id)
+        return by_engine
+
+    def acknowledge_finished_requests(self, request_ids: Iterable[str]) -> None:
+        for request_id in request_ids:
+            self._finished_request_engines.pop(request_id, None)
+
     async def abort_requests_async(self, request_ids: list[str]) -> None:
+        self.acknowledge_finished_requests(request_ids)
         if not request_ids or self.resources.engine_dead:
             return
 

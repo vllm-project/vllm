@@ -4,9 +4,12 @@
 import asyncio
 import os
 import time
+from collections import Counter
 from contextlib import ExitStack
+from copy import copy
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -18,12 +21,106 @@ from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.engine import (
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    EngineCoreRequest,
+    FinishReason,
+)
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import DPLBAsyncMPClient
+from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, MultiModalCacheStats, SchedulerStats
 
 DP_SIZE = int(os.getenv("DP_SIZE", 2))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("internal", [False, True])
+async def test_abort_parent_records_stats_on_owning_engines(
+    internal: bool, monkeypatch: pytest.MonkeyPatch
+):
+    """Keep abort ownership even when completion is awaiting frontend processing."""
+    output_processor = OutputProcessor(None, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="parent",
+        external_req_id="external-parent",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=time.time(),
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(n=2, detokenize=False),
+        pooling_params=None,
+    )
+    parent = ParentRequest(request)
+    core = object.__new__(DPLBAsyncMPClient)
+    core.reqs_in_flight = {}
+    core._finished_request_engines = {}
+    core.engine_inflight = Counter()
+    core.resources = MagicMock(engine_dead=False)
+    abort_requests = AsyncMock()
+    monkeypatch.setattr(core, "_abort_requests", abort_requests)
+    for index, token_count in enumerate([3, 5]):
+        child_id, child_params = parent.get_child_info(index)
+        child = copy(request)
+        child.request_id = child_id
+        child.sampling_params = child_params
+        output_processor.add_request(child, None, parent, index)
+        stats = output_processor.request_states[child_id].stats
+        assert stats is not None
+        stats.num_generation_tokens = token_count
+        owner = (index + 2).to_bytes(2, "little")
+        core.reqs_in_flight[child_id] = owner
+        core.engine_inflight[owner] += 1
+
+    await DPLBAsyncMPClient.process_engine_outputs(
+        core,
+        EngineCoreOutputs(
+            engine_index=2,
+            outputs=[EngineCoreOutput("0_parent", [], finish_reason=FinishReason.STOP)],
+            finished_requests={"0_parent"},
+        ),
+    )
+    assert "0_parent" not in core.reqs_in_flight
+    assert core._finished_request_engines["0_parent"] == (2).to_bytes(2, "little")
+    engine = MagicMock(
+        log_stats=True,
+        log_requests=False,
+        output_processor=output_processor,
+        engine_core=core,
+    )
+
+    request_id = parent.request_id if internal else parent.external_req_id
+    await AsyncLLM.abort(engine, request_id, internal=internal)
+
+    assert engine.logger_manager.record.call_count == 2
+    recorded = {
+        call.kwargs["engine_idx"]: call.kwargs["iteration_stats"]
+        for call in engine.logger_manager.record.call_args_list
+    }
+    assert set(recorded) == {2, 3}
+    for rank, token_count in [(2, 3), (3, 5)]:
+        assert len(recorded[rank].finished_requests) == 1
+        finished = recorded[rank].finished_requests[0]
+        assert finished.finish_reason == FinishReason.ABORT
+        assert finished.num_generation_tokens == token_count
+    assert [n for stats in recorded.values() for n in stats.n_params_iter] == [2]
+    assert [
+        n for stats in recorded.values() for n in stats.max_num_generation_tokens_iter
+    ] == [5]
+    assert not output_processor.request_states
+    assert not output_processor.external_req_ids
+    assert not output_processor.parent_requests
+    assert not parent.child_requests
+    assert not core._finished_request_engines
+    abort_requests.assert_awaited_once_with(["1_parent"], (3).to_bytes(2, "little"))
+
+    await AsyncLLM.abort(engine, [request_id, "unknown"], internal=internal)
+    assert engine.logger_manager.record.call_count == 2
 
 
 async def generate(

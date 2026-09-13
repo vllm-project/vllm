@@ -1452,8 +1452,16 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.external_req_id], internal=False)
 
 
-@pytest.mark.parametrize("abort_stage", ["queued", "prefill", "decode"])
-def test_abort_requests_updates_finished_stats(abort_stage: str):
+@pytest.mark.parametrize(
+    ("runner", "abort_stage"),
+    [
+        ("generate", "queued"),
+        ("generate", "prefill"),
+        ("generate", "decode"),
+        ("pooling", "prefill"),
+    ],
+)
+def test_abort_requests_updates_finished_stats(runner: str, abort_stage: str):
     output_processor = OutputProcessor(None, log_stats=True)
     request = EngineCoreRequest(
         request_id="request-0",
@@ -1464,8 +1472,10 @@ def test_abort_requests_updates_finished_stats(abort_stage: str):
         lora_request=None,
         cache_salt=None,
         data_parallel_rank=None,
-        sampling_params=SamplingParams(detokenize=False),
-        pooling_params=None,
+        sampling_params=SamplingParams(detokenize=False)
+        if runner == "generate"
+        else None,
+        pooling_params=PoolingParams(task="embed") if runner == "pooling" else None,
     )
     output_processor.add_request(request, None)
 
@@ -1490,6 +1500,7 @@ def test_abort_requests_updates_finished_stats(abort_stage: str):
     assert finished.finish_reason == FinishReason.ABORT
     assert finished.request_id == request.external_req_id
     assert finished.num_prompt_tokens == len(request.prompt_token_ids or [])
+    assert finished.num_generation_tokens == (3 if abort_stage == "decode" else 0)
     assert finished.queued_time == (None if abort_stage == "queued" else 1.0)
 
     if abort_stage == "decode":
