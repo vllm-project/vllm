@@ -4904,12 +4904,9 @@ class GPUModelRunner(
             for bt in multi_block_table.block_tables
         ]
         multi_block_table.clear()
-        saved_eplb_suppressed = self.eep_eplb_suppressed
-        self.eep_eplb_suppressed = True
         try:
             yield
         finally:
-            self.eep_eplb_suppressed = saved_eplb_suppressed
             for bt, (saved_gpu, saved_cpu) in zip(
                 multi_block_table.block_tables, saved
             ):

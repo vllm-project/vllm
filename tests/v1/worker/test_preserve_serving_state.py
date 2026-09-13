@@ -7,7 +7,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.eplb_utils import EPLBController
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.states import RequestState
 
 BLOCK_SIZE = 16
@@ -37,9 +37,6 @@ class _Runner:
             device=torch.device("cuda"),
             kernel_block_sizes=[BLOCK_SIZE],
         )
-        self.eplb = EPLBController(
-            SimpleNamespace(enable_eplb=False), torch.device("cuda")
-        )
         self.zeroed: list[list[int]] = []
         self.kv_block_zeroer = SimpleNamespace(zero_block_ids=self.zeroed.append)
         self.removed: list[str] = []
@@ -48,8 +45,7 @@ class _Runner:
         self.removed.append(req_id)
         self.req_states.remove_request(req_id)
 
-    def preserve_serving_state(self):
-        return self.eplb.preserve_serving_state(self)
+    preserve_serving_state = GPUModelRunner.preserve_serving_state
 
 
 def _add_request(runner: _Runner, req_id: str) -> int:
@@ -87,7 +83,6 @@ def test_warmup_uses_full_pool_and_null_blocks():
     assert _pool_state(runner) == pool_before
     assert torch.equal(runner.block_tables.block_tables[0].gpu, blocks_before)
     assert runner.removed == ["_warmup"]
-    assert not runner.eplb.suppressed
     assert not runner.block_tables.redirect_writes_to_null_block
     assert runner.zeroed == [[0]]
 

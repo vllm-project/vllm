@@ -20,7 +20,8 @@ instead of embedding feature-specific logic directly.
 import functools
 import gc
 import time
-from contextlib import AbstractContextManager
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from typing import Any, NamedTuple
 
@@ -1056,6 +1057,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.prompt_logprobs_worker.remove_request(req_id)
         self.lora_state.remove_request(req_id)
         return True
+
+    @contextmanager
+    def preserve_serving_state(self) -> Iterator[None]:
+        """Keep the elastic EP warmup out of the request pool and the KV cache."""
+        assert not self.req_states.req_id_to_index, (
+            "MRV2 warmup requires an empty request pool, found "
+            f"{len(self.req_states.req_id_to_index)} live requests"
+        )
+        self.block_tables.redirect_writes_to_null_block = True
+        try:
+            yield
+        finally:
+            for req_id in list(self.req_states.req_id_to_index):
+                self._remove_request(req_id)
+            self.block_tables.redirect_writes_to_null_block = False
+            if self.kv_block_zeroer is not None:
+                self.kv_block_zeroer.zero_block_ids([0])
+
+    def warm_up_workspace(self) -> None:
+        self._dummy_run(self.max_num_tokens, is_profile=True, skip_eplb=True)
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         finished_req_ids = scheduler_output.finished_req_ids
@@ -2235,12 +2256,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @eep_eplb_suppressed.setter
     def eep_eplb_suppressed(self, suppressed: bool) -> None:
         self.eplb.suppressed = suppressed
-
-    def preserve_serving_state(self) -> AbstractContextManager[None]:
-        return self.eplb.preserve_serving_state(self)
-
-    def warm_up_workspace(self) -> None:
-        self._dummy_run(self.max_num_tokens, is_profile=True, skip_eplb=True)
 
     def setup_eplb_from_mapping(
         self,
