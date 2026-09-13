@@ -16,11 +16,13 @@ import pytest
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.streaming_helpers import simulate_reasoning_streaming
 from vllm.parser.abstract_parser import DelegatingParser
+from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.parser.engine.registered_adapters import (
     Qwen3ParserReasoningAdapter,
     Qwen3ParserToolAdapter,
 )
+from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.parser.qwen3 import Qwen3Parser, qwen3_config
 
 _THINK_START_ID = 50
@@ -56,7 +58,107 @@ def parser(mock_tokenizer):
     return Qwen3Parser(mock_tokenizer)
 
 
+@pytest.mark.parametrize("thinking", [True, False])
+@pytest.mark.parametrize("chunk_size", [1, 7, 1000])
+def test_malformed_tool_preamble_is_lossless_across_chunks(thinking, chunk_size):
+    text = "Quoted `<tool_call>` prose </tool_call> still visible."
+    engine = StreamingParserEngine(qwen3_config(thinking=thinking), None)
+    events = []
+    for offset in range(0, len(text), chunk_size):
+        events.extend(engine.feed(text[offset : offset + chunk_size], []))
+    events.extend(engine.finish())
+    kind = EventType.REASONING_CHUNK if thinking else EventType.TEXT_CHUNK
+    assert "".join(e.value for e in events if e.type == kind) == text
+    assert not any(e.type == EventType.TOOL_CALL_START for e in events)
+
+
+def test_malformed_special_token_then_real_tool_preserves_tool_index(mock_tokenizer):
+    engine = StreamingParserEngine(qwen3_config(), mock_tokenizer)
+    events = engine.feed("<tool_call>", [_TOOL_CALL_ID])
+    assert not events
+    events += engine.feed("` quoted marker. ", [])
+    events += engine.feed("<tool_call>", [_TOOL_CALL_ID])
+    events += engine.feed("\n<function=bash><parameter=cmd>pwd</parameter>", [])
+    events += engine.feed("</function></tool_call>", [_TOOL_CALL_END_ID])
+    events += engine.finish()
+    assert (
+        "".join(e.value for e in events if e.type == EventType.REASONING_CHUNK)
+        == "<tool_call>` quoted marker. "
+    )
+    starts = [e for e in events if e.type == EventType.TOOL_CALL_START]
+    assert len(starts) == 1
+    assert starts[0].tool_index == 0
+    assert "".join(e.value for e in events if e.type == EventType.TOOL_NAME) == "bash"
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 7, 64, 1000])
+@pytest.mark.parametrize(
+    "reasoning",
+    [
+        "The literal marker is `<tool_call>` in prose.",
+        "The wrapper is `<tool_call>quoted</tool_call>` in prose.",
+    ],
+)
+def test_quoted_tool_marker_preserves_following_final_answer(reasoning, chunk_size):
+    """A malformed wrapper must not swallow the real reasoning end or answer."""
+    text = reasoning + "</think>The answer is 42."
+    engine = StreamingParserEngine(qwen3_config(), None)
+    events = []
+    for offset in range(0, len(text), chunk_size):
+        events.extend(engine.feed(text[offset : offset + chunk_size], []))
+    events.extend(engine.finish())
+    assert (
+        "".join(e.value for e in events if e.type == EventType.REASONING_CHUNK)
+        == reasoning
+    )
+    assert (
+        "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        == "The answer is 42."
+    )
+    assert not any(e.type == EventType.TOOL_CALL_START for e in events)
+
+
+def test_quoted_special_token_preserves_following_final_answer(mock_tokenizer):
+    engine = StreamingParserEngine(qwen3_config(), mock_tokenizer)
+    events = engine.feed("The literal marker is `", [])
+    events += engine.feed("<tool_call>", [_TOOL_CALL_ID])
+    events += engine.feed("` in prose.", [])
+    events += engine.feed("</think>", [_THINK_END_ID])
+    events += engine.feed("The answer is 42.", [])
+    events += engine.finish()
+    assert (
+        "".join(e.value for e in events if e.type == EventType.REASONING_CHUNK)
+        == "The literal marker is `<tool_call>` in prose."
+    )
+    assert (
+        "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        == "The answer is 42."
+    )
+    assert not any(e.type == EventType.TOOL_CALL_START for e in events)
+
+
 class TestNonStreaming:
+    def test_quoted_tool_marker_preserves_following_final_answer(self, parser):
+        reasoning = "The literal marker is `<tool_call>` in prose."
+        actual_reasoning, content = parser.extract_reasoning(
+            reasoning + "</think>The answer is 42.", None
+        )
+        assert actual_reasoning == reasoning
+        assert content == "The answer is 42."
+
+    @pytest.mark.parametrize(
+        "candidate",
+        [
+            "<tool_call>` ordinary prose continues",
+            "<tool_call>quoted text</tool_call>",
+        ],
+    )
+    def test_malformed_tool_preamble_preserves_reasoning(self, parser, candidate):
+        text = "The literal marker is `" + candidate
+        reasoning, content = parser.extract_reasoning(text, None)
+        assert reasoning == text
+        assert content is None
+
     def test_reasoning_then_content(self, parser):
         text = "<think>Let me analyze.</think>The answer is 42."
         reasoning, content = parser.extract_reasoning(text, None)
