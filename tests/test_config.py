@@ -1136,8 +1136,71 @@ def test_data_parallel_rpc_port_has_fixed_default():
     assert ParallelConfig().data_parallel_rpc_port == 29550
 
 
-def test_all2all_backend_has_portable_default():
-    assert ParallelConfig().all2all_backend == "allgather_reducescatter"
+@pytest.mark.parametrize(
+    ("is_cuda", "enable_expert_parallel", "expected_backend"),
+    [
+        (True, True, "flashinfer_nvlink_one_sided"),
+        # Without expert parallel the naive AllGather+ReduceScatter path
+        # dispatches through the generic manager interface, which the
+        # one-sided manager does not implement.
+        (True, False, "allgather_reducescatter"),
+        (False, True, "allgather_reducescatter"),
+        (False, False, "allgather_reducescatter"),
+    ],
+)
+def test_all2all_backend_default_needs_cuda_and_expert_parallel(
+    monkeypatch, is_cuda, enable_expert_parallel, expected_backend
+):
+    """Only CUDA with expert parallel gets the one-sided backend; everything
+    else keeps the portable default (#53952)."""
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: is_cuda)
+    monkeypatch.setattr(
+        "vllm.platforms.current_platform.has_device_capability", lambda _: True
+    )
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
+    )
+    config = ParallelConfig(enable_expert_parallel=enable_expert_parallel)
+    assert config.all2all_backend == expected_backend
+
+
+def test_all2all_backend_falls_back_before_blackwell(monkeypatch):
+    """No unquantized MoE kernel accepts this backend below SM100, so the
+    backend oracle would raise while loading the model (L4, DP+EP)."""
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
+    monkeypatch.setattr(
+        "vllm.platforms.current_platform.has_device_capability", lambda _: False
+    )
+    config = ParallelConfig(enable_expert_parallel=True)
+    assert config.all2all_backend == "allgather_reducescatter"
+
+
+def test_all2all_backend_falls_back_without_flashinfer_one_sided(monkeypatch):
+    """FlashInferNVLinkOneSidedManager asserts on this module, so a CUDA
+    install without it must keep serving instead of failing at startup."""
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
+    monkeypatch.setattr(
+        "vllm.platforms.current_platform.has_device_capability", lambda _: True
+    )
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: False
+    )
+    config = ParallelConfig(enable_expert_parallel=True)
+    assert config.all2all_backend == "allgather_reducescatter"
+
+
+def test_all2all_backend_explicit_one_sided_downgrades_without_expert_parallel(
+    monkeypatch,
+):
+    """Without expert parallel, DP deployments reach naive_dp_ep.prepare(),
+    which dispatches through the generic manager interface, so an explicit
+    request must be downgraded rather than crash there."""
+    monkeypatch.setattr("vllm.platforms.current_platform.is_cuda", lambda: True)
+    config = ParallelConfig(
+        all2all_backend="flashinfer_nvlink_one_sided",
+        enable_expert_parallel=False,
+    )
+    assert config.all2all_backend == "allgather_reducescatter"
 
 
 @pytest.mark.parametrize(
