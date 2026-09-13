@@ -8,15 +8,21 @@ Validating the configuration and printing results for manual checking.
 Run `pytest tests/quantization/test_auto_round.py`.
 """
 
+import math
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 import torch
+from compressed_tensors.transform import deterministic_hadamard_matrix
 
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
-from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import (
+    LinearBase,
+    LinearMethodBase,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.inc.config_parser import INCLayerConfig
@@ -124,12 +130,23 @@ QWEN3_AUTOROUND_MODELS = [
         ),
         id="auto_round:mxfp8:qwen3-30b-a3b",
     ),
+    pytest.param(
+        "INCModel/Qwen3.6-27B-MXFP4-RTN-Hadamard-12L-test",
+        marks=pytest.mark.skipif(
+            not (current_platform.is_cuda() or current_platform.is_xpu()),
+            reason="Qwen3.6-27B MXFP4 AutoRound model requires CUDA/XPU.",
+        ),
+        id="auto_round:mxfp4:qwen3-6-27b-hadamard",
+    ),
 ]
 
 MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
     "INCModel/Qwen3-1.7B-AutoRound-MXFP4-W4A4": {"enforce_eager": True},
     "INCModel/Qwen3-30B-A3B-12L-MXFP4-test": {"enforce_eager": True},
     "INCModel/Qwen3-30B-A3B-12L-MXFP8-test": {"enforce_eager": True},
+    "INCModel/Qwen3.6-27B-MXFP4-RTN-Hadamard-12L-test": {
+        "enable_chunked_prefill": True
+    },
     "Intel/Qwen3-8B-w2g64-for-ut": {
         "block_size": 64,
         "gpu_memory_utilization": 0.8,
@@ -777,6 +794,124 @@ def test_inc_config_accepts_mxfp_family_llm_compressor() -> None:
     assert isinstance(resolve_scheme(layer_config), INCMxfp4Scheme)
 
 
+def test_inc_config_accepts_mxfp4_hadamard_rotation() -> None:
+    config = INCConfig.from_config(
+        {
+            "bits": 4,
+            "group_size": 32,
+            "sym": True,
+            "packing_format": "auto_round:llm_compressor",
+            "data_type": "mx_fp",
+            "rotation_config": {
+                "backend": "transform",
+                "block_size": 32,
+                "hadamard_type": "hadamard",
+            },
+        }
+    )
+
+    assert config.rotation_config == {
+        "backend": "transform",
+        "block_size": 32,
+        "hadamard_type": "hadamard",
+    }
+
+
+@pytest.mark.parametrize("backend", [None, "auto"])
+def test_inc_config_accepts_auto_rotation_backend(backend) -> None:
+    rotation_config = {
+        "block_size": 32,
+        "hadamard_type": "hadamard",
+    }
+    if backend is not None:
+        rotation_config["backend"] = backend
+
+    config = INCConfig.from_config(
+        {
+            "bits": 4,
+            "group_size": 32,
+            "sym": True,
+            "packing_format": "auto_round:llm_compressor",
+            "data_type": "mx_fp",
+            "rotation_config": rotation_config,
+        }
+    )
+
+    assert config.rotation_config == rotation_config
+
+
+def test_inc_config_accepts_maximum_rotation_block_size() -> None:
+    config = INCConfig.from_config(
+        {
+            "bits": 4,
+            "group_size": 32,
+            "sym": True,
+            "packing_format": "auto_round:llm_compressor",
+            "data_type": "mx_fp",
+            "rotation_config": {
+                "backend": "transform",
+                "block_size": 32768,
+                "hadamard_type": "hadamard",
+            },
+        }
+    )
+
+    assert config.rotation_config is not None
+    assert config.rotation_config["block_size"] == 32768
+
+
+@pytest.mark.parametrize(
+    ("rotation_config", "error"),
+    [
+        (
+            {"backend": "inplace", "hadamard_type": "hadamard"},
+            "backends 'auto' and 'transform'",
+        ),
+        (
+            {"backend": "transform", "hadamard_type": "random_hadamard"},
+            "deterministic",
+        ),
+        (
+            {
+                "backend": "transform",
+                "block_size": 24,
+                "hadamard_type": "hadamard",
+            },
+            "positive power of two",
+        ),
+        (
+            {
+                "backend": "transform",
+                "block_size": 65536,
+                "hadamard_type": "hadamard",
+            },
+            "no greater than 32768",
+        ),
+        (
+            {
+                "backend": "transform",
+                "block_size": True,
+                "hadamard_type": "hadamard",
+            },
+            "positive power of two",
+        ),
+        (True, "rotation_config must be an object"),
+    ],
+)
+def test_inc_config_rejects_unsupported_rotation(rotation_config, error) -> None:
+    with pytest.raises(ValueError, match=error):
+        INCConfig.from_config(
+            {
+                "bits": 4,
+                "group_size": 32,
+                "sym": True,
+                "packing_format": "auto_round:llm_compressor",
+                "data_type": "mx_fp",
+                "rotation_config": rotation_config,
+            }
+        )
+
+
 def test_qwen3_1p7b_mxfp4_autoround_uses_mxfp4_linear_scheme(
     monkeypatch,
 ) -> None:
@@ -1054,6 +1189,234 @@ def test_inc_mxfp4_linear_method_registers_and_processes_weights(
     assert layer.weight.data.data_ptr() == packed_data.data_ptr()
     assert not hasattr(layer, "weight_packed")
     assert captured["processed_layer"] is layer
+
+
+def test_inc_mxfp4_linear_rotation_rejects_tp_shard_crossing_block() -> None:
+    """A rotation block spanning multiple TP shards is not supported.
+
+    E.g. a checkpoint-wide block_size=64 on a 64-wide layer is valid without
+    TP, but under tensor_parallel_size=2 each shard only sees 32 of the 64
+    input channels, so the block straddles two ranks. This must fail fast at
+    weight-creation time with a message that points at the TP mismatch, not
+    a generic "not divisible" error.
+    """
+
+    class FailingQuantMethod(LinearMethodBase):
+        def create_weights(self, *args, **kwargs) -> None:
+            pytest.fail("quant_method.create_weights should not be reached")
+
+        def apply(self, layer, x, bias=None):
+            raise NotImplementedError
+
+    from vllm.model_executor.layers.quantization.inc.transform.linear import (
+        INCLinearTransformMethod,
+    )
+
+    method = INCLinearTransformMethod(FailingQuantMethod(), block_size=64)
+
+    with pytest.raises(ValueError, match="tensor-parallel shard"):
+        method.create_weights(
+            torch.nn.Module(),
+            input_size_per_partition=32,
+            output_partition_sizes=[16],
+            input_size=64,
+            output_size=16,
+            params_dtype=torch.bfloat16,
+        )
+
+
+def test_inc_mxfp4_linear_rotation_validates_shard_alignment(monkeypatch) -> None:
+    """Divisibility is still enforced without TP, and an aligned TP shard is
+    accepted — covering the two codepaths the shard-aware check must not
+    regress.
+    """
+
+    class DummyKernel:
+        pass
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_mxfp4_linear.init_mxfp4_linear_kernel",
+        lambda **kwargs: DummyKernel(),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_linear import (  # noqa: E501
+        INCMxfp4LinearMethod,
+    )
+    from vllm.model_executor.layers.quantization.inc.transform.linear import (
+        INCLinearTransformMethod,
+    )
+
+    def make_quant_method() -> INCLinearMethod:
+        return INCLinearMethod(
+            INCMxfp4LinearMethod(make_layer_config(group_size=32, data_type="mx_fp"))
+        )
+
+    # No TP sharding (input_size_per_partition == input_size): a block_size
+    # that just does not fit the layer's width is a plain, generic error.
+    misaligned_method = INCLinearTransformMethod(make_quant_method(), block_size=48)
+    with pytest.raises(ValueError, match="not divisible by"):
+        misaligned_method.create_weights(
+            torch.nn.Module(),
+            input_size_per_partition=64,
+            output_partition_sizes=[16],
+            input_size=64,
+            output_size=16,
+            params_dtype=torch.bfloat16,
+        )
+
+    # TP shards the input, but the block_size still evenly divides the
+    # per-shard width, so this must be accepted.
+    aligned_method = INCLinearTransformMethod(make_quant_method(), block_size=32)
+    layer = torch.nn.Module()
+    aligned_method.create_weights(
+        layer,
+        input_size_per_partition=32,
+        output_partition_sizes=[16],
+        input_size=64,
+        output_size=16,
+        params_dtype=torch.bfloat16,
+    )
+    assert layer.input_size_per_partition == 32
+
+
+def test_inc_mxfp4_linear_applies_rotation_before_kernel(monkeypatch) -> None:
+    captured = {}
+
+    class DummyKernel:
+        def apply_weights(self, layer, x, bias):
+            captured["kernel_input"] = x
+            return x
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_mxfp4_linear.init_mxfp4_linear_kernel",
+        lambda **kwargs: DummyKernel(),
+    )
+
+    def fake_hadamard(x):
+        captured["hadamard_shape"] = x.shape
+        return x + 1
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.transform.hadamard.ops."
+        "hadacore_transform",
+        fake_hadamard,
+    )
+
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_linear import (  # noqa: E501
+        INCMxfp4LinearMethod,
+    )
+    from vllm.model_executor.layers.quantization.inc.transform.hadamard import (
+        HadamardTransform,
+    )
+    from vllm.model_executor.layers.quantization.inc.transform.linear import (
+        INCLinearTransformMethod,
+    )
+
+    block_size = 32
+    method = INCLinearTransformMethod(
+        INCLinearMethod(
+            INCMxfp4LinearMethod(make_layer_config(group_size=32, data_type="mx_fp"))
+        ),
+        block_size=block_size,
+        rotation=HadamardTransform(block_size),
+    )
+    value = torch.zeros(2, 64)
+    result = method.apply(torch.nn.Module(), value)
+
+    assert captured["hadamard_shape"] == (2, 2, 32)
+    assert torch.equal(captured["kernel_input"], torch.ones_like(value))
+    assert torch.equal(result, torch.ones_like(value))
+
+
+def test_inc_mxfp4_rotation_requires_cuda_or_xpu(monkeypatch) -> None:
+    config = INCConfig.from_config(
+        {
+            "bits": 4,
+            "group_size": 32,
+            "sym": True,
+            "packing_format": "auto_round:llm_compressor",
+            "data_type": "mx_fp",
+            "rotation_config": {
+                "backend": "transform",
+                "block_size": 32,
+                "hadamard_type": "hadamard",
+            },
+        }
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.transform."
+        "linear.current_platform.is_cuda",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.transform."
+        "linear.current_platform.is_xpu",
+        lambda: False,
+    )
+
+    with pytest.raises(NotImplementedError, match="requires CUDA Hadacore or XPU ARK"):
+        INCMxfp4Scheme().get_linear_method(
+            config,
+            object.__new__(LinearBase),
+            "model.layers.0.mlp.gate_proj",
+            make_layer_config(group_size=32, data_type="mx_fp"),
+        )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA Hadacore only")
+def test_inc_mxfp4_linear_rotation_matches_hadamard(monkeypatch) -> None:
+    class DummyKernel:
+        def apply_weights(self, layer, x, bias):
+            return x
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes."
+        "inc_mxfp4_linear.init_mxfp4_linear_kernel",
+        lambda **kwargs: DummyKernel(),
+    )
+
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_linear import (  # noqa: E501
+        INCMxfp4LinearMethod,
+    )
+    from vllm.model_executor.layers.quantization.inc.transform.hadamard import (
+        HadamardTransform,
+    )
+    from vllm.model_executor.layers.quantization.inc.transform.linear import (
+        INCLinearTransformMethod,
+    )
+
+    block_size = 32
+    method = INCLinearTransformMethod(
+        INCLinearMethod(
+            INCMxfp4LinearMethod(make_layer_config(group_size=32, data_type="mx_fp"))
+        ),
+        block_size=block_size,
+        rotation=HadamardTransform(block_size),
+    )
+    identity = torch.eye(block_size, dtype=torch.bfloat16, device="cuda")
+    value = torch.cat((identity, identity), dim=-1)
+    original = value.clone()
+    hadamard = deterministic_hadamard_matrix(
+        block_size, dtype=torch.float64, device="cuda"
+    ) / math.sqrt(block_size)
+    expected = (
+        value.unflatten(-1, (-1, block_size)).to(hadamard.dtype) @ hadamard.T
+    ).to(value.dtype)
+
+    result = method.apply(torch.nn.Module(), value)
+
+    torch.testing.assert_close(result.unflatten(-1, (-1, block_size)), expected)
+    torch.testing.assert_close(value, original)
 
 
 @pytest.mark.parametrize(
