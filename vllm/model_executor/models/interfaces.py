@@ -1274,6 +1274,16 @@ class SupportsRealtime(Protocol):
     """Maximum tokens to generate per streaming audio segment.
     Override in subclasses based on the model's expected output length."""
 
+    realtime_carries_context: bool = True
+    """Whether earlier segments belong in this segment's context.
+
+    True suits models whose realtime prompt is a running conversation and which
+    consume ``input_stream``. Models that emit a fresh single-turn prompt per
+    segment must set this False: the generic streaming carry-over would turn
+    their own transcripts into conversation history, and segments with weak
+    acoustic evidence then reproduce earlier ones.
+    """
+
     @classmethod
     async def buffer_realtime_audio(
         cls,

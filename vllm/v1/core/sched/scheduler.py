@@ -1575,7 +1575,15 @@ class Scheduler(SchedulerInterface):
         Updates the waiting session with the next streaming update.
 
         Discards the last sampled output token from the prior input chunk.
+
+        Models whose realtime prompt is a complete single turn per segment opt
+        out of that carry-over via ``SupportsRealtime.realtime_carries_context``
+        and are restarted from the new chunk instead.
         """
+
+        if not self._realtime_carries_context():
+            self._restart_session_for_new_chunk(session, update)
+            return
 
         # Current streaming input behaviour: Keep only computed output tokens
         # (discard final sampled output token).
@@ -1602,6 +1610,75 @@ class Scheduler(SchedulerInterface):
         # Update block hashes for the new tokens.
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
+        session.arrival_time = update.arrival_time
+        session.sampling_params = update.sampling_params
+        if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+            self.num_waiting_for_streaming_input -= 1
+        session.status = RequestStatus.WAITING
+
+        if self.log_stats:
+            session.record_event(EngineCoreEventType.QUEUED)
+
+    def _realtime_carries_context(self) -> bool:
+        """Whether the served realtime model wants earlier segments in context.
+
+        Resolved once on the first streaming-session update: deployments that
+        never open a realtime session never pay for the lookup, and a model
+        config that cannot be resolved simply keeps today's behaviour.
+        """
+        policy = getattr(self, "_realtime_context_policy", None)
+        if policy is None:
+            policy = True
+            try:
+                model_config = self.vllm_config.model_config
+                model_cls, arch = model_config.registry.resolve_model_cls(
+                    model_config.architectures, model_config
+                )
+                policy = getattr(model_cls, "realtime_carries_context", True)
+                logger.info(
+                    "Realtime context policy: %s carries_context=%s", arch, policy
+                )
+            except Exception:
+                logger.debug(
+                    "Could not resolve the model class for the realtime context "
+                    "policy; keeping context.",
+                    exc_info=True,
+                )
+            self._realtime_context_policy = policy
+        return policy
+
+    def _restart_session_for_new_chunk(
+        self, session: Request, update: StreamingUpdate
+    ) -> None:
+        """Rebuild a streaming session from the new chunk alone.
+
+        Used by realtime models whose prompt is a complete single turn per
+        segment. Text, multimodal features, KV blocks and block hashes are all
+        returned to the chunk boundary together; leaving any of them at the old
+        frontier keeps the previous segment reachable.
+        """
+        self._free_request_blocks(session)
+        self.encoder_cache_manager.free(session)
+        self._inflight_prefills.discard(session)
+
+        prompt_token_ids = list(update.prompt_token_ids or ())
+        session.prompt_token_ids = prompt_token_ids
+        session._all_token_ids = list(prompt_token_ids)
+        session._output_token_ids.clear()
+        session.num_prompt_tokens = len(prompt_token_ids)
+        session.num_computed_tokens = 0
+        session.num_output_placeholders = 0
+        session.num_in_flight_tokens = 0
+        session.spec_token_ids = []
+
+        # Assign mm_features BEFORE recomputing hashes: realtime prompts are
+        # identical every segment, so hashes that do not cover the multimodal
+        # identity collide with the previous segment and the prefix cache
+        # serves back its audio.
+        session.mm_features = list(update.mm_features or ())
+        session.block_hashes = []
+        session.update_block_hashes()
+
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
