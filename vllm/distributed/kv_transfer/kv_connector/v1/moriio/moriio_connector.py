@@ -802,6 +802,38 @@ class MoRIIOConnectorScheduler:
 
             params["do_remote_prefill"] = False
 
+    def _clamp_to_prompt_blocks(
+        self, req: "Request", local_block_ids: list[int]
+    ) -> list[int]:
+        """Keep only the blocks that cover the request's prompt, dropping any
+        trailing blocks the consumer (decode) never allocated.
+
+        Under speculative decoding (e.g. MTP) the producer (prefill) KV-cache
+        manager reserves lookahead slots beyond the prompt that the consumer
+        (decode) does not allocate, so the producer's local_block_ids run
+        longer than the consumer's remote_block_ids. Block order is positional
+        and the prompt occupies the leading blocks, so keep
+        ``ceil(num_prompt_tokens / block_size)`` blocks and drop the trailing
+        lookahead scratch. The drop count is derived from the prompt length
+        (not the speculative-token count), so this is correct for **any** block
+        size. Runs on the final-chunk save, where the full local set has been
+        assembled.
+        """
+        num_prompt_blocks = math.ceil(req.num_prompt_tokens / self.block_size)
+        if len(local_block_ids) <= num_prompt_blocks:
+            return local_block_ids
+        clamped = local_block_ids[:num_prompt_blocks]
+        logger.debug(
+            "MoRIIO WRITE producer: kept %d prompt block(s), dropped %d "
+            "trailing lookahead block(s) for request %s (%d -> %d)",
+            num_prompt_blocks,
+            len(local_block_ids) - num_prompt_blocks,
+            req.request_id,
+            len(local_block_ids),
+            len(clamped),
+        )
+        return clamped
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -838,9 +870,15 @@ class MoRIIOConnectorScheduler:
                         kv_params = self._req_kv_params.pop(
                             req_id, req.kv_transfer_params or {}
                         )
+                        # Final chunk holds the full local set including any
+                        # speculative lookahead blocks; keep only the prompt
+                        # blocks so decode receives exactly what it allocated.
+                        save_block_ids = self._clamp_to_prompt_blocks(
+                            req, self._reqs_need_pending_save[req_id][1]
+                        )
                         meta.add_new_req(
                             request_id=req_id,
-                            local_block_ids=self._reqs_need_pending_save[req_id][1],
+                            local_block_ids=save_block_ids,
                             kv_transfer_params=kv_params,
                             write_mode=True,
                         )
@@ -861,9 +899,12 @@ class MoRIIOConnectorScheduler:
                 # not last chunk prefill
                 self._reqs_need_pending_save[req_id] = (req, block_ids)
                 continue
+            # Final/only chunk: keep only the prompt blocks (drop any trailing
+            # speculative lookahead blocks) so only the prompt KV is recorded.
+            save_block_ids = self._clamp_to_prompt_blocks(req, block_ids)
             meta.add_new_req(
                 request_id=req_id,
-                local_block_ids=block_ids,
+                local_block_ids=save_block_ids,
                 kv_transfer_params=kv_params,
                 write_mode=True,
             )
@@ -2568,6 +2609,18 @@ class MoRIIOConnectorWorker:
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             is_mla=self._is_mla_cache_layer(layer_name),
         )
+        # The scheduler WRITE producer save already clamps local_block_ids to
+        # the prompt blocks before recording, so by transfer time local must
+        # never exceed remote. Assert that invariant instead of trimming again
+        # (a longer local here is a genuine bug). compute_block_transfer_offsets
+        # still raises on the READ path (unclamped), so READ bugs stay guarded.
+        if self.mode == MoRIIOMode.WRITE:
+            assert len(local_block_ids) <= len(remote_block_ids), (
+                "MoRIIO WRITE local_block_ids longer than remote_block_ids "
+                f"(local {len(local_block_ids)} vs remote "
+                f"{len(remote_block_ids)}); scheduler save should have clamped "
+                "to prompt blocks"
+            )
         local, remote, sizes = compute_block_transfer_offsets(
             layer_name=layer_name,
             kv_cache=self.kv_caches[layer_name],
