@@ -1305,6 +1305,13 @@ def get_default_config(
     dtype: str | None,
     block_shape: list[int] | None = None,
 ) -> dict[str, int]:
+    """Return default Triton kernel tile configuration for fused MoE.
+
+    Selects BLOCK_SIZE_M/N/K, GROUP_SIZE_M, num_warps, and num_stages
+    based on batch size (M), expert count (E), data type, and optional
+    block-quantization shape. Fine-grained MoEs (E >= 128) use smaller
+    M tiles to reduce padding overhead.
+    """
     if envs.VLLM_BATCH_INVARIANT:
         return {
             "BLOCK_SIZE_M": 64,
@@ -1374,7 +1381,17 @@ def get_default_config(
         # Tile sizes scale with batch: small batches are memory-bound
         # (favor tall-K tiles), large batches are compute-bound (favor
         # large M/N tiles with more warps).
-        if M <= 32:
+        if E >= 128:
+            # Fine-grained MoE (e.g. 128+ experts): tokens are distributed
+            # thinly across many experts, so smaller M tiles dramatically
+            # reduce padding overhead.
+            if M <= 64:
+                block_m = 16
+            elif M <= 256:
+                block_m = 32
+            else:
+                block_m = 64
+        elif M <= 32:
             block_m = 16
         elif M <= 96:
             block_m = 32
@@ -1393,7 +1410,7 @@ def get_default_config(
         # Grouping adjacent M-blocks lets them share weight tiles in L2.
         # Only helps when there are enough M-blocks per expert to group;
         # with many experts each one sees few tokens so grouping is useless.
-        tokens_per_expert = M // max(E, 1)
+        tokens_per_expert = (M * topk) // max(E, 1)
         group_m = 16 if tokens_per_expert > 128 else 1
 
         # Large batches have enough blocks to saturate the GPU, so we
@@ -1555,27 +1572,45 @@ def _prepare_expert_assignment(
     ignore_invalid_experts: bool = False,
 ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
     """Prepare expert assignments for the aligned and low-latency Triton paths."""
-    # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
-    # activates only a small fraction of total experts
-    # Skips moe_align_block_size and activates the `sorted_token_ids is None`
-    # path of the fused_moe_kernel kernel
+    # Naive block assignment: skip moe_align_block_size when tokens are so
+    # sparsely distributed across experts that the sorting kernel's fixed
+    # ~20 µs cost exceeds any packing benefit.
+    #
+    # Birthday paradox threshold (factor of 4, i.e. 25% load):
+    #   When load factor M*topk/E <= 0.25, expert collisions are rare.
+    #   At E=128, topk=8:
+    #     M=4 → 32 tokens in 128 bins → ~3.7 collisions → saves ~12 µs
+    #     M=5 → 40 tokens in 128 bins → ~5.6 collisions → saves ~19 µs
+    #   The moe_align_block_size sorting kernel costs ~20 µs, so the
+    #   crossover where sorting pays for itself is right at 25% load.
+    #
+    # Expert map safety (EP): when expert_map is provided, the naive path
+    # remaps IDs via expert_map[topk_ids]. This is safe when
+    # ignore_invalid_experts is False (all experts in topk_ids are valid
+    # for this rank). When ignore_invalid_experts is True (active EP with
+    # potentially unmapped -1 sentinel experts), we must use the aligned
+    # path which handles invalid expert filtering.
+    #
+    # WNA16 quantized kernels (int8_w8a16, int4_w4a16) require the aligned
+    # path as their Triton kernels do not support sorted_token_ids=None.
     naive_block_assignment = (
-        expert_map is None
+        (expert_map is None or not ignore_invalid_experts)
         and num_tokens * top_k_num * 4 <= global_num_experts
-        and not (
-            (use_int8_w8a16 or use_int4_w4a16)
-            and block_shape is not None
-            and block_shape[1] > 0
-        )
+        and not (use_int8_w8a16 or use_int4_w4a16)
     )
 
     if naive_block_assignment:
+        block_m = min(config.get("BLOCK_SIZE_M", 16), 16)
+        config["BLOCK_SIZE_M"] = block_m
+        expert_ids = (
+            topk_ids.view(-1) if expert_map is None else expert_map[topk_ids.view(-1)]
+        )
         return (
             None,
-            topk_ids.view(-1),
+            expert_ids,
             torch.full(
                 (1,),
-                topk_ids.numel() * config["BLOCK_SIZE_M"],
+                topk_ids.numel() * block_m,
                 dtype=torch.int32,
                 device=topk_ids.device,
             ),
