@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import MagicMock
+
+from prometheus_client import CollectorRegistry, Counter, Histogram
+
 from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
+from vllm.v1.metrics.loggers import PrometheusStatLogger
 from vllm.v1.metrics.stats import (
+    FinishedRequestStats,
     IterationStats,
     PrefillStats,
     PromptTokenStats,
@@ -12,6 +18,49 @@ from vllm.v1.metrics.stats import (
 )
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.utils import compute_iteration_details
+
+
+def test_abort_metrics_do_not_count_as_engine_iterations():
+    registry = CollectorRegistry()
+    iteration_tokens = Histogram("iteration_tokens", "", ["engine"], registry=registry)
+    aborted_requests = Counter("aborted_requests", "", ["engine"], registry=registry)
+    stat_logger = MagicMock(
+        histogram_iteration_tokens={
+            idx: iteration_tokens.labels(engine=str(idx)) for idx in (0, 1)
+        },
+        counter_request_success={
+            FinishReason.ABORT: {
+                idx: aborted_requests.labels(engine=str(idx)) for idx in (0, 1)
+            }
+        },
+        kv_cache_metrics_enabled=False,
+        gauge_lora_info=None,
+    )
+    abort_stats = IterationStats()
+    abort_stats.finished_requests.append(
+        FinishedRequestStats(finish_reason=FinishReason.ABORT)
+    )
+
+    PrometheusStatLogger.record(stat_logger, None, abort_stats, engine_idx=1)
+
+    assert registry.get_sample_value("aborted_requests_total", {"engine": "1"}) == 1
+    assert registry.get_sample_value("aborted_requests_total", {"engine": "0"}) == 0
+    assert registry.get_sample_value("iteration_tokens_count", {"engine": "1"}) == 0
+    assert registry.get_sample_value("iteration_tokens_count", {"engine": "0"}) == 0
+
+    step_stats = IterationStats()
+    step_stats.num_generation_tokens = 3
+    PrometheusStatLogger.record(stat_logger, None, step_stats, engine_idx=1)
+
+    assert registry.get_sample_value("iteration_tokens_count", {"engine": "1"}) == 1
+    assert registry.get_sample_value("iteration_tokens_sum", {"engine": "1"}) == 3
+
+    PrometheusStatLogger.record(
+        stat_logger, SchedulerStats(), IterationStats(), engine_idx=1
+    )
+
+    assert registry.get_sample_value("iteration_tokens_count", {"engine": "1"}) == 2
+    assert registry.get_sample_value("iteration_tokens_sum", {"engine": "1"}) == 3
 
 
 def test_iteration_stats_repr():

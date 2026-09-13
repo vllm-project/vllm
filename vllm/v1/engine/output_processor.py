@@ -492,7 +492,28 @@ class OutputProcessor:
             assert state.queue is not None
             state.queue.put(e)
 
-    def abort_requests(self, request_ids: Iterable[str], internal: bool) -> list[str]:
+    def resolve_abort_request_ids(
+        self, request_ids: Iterable[str], internal: bool
+    ) -> list[str]:
+        """Resolve external and parent IDs to live IDs without removing state."""
+        resolved_ids: dict[str, None] = {}
+        for request_id in request_ids:
+            internal_ids = (
+                [request_id] if internal else self.external_req_ids.get(request_id, [])
+            )
+            for internal_id in internal_ids:
+                if internal_id in self.request_states:
+                    resolved_ids[internal_id] = None
+                elif parent := self.parent_requests.get(internal_id):
+                    resolved_ids.update(dict.fromkeys(parent.child_requests))
+        return list(resolved_ids)
+
+    def abort_requests(
+        self,
+        request_ids: Iterable[str],
+        internal: bool,
+        iteration_stats: IterationStats | None = None,
+    ) -> list[str]:
         """Abort a list of requests.
 
         The request_ids may be either external request IDs (those passed to
@@ -507,32 +528,19 @@ class OutputProcessor:
         a parent request, in which case the associated child requests are aborted
         also.
         """
-        internal_req_ids = []
-        for request_id in request_ids:
-            if internal:
-                # Internal ID - this may be a parent request
-                internal_req_ids.append(request_id)
-
-                # Remove internal ID from the external->internal mapping
-                if req_state := self.request_states.get(request_id):
-                    external_req_id = req_state.external_req_id
-                    internal_ids = self.external_req_ids[external_req_id]
-                    internal_ids.remove(request_id)
-                    if not internal_ids:
-                        del self.external_req_ids[external_req_id]
-            elif internal_ids := self.external_req_ids.pop(request_id, []):
-                # External ID - abort all requests in the external->internal mapping
-                internal_req_ids.extend(internal_ids)
-
+        internal_req_ids = self.resolve_abort_request_ids(request_ids, internal)
         request_ids_to_abort = []
         for request_id in internal_req_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
-                self.lora_states.request_finished(request_id, req_state.lora_name)
+                internal_ids = self.external_req_ids[req_state.external_req_id]
+                internal_ids.remove(request_id)
+                if not internal_ids:
+                    del self.external_req_ids[req_state.external_req_id]
                 request_ids_to_abort.append(request_id)
-                # Produce final abort output.
-                if req_state.queue is not None and (
-                    request_output := req_state.make_request_output(
+                # Update parent completion state even without an output queue.
+                if req_state.queue is not None or req_state.parent_req is not None:
+                    request_output = req_state.make_request_output(
                         new_token_ids=[],
                         # Set pooling_output is not None to
                         # correctly enter the abort pooling branch
@@ -544,15 +552,16 @@ class OutputProcessor:
                         kv_transfer_params=None,
                         ec_transfer_params=None,
                     )
-                ):
-                    req_state.queue.put(request_output)
-            elif parent := self.parent_requests.get(request_id):
-                # Abort children prior to removing the parent.
-                if parent.child_requests:
-                    child_reqs = list(parent.child_requests)
-                    child_reqs = self.abort_requests(child_reqs, internal=True)
-                    request_ids_to_abort.extend(child_reqs)
-                self.parent_requests.pop(request_id, None)
+                    if req_state.queue is not None and request_output is not None:
+                        req_state.queue.put(request_output)
+                if iteration_stats is not None:
+                    self._update_stats_from_finished(
+                        req_state, FinishReason.ABORT, iteration_stats
+                    )
+                else:
+                    self.lora_states.request_finished(request_id, req_state.lora_name)
+                if (parent := req_state.parent_req) and not parent.child_requests:
+                    self.parent_requests.pop(parent.request_id, None)
         return request_ids_to_abort
 
     def add_request(

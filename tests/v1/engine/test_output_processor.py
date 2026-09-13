@@ -3,6 +3,7 @@
 
 import math
 import time
+from copy import copy
 from unittest.mock import MagicMock
 
 import pytest
@@ -32,6 +33,7 @@ from vllm.v1.engine.output_processor import (
     RequestOutputCollector,
     RequestState,
 )
+from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 
@@ -1448,3 +1450,123 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.request_id], internal=True)
         else:
             output_processor.abort_requests([request.external_req_id], internal=False)
+
+
+@pytest.mark.parametrize(
+    ("runner", "abort_stage"),
+    [
+        ("generate", "queued"),
+        ("generate", "prefill"),
+        ("generate", "decode"),
+        ("pooling", "prefill"),
+    ],
+)
+def test_abort_requests_updates_finished_stats(runner: str, abort_stage: str):
+    output_processor = OutputProcessor(None, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="request-0",
+        external_req_id="external-0",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=time.time(),
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(detokenize=False)
+        if runner == "generate"
+        else None,
+        pooling_params=PoolingParams(task="embed") if runner == "pooling" else None,
+    )
+    output_processor.add_request(request, None)
+
+    request_stats = output_processor.request_states[request.request_id].stats
+    assert request_stats is not None
+    request_stats.queued_ts = 1.0
+    if abort_stage != "queued":
+        request_stats.scheduled_ts = 2.0
+    if abort_stage == "decode":
+        request_stats.first_token_ts = 3.0
+        request_stats.last_token_ts = 5.0
+        request_stats.num_generation_tokens = 3
+
+    iteration_stats = IterationStats()
+    output_processor.abort_requests(
+        [request.request_id], internal=True, iteration_stats=iteration_stats
+    )
+
+    assert not output_processor.has_unfinished_requests()
+    assert len(iteration_stats.finished_requests) == 1
+    finished = iteration_stats.finished_requests[0]
+    assert finished.finish_reason == FinishReason.ABORT
+    assert finished.request_id == request.external_req_id
+    assert finished.num_prompt_tokens == len(request.prompt_token_ids or [])
+    assert finished.num_generation_tokens == (3 if abort_stage == "decode" else 0)
+    assert finished.queued_time == (None if abort_stage == "queued" else 1.0)
+
+    if abort_stage == "decode":
+        assert finished.prefill_time == 1.0
+        assert finished.decode_time == 2.0
+        assert finished.inference_time == 3.0
+        assert finished.mean_time_per_output_token == 1.0
+    else:
+        assert finished.prefill_time is None
+        assert finished.decode_time is None
+        assert finished.inference_time is None
+        assert finished.mean_time_per_output_token is None
+
+
+@pytest.mark.parametrize("output_kind", [None, RequestOutputKind.FINAL_ONLY])
+def test_abort_parent_records_parallel_sampling_stats(output_kind):
+    """Finalize parent metrics once all aborted children have been removed."""
+    output_processor = OutputProcessor(None, log_stats=True)
+    request = EngineCoreRequest(
+        request_id="parent",
+        external_req_id="external-parent",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=time.time(),
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            n=2,
+            detokenize=False,
+            output_kind=output_kind or RequestOutputKind.CUMULATIVE,
+        ),
+        pooling_params=None,
+    )
+    parent = ParentRequest(request)
+    queue = (
+        RequestOutputCollector(output_kind, request.request_id)
+        if output_kind is not None
+        else None
+    )
+    for index, token_count in enumerate([3, 5]):
+        child_id, child_params = parent.get_child_info(index)
+        child = copy(request)
+        child.request_id = child_id
+        child.sampling_params = child_params
+        output_processor.add_request(child, None, parent, index, queue)
+        stats = output_processor.request_states[child_id].stats
+        assert stats is not None
+        stats.num_generation_tokens = token_count
+
+    iteration_stats = IterationStats()
+    output_processor.abort_requests(
+        [parent.request_id], internal=True, iteration_stats=iteration_stats
+    )
+
+    assert iteration_stats.n_params_iter == [2]
+    assert iteration_stats.max_num_generation_tokens_iter == [5]
+    assert len(iteration_stats.finished_requests) == 2
+    assert all(
+        stats.finish_reason == FinishReason.ABORT
+        for stats in iteration_stats.finished_requests
+    )
+    assert not parent.child_requests
+    assert not output_processor.has_unfinished_requests()
+    if queue is not None:
+        output = queue.get_nowait()
+        assert isinstance(output, RequestOutput)
+        assert output.finished
+        assert len(output.outputs) == 2
