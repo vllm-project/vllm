@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import io
+import os
+import sys
+
 import pytest
 import torch
 
@@ -165,6 +170,26 @@ def test_startup_omp_num_threads_divides_between_local_workers():
     assert startup_omp_num_threads(2) == available // 2
     # Never zero, however many workers share the node.
     assert startup_omp_num_threads(available * 4) == 1
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux cgroups")
+def test_available_cpu_count_honors_root_cgroup_quota(monkeypatch):
+    files = {
+        "/proc/self/cgroup": "0::/user.slice/container.scope\n",
+        "/sys/fs/cgroup/user.slice/container.scope/cpu.max": "max 100000\n",
+        "/sys/fs/cgroup/user.slice/cpu.max": "max 100000\n",
+        "/sys/fs/cgroup/cpu.max": "200000 100000\n",
+    }
+
+    def fake_open(path, *args, **kwargs):
+        if path in files:
+            return io.StringIO(files[path])
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(8)))
+
+    assert available_cpu_count() == 2
 
 
 def test_set_torch_threads_for_runtime(restore_torch_threads):
