@@ -212,6 +212,9 @@ class StreamingParserEngine:
         self._message_header_buffer = ""
         self._message_header_token_count = 0
         self._in_skipped_tool_span = False
+        self._pending_tool_start: tuple[str, str, int] | None = None
+        self._tool_preamble_buffer = ""
+        self._tool_preamble_token_count = 0
         self._reset_args_state()
 
     def feed(
@@ -288,6 +291,8 @@ class StreamingParserEngine:
         events = self._process_scanner_items(self._scanner.flush_pending())
 
         events.extend(self._process_lex_tokens(self._lexer.flush()))
+
+        events.extend(self._confirm_tool_preamble())
 
         if self._args_buffer:
             events.append(
@@ -395,8 +400,28 @@ class StreamingParserEngine:
         return markers
 
     def _on_terminal(
-        self, terminal: str, value: str, token_count: int = 0
+        self,
+        terminal: str,
+        value: str,
+        token_count: int = 0,
+        *,
+        confirmed_tool_start: bool = False,
     ) -> list[SemanticEvent]:
+        if self._pending_tool_start is not None:
+            next_transition = self.config.transitions.get(
+                (ParserState.TOOL_PREAMBLE, terminal)
+            )
+            if next_transition is not None and next_transition.next_state in (
+                ParserState.TOOL_NAME,
+                ParserState.CONTENT,
+            ):
+                events = self._confirm_tool_preamble()
+                events.extend(self._on_terminal(terminal, value, token_count))
+                return events
+            events = self._flush_tool_preamble()
+            events.extend(self._on_terminal(terminal, value, token_count))
+            return events
+
         key = (self.state, terminal)
         transition = self.config.transitions.get(key)
 
@@ -410,6 +435,15 @@ class StreamingParserEngine:
 
         if self.skip_reasoning_parsing and terminal in self._reasoning_markup_terminals:
             return self._emit_for_state(value, token_count)
+
+        if (
+            self.config.validate_tool_preamble
+            and not confirmed_tool_start
+            and self.state in (ParserState.CONTENT, ParserState.REASONING)
+            and transition.next_state == ParserState.TOOL_PREAMBLE
+        ):
+            self._pending_tool_start = (terminal, value, token_count)
+            return []
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:
             # Inkling reuses one terminal for tool, text, and reasoning exits.
@@ -469,6 +503,26 @@ class StreamingParserEngine:
         return self._apply_transition(transition, value, token_count)
 
     def _emit_for_state(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
+        if self._pending_tool_start is not None:
+            self._tool_preamble_buffer += text
+            self._tool_preamble_token_count += token_count
+            if text.strip():
+                candidate = self._tool_preamble_buffer.lstrip()
+                for (state, terminal), tr in self.config.transitions.items():
+                    if (
+                        state == ParserState.TOOL_PREAMBLE
+                        and tr.next_state == ParserState.TOOL_NAME
+                        and (literal := self.config.terminals.get(terminal))
+                        and any(
+                            value.startswith(candidate)
+                            for value in (
+                                (literal,) if isinstance(literal, str) else literal
+                            )
+                        )
+                    ):
+                        return []
+                return self._flush_tool_preamble()
+            return []
         if self.state == ParserState.MESSAGE_HEADER:
             self._message_header_buffer += text
             self._message_header_token_count += token_count
@@ -495,6 +549,30 @@ class StreamingParserEngine:
                 )
             ]
         return []
+
+    def _flush_tool_preamble(self) -> list[SemanticEvent]:
+        if self._pending_tool_start is None:
+            return []
+        _, opener, opener_count = self._pending_tool_start
+        text = opener + self._tool_preamble_buffer
+        count = opener_count + self._tool_preamble_token_count
+        self._pending_tool_start = None
+        self._tool_preamble_buffer = ""
+        self._tool_preamble_token_count = 0
+        return self._emit_for_state(text, count)
+
+    def _confirm_tool_preamble(self) -> list[SemanticEvent]:
+        if self._pending_tool_start is None:
+            return []
+        opener = self._pending_tool_start
+        text = self._tool_preamble_buffer
+        count = self._tool_preamble_token_count
+        self._pending_tool_start = None
+        self._tool_preamble_buffer = ""
+        self._tool_preamble_token_count = 0
+        events = self._on_terminal(*opener, confirmed_tool_start=True)
+        events.extend(self._emit_for_state(text, count))
+        return events
 
     def _on_content(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
         if not text:

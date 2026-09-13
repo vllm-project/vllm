@@ -101,6 +101,9 @@ class ParserEngineConfig:
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
 
+    # Delay a tool wrapper until its whitespace-only preamble reaches TOOL_NAME.
+    validate_tool_preamble: bool = False
+
     def terminal_literal(self, name: str) -> str | None:
         """Canonical spelling of terminal *name*, or ``None`` if undeclared."""
         value = self.terminals.get(name)
