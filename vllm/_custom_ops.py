@@ -123,6 +123,7 @@ def paged_attention_rocm(
     v_scale: torch.Tensor,
     fp8_out_scale: torch.Tensor | None = None,
     mfma_type: str = "fp8" if envs.VLLM_ROCM_FP8_MFMA_PAGE_ATTN else "f16",
+    use_interleaved_v_cache: bool = False,
 ) -> None:
     torch.ops._rocm_C.paged_attention(
         out,
@@ -145,6 +146,7 @@ def paged_attention_rocm(
         v_scale,
         fp8_out_scale,
         mfma_type,
+        use_interleaved_v_cache,
     )
 
 
@@ -2606,6 +2608,7 @@ def reshape_and_cache(
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
+    interleaved_v: bool = False,
 ) -> None:
     torch.ops._C_cache_ops.reshape_and_cache(
         key,
@@ -2616,6 +2619,7 @@ def reshape_and_cache(
         kv_cache_dtype,
         k_scale,
         v_scale,
+        interleaved_v,
     )
 
 
