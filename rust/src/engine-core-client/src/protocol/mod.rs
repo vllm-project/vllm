@@ -29,6 +29,7 @@ pub mod lora;
 pub mod multimodal;
 pub mod output;
 pub mod request;
+pub mod routed_experts;
 pub mod sampling;
 pub mod stats;
 pub mod structured_outputs;
