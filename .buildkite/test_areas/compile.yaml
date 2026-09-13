@@ -186,7 +186,7 @@ steps:
       label: ":amd: (MI355) Fusion E2E TP2 Quick (AITER subset)"
       dind: false
       device: mi355_2
-      timeout_in_minutes: 180
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
       working_dir: /vllm-workspace/

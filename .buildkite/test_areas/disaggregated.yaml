@@ -61,7 +61,7 @@ steps:
       label: ":amd: (MI300) Push NixlConnector PP prefill PD accuracy"
       dind: false
       device: mi300_4
-      timeout_in_minutes: 180
+      timeout_in_minutes: 55
       depends_on:
         - image-build-amd
       source_file_dependencies:
@@ -178,7 +178,7 @@ steps:
       label: ":amd: (MI300) NixlConnector PD edge case"
       dind: false
       device: mi300_2
-      timeout_in_minutes: 180
+      timeout_in_minutes: 65
       depends_on:
         - image-build-amd
       source_file_dependencies:
@@ -331,7 +331,7 @@ steps:
       label: ":amd: (MI355) DSv4-Flash Disaggregated DP EP"
       dind: false
       device: mi355_8
-      timeout_in_minutes: 180
+      timeout_in_minutes: 85
       depends_on:
         - image-build-amd
       source_file_dependencies:

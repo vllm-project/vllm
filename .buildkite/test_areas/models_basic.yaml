@@ -83,7 +83,7 @@ steps:
       label: ":amd: (MI355) Inkling"
       dind: false
       device: mi355_1
-      timeout_in_minutes: 180
+      timeout_in_minutes: 65
       working_dir: "/vllm-workspace/tests"
       depends_on:
       - image-build-amd
@@ -114,7 +114,7 @@ steps:
       label: ":amd: (MI300) Kimi K3"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 30
+      timeout_in_minutes: 65
       working_dir: "/vllm-workspace/tests"
       depends_on:
       - image-build-amd

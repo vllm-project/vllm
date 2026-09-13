@@ -84,7 +84,7 @@ steps:
       label: ":amd: (MI355) LM Eval Small Models Distributed"
       dind: false
       device: mi355_2
-      timeout_in_minutes: 180
+      timeout_in_minutes: 145
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -181,7 +181,7 @@ steps:
       label: ":amd: (MI355) LM Eval Spec Decode (Fixed-length FP8)"
       dind: false
       device: mi355_4
-      timeout_in_minutes: 180
+      timeout_in_minutes: 145
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -409,7 +409,7 @@ steps:
       label: ":amd: (MI300) LM Eval TurboQuant KV Cache"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 180
+      timeout_in_minutes: 80
       depends_on:
       - image-build-amd
       working_dir: /vllm-workspace/tests
@@ -542,7 +542,7 @@ steps:
       label: ":amd: (MI300) LM Eval KV-Offload"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 180
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
       working_dir: /vllm-workspace/tests
@@ -572,7 +572,7 @@ steps:
       label: ":amd: (MI300) LM Eval KV-Offload Medium"
       dind: false
       device: mi300_2
-      timeout_in_minutes: 180
+      timeout_in_minutes: 70
       depends_on:
       - image-build-amd
       working_dir: /vllm-workspace/tests
@@ -602,7 +602,7 @@ steps:
       label: ":amd: (MI300) LM Eval KV-Offload Large"
       dind: false
       device: mi300_4
-      timeout_in_minutes: 180
+      timeout_in_minutes: 65
       depends_on:
       - image-build-amd
       working_dir: /vllm-workspace/tests

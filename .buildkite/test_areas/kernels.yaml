@@ -128,7 +128,7 @@ steps:
       label: ":amd: (MI355) Miscellaneous Kernels"
       dind: false
       device: mi355_1
-      timeout_in_minutes: 180
+      timeout_in_minutes: 70
       working_dir: "/vllm-workspace/tests"
       depends_on:
       - image-build-amd
