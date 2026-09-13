@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
-
 import numpy as np
 import torch
 from numba import get_num_threads, jit, njit, prange, set_num_threads
 
 from vllm.config import VllmConfig
+from vllm.utils.torch_utils import available_cpu_count
 
 
 class NgramProposer:
@@ -34,31 +33,44 @@ class NgramProposer:
         # Threshold of total number of tokens in the batch to enable
         # multi-threading in numba batch propose.
         self.num_tokens_threshold = 8192
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-        cpu_count = os.cpu_count()
-        # Max number of threads for numba parallel processing.
-        if cpu_count:
-            # Divide by 2 to use physical cores
-            # and not logical cores (hyper-threading).
-            # Cap the number of threads to 8 to avoid using too many threads
-            # since other components like frontend (incl tokenization)
-            # and Structured Outputs also use multiple threads.
-            # TODO(ekagra-ranjan): bump up the cap from 1 to 8
-            # when TP parallelization for ngram is implemented.
-            self.num_numba_thread_available = min(1, (cpu_count // 2))
-            # Divide by tp_size to ensure each tensor parallel rank
-            # has some threads since all ranks will run this.
-            self.num_numba_thread_available //= tp_size
-        else:
-            self.num_numba_thread_available = 1
+
+        parallel_config = vllm_config.parallel_config
+        # The engine core reads draft tokens from a single rank (TP rank 0 of the
+        # last PP stage) and hands them back to every rank on the next step via
+        # SchedulerOutput.scheduled_spec_decode_tokens, so the other ranks can
+        # skip the lookup instead of computing a result nothing consumes.
+        # external_launcher is the exception: it runs one scheduler per rank with
+        # no draft broadcast, so every rank must reach the same drafts on its own.
+        self.drafts_on_every_rank = (
+            parallel_config.distributed_executor_backend == "external_launcher"
+        )
+        self.is_leader = (
+            self.drafts_on_every_rank
+            or parallel_config.rank % parallel_config.tensor_parallel_size == 0
+        )
+        # If all ranks drafts, then we need to share the threads equally.
+        num_sharers = (
+            parallel_config.local_world_size if self.drafts_on_every_rank else 1
+        )
+        # Divide by 2 to use physical cores and not logical cores
+        # (hyper-threading). Cap the number of threads to 8 to avoid using too
+        # many threads since other components like frontend (incl tokenization)
+        # and Structured Outputs also use multiple threads. available_cpu_count
+        # respects scheduling affinity and the cgroup CPU quota, unlike
+        # os.cpu_count().
+        self.num_numba_thread_available = max(
+            1, min(8, available_cpu_count() // 2 // num_sharers)
+        )
 
         # Trigger Numba JIT compilation for N-gram proposer.
         # This usually takes less than 1 second.
-        self.propose(
+        num_warmup_reqs = min(8, max_num_seqs)
+        self.batch_propose(
+            num_warmup_reqs,
+            list(range(num_warmup_reqs)),
+            np.zeros(num_warmup_reqs, dtype=np.int32),
+            np.zeros((num_warmup_reqs, self.max_model_len), dtype=np.int32),
             self.k,
-            [[]] * 1024,
-            np.zeros(1024, dtype=np.int32),
-            np.zeros((1024, self.max_model_len), dtype=np.int32),
         )
 
     def batch_propose(
@@ -143,6 +155,10 @@ class NgramProposer:
         | None = None,  # unused
     ) -> list[list[int]]:
         assert num_speculative_tokens <= self.k
+
+        if not self.is_leader:
+            # Nothing reads this rank's drafts; see is_leader in __init__.
+            return [[] for _ in range(len(sampled_token_ids))]
 
         # find which requests need ngram proposals
         valid_ngram_requests = []
