@@ -428,7 +428,8 @@ def test_mxfp8_linear_emulation_bf16_at_load(
 # Native MXFP8 linear: the K % 128 != 0 weight is dequantized once at load
 # --------------------------------------------------------------------------- #
 @requires_gfx950
-@pytest.mark.parametrize("shape", [(256, 2080), (256, 2048)])
+# (5120, 576) and (5120, 288): DSv4.1 shared-expert down_proj at TP4 and TP8.
+@pytest.mark.parametrize("shape", [(5120, 576), (5120, 288), (256, 2048)])
 @torch.inference_mode()
 def test_mxfp8_rocm_native_unaligned_k_dequantizes_at_load(shape):
     """``dot_scaled`` tiles K by 128, so an unaligned weight must not reach it.
