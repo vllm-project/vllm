@@ -698,6 +698,10 @@ class EngineArgs:
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
+    enable_mamba_ssu_autotune: bool = get_field(
+        KernelConfig, "enable_mamba_ssu_autotune"
+    )
+    enable_bf16x3_router_gemm: bool | None = None
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -1664,6 +1668,14 @@ class EngineArgs:
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
         )
+        kernel_group.add_argument(
+            "--enable-mamba-ssu-autotune",
+            **kernel_kwargs["enable_mamba_ssu_autotune"],
+        )
+         kernel_group.add_argument(
+            "--enable-bf16x3-router-gemm",
+            **kernel_kwargs["enable_bf16x3_router_gemm"],
+        )
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
@@ -2544,6 +2556,16 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+        if self.enable_mamba_ssu_autotune is not None:
+            if kernel_config.enable_mamba_ssu_autotune is not None:
+                raise ValueError(
+                    "enable_mamba_ssu_autotune and "
+                    "kernel_config.enable_mamba_ssu_autotune "
+                    "are mutually exclusive"
+                )
+            kernel_config.enable_mamba_ssu_autotune = self.enable_mamba_ssu_autotune
+        if self.enable_bf16x3_router_gemm is not None:
+            kernel_config.enable_bf16x3_router_gemm = self.enable_bf16x3_router_gemm
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
         if self.linear_backend != "auto":

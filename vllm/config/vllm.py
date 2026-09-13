@@ -274,6 +274,7 @@ OPTIMIZATION_LEVEL_00 = {
     },
     "kernel_config": {
         "enable_flashinfer_autotune": False,
+        "enable_mamba_ssu_autotune": False,
     },
 }
 OPTIMIZATION_LEVEL_01 = {
@@ -297,6 +298,7 @@ OPTIMIZATION_LEVEL_01 = {
     },
     "kernel_config": {
         "enable_flashinfer_autotune": True,
+        "enable_mamba_ssu_autotune": False,
     },
 }
 OPTIMIZATION_LEVEL_02 = {
@@ -320,6 +322,7 @@ OPTIMIZATION_LEVEL_02 = {
     },
     "kernel_config": {
         "enable_flashinfer_autotune": True,
+        "enable_mamba_ssu_autotune": False,
     },
 }
 OPTIMIZATION_LEVEL_03 = {
@@ -343,6 +346,7 @@ OPTIMIZATION_LEVEL_03 = {
     },
     "kernel_config": {
         "enable_flashinfer_autotune": True,
+        "enable_mamba_ssu_autotune": False,
     },
 }
 
@@ -1621,6 +1625,11 @@ class VllmConfig:
         if self.kernel_config.enable_flashinfer_autotune is None:
             raise ValueError(
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
+                "optimization level defaults."
+            )
+        if self.kernel_config.enable_mamba_ssu_autotune is None:
+            raise ValueError(
+                "KernelConfig.enable_mamba_ssu_autotune must be set after applying "
                 "optimization level defaults."
             )
 
