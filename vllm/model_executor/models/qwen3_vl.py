@@ -114,6 +114,7 @@ from vllm.utils.cache import LRUCache
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from ...utils.gpu_sync_debug import gpu_sync_allowed
@@ -834,15 +835,21 @@ class Qwen3_VisionTransformer(nn.Module):
         # graphs without changing behavior (the scalar is baked at capture).
         metadata["max_seqlen"] = torch.tensor(max_seqlen_val, dtype=torch.int32)
 
-        # Recompute cu_seqlens (backend-specific transformation)
-        metadata["cu_seqlens"] = MMEncoderAttention.maybe_recompute_cu_seqlens(
-            self.attn_backend,
-            cu_seqlens,
-            self.hidden_size,
-            self.tp_size,
-            device,
-            fp8_padded_hidden_size=self.fp8_padded_hidden_size,
-        )
+        # Recompute cu_seqlens (backend-specific transformation).
+        # The non-flash (SDPA) backend splits the packed sequence with Python
+        # sizes derived from cu_seqlens in every block, so keep it on CPU to
+        # avoid a device-to-host sync per layer. Kernel backends need it on GPU.
+        if self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
+            metadata["cu_seqlens"] = torch.from_numpy(cu_seqlens)
+        else:
+            metadata["cu_seqlens"] = MMEncoderAttention.maybe_recompute_cu_seqlens(
+                self.attn_backend,
+                cu_seqlens,
+                self.hidden_size,
+                self.tp_size,
+                device,
+                fp8_padded_hidden_size=self.fp8_padded_hidden_size,
+            )
 
         return metadata
 

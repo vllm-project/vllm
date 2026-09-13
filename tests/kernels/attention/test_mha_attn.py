@@ -253,6 +253,50 @@ def test_mha_attn_varlen_forward(
 
 
 @pytest.mark.parametrize("var_seq_len", VAR_SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("num_kv_heads", NUM_KV_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("device", devices)
+def test_mha_attn_varlen_forward_sdpa_cpu_cu_seqlens(
+    default_vllm_config,
+    var_seq_len: list[int],
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    dtype: torch.dtype,
+    device: str,
+):
+    """Non-flash (SDPA) varlen forward must not require cu_seqlens on GPU.
+
+    The Qwen VL vision encoders keep cu_seqlens on CPU for the TORCH_SDPA
+    backend (it is only consumed on the host to derive split sizes), so
+    passing a CPU cu_seqlens tensor must yield identical output.
+    """
+    set_random_seed(0)
+    torch.set_default_device(device)
+    torch.set_default_dtype(dtype)
+
+    q = torch.randn(1, sum(var_seq_len), num_heads, head_size)
+    k = torch.randn(1, sum(var_seq_len), num_kv_heads, head_size)
+    v = torch.randn(1, sum(var_seq_len), num_kv_heads, head_size)
+    cu_seqlens = torch.tensor(
+        [0] + list(itertools.accumulate(var_seq_len)), dtype=torch.int32
+    )
+    scale = 1.0 / head_size**0.5
+    attn = MMEncoderAttention(
+        num_heads, head_size, scale=scale, num_kv_heads=num_kv_heads
+    )
+    if attn.attn_backend != AttentionBackendEnum.TORCH_SDPA:
+        pytest.skip("Test only applies to the non-flash (SDPA) encoder backend.")
+
+    max_seqlen = torch.tensor(max(var_seq_len))
+    output_device = attn(q, k, v, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
+    output_cpu = attn(q, k, v, cu_seqlens=cu_seqlens.cpu(), max_seqlen=max_seqlen.cpu())
+    torch.testing.assert_close(output_cpu, output_device, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("var_seq_len", VAR_SEQ_LENS)
 @pytest.mark.parametrize(
     "dtype",
     [torch.bfloat16, torch.half],
