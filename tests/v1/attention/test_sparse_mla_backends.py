@@ -3096,6 +3096,46 @@ def test_flashattn_hisparse_decode_uses_index_group():
     impl._run_mqa_kernel.assert_called_once()
 
 
+def test_flashattn_mla_sparse_zero_tokens():
+    num_heads = 16
+    head_size = 128
+    q_nope = torch.empty(0, num_heads, head_size, device=DEVICE_TYPE)
+    q_rope = torch.empty(0, num_heads, 64, device=DEVICE_TYPE)
+    topk = torch.zeros((0, 4), dtype=torch.int32, device=DEVICE_TYPE)
+
+    impl = object.__new__(FlashAttnMLASparseImpl)
+    impl.num_heads = num_heads
+    impl.head_size = head_size
+    impl.topk_indices_buffer = topk
+    impl._run_mqa_kernel = MagicMock()
+
+    metadata = SimpleNamespace(num_decode_tokens=0, block_size=64)
+
+    output, lse = FlashAttnMLASparseImpl.forward_mqa(
+        impl,
+        (q_nope, q_rope),
+        torch.empty(1, device=DEVICE_TYPE),
+        metadata,
+        SimpleNamespace(),
+    )
+
+    assert output.shape == (0, num_heads, head_size)
+    assert lse is None
+    impl._run_mqa_kernel.assert_not_called()
+
+    # Test _run_mqa_kernel short-circuit
+    res = FlashAttnMLASparseImpl._run_mqa_kernel(
+        impl,
+        q_nope,
+        q_rope,
+        torch.empty(1, device=DEVICE_TYPE),
+        topk,
+        torch.empty(0, device=DEVICE_TYPE),
+        64,
+    )
+    assert res.shape == (0, num_heads, head_size)
+
+
 def test_flashinfer_sm120_hisparse_decode_uses_index_group():
     num_tokens = 4
     q = torch.empty(num_tokens, 2, 4, device=DEVICE_TYPE)
