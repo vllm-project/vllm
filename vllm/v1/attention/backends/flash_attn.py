@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, zip_inputs
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, WarmupChoices
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
@@ -69,7 +69,13 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    FullAttentionSpec,
+    KVCacheSpec,
+    KVQuantMode,
+    SlidingWindowSpec,
+)
 from vllm.v1.worker.cp_utils import (
     run_split_fa2_dcp_context_attention,
     should_skip_dcp_context_attention,
@@ -136,19 +142,32 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
     def get_warmup_keys(
         self,
         *,
-        dtype: torch.dtype,
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
         num_qo_heads: int,
-        num_kv_heads: int,
-        head_dim: int,
-        page_size: int,
-        window_size: tuple[int, int],
-        softcap: float,
-        fa_version: int,
     ) -> list[CompileKey]:
         capability = current_platform.get_device_capability()
         major = capability.major if capability is not None else None
-        if fa_version != 4 or dtype not in FA4_DENSE_FLOAT_DTYPES:
+        if (
+            vllm_config.parallel_config.decode_context_parallel_size != 1
+            or vllm_config.model_config.rswa_window is not None
+            or kv_cache_spec.kv_quant_mode != KVQuantMode.NONE
+            or kv_cache_spec.dtype not in FA4_DENSE_FLOAT_DTYPES
+            or not isinstance(kv_cache_spec, (FullAttentionSpec, SlidingWindowSpec))
+        ):
             return []
+        head_dim = kv_cache_spec.head_size
+        page_size = kv_cache_spec.block_size
+        sliding_window = kv_cache_spec.sliding_window
+        window_size = (
+            (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
+        )
+        softcap = float(
+            getattr(
+                vllm_config.model_config.hf_text_config, "attn_logit_softcapping", 0
+            )
+            or 0
+        )
         if (
             major in (10, 11)
             and uses_fa4_hd256_kernel(head_dim)
@@ -158,10 +177,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             single_batches = (True, False)
             split_counts = (1,)
         elif (
-            major == 9
-            and head_dim == 512
-            and window_size == (-1, -1)
-            and softcap == 0
+            major == 9 and head_dim == 512 and window_size == (-1, -1) and softcap == 0
         ):
             # SM90 forward has split/non-split variants; its transitive
             # combine specializes at 32/64/128/256 splits.
@@ -172,15 +188,15 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             return []
 
         return self._trace_dispatch(self.dispatch)(
-            zip_inputs({"window_size": window_size}),
             q_stage=q_stages,
             is_single_batch=single_batches,
             num_splits=split_counts,
-            dtype=dtype,
+            dtype=vllm_config.model_config.dtype,
             num_qo_heads=num_qo_heads,
-            num_kv_heads=num_kv_heads,
+            num_kv_heads=kv_cache_spec.num_kv_heads,
             head_dim=head_dim,
             page_size=page_size,
+            window_size=WarmupChoices(window_size),
             softcap=softcap,
         )
 
@@ -282,26 +298,24 @@ class FlashAttentionBackend(AttentionBackend):
             return None
 
         model_config = vllm_config.model_config
-        head_sizes = {model_config.get_head_size()}
-        arch_config = model_config.model_arch_config
-        # The model-wide size is the maximum; smaller layers can still need
-        # FA4's 128-token pages.
-        if arch_config.per_layer_overrides is not None:
-            head_sizes.update(
-                layer["head_size"]
-                for layer in arch_config.per_layer_overrides
-                if "head_size" in layer
+        head_size = model_config.get_head_size()
+        overrides = model_config.model_arch_config.per_layer_overrides
+        # The model-wide size is the maximum; Gemma4 may have smaller layers.
+        if (
+            head_size != 256
+            and overrides
+            and any(layer.get("head_size") == 256 for layer in overrides)
+        ):
+            head_size = 256
+        if uses_fa4_hd256_kernel(head_size, cls.head_size_v) and (
+            get_flash_attn_version(
+                head_size=head_size,
+                head_size_v=cls.head_size_v,
+                supports_fa4_hd256=True,
             )
-        for head_size in head_sizes:
-            if uses_fa4_hd256_kernel(head_size, cls.head_size_v) and (
-                get_flash_attn_version(
-                    head_size=head_size,
-                    head_size_v=cls.head_size_v,
-                    supports_fa4_hd256=True,
-                )
-                == 4
-            ):
-                return FA4_HD256_PAGE_SIZE
+            == 4
+        ):
+            return FA4_HD256_PAGE_SIZE
         return None
 
     @classmethod
@@ -644,73 +658,22 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = get_flash_attn_version() == 3
 
-        self.fa4_hd256 = uses_fa4_hd256_kernel(self.headdim) and (
-            get_flash_attn_version(
-                head_size=self.headdim,
-                kv_cache_block_size=self.block_size,
-                supports_fa4_hd256=True,
-            )
-            == 4
-        )
-
-        capability = current_platform.get_device_capability()
-        self.fa4_hopper_hd512 = (
-            capability is not None
-            and capability.major == 9
-            and self.headdim == 512
+        if (
+            vllm_config.kernel_config.enable_jit_warmup
+            and self.model_config.hf_config.model_type in ("gemma4", "gemma4_unified")
             and get_flash_attn_version(
                 head_size=self.headdim,
+                head_size_v=kv_cache_spec.head_size_v,
                 kv_cache_block_size=self.block_size,
                 supports_fa4_hd256=True,
             )
             == 4
-        )
-        if vllm_config.kernel_config.enable_jit_warmup and (
-            self.fa4_hd256 or self.fa4_hopper_hd512
         ):
-            # This registration is intentionally scoped to ordinary paged,
-            # causal attention. Other FA4 paths need separate evidence and
-            # warmup coverage before adding them here.
-            if (
-                not is_quantized_kv_cache(self.cache_config.cache_dtype)
-                and self.parallel_config.decode_context_parallel_size == 1
-                and self.model_config.rswa_window is None
-            ):
-                attn_layers = get_layers_from_vllm_config(
-                    vllm_config, Attention, layer_names
-                )
-                variants = {
-                    (layer.impl.sliding_window, float(layer.impl.logits_soft_cap))
-                    for layer in attn_layers.values()
-                    if isinstance(layer.impl, FlashAttentionImpl)
-                    and layer.impl.head_size == self.headdim
-                    and (layer.impl.fa4_hd256 or layer.impl.fa4_hopper_hd512)
-                    and (
-                        not layer.impl.fa4_hopper_hd512
-                        or (
-                            layer.impl.sliding_window == (-1, -1)
-                            and layer.impl.logits_soft_cap == 0
-                            and layer.impl.sinks is None
-                        )
-                    )
-                    and layer.impl.sliding_window is not None
-                    and layer.impl.attn_type
-                    not in (
-                        AttentionType.ENCODER_ONLY,
-                        AttentionType.ENCODER,
-                    )
-                }
-                for window_size, softcap in variants:
-                    _FA4_DENSE_ATTENTION_KERNEL.register_warmup(
-                        dtype=self.model_config.dtype,
-                        num_qo_heads=self.num_heads_q,
-                        num_kv_heads=self.num_heads_kv,
-                        head_dim=self.headdim,
-                        page_size=self.block_size,
-                        window_size=window_size,
-                        softcap=softcap,
-                        fa_version=4,
-                    )
+            _FA4_DENSE_ATTENTION_KERNEL.register_warmup(
+                vllm_config=vllm_config,
+                kv_cache_spec=kv_cache_spec,
+                num_qo_heads=self.num_heads_q,
+            )
 
         try:
             from vllm.distributed.parallel_state import get_dcp_group
@@ -1146,13 +1109,6 @@ class FlashAttentionImpl(AttentionImpl):
         self.fa4_hd256 = self.vllm_flash_attn_version == 4 and uses_fa4_hd256_kernel(
             head_size
         )
-        capability = current_platform.get_device_capability()
-        self.fa4_hopper_hd512 = (
-            self.vllm_flash_attn_version == 4
-            and head_size == 512
-            and capability is not None
-            and capability.major == 9
-        )
         if self.fa4_hd256 and not uses_kv_cache and sliding_window is not None:
             # The hd256 kernel requires seqused_k for local attention.
             logger.warning_once(
@@ -1161,6 +1117,22 @@ class FlashAttentionImpl(AttentionImpl):
             )
             self.vllm_flash_attn_version = 2
             self.fa4_hd256 = False
+        self.fa4_dense_warmup_eligible = (
+            vllm_config is not None
+            and vllm_config.model_config is not None
+            and vllm_config.model_config.hf_config.model_type
+            in ("gemma4", "gemma4_unified")
+            and vllm_config.parallel_config.decode_context_parallel_size == 1
+            and vllm_config.model_config.rswa_window is None
+            and (
+                self.fa4_hd256
+                or (
+                    self.vllm_flash_attn_version == 4
+                    and head_size == 512
+                    and current_platform.is_device_capability_family(90)
+                )
+            )
+        )
         logger.info_once(
             "Using FlashAttention version %s",
             self.vllm_flash_attn_version,
@@ -1427,11 +1399,11 @@ class FlashAttentionImpl(AttentionImpl):
                     num_splits = 1
 
                 use_fa4_dense_warmup = (
-                    (
+                    self.fa4_dense_warmup_eligible
+                    and (
                         self.fa4_hd256
                         or (
-                            self.fa4_hopper_hd512
-                            and sliding_window_size == [-1, -1]
+                            sliding_window_size == [-1, -1]
                             and self.logits_soft_cap == 0
                             and self.sinks is None
                         )
