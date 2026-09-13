@@ -29,6 +29,8 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `InternVLChatModel` | `InternVL3.5`, `InternVL3`, `InternVL2.5`, `InternVL2` | ✅︎ | ✅︎ | ❌︎ |
 | `KimiVLForConditionalGeneration` | `Kimi-VL` | ✅︎ | ❌︎ | ❌︎ |
 | `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | ❌︎ | ❌︎ |
+| `Mistral3ForConditionalGeneration` | `Mistral 3` | ✅︎ | ❌︎ | ❌︎ |
+| `PixtralForConditionalGeneration` | `Pixtral`, Mistral-format `Mistral 3` | ✅︎ | ❌︎ | ❌︎ |
 | `Qwen2VLForConditionalGeneration` | `Qwen2-VL` | ✅︎ | ✅︎ | ❌︎ |
 | `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL` | ✅︎ | ✅︎ | ❌︎ |
 | `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ | ❌︎ |
@@ -50,6 +52,8 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `InternVLChatModel` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `KimiVLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `Llama4ForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `Mistral3ForConditionalGeneration` | ❔ | ❔ | ❔ | ❔ |
+| `PixtralForConditionalGeneration` | ❔ | ❔ | ❔ | ❔ |
 | `Qwen2VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `Qwen2_5_VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
 | `Qwen3VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
