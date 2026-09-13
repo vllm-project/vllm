@@ -461,6 +461,135 @@ class DFlashQwen3Model(nn.Module):
             embeds = torch.where(is_mask, self.mask_embedding.to(embeds.dtype), embeds)
         return embeds
 
+    @staticmethod
+    def _dequant_kv_slice(attn: nn.Module, act_dtype: torch.dtype) -> torch.Tensor:
+        """The layer's K/V rows in `act_dtype`, dequantizing if stored quantized.
+
+        `_project_context_kv` runs ONE fused `F.linear` over every layer's K/V
+        weights, bypassing `quant_method.apply()`. Dequantizing here keeps that
+        cross-layer fusion; going through `apply()` per layer would give it up.
+
+        This runs at the end of `load_weights()`, before
+        `process_weights_after_loading`, so the weights are still in checkpoint
+        layout — no kernel-specific repack or transposition to undo.
+        """
+        qkv = attn.qkv_proj
+        w = getattr(qkv, "weight", None)
+
+        if w is None or w.dim() != 2:
+            # compressed-tensors pack-quantized (W4A16 / W8A16): there is no plain
+            # `weight`; values are packed into int32 with group-wise scales.
+            from compressed_tensors.compressors.pack_quantized.base import (
+                unpack_from_int32,
+            )
+
+            packed, group_scale = qkv.weight_packed, qkv.weight_scale
+            in_f = int(qkv.input_size)
+            # `unpack_from_int32` reads 32-bit containers, and the bit width is
+            # derived from the column count on that assumption. An NVFP4 export
+            # packs two 4-bit values per uint8 instead, and that arithmetic gives
+            # a clean, wrong answer for it (bits=16, no remainder) rather than
+            # failing -- so the container dtype has to be checked, not inferred.
+            bits, remainder = divmod(32 * int(packed.shape[1]), in_f)
+            if packed.dtype != torch.int32 or remainder or group_scale.dim() != 2:
+                raise ValueError(
+                    f"DFlash context-KV precompute cannot read a "
+                    f"{packed.dtype} packed weight of {tuple(packed.shape)} over "
+                    f"{in_f} input features with a weight_scale of "
+                    f"{tuple(group_scale.shape)}."
+                )
+
+            # Slice to the K/V rows *before* unpacking. The q rows are discarded
+            # either way, and both tensors are row-major over output features, so
+            # unpacking them first would trade ~3x the transient memory for
+            # nothing (2048 of 3072 rows at 27B geometry).
+            packed = packed.data[attn.q_size :]
+            group_scale = group_scale.data[attn.q_size :]
+            out_f = int(packed.shape[0])
+
+            q = unpack_from_int32(packed, bits, torch.Size([out_f, in_f]), packed_dim=1)
+            group = in_f // int(group_scale.shape[1])
+            dense = (
+                q.to(torch.float32).reshape(out_f, in_f // group, group)
+                * group_scale.to(torch.float32)[..., None]
+            ).reshape(out_f, in_f)
+            return dense.to(act_dtype)
+
+        kv = w[attn.q_size :]
+        if kv.dtype == act_dtype:
+            return kv
+
+        # Block-scaled FP8 (DeepSeek layout): the scale covers a 2-D tile rather
+        # than a row, and lives under `weight_scale_inv` -- vLLM's checkpoint
+        # compatibility name for it, not a reciprocal.
+        scale_inv = getattr(qkv, "weight_scale_inv", None)
+        if scale_inv is not None:
+            block = getattr(qkv, "weight_block_size", None)
+            si = scale_inv.data if hasattr(scale_inv, "data") else scale_inv
+            if block is None or len(block) != 2:
+                raise ValueError(
+                    f"DFlash context-KV precompute found a weight_scale_inv of "
+                    f"{tuple(si.shape)} but no usable weight_block_size "
+                    f"({block!r}) to interpret it with."
+                )
+            block_n, block_k = int(block[0]), int(block[1])
+            # Which axis each block size describes is a convention, so require it
+            # to explain the scale rather than assuming it does.
+            expected = (-(-w.shape[0] // block_n), -(-w.shape[1] // block_k))
+            if expected != tuple(si.shape):
+                raise ValueError(
+                    f"DFlash context-KV precompute: weight_block_size "
+                    f"{(block_n, block_k)} over a {tuple(w.shape)} weight implies "
+                    f"a scale of {expected}, but weight_scale_inv is "
+                    f"{tuple(si.shape)}."
+                )
+            if attn.q_size % block_n:
+                raise ValueError(
+                    f"DFlash context-KV precompute cannot slice a block-scaled "
+                    f"weight at row {attn.q_size}: it falls inside a {block_n}-row "
+                    f"block, so K would take part of q's scale."
+                )
+            # Drop q's block rows before expanding, as in the packed path.
+            si = si[attn.q_size // block_n :].to(torch.float32)
+            dense = (
+                kv.to(torch.float32)
+                * si.repeat_interleave(block_n, 0).repeat_interleave(block_k, 1)[
+                    : kv.shape[0], : kv.shape[1]
+                ]
+            )
+            return dense.to(act_dtype)
+
+        # Plain quantized weight (e.g. compressed-tensors FP8) + a weight_scale.
+        scale = getattr(qkv, "weight_scale", None)
+        if scale is None:
+            raise ValueError(
+                f"DFlash context-KV precompute needs to dequantize {kv.dtype} "
+                f"weights, but {type(qkv).__name__} exposes no weight_scale."
+            )
+        s = scale.data if hasattr(scale, "data") else scale
+        out = kv.to(act_dtype)
+        if s.numel() == 1:
+            return out * s.to(act_dtype).reshape(())
+        s = s.reshape(-1)
+
+        # One scalar per fused shard: a per-tensor scheme on a merged layer stores
+        # `weight_scale` as (num_shards,) — (3,) for q/k/v — not one entry per row.
+        # Expand each shard's scalar over the rows it owns before slicing.
+        sizes = getattr(qkv, "output_partition_sizes", None) or getattr(
+            qkv, "output_sizes", None
+        )
+        if sizes is not None and s.numel() == len(sizes) and sum(sizes) == w.shape[0]:
+            s = torch.cat([s[i].expand(int(n)) for i, n in enumerate(sizes)])
+
+        if s.numel() == w.shape[0]:
+            s = s[attn.q_size :]
+        if s.numel() != out.shape[0]:
+            raise ValueError(
+                f"DFlash context-KV precompute cannot map a weight_scale of "
+                f"{tuple(scale.shape)} onto a K/V slice of {tuple(out.shape)}."
+            )
+        return out * s.to(act_dtype).reshape(-1, 1)
+
     def _build_context_kv_buffers(
         self,
         layers_attn: list[nn.Module],
@@ -469,8 +598,12 @@ class DFlashQwen3Model(nn.Module):
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
         # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
-        kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+        kv_weights = [
+            self._dequant_kv_slice(a, self._hidden_norm_weight.dtype)
+            for a in layers_attn
+        ]
         self._fused_kv_weight = torch.cat(kv_weights, dim=0)
+
         if has_bias:
             kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
             self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
