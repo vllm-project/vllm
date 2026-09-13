@@ -350,6 +350,7 @@ class PixtralForConditionalGeneration(
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
+    supports_encoder_tp_data = True
     supports_tower_connector_lora = True
 
     @classmethod

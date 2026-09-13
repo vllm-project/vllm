@@ -625,6 +625,7 @@ class Lfm2VLForConditionalGeneration(
     IsHybrid,
 ):
     supports_tower_connector_lora = True
+    supports_encoder_tp_data = True
     merge_by_field_config = True
 
     hf_to_vllm_mapper = WeightsMapper(
