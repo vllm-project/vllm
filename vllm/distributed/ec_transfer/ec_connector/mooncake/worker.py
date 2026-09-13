@@ -49,6 +49,9 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
     MooncakeTransfer,
     ensure_mooncake_available,
 )
+from vllm.distributed.ec_transfer.ec_connector.mooncake_store_embedding.data import (
+    build_embedding_key_metadata,
+)
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip
 
@@ -58,6 +61,10 @@ _T = TypeVar("_T")
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+    from ..mooncake_store_embedding.backend import (
+        MooncakeEmbeddingStoreBackend,
+    )
 
 _RESERVATION_REFRESH_SECONDS = _RESERVATION_TTL_SECONDS / 2
 _MAX_CANCELLED_TRANSFER_IDS = 1 << 16
@@ -87,6 +94,16 @@ class ECMooncakeWorker:
     def __init__(self, vllm_config: VllmConfig) -> None:
         ensure_mooncake_available()
         config = MooncakeECConfig.from_vllm_config(vllm_config)
+        self._store_config = (
+            (
+                build_embedding_key_metadata(vllm_config),
+                config.store_max_pending_items,
+                config.store_max_pending_bytes,
+            )
+            if config.cross_encoder_cache
+            else None
+        )
+        self._output_store: MooncakeEmbeddingStoreBackend | None = None
         self.is_producer = config.is_producer
         self.is_consumer = config.is_consumer
         self._buffer_device = config.buffer_device
@@ -173,6 +190,21 @@ class ECMooncakeWorker:
             self._is_receiving_rank = True
 
     def start_services(self) -> None:
+        if self._store_config is not None and self._output_store is None:
+            from ..mooncake_store_embedding.backend import (
+                MooncakeEmbeddingStoreBackend,
+            )
+            from ..mooncake_store_embedding.store_client import (
+                create_mooncake_embedding_store_client,
+            )
+
+            key_metadata, max_items, max_bytes = self._store_config
+            self._output_store = MooncakeEmbeddingStoreBackend(
+                create_mooncake_embedding_store_client(),
+                key_metadata,
+                max_pending_items=max_items,
+                max_pending_bytes=max_bytes,
+            )
         if not self.is_consumer or self._control_server is not None:
             return
         self._resolve_consumer_rank()
@@ -470,6 +502,14 @@ class ECMooncakeWorker:
             tensor = encoder_cache.get(mm_hash)
             if tensor is not None:
                 self._bind_push_source(tensor, mm_hash)
+        if self._output_store is not None:
+            loaded = self._output_store.resolve_inputs(
+                metadata.store_candidates, encoder_cache, self._buffer_device
+            )
+            # Loaded entries precede the runner's new-output snapshot, so they
+            # need explicit P2P source binding here.
+            for mm_hash in loaded:
+                self._bind_push_source(encoder_cache[mm_hash], mm_hash)
 
     def _reserve_batch(self, records: list[ProducerPushRecord]) -> None:
         """Resolve independent item futures with one reserve RPC per shard."""
@@ -851,6 +891,8 @@ class ECMooncakeWorker:
         if not self.is_producer:
             return None, None
 
+        if self._output_store is not None:
+            self._output_store.reap()
         for record in self._producer_pushes.cancel_requests(finished_req_ids):
             self._producer_pushes.submit_cancel(
                 record,
@@ -866,6 +908,8 @@ class ECMooncakeWorker:
             return
         tensor = encoder_cache[mm_hash]
         self._bind_push_source(tensor, mm_hash)
+        if self._output_store is not None:
+            self._output_store.record_output(mm_hash, tensor)
 
     def build_connector_worker_meta(self) -> ECMooncakeWorkerMetadata | None:
         if self.is_consumer and not self._is_receiving_rank:
@@ -894,6 +938,8 @@ class ECMooncakeWorker:
         self._failed_saves = set()
         self._completed_loads = set()
         self._failed_loads = set()
+        if self._output_store is not None:
+            self._output_store.publish_outputs()
         return meta
 
     def close(self) -> None:
@@ -938,3 +984,6 @@ class ECMooncakeWorker:
             )
         self._producer_memory.close()
         self._transfer.close()
+        if self._output_store is not None:
+            self._output_store.shutdown()
+            self._output_store = None
