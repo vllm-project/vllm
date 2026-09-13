@@ -495,7 +495,7 @@ class HummingLinearMethod(LinearMethodBase):
             return None
 
         # convert from checkpoint format to humming format
-        is_humming_weight = not isinstance(self.weight_schema, _hm.HummingWeightSchema)
+        is_humming_weight = isinstance(self.weight_schema, _hm.HummingWeightSchema)
         is_humming_input = isinstance(self.input_schema, _hm.HummingInputSchema)
 
         if not is_humming_weight or not is_humming_input:
