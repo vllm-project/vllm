@@ -1304,6 +1304,22 @@ def is_full_attention_spec(kv_cache_spec: KVCacheSpec) -> bool:
     )
 
 
+def uses_generic_slot_mapping(kv_cache_spec: KVCacheSpec) -> bool:
+    """Whether the generic position-indexed slot-mapping kernel may serve a
+    KV cache group.
+
+    Builder-managed groups are excluded: ``CircularBufferSpec`` and
+    ``KpoolTailSpec`` rows hold a single block per request whose slot mapping
+    is computed by their own attention metadata builders, so the generic
+    ``pos // kernel_block_size`` column lookup would index past the row and
+    read unmaterialized block ids (#56380).
+    """
+    layer_specs = iter_layer_specs(kv_cache_spec)
+    return not any(
+        isinstance(spec, (CircularBufferSpec, KpoolTailSpec)) for spec in layer_specs
+    )
+
+
 def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         inner_kinds = {
