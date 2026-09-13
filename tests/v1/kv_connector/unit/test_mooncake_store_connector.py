@@ -159,6 +159,29 @@ def test_scheduler_role_initializes_store_scheduler_only():
     mock_scheduler.return_value.bind_gpu_block_pool.assert_called_once_with(block_pool)
 
 
+def test_pp_aware_handshake_metadata_is_accepted_and_ignored():
+    """A pipeline-parallel producer hands every connector handshake metadata
+    keyed by (pp_rank, tp_rank). The store connector never reads it, so PP
+    shards must not make it refuse to start."""
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreScheduler"
+        ),
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+        )
+
+    connector.set_xfer_handshake_metadata_pp_aware(
+        {(0, 0): MagicMock(), (1, 0): MagicMock()}
+    )
+
+
 def test_worker_methods_delegate_to_store_worker():
     vllm_config = _make_vllm_config()
     kv_cache_config = _make_kv_cache_config()
