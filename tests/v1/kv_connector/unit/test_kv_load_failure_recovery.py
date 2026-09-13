@@ -242,8 +242,8 @@ def test_sync_load_failure_with_shared_blocks(
 
     assert len(scheduler.running) == 2
     assert len(scheduler_output.scheduled_new_reqs) == 2
-    for request in scheduler_output.scheduled_new_reqs:
-        assert request.num_computed_tokens == expected_computed_tokens[request.req_id]
+    for new_req in scheduler_output.scheduled_new_reqs:
+        assert new_req.num_computed_tokens == expected_computed_tokens[new_req.req_id]
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 2
 
     # Simulate a failure in loading some of the shared blocks.

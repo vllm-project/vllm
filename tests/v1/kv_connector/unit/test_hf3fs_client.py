@@ -121,8 +121,8 @@ class TestHf3fsClientResourceManagement:
 
         # Manually point internal handles to our controllable fakes so that
         # assertions after close() can inspect them directly.
-        client.shm_r = fake_shm_r
-        client.shm_w = fake_shm_w
+        client.shm_r = fake_shm_r  # type: ignore[assignment]
+        client.shm_w = fake_shm_w  # type: ignore[assignment]
         client.file = 99
         return client, fake_shm_r, fake_shm_w
 

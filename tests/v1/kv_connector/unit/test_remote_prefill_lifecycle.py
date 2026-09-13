@@ -126,6 +126,7 @@ def test_basic_lifecycle():
     scheduled_req = scheduler_output.scheduled_new_reqs[0]
     num_scheduled_tokens = scheduler_output.num_scheduled_tokens[request_id]
     num_computed_tokens = scheduled_req.num_computed_tokens
+    assert scheduled_req.prompt_token_ids is not None
     total_prompt_tokens = len(scheduled_req.prompt_token_ids)
     assert num_scheduled_tokens == total_prompt_tokens - num_computed_tokens
 
@@ -633,6 +634,7 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
     # ── Step 1: first chunk ──
     scheduler_output = scheduler.schedule()
 
+    assert request.prompt_token_ids is not None
     assert len(request.prompt_token_ids) == NUM_TOKENS - 1
     assert request.max_tokens == 1
     assert scheduler_output.num_scheduled_tokens[request_id] == BATCH_SIZE

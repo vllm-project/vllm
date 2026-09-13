@@ -150,11 +150,11 @@ def _make_mock_worker_for_splits(group_spec_types):
     """
     worker = object.__new__(NixlConnectorWorker)
     worker._group_spec_types = group_spec_types
-    worker.transfer_topo = SimpleNamespace(virtually_split_kv_in_blocks=False)
+    worker.transfer_topo = SimpleNamespace(virtually_split_kv_in_blocks=False)  # type: ignore[assignment]
     worker.block_len_per_layer = []
     worker.num_regions = 0
     worker._region_is_mla = []
-    worker._conv_decomp = SimpleNamespace(local_conv_offsets=())
+    worker._conv_decomp = SimpleNamespace(local_conv_offsets=())  # type: ignore[assignment]
     worker._ssm_region_indices = [0] if MambaSpec in group_spec_types else []
     worker._ple_region_index = None
     return worker
@@ -306,7 +306,7 @@ def test_csa_linear_tp_layout_boundary(total_kv_heads, local_tp, remote_tp, comp
     worker = object.__new__(NixlConnectorWorker)
     worker.world_size = local_tp
     worker._is_csa_linear = True
-    worker.transfer_topo = SimpleNamespace(total_num_kv_heads=total_kv_heads)
+    worker.transfer_topo = SimpleNamespace(total_num_kv_heads=total_kv_heads)  # type: ignore[assignment]
 
     if compatible:
         worker._validate_csa_linear_tp_layout(remote_tp)
