@@ -568,8 +568,15 @@ def test_peak_memory_bounded():
     assert charged > 0, (
         "no token was penalized, so this test did not reach the penalty path"
     )
-    # generous headroom over the budget for l_max, W and allocator slack
-    assert peak < 2 * _CHUNK_BYTE_BUDGET, f"peak transient {peak / 2**20:.0f} MiB"
+    # A real ceiling, not a formality. The old bound was 2 * _CHUNK_BYTE_BUDGET
+    # (512 MiB) against a measured peak of 100-165 MiB, which would have let a
+    # 3x regression pass unnoticed - and a 3x regression is what the dense
+    # [R, vocab] penalty formulation this test guards against looked like.
+    # 320 MiB keeps headroom for allocator slack and for the l_max floor at
+    # larger vocabularies while still failing on a return to dense.
+    limit = 320 * 1024 * 1024
+    assert limit < 2 * _CHUNK_BYTE_BUDGET, "bound must beat the chunk budget"
+    assert peak < limit, f"peak {peak / 2**20:.0f} MiB over {limit / 2**20:.0f} MiB"
 
 
 def _validate_with_runner(params, *, use_v2_model_runner):
