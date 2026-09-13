@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -35,23 +36,33 @@ class MHCPreNormKernel(VllmJitKernel["MHCPreNormKernel.CompileKey"]):
         use_pre_mix_in: bool
         rms_numel: int
         save_pre_mix: bool = True
+        write_aux: bool = False
 
     kernel: Any = staticmethod(mhc_pre_big_fuse_with_norm_tilelang)
 
     def dispatch(self, *, n_splits, **fields) -> CompileKey:  # type: ignore[override]
         return self.CompileKey(n_splits=n_splits, **fields)
 
-    def get_warmup_keys(self, *, max_tokens: int, **fields) -> list[CompileKey]:
-        # The split heuristic changes only at 64-token boundaries.
-        splits = (
-            sorted(
+    def get_warmup_keys(
+        self,
+        *,
+        max_tokens: int,
+        extra_splits: Iterable[int] = (),
+        **fields,
+    ) -> list[CompileKey]:
+        # The split heuristic changes only at 64-token boundaries. Callers that
+        # reach this kernel through another GEMM (the fused post + pre-norm
+        # GEMM) pass the splits that GEMM picks in extra_splits.
+        splits = sorted(
+            set(extra_splits)
+            | (
                 {
                     compute_mhc_pre_num_splits(fields["rms_numel"], num_tokens)
                     for num_tokens in range(1, max_tokens + 1, 64)
                 }
+                if is_deep_gemm_supported()
+                else {1}
             )
-            if is_deep_gemm_supported()
-            else [1]
         )
         return self._trace_dispatch(self.dispatch)(n_splits=splits, **fields)
 
