@@ -253,18 +253,6 @@ def check_and_fallback_input_schema(
             param_dtype = torch.bfloat16 if sm_version >= 80 else torch.float16
     assert param_dtype in (torch.float16, torch.bfloat16)
 
-    dtype_min_sm_version_map = {
-        humming_dtypes.float16: 75,
-        humming_dtypes.bfloat16: 80,
-        humming_dtypes.float8e5m2: 89,
-        humming_dtypes.float8e4m3: 89,
-        humming_dtypes.float8e3m4: 120,
-        humming_dtypes.float4e2m1: 120,
-        humming_dtypes.float4e0m3: 120,
-        humming_dtypes.int8: 75,
-        humming_dtypes.int4: 80,
-    }
-
     dtype_fallback_order_map = {
         humming_dtypes.float8e5m2: (
             humming_dtypes.float8e4m3,
@@ -305,99 +293,87 @@ def check_and_fallback_input_schema(
     weight_schema = weight_schema.to_humming_schema(param_dtype)
     input_schema = input_schema.to_humming_schema(param_dtype)
     input_dtype = input_schema.input_dtype
-    input_scale_group_size = input_schema.input_scale_group_size
+    input_bits = input_dtype.num_bits if input_dtype is not None else 16
+    input_group_size = input_schema.input_scale_group_size
     input_scale_dtype = input_schema.input_scale_dtype
     input_quant_mode = input_schema.input_quant_mode
 
-    if input_dtype is None or input_dtype.num_bits == 16:
-        return input_schema
+    def is_deprecated(dtype: "humming_dtypes.DataType | None") -> bool:
+        is_int4_deprecated = dtype == humming_dtypes.int4 and sm_version >= 90
+        is_int8_deprecated = dtype == humming_dtypes.int8 and 103 <= sm_version < 110
+        return is_int4_deprecated or is_int8_deprecated
 
-    min_sm_version = dtype_min_sm_version_map[input_dtype]
-    if sm_version >= min_sm_version:
-        is_dtype_deprecated = False
-        if input_dtype == humming_dtypes.int4:
-            is_dtype_deprecated = sm_version >= 90
-        elif input_dtype == humming_dtypes.int8:
-            is_dtype_deprecated = sm_version >= 103 and sm_version < 110
-
+    if input_schema.is_compatible_with(weight_schema, param_dtype):
         if not allow_fallback:
-            if is_dtype_deprecated:
+            if is_deprecated(input_dtype):
                 logger.warning_once(f"{input_dtype} is deprecated on SM{sm_version}")
             return input_schema
 
-        if not is_dtype_deprecated:
+        if input_dtype is None or input_dtype.num_bits == 16:
+            return input_schema
+
+        if not is_deprecated(input_dtype):
             is_mxfp8 = (
                 input_dtype.is_floating_point_type
                 and input_dtype.num_bits == 8
-                and input_scale_group_size == 32
+                and input_group_size == 32
                 and input_scale_dtype == humming_dtypes.float8e8m0
                 and sm_version >= 120
             )
-            num_bits = input_dtype.num_bits
-            if num_bits == 8 and input_scale_group_size >= 0 and not is_mxfp8:
-                # prefer tokenwise fp8/int8 for better performance
-                input_scale_group_size = 0
-                input_scale_dtype = humming_dtypes.float32
-                if input_quant_mode != InputQuantizationMode.StaticTensor:
-                    input_quant_mode = InputQuantizationMode.DynamicToken
+            if input_bits == 8 and input_group_size >= 0 and not is_mxfp8:
+                # Prefer tokenwise fp8/int8 when the weight pairing allows it.
+                new_quant_mode = InputQuantizationMode.DynamicToken
+                if input_quant_mode == InputQuantizationMode.StaticTensor:
+                    new_quant_mode = InputQuantizationMode.StaticTensor
+                candidate = HummingInputSchema(
+                    input_dtype=input_dtype,
+                    input_scale_group_size=0,
+                    input_scale_dtype=humming_dtypes.float32,
+                    input_quant_mode=new_quant_mode,
+                )
+                if candidate.is_compatible_with(weight_schema, param_dtype):
+                    return candidate
+            return input_schema
 
-            return HummingInputSchema(
-                input_dtype=input_dtype,
-                input_scale_group_size=input_scale_group_size,
-                input_scale_dtype=input_scale_dtype,
-                input_quant_mode=input_quant_mode,
+    if allow_fallback:
+        fallback_dtypes = (
+            input_dtype,
+            *dtype_fallback_order_map.get(input_dtype, ()),
+            humming_dtypes.DataType.from_any(param_dtype),
+        )
+        for dtype in fallback_dtypes:
+            if dtype is None or is_deprecated(dtype):
+                continue
+
+            group_size = 0
+            scale_dtype = humming_dtypes.float32
+            quant_mode = InputQuantizationMode.DynamicToken
+            if dtype.num_bits == 16:
+                scale_dtype = None
+                quant_mode = InputQuantizationMode.Disabled
+            elif dtype in (humming_dtypes.float8e4m3, humming_dtypes.float8e3m4):
+                is_channelwise_weight = weight_schema.weight_scale_group_size == 0
+                weight_group_size = weight_schema.weight_scale_group_size
+                is_e8m0_scale = weight_schema.bs_dtype == humming_dtypes.float8e8m0
+                is_mx_weight = weight_group_size == 32 and is_e8m0_scale
+                if sm_version >= 120 and (is_channelwise_weight or is_mx_weight):
+                    group_size = 32
+                    scale_dtype = humming_dtypes.float8e8m0
+                    quant_mode = InputQuantizationMode.DynamicGroup
+
+            candidate = HummingInputSchema(
+                input_dtype=dtype,
+                input_scale_group_size=group_size,
+                input_scale_dtype=scale_dtype,
+                input_quant_mode=quant_mode,
             )
+            if candidate.is_compatible_with(weight_schema, param_dtype):
+                return candidate
 
-    if not allow_fallback:
-        raise ValueError(f"{input_schema.input_dtype} requires SM{min_sm_version}+")
-
-    b_dtype = weight_schema.b_dtype
-    bs_dtype = weight_schema.bs_dtype
-    for dtype in dtype_fallback_order_map[input_dtype]:
-        dtype_min_sm_version = dtype_min_sm_version_map[dtype]
-        if sm_version < dtype_min_sm_version:
-            continue
-        elif dtype == humming_dtypes.int4:
-            if sm_version >= 90 or input_scale_group_size > 0:
-                continue
-        elif dtype == humming_dtypes.int8:
-            if sm_version >= 103 and sm_version < 110:
-                continue
-            is_e8m0_scale = bs_dtype == humming_dtypes.float8e8m0
-            is_mx_weight = weight_schema.weight_scale_group_size == 32 and is_e8m0_scale
-            is_mxfp4 = is_mx_weight and b_dtype == humming_dtypes.float4e2m1
-            if not is_mxfp4 and not b_dtype.is_integer_type:
-                continue
-        elif b_dtype == humming_dtypes.int8:
-            continue
-
-        input_dtype = dtype
-        break
-    else:
-        input_dtype = humming_dtypes.DataType.from_any(param_dtype)
-
-    input_scale_group_size = 0
-    input_scale_dtype = humming_dtypes.float32
-    input_quant_mode = InputQuantizationMode.DynamicToken
-    if input_dtype.num_bits == 16:
-        input_scale_dtype = None
-        input_quant_mode = InputQuantizationMode.Disabled
-
-    if input_dtype in [humming_dtypes.float8e4m3, humming_dtypes.float8e3m4]:
-        is_channelwise_weight = weight_schema.weight_scale_group_size == 0
-        is_e8m0_scale = weight_schema.bs_dtype == humming_dtypes.float8e8m0
-        is_mx_weight = weight_schema.weight_scale_group_size == 32 and is_e8m0_scale
-
-        if sm_version >= 120 and (is_channelwise_weight or is_mx_weight):
-            input_scale_group_size = max(32, weight_schema.weight_scale_group_size)
-            input_scale_dtype = humming_dtypes.float8e8m0
-            input_quant_mode = InputQuantizationMode.DynamicGroup
-
-    return HummingInputSchema(
-        input_dtype=input_dtype,
-        input_scale_group_size=input_scale_group_size,
-        input_scale_dtype=input_scale_dtype,
-        input_quant_mode=input_quant_mode,
+    raise ValueError(
+        f"No compatible Humming input schema for {input_schema} with "
+        f"weight schema {weight_schema} on SM{sm_version} "
+        f"({allow_fallback=})"
     )
 
 
