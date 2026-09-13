@@ -1268,6 +1268,15 @@ def wait_for_engine_startup(
         and not parallel_config.data_parallel_external_lb
     )
 
+    parallel_config_keys: tuple[str, ...] = (
+        "data_parallel_master_ip",
+        "data_parallel_master_port",
+        "_data_parallel_master_port_list",
+        "data_parallel_size",
+    )
+    if parallel_config._snapshot_data_parallel_port_list is not None:
+        parallel_config_keys += ("_snapshot_data_parallel_port_list",)
+
     # 1. Engine processes
     if isinstance(launch.engine_manager, CoreEngineProcManager):
         for sentinel in launch.engine_manager.sentinels():
@@ -1367,13 +1376,7 @@ def wait_for_engine_startup(
                 EngineHandshakeMetadata(
                     addresses=launch.addresses,
                     parallel_config={
-                        k: getattr(parallel_config, k)
-                        for k in (
-                            "data_parallel_master_ip",
-                            "data_parallel_master_port",
-                            "_data_parallel_master_port_list",
-                            "data_parallel_size",
-                        )
+                        k: getattr(parallel_config, k) for k in parallel_config_keys
                     }
                     if coordinated_dp
                     else {},

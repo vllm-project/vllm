@@ -228,6 +228,10 @@ class Platform:
         # all ROCm platforms for now.
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.XPU)
 
+    def is_restore(self) -> bool:
+        """Return whether the process was restored from a container snapshot."""
+        return False
+
     def is_cumem_allocator_available(self) -> bool:
         try:
             from vllm.device_allocator.cumem import cumem_available

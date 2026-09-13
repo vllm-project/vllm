@@ -5,6 +5,7 @@
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config_or_none
 from vllm.model_executor.custom_op import CustomOp
 
 from .common import ApplyRotaryEmb
@@ -60,7 +61,14 @@ class RotaryEmbeddingBase(CustomOp):
             if not self.use_flashinfer:
                 cache = cache.to(dtype)
             self.cos_sin_cache: torch.Tensor
-            self.register_buffer("cos_sin_cache", cache, persistent=False)
+            vllm_config = get_current_vllm_config_or_none()
+            self.register_buffer(
+                "cos_sin_cache",
+                cache,
+                persistent=(
+                    vllm_config is not None and vllm_config.snapshot_config is not None
+                ),
+            )
 
             # Reuse a precomputed bf16 cache for the AITER compile path.
             if self.use_aiter and cache.dtype != torch.bfloat16:
