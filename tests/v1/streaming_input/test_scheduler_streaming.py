@@ -13,6 +13,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
@@ -73,6 +74,40 @@ def create_scheduler() -> Scheduler:
         ],
     )
     return Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        log_stats=True,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+        block_size=16,
+        hash_block_size=16,
+    )
+
+
+def create_async_scheduler() -> AsyncScheduler:
+    vllm_config = VllmConfig(device_config=DeviceConfig("cpu"))
+    vllm_config.model_config = MagicMock()
+    vllm_config.model_config.skip_tokenizer_init = True
+    vllm_config.model_config.is_multimodal_model = False
+    vllm_config.model_config.is_encoder_decoder = False
+    vllm_config.model_config.is_diffusion = False
+    vllm_config.model_config.max_model_len = 1024
+    vllm_config.model_config.enable_return_routed_experts = False
+    vllm_config.cache_config = MagicMock()
+    vllm_config.cache_config.num_gpu_blocks = 1000
+    vllm_config.cache_config.enable_prefix_caching = False
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1000,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+                ),
+            )
+        ],
+    )
+    return AsyncScheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         log_stats=True,
@@ -577,3 +612,73 @@ class TestStreamingScheduler(unittest.TestCase):
             cached_state_cycle1["prompt_token_ids"]
             is not cached_state_cycle3["prompt_token_ids"]
         ), "Cached states from different cycles should be independent objects."
+
+    def test_streaming_async_stale_in_flight_tokens(self):
+        """Test that in-flight tokens from a finished turn in AsyncScheduler
+        are cleanly marked as stale and dropped without causing placeholder
+        underflow or dual-scheduling."""
+        scheduler = create_async_scheduler()
+
+        req = DummyRequest(
+            request_id="session_stale_async",
+            prompt_token_ids=[1, 2, 3],
+            resumable=True,
+            max_tokens=10,
+        )
+        scheduler.add_request(req)
+
+        # Dispatch step A (Turn 1 Decode 1)
+        out_a = scheduler.schedule()
+        req.is_prefill_chunk = False
+        scheduler._update_after_schedule(out_a)
+
+        # Pre-schedule step B into async pipeline (Turn 1 Decode 2)
+        out_b = scheduler.schedule()
+        req.is_prefill_chunk = False
+        scheduler._update_after_schedule(out_b)
+
+        assert req.num_in_flight_tokens > 0
+        assert req.num_output_placeholders > 0
+
+        # Enqueue Turn 2
+        turn2 = DummyRequest(
+            request_id="session_stale_async",
+            prompt_token_ids=[4, 5],
+            resumable=True,
+            max_tokens=10,
+        )
+        scheduler.add_request(turn2)
+
+        # Step A returns with stop token, completing Turn 1
+        req.num_computed_tokens = 3
+        mro_a = ModelRunnerOutput(
+            req_ids=["session_stale_async"],
+            req_id_to_index={"session_stale_async": 0},
+            sampled_token_ids=[[STOP_TOKEN]],
+            logprobs=None,
+            prompt_logprobs_dict={"session_stale_async": None},
+            pooler_output=[],
+        )
+        scheduler.update_from_output(out_a, mro_a)
+
+        # In-flight tokens must be marked stale, placeholders reset
+        assert req.drop_stale_output is True
+        assert req.num_stale_output_tokens == req.num_in_flight_tokens
+        assert req.num_output_placeholders == 0
+
+        # Step B returns late. Output must be dropped and not underflow placeholders
+        mro_b = ModelRunnerOutput(
+            req_ids=["session_stale_async"],
+            req_id_to_index={"session_stale_async": 0},
+            sampled_token_ids=[[100]],
+            logprobs=None,
+            prompt_logprobs_dict={"session_stale_async": None},
+            pooler_output=[],
+        )
+        scheduler.update_from_output(out_b, mro_b)
+        assert req.num_output_placeholders == 0
+
+        # Next scheduling cycle schedules Turn 2 cleanly
+        out_c = scheduler.schedule()
+        assert "session_stale_async" in out_c.num_scheduled_tokens
+        assert req.status == RequestStatus.RUNNING
