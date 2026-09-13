@@ -8,6 +8,8 @@ Known Issues:
   test_backend_correctness[small_prefill], but passes when run alone.
 """
 
+import hashlib
+import json
 import sys
 from types import SimpleNamespace
 
@@ -67,6 +69,243 @@ if current_platform.is_rocm():
     BACKENDS_TO_TEST.append(AttentionBackendEnum.ROCM_AITER_MLA)
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def _trtllm_ragged_dcp_parity_case(config, rank, world, query_len, seed, k_scale):
+    from vllm.distributed import get_dcp_group
+    from vllm.model_executor.layers.attention.mla_attention import (
+        MLACommonBaseImpl,
+        MLACommonPrefillMetadata,
+    )
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+        FlashInferMLASparseImpl,
+    )
+    from vllm.v1.attention.backends.mla.prefill.trtllm_ragged import (
+        TrtllmRaggedPrefillBackend,
+    )
+    from vllm.v1.attention.ops.dcp import MLADCPManager
+
+    device, dtype = torch.device(f"cuda:{rank}"), torch.bfloat16
+    torch.manual_seed(seed)
+    heads, kv_rank, nope_dim, rope_dim, v_dim = 64, 512, 192, 64, 256
+    contexts = [0, 1, 63, 64, 65, 255, 256, 257, 2049]
+    batch, tokens = len(contexts), len(contexts) * query_len
+    capacity = cdiv(max(contexts) + query_len, 256) * 256
+    q_full = torch.randn(tokens, heads, nope_dim + rope_dim, device=device, dtype=dtype)
+    kv = torch.randn(batch, capacity, kv_rank + rope_dim, device=device, dtype=dtype)
+    weight = torch.randn(heads, nope_dim + v_dim, kv_rank, device=device, dtype=dtype)
+    weight = (weight / kv_rank**0.5).to(dtype)
+    input_hashes = {
+        name: hashlib.sha256(
+            value.view(torch.uint8).cpu().numpy().tobytes()
+        ).hexdigest()
+        for name, value in (("query", q_full), ("kv", kv), ("kv_b_weight", weight))
+    }
+    q = q_full.chunk(world, dim=1)[rank].contiguous()
+    positions = torch.arange(capacity, device=device)
+    owned = positions[(positions // 64) % world == rank]
+    blocks_per_req = owned.numel() // 64
+    block_table = (
+        torch.randperm(batch * blocks_per_req, device=device)
+        .add(1)
+        .reshape(batch, blocks_per_req)
+        .to(torch.int32)
+    )
+    local_positions = torch.arange(owned.numel(), device=device)
+    slots = (
+        block_table[:, local_positions // 64].long() * 64 + local_positions % 64
+    ).flatten()
+    cache = torch.zeros(
+        batch * blocks_per_req + 1,
+        64,
+        kv_rank + rope_dim,
+        dtype=torch.float8_e4m3fn,
+        device=device,
+    )
+    local_kv = kv[:, owned].reshape(-1, kv_rank + rope_dim)
+    scale_tensor = torch.tensor(k_scale, device=device, dtype=torch.float32)
+    # Include future tokens in the cache to expose incorrect context bounds.
+    ops.concat_and_cache_mla(
+        local_kv[:, :kv_rank], local_kv[:, kv_rank:], cache, slots, "fp8", scale_tensor
+    )
+    proj = ColumnParallelLinear(
+        kv_rank, heads * (nope_dim + v_dim), bias=False, params_dtype=dtype
+    ).to(device)
+    with torch.no_grad():
+        proj.weight.copy_(weight.chunk(world, dim=0)[rank].flatten(0, 1))
+    backend = TrtllmRaggedPrefillBackend(
+        num_heads=heads // world,
+        scale=(nope_dim + rope_dim) ** -0.5,
+        kv_lora_rank=kv_rank,
+        qk_nope_head_dim=nope_dim,
+        qk_rope_head_dim=rope_dim,
+        v_head_dim=v_dim,
+        vllm_config=config,
+    )
+    # Reuse the production dense-prefill implementation inherited by sparse MLA.
+    impl = object.__new__(FlashInferMLASparseImpl)
+    impl.num_heads, impl.kv_lora_rank = heads // world, kv_rank
+    impl.qk_nope_head_dim, impl.qk_rope_head_dim = nope_dim, rope_dim
+    impl.v_head_dim, impl.kv_cache_dtype, impl.kv_b_proj = v_dim, "fp8", proj
+    impl.dcp_world_size, impl._use_flashinfer_concat_mla_k = world, False
+    query_starts = torch.arange(batch + 1, dtype=torch.int32) * query_len
+    workspace_size = 1024  # Force multiple chunks, including continuation chunks.
+    workspace = torch.empty(
+        workspace_size + (workspace_size // world if world > 1 else 0),
+        kv_rank + rope_dim,
+        dtype=dtype,
+        device=device,
+    )
+    manager = None
+    if world > 1:
+        manager = MLADCPManager(
+            config,
+            device,
+            heads // world,
+            kv_rank + rope_dim,
+            kv_rank,
+            dtype,
+            dtype,
+            None,
+            True,
+            False,
+        )
+        manager.init_kv_gather(workspace, workspace_size)
+    chunks = build_mla_chunked_context_metadata(
+        context_lens_cpu=torch.tensor(contexts, dtype=torch.int32),
+        prefill_query_start_loc_cpu=query_starts,
+        chunked_prefill_workspace=workspace,
+        chunked_prefill_workspace_size=workspace_size,
+        block_size=64,
+        align_chunk_to_block=True,
+        device=device,
+        dcp_world_size=world,
+        dcp_local_block_size=64,
+        dcp_virtual_block_size=64 * world,
+        dcp_manager=manager,
+    )
+    assert chunks is not None and any(chunk.is_continuation for chunk in chunks.chunks)
+    prefill = MLACommonPrefillMetadata(
+        block_table=block_table,
+        query_start_loc=query_starts.to(device),
+        max_query_len=query_len,
+        chunked_context=chunks,
+        q_data_type=dtype,
+        output_dtype=dtype,
+        prefill_backend=backend,
+    )
+    backend.prepare_metadata(prefill)
+    new_kv = torch.cat(
+        [kv[i, context : context + query_len] for i, context in enumerate(contexts)]
+    )
+    out = torch.empty(tokens, heads // world, v_dim, device=device, dtype=dtype)
+    with torch.inference_mode():
+        MLACommonBaseImpl.forward_mha(
+            impl,
+            q,
+            new_kv[:, :kv_rank],
+            new_kv[:, kv_rank:].unsqueeze(1),
+            cache,
+            SimpleNamespace(prefill=prefill),
+            scale_tensor,
+            out,
+        )
+    if world > 1:
+        out = get_dcp_group().all_gather(out, dim=1)
+    result = {"out": out.cpu(), "input_hashes": input_hashes}
+    if world == 1:
+        canonical = (
+            (cache.view(-1, kv_rank + rope_dim)[slots].float() * k_scale)
+            .to(dtype)
+            .reshape(batch, capacity, kv_rank + rope_dim)
+        )
+        oracle = torch.empty(tokens, heads, v_dim, device=device)
+        # Independent dense FP32 attention with the same BF16 projected K/V.
+        # Each row sees all cached context and only its causal new-token prefix.
+        with torch.inference_mode():
+            for req, context in enumerate(contexts):
+                source = torch.cat(
+                    (canonical[req, :context], kv[req, context : context + query_len])
+                )
+                projected = proj(source[:, :kv_rank])[0].view(
+                    -1, heads, nope_dim + v_dim
+                )
+                k_nope, value = projected.split((nope_dim, v_dim), -1)
+                key = torch.cat(
+                    (k_nope, source[:, None, kv_rank:].expand(-1, heads, -1)), -1
+                )
+                query = q_full[req * query_len : (req + 1) * query_len]
+                scores = torch.einsum("qhd,khd->hqk", query.float(), key.float())
+                scores *= backend.scale
+                causal = torch.arange(source.shape[0], device=device)[None, :]
+                causal = (
+                    causal > context + torch.arange(query_len, device=device)[:, None]
+                )
+                scores.masked_fill_(causal[None], -torch.inf)
+                oracle[req * query_len : (req + 1) * query_len] = torch.einsum(
+                    "hqk,khd->qhd", scores.softmax(-1), value.float()
+                )
+        result["sdpa"] = oracle.cpu()
+    return result
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda()
+    or not current_platform.is_device_capability_family(100),
+    reason="TRTLLM ragged MLA requires SM100",
+)
+def test_trtllm_ragged_dcp4_interleave64_attention_matches_tp1(tmp_path):
+    """Real dense prefill outputs match TP1 after gathering block64 FP8 context.
+
+    Four GPUs exercise the production cache gather/reorganization, projection,
+    causal suffix, chunk continuation and attention-output merge. Four-token
+    and 65-token suffixes cover MTP3-sized masks and prefill block boundaries.
+    Sparse selection is tested separately by the sparse backend parity test.
+    """
+    from tests.v1.attention.test_indexer_dcp_localize import _mla_dcp_parity_worker
+
+    if torch.accelerator.device_count() < 4:
+        pytest.skip("Requires four GPUs for real TP4/DCP4 collectives")
+    for world in (1, 4):
+        torch.multiprocessing.spawn(
+            _mla_dcp_parity_worker,
+            args=(world, str(tmp_path), "trtllm_ragged"),
+            nprocs=world,
+            join=True,
+        )
+    metrics = []
+    for ref_path in sorted(tmp_path.glob("tp1-*.pt")):
+        ref = torch.load(ref_path, weights_only=True)
+        candidate = torch.load(
+            ref_path.with_name(ref_path.name.replace("tp1-", "tp4-")), weights_only=True
+        )
+        assert candidate["input_hashes"] == ref["input_hashes"]
+        delta = candidate["out"].float() - ref["out"].float()
+        row_relative_l2 = delta.flatten(1).norm(dim=1) / ref["out"].float().flatten(
+            1
+        ).norm(dim=1)
+        metrics.append(
+            {
+                "case": ref_path.stem.removeprefix("tp1-"),
+                "max_abs": delta.abs().max().item(),
+                "relative_l2": (delta.norm() / ref["out"].float().norm()).item(),
+                "max_row_relative_l2": row_relative_l2.max().item(),
+            }
+        )
+    assert len(metrics) == 8
+    (tmp_path / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
+    print(json.dumps(metrics, indent=2))
+    for ref_path in sorted(tmp_path.glob("tp1-*.pt")):
+        ref = torch.load(ref_path, weights_only=True)
+        candidate = torch.load(
+            ref_path.with_name(ref_path.name.replace("tp1-", "tp4-")), weights_only=True
+        )
+        torch.testing.assert_close(candidate["out"], ref["out"], rtol=0.01, atol=0.01)
+        for actual in (ref["out"], candidate["out"]):
+            error = (actual.float() - ref["sdpa"]).flatten(1).norm(dim=1)
+            assert (error / ref["sdpa"].flatten(1).norm(dim=1) < 0.01).all()
+    assert all(case["max_row_relative_l2"] < 0.01 for case in metrics)
 
 
 @pytest.mark.parametrize(

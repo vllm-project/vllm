@@ -43,3 +43,29 @@ steps:
   commands:
     - pytest -v -s v1/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
+
+- label: ":nvidia: (4xB200) MLA DCP Attention Parity"
+  key: mla-dcp-attention-parity-4xb200
+  timeout_in_minutes: 30
+  device: b200-k8s
+  num_devices: 4
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+    - .buildkite/test_areas/attention.yaml
+    - vllm/config/
+    - vllm/distributed/
+    - vllm/model_executor/layers/
+    - vllm/v1/attention/
+    - tests/v1/attention/
+  env:
+    VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: "2147483648"
+    OMP_NUM_THREADS: "8"
+  commands:
+    - >-
+      python -c "import torch; from vllm.platforms import current_platform;
+      assert current_platform.is_cuda() and current_platform.is_device_capability_family(100), 'Requires SM100 GPUs';
+      assert torch.accelerator.device_count() >= 4, 'Requires four GPUs'"
+    - >-
+      pytest -v -s -rs
+      v1/attention/test_indexer_dcp_localize.py::test_sparse_dcp4_interleave64_attention_matches_tp1
+      v1/attention/test_mla_backends.py::test_trtllm_ragged_dcp4_interleave64_attention_matches_tp1
