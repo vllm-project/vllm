@@ -18,6 +18,8 @@ from vllm.entrypoints.chat_utils import (
     MEDIA_CONNECTOR_REGISTRY,
     AsyncMultiModalItemTracker,
     ConversationMessage,
+    _load_embeds_dict,
+    _parse_metadata_array,
     _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
@@ -37,6 +39,45 @@ PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 QWEN2AUDIO_MODEL_ID = "Qwen/Qwen2-Audio-7B-Instruct"
 QWEN25OMNI_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
 MISTRAL_MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+
+
+@pytest.mark.parametrize("values", [[1, 32, 48], [0.0, 0.12345678912345678]])
+def test_json_metadata_preserves_numeric_precision(values):
+    tensor = _parse_metadata_array("grid", values, {"grid"})
+    assert tensor.tolist() == values
+    assert tensor.dtype == (
+        torch.float64 if isinstance(values[0], float) else torch.int64
+    )
+
+
+@pytest.mark.parametrize(
+    "key,values",
+    [
+        ("image_embeds", [1, 2]),
+        ("grid", [True]),
+        ("grid", [float("nan")]),
+        ("grid", [float("inf")]),
+        ("grid", [[1, 2]]),
+        ("grid", [2**64]),
+    ],
+)
+def test_json_arrays_are_only_valid_numeric_metadata(key, values):
+    with pytest.raises(VLLMValidationError):
+        _parse_metadata_array(key, values, {"grid"})
+
+
+@pytest.mark.asyncio
+async def test_json_metadata_bypasses_tensor_deserialization():
+    from unittest.mock import AsyncMock
+
+    tensor = torch.ones(2, 3)
+    fetch = AsyncMock(return_value=tensor)
+    result = await _load_embeds_dict(
+        {"image_embeds": "legacy-base64", "image_grid_thw": [1, 2, 2]}, fetch
+    )
+    fetch.assert_awaited_once_with("legacy-base64")
+    assert result["image_embeds"] is tensor
+    assert result["image_grid_thw"] == [1, 2, 2]
 
 
 @pytest.fixture(scope="function")
@@ -1355,8 +1396,10 @@ def test_parse_chat_messages_empty_dict_image_embeds(
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
 
 
+@pytest.mark.parametrize("json_metadata", [False, True])
 def test_parse_chat_messages_multiple_dict_image_embeds(
     qwen25omni_model_config_image_embeds,
+    json_metadata,
 ):
     """Test that multiple dictionaries for image_embeds is handled without errors."""
     # Create two sample image embedding tensors
@@ -1374,7 +1417,9 @@ def test_parse_chat_messages_multiple_dict_image_embeds(
                         "type": "image_embeds",
                         "image_embeds": {
                             "image_embeds": tensor2base64(embeds),
-                            "image_grid_thw": tensor2base64(grid_thw),
+                            "image_grid_thw": grid_thw.tolist()
+                            if json_metadata
+                            else tensor2base64(grid_thw),
                         },
                     }
                     for embeds, grid_thw in zip(
@@ -2339,8 +2384,10 @@ def test_parse_chat_messages_include_thinking_chunk(mistral_model_config):
     assert conversation_with_thinking == expected_conversation
 
 
+@pytest.mark.parametrize("input_audio", [None, {}, {"data": "", "format": "wav"}])
 def test_parse_chat_messages_single_empty_audio_with_uuid(
     qwen2_audio_model_config,
+    input_audio,
 ):
     audio_uuid = "abcd"
     conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -2350,7 +2397,7 @@ def test_parse_chat_messages_single_empty_audio_with_uuid(
                 "content": [
                     {
                         "type": "input_audio",
-                        "input_audio": {},
+                        "input_audio": input_audio,
                         "uuid": audio_uuid,
                     },
                     {"type": "text", "text": "What does the audio say?"},
@@ -2373,8 +2420,10 @@ def test_parse_chat_messages_single_empty_audio_with_uuid(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("input_audio", [None, {}, {"data": "", "format": "wav"}])
 async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
     qwen2_audio_model_config,
+    input_audio,
 ):
     audio_uuid = "abcd"
     conversation, mm_data, mm_uuids = await parse_chat_messages_async(
@@ -2384,7 +2433,7 @@ async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
                 "content": [
                     {
                         "type": "input_audio",
-                        "input_audio": {},
+                        "input_audio": input_audio,
                         "uuid": audio_uuid,
                     },
                     {"type": "text", "text": "What does the audio say?"},

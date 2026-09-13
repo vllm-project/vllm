@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.distributed import get_dcp_group
 from vllm.forward_context import (
     DPMetadata,
     ForwardContext,
@@ -21,6 +22,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
+from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.ubatch_utils import (
@@ -76,16 +78,20 @@ def _slice_input_batch(
     ubatch_slice: UBatchSlice,
     query_start_loc_buf: torch.Tensor,
     seq_lens_buf: torch.Tensor,
+    dcp_local_seq_lens_buf: torch.Tensor | None = None,
+    *,
+    dcp_size: int = 1,
+    dcp_rank: int = 0,
+    cp_interleave: int = 1,
 ) -> InputBatch:
     """Build the sub-`InputBatch` a single microbatch runs on.
 
     A request straddling the boundary appears in both microbatches, its query
     truncated to the tokens each one owns.
 
-    Everything except `query_start_loc` and `seq_lens` is a view of the full
-    batch's buffers, so slicing costs no allocation. Those two are rebased onto
-    the microbatch's token range and written to the caller's buffers, which
-    keeps them valid under CUDA graph capture and replay.
+    Query offsets and sequence lengths (including DCP-local lengths) are
+    written to the caller's persistent buffers after truncation. Other GPU
+    inputs are views of the full batch's buffers.
 
     The sub-batch describes the forward pass only. Sampling runs once over the
     merged batch, so `logits_indices`, `cu_num_logits` and the draft-token
@@ -139,11 +145,18 @@ def _slice_input_batch(
     # max_query_len from this array see the microbatch's own lengths.
     num_scheduled_tokens = np.diff(query_start_loc_np)[:num_reqs]
 
-    dcp_local_seq_lens = input_batch.dcp_local_seq_lens
-    if dcp_local_seq_lens is not None:
-        # NOTE: a request split across microbatches keeps its full local
-        # seq_len here. DCP is not yet validated with DBO.
-        dcp_local_seq_lens = dcp_local_seq_lens[req_start:req_stop]
+    dcp_local_seq_lens = None
+    if dcp_size > 1:
+        assert dcp_local_seq_lens_buf is not None
+        dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
+            dcp_local_seq_lens_buf,
+            seq_lens,
+            num_reqs,
+            dcp_size,
+            dcp_rank,
+            cp_interleave,
+            num_reqs_padded=num_reqs_padded,
+        )
 
     return replace(
         input_batch,
@@ -174,6 +187,7 @@ def _slice_input_batch(
             if input_batch.prompt_lens is None
             else input_batch.prompt_lens[req_start:req_stop]
         ),
+        fast_prefill=None,
     )
 
 
@@ -278,6 +292,9 @@ class UBatchRunner:
         self.vllm_config = vllm_config
         self.parallel_config = vllm_config.parallel_config
         self.num_ubatches = self.parallel_config.num_ubatches
+        self.dcp_size = self.parallel_config.decode_context_parallel_size
+        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
+        self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
         self.device = device
         self.model_state = model_state
         self.attn_groups = attn_groups
@@ -291,6 +308,12 @@ class UBatchRunner:
         ]
         self.ubatch_seq_lens = [
             torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+            for _ in range(self.num_ubatches)
+        ]
+        self.ubatch_dcp_local_seq_lens = [
+            torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+            if self.dcp_size > 1
+            else None
             for _ in range(self.num_ubatches)
         ]
         self.comm_stream = torch.cuda.Stream(device=device)
@@ -320,6 +343,10 @@ class UBatchRunner:
                 ubatch_slice,
                 self.ubatch_query_start_loc[i],
                 self.ubatch_seq_lens[i],
+                self.ubatch_dcp_local_seq_lens[i],
+                dcp_size=self.dcp_size,
+                dcp_rank=self.dcp_rank,
+                cp_interleave=self.cp_interleave,
             )
             ubatch_slot_mappings = slot_mappings[:, ubatch_slice.token_slice]
             ubatch_block_tables = tuple(

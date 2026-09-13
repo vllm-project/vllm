@@ -98,6 +98,16 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     ROCM_FLASHMLA_SPARSE_DSV4 = (
         "vllm.models.deepseek_v4.amd.rocm.DeepseekV4ROCMAiterMLASparseBackend"
     )
+    # DeepSeek V4.1 sparse MLA backends (model-driven; selected via the V4.1
+    # layer). Separate names from DSV4 so a V4.1 model never resolves the
+    # V4.0 backend classes through this enum.
+    FLASHMLA_SPARSE_DSV41 = (
+        "vllm.models.deepseek_v4_1.sparse_mla.DeepseekV4FlashMLABackend"
+    )
+    FLASHINFER_MLA_SPARSE_DSV41 = (
+        "vllm.models.deepseek_v4_1.nvidia.flashinfer_sparse."
+        "DeepseekV4FlashInferMLASparseBackend"
+    )
     B12X = "vllm.v1.attention.backends.b12x.B12xPagedAttentionBackend"
     FLASH_ATTN_MLA = "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"
     FLASH_ATTN_MLA_SPARSE = (
