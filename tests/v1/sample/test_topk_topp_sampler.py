@@ -80,6 +80,10 @@ def test_rocm_aiter_sampler_defers_import_when_generators_force_native(
             return False
 
         @staticmethod
+        def is_cuda_alike():
+            return True
+
+        @staticmethod
         def is_cpu():
             return False
 

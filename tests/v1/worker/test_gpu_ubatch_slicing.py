@@ -22,7 +22,9 @@ import torch
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.config import CUDAGraphMode, ModelConfig, ParallelConfig, VllmConfig
 from vllm.forward_context import create_forward_context
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
 from vllm.v1.worker.gpu import dp_utils
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -581,3 +583,138 @@ def test_ubatch_runner_names_the_microbatch_that_failed():
     assert isinstance(result["error"], RuntimeError)
     assert "Microbatch 0" in str(result["error"])
     assert isinstance(result["error"].__cause__, ValueError)
+
+
+# DCP x DBO: each microbatch recomputes DCP-local seq_lens from its own
+# truncated seq_lens into its own persistent buffer (the parent's values for
+# a straddling request are wrong for the leading microbatch).
+
+DCP_SIZE = 2
+CP_INTERLEAVE = 1
+
+
+def _make_cuda_input_batch(
+    query_lens: list[int], seq_lens: list[int]
+) -> tuple[InputBatch, InputBuffers]:
+    buffers = InputBuffers(
+        max_num_reqs=MAX_NUM_REQS,
+        max_num_tokens=MAX_NUM_TOKENS,
+        device=torch.device("cuda:0"),
+    )
+    return _make_input_batch(query_lens, seq_lens, buffers), buffers
+
+
+def _make_dcp_ubatch_buffers(
+    num_ubatches: int = 2,
+) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Per-microbatch (query_start_loc, seq_lens, dcp_local_seq_lens)."""
+    return [
+        (
+            torch.zeros(MAX_NUM_REQS + 1, dtype=torch.int32, device="cuda:0"),
+            torch.zeros(MAX_NUM_REQS, dtype=torch.int32, device="cuda:0"),
+            torch.zeros(MAX_NUM_REQS, dtype=torch.int32, device="cuda:0"),
+        )
+        for _ in range(num_ubatches)
+    ]
+
+
+def _slice_with_dcp(
+    input_batch: InputBatch, dcp_rank: int, num_ubatches: int = 2
+) -> tuple[list[InputBatch], list[torch.Tensor]]:
+    dcp_buffers = [
+        torch.zeros(MAX_NUM_REQS, dtype=torch.int32, device="cuda:0")
+        for _ in range(num_ubatches)
+    ]
+    ubatch_buffers = _make_dcp_ubatch_buffers(num_ubatches)
+    ubatches = [
+        _slice_input_batch(
+            input_batch,
+            ubatch_slice,
+            ubatch_buffers[i][0],
+            ubatch_buffers[i][1],
+            dcp_buffers[i],
+            dcp_size=DCP_SIZE,
+            dcp_rank=dcp_rank,
+            cp_interleave=CP_INTERLEAVE,
+        )
+        for i, ubatch_slice in enumerate(
+            create_ubatch_slices(input_batch, num_ubatches)
+        )
+    ]
+    return ubatches, dcp_buffers
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="triton kernel needs CUDA")
+@pytest.mark.parametrize("dcp_rank", [0, 1])
+def test_microbatches_recompute_dcp_lens_from_truncated_seq_lens(dcp_rank: int):
+    """A boundary-split request keeps a truncated seq_len on the leading
+    microbatch, whose DCP-local length may differ (in parity) from the full
+    batch's. Microbatches must therefore derive DCP lengths from their own
+    seq_lens, not reuse the parent's row.
+    """
+    input_batch, buffers = _make_cuda_input_batch(
+        [1, 1, 10, 1, 1], [64, 96, 512, 32, 48]
+    )
+    # execute_model has populated the merged batch's DCP metadata already.
+    input_batch.dcp_local_seq_lens = gpu_cp_utils.maybe_prepare_dcp_local_seq_lens(
+        buffers.dcp_local_seq_lens,
+        input_batch.seq_lens,
+        input_batch.num_reqs,
+        DCP_SIZE,
+        dcp_rank,
+        CP_INTERLEAVE,
+        num_reqs_padded=input_batch.num_reqs_after_padding,
+    )
+    parent_lens = input_batch.dcp_local_seq_lens.clone()
+
+    ubatches, _ = _slice_with_dcp(input_batch, dcp_rank)
+
+    for ubatch in ubatches:
+        assert ubatch.dcp_local_seq_lens is not None
+        expected = get_dcp_local_seq_lens(
+            ubatch.seq_lens.cpu(), DCP_SIZE, dcp_rank, CP_INTERLEAVE
+        )
+        assert torch.equal(
+            ubatch.dcp_local_seq_lens[: ubatch.num_reqs].cpu(),
+            expected.to(torch.int32),
+        )
+
+    # The straddling request (512 tokens, 5 of its 10 query tokens truncated)
+    # lands on this rank with a different local length than the full batch
+    # reports (507 vs 512 -> 254 vs 256 for dcp_size=2, interleave=1); copying
+    # the parent's row would ship the stale value.
+    assert ubatches[0].num_reqs == 3
+    assert ubatches[0].seq_lens[2].item() == 507
+    assert ubatches[0].dcp_local_seq_lens[2].item() != parent_lens[2].item()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="triton kernel needs CUDA")
+def test_each_microbatch_owns_its_dcp_buffer():
+    """Microbatch DCP lengths live in per-microbatch persistent buffers so
+    CPU-visible shapes stay valid under CUDA graph capture and replay."""
+    input_batch, _ = _make_cuda_input_batch([4, 4, 4, 4], [8, 9, 10, 11])
+
+    ubatches, dcp_buffers = _slice_with_dcp(input_batch, dcp_rank=0)
+
+    for ubatch, dcp_buffer in zip(ubatches, dcp_buffers):
+        assert ubatch.dcp_local_seq_lens is not None
+        assert ubatch.dcp_local_seq_lens.data_ptr() == dcp_buffer.data_ptr()
+    assert dcp_buffers[0].data_ptr() != dcp_buffers[1].data_ptr()
+
+
+def test_slicing_drops_stale_dcp_metadata_when_dcp_is_off():
+    """dcp_size == 1 yields None even when the parent carries a value, so a
+    microbatch can never consume DCP metadata this deployment did not
+    enable.
+    """
+    buffers = _make_buffers()
+    input_batch = _make_input_batch([4, 4, 4, 4], [8, 9, 10, 11], buffers)
+    input_batch.dcp_local_seq_lens = buffers.dcp_local_seq_lens[:4]
+
+    ubatch_buffers = _make_ubatch_buffers()
+    ubatches = [
+        _slice_input_batch(input_batch, ubatch_slice, *ubatch_buffers[i])
+        for i, ubatch_slice in enumerate(create_ubatch_slices(input_batch, 2))
+    ]
+
+    assert all(ubatch.dcp_local_seq_lens is None for ubatch in ubatches)

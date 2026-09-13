@@ -135,8 +135,8 @@ def can_initialize(
     if model_arch == "DeepseekV4ForConditionalGeneration":
         from vllm.platforms import current_platform
 
-        if not current_platform.is_cuda():
-            pytest.skip("Deepseek V4 is only supported on CUDA")
+        if not (current_platform.is_cuda() or current_platform.is_rocm()):
+            pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
 
     skip_if_capability_restricted(model_arch)
 
