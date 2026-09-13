@@ -148,9 +148,14 @@ def fused_topk_bias(
         )
 
         output_indices_dtype = torch.int32 if indices_type is None else indices_type
+        force_generic = (
+            is_forward_context_available()
+            and get_forward_context().force_generic_moe_router
+        )
         if (
             scoring_func == "sqrtsoftplus"
             and hash_indices_table is None
+            and not force_generic
             and can_use_dsv4_topk(
                 gating_output,
                 e_score_correction_bias,
