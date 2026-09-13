@@ -13,6 +13,29 @@ from vllm.v1.worker.gpu.model_runner import (
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
+class _XPUEvent(torch.xpu.Event):
+    """torch.xpu.Event that synchronizes by draining its recording stream.
+
+    torch.xpu.Event.synchronize() waits on a blocking cross-stream event that
+    can miss its wakeup on XPU and hang the worker; draining the stream the
+    event was recorded on is a reliable queue wait with the same completion
+    guarantee.
+    """
+
+    def record(self, stream=None) -> None:
+        if stream is None:
+            stream = torch.xpu.current_stream()
+        self._record_stream = stream
+        super().record(stream)
+
+    def synchronize(self) -> None:
+        stream = getattr(self, "_record_stream", None)
+        if stream is not None:
+            stream.synchronize()
+        else:
+            super().synchronize()
+
+
 class XPUModelRunner(GPUModelRunner):
     """A model runner for XPU devices."""
 
@@ -51,9 +74,11 @@ def _torch_cuda_wrapper():
     torch.cuda.set_stream = partial(torch.xpu.set_stream)
 
     # torch.xpu.Event does not accept the ``blocking`` kwarg that
-    # torch.cuda.Event supports, so drop it here.
+    # torch.cuda.Event supports, so drop it here. _XPUEvent also makes
+    # synchronize() drain the recording stream, avoiding a blocking
+    # cross-stream event wait that can hang on XPU.
     def _xpu_event(*args, blocking=None, **kwargs):
-        return torch.xpu.Event(*args, **kwargs)
+        return _XPUEvent(*args, **kwargs)
 
     torch.cuda.Event = _xpu_event
     if supports_xpu_graph():
