@@ -59,6 +59,18 @@ def flash_attn_maxseqlen_wrapper(
             max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+
+    out = None
+    if not is_rocm_aiter and torch.cuda.is_current_stream_capturing():
+        # Encoder CUDA-graph replay pads the batch with empty sequences whose
+        # rows the attention kernel never writes. Zero-init `out` so those
+        # rows stay finite: stale pool memory there would otherwise feed NaNs
+        # into the next block's K/V tile loads, where masking cannot remove
+        # them (0 * NaN = NaN in the PV matmul).
+        out = torch.zeros(
+            q.shape[0], q.shape[1], v.shape[-1], dtype=q.dtype, device=q.device
+        )
+
     output = flash_attn_varlen_func(
         q,
         k,
@@ -70,6 +82,7 @@ def flash_attn_maxseqlen_wrapper(
         dropout_p=0.0,
         causal=False,
         softmax_scale=scale,
+        out=out,
         **kwargs,
     )
     context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
