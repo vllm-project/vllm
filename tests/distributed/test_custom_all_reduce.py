@@ -108,6 +108,24 @@ def test_local_multicast_support_rejects_non_cuda(monkeypatch):
     assert not car._has_local_multicast_support(torch.device("cuda:0"))
 
 
+@pytest.mark.parametrize(
+    "env_var", ["PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_HIP_ALLOC_CONF"]
+)
+def test_custom_allreduce_disabled_with_expandable_segments(monkeypatch, env_var):
+    # Expandable-segments allocations cannot be IPC-exported, so custom
+    # allreduce must stay disabled or CUDA graph buffer registration fails.
+    monkeypatch.setenv(env_var, "expandable_segments:True")
+    monkeypatch.setattr(car, "custom_ar", True)
+    monkeypatch.setattr(car.dist, "get_backend", lambda _group: "gloo")
+    monkeypatch.setattr(car, "in_the_same_node_as", lambda *a, **k: [True, True])
+    monkeypatch.setattr(car.dist, "get_rank", lambda *a, **k: 0)
+    monkeypatch.setattr(car.dist, "get_world_size", lambda *a, **k: 2)
+
+    comm = car.CustomAllreduce(group=object(), device=0)
+
+    assert comm.disabled
+
+
 @ray.remote(num_gpus=1, max_calls=1)
 def graph_allreduce(
     monkeypatch: pytest.MonkeyPatch,
