@@ -11,8 +11,24 @@ from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize(
-    "shape", [(31, 128), (32, 128), (63, 256), (64, 256), (16, 512)]
+    "shape",
+    [
+        (0, 128),
+        (1, 128),
+        (3, 384),
+        (5, 384),
+        (7, 384),
+        (15, 384),
+        (31, 128),
+        (32, 128),
+        (63, 256),
+        (64, 256),
+        (16, 512),
+        (3, 2688),
+        (3, 5376),
+    ],
 )
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("column_major", [False, True])
 @pytest.mark.parametrize("tma_aligned", [False, True])
 @pytest.mark.parametrize("scale_ue8m0", [False, True])
@@ -22,14 +38,20 @@ from vllm.platforms import current_platform
     reason="Only test on CUDA/ROCm/XPU.",
 )
 def test_per_token_group_quant_fp8(
-    shape, column_major: bool, tma_aligned: bool, scale_ue8m0: bool, group_size: int
+    shape,
+    dtype,
+    column_major: bool,
+    tma_aligned: bool,
+    scale_ue8m0: bool,
+    group_size: int,
 ):
+    """Tail groups preserve FP8 values and scales in every supported layout."""
     device = current_platform.device_type
 
     torch.manual_seed(42)
     num_tokens, hidden_dim = shape
 
-    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8
+    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=dtype) * 8
 
     # native kernel path
     out_q, scale = fp8_utils.per_token_group_quant_fp8(
@@ -411,19 +433,34 @@ def test_per_token_group_quant_fp8_packed_large_mn():
     assert torch.equal(out_s_packed.cpu(), expected.cpu()), "Packed scale mismatch"
 
 
-@pytest.mark.parametrize("shape", [(32, 128), (64, 256), (16, 512)])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (0, 128),
+        (1, 128),
+        (3, 384),
+        (5, 384),
+        (7, 384),
+        (15, 384),
+        (32, 128),
+        (64, 256),
+        (16, 512),
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.skipif(
     not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="Only test on CUDA/ROCm/XPU.",
 )
-def test_per_token_group_quant_int8(shape, group_size: int):
+def test_per_token_group_quant_int8(shape, dtype, group_size: int):
+    """The shared launch policy also handles INT8 tail groups."""
     device = current_platform.device_type
 
     torch.manual_seed(42)
     num_tokens, hidden_dim = shape
 
-    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8
+    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=dtype) * 8
 
     # cuda path
     out_q, scale = int8_utils.per_token_group_quant_int8(
