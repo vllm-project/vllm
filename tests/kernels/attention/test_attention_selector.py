@@ -638,6 +638,68 @@ def test_flash_attn_accepts_handled_fp8_variants(
     assert FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)
 
 
+def test_cuda_toolkit_version_parses_nvcc_output(monkeypatch: pytest.MonkeyPatch):
+    import subprocess
+
+    from packaging.version import Version
+
+    import vllm.utils.flashinfer as fi
+
+    fi.get_cuda_version.cache_clear()
+
+    NVCC_12_8 = """nvcc: NVIDIA (R) Cuda compiler driver
+    Copyright (c) 2005-2025 NVIDIA Corporation
+    Built on Fri_Feb_21_20:23:50_PST_2025
+    Cuda compilation tools, release 12.8, V12.8.93
+    Build cuda_12.8.r12.8/compiler.35583870_0
+    """
+
+    def fake_check_output(*args, **kwargs):
+        return NVCC_12_8
+
+    monkeypatch.setattr(subprocess, "check_output", fake_check_output)
+    monkeypatch.setattr(fi, "get_cuda_path", lambda: "/fake/cuda")
+    assert fi.get_cuda_version() == Version("12.8")
+
+
+def test_cuda_toolkit_below_12_9_disables_flashinfer_on_sm120(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from packaging.version import Version
+
+    import vllm.utils.flashinfer as fi
+
+    fi.has_flashinfer.cache_clear()
+
+    monkeypatch.setattr(fi, "get_cuda_version", lambda: Version("12.8"))
+    monkeypatch.setattr(fi.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(fi, "has_flashinfer_cubin", lambda: True)
+
+    platform = MagicMock()
+    platform.is_cuda.return_value = True
+    platform.get_device_capability.return_value = DeviceCapability(12, 0)
+    with patch("vllm.utils.flashinfer.current_platform", platform):
+        assert not fi.has_flashinfer()
+
+
+def test_cuda_toolkit_12_9_keeps_flashinfer_on_sm120(monkeypatch: pytest.MonkeyPatch):
+    from packaging.version import Version
+
+    import vllm.utils.flashinfer as fi
+
+    fi.has_flashinfer.cache_clear()
+
+    monkeypatch.setattr(fi, "get_cuda_version", lambda: Version("12.9"))
+    monkeypatch.setattr(fi.importlib.util, "find_spec", lambda name: object())
+    monkeypatch.setattr(fi, "has_flashinfer_cubin", lambda: True)
+
+    platform = MagicMock()
+    platform.is_cuda.return_value = True
+    platform.get_device_capability.return_value = DeviceCapability(12, 0)
+    with patch("vllm.utils.flashinfer.current_platform", platform):
+        assert fi.has_flashinfer()
+
+
 blackwell_only = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="FA4 is CUDA-only"
 )
