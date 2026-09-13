@@ -13,9 +13,24 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import current_platform
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 MESSAGES = [{"role": "user", "content": "What is 1+1? Be concise."}]
+# Qwen3's chain-of-thought length is not fully deterministic (it depends on
+# kernel implementation and batching, which vary across hardware backends).
+# On XPU CI, this occasionally let reasoning consume the entire max_tokens
+# budget before any answer content was produced, flaking
+# test_include_reasoning_true_streaming with an empty content_text assertion.
+# Capping thinking_token_budget guarantees tokens remain for content.
+# Restricted to XPU so CUDA/ROCm test behavior is unchanged.
+THINK_BUDGET = 50
+
+
+def _extra_body(**kwargs: object) -> dict[str, object]:
+    if current_platform.is_xpu():
+        kwargs["thinking_token_budget"] = THINK_BUDGET
+    return kwargs
 
 
 @pytest.fixture(scope="module")
@@ -46,7 +61,8 @@ async def test_include_reasoning_true_non_streaming(client: openai.AsyncOpenAI):
         model=MODEL_NAME,
         messages=MESSAGES,
         max_tokens=200,
-        extra_body={"include_reasoning": True},
+        temperature=0.0,
+        extra_body=_extra_body(include_reasoning=True),
     )
 
     msg = response.choices[0].message
@@ -64,7 +80,8 @@ async def test_include_reasoning_false_non_streaming(client: openai.AsyncOpenAI)
         model=MODEL_NAME,
         messages=MESSAGES,
         max_tokens=200,
-        extra_body={"include_reasoning": False},
+        temperature=0.0,
+        extra_body=_extra_body(include_reasoning=False),
     )
 
     msg = response.choices[0].message
@@ -100,8 +117,9 @@ async def test_include_reasoning_true_streaming(client: openai.AsyncOpenAI):
         model=MODEL_NAME,
         messages=MESSAGES,
         max_tokens=200,
+        temperature=0.0,
         stream=True,
-        extra_body={"include_reasoning": True},
+        extra_body=_extra_body(include_reasoning=True),
     )
 
     reasoning_parts = []
@@ -131,8 +149,9 @@ async def test_include_reasoning_false_streaming(client: openai.AsyncOpenAI):
         model=MODEL_NAME,
         messages=MESSAGES,
         max_tokens=200,
+        temperature=0.0,
         stream=True,
-        extra_body={"include_reasoning": False},
+        extra_body=_extra_body(include_reasoning=False),
     )
 
     reasoning_parts = []
@@ -165,6 +184,8 @@ async def test_default_includes_reasoning(client: openai.AsyncOpenAI):
         model=MODEL_NAME,
         messages=MESSAGES,
         max_tokens=200,
+        temperature=0.0,
+        extra_body=_extra_body(),
     )
 
     msg = response.choices[0].message
