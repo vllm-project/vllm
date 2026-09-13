@@ -96,7 +96,8 @@ __device__ __forceinline__ void QuantizeGroup(
 }
 
 template <typename T, typename DST_DTYPE, bool IS_COLUMN_MAJOR = false,
-          bool SCALE_UE8M0 = false, typename scale_packed_t = float>
+          bool SCALE_UE8M0 = false, typename scale_packed_t = float,
+          bool CHECK_BOUNDS = false>
 __global__ void per_token_group_quant_8bit_kernel(
     const T* __restrict__ input, void* __restrict__ output_q,
     scale_packed_t* __restrict__ output_s, const int group_size,
@@ -114,49 +115,54 @@ __global__ void per_token_group_quant_8bit_kernel(
   using scale_element_t = float;
   static_assert(sizeof(scale_packed_t) % sizeof(scale_element_t) == 0);
 
-  const T* group_input = input + block_group_offset;
-  DST_DTYPE* group_output =
-      static_cast<DST_DTYPE*>(output_q) + block_group_offset;
-  scale_element_t* scale_output;
-
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   cudaGridDependencySynchronize();
 #endif
-
-  if constexpr (IS_COLUMN_MAJOR) {
-    const int num_elems_per_pack =
-        static_cast<int>(sizeof(scale_packed_t) / sizeof(scale_element_t));
-    const int scale_num_rows_element = scale_num_rows * num_elems_per_pack;
-    const int row_idx = global_group_id / scale_num_rows_element;
-    const int col_idx_raw = global_group_id % scale_num_rows_element;
-    const int col_idx = col_idx_raw / num_elems_per_pack;
-    const int pack_idx = col_idx_raw % num_elems_per_pack;
-    scale_output = reinterpret_cast<scale_element_t*>(output_s) +
-                   (col_idx * scale_stride * num_elems_per_pack +
-                    row_idx * num_elems_per_pack + pack_idx);
-  } else {
-    scale_output = output_s + global_group_id;
-  }
 
   // shared memory to cache each group's data to avoid double DRAM reads.
   extern __shared__ __align__(16) char smem_raw[];
   T* smem = reinterpret_cast<T*>(smem_raw);
   T* smem_group = smem + local_group_id * group_size;
+  const bool valid_group = !CHECK_BOUNDS || global_group_id < num_groups;
+  float y_s = 1.0f;
+  if (valid_group) {
+    const T* group_input = input + block_group_offset;
+    scale_element_t* scale_output;
 
-  const float y_s = ComputeGroupScale<T, SCALE_UE8M0>(
-      group_input, smem_group, group_size, lane_id, threads_per_group, eps,
-      max_8bit);
+    if constexpr (IS_COLUMN_MAJOR) {
+      const int num_elems_per_pack =
+          static_cast<int>(sizeof(scale_packed_t) / sizeof(scale_element_t));
+      const int scale_num_rows_element = scale_num_rows * num_elems_per_pack;
+      const int row_idx = global_group_id / scale_num_rows_element;
+      const int col_idx_raw = global_group_id % scale_num_rows_element;
+      const int col_idx = col_idx_raw / num_elems_per_pack;
+      const int pack_idx = col_idx_raw % num_elems_per_pack;
+      scale_output = reinterpret_cast<scale_element_t*>(output_s) +
+                     (col_idx * scale_stride * num_elems_per_pack +
+                      row_idx * num_elems_per_pack + pack_idx);
+    } else {
+      scale_output = output_s + global_group_id;
+    }
 
-  scale_element_t y_s_quant = y_s;
+    y_s = ComputeGroupScale<T, SCALE_UE8M0>(group_input, smem_group, group_size,
+                                            lane_id, threads_per_group, eps,
+                                            max_8bit);
 
-  if (lane_id == 0) {
-    *scale_output = y_s_quant;
+    scale_element_t y_s_quant = y_s;
+
+    if (lane_id == 0) {
+      *scale_output = y_s_quant;
+    }
   }
 
   __syncthreads();
 
-  QuantizeGroup<T, DST_DTYPE>(smem_group, group_output, group_size, lane_id,
-                              threads_per_group, y_s, min_8bit, max_8bit);
+  if (valid_group) {
+    DST_DTYPE* group_output =
+        static_cast<DST_DTYPE*>(output_q) + block_group_offset;
+    QuantizeGroup<T, DST_DTYPE>(smem_group, group_output, group_size, lane_id,
+                                threads_per_group, y_s, min_8bit, max_8bit);
+  }
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   cudaTriggerProgrammaticLaunchCompletion();
@@ -209,10 +215,20 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
 
   constexpr int THREADS_PER_GROUP = 16;
 
-  const int groups_per_block = GetGroupsPerBlock(num_groups);
+  if (num_groups == 0) {
+    return;
+  }
+  STD_TORCH_CHECK(input.size(-1) % group_size == 0);
+  const int64_t groups_per_row = input.size(-1) / group_size;
+  const int64_t num_rows = num_groups / groups_per_row;
+  // Odd row counts inherit the next even row count's launch geometry.
+  const int64_t policy_num_groups =
+      (num_rows + (num_rows & 1)) * groups_per_row;
+  const int groups_per_block = GetGroupsPerBlock(policy_num_groups);
+  const bool needs_bounds_check = num_groups % groups_per_block != 0;
 
   auto dst_type = output_q.scalar_type();
-  const int num_blocks = num_groups / groups_per_block;
+  const int num_blocks = (num_groups + groups_per_block - 1) / groups_per_block;
   const int num_threads = groups_per_block * THREADS_PER_GROUP;
 
   const bool is_column_major = output_s.stride(0) < output_s.stride(1);
@@ -220,37 +236,50 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
   const int scale_stride = output_s.stride(1);
 
 #ifndef USE_ROCM
-  #define LAUNCH_KERNEL_INST(T, DST_DTYPE, COL_MAJOR, UE8M0, SMEM_BYTES)     \
-    do {                                                                     \
-      cudaLaunchConfig_t config = {};                                        \
-      config.gridDim = dim3(num_blocks);                                     \
-      config.blockDim = dim3(num_threads);                                   \
-      config.dynamicSmemBytes = (SMEM_BYTES);                                \
-      config.stream = stream;                                                \
-      cudaLaunchAttribute attrs[1];                                          \
-      attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;      \
-      attrs[0].val.programmaticStreamSerializationAllowed = 1;               \
-      config.numAttrs = 1;                                                   \
-      config.attrs = attrs;                                                  \
-      cudaLaunchKernelEx(                                                    \
-          &config,                                                           \
-          per_token_group_quant_8bit_kernel<T, DST_DTYPE, COL_MAJOR, UE8M0>, \
-          static_cast<T*>(input.data_ptr()), output_q.data_ptr(),            \
-          static_cast<float*>(output_s.data_ptr()), group_size, num_groups,  \
-          groups_per_block, (float)eps, (float)min_8bit, (float)max_8bit,    \
-          scale_num_rows, scale_stride);                                     \
+  #define LAUNCH_KERNEL_IMPL(T, DST_DTYPE, COL_MAJOR, UE8M0, CHECK_BOUNDS,  \
+                             SMEM_BYTES)                                    \
+    do {                                                                    \
+      cudaLaunchConfig_t config = {};                                       \
+      config.gridDim = dim3(num_blocks);                                    \
+      config.blockDim = dim3(num_threads);                                  \
+      config.dynamicSmemBytes = (SMEM_BYTES);                               \
+      config.stream = stream;                                               \
+      cudaLaunchAttribute attrs[1];                                         \
+      attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;     \
+      attrs[0].val.programmaticStreamSerializationAllowed = 1;              \
+      config.numAttrs = 1;                                                  \
+      config.attrs = attrs;                                                 \
+      cudaLaunchKernelEx(                                                   \
+          &config,                                                          \
+          per_token_group_quant_8bit_kernel<T, DST_DTYPE, COL_MAJOR, UE8M0, \
+                                            float, CHECK_BOUNDS>,           \
+          static_cast<T*>(input.data_ptr()), output_q.data_ptr(),           \
+          static_cast<float*>(output_s.data_ptr()), group_size, num_groups, \
+          groups_per_block, (float)eps, (float)min_8bit, (float)max_8bit,   \
+          scale_num_rows, scale_stride);                                    \
     } while (0)
 #else
-  #define LAUNCH_KERNEL_INST(T, DST_DTYPE, COL_MAJOR, UE8M0, SMEM_BYTES)   \
-    do {                                                                   \
-      per_token_group_quant_8bit_kernel<T, DST_DTYPE, COL_MAJOR, UE8M0>    \
-          <<<dim3(num_blocks), dim3(num_threads), (SMEM_BYTES), stream>>>( \
-              static_cast<T*>(input.data_ptr()), output_q.data_ptr(),      \
-              static_cast<float*>(output_s.data_ptr()), group_size,        \
-              num_groups, groups_per_block, (float)eps, (float)min_8bit,   \
-              (float)max_8bit, scale_num_rows, scale_stride);              \
+  #define LAUNCH_KERNEL_IMPL(T, DST_DTYPE, COL_MAJOR, UE8M0, CHECK_BOUNDS,     \
+                             SMEM_BYTES)                                       \
+    do {                                                                       \
+      per_token_group_quant_8bit_kernel<T, DST_DTYPE, COL_MAJOR, UE8M0, float, \
+                                        CHECK_BOUNDS>                          \
+          <<<dim3(num_blocks), dim3(num_threads), (SMEM_BYTES), stream>>>(     \
+              static_cast<T*>(input.data_ptr()), output_q.data_ptr(),          \
+              static_cast<float*>(output_s.data_ptr()), group_size,            \
+              num_groups, groups_per_block, (float)eps, (float)min_8bit,       \
+              (float)max_8bit, scale_num_rows, scale_stride);                  \
     } while (0)
 #endif
+
+#define LAUNCH_KERNEL_INST(T, DST_DTYPE, COL_MAJOR, UE8M0, SMEM_BYTES)       \
+  do {                                                                       \
+    if (needs_bounds_check) {                                                \
+      LAUNCH_KERNEL_IMPL(T, DST_DTYPE, COL_MAJOR, UE8M0, true, SMEM_BYTES);  \
+    } else {                                                                 \
+      LAUNCH_KERNEL_IMPL(T, DST_DTYPE, COL_MAJOR, UE8M0, false, SMEM_BYTES); \
+    }                                                                        \
+  } while (0)
 
 #define LAUNCH_KERNEL(T, DST_DTYPE)                                     \
   do {                                                                  \
@@ -284,6 +313,7 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
 
 #undef LAUNCH_KERNEL
 #undef LAUNCH_KERNEL_INST
+#undef LAUNCH_KERNEL_IMPL
 }
 
 // Register-resident fast path for group_size==128.
