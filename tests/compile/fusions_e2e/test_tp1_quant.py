@@ -14,6 +14,7 @@ from .common import (
     Matches,
     custom_ops_combos,
     is_blackwell,
+    nvfp4_kernel_exposes_input_quant_key,
 )
 from .models import (
     FLASHINFER_ATTN,
@@ -77,7 +78,6 @@ def test_tp1_fp8_fusions(
     inductor_graph_partition: bool,
     use_deepgemm: bool,
     run_e2e_fusion_test,
-    monkeypatch,
 ):
     if use_deepgemm and not current_platform.is_cuda():
         pytest.skip("DeepGemm only supported on CUDA")
@@ -109,7 +109,7 @@ def test_tp1_fp8_fusions(
         custom_ops=custom_ops.split(","),
         pass_config=PassConfig(
             fuse_norm_quant=True,
-            fuse_act_quant=True,
+            fuse_act_quant=False,
             fuse_attn_quant=True,
             enable_qk_norm_rope_fusion=True,
         ),
@@ -119,7 +119,6 @@ def test_tp1_fp8_fusions(
 
     matches_check = [
         "rms_quant_fusion",
-        "act_quant_fusion",
         "norm_rope_fusion",
         "attn_quant_fusion",
     ]
@@ -168,6 +167,12 @@ def test_tp1_fp4_fusions(
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
 ):
+    if nvfp4_kernel_exposes_input_quant_key():
+        pytest.skip(
+            "NVFP4 kernel exposes input_quant_key; manual fusion fires "
+            "instead of compiler pass-based fusion"
+        )
+
     matches = matches_fn(n_layers)
 
     # Reduce size of model and skip weight loading time
@@ -181,13 +186,13 @@ def test_tp1_fp4_fusions(
         custom_ops=custom_ops.split(","),
         pass_config=PassConfig(
             fuse_norm_quant=True,
-            fuse_act_quant=True,
+            fuse_act_quant=False,
             fuse_attn_quant=True,
             enable_qk_norm_rope_fusion=True,
         ),
     )
 
-    matches_check = ["act_quant_fusion", "attn_quant_fusion", "norm_rope_fusion"]
+    matches_check = ["attn_quant_fusion", "norm_rope_fusion"]
 
     run_e2e_fusion_test(
         model_name,

@@ -169,6 +169,9 @@ class TerratorchInputBuilder(BaseDummyInputsBuilder[TerratorchProcessingInfo]):
 
 
 class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessingInfo]):
+    # Terratorch models, including Prithvi, consume tokenizer-free inputs.
+    requires_tokenizer = False
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,

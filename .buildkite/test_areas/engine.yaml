@@ -77,7 +77,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) E2E Core"
   device: h200_35gb
   key: e2e-core-1-gpu
-  timeout_in_minutes: 40
+  timeout_in_minutes: 50
   source_file_dependencies:
     - vllm/v1/
     - tests/v1/e2e/general/

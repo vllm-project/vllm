@@ -216,11 +216,19 @@ def default_server_args():
     ]
 
 
-@pytest.fixture(scope="module", params=[1, 4])
+@pytest.fixture(
+    scope="module",
+    params=[(1, False), (4, False), (1, True)],
+    ids=["api-1-standard", "api-4-standard", "api-1-ep-enabled"],
+)
 def server_manager(request, default_server_args):
-    api_server_count = request.param
+    api_server_count, enable_expert_parallel = request.param
+    server_args = default_server_args.copy()
+    if enable_expert_parallel:
+        server_args.append("--enable-expert-parallel")
+
     server_manager = ExternalLBServerManager(
-        MODEL_NAME, DP_SIZE, api_server_count, default_server_args
+        MODEL_NAME, DP_SIZE, api_server_count, server_args
     )
 
     with server_manager:
@@ -342,9 +350,20 @@ def test_external_lb_elastic_ep_scale_up(default_server_args) -> None:
             assert completion.choices[0].finish_reason in ("length", "stop")
 
 
+def _assert_expert_parallel_config(
+    servers: list[tuple[RemoteOpenAIServer, list[str]]],
+):
+    for server, server_args in servers:
+        expected = "--enable-expert-parallel" in server_args
+        parallel_config = _get_parallel_config(server)
+        assert parallel_config["enable_expert_parallel"] is expected
+
+
 def test_external_lb_server_info(server_manager):
     servers = server_manager.servers
     api_server_count = server_manager.api_server_count
+
+    _assert_expert_parallel_config(servers)
 
     for i, (server, _) in enumerate(servers):
         print(f"Testing {i=}")

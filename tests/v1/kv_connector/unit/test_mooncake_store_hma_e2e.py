@@ -29,7 +29,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
 )
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
+    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
@@ -605,3 +607,293 @@ def test_sub_block_partial_tail_offload_covers_smaller_group_blocks():
         token_dbs[1].key_for(hs[2]): [10_000 + mamba_cow_block * 512],
     }
     assert store.puts == expected
+
+
+def test_worker_lookup_hits_sub_block_partial_tail():
+    """worker.lookup must query sub-block keys when partial hash hits are on.
+
+    Regression test: ``lookup`` hard-coded ``fine_grained = False``, so the
+    sub-block keys persisted by ``_sub_block_tail_puts`` were never probed and
+    partial prefix hits silently returned 0 while the store side kept writing
+    them. Here the mamba block (16) exceeds the hash unit (4), so
+    ``enable_partial_hash_hits`` is on and the lookup must find the stored
+    boundary at 12.
+    """
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    cfg = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * full.page_size_bytes,
+                layers=["L0"],
+                layer_stride=4 * full.page_size_bytes,
+                block_stride=full.page_size_bytes,
+            ),
+            KVCacheTensor(
+                size=4 * mamba.page_size_bytes,
+                layers=["L1"],
+                layer_stride=4 * mamba.page_size_bytes,
+                block_stride=mamba.page_size_bytes,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["L0"], full),
+            KVCacheGroupSpec(["L1"], mamba),
+        ],
+    )
+    vllm_config = _minimal_vllm_config(cache_block_size=16)
+    # Hash unit 4 < mamba block 16 -> partial hash hits are enabled.
+    vllm_config.cache_config.prefix_match_unit = 4
+    store = _DictStore()
+
+    worker = _build_worker_with_dict_store(vllm_config, cfg, store)
+    worker.tp_size = 1
+    worker.pp_size = 1
+    worker.num_kv_head = 8
+    assert worker.coord.enable_partial_hash_hits
+
+    for g_idx, db in enumerate(worker.token_dbs):
+        db.set_kv_caches_base_addr([g_idx * 10_000])
+        db.set_block_len([512])
+
+    send_thread = KVCacheStoreSendingThread(
+        store=store,
+        token_databases=worker.token_dbs,
+        block_size=worker.block_size,
+        coord=worker.coord,
+        tp_rank=0,
+        group_put_steps=[1, 1],
+        kv_role="kv_both",
+        ready_event=threading.Event(),
+        replicate_config=MagicMock(),
+    )
+
+    # Persist the sub-block partial tail at boundary 12 (keyed by hs[12//4-1]).
+    hs = [BlockHash(bytes([i + 1]) * 4) for i in range(5)]
+    req = ReqMeta(
+        req_id="r0",
+        token_len_chunk=0,
+        block_ids=([1], [2]),
+        block_hashes=hs,
+        can_save=True,
+        num_prompt_tokens=20,
+        boundary_state_offloads=[(1, 7, 12)],
+    )
+    send_thread._maybe_offload_boundary_states(req)
+
+    worker.store = store
+
+    # A 13-token prompt sharing the prefix must hit the stored boundary at 12.
+    assert worker.lookup(num_tokens=13, block_hashes=hs).hit_length == 12
+
+
+def test_worker_setup_tolerates_finer_scratch_group():
+    """Setup and lookup must tolerate a non-prefix-cacheable scratch group.
+
+    Regression: GLM-5.3-Flash carries a kpool-tail scratch group whose block
+    size (``index_kpool`` tokens) is finer than the hash unit, so the
+    coordinator's divisibility assert and the scratch group's
+    ``ChunkedTokenDatabase`` both rejected worker setup for any hash unit the
+    scratch block does not divide. Scratch groups never participate in
+    store/load/lookup, so setup must skip them and lookup must still hit
+    stored sub-block boundaries on the participating groups.
+    """
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    mamba = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    # Scratch block 4 is not divisible by the hash unit 8 below.
+    scratch = KpoolTailSpec(
+        block_size=4,
+        num_kv_heads=2,
+        head_size=64,
+        head_size_v=0,
+        dtype=torch.bfloat16,
+        sliding_window=4,
+    )
+    cfg = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * full.page_size_bytes,
+                layers=["L0"],
+                layer_stride=4 * full.page_size_bytes,
+                block_stride=full.page_size_bytes,
+            ),
+            KVCacheTensor(
+                size=4 * mamba.page_size_bytes,
+                layers=["L1"],
+                layer_stride=4 * mamba.page_size_bytes,
+                block_stride=mamba.page_size_bytes,
+            ),
+            KVCacheTensor(
+                size=4 * scratch.page_size_bytes,
+                layers=["L2"],
+                layer_stride=4 * scratch.page_size_bytes,
+                block_stride=scratch.page_size_bytes,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["L0"], full),
+            KVCacheGroupSpec(["L1"], mamba),
+            KVCacheGroupSpec(["L2"], scratch),
+        ],
+    )
+    vllm_config = _minimal_vllm_config(cache_block_size=16)
+    # Hash unit 8 divides the participating groups (16) but not the scratch
+    # group (4); mamba block 16 > 8 keeps partial hash hits on.
+    vllm_config.cache_config.prefix_match_unit = 8
+    store = _DictStore()
+
+    worker = _build_worker_with_dict_store(vllm_config, cfg, store)
+    worker.tp_size = 1
+    worker.pp_size = 1
+    worker.num_kv_head = 8
+    assert worker.coord.enable_partial_hash_hits
+    # The scratch DB is keyed at its own block size and never probed.
+    assert worker.token_dbs[2].hash_block_size == 4
+
+    for g_idx, db in enumerate(worker.token_dbs):
+        db.set_kv_caches_base_addr([g_idx * 10_000])
+        db.set_block_len([512])
+
+    send_thread = KVCacheStoreSendingThread(
+        store=store,
+        token_databases=worker.token_dbs,
+        block_size=worker.block_size,
+        coord=worker.coord,
+        tp_rank=0,
+        group_put_steps=[1, 1, 1],
+        kv_role="kv_both",
+        ready_event=threading.Event(),
+        replicate_config=MagicMock(),
+        group_participates=[True, True, False],
+    )
+
+    # Persist the sub-block partial tail at boundary 12 (keyed by hs[12//8-1]).
+    hs = [BlockHash(bytes([i + 1]) * 8) for i in range(3)]
+    req = ReqMeta(
+        req_id="r0",
+        token_len_chunk=0,
+        block_ids=([1], [2], [3]),
+        block_hashes=hs,
+        can_save=True,
+        num_prompt_tokens=20,
+        boundary_state_offloads=[(1, 7, 12)],
+    )
+    send_thread._maybe_offload_boundary_states(req)
+
+    worker.store = store
+
+    # A 13-token prompt sharing the prefix must hit the first hash unit.
+    assert worker.lookup(num_tokens=13, block_hashes=hs).hit_length == 8
+    # The scratch group's namespace never enters the store.
+    scratch_prefix = worker.token_dbs[2].key_for(hs[0]).rsplit("@", 1)[0]
+    assert not any(key.startswith(scratch_prefix) for key in store._data)
+
+
+def test_ring_scratch_group_is_never_stored_and_does_not_block_hits():
+    """A per-request ring group (CircularBufferSpec, capacity as block_size)
+    sits beside the paged group: worker setup tolerates its block size (the
+    DeepSeek-V4.1 compressor ring is 8 rows), saving a request stores paged
+    blocks only, and lookup hits on the paged group alone."""
+    full = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    ring = CircularBufferSpec(
+        block_size=8, num_kv_heads=1, head_size=64, head_size_v=0, dtype=torch.uint8
+    )
+    cfg = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=4 * full.page_size_bytes,
+                layers=["L0"],
+                layer_stride=4 * full.page_size_bytes,
+                block_stride=full.page_size_bytes,
+            ),
+            KVCacheTensor(
+                size=4 * ring.page_size_bytes,
+                layers=["L1"],
+                layer_stride=4 * ring.page_size_bytes,
+                block_stride=ring.page_size_bytes,
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["L0"], full),
+            KVCacheGroupSpec(["L1"], ring),
+        ],
+    )
+    vllm_config = _minimal_vllm_config(cache_block_size=16)
+    store = _DictStore()
+
+    worker = _build_worker_with_dict_store(vllm_config, cfg, store)
+    worker.tp_size = 1
+    worker.pp_size = 1
+    worker.num_kv_head = 8
+    assert worker.token_dbs[1].hash_block_size == 8
+
+    raw_full = torch.zeros(4 * full.page_size_bytes, dtype=torch.int8)
+    raw_ring = torch.zeros(4 * ring.page_size_bytes, dtype=torch.int8)
+    kv_caches = {
+        "L0": dense_kv_cache_views(raw_full, full, 4, 1, KVCacheLayout.LBNHC)[0],
+        "L1": dense_kv_cache_views(raw_ring, ring, 4, 1, KVCacheLayout.LBNHC)[0],
+    }
+
+    def _fake_thread_init(*args, **kwargs):
+        for v in list(args) + list(kwargs.values()):
+            if isinstance(v, threading.Event):
+                v.set()
+        m = MagicMock()
+        m.start = lambda: None
+        return m
+
+    with (
+        patch.object(
+            mooncake_store_worker,
+            "KVCacheStoreSendingThread",
+            side_effect=_fake_thread_init,
+        ),
+        patch.object(
+            mooncake_store_worker,
+            "KVCacheStoreRecvingThread",
+            side_effect=_fake_thread_init,
+        ),
+    ):
+        worker.register_kv_caches(kv_caches)
+
+    send_thread = KVCacheStoreSendingThread(
+        store=store,
+        token_databases=worker.token_dbs,
+        block_size=worker.block_size,
+        coord=worker.coord,
+        tp_rank=worker.tp_rank,
+        group_put_steps=worker._group_tp_replication_factors,
+        kv_role=worker.kv_role,
+        ready_event=threading.Event(),
+        enable_kv_event=False,
+        group_participates=[True, False],
+    )
+    hs = [BlockHash(bytes([i + 1]) * 4) for i in range(4)]
+    save_req = ReqMeta(
+        req_id="r0",
+        token_len_chunk=64,
+        # The ring group holds one block for the request's lifetime.
+        block_ids=([1, 2, 3, 4], [1]),
+        block_hashes=hs,
+        can_save=True,
+        store_job_id=1,
+    )
+    send_thread.add_request(save_req)
+    send_thread._handle_request(send_thread.request_queue.get())
+    worker.store = store
+
+    assert worker.lookup(num_tokens=65, block_hashes=hs).hit_length == 64
+    assert not any("@group:1" in key for key in store._data)

@@ -2,7 +2,6 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
-use thiserror::Error;
 
 use crate::protocol::OpaqueValue;
 
@@ -23,44 +22,4 @@ pub struct LoraRequest {
     pub load_inplace: bool,
     #[serde(default)]
     pub is_3d_lora_weight: bool,
-}
-
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum LoraRequestError {
-    #[error("lora_name must not be empty")]
-    EmptyName,
-    #[error("lora_int_id must be nonzero")]
-    ZeroId,
-    #[error("lora_path must not be empty")]
-    EmptyPath,
-}
-
-impl LoraRequest {
-    pub fn new(
-        lora_name: String,
-        lora_int_id: u64,
-        lora_path: String,
-        load_inplace: bool,
-        is_3d_lora_weight: bool,
-    ) -> Result<Self, LoraRequestError> {
-        if lora_name.trim().is_empty() {
-            return Err(LoraRequestError::EmptyName);
-        }
-        if lora_int_id == 0 {
-            return Err(LoraRequestError::ZeroId);
-        }
-        if lora_path.trim().is_empty() {
-            return Err(LoraRequestError::EmptyPath);
-        }
-
-        Ok(Self {
-            lora_name,
-            lora_int_id,
-            lora_path,
-            base_model_name: None,
-            tensorizer_config_dict: None,
-            load_inplace,
-            is_3d_lora_weight,
-        })
-    }
 }

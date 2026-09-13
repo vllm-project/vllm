@@ -80,3 +80,14 @@ class Ernie4_5_VLRotaryEmbedding(MRotaryEmbedding):
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.forward_native(positions, query, key)
+
+    def forward_xpu(  # type: ignore[override]
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # No fused XPU kernel for this 3D t/h/w rope; base
+        # MRotaryEmbedding.forward_xpu forwards an extra `offsets` arg that
+        # this class's forward_cuda override doesn't accept. Use native path.
+        return self.forward_native(positions, query, key)

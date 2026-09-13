@@ -43,6 +43,41 @@ def test_api_key_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
     assert "VLLM_API_KEY" not in envs.compile_factors()
 
 
+def test_scale_out_endpoints_flag_is_runtime_only(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", "1")
+
+    assert envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS is True
+    assert "VLLM_ENABLE_SCALE_OUT_ENDPOINTS" not in envs.compile_factors()
+
+
+def test_scale_out_endpoints_flag_distinguishes_unset_from_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", raising=False)
+    assert envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS is None
+
+    monkeypatch.setenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", "0")
+    assert envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS is False
+
+
+def test_scale_out_endpoints_flag_treats_empty_as_unset(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", "")
+
+    assert envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS is None
+
+
+@pytest.mark.parametrize("value", ["-1", "2", "01", "+1", "invalid", " "])
+def test_scale_out_endpoints_flag_rejects_values_other_than_zero_or_one(
+    monkeypatch: pytest.MonkeyPatch, value: str
+):
+    monkeypatch.setenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", value)
+
+    with pytest.raises(ValueError, match="must be 0 or 1"):
+        _ = envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS
+
+
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)

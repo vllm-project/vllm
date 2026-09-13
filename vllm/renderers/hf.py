@@ -27,6 +27,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt
 from vllm.inputs.engine import MultiModalInput
 from vllm.logger import init_logger
@@ -396,9 +397,45 @@ def _iter_nodes_assign_messages_item(root: jinja2.nodes.Node):
 
 
 def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
+    """Yield loops that iterate over message content or macro-bound content."""
     message_varnames = [
         varname for _, varname in _iter_nodes_assign_messages_item(root)
     ]
+
+    # Track macro parameters that receive message.content as an argument.
+    # Some templates pass message.content through a macro parameter whose
+    # name is not literally "content".
+    macro_content_params_by_loop: dict[int, set[str]] = {}
+    loops_in_macros: set[int] = set()
+    for macro_node in root.find_all(jinja2.nodes.Macro):
+        macro_param_names = {arg.name for arg in macro_node.args}
+        macro_content_params: set[str] = set()
+        for call_node in root.find_all(jinja2.nodes.Call):
+            if (
+                isinstance(call_node.node, jinja2.nodes.Name)
+                and call_node.node.name == macro_node.name
+            ):
+                for i, arg in enumerate(call_node.args):
+                    if i < len(macro_node.args) and any(
+                        _is_var_or_elems_access(arg, varname, "content")
+                        for varname in message_varnames
+                    ):
+                        macro_content_params.add(macro_node.args[i].name)
+                for kwarg in call_node.kwargs:
+                    if (
+                        isinstance(kwarg, jinja2.nodes.Keyword)
+                        and kwarg.key in macro_param_names
+                        and any(
+                            _is_var_or_elems_access(kwarg.value, varname, "content")
+                            for varname in message_varnames
+                        )
+                    ):
+                        macro_content_params.add(kwarg.key)
+
+        for loop_ast in macro_node.find_all(jinja2.nodes.For):
+            loops_in_macros.add(id(loop_ast))
+            if macro_content_params:
+                macro_content_params_by_loop[id(loop_ast)] = macro_content_params
 
     # Search for {%- for content in message['content'] -%} loops
     # or {%- for item in content -%} loops
@@ -411,10 +448,26 @@ def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
                 assert isinstance(loop_target, jinja2.nodes.Name)
                 yield loop_ast, loop_target.name
                 break
+        else:
+            macro_content_params_for_loop = macro_content_params_by_loop.get(
+                id(loop_ast)
+            )
+            if (
+                isinstance(loop_iter, jinja2.nodes.Name)
+                and macro_content_params_for_loop is not None
+                and loop_iter.name in macro_content_params_for_loop
+            ):
+                assert isinstance(loop_target, jinja2.nodes.Name)
+                yield loop_ast, loop_target.name
+                continue
 
-        if isinstance(loop_iter, jinja2.nodes.Name) and loop_iter.name == "content":
-            assert isinstance(loop_target, jinja2.nodes.Name)
-            yield loop_ast, loop_target.name
+            if (
+                id(loop_ast) not in loops_in_macros
+                and isinstance(loop_iter, jinja2.nodes.Name)
+                and loop_iter.name == "content"
+            ):
+                assert isinstance(loop_target, jinja2.nodes.Name)
+                yield loop_ast, loop_target.name
 
 
 def _try_extract_ast(chat_template: str) -> jinja2.nodes.Template | None:
@@ -509,6 +562,22 @@ def _consolidate_system_messages(
     return [merged, *non_system]
 
 
+_CONTENT_FORMATS_MAXSIZE = 32
+_CONTENT_FORMATS = dict[
+    tuple[str | None, bool, str, str | None, str | None, bool],
+    "ChatTemplateContentFormat",
+]()
+"""
+Used in `_resolve_chat_template_content_format` to avoid resolving and parsing
+the chat template on every request.
+
+`lru_cache` cannot be used because `tools` is a list and `ModelConfig` defines
+`__eq__` without `__hash__`, so the key holds the fields `resolve_chat_template`
+selects the template by. Only the presence of `tools` is part of it: it decides
+whether the processor template is tried, and its contents never reach the AST.
+"""
+
+
 def _resolve_chat_template_content_format(
     chat_template: str | None,
     tools: list[dict[str, Any]] | None,
@@ -516,6 +585,17 @@ def _resolve_chat_template_content_format(
     *,
     model_config: ModelConfig,
 ) -> ChatTemplateContentFormat:
+    cache_key = (
+        chat_template,
+        tools is None,
+        tokenizer.name_or_path,
+        model_config.revision,
+        model_config.code_revision,
+        model_config.trust_remote_code,
+    )
+    if (cached_format := _CONTENT_FORMATS.get(cache_key)) is not None:
+        return cached_format
+
     resolved_chat_template = resolve_chat_template(
         tokenizer,
         chat_template=chat_template,
@@ -535,31 +615,12 @@ def _resolve_chat_template_content_format(
         else _detect_content_format(jinja_text, default="string")
     )
 
+    # Requests may carry their own chat template, so bound the cache.
+    if len(_CONTENT_FORMATS) >= _CONTENT_FORMATS_MAXSIZE:
+        _CONTENT_FORMATS.clear()
+    _CONTENT_FORMATS[cache_key] = detected_format
+
     return detected_format
-
-
-@lru_cache
-def _log_chat_template_content_format(
-    chat_template: str | None,  # For caching purposes
-    given_format: ChatTemplateContentFormatOption,
-    detected_format: ChatTemplateContentFormatOption,
-):
-    logger.info(
-        "Detected the chat template content format to be '%s'. "
-        "You can set `--chat-template-content-format` to override this.",
-        detected_format,
-    )
-
-    if given_format != "auto" and given_format != detected_format:
-        logger.warning(
-            "You specified `--chat-template-content-format %s` "
-            "which is different from the detected format '%s'. "
-            "If our automatic detection is incorrect, please consider "
-            "opening a GitHub issue so that we can improve it: "
-            "https://github.com/vllm-project/vllm/issues/new/choose",
-            given_format,
-            detected_format,
-        )
 
 
 def resolve_chat_template_content_format(
@@ -570,9 +631,6 @@ def resolve_chat_template_content_format(
     *,
     model_config: ModelConfig,
 ) -> ChatTemplateContentFormat:
-    if given_format != "auto":
-        return given_format
-
     detected_format = _resolve_chat_template_content_format(
         chat_template,
         tools,
@@ -580,13 +638,24 @@ def resolve_chat_template_content_format(
         model_config=model_config,
     )
 
-    _log_chat_template_content_format(
-        chat_template,
-        given_format=given_format,
-        detected_format=detected_format,
-    )
+    if given_format == "auto":
+        logger.info_once(
+            "Detected the chat template content format to be '%s'. "
+            "You can set `--chat-template-content-format` to override this.",
+            detected_format,
+        )
+    elif given_format != detected_format:
+        logger.warning_once(
+            "You specified `--chat-template-content-format %s` "
+            "which is different from the detected format '%s'. "
+            "If our automatic detection is incorrect, please consider "
+            "opening a GitHub issue so that we can improve it: "
+            "https://github.com/vllm-project/vllm/issues/new/choose",
+            given_format,
+            detected_format,
+        )
 
-    return detected_format
+    return detected_format if given_format == "auto" else given_format
 
 
 # adapted from https://github.com/huggingface/transformers/blob/v4.56.2/src/transformers/utils/chat_template_utils.py#L398-L412
@@ -666,6 +735,18 @@ def resolve_chat_template_kwargs(
 
     accept_vars = (fn_kw | template_vars | hf_base_params) - unexpected_vars
     return {k: v for k, v in chat_template_kwargs.items() if k in accept_vars}
+
+
+def _template_error_reason(exc: BaseException) -> str:
+    # Extract the most specific reason from a chat template error chain.
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, jinja2.TemplateError):
+            return str(current)
+        current = current.__cause__ or current.__context__
+    return str(exc)
 
 
 @overload
@@ -790,10 +871,13 @@ def safe_apply_chat_template(
             **resolved_kwargs,
         )
     except Exception as e:
-        logger.exception(
-            "An error occurred in `transformers` while applying chat template"
-        )
-        raise ValueError(str(e)) from e
+        # Chat templates reject invalid user input (e.g. an unsupported
+        # `reasoning_effort` value) by raising from within the template.
+        # Surface those as a 400 Bad Request carrying the template's own
+        # reason (which typically lists the supported values) instead of a
+        # 500 or any generic upstream wrapper message.
+        logger.warning("Chat template rejected the request: %s", e)
+        raise VLLMValidationError(_template_error_reason(e)) from e
 
     if return_assistant_tokens_mask:
         assert isinstance(plain, list), f"Expected list[int], got {type(plain)}"

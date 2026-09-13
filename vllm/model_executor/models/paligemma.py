@@ -181,6 +181,7 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
@@ -197,11 +198,13 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
         # Paligemma 1 and 2 have different tokenizer.add_bos_token
         # Insert <image>*n + <bos> after <bos> for Paligemma 1
         # Insert <image>*n + <bos> for Paligemma 2
+        add_bos_token = getattr(tokenizer, "add_bos_token", None)
+        assert isinstance(add_bos_token, bool)
         return [
             PromptInsertion(
                 modality="image",
                 target=PromptIndexTargets.prefix(
-                    [bos_token_id] if tokenizer.add_bos_token else []
+                    [bos_token_id] if add_bos_token else []
                 ),
                 insertion=get_insertion,
             )

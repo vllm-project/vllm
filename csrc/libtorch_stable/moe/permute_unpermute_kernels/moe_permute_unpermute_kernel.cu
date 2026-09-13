@@ -146,16 +146,17 @@ __global__ void preprocessTopkIdKernel(int* topk_id_ptr, int size,
   }
   __syncthreads();
 
-  // query global expert id in expert map.
-  // if global expert id = -1 in exert map, plus n_expert
-  // else set global expert id = exert map[global expert id]
   if (offset + tidx < bound) {
     auto topk_id = topk_id_ptr[offset + tidx];
-    auto local_expert_idx = smem_expert_map[topk_id];
-    if (local_expert_idx == -1) {
-      topk_id += num_experts;
+    if (topk_id < 0 || topk_id >= num_experts) {
+      topk_id = num_experts;
     } else {
-      topk_id = local_expert_idx;
+      auto local_expert_idx = smem_expert_map[topk_id];
+      if (local_expert_idx == -1) {
+        topk_id += num_experts;
+      } else {
+        topk_id = local_expert_idx;
+      }
     }
     __syncwarp();
     topk_id_ptr[offset + tidx] = topk_id;

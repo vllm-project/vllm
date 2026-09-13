@@ -30,6 +30,7 @@ from vllm.parser.deepseek_v4 import (
     DSML_THINK_START,
     DSML_TOOL_END,
     DSML_TOOL_START,
+    DSML_TOOL_START_VARIANTS,
     DeepSeekV4Parser,
     _dsml_arg_converter,
     _unwrap_wrapper_args,
@@ -154,6 +155,26 @@ class TestArgConverter:
         assert result["city"] == "Tokyo"
         assert result["expr"] == "x<5"
 
+    def test_next_parameter_prefix_implicitly_closes_previous(self):
+        raw = (
+            f"<{_PARAM_OPEN.format(name='city', is_str='true')}Tokyo\n"
+            "<｜DSML｜parameter name="
+        )
+        result = json.loads(_dsml_arg_converter(raw, partial=False))
+        assert result == {"city": "Tokyo\n"}
+
+    def test_implicit_close_preserves_malformed_text(self):
+        raw = (
+            f"<{_PARAM_OPEN.format(name='city', is_str='true')}"
+            "Tokyo</｜DSML｜parameter\n"
+            f"<{_PARAM_OPEN.format(name='unit', is_str='true')}celsius{_PARAM_CLOSE}"
+        )
+        result = json.loads(_dsml_arg_converter(raw, partial=False))
+        assert result == {
+            "city": "Tokyo</｜DSML｜parameter\n",
+            "unit": "celsius",
+        }
+
     def test_null_string_false(self):
         raw = self._raw(("val", "false", "null"))
         result = json.loads(_dsml_arg_converter(raw, partial=False))
@@ -164,6 +185,51 @@ class TestArgConverter:
         result = json.loads(_dsml_arg_converter(raw, partial=False))
         assert result["n"] == "42"
         assert isinstance(result["n"], str)
+
+
+class TestImplicitParameterClose:
+    def test_non_streaming_recovers_next_parameter(self, mock_tokenizer, mock_request):
+        text = (
+            f"{DSML_TOOL_START}"
+            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
+            f"<{_PARAM_OPEN.format(name='location', is_str='true')}Paris "
+            f"<{_PARAM_OPEN.format(name='date', is_str='true')}"
+            f"tomorrow{_PARAM_CLOSE}"
+            f"{DSML_INVOKE_END}{DSML_TOOL_END}"
+        )
+
+        result = DeepSeekV4Parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "location": "Paris ",
+            "date": "tomorrow",
+        }
+
+    def test_streaming_split_next_parameter_tag_is_buffered(
+        self, mock_tokenizer, mock_request
+    ):
+        chunks = [
+            DSML_TOOL_START,
+            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n",
+            f"<{_PARAM_OPEN.format(name='location', is_str='true')}"
+            "Paris a<b><｜DSML｜parameter",
+            ' name="date" string="true">tomorrow',
+            _PARAM_CLOSE,
+            DSML_INVOKE_END,
+            DSML_TOOL_END,
+        ]
+
+        results = simulate_tool_streaming(
+            DeepSeekV4Parser(mock_tokenizer), mock_request, chunks
+        )
+
+        arguments = collect_tool_arguments(results)
+        assert "<｜DSML｜param" not in arguments
+        assert json.loads(arguments) == {
+            "location": "Paris a<b>",
+            "date": "tomorrow",
+        }
 
 
 # ── Bare </think> absorption and duplicate <think> absorption ─────────
@@ -228,7 +294,155 @@ class TestMissingInvokeEnd:
         assert collect_function_name(results) == "get_weather"
         args = json.loads(collect_tool_arguments(results))
         assert args == {"location": "NYC"}
-        assert "Done." in collect_content(results)
+        # A tool call ends the turn; anything after the block is dropped.
+        assert "Done." not in collect_content(results)
+        assert "DSML" not in collect_content(results)
+
+
+class TestMissingToolCallsWrapper:
+    """The model sometimes drops ``<｜DSML｜tool_calls>`` at long context and
+    opens ``<｜DSML｜invoke ...>`` directly (#48931). The invoke itself must
+    anchor tool-call detection so the block is never leaked as content.
+    """
+
+    _ORPHAN = (
+        f"{DSML_INVOKE_PREFIX}terminal{DSML_INVOKE_NAME_END}\n"
+        f"{_param('command', 'true', 'echo hi')}\n"
+        f"{DSML_INVOKE_END}\n"
+    )
+
+    @pytest.mark.parametrize("trailing_end", [True, False])
+    def test_non_streaming(self, mock_tokenizer, mock_request, trailing_end):
+        text = "Let me run it.\n" + self._ORPHAN
+        if trailing_end:
+            text += DSML_TOOL_END
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "terminal"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"command": "echo hi"}
+        assert result.content == "Let me run it.\n"
+
+    @pytest.mark.parametrize("trailing_end", [True, False])
+    def test_trailing_content_dropped_consistently(
+        self, mock_tokenizer, mock_request, trailing_end
+    ):
+        """Text after a tool block is dropped whether or not the closing
+        wrapper is present, so a missing ``</｜DSML｜tool_calls>`` does not
+        change what the client sees."""
+        text = "pre\n" + self._ORPHAN
+        if trailing_end:
+            text += DSML_TOOL_END
+        text += "Done."
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+        assert [tc.function.name for tc in result.tool_calls] == ["terminal"]
+        assert result.content == "pre\n"
+
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        results = simulate_tool_streaming(parser, mock_request, list(text))
+        assert collect_function_name(results) == "terminal"
+        assert collect_content(results) == "pre\n"
+
+    def test_second_wrapped_block_after_orphan(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        text = self._ORPHAN + DSML_TOOL_START + self._ORPHAN + DSML_TOOL_END
+        result = parser.extract_tool_calls(text, mock_request)
+        assert [tc.function.name for tc in result.tool_calls] == [
+            "terminal",
+            "terminal",
+        ]
+        assert result.content is None
+
+    def test_streaming_marker_split_across_deltas(self, mock_tokenizer, mock_request):
+        text = "Let me run it.\n" + self._ORPHAN + DSML_TOOL_END
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        results = simulate_tool_streaming(parser, mock_request, list(text))
+
+        assert collect_function_name(results) == "terminal"
+        args = json.loads(collect_tool_arguments(results))
+        assert args == {"command": "echo hi"}
+        content = collect_content(results)
+        assert "Let me run it." in content
+        assert "DSML" not in content
+
+    def test_parallel_orphan_invokes(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": False}
+        )
+        result = parser.extract_tool_calls(self._ORPHAN + self._ORPHAN, mock_request)
+
+        assert [tc.function.name for tc in result.tool_calls] == [
+            "terminal",
+            "terminal",
+        ]
+        assert result.content is None
+
+    def test_orphan_invoke_inside_reasoning_is_not_a_tool_call(
+        self, mock_tokenizer, mock_request
+    ):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        text = "Let me run it.\n\n" + self._ORPHAN + DSML_TOOL_END
+        reasoning, content, tool_calls = parser.parse(text, mock_request)
+
+        assert not tool_calls
+        assert content is None
+        assert reasoning is not None and reasoning.startswith("Let me run it.")
+
+    def test_drafted_invoke_in_reasoning_does_not_hijack_real_call(
+        self, mock_tokenizer, mock_request
+    ):
+        """A drafted invoke in ``<think>`` must not steal the real call."""
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        text = (
+            f"Maybe {DSML_INVOKE_PREFIX}search{DSML_INVOKE_NAME_END} is wrong; "
+            f"use terminal.{DSML_THINK_END}\n"
+            f"{DSML_TOOL_START}\n{self._ORPHAN}{DSML_TOOL_END}"
+        )
+        reasoning, content, tool_calls = parser.parse(text, mock_request)
+
+        assert tool_calls is not None
+        assert [tc.name for tc in tool_calls] == ["terminal"]
+        assert json.loads(tool_calls[0].arguments) == {"command": "echo hi"}
+        assert reasoning is not None and "use terminal." in reasoning
+
+    def test_streaming_orphan_invoke_inside_reasoning_is_not_a_tool_call(
+        self, mock_tokenizer
+    ):
+        parser = DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        chunks = ["Let me run it.\n\n", *list(self._ORPHAN), DSML_TOOL_END]
+        reasoning, content = simulate_reasoning_streaming(parser, chunks)
+
+        assert reasoning.startswith("Let me run it.")
+        assert content == ""
+
+    def test_wrapper_present_is_unchanged(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(mock_tokenizer)
+        text = DSML_TOOL_START + "\n" + self._ORPHAN + DSML_TOOL_END
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "terminal"
+        assert result.content is None
 
 
 # ── Thinking mode initial state ──────────────────────────────────────
@@ -350,6 +564,17 @@ class TestImplicitReasoningEnd:
         assert tool_calls[0].name == "get_weather"
         args = json.loads(tool_calls[0].arguments)
         assert args == {"location": "NYC"}
+
+    def test_reasoning_end_token_ids_drop_multi_token_tool_opener(
+        self, thinking_parser
+    ):
+        # Like the real DeepSeek-V4 tokenizer, the mock vocab has no single
+        # token for the DSML tool opener, so only </think> is tracked on the
+        # token-ID fast path; the implicit tool-call exit still goes through
+        # the text lexer.
+        assert thinking_parser.reasoning_end_token_ids == {_THINK_END_ID}
+        assert thinking_parser.find_reasoning_end_offset([7, _THINK_END_ID, 8]) == 1
+        assert thinking_parser.find_reasoning_end_offset([7, 8]) is None
 
     def test_streaming_reasoning_implicit_end(self, thinking_parser):
         chunks = [
@@ -1005,3 +1230,164 @@ class TestDelegatingParserLargeDelta:
         assert eos_text not in output.reasoning
         assert output.content == ""
         assert output.tool_calls == []
+
+
+# ── Malformed DSML markup must not leak into content (#51914) ─────────
+
+_WRAPPER_VARIANTS = list(DSML_TOOL_START_VARIANTS)
+
+
+class TestMalformedDsmlNoise:
+    """DeepSeek-V4-Flash intermittently misspells the tool-call opener, e.g.
+    ``<｜DSML｜toolcalls>``. Known corrupted openers open a tool block like
+    the real wrapper so the markup never surfaces as assistant content.
+    """
+
+    _INNER = (
+        f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
+        f"{_param('city', 'true', 'Seoul')}\n"
+        f"{DSML_INVOKE_END}\n"
+        f"{DSML_TOOL_END}"
+    )
+
+    @staticmethod
+    def _parser(mock_tokenizer, thinking: bool = False):
+        return DeepSeekV4Parser(
+            mock_tokenizer, chat_template_kwargs={"thinking": thinking}
+        )
+
+    @pytest.mark.parametrize("wrapper", _WRAPPER_VARIANTS)
+    @pytest.mark.parametrize("preamble", ["", "Let me check.\n"])
+    def test_corrupted_wrapper_behaves_like_real_one(
+        self, mock_tokenizer, mock_request, wrapper, preamble
+    ):
+        text = f"{preamble}{wrapper}\n{self._INNER}"
+        reference = f"{preamble}{DSML_TOOL_START}\n{self._INNER}"
+
+        result = self._parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+        expected = self._parser(mock_tokenizer).extract_tool_calls(
+            reference, mock_request
+        )
+        assert [tc.function.name for tc in result.tool_calls] == ["get_weather"]
+        assert json.loads(result.tool_calls[0].function.arguments) == {"city": "Seoul"}
+        assert result.content == expected.content
+        assert "DSML" not in (result.content or "")
+
+        results = simulate_tool_streaming(
+            self._parser(mock_tokenizer), mock_request, list(text)
+        )
+        assert collect_function_name(results) == "get_weather"
+        assert json.loads(collect_tool_arguments(results)) == {"city": "Seoul"}
+        assert collect_content(results) == (expected.content or "")
+
+    @pytest.mark.parametrize("wrapper", _WRAPPER_VARIANTS)
+    def test_corrupted_wrapper_ends_reasoning(
+        self, mock_tokenizer, mock_request, wrapper
+    ):
+        """Like the real wrapper, a corrupted one inside ``<think>`` closes
+        the reasoning block and starts the tool call."""
+        text = f"thinking{wrapper}\n{self._INNER}"
+        parser = self._parser(mock_tokenizer, thinking=True)
+        reasoning, content = parser.extract_reasoning(text, mock_request)
+        assert reasoning == "thinking"
+        assert "DSML" not in (content or "")
+
+        result = self._parser(mock_tokenizer, thinking=True).extract_tool_calls(
+            text, mock_request
+        )
+        assert [tc.function.name for tc in result.tool_calls] == ["get_weather"]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Fullwidth bars, DSML namespace, but not a registered spelling.
+            "see <｜DSML｜foo> and <｜DSML｜tool_call> here",
+            # Unclosed prefix.
+            "see <｜DSML｜ here\nnext line",
+            # ASCII pipes are not the DSML sigil.
+            "see <|DSML|tool> and <|DSML|toolcalls> there",
+        ],
+    )
+    def test_unregistered_markup_is_ordinary_content(
+        self, mock_tokenizer, mock_request, text
+    ):
+        """Only the registered spellings are treated as wrappers."""
+        result = self._parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+        assert result.tools_called is False
+        assert result.content == text
+
+        results = simulate_tool_streaming(
+            self._parser(mock_tokenizer), mock_request, list(text)
+        )
+        assert collect_content(results) == text
+
+    @pytest.mark.parametrize("wrapper", _WRAPPER_VARIANTS)
+    def test_prose_mention_matches_canonical_wrapper(
+        self, mock_tokenizer, mock_request, wrapper
+    ):
+        """A registered spelling mentioned in prose behaves exactly like a
+        prose mention of the real wrapper: the opener starts a tool block and
+        the rest of the message is dropped. That is pre-existing behavior of
+        ``<｜DSML｜tool_calls>``; the variants must not differ from it either
+        way."""
+        template = "The opener looks like {} and then params follow. Done."
+        text = template.format(wrapper)
+        reference = template.format(DSML_TOOL_START)
+
+        result = self._parser(mock_tokenizer).extract_tool_calls(text, mock_request)
+        expected = self._parser(mock_tokenizer).extract_tool_calls(
+            reference, mock_request
+        )
+        assert result.tools_called == expected.tools_called
+        assert result.content == expected.content
+
+        results = simulate_tool_streaming(
+            self._parser(mock_tokenizer), mock_request, list(text)
+        )
+        expected_results = simulate_tool_streaming(
+            self._parser(mock_tokenizer), mock_request, list(reference)
+        )
+        assert collect_content(results) == collect_content(expected_results)
+
+    @pytest.mark.parametrize("wrapper", _WRAPPER_VARIANTS)
+    @pytest.mark.parametrize("chunk_size", [1, 3, None], ids=lambda c: f"chunk={c}")
+    def test_delegating_parser_corrupted_wrapper(self, wrapper, chunk_size):
+        """The serving-layer shape: reasoning and tool adapters on separate
+        engines, with the corrupted opener arriving as plain text."""
+        tokens = _dsv4_tokens(
+            reasoning="Checking the weather.",
+            tool_name="get_weather",
+            params=[("city", "true", "Seoul")],
+        )
+        start_id = _DSV4_FULL_VOCAB[DSML_TOOL_START]
+        tokens = [
+            (900, wrapper) if tid == start_id else (tid, text) for tid, text in tokens
+        ]
+        # Only the think markers are single tokens in the real
+        # DeepSeek-V4-Flash vocab; the DSML wrappers are ordinary text and
+        # must be matched by the lexer. Mirror that here.
+        vocab = {
+            DSML_THINK_START: _DSV4_FULL_VOCAB[DSML_THINK_START],
+            DSML_THINK_END: _DSV4_FULL_VOCAB[DSML_THINK_END],
+        }
+        tokenizer = MockTokenizer(vocab=vocab, tokens=tokens)
+        parser = _DeepSeekV4Delegating(
+            tokenizer, chat_template_kwargs={"thinking": True}
+        )
+
+        deltas = replay_streaming(
+            parser,
+            tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            tools=DUMMY_TOOLS,
+        )
+        output = collect_output(deltas)
+
+        assert "Checking" in output.reasoning
+        assert len(output.tool_calls) == 1, (
+            f"reasoning={output.reasoning!r}, content={output.content!r}"
+        )
+        assert output.tool_calls[0]["name"] == "get_weather"
+        assert json.loads(output.tool_calls[0]["arguments"]) == {"city": "Seoul"}
+        assert "DSML" not in (output.content or "")

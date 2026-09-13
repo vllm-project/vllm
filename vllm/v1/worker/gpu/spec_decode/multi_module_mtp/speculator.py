@@ -226,10 +226,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             slot_mappings = build_slot_mappings_by_layer(
                 slot_mappings_tensor, self.kv_cache_config
             )
-            draft_attn_metadata = self._build_draft_attn_metadata(
+            draft_attn_metadata = self._build_attn_metadata(
                 num_reqs=num_reqs,
-                num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                num_tokens_padded=batch_desc.num_tokens,
+                batch_desc=batch_desc,
                 query_start_loc_np=input_batch.query_start_loc_np,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=0,

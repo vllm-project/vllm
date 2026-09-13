@@ -64,6 +64,12 @@ class ECConnectorModelRunnerMixin:
         assert scheduler_output.ec_connector_metadata is not None
         ec_connector.bind_connector_metadata(scheduler_output.ec_connector_metadata)
 
+        if ec_connector.is_producer:
+            # Pass the cache explicitly: a producer needs it to publish an item
+            # that is already cached from an earlier step, which this step will
+            # not re-encode -- `save_caches` never fires for those.
+            ec_connector.start_save_caches(encoder_cache=encoder_cache, **kwargs)
+
         # Load caches for consumer or both roles
         if ec_connector.is_consumer:
             ec_connector.start_load_caches(encoder_cache, **kwargs)
@@ -74,5 +80,6 @@ class ECConnectorModelRunnerMixin:
             output.finished_sending, output.finished_recving = (
                 ec_connector.get_finished(scheduler_output.finished_req_ids)
             )
+            output.ec_connector_worker_meta = ec_connector.build_connector_worker_meta()
 
             ec_connector.clear_connector_metadata()

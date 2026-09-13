@@ -34,6 +34,13 @@ from vllm.platforms import current_platform
 if not current_platform.is_rocm():
     pytest.skip("RDNA3 compile-guard tests are ROCm-only", allow_module_level=True)
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa: E402
+    kInt4Static,
+    kInt4Static32,
+    kInt4Static32Asym,
+    kInt4StaticAsym,
+    kInt8Static,
+)
 from vllm.platforms.rocm import on_gfx1100  # noqa: E402
 
 gfx1100_only = pytest.mark.skipif(
@@ -166,15 +173,13 @@ def test_op_absent_on_non_gfx1100(op_name):
 
 @not_gfx1100
 def test_rocm_moe_not_supported_on_non_gfx1100():
-    """rocm_moe_rdna.is_supported() must return False on non-gfx1100 hardware."""
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-        rocm_moe_rdna,
+    """The RDNA3 MoE experts must not be selectable on non-gfx1100 hardware."""
+    from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
+        Rdna3WNA16Experts,
     )
 
-    wq = type("WQ", (), {"num_bits": 4})()
-    assert rocm_moe_rdna.is_supported(wq) is False, (
-        "rocm_moe_rdna.is_supported() returned True on non-gfx1100 — "
-        "dispatch guard is broken"
+    assert Rdna3WNA16Experts._supports_current_device() is False, (
+        "Rdna3WNA16Experts reported support on non-gfx1100 — dispatch guard is broken"
     )
 
 
@@ -196,7 +201,6 @@ def test_dense_kernel_rejects_on_non_gfx1100():
         act_type=torch.float16,
         group_size=128,
         zero_points=False,
-        has_g_idx=False,
     )
     ok, reason = RDNA3W4A16LinearKernel.can_implement(config)
     assert ok is False, f"RDNA3 dense kernel accepted on non-gfx1100: {reason}"
@@ -360,54 +364,58 @@ class TestCustomOpsGuards:
 # ============================================================================
 
 
-class _FakeWeightQuant:
-    """Minimal stand-in for a weight quantization config."""
-
-    def __init__(self, num_bits):
-        self.num_bits = num_bits
-
-
 class TestMoEDispatchMocked:
     """Mock on_gfx1100() to False and verify RDNA3 MoE is unreachable."""
 
-    def test_is_supported_false_when_mocked_cdna(self):
-        """rocm_moe_rdna.is_supported() must return False when not on gfx1100."""
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-            rocm_moe_rdna,
+    def test_kernel_unavailable_when_mocked_cdna(self):
+        """The device gate must reject when not on gfx1100."""
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
+            rdna3_moe_kernel_available,
         )
 
         with patch("vllm.platforms.rocm.on_gfx1100", return_value=False):
-            assert rocm_moe_rdna.is_supported(_FakeWeightQuant(num_bits=4)) is False
+            assert rdna3_moe_kernel_available() is False
 
-    @pytest.mark.parametrize("num_bits", [2, 3, 8, 16])
-    def test_is_supported_rejects_non_w4(self, num_bits):
-        """is_supported() rejects non-4-bit even before checking arch."""
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-            rocm_moe_rdna,
+    @pytest.mark.parametrize(
+        "weight_key",
+        [kInt8Static, kInt4StaticAsym, kInt4Static32Asym, None],
+    )
+    def test_quant_scheme_rejects_non_symmetric_int4(self, weight_key):
+        """Only symmetric int4 weight-only schemes reach the kernel."""
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
+            Rdna3WNA16Experts,
         )
 
-        assert rocm_moe_rdna.is_supported(_FakeWeightQuant(num_bits=num_bits)) is False
+        assert Rdna3WNA16Experts._supports_quant_scheme(weight_key, None) is False
 
-    def test_is_supported_false_when_op_missing(self):
-        """is_supported() returns False when the C++ op doesn't exist."""
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-            rocm_moe_rdna,
+    @pytest.mark.parametrize("weight_key", [kInt4Static, kInt4Static32])
+    def test_quant_scheme_accepts_symmetric_int4(self, weight_key):
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
+            Rdna3WNA16Experts,
+        )
+
+        assert Rdna3WNA16Experts._supports_quant_scheme(weight_key, None) is True
+
+    def test_kernel_unavailable_when_op_missing(self):
+        """The device gate returns False when the C++ op doesn't exist."""
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
+            rdna3_moe_kernel_available,
         )
 
         fake_rocm_c = type("FakeRocmC", (), {"gptq_gemm_rdna3": None})()
         with patch.object(torch, "ops", create=True) as mock_ops:
             mock_ops._rocm_C = fake_rocm_c
-            assert rocm_moe_rdna.is_supported(_FakeWeightQuant(num_bits=4)) is False
+            assert rdna3_moe_kernel_available() is False
 
-    def test_is_supported_false_when_rocm_c_absent(self):
-        """is_supported() returns False when _rocm_C doesn't exist at all."""
-        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
-            rocm_moe_rdna,
+    def test_kernel_unavailable_when_rocm_c_absent(self):
+        """The device gate returns False when _rocm_C doesn't exist at all."""
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
+            rdna3_moe_kernel_available,
         )
 
         fake_ops = type("FakeOps", (), {})()
         with patch.object(torch, "ops", fake_ops):
-            assert rocm_moe_rdna.is_supported(_FakeWeightQuant(num_bits=4)) is False
+            assert rdna3_moe_kernel_available() is False
 
 
 class TestDenseKernelSelectionMocked:
@@ -431,7 +439,6 @@ class TestDenseKernelSelectionMocked:
             act_type=torch.float16,
             group_size=128,
             zero_points=False,
-            has_g_idx=False,
         )
         ok, _ = RDNA3W4A16LinearKernel.can_implement(config)
         assert ok is True
@@ -461,7 +468,6 @@ class TestDenseKernelSelectionMocked:
             act_type=torch.float16,
             group_size=128,
             zero_points=False,
-            has_g_idx=False,
         )
         with (
             patch("vllm.platforms.rocm.on_gfx1100", return_value=False),
@@ -474,30 +480,30 @@ class TestDenseKernelSelectionMocked:
             )
 
 
-class TestCompressedTensorsMoEDispatchGuard:
-    """Verify compressed_tensors_moe.py only enters rocm_moe_rdna under is_rocm()."""
+class TestWNA16OracleWiring:
+    """The RDNA3 backend must reach the kernel only through the oracle."""
 
-    def test_rocm_guard_in_dispatch_source(self):
-        """The rocm_moe_rdna import and call must be inside an is_rocm() check."""
-        src = _read_pkg_source_or_skip(
-            "model_executor",
-            "layers",
-            "quantization",
-            "compressed_tensors",
-            "compressed_tensors_moe",
-            "compressed_tensors_moe.py",
+    def test_backend_maps_to_rdna3_experts(self):
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
+            Rdna3WNA16Experts,
         )
-        lines = src.splitlines()
+        from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+            WNA16MoEBackend,
+            backend_to_kernel_cls,
+            map_wna16_backend,
+        )
 
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            if "rocm_moe" in stripped and not stripped.startswith("#"):
-                found_guard = False
-                for j in range(i - 1, max(0, i - 15), -1):
-                    if "is_rocm()" in lines[j - 1]:
-                        found_guard = True
-                        break
-                assert found_guard, (
-                    f"L{i}: rocm_moe_rdna reference not protected by "
-                    f"is_rocm() guard: {stripped}"
-                )
+        assert backend_to_kernel_cls(WNA16MoEBackend.RDNA3) == [Rdna3WNA16Experts]
+        assert map_wna16_backend("rdna3") == WNA16MoEBackend.RDNA3
+
+    def test_backend_is_offered_before_the_triton_fallback(self):
+        """Priority order: the native kernel outranks Triton when supported."""
+        from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+            WNA16MoEBackend,
+            _get_priority_backends,
+        )
+
+        backends = _get_priority_backends()
+        assert backends.index(WNA16MoEBackend.RDNA3) < backends.index(
+            WNA16MoEBackend.TRITON
+        )

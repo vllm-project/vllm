@@ -172,7 +172,7 @@ async def test_invalid_audio_file(whisper_client):
         )
 
     assert exc_info.value.status_code == 400
-    assert "Invalid or unsupported audio file" in exc_info.value.message
+    assert "Invalid or corrupted audio data" in exc_info.value.message
 
 
 @pytest.mark.asyncio

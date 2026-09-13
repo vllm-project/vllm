@@ -3,7 +3,7 @@
 """Inference-only Deepseek-OCR model compatible with HuggingFace weights."""
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
 import torch
@@ -804,6 +804,7 @@ class DeepseekOCRForCausalLM(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         assert path in ("global", "local")
 

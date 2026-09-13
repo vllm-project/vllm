@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -16,17 +17,26 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models import supports_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.watermarking import create_watermarker
+from vllm.v1.watermarking.spec_decode import (
+    DraftWatermarker,
+    create_speculative_draft_watermarker,
+)
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import maybe_prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.utils import AttentionGroup
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 logger = init_logger(__name__)
 
@@ -145,9 +155,8 @@ class DraftModelSpeculator(BaseSpeculator):
             dtype=torch.int64,
             device=device,
         )
-        self.arange = torch.arange(
-            self.max_num_reqs + 1, dtype=torch.int32, device="cpu"
-        )
+        self.arange_np = np.arange(self.max_num_reqs + 1, dtype=np.int32)
+        self.draft_is_prefilling = torch.zeros(self.max_num_reqs, dtype=torch.bool)
 
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
@@ -164,7 +173,19 @@ class DraftModelSpeculator(BaseSpeculator):
                 device=device,
             )
 
+        self.draft_watermarker: DraftWatermarker | None = None
+        watermark_config = getattr(vllm_config, "watermark_config", None)
+        if watermark_config is not None:
+            watermarker = create_watermarker(watermark_config)
+            self.draft_watermarker = create_speculative_draft_watermarker(
+                watermarker,
+                self.max_num_reqs,
+                device,
+                watermark_config.allow_target_only_watermarking,
+            )
+
         self.supports_mm_inputs = False
+        self.pcp_manager: PCPManager | None = None
 
     @abstractmethod
     def load_draft_model(
@@ -248,42 +269,37 @@ class DraftModelSpeculator(BaseSpeculator):
         self.target_input_buffers = target_input_buffers
         self.target_attn_groups = target_attn_groups
 
-    def _build_draft_attn_metadata(
+    def _build_attn_metadata(
         self,
         num_reqs: int,
-        num_reqs_padded: int,
-        num_tokens_padded: int,
+        batch_desc: BatchExecutionDescriptor,
+        query_start_loc_np: np.ndarray,
         seq_lens_cpu_upper_bound: torch.Tensor,
         step: int,
-        num_query_per_req: int = 1,
         causal: bool | Mapping[int, bool] = True,
-        query_start_loc_np: np.ndarray | None = None,
         dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
-        if query_start_loc_np is not None:
-            # Non-uniform query layout (e.g. multi-module MTP's mixed
-            # prefill/decode queries); num_query_per_req is ignored.
-            query_start_loc_cpu = torch.empty(num_reqs_padded + 1, dtype=torch.int32)
-            query_start_loc_cpu[: num_reqs + 1] = torch.from_numpy(
-                query_start_loc_np[: num_reqs + 1]
-            )
-            query_start_loc_cpu[num_reqs:] = query_start_loc_cpu[num_reqs]
-            max_query_len = int(
-                (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).max()
-            )
-        else:
-            # Uniform query: query_start_loc[i] = min(i, num_reqs) * num_query_per_req.
-            # Clamp keeps the series non-decreasing past num_reqs, which some
-            # attention backends require.
-            query_start_loc_cpu = (
-                torch.clamp(self.arange[: num_reqs_padded + 1], max=num_reqs)
-                * num_query_per_req
-            )
-            max_query_len = num_query_per_req
+        num_reqs_padded = batch_desc.num_reqs or num_reqs
+        # A FULL graph replays a captured shape whose padded requests each hold
+        # a full query width, so attention must see the padded token count.
+        # PIECEWISE/eager needs the actual token count, because batch_desc may
+        # carry graph or DP padding that no request owns, which would desync it
+        # from query_start_loc.
+        num_tokens = (
+            batch_desc.num_tokens
+            if batch_desc.cg_mode == CUDAGraphMode.FULL
+            else int(query_start_loc_np[-1])
+        )
+        query_start_loc_cpu = torch.empty(num_reqs_padded + 1, dtype=torch.int32)
+        query_start_loc_cpu[: num_reqs + 1] = torch.from_numpy(
+            query_start_loc_np[: num_reqs + 1]
+        )
+        query_start_loc_cpu[num_reqs:] = query_start_loc_cpu[num_reqs]
+        max_query_len = int((query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).max())
         block_tables = [
             x[:num_reqs_padded] for x in self.block_tables.input_block_tables
         ]
-        slot_mappings = self.block_tables.slot_mappings[:, :num_tokens_padded]
+        slot_mappings = self.block_tables.slot_mappings[:, :num_tokens]
         draft_seq_lens_cpu_upper_bound = torch.zeros(
             num_reqs_padded, dtype=torch.int32, device="cpu"
         )
@@ -296,7 +312,7 @@ class DraftModelSpeculator(BaseSpeculator):
         if dcp_local_seq_lens is None and self.block_tables.cp_size > 1:
             # Draft steps advance and rewind their own global sequence lengths,
             # so the target model's DCP-local lengths may already be stale.
-            prepare_dcp_local_seq_lens(
+            dcp_local_seq_lens = maybe_prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
                 self.input_buffers.seq_lens,
                 num_reqs,
@@ -304,11 +320,10 @@ class DraftModelSpeculator(BaseSpeculator):
                 self.block_tables.cp_rank,
                 self.block_tables.cp_interleave,
             )
-            dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens
         attn_metadata = build_attn_metadata(
             attn_groups=self.attn_groups,
             num_reqs=num_reqs_padded,
-            num_tokens=num_tokens_padded,
+            num_tokens=num_tokens,
             query_start_loc_gpu=self.input_buffers.query_start_loc[
                 : num_reqs_padded + 1
             ],
@@ -326,6 +341,7 @@ class DraftModelSpeculator(BaseSpeculator):
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
+            is_prefilling=self.draft_is_prefilling[:num_reqs],
         )
         return attn_metadata
 
@@ -373,7 +389,7 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         if draft_logits is not None:
             logits = self.model.compute_logits(hidden_states)
-            return gumbel_sample(
+            sampled = gumbel_sample(
                 logits,
                 idx_mapping,
                 temperature,
@@ -385,7 +401,22 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
+            if self.draft_watermarker is not None:
+                sampled = self.draft_watermarker.sample(
+                    logits,
+                    sampled,
+                    idx_mapping,
+                    temperature,
+                )
+            return sampled
         return self._greedy_sample_draft(hidden_states)
+
+    def prepare_watermarking(
+        self, contexts: torch.Tensor, watermarking: torch.Tensor
+    ) -> None:
+        if self.draft_watermarker is None:
+            return
+        self.draft_watermarker.prepare(contexts, watermarking)
 
     def _copy_request_inputs(
         self,
@@ -409,3 +440,43 @@ class DraftModelSpeculator(BaseSpeculator):
         # idx_mapping for CG padded requests points to -1, which is ignored
         # during sampling to prevent writing stale values to draft logits.
         self.idx_mapping[num_reqs:].fill_(-1)
+
+    def _build_uniform_batch_dp_sync(
+        self,
+        target_dp_sync: DPSyncState,
+        num_reqs: int,
+        num_query_per_req: int = 1,
+    ) -> tuple[DPSyncState, int]:
+        num_batch_tokens = target_dp_sync.num_reqs * num_query_per_req
+        assert num_reqs * num_query_per_req <= num_batch_tokens, (
+            "reusing a DP sync that does not cover this batch's requests"
+        )
+        return replace(
+            target_dp_sync,
+            num_tokens_across_dp=torch.full_like(
+                target_dp_sync.num_tokens_across_dp, num_batch_tokens
+            ),
+            uniform_token_count=num_query_per_req,
+            eager=False,
+        ), num_batch_tokens
+
+    def _build_uniform_attn_metadata(
+        self,
+        batch_desc: BatchExecutionDescriptor,
+        num_reqs: int,
+        num_query_per_req: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
+        causal: bool | Mapping[int, bool] = True,
+        dcp_local_seq_lens: torch.Tensor | None = None,
+    ) -> dict[str, Any] | None:
+        query_start_loc_np = self.arange_np[: num_reqs + 1] * num_query_per_req
+        return self._build_attn_metadata(
+            num_reqs=num_reqs,
+            batch_desc=batch_desc,
+            query_start_loc_np=query_start_loc_np,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            step=step,
+            causal=causal,
+            dcp_local_seq_lens=dcp_local_seq_lens,
+        )

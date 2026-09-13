@@ -16,7 +16,7 @@ pub use inkling::InklingUnifiedParser;
 pub use kimi_k3::{KimiK3StructuralTagBuilder, KimiK3UnifiedParser};
 use thiserror::Error;
 use thiserror_ext::Macro;
-use vllm_tokenizer::DynTokenizer;
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use crate::reasoning::ReasoningError;
 use crate::tool::{
@@ -32,7 +32,11 @@ pub enum UnifiedParserEvent {
     /// Normal assistant-visible text.
     Text(String),
     /// Reasoning text hidden from the normal content stream.
-    Reasoning(String),
+    ///
+    /// Carries the attributions of the generated tokens that produced it, so
+    /// downstream consumers can count reasoning tokens exactly. Marker spans
+    /// are dropped by the parsers, keeping marker tokens out of any count.
+    Reasoning(DecodedText),
     /// A tool-call update extracted from visible assistant text.
     ToolCall(ToolCallDelta),
 }
@@ -58,15 +62,18 @@ impl UnifiedParserOutput {
     }
 
     /// Append one reasoning text event if `delta` is non-empty.
-    pub fn push_reasoning(&mut self, delta: impl AsRef<str> + Into<String>) {
-        if delta.as_ref().is_empty() {
+    ///
+    /// A piece with empty text but non-empty attributions (zero-width tokens
+    /// only) is still kept: the tokens count as reasoning.
+    pub fn push_reasoning(&mut self, delta: DecodedText) {
+        if delta.is_empty() {
             return;
         }
         if let Some(UnifiedParserEvent::Reasoning(last_text)) = self.events.last_mut() {
-            last_text.push_str(delta.as_ref());
+            last_text.append(delta);
             return;
         }
-        self.events.push(UnifiedParserEvent::Reasoning(delta.into()));
+        self.events.push(UnifiedParserEvent::Reasoning(delta));
     }
 
     /// Append one tool-call event.
@@ -98,6 +105,8 @@ impl UnifiedParserOutput {
 
 #[cfg(test)]
 mod tests {
+    use vllm_tokenizer::{DecodedText, TokenAnchor, TokenAttribution};
+
     use super::{UnifiedParserEvent, UnifiedParserOutput};
     use crate::tool::ToolCallDelta;
 
@@ -107,8 +116,8 @@ mod tests {
         output.push_text("hello");
         output.push_text(" ");
         output.push_text("world");
-        output.push_reasoning("think");
-        output.push_reasoning("ing");
+        output.push_reasoning(DecodedText::unattributed("think"));
+        output.push_reasoning(DecodedText::unattributed("ing"));
         output.push_call(ToolCallDelta {
             tool_index: 0,
             name: Some("lookup".to_string()),
@@ -120,7 +129,7 @@ mod tests {
             output.events,
             vec![
                 UnifiedParserEvent::Text("hello world".to_string()),
-                UnifiedParserEvent::Reasoning("thinking".to_string()),
+                UnifiedParserEvent::Reasoning(DecodedText::unattributed("thinking")),
                 UnifiedParserEvent::ToolCall(ToolCallDelta {
                     tool_index: 0,
                     name: Some("lookup".to_string()),
@@ -139,11 +148,11 @@ mod tests {
         let mut other = UnifiedParserOutput::default();
         other.push_text(" ");
         other.push_text("world");
-        other.push_reasoning("think");
+        other.push_reasoning(DecodedText::unattributed("think"));
         output.append(other);
 
         let mut after_reasoning = UnifiedParserOutput::default();
-        after_reasoning.push_reasoning("ing");
+        after_reasoning.push_reasoning(DecodedText::unattributed("ing"));
         after_reasoning.push_text("!");
         output.append(after_reasoning);
 
@@ -151,9 +160,65 @@ mod tests {
             output.events,
             vec![
                 UnifiedParserEvent::Text("hello world".to_string()),
-                UnifiedParserEvent::Reasoning("thinking".to_string()),
+                UnifiedParserEvent::Reasoning(DecodedText::unattributed("thinking")),
                 UnifiedParserEvent::Text("!".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn unified_parser_output_reasoning_coalescing_rebases_attributions() {
+        let mut output = UnifiedParserOutput::default();
+        output.push_reasoning(DecodedText {
+            text: "think".to_string(),
+            attributions: [TokenAttribution {
+                token_id: 1,
+                anchor: TokenAnchor::Visible { byte_offset: 0 },
+            }]
+            .into_iter()
+            .collect(),
+        });
+        output.push_reasoning(DecodedText {
+            text: "ing".to_string(),
+            attributions: [TokenAttribution {
+                token_id: 2,
+                anchor: TokenAnchor::Visible { byte_offset: 0 },
+            }]
+            .into_iter()
+            .collect(),
+        });
+        // A zero-width-token-only piece is kept: the tokens count as reasoning.
+        output.push_reasoning(DecodedText {
+            text: String::new(),
+            attributions: [TokenAttribution {
+                token_id: 3,
+                anchor: TokenAnchor::ZeroWidth { byte_offset: 0 },
+            }]
+            .into_iter()
+            .collect(),
+        });
+
+        assert_eq!(
+            output.events,
+            vec![UnifiedParserEvent::Reasoning(DecodedText {
+                text: "thinking".to_string(),
+                attributions: [
+                    TokenAttribution {
+                        token_id: 1,
+                        anchor: TokenAnchor::Visible { byte_offset: 0 },
+                    },
+                    TokenAttribution {
+                        token_id: 2,
+                        anchor: TokenAnchor::Visible { byte_offset: 5 },
+                    },
+                    TokenAttribution {
+                        token_id: 3,
+                        anchor: TokenAnchor::ZeroWidth { byte_offset: 8 },
+                    },
+                ]
+                .into_iter()
+                .collect(),
+            })]
         );
     }
 }
@@ -186,7 +251,7 @@ pub trait UnifiedParser: Send {
     }
 
     /// Feed one decoded text delta into the parser, appending committed output into `output`.
-    fn parse_into(&mut self, delta: &str, output: &mut UnifiedParserOutput) -> Result<()>;
+    fn parse_into(&mut self, delta: DecodedText, output: &mut UnifiedParserOutput) -> Result<()>;
 
     /// Flush any buffered parser state at end of stream.
     fn finish(&mut self) -> Result<UnifiedParserOutput> {

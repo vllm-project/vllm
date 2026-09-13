@@ -6,7 +6,10 @@ from torch.nn import Module
 
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.model_executor.layers.fused_moe import RoutedExperts
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     convert_to_nvfp4_moe_kernel_format,
     make_nvfp4_moe_kernel,
@@ -87,13 +90,13 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
     def __init__(
         self,
         *,
-        layer: torch.nn.Module,
+        moe: FusedMoEConfig,
     ):
         if not current_platform.is_device_capability_family(100):
             raise ValueError(
                 "nvfp4_per_token online quantization requires a Blackwell (SM100) GPU."
             )
-        super().__init__(layer.moe_config)
+        super().__init__(moe)
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,

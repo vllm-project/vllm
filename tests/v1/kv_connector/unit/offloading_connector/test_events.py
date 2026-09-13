@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpecKind,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.base import (
     Locality,
     Medium,
@@ -88,12 +89,22 @@ def _group_config(
         tokens_per_hash = block_size
     tokens_per_chunk = block_size * blocks_per_chunk
     assert tokens_per_chunk % tokens_per_hash == 0
+    kv_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    manager_cls = KVCacheSpecRegistry.get_manager_class(kv_spec)
+    assert manager_cls is not None
     return GroupOffloadConfig(
         group_idx=group_idx,
         tokens_per_block=block_size,
         tokens_per_chunk=tokens_per_chunk,
         hashes_per_chunk=tokens_per_chunk // tokens_per_hash,
         sliding_window_size_in_chunks=sliding_window_size_in_chunks,
+        kv_cache_spec=kv_spec,
+        manager_cls=manager_cls,
         kv_event_group_spec=_FULL_ATTENTION_EVENT_SPEC,
     )
 

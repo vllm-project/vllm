@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ClassVar
 import torch
 
 import vllm.envs as envs
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backends.mla.prefill.base import (
     MLADimensions,
     MLAPrefillBackend,
@@ -161,39 +162,43 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         kv_indptr = qo_indptr.clone()
 
         assert self._prefill_main is not None
-        self._prefill_main.plan(
-            qo_indptr=qo_indptr,
-            kv_indptr=kv_indptr,
-            num_qo_heads=num_qo_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim_qk=head_dim_qk,
-            head_dim_vo=head_dim_vo,
-            causal=True,
-            sm_scale=global_hyperparameters.sm_scale,
-            window_left=global_hyperparameters.window_left,
-            logits_soft_cap=global_hyperparameters.logits_soft_cap,
-            q_data_type=prefill_metadata.q_data_type,
-            o_data_type=prefill_metadata.output_dtype,
-        )
+        # FlashInfer's plan() currently copies GPU indptrs to the CPU.
+        # This will be fixed by https://github.com/vllm-project/vllm/pull/52657.
+        with gpu_sync_allowed():
+            self._prefill_main.plan(
+                qo_indptr=qo_indptr,
+                kv_indptr=kv_indptr,
+                num_qo_heads=num_qo_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim_qk=head_dim_qk,
+                head_dim_vo=head_dim_vo,
+                causal=True,
+                sm_scale=global_hyperparameters.sm_scale,
+                window_left=global_hyperparameters.window_left,
+                logits_soft_cap=global_hyperparameters.logits_soft_cap,
+                q_data_type=prefill_metadata.q_data_type,
+                o_data_type=prefill_metadata.output_dtype,
+            )
 
         if has_context:
             chunked_context = prefill_metadata.chunked_context
             assert chunked_context is not None
             for chunk in chunked_context.chunks:
-                self._prefill_chunks[chunk.index].plan(
-                    qo_indptr=chunk.query_start_loc,
-                    kv_indptr=chunk.cu_seq_lens,
-                    num_qo_heads=num_qo_heads,
-                    num_kv_heads=num_kv_heads,
-                    head_dim_qk=head_dim_qk,
-                    head_dim_vo=head_dim_vo,
-                    causal=False,
-                    sm_scale=global_hyperparameters.sm_scale,
-                    window_left=global_hyperparameters.window_left,
-                    logits_soft_cap=global_hyperparameters.logits_soft_cap,
-                    q_data_type=prefill_metadata.q_data_type,
-                    o_data_type=prefill_metadata.output_dtype,
-                )
+                with gpu_sync_allowed():
+                    self._prefill_chunks[chunk.index].plan(
+                        qo_indptr=chunk.query_start_loc,
+                        kv_indptr=chunk.cu_seq_lens,
+                        num_qo_heads=num_qo_heads,
+                        num_kv_heads=num_kv_heads,
+                        head_dim_qk=head_dim_qk,
+                        head_dim_vo=head_dim_vo,
+                        causal=False,
+                        sm_scale=global_hyperparameters.sm_scale,
+                        window_left=global_hyperparameters.window_left,
+                        logits_soft_cap=global_hyperparameters.logits_soft_cap,
+                        q_data_type=prefill_metadata.q_data_type,
+                        o_data_type=prefill_metadata.output_dtype,
+                    )
 
     def supports_out(self) -> bool:
         # Planned with head_dim_vo == v_head_dim, so the output is unpadded.

@@ -5,17 +5,19 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-def prepare_dcp_local_seq_lens(
+def maybe_prepare_dcp_local_seq_lens(
     dcp_local_seq_lens: torch.Tensor,
     seq_lens: torch.Tensor,
     num_reqs: int,
     dcp_size: int,
     dcp_rank: int,
     cp_interleave: int,
-) -> None:
-    """Populate the persistent DCP local seq_lens buffer (CUDA graph safe)."""
+    *,
+    num_reqs_padded: int | None = None,
+) -> torch.Tensor | None:
+    """Populate caller-owned storage and return its padded view, or None without DCP."""
     if dcp_size == 1:
-        return
+        return None
 
     max_num_reqs = dcp_local_seq_lens.shape[0]
     BLOCK_SIZE = 128
@@ -30,6 +32,7 @@ def prepare_dcp_local_seq_lens(
         max_num_reqs,
         BLOCK_SIZE,
     )
+    return dcp_local_seq_lens[:num_reqs_padded]
 
 
 @triton.jit

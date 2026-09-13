@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterable, MutableMapping, Sequence
 from contextlib import ExitStack, contextmanager
 from multiprocessing import Process, get_context
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import patch
 
 import anthropic
@@ -46,10 +46,6 @@ from vllm.distributed import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear import (
-    _KernelT,
-    init_fp8_linear_kernel,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
@@ -64,6 +60,9 @@ from vllm.utils.torch_utils import (
     set_random_seed,  # noqa: F401 - re-exported for use in test files
 )
 from vllm.v1.engine.utils import get_engine_process_shutdown_timeout
+
+if TYPE_CHECKING:
+    from vllm.model_executor.kernels.linear import _KernelT
 
 logger = init_logger(__name__)
 
@@ -148,6 +147,28 @@ ROCM_ENGINE_KWARGS: dict = (
 _TILELANG_TVM_PYTHONPATH_FRAGMENT = os.path.join(
     "tilelang", "3rdparty", "tvm", "python"
 )
+_SENSITIVE_CLI_ARG_NARGS = {"--api-key": "+", "--hf-token": "?"}
+
+
+def _redact_sensitive_cli_args(args: Sequence[str]) -> list[str]:
+    redacted_args = list(args)
+    index = 0
+    while index < len(args):
+        name, separator, _ = args[index].partition("=")
+        nargs = _SENSITIVE_CLI_ARG_NARGS.get(name.replace("_", "-"))
+        if nargs is None:
+            index += 1
+            continue
+        if separator:
+            redacted_args[index] = f"{name}=***"
+        index += 1
+        if not separator or nargs == "+":
+            while index < len(args) and not args[index].startswith("-"):
+                redacted_args[index] = "***"
+                index += 1
+                if nargs == "?":
+                    break
+    return redacted_args
 
 
 def _sanitize_pythonpath_value(pythonpath: str | None) -> str:
@@ -785,8 +806,8 @@ class RemoteOpenAIServer(RemoteVLLMServer):
             env.update(env_dict)
         _sanitize_pythonpath_env(env)
         serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
-        print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
-        print(f"Environment variables: {env}")
+        redacted_serve_cmd = _redact_sensitive_cli_args(serve_cmd)
+        print(f"Launching RemoteOpenAIServer with: {' '.join(redacted_serve_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,
@@ -813,7 +834,10 @@ class RemoteLaunchRenderServer(RemoteVLLMServer):
             env.update(env_dict)
         _sanitize_pythonpath_env(env)
         serve_cmd = ["vllm", "launch", "render", model, *vllm_serve_args]
-        print(f"Launching RemoteLaunchRenderServer with: {' '.join(serve_cmd)}")
+        redacted_serve_cmd = _redact_sensitive_cli_args(serve_cmd)
+        print(
+            f"Launching RemoteLaunchRenderServer with: {' '.join(redacted_serve_cmd)}"
+        )
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,
@@ -1392,6 +1416,8 @@ def init_test_distributed_environment(
     rank: int,
     distributed_init_port: str,
     local_rank: int = -1,
+    data_parallel_size: int = 1,
+    data_parallel_master_port: int | None = None,
 ) -> None:
     # Note: This function is often called from Ray worker processes, so we
     # can't rely on pytest fixtures to set the config. We check if the config
@@ -1403,6 +1429,29 @@ def init_test_distributed_environment(
     )
 
     distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+
+    if data_parallel_size > 1:
+        # For DP we need to set a common DP master port
+        from vllm.config.parallel import ParallelConfig
+
+        assert data_parallel_master_port is not None, (
+            "data_parallel_master_port is required when data_parallel_size > 1"
+        )
+        tp_pp_world = tp_size * pp_size
+        parallel_config = ParallelConfig(
+            data_parallel_size=data_parallel_size,
+            data_parallel_rank=rank // tp_pp_world,
+            _data_parallel_master_port_list=[int(data_parallel_master_port)],
+        )
+        with set_current_vllm_config(VllmConfig(parallel_config=parallel_config)):
+            init_distributed_environment(
+                world_size=tp_pp_world,
+                rank=rank % tp_pp_world,
+                distributed_init_method=distributed_init_method,
+                local_rank=local_rank if local_rank >= 0 else rank,
+            )
+            ensure_model_parallel_initialized(tp_size, pp_size)
+        return
 
     if get_current_vllm_config_or_none() is not None:
         # Config already set, use it directly
@@ -1430,6 +1479,7 @@ def multi_process_parallel(
     tp_size: int,
     pp_size: int,
     test_target: Any,
+    data_parallel_size: int = 1,
 ) -> None:
     import ray
 
@@ -1450,18 +1500,34 @@ def multi_process_parallel(
     )
 
     distributed_init_port = get_open_port()
+    # Separate port for the DP master group; only used when data_parallel_size > 1.
+    data_parallel_master_port = get_open_port() if data_parallel_size > 1 else None
+    world_size = data_parallel_size * tp_size * pp_size
     try:
         refs = []
-        for rank in range(tp_size * pp_size):
-            refs.append(
-                test_target.remote(
-                    monkeypatch,
-                    tp_size,
-                    pp_size,
-                    rank,
-                    distributed_init_port,
-                ),
-            )
+        for rank in range(world_size):
+            if data_parallel_size > 1:
+                refs.append(
+                    test_target.remote(
+                        monkeypatch,
+                        tp_size,
+                        pp_size,
+                        rank,
+                        distributed_init_port,
+                        data_parallel_size,
+                        data_parallel_master_port,
+                    ),
+                )
+            else:
+                refs.append(
+                    test_target.remote(
+                        monkeypatch,
+                        tp_size,
+                        pp_size,
+                        rank,
+                        distributed_init_port,
+                    ),
+                )
         ray.get(refs)
     finally:
         ray.shutdown()
@@ -2349,9 +2415,11 @@ class TestFP8Layer(torch.nn.Module):
         out_dtype: torch.dtype | None = None,
         transpose_weights: bool = False,
         device: torch.device | None = None,
-        force_kernel: type[_KernelT] | None = None,
+        force_kernel: "type[_KernelT] | None" = None,
     ):
         super().__init__()
+        from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
+
         self.input_size_per_partition = weight_shape[1]
         self.output_size_per_partition = weight_shape[0]
         self.logical_widths = [self.output_size_per_partition]

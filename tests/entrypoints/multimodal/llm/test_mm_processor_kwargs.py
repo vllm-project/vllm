@@ -286,3 +286,133 @@ def test_preprocess_chat_omits_mm_processor_kwargs_when_no_override() -> None:
     assert call_args.args[1].mm_processor_kwargs is None
     assert call_args.args[2] == "tok-params"
     assert call_args.kwargs["prompt_extras"] is None
+
+
+def test_preprocess_chat_defaults_add_special_tokens_to_false() -> None:
+    # Matches `ChatCompletionRequest.add_special_tokens` on the server.
+    llm = _make_mock_llm()
+    messages = [[{"role": "user", "content": "hi"}]]
+
+    renderer = Mock()
+    renderer.tokenizer = object()
+    renderer.default_chat_tok_params = Mock()
+    renderer.default_chat_tok_params.with_kwargs.return_value = "tok-params"
+    renderer.render_chat.return_value = (messages, ["engine-input"])
+    llm.renderer = renderer
+
+    llm._preprocess_chat(messages)
+
+    renderer.default_chat_tok_params.with_kwargs.assert_called_once_with(
+        add_special_tokens=False
+    )
+
+
+def test_preprocess_chat_tokenization_kwargs_override_add_special_tokens() -> None:
+    llm = _make_mock_llm()
+    messages = [[{"role": "user", "content": "hi"}]]
+
+    renderer = Mock()
+    renderer.tokenizer = object()
+    renderer.default_chat_tok_params = Mock()
+    renderer.default_chat_tok_params.with_kwargs.return_value = "tok-params"
+    renderer.render_chat.return_value = (messages, ["engine-input"])
+    llm.renderer = renderer
+
+    llm._preprocess_chat(
+        messages,
+        tokenization_kwargs={"add_special_tokens": True, "truncate_prompt_tokens": 8},
+    )
+
+    renderer.default_chat_tok_params.with_kwargs.assert_called_once_with(
+        add_special_tokens=True, truncate_prompt_tokens=8
+    )
+
+
+@pytest.fixture(scope="module")
+def llava_llm():
+    from vllm.config import ModelConfig, VllmConfig
+    from vllm.renderers.hf import HfRenderer
+    from vllm.tokenizers import cached_tokenizer_from_config
+
+    # A real multimodal model (Llama tokenizer, BOS=1) so that the real
+    # processor default (`add_special_tokens=True`) is in play. Only
+    # config/tokenizer/processor files are fetched, no weights.
+    model_config = ModelConfig(model="llava-hf/llava-1.5-7b-hf", max_model_len=128)
+    renderer = HfRenderer(
+        VllmConfig(model_config=model_config),
+        cached_tokenizer_from_config(model_config),
+    )
+    assert renderer.default_chat_tok_params.add_special_tokens is True
+
+    llm = _make_mock_llm()
+    # `_preprocess_cmpl` parses prompts against the real model config.
+    llm.model_config = model_config
+    llm.renderer = renderer
+    return llm
+
+
+class TestChatAddSpecialTokensDefault:
+    """`LLM.chat()` renders the chat template to text and then tokenizes it.
+    The multimodal processor default is `add_special_tokens=True`, so a
+    template that emits `bos_token` used to get a second BOS from the
+    tokenizer. `_preprocess_chat` now defaults `add_special_tokens=False`
+    like the online chat API does (`ChatCompletionRequest`), unless the
+    caller overrides it via `tokenization_kwargs`.
+    """
+
+    # Mirrors the Gemma 3 chat template and the bundled deepseek_vl2 /
+    # deepseek_ocr templates, whose rendered output starts with the BOS token.
+    BOS_TEMPLATE = (
+        "{{ bos_token }}{% for m in messages %}{{ m['content'] }}{% endfor %}"
+    )
+    MESSAGES = [[{"role": "user", "content": "hi"}]]
+
+    def _chat_token_ids(self, llm, **kwargs):
+        (engine_input,) = llm._preprocess_chat(
+            self.MESSAGES,
+            chat_template=self.BOS_TEMPLATE,
+            add_generation_prompt=False,
+            **kwargs,
+        )
+        return engine_input["prompt_token_ids"]
+
+    def test_chat_does_not_duplicate_template_bos(self, llava_llm):
+        bos = llava_llm.renderer.tokenizer.bos_token_id
+        prompt_token_ids = self._chat_token_ids(llava_llm)
+
+        assert prompt_token_ids[0] == bos
+        assert prompt_token_ids.count(bos) == 1
+
+    def test_chat_matches_online_chat_api(self, llava_llm):
+        from vllm.renderers.params import ChatParams, TokenizeParams
+
+        # `ChatCompletionRequest.add_special_tokens` defaults to `False`.
+        online_tok_params = TokenizeParams(
+            max_total_tokens=llava_llm.renderer.model_config.max_model_len,
+            add_special_tokens=False,
+        )
+        chat_params = ChatParams(
+            chat_template=self.BOS_TEMPLATE,
+            chat_template_kwargs=dict(tokenize=False, add_generation_prompt=False),
+        )
+        _, (online_input,) = llava_llm.renderer.render_chat(
+            self.MESSAGES, chat_params, online_tok_params
+        )
+
+        assert self._chat_token_ids(llava_llm) == online_input["prompt_token_ids"]
+
+    def test_explicit_tokenization_kwargs_override_default(self, llava_llm):
+        bos = llava_llm.renderer.tokenizer.bos_token_id
+        prompt_token_ids = self._chat_token_ids(
+            llava_llm, tokenization_kwargs={"add_special_tokens": True}
+        )
+
+        assert prompt_token_ids.count(bos) == 2
+
+    def test_generate_keeps_processor_default(self, llava_llm):
+        # Raw prompts have no chat template to emit BOS, so `LLM.generate()`
+        # must keep letting the tokenizer add it.
+        bos = llava_llm.renderer.tokenizer.bos_token_id
+        (engine_input,) = llava_llm._preprocess_cmpl(["hi"])
+
+        assert engine_input["prompt_token_ids"][0] == bos

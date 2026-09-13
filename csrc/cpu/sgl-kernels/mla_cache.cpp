@@ -1,14 +1,14 @@
 // vLLM-native CPU cache-write op for MLA's single-latent-buffer KV cache.
+// `concat_and_cache_mla` (the generic op used by every GPU backend) is
+// CUDA-only; this is the CPU counterpart, adapted in spirit from SGLang's
+// `store_cache_cpu` (csrc/cpu/kvcache.cpp).
 //
-// `concat_and_cache_mla` (the generic MLA cache-write op used by every GPU
-// backend) is registered CUDA-only. This is the CPU counterpart, adapted in
-// spirit from SGLang's `store_cache_cpu` (csrc/cpu/kvcache.cpp) but
-// generalized to write two source tensors (`kv_c_normed`, `k_pe`) into two
-// different column-offset ranges of the SAME destination row -- SGLang's
-// version assumes k/v land in two independent, equal-row-width cache
-// tensors, which doesn't hold here since MLA's cache is one 576-wide buffer
-// and the two column ranges (512-wide, 64-wide) don't match the buffer's
-// true per-token stride, so the write can't reuse `store_cache_cpu` as-is.
+// Difference from upstream: writes two source tensors (`kv_c_normed`,
+// `k_pe`) into two column-offset ranges of the SAME destination row.
+// Upstream assumes k/v land in two independent, equal-row-width cache
+// tensors -- MLA's cache is one 576-wide buffer whose two column ranges
+// (512-wide, 64-wide) don't match that per-token stride, so
+// `store_cache_cpu` can't be reused as-is.
 
 #include "common.h"
 #include "vec.h"
@@ -59,9 +59,9 @@ void concat_and_cache_mla_kernel_impl(
 
 // kv_c_normed : [num_tokens, kv_lora_rank]
 // k_pe        : [num_tokens, qk_rope_head_dim] or [num_tokens, 1,
-// qk_rope_head_dim] kv_cache    : [num_blocks, block_size, kv_lora_rank +
-// qk_rope_head_dim] slot_mapping: [num_tokens] int32/int64, absolute physical
-// row index
+//               qk_rope_head_dim]
+// kv_cache    : [num_blocks, block_size, kv_lora_rank + qk_rope_head_dim]
+// slot_mapping: [num_tokens] int32/int64, absolute physical row index
 //               (block_id * block_size + block_offset); negative entries are
 //               skipped (padded tokens), matching `concat_and_cache_mla`.
 void concat_and_cache_mla_cpu(const at::Tensor& kv_c_normed,

@@ -606,7 +606,10 @@ def create_build_payload(
     }
     return {
         "commit": pr["head"]["sha"],
-        "branch": pr["head"]["ref"],
+        # Use the head label (owner:branch) rather than the bare ref so a PR
+        # whose fork branch is named e.g. "main" does not collide with the
+        # upstream branch of the same name.
+        "branch": pr["head"].get("label") or pr["head"]["ref"],
         "message": f"PR #{pr['number']} {command} by @{actor}",
         "pull_request_id": pr["number"],
         "pull_request_base_branch": pr["base"]["ref"],
@@ -969,12 +972,13 @@ def handle_cancel_ci(
 ) -> str:
     ci_name = ci_name_for_command(command)
     branch = pr["head"]["ref"]
+    # Builds are created under the head label (owner:branch); also match the
+    # bare ref so builds created before that change can still be cancelled.
     branches = [branch]
+    head_label = pr["head"].get("label")
+    if head_label and head_label not in branches:
+        branches.insert(0, str(head_label))
     states = CANCELABLE_BUILD_STATES
-    if command in AMD_CI_COMMANDS:
-        head_label = pr["head"].get("label")
-        if head_label and head_label not in branches:
-            branches.append(str(head_label))
 
     builds_by_number: dict[int, dict[str, Any]] = {}
     for candidate_branch in branches:

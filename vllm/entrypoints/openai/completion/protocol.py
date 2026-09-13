@@ -16,6 +16,7 @@ from vllm.entrypoints.generate.base.protocol import (
     StopParam,
     StreamOptions,
     structured_outputs_from_response_format,
+    validate_cache_salt,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
@@ -74,6 +75,7 @@ class CompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
+    watermarking: bool = True
     length_penalty: float = 1.0
     stop_token_ids: list[int] | None = []
     include_stop_str_in_output: bool = False
@@ -372,6 +374,7 @@ class CompletionRequest(OpenAIBaseModel):
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
             temperature=temperature,
+            watermarking=self.watermarking,
             top_p=top_p,
             top_k=top_k,
             min_p=min_p,
@@ -401,6 +404,14 @@ class CompletionRequest(OpenAIBaseModel):
             thinking_token_budget=self.thinking_token_budget,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        validate_cache_salt(data.get("cache_salt"))
+        return data
 
     @model_validator(mode="before")
     @classmethod

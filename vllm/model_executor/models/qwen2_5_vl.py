@@ -26,7 +26,7 @@
 # limitations under the License.
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
 
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -630,6 +630,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         vision_config: Qwen2_5_VLVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -660,6 +661,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
             temporal_patch_size=temporal_patch_size,
             in_channels=in_channels,
             hidden_size=self.hidden_size,
+        )
+        self.input_norm = (
+            input_norm if input_norm is not None else FusedInputNorm.identity()
         )
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
@@ -805,7 +809,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         window_index_thw, cu_seqlens_window_thw = self.get_window_index_thw(t, h, w)
         cos_thw, sin_thw = self.rotary_pos_emb_thw(t, h, w)
 
-        window_index_thw_dev = window_index_thw.to(cos_thw.device, non_blocking=True)
+        window_index_thw_dev = async_tensor_h2d(window_index_thw, cos_thw.device)
         cos_thw = cos_thw[window_index_thw_dev, :, :]
         cos_thw = cos_thw.flatten(start_dim=0, end_dim=1)
         sin_thw = sin_thw[window_index_thw_dev, :, :]
@@ -1053,7 +1057,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         )
         rotary_pos_emb_cos = rotary_pos_emb_cos.to(device=device, non_blocking=True)
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(device=device, non_blocking=True)
-        window_index = window_index.to(device=device, non_blocking=True)
+        window_index = async_tensor_h2d(window_index, device)
         reverse_indices = reverse_indices.to(device=device, non_blocking=True)
 
         metadata["rotary_pos_emb_cos"] = rotary_pos_emb_cos
@@ -1076,7 +1080,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         *,
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        hidden_states = x.to(device=self.device, dtype=self.dtype)
+        hidden_states = self.input_norm(x.to(device=self.device), self.dtype)
         hidden_states = self.patch_embed(hidden_states)
 
         seq_len = hidden_states.shape[0]
@@ -1359,9 +1363,9 @@ class Qwen2_5_VLForConditionalGeneration(
                 vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self.quant_config,
+                input_norm=FusedInputNorm.from_model_config(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
-            self.input_norm = FusedInputNorm.from_model_config(self.model_config)
 
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
@@ -1436,11 +1440,13 @@ class Qwen2_5_VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-            pixel_values = self.input_norm(pixel_values, self.visual.dtype)
 
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
+                    self.visual,
+                    pixel_values.type(self.visual.dtype),
+                    grid_thw_list,
+                    rope_type="rope_3d",
                 )
             else:
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
@@ -1475,8 +1481,8 @@ class Qwen2_5_VLForConditionalGeneration(
         grid_thw_list = grid_thw.tolist()
         image_embeds_out = []
         for emb, size in zip(image_embeds_split, grid_thw_list):
-            positions = compute_mrope_for_media(size, merge_size).to(
-                emb.device, non_blocking=True
+            positions = async_tensor_h2d(
+                compute_mrope_for_media(size, merge_size), emb.device
             )
             emb = torch.cat([emb, positions], dim=1)
             image_embeds_out.append(emb)
@@ -1494,14 +1500,11 @@ class Qwen2_5_VLForConditionalGeneration(
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
-            pixel_values_videos = self.input_norm(
-                pixel_values_videos, self.visual.dtype
-            )
 
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual,
-                    pixel_values_videos,
+                    pixel_values_videos.type(self.visual.dtype),
                     grid_thw_list,
                     rope_type="rope_3d",
                 )
@@ -1558,12 +1561,13 @@ class Qwen2_5_VLForConditionalGeneration(
                 spatial_merge_size=self.visual.spatial_merge_size,
                 q=self.video_pruning_rate,
             )
-            positions = compute_mrope_for_media(
+            positions_cpu = compute_mrope_for_media(
                 size,
                 merge_size,
                 tokens_per_second=tokens_per_second,
                 video_second_per_grid=video_second_per_grid_t.item(),
-            ).to(emb.device, non_blocking=True)
+            )
+            positions = async_tensor_h2d(positions_cpu, emb.device)
 
             with gpu_sync_allowed():
                 emb = emb[retention_mask]
@@ -1852,6 +1856,7 @@ class Qwen2_5_VLForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,

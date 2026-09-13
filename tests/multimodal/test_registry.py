@@ -6,14 +6,44 @@ Qwen2.5-VL visual component loading behavior.
 """
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
+from vllm.config import SchedulerConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ..models.utils import build_model_context
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.parametrize(
+    ("chunked_prefill", "max_model_len", "expected_seq_len"),
+    [(None, 491520, 491520), (True, 491520, 8192), (True, 128, 128), (False, 128, 128)],
+)
+def test_dummy_inputs_scheduler_budget(
+    chunked_prefill, max_model_len, expected_seq_len
+):
+    model_config = MagicMock()
+    model_config.max_model_len = max_model_len
+    processor = MagicMock()
+    processor.apply.return_value = {"prompt_token_ids": [7]}
+    kwargs = {}
+    if chunked_prefill is not None:
+        kwargs["scheduler_config"] = SchedulerConfig(
+            max_model_len=max_model_len,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=8192,
+            max_num_seqs=1,
+            enable_chunked_prefill=chunked_prefill,
+        )
+    result = MULTIMODAL_REGISTRY.get_dummy_mm_inputs(
+        model_config, {"image": 1}, processor=processor, **kwargs
+    )
+    get_inputs = processor.dummy_inputs.get_dummy_processor_inputs
+    assert get_inputs.call_args.kwargs["seq_len"] == expected_seq_len
+    assert len(result["prompt_token_ids"]) == expected_seq_len
 
 
 @pytest.mark.parametrize(

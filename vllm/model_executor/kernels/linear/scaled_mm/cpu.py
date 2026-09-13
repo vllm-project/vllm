@@ -6,6 +6,9 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    _upcast_e8m0_to_fp32,
+)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
@@ -281,10 +284,12 @@ class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             else params.weight_scale
         )
         assert weight_scale is not None
+        if weight_scale.dtype in (torch.float8_e8m0fnu, torch.uint8):
+            weight_scale = _upcast_e8m0_to_fp32(weight_scale.data)
         replace_parameter(
             layer,
             scale_attr,
-            torch.nn.Parameter(weight_scale.data, requires_grad=False),
+            torch.nn.Parameter(weight_scale.data.contiguous(), requires_grad=False),
         )
 
     def apply_weights(

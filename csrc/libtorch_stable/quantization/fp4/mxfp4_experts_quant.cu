@@ -76,9 +76,12 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
 
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int colsPerRow = numCols / CVT_FP4_ELTS_PER_THREAD;
+  int32_t const numValidRows =
+      min(numRows,
+          static_cast<int32_t>(__ldca(&input_offset_by_experts[n_experts])));
   int inColsPerRow = FUSE_SILU_MUL ? colsPerRow * 2 : colsPerRow;
 
-  for (int globalIdx = tid; globalIdx < numRows * colsPerRow;
+  for (int globalIdx = tid; globalIdx < numValidRows * colsPerRow;
        globalIdx += gridDim.x * blockDim.x) {
     int rowIdx = globalIdx / colsPerRow;
     int colIdx = globalIdx % colsPerRow;
@@ -193,9 +196,11 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
 
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int colsPerRow = numCols / CVT_FP4_ELTS_PER_THREAD;
+  int32_t const numValidRows =
+      min(numRows, static_cast<int32_t>(shared_input_offsets[n_experts]));
   int inColsPerRow = FUSE_SILU_MUL ? colsPerRow * 2 : colsPerRow;
 
-  for (int globalIdx = tid; globalIdx < numRows * colsPerRow;
+  for (int globalIdx = tid; globalIdx < numValidRows * colsPerRow;
        globalIdx += gridDim.x * blockDim.x) {
     int rowIdx = globalIdx / colsPerRow;
     int colIdx = globalIdx % colsPerRow;

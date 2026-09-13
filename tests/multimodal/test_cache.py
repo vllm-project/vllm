@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing as mp
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -360,6 +361,76 @@ def test_mm_cache_miss_batches_all_drifted_hashes():
     assert exc_info.value.mm_hashes == ["B", "D", "E"]
     # The non-drifted items were still ingested into P1 before the raise.
     assert "A" in p1._cache and "C" in p1._cache
+
+
+def test_shm_receiver_handles_prefix_covered_items(monkeypatch):
+    """Regression test for the EngineCore crash with prefix caching + SHM cache.
+
+    On a repeated request, prefix caching can fully cover an item's
+    placeholder range, so strip_covered_mm_data() drops its payload: uncached
+    items arrive at the worker with data=None, while SHM-cached items keep
+    their address descriptor. Before the fix the SHM receiver asserted on the
+    None item, terminating EngineCore on the second identical request
+    (vllm-project/vllm#54994). The address item must still be resolved and
+    acknowledged so the object stays reclaimable.
+    """
+    monkeypatch.setenv(
+        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME", "test_shm_prefix_covered_items"
+    )
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(world_size=1),
+        model_config=_StubModelConfig(mm_processor_cache_gb=4 * MiB_bytes / GiB_bytes),
+    )
+    p0 = ShmObjectStoreSenderCache(vllm_config)  # type: ignore[arg-type]
+    p1 = ShmObjectStoreReceiverCache(vllm_config, mp.Lock())  # type: ignore[arg-type]
+
+    def _feature(
+        mm_hash: str, data: MultiModalKwargsItem | None
+    ) -> MultiModalFeatureSpec:
+        return MultiModalFeatureSpec(
+            data=data,
+            modality="image",
+            identifier=mm_hash,
+            mm_position=PlaceholderRange(offset=0, length=100),
+            mm_hash=mm_hash,
+        )
+
+    mm_hash = "image_A"
+    item = MultiModalKwargsItem.dummy(nbytes=1024)
+
+    try:
+        # Request 1 (sender miss): the payload is put into SHM; the worker
+        # receives an address descriptor and resolves it.
+        p0.touch_sender_cache_item(mm_hash)
+        address_item, _ = p0.get_and_update_item((item, []), mm_hash)
+        first = _feature(mm_hash, address_item)
+        p1.get_and_update_features([first])
+        assert torch.equal(first.data["dummy"].data, item["dummy"].data)
+
+        # Request 2 (identical, fully prefix-covered): the sender hit takes
+        # writer references (touch + get_cached) and returns the address
+        # descriptor; the scheduler strips the covered uncached payload to
+        # data=None.
+        p0.touch_sender_cache_item(mm_hash)
+        address_item_2, _ = p0.get_and_update_item(None, mm_hash)
+        covered_uncached = _feature("image_B", None)
+        covered_cached = _feature(mm_hash, address_item_2)
+
+        # Pre-fix this asserted in touch_receiver_cache_item and terminated
+        # EngineCore.
+        p1.get_and_update_features([covered_uncached, covered_cached])
+
+        assert covered_uncached.data is None
+        # The address item is resolved to the cached payload.
+        assert torch.equal(covered_cached.data["dummy"].data, item["dummy"].data)
+
+        # The hit's writer references were acknowledged by the worker, so the
+        # object remains reclaimable instead of permanently protected.
+        p0._shm_cache.free_unused()
+        assert not p0._shm_cache.is_cached(mm_hash)
+    finally:
+        p1._shm_cache.close()
+        p0.close()
 
 
 def _run_test_cache_eviction_lru(

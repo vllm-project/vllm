@@ -34,6 +34,7 @@ def _import_submodule(module_name: str) -> ModuleType | None:
 _B12X_SUBMODULES = {
     module_name: _import_submodule(module_name)
     for module_name in (
+        "b12x.attention.paged",
         "b12x.gemm.blockscaled",
         # TODO: Remove once B12X exposes the scale-swizzle API publicly.
         "b12x._lib.intrinsics",
@@ -71,6 +72,10 @@ def get_b12x_tensor_fp8_linear() -> ModuleType | None:
 
 def get_b12x_fused_moe() -> ModuleType | None:
     return _get_submodule("b12x.moe.fused_moe")
+
+
+def get_b12x_paged_attention() -> ModuleType | None:
+    return _get_submodule("b12x.attention.paged")
 
 
 def b12x_warmup_token_counts(

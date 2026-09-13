@@ -24,12 +24,15 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence, Sized
 from functools import lru_cache
 from typing import (
     Annotated,
     Any,
     Literal,
+    SupportsIndex,
+    SupportsInt,
+    TypedDict,
 )
 
 import numpy as np
@@ -45,6 +48,7 @@ from transformers.dynamic_module_utils import (
 )
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+from typing_extensions import Buffer
 
 from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
@@ -728,6 +732,11 @@ class LlavaOnevision2VideoPixelInputs(TensorSchema):
 LlavaOnevision2ImageInputs = (
     LlavaOnevision2ImagePixelInputs | LlavaOnevision2ImageEmbeddingInputs
 )
+
+
+class LlavaOnevision2InputsByModality(TypedDict, total=False):
+    images: LlavaOnevision2ImageInputs | None
+    videos: LlavaOnevision2VideoPixelInputs | None
 
 
 class LlavaOnevision2VisionRotaryEmbedding(nn.Module):
@@ -1468,7 +1477,7 @@ class LlavaOnevision2DummyInputsBuilder(
         n_img = mm_counts.get("image", 0)
         n_vid = mm_counts.get("video", 0)
         w, h = self.info.get_image_size_with_most_features()
-        out: MultiModalDataDict = {}
+        out: dict[str, object] = {}
         if n_img:
             out["image"] = self._get_dummy_images(width=w, height=h, num_images=n_img)
         if n_vid:
@@ -1586,6 +1595,8 @@ class LlavaOnevision2MultiModalProcessor(
         # array, or tensor, and ``and <array>`` would raise on the ambiguous
         # truth value of a multi-element array.
         _videos = mm_data.get("videos")
+        if _videos is not None and not isinstance(_videos, Sized):
+            raise TypeError(f"object of type '{type(_videos).__name__}' has no len()")
         videos_present = _videos is not None and len(_videos) > 0
 
         codec_video_paths = (
@@ -1666,15 +1677,24 @@ class LlavaOnevision2MultiModalProcessor(
         # provided by the backend's ``compute_frames_index_to_sample``; SSRF /
         # local-file gating is enforced by the connector before decoding.
         if videos_present:
-            timestamp_decimals = int(
-                hf_processor_mm_kwargs.get(
-                    "timestamp_decimals", _DEFAULT_TIMESTAMP_DECIMALS
-                )
+            timestamp_decimals = hf_processor_mm_kwargs.get(
+                "timestamp_decimals", _DEFAULT_TIMESTAMP_DECIMALS
             )
+            if not isinstance(
+                timestamp_decimals, (str, Buffer, SupportsInt, SupportsIndex)
+            ):
+                raise TypeError(
+                    "int() argument must be a string, a bytes-like object "
+                    f"or a real number, not '{type(timestamp_decimals).__name__}'"
+                )
+            timestamp_decimals = int(timestamp_decimals)
 
             per_video_frames: list[list[Image.Image]] = []
             per_video_timestamps: list[list[float]] = []
-            for item in mm_data["videos"]:
+            videos = mm_data["videos"]
+            if not isinstance(videos, Iterable):
+                raise TypeError(f"Unsupported videos input: {type(videos)}")
+            for item in videos:
                 pil_frames, timestamps = _frame_video_to_pil_and_timestamps(item)
                 per_video_frames.append(pil_frames)
                 per_video_timestamps.append(timestamps)
@@ -1902,18 +1922,21 @@ class LlavaOnevision2MultiModalProcessor(
         def get_image_replacement(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
             grid_thw = out_item["image_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
             n = int(grid_thw.prod(-1).sum()) // merge_length
             return [image_pad_id] * n
 
         def get_video_replacement(item_idx: int):
             out_item = out_mm_kwargs["video"][item_idx]
             grid_thw = out_item["video_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
             is_codec_field = out_item.get("video_is_codec")
-            is_codec = (
-                bool(int(is_codec_field.data.item()))
-                if is_codec_field is not None
-                else False
-            )
+            if is_codec_field is not None:
+                is_codec_data = is_codec_field.data
+                assert isinstance(is_codec_data, torch.Tensor)
+                is_codec = bool(int(is_codec_data.item()))
+            else:
+                is_codec = False
             tokens: list[int] = []
 
             if is_codec:
@@ -1924,6 +1947,8 @@ class LlavaOnevision2MultiModalProcessor(
                 # run, emit ``<sec seconds><|vision_start|><pad*N><|vision_end|>\n``.
                 patch_positions = out_item["patch_positions_videos"].data
                 fps_t = out_item["codec_fps"].data
+                assert isinstance(patch_positions, torch.Tensor)
+                assert isinstance(fps_t, torch.Tensor)
                 fps = float(int(fps_t.item())) / 1_000_000_000.0
                 runs = _codec_timestamp_runs(
                     patch_positions, fps, image_processor.merge_size
@@ -1938,6 +1963,7 @@ class LlavaOnevision2MultiModalProcessor(
                     tokens.extend(newline_ids)
             else:
                 timestamps = out_item["frame_timestamps"].data
+                assert isinstance(timestamps, torch.Tensor)
                 T_total = int(grid_thw.shape[0])
                 for t in range(T_total):
                     sec = float(timestamps[t].item())
@@ -2121,7 +2147,7 @@ class LlavaOnevision2ForConditionalGeneration(
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
 
-        if image_input["type"] == "image_embeds":
+        if isinstance(image_input, LlavaOnevision2ImageEmbeddingInputs):
             image_embeds = image_input["image_embeds"]
         else:
             image_embeds = self.visual(
@@ -2166,8 +2192,13 @@ class LlavaOnevision2ForConditionalGeneration(
             )
         if isinstance(video_num_frames, list):
             video_num_frames = torch.cat([v.flatten() for v in video_num_frames])
-        else:
+        elif isinstance(video_num_frames, torch.Tensor):
             video_num_frames = video_num_frames.flatten()
+        else:
+            raise TypeError(
+                "video_num_frames must be a tensor or a list of tensors, "
+                f"got {type(video_num_frames)}"
+            )
         return LlavaOnevision2VideoPixelInputs(
             type="pixel_values_videos",
             pixel_values_videos=pixel_values_videos,
@@ -2202,8 +2233,10 @@ class LlavaOnevision2ForConditionalGeneration(
             cursor += n
         return video_embeds.split(sizes)
 
-    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
-        modalities = {}
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> LlavaOnevision2InputsByModality:
+        modalities = LlavaOnevision2InputsByModality()
         for key in kwargs:
             if key in ("pixel_values", "image_embeds") and "images" not in modalities:
                 modalities["images"] = self._parse_and_validate_image_input(**kwargs)
@@ -2221,9 +2254,13 @@ class LlavaOnevision2ForConditionalGeneration(
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
         for modality in modalities:
             if modality == "images":
-                multimodal_embeddings += self._process_image_input(modalities["images"])
+                image_input = modalities["images"]
+                assert image_input is not None
+                multimodal_embeddings += self._process_image_input(image_input)
             elif modality == "videos":
-                multimodal_embeddings += self._process_video_input(modalities["videos"])
+                video_input = modalities["videos"]
+                assert video_input is not None
+                multimodal_embeddings += self._process_video_input(video_input)
         return multimodal_embeddings
 
     def get_input_embeddings(

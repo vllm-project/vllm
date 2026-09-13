@@ -456,6 +456,7 @@ class MiniCPMModel(nn.Module, EagleModelMixin):
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
+            assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 

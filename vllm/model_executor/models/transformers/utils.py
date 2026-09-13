@@ -224,41 +224,22 @@ def _rebase_on_vocab_parallel(cls: type[nn.Embedding]) -> type[VocabParallelEmbe
 
 
 def replace_embedding_class(
-    embedding: nn.Module,
+    embedding: nn.Embedding,
     quant_config: "QuantizationConfig | None" = None,
     *,
     prefix: str = "",
 ) -> nn.Module:
-    """Replace the `nn.Embedding` in `embedding` with `VocabParallelEmbedding`.
+    """Replace `nn.Embedding` with `VocabParallelEmbedding`.
 
     Args:
-        embedding: The module returned by `model.get_input_embeddings()`.
+        embedding: The `nn.Embedding` holding a vocab table.
         quant_config: Quantization config for the new embedding.
         prefix: Qualname of `embedding`, used to look up its quantization method.
     Returns:
-        The module to install with `model.set_input_embeddings()`. Composing and
-        inheriting modules are mutated in place and returned as-is.
-    Raises:
-        ValueError: If `embedding` composes anything other than one `nn.Embedding`,
-            which would leave the input embedding weights ambiguous.
+        The module to install in `embedding`'s place.
     """
-    # If `embedding` composes its `nn.Embedding`, recurse into it
-    if not isinstance(embedding, nn.Embedding):
-        composed = [
-            (name, module)
-            for name, module in embedding.named_modules()
-            if isinstance(module, nn.Embedding)
-        ]
-        if len(composed) != 1:
-            raise ValueError(
-                f"Expected {type(embedding).__name__} to be an `nn.Embedding` or to "
-                f"compose exactly one, but found {len(composed)}."
-            )
-        name, module = composed[0]
-        new_embedding = replace_embedding_class(
-            module, quant_config, prefix=maybe_prefix(prefix, name)
-        )
-        attrsetter(name)(embedding, new_embedding)
+    # Tied tables are reached more than once, so don't rebase an already new embedding
+    if isinstance(embedding, VocabParallelEmbedding):
         return embedding
 
     kwargs = dict(

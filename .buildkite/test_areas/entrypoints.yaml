@@ -48,10 +48,11 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server)"
+- label: ":nvidia: (H200 MIG 35GB) Entrypoints Integration (API Server) %N"
   key: entrypoints-integration-api-server
   device: h200_35gb
   timeout_in_minutes: 75
+  parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -60,12 +61,12 @@ steps:
   - tests/entrypoints/scale_out
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
-  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
-  - pytest -v -s entrypoints/scale_out
+  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc; fi
+  - pytest -v -s entrypoints/scale_out --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
-      label: ":amd: (MI300) Entrypoints Integration (API Server)"
+      label: ":amd: (MI300) Entrypoints Integration (API Server) %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 65

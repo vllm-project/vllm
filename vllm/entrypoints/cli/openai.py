@@ -171,7 +171,7 @@ class ChatCommand(CLISubcommand):
         if stats:
             create_kwargs["stream_options"] = {"include_usage": True}
 
-        if args.quick:
+        if args.quick is not None:
             conversation.append({"role": "user", "content": args.quick})
 
             stream = client.chat.completions.create(
@@ -248,12 +248,12 @@ class CompleteCommand(CLISubcommand):
             "model": model_name,
             "stream": True,
         }
-        if args.max_tokens:
+        if args.max_tokens is not None:
             kwargs["max_tokens"] = args.max_tokens
         if stats:
             kwargs["stream_options"] = {"include_usage": True}
 
-        if args.quick:
+        if args.quick is not None:
             stream = client.completions.create(prompt=args.quick, **kwargs)
             _print_completion_stream(stream, stats)
             return
