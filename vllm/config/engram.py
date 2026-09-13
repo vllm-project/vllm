@@ -47,6 +47,24 @@ class EngramConfig:
     """Shard embeddings across TP and all DP ranks when enabled.
     Otherwise, each DP rank has a separate TP-sharded embedding replica."""
 
+    lookup_overlap: bool = False
+    """Experimentally overlap Engram lookup within an explicit workload limit.
+    Supported for CPU-offloaded embeddings on the V1 eager runner."""
+
+    lookup_overlap_max_seq_len: int = Field(default=0, ge=0)
+    """Maximum full prompt and current context length eligible for overlap.
+    Zero disables overlap. Set a positive limit after profiling the target
+    workload; this is an execution policy, not a guaranteed speedup threshold."""
+
+    def allows_lookup_overlap(self, max_seq_len: int, max_prompt_len: int) -> bool:
+        """Require every request, including chunked prefills, to fit the limit."""
+        return (
+            self.lookup_overlap
+            and self.cpu_offload
+            and 0 < max_seq_len <= self.lookup_overlap_max_seq_len
+            and 0 < max_prompt_len <= self.lookup_overlap_max_seq_len
+        )
+
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
         """Reject Engram configuration for models without n-gram embeddings."""
         from vllm.platforms import current_platform

@@ -465,6 +465,9 @@ class CommonAttentionMetadata:
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
 
+    engram_lookup_overlap: bool = False
+    """Runner-approved overlap for the whole batch; unknown paths stay disabled."""
+
     def batch_size(self) -> int:
         return self.seq_lens.shape[0]
 
@@ -524,6 +527,7 @@ class CommonAttentionMetadata:
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,
             max_seq_len=self.max_seq_len,
+            engram_lookup_overlap=self.engram_lookup_overlap,
             block_table_tensor=self.block_table_tensor[:num_actual_reqs],
             slot_mapping=self.slot_mapping[:num_actual_tokens],
             causal=self.causal[:num_actual_reqs]

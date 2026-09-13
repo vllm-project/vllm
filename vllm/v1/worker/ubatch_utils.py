@@ -328,6 +328,7 @@ def _make_metadata_with_slice(
         num_actual_tokens=num_actual_tokens,
         max_query_len=max_query_len,
         max_seq_len=max_seq_len,
+        engram_lookup_overlap=attn_metadata.engram_lookup_overlap,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
