@@ -3,6 +3,7 @@
 
 from collections.abc import Mapping
 
+import numpy as np
 import pytest
 import torch
 from PIL import Image as PILImage
@@ -13,6 +14,7 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4ImagePixelInputs,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalFieldConfig
 from vllm.utils.mem_constants import GiB_bytes
 
@@ -197,6 +199,72 @@ def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
     ).full
 
     assert replacement == expected
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+@pytest.mark.parametrize("kwargs_on_init", [False, True])
+@pytest.mark.parametrize(
+    "image_kwargs", [{"rescale_factor": 1 / 127.5}, {"max_soft_tokens": 560}]
+)
+@pytest.mark.parametrize("video_uuid", [None, "same-video"])
+def test_video_cache_is_independent_of_image_kwargs(
+    model_id: str,
+    kwargs_on_init: bool,
+    image_kwargs: dict[str, object],
+    video_uuid: str | None,
+):
+    """Image overrides must not change video frames or depend on cache warmth."""
+    kwargs = {"images_kwargs": image_kwargs}
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+        mm_processor_cache_gb=1,
+    )
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config, cache=cache)
+    hf_processor = processor.info.get_hf_processor()
+    image = PILImage.new("RGB", (48, 48), color=(128, 128, 128))
+    frames = np.stack([np.asarray(image)] * 2)
+    metadata = {"fps": 2.0, "frames_indices": [0, 1]}
+    mm_items = processor.info.parse_mm_data(
+        {"image": image, "video": [(frames, metadata)]}
+    )
+
+    def process(mm_kwargs):
+        return processor(
+            hf_processor.image_token + hf_processor.video_token,
+            mm_items,
+            mm_uuid_items={"video": [video_uuid]},
+            hf_processor_mm_kwargs=mm_kwargs,
+        )
+
+    baseline = process({})
+    if kwargs_on_init:
+        ctx = build_model_context(
+            model_id,
+            mm_processor_kwargs=kwargs,
+            limit_mm_per_prompt={"image": 1, "video": 1},
+            mm_processor_cache_gb=1,
+        )
+        cache = MultiModalProcessorOnlyCache(ctx.model_config)
+        processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config, cache=cache)
+    request_kwargs = {} if kwargs_on_init else kwargs
+    process(request_kwargs)
+    cached = process(request_kwargs)
+    cache.clear_cache()
+    fresh = process(request_kwargs)
+
+    def pixels(result, modality, field):
+        return result["mm_kwargs"][modality][0][field].data
+
+    video_pixels = pixels(fresh, "video", "pixel_values_videos")
+    assert torch.equal(pixels(cached, "video", "pixel_values_videos"), video_pixels)
+    assert torch.equal(pixels(baseline, "video", "pixel_values_videos"), video_pixels)
+    assert baseline["mm_hashes"]["video"] == fresh["mm_hashes"]["video"]
+    assert not torch.equal(
+        pixels(baseline, "image", "pixel_values"),
+        pixels(fresh, "image", "pixel_values"),
+    )
 
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
