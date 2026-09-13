@@ -27,6 +27,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesResponse,
     AnthropicOutputConfig,
     AnthropicStreamEvent,
+    AnthropicThinkingConfig,
     AnthropicUsage,
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
@@ -212,6 +213,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         req = cls._build_base_request(anthropic_request, openai_messages)
         cls._handle_streaming_options(req, anthropic_request)
         cls._handle_output_config(req, anthropic_request)
+        cls._handle_thinking(req, anthropic_request)
         cls._convert_tool_choice(anthropic_request, req)
         cls._convert_tools(anthropic_request, req)
         return req
@@ -491,6 +493,30 @@ class AnthropicServingMessages(OpenAIServingChat):
             vllm_xargs=anthropic_request.vllm_xargs,
             chat_template_kwargs=anthropic_request.chat_template_kwargs,
         )
+
+    @classmethod
+    def _handle_thinking(
+        cls,
+        req: ChatCompletionRequest,
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+    ) -> None:
+        """Handle extended-thinking configuration"""
+        if isinstance(anthropic_request, AnthropicCountTokensRequest):
+            return
+        thinking: AnthropicThinkingConfig | None = anthropic_request.thinking
+        if thinking is None:
+            return
+
+        if thinking.type == "disabled":
+            # "none" is what clears enable_thinking for templates that honor it.
+            req.reasoning_effort = "none"
+        elif thinking.type == "enabled" and thinking.budget_tokens is not None:
+            req.thinking_token_budget = thinking.budget_tokens
+        # "adaptive" pins nothing: the model chooses depth beneath the ceiling
+        # already set from output_config.effort.
+
+        if thinking.display == "omitted":
+            req.include_reasoning = False
 
     @classmethod
     def _handle_output_config(

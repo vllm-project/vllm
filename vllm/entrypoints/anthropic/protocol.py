@@ -118,6 +118,18 @@ class AnthropicOutputConfig(BaseModel):
     format: AnthropicJsonOutputFormat | None = None
 
 
+class AnthropicThinkingConfig(BaseModel):
+    """Extended-thinking configuration.
+
+    ``display`` controls visibility only: reasoning still runs and is still
+    billed under every setting.
+    """
+
+    type: Literal["enabled", "disabled", "adaptive"] = "enabled"
+    budget_tokens: int | None = None
+    display: Literal["summarized", "omitted"] | None = None
+
+
 class AnthropicMessagesRequest(BaseModel):
     """Anthropic Messages API request"""
 
@@ -126,6 +138,7 @@ class AnthropicMessagesRequest(BaseModel):
     max_tokens: int
     metadata: dict[str, Any] | None = None
     output_config: AnthropicOutputConfig | None = None
+    thinking: AnthropicThinkingConfig | None = None
     stop_sequences: (
         Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
     ) = None
