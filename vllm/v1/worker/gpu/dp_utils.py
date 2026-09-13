@@ -116,10 +116,8 @@ def sync_cudagraph_and_dp_padding(
             num_ubatches = get_num_ubatches(parallel_config)
             ubatch_desc = None
             if cudagraph_manager is not None:
-                # Ask for a captured FULL graph the same way the non-ubatched
-                # path below does, with the synced uniform token count -- the
-                # microbatched graphs are uniform-decode ones. `dispatch` falls
-                # back to a NONE descriptor when nothing matches.
+                # Match a FULL microbatched CUDA graph, falling back to an eager
+                # descriptor if no graph matches.
                 ubatch_desc = cudagraph_manager.dispatch(
                     num_reqs,
                     ubatch_num_tokens,
@@ -128,11 +126,8 @@ def sync_cudagraph_and_dp_padding(
                     num_ubatches=num_ubatches,
                 )
                 if 2 * int(num_tokens_across_dp.min()) < ubatch_desc.num_tokens:
-                    # The graph baked in a request split taken at the midpoint
-                    # of a full batch. A rank holding under half the captured
-                    # tokens splits at a different request and would replay
-                    # against the wrong metadata, so every rank -- they all see
-                    # these counts -- drops back to eager together.
+                    # If one rank has an empty second microbatch, run without
+                    # CUDA graphs.
                     ubatch_desc = None
             if ubatch_desc is None:
                 ubatch_desc = BatchExecutionDescriptor(
@@ -141,22 +136,19 @@ def sync_cudagraph_and_dp_padding(
                     num_reqs=num_reqs,
                     num_ubatches=num_ubatches,
                 )
-            else:
-                # Dispatch rounds the token count up to the captured size, and
-                # every rank has to run what the graph expects.
-                ubatch_num_tokens = ubatch_desc.num_tokens
+            # Refresh the token count to include CUDA graph padding.
+            ubatch_num_tokens = ubatch_desc.num_tokens
+            num_reqs = int(num_reqs_across_dp.max())
+            if ubatch_desc.cg_mode == CUDAGraphMode.FULL:
+                assert ubatch_desc.num_reqs is not None
+                num_reqs = ubatch_desc.num_reqs
             return ubatch_desc, DPSyncState(
                 num_tokens_across_dp=torch.full_like(
                     num_tokens_across_dp, ubatch_num_tokens
                 ),
                 uniform_token_count=synced_uniform_token_count,
                 eager=ubatch_desc.cg_mode == CUDAGraphMode.NONE,
-                num_reqs=(
-                    ubatch_desc.num_reqs
-                    if ubatch_desc.cg_mode == CUDAGraphMode.FULL
-                    and ubatch_desc.num_reqs is not None
-                    else int(num_reqs_across_dp.max())
-                ),
+                num_reqs=num_reqs,
             )
 
     synced_cg_mode = CUDAGraphMode(int(cg_mode_across_dp.min().item()))
