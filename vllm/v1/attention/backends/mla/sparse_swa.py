@@ -69,6 +69,28 @@ def _layer_type_for(compress_ratio: int) -> str:
     )
 
 
+def swa_max_image_tokens(vllm_config: VllmConfig) -> int:
+    """Width by which prefill SWA index rows widen for in-image visibility.
+
+    Vision checkpoints of DeepSeek-V4/V4.1 make image spans visible
+    bidirectionally, so prefill rows grow from ``sliding_window`` to
+    ``sliding_window + vision_max_n_token``. That width is only needed when
+    images can actually reach the model: a text-only checkpoint
+    (``vision_n_layers == 0``) or a vision checkpoint served with
+    ``--language-model-only`` keeps the plain window. Sizing the rows for
+    images that can never arrive costs KV metadata and, on SM120, lands on a
+    ``topk`` (128 + 1024 = 1152 for V4.1-Flash) that the FlashInfer sparse-MLA
+    kernels do not instantiate.
+    """
+    hf_config = vllm_config.model_config.hf_config
+    if getattr(hf_config, "vision_n_layers", 0) <= 0:
+        return 0
+    mm_config = vllm_config.model_config.multimodal_config
+    if mm_config is not None and mm_config.language_model_only:
+        return 0
+    return int(getattr(hf_config, "vision_max_n_token", 0) or 0)
+
+
 class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
     def __init__(
         self,
@@ -447,11 +469,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # visible bidirectionally, so prefill index rows widen from
         # window_size to window_size + max_image_tokens. Text-only models keep
         # max_image_tokens == 0 and take the original code paths everywhere.
-        self.max_image_tokens = (
-            getattr(hf_config, "vision_max_n_token", 0)
-            if getattr(hf_config, "vision_n_layers", 0) > 0
-            else 0
-        )
+        self.max_image_tokens = swa_max_image_tokens(self.vllm_config)
         self.prefill_index_width = self.window_size + self.max_image_tokens
 
         # Detect which DeepseekV4 layer types this model uses so we only build a
