@@ -351,6 +351,9 @@ class BenchmarkMetrics:
     max_output_tokens_per_s: float
     max_concurrent_requests: int
     rtfx: float = 0.0  # Inverse Real-Time Factor for ASR benchmarks
+    total_output_chars: int = 0
+    output_char_throughput: float = 0.0
+    mean_chars_per_token: float | None = None
 
 
 @dataclass
@@ -582,6 +585,9 @@ def calculate_metrics(
         A tuple of the benchmark metrics and the actual output lengths.
     """
     actual_output_lens: list[int] = []
+    total_output_chars = 0
+    measured_output_tokens = 0
+    has_unmeasured_output_tokens = False
     total_input = 0
     completed = 0
     good_completed = 0
@@ -594,10 +600,16 @@ def calculate_metrics(
     for i in range(len(outputs)):
         if outputs[i].success:
             output_len = outputs[i].output_tokens
+            generated_text = outputs[i].generated_text or ""
+            total_output_chars += sum(not char.isspace() for char in generated_text)
+            output_tokens_measured = bool(output_len and output_len > 0)
 
             if not output_len:
                 if tokenizer is None:
+                    # Preserve the historical fallback for token throughput,
+                    # but do not use it as a measured token count.
                     output_len = 1
+                    has_unmeasured_output_tokens = True
                 else:
                     # We use the tokenizer to count the number of output tokens
                     # for some serving backends instead of looking at
@@ -605,10 +617,11 @@ def calculate_metrics(
                     # bundled together
                     # Note : this may inflate the output token count slightly
                     output_len = len(
-                        tokenizer(
-                            outputs[i].generated_text, add_special_tokens=False
-                        ).input_ids
+                        tokenizer(generated_text, add_special_tokens=False).input_ids
                     )
+                    output_tokens_measured = True
+            if output_tokens_measured:
+                measured_output_tokens += output_len
             actual_output_lens.append(output_len)
             total_input += outputs[i].prompt_len
             tpot = 0.0
@@ -730,15 +743,16 @@ def calculate_metrics(
         else:
             print("tip: install termplotlib and gnuplot to plot the metrics")
 
+    total_output_tokens = sum(actual_output_lens)
     metrics = BenchmarkMetrics(
         completed=completed,
         failed=len(failed_outputs),
         total_input=total_input,
-        total_output=sum(actual_output_lens),
+        total_output=total_output_tokens,
         request_throughput=completed / dur_s,
         request_goodput=good_completed / dur_s,
-        output_throughput=sum(actual_output_lens) / dur_s,
-        total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
+        output_throughput=total_output_tokens / dur_s,
+        total_token_throughput=(total_input + total_output_tokens) / dur_s,
         mean_ttft_ms=np.mean(ttfts or 0)
         * 1000,  # ttfts is empty if streaming is not supported by the endpoint
         std_ttft_ms=np.std(ttfts or 0) * 1000,
@@ -767,9 +781,61 @@ def calculate_metrics(
         max_output_tokens_per_s=max_output_tokens_per_s,
         max_concurrent_requests=max_concurrent_requests,
         rtfx=input_audio_duration / dur_s,
+        total_output_chars=total_output_chars,
+        output_char_throughput=total_output_chars / dur_s,
+        mean_chars_per_token=(
+            None
+            if has_unmeasured_output_tokens
+            else (
+                total_output_chars / measured_output_tokens
+                if measured_output_tokens > 0
+                else 0.0
+            )
+        ),
     )
 
     return metrics, actual_output_lens
+
+
+def _format_mean_chars_per_token(value: float | None) -> str:
+    """Format the character/token ratio for the terminal summary."""
+    return "N/A" if value is None else f"{value:.2f}"
+
+
+def _build_generation_result(
+    metrics: BenchmarkMetrics,
+    benchmark_duration: float,
+    outputs: list[RequestFuncOutput],
+    actual_output_lens: list[int],
+    goodput_config_dict: dict[str, float],
+) -> dict[str, Any]:
+    """Build the JSON-serializable result for a generation benchmark."""
+    return {
+        "duration": benchmark_duration,
+        "completed": metrics.completed,
+        "failed": metrics.failed,
+        "total_input_tokens": metrics.total_input,
+        "total_output_tokens": metrics.total_output,
+        "total_output_chars": metrics.total_output_chars,
+        "request_throughput": metrics.request_throughput,
+        "request_goodput": metrics.request_goodput if goodput_config_dict else None,
+        "output_throughput": metrics.output_throughput,
+        "output_char_throughput": metrics.output_char_throughput,
+        "mean_chars_per_token": metrics.mean_chars_per_token,
+        "total_token_throughput": metrics.total_token_throughput,
+        "input_lens": [output.prompt_len for output in outputs],
+        "output_lens": actual_output_lens,
+        "ttfts": [output.ttft for output in outputs],
+        "itls": [output.itl for output in outputs],
+        "latencies": [output.latency for output in outputs],
+        "start_times": [output.start_time for output in outputs],
+        "queue_times": [output.client_queue_time for output in outputs],
+        "generated_texts": [output.generated_text for output in outputs],
+        "errors": [output.error for output in outputs],
+        "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
+        "max_concurrent_requests": metrics.max_concurrent_requests,
+        "rtfx": metrics.rtfx,
+    }
 
 
 async def benchmark(
@@ -1190,6 +1256,12 @@ async def benchmark(
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
     if isinstance(metrics, BenchmarkMetrics) and tokenizer:
         print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
+    if isinstance(metrics, BenchmarkMetrics):
+        print(
+            "{:<40} {:<10}".format(
+                "Total generated characters:", metrics.total_output_chars
+            )
+        )
     print(
         "{:<40} {:<10.2f}".format(
             "Request throughput (req/s):", metrics.request_throughput
@@ -1220,6 +1292,18 @@ async def benchmark(
                     metrics.max_output_tokens_per_s,
                 )
             )
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Output character throughput (char/s):",
+                metrics.output_char_throughput,
+            )
+        )
+        print(
+            "{:<40} {:<10}".format(
+                "Mean characters per token:",
+                _format_mean_chars_per_token(metrics.mean_chars_per_token),
+            )
+        )
         print(
             "{:<40} {:<10.2f}".format(
                 "Peak concurrent requests:", metrics.max_concurrent_requests
@@ -1278,29 +1362,13 @@ async def benchmark(
 
     result: dict[str, Any]
     if isinstance(metrics, BenchmarkMetrics):
-        result = {
-            "duration": benchmark_duration,
-            "completed": metrics.completed,
-            "failed": metrics.failed,
-            "total_input_tokens": metrics.total_input,
-            "total_output_tokens": metrics.total_output,
-            "request_throughput": metrics.request_throughput,
-            "request_goodput": metrics.request_goodput if goodput_config_dict else None,
-            "output_throughput": metrics.output_throughput,
-            "total_token_throughput": metrics.total_token_throughput,
-            "input_lens": [output.prompt_len for output in outputs],
-            "output_lens": actual_output_lens,
-            "ttfts": [output.ttft for output in outputs],
-            "itls": [output.itl for output in outputs],
-            "latencies": [output.latency for output in outputs],
-            "start_times": [output.start_time for output in outputs],
-            "queue_times": [output.client_queue_time for output in outputs],
-            "generated_texts": [output.generated_text for output in outputs],
-            "errors": [output.error for output in outputs],
-            "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
-            "max_concurrent_requests": metrics.max_concurrent_requests,
-            "rtfx": metrics.rtfx,
-        }
+        result = _build_generation_result(
+            metrics,
+            benchmark_duration,
+            outputs,
+            actual_output_lens,
+            goodput_config_dict,
+        )
     else:
         result = {
             "duration": benchmark_duration,
