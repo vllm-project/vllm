@@ -68,6 +68,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     get_kv_quant_mode,
 )
+from vllm.v1.worker.ubatching import dbo_select_buffer
 
 logger = init_logger(__name__)
 
@@ -352,7 +353,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             compress_ratio=self.compress_ratio,
         )
         self.indexer_rotary_emb = self.rotary_emb
-        self.topk_indices_buffer = topk_indices_buffer
+        self._topk_indices_buffer = topk_indices_buffer
         self.candidate_block_buffer = candidate_block_buffer
 
         # Register with compilation context for metadata lookup. Done before
@@ -541,6 +542,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 )
 
                 _COMBINE_TOPK_SWA_INDICES_KERNEL.register_warmup()
+
+    @property
+    def topk_indices_buffer(self) -> torch.Tensor | None:
+        if self._topk_indices_buffer is None:
+            return None
+        return dbo_select_buffer(self._topk_indices_buffer)
 
     def forward(
         self,
@@ -1079,7 +1086,7 @@ class DeepseekV4Indexer(nn.Module):
 
         self.scale_fmt = "ue8m0"
         self.quant_block_size = 128  # TODO: get from config
-        self.topk_indices_buffer = topk_indices_buffer
+        self._topk_indices_buffer = topk_indices_buffer
 
         self.max_model_len = (
             vllm_config.model_config.max_model_len // self.compress_ratio
@@ -1112,7 +1119,7 @@ class DeepseekV4Indexer(nn.Module):
             self.head_dim,
             self.max_model_len,
             self.max_total_seq_len,
-            self.topk_indices_buffer,
+            topk_indices_buffer,
             skip_k_cache_insert=True,
             use_fp4_cache=self.use_fp4_kv,
             compress_ratio=self.compress_ratio,
@@ -1120,6 +1127,12 @@ class DeepseekV4Indexer(nn.Module):
             candidate_block_size=candidate_block_size,
             candidate_write=candidate_write,
         )
+
+    @property
+    def topk_indices_buffer(self) -> torch.Tensor | None:
+        if self._topk_indices_buffer is None:
+            return None
+        return dbo_select_buffer(self._topk_indices_buffer)
 
     def _produce_k(
         self,

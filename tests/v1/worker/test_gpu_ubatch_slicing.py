@@ -41,7 +41,11 @@ from vllm.v1.worker.ubatch_utils import (
     maybe_create_ubatch_slices,
     split_attn_metadata,
 )
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id, dbo_yield
+from vllm.v1.worker.ubatching import (
+    dbo_current_ubatch_id,
+    dbo_select_buffer,
+    dbo_yield,
+)
 
 MAX_NUM_REQS = 32
 MAX_NUM_TOKENS = 128
@@ -718,3 +722,83 @@ def test_slicing_drops_stale_dcp_metadata_when_dcp_is_off():
     ]
 
     assert all(ubatch.dcp_local_seq_lens is None for ubatch in ubatches)
+
+
+class _CrossLayerIndexModel(torch.nn.Module):
+    """Publish index state, yield at MoE, then consume it in a later layer."""
+
+    def __init__(self, device: torch.device, num_ubatches: int):
+        super().__init__()
+        self.topk = torch.empty(num_ubatches, 16, 4, dtype=torch.int32, device=device)
+        self.candidates = torch.empty(
+            num_ubatches, 16, 2, dtype=torch.int32, device=device
+        )
+
+    def forward(self, input_ids, positions, intermediate_tensors=None, **kwargs):
+        n = input_ids.numel()
+        dbo_select_buffer(self.topk)[:n].copy_(input_ids[:, None])
+        dbo_select_buffer(self.candidates)[:n].copy_(positions[:, None])
+        dbo_yield()
+        return torch.cat(
+            (dbo_select_buffer(self.topk)[:n], dbo_select_buffer(self.candidates)[:n]),
+            dim=-1,
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+def test_ubatch_runner_preserves_cross_layer_index_state():
+    """Another microbatch must not overwrite indices needed after an MoE yield."""
+    config = _make_dbo_config()
+    device = torch.device("cuda:0")
+    runner = _make_execution_runner(config)
+    model = _CrossLayerIndexModel(device, config.parallel_config.num_ubatches)
+    state = _make_ubatch_state(
+        config,
+        [
+            UBatchSlice(slice(0, 4), slice(0, 8)),
+            UBatchSlice(slice(4, 8), slice(8, 16)),
+        ],
+    )
+    inputs = _make_model_inputs(16, device)
+    for offset in (0, 100):
+        inputs["input_ids"].add_(offset)
+        output = runner.run(model, inputs, state)
+        expected = torch.cat(
+            (
+                inputs["input_ids"][:, None].expand(-1, 4),
+                inputs["positions"][:, None].expand(-1, 2),
+            ),
+            dim=-1,
+        ).to(torch.int32)
+        torch.testing.assert_close(output, expected)
+
+
+def test_dbo_select_buffer_preserves_unbatched_storage():
+    buffer = torch.empty(16, 4, dtype=torch.int32)
+    assert dbo_select_buffer(buffer) is buffer
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA graphs")
+def test_microbatch_buffer_selection_is_stable_across_graph_replay(monkeypatch):
+    """Replay retains each captured slot even without an active Python microbatch."""
+    import vllm.v1.worker.ubatching as ubatching
+
+    storage = torch.empty(2, 8, 4, dtype=torch.int32, device="cuda")
+    inputs = torch.arange(32, dtype=torch.int32, device="cuda").view(8, 4)
+    active = 0
+    monkeypatch.setattr(ubatching, "dbo_current_ubatch_id", lambda: active)
+    graphs = [torch.cuda.CUDAGraph(), torch.cuda.CUDAGraph()]
+    outputs = []
+    torch.accelerator.synchronize()
+    for active, graph in enumerate(graphs):
+        with torch.cuda.graph(graph):
+            dbo_select_buffer(storage).copy_(inputs + active)
+            outputs.append(dbo_select_buffer(storage).clone())
+    active = 0
+    for increment in (100, 200):
+        inputs.add_(increment)
+        for graph in reversed(graphs):
+            graph.replay()
+        for slot, output in enumerate(outputs):
+            torch.testing.assert_close(storage[slot], inputs + slot)
+            torch.testing.assert_close(output, inputs + slot)
