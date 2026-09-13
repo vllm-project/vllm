@@ -1071,17 +1071,16 @@ def emit_simple_tool_call_done(
     state: SimpleStreamingState,
 ) -> list[StreamingResponsesResponse]:
     events: list[StreamingResponsesResponse] = []
-    if state.has_emitted_tool_call_delta:
-        events.append(
-            ResponseFunctionCallArgumentsDoneEvent(
-                type="response.function_call_arguments.done",
-                sequence_number=-1,
-                output_index=state.output_index,
-                item_id=state.current_item_id,
-                arguments=state.accumulated_text,
-                name=state.tool_call_name,
-            )
+    events.append(
+        ResponseFunctionCallArgumentsDoneEvent(
+            type="response.function_call_arguments.done",
+            sequence_number=-1,
+            output_index=state.output_index,
+            item_id=state.current_item_id,
+            arguments=state.accumulated_text,
+            name=state.tool_call_name,
         )
+    )
     events.append(
         ResponseOutputItemDoneEvent(
             type="response.output_item.done",
