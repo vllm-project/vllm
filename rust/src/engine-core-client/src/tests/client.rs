@@ -2748,6 +2748,9 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         mm_cache_miss_hashes: None,
                         new_sampling_mask: None,
                         spec_decode_metrics: None,
+                        weight_version: Some(
+                            "step-7",
+                        ),
                     },
                 ],
                 scheduler_stats: None,

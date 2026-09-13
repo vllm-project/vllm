@@ -126,6 +126,7 @@ def _make_request_output(
     logprobs: list[dict[int, Any] | None] | None = None,
     num_cached_tokens: int | None = None,
     index: int = 0,
+    weight_version: str = "step-7",
 ) -> RequestOutput:
     return RequestOutput(
         request_id=request_id,
@@ -148,6 +149,7 @@ def _make_request_output(
         encoder_prompt=None,
         encoder_prompt_token_ids=None,
         num_cached_tokens=num_cached_tokens,
+        weight_version=weight_version,
     )
 
 
@@ -198,6 +200,7 @@ async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
     response = await serving.serve_tokens(request)
 
     assert isinstance(response, GenerateResponse)
+    assert response.weight_version == "step-7"
     assert (
         serving.online_renderer.preprocess_completion.call_args.kwargs["skip_mm_cache"]
         is True
@@ -289,6 +292,7 @@ async def test_stream_basic():
     assert len(data_chunks) == 3
 
     assert data_chunks[0]["choices"][0]["token_ids"] == [10]
+    assert data_chunks[0]["weight_version"] == "step-7"
     assert data_chunks[1]["choices"][0]["token_ids"] == [20, 30]
     assert data_chunks[2]["choices"][0]["token_ids"] == [40]
     assert data_chunks[2]["choices"][0]["finish_reason"] == "stop"
