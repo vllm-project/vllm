@@ -354,6 +354,7 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
         parallel_config=SimpleNamespace(tensor_parallel_size=1),
         attention_config=SimpleNamespace(backend=None),
         cache_config=SimpleNamespace(),
+        load_config=SimpleNamespace(),
         model_config=SimpleNamespace(get_vocab_size=Mock(return_value=100)),
     )
 
@@ -366,6 +367,10 @@ def test_dspark_shares_target_embedding_with_smaller_draft_vocabulary():
         patch.object(dspark_utils, "replace", side_effect=fake_replace),
         patch(
             "vllm.v1.worker.gpu.spec_decode.eagle.utils.get_pp_group",
+            return_value=SimpleNamespace(world_size=1),
+        ),
+        patch(
+            "vllm.v1.worker.gpu.spec_decode.utils.get_pp_group",
             return_value=SimpleNamespace(world_size=1),
         ),
         patch(

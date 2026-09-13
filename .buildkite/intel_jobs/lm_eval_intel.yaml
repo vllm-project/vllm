@@ -23,6 +23,5 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install "gpt-oss[eval]==0.0.5" &&
-      cd tests &&
+      'cd tests &&
       pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-xpu.txt'

@@ -7,6 +7,7 @@ from typing import Any
 import torch
 from compressed_tensors.quantization import (
     QuantizationArgs,
+    QuantizationStrategy,
 )
 
 import vllm._custom_ops as ops
@@ -41,8 +42,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    pack_quantized_values_into_int32,
 )
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 
@@ -56,6 +59,7 @@ class WNA16MoEBackend(Enum):
     TRITON = "TRITON"
     XPU = "XPU"
     EMULATION = "EMULATION"
+    RDNA3 = "RDNA3"
 
 
 def backend_to_kernel_cls(
@@ -100,6 +104,12 @@ def backend_to_kernel_cls(
         )
 
         return [Int4EmulationTritonExperts]
+    elif backend == WNA16MoEBackend.RDNA3:
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
+            Rdna3WNA16Experts,
+        )
+
+        return [Rdna3WNA16Experts]
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
@@ -114,6 +124,8 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
         return [WNA16MoEBackend.XPU]
 
     return [
+        # Native HIP kernel, gated on gfx1100 by _supports_current_device().
+        WNA16MoEBackend.RDNA3,
         WNA16MoEBackend.FLASHINFER_TRTLLM,
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
@@ -133,6 +145,18 @@ def _backend_incompatibility_reason(
 ) -> str | None:
     if backend == WNA16MoEBackend.FLASHINFER_TRTLLM and (may_have_zp or may_have_bias):
         return "zero points and bias are not supported"
+
+    if backend == WNA16MoEBackend.RDNA3:
+        if not isinstance(quant_config, QuantizationArgs):
+            return "only compressed-tensors checkpoints are supported"
+        if may_have_zp:
+            return "asymmetric checkpoints are not supported"
+        if may_have_bias:
+            return "expert bias is not supported"
+        if quant_config.actorder == "group":
+            return "group activation ordering is not supported"
+        if quant_config.strategy != QuantizationStrategy.GROUP:
+            return "only group-wise scales are supported"
 
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
     from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -190,6 +214,7 @@ def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
         "humming": WNA16MoEBackend.HUMMING,
         "flashinfer_trtllm": WNA16MoEBackend.FLASHINFER_TRTLLM,
         "emulation": WNA16MoEBackend.EMULATION,
+        "rdna3": WNA16MoEBackend.RDNA3,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -372,6 +397,9 @@ def make_wna16_moe_kernel(
     from vllm.model_executor.layers.fused_moe.experts.int4_emulation_moe import (
         Int4EmulationTritonExperts,
     )
+    from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
+        Rdna3WNA16Experts,
+    )
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExpertsWNA16,
     )
@@ -387,6 +415,7 @@ def make_wna16_moe_kernel(
         XPUExpertsWNA16,
         CPUExpertsInt4,
         Int4EmulationTritonExperts,
+        Rdna3WNA16Experts,
     )
     if backend == WNA16MoEBackend.HUMMING:
         allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
@@ -808,6 +837,78 @@ def _process_awq_weights_marlin(
         w2_input_global_scale,
         w13_bias_out,
         w2_bias_out,
+    )
+
+
+def _synthesize_rdna3_qzeros(
+    groups: int, out_features: int, device: torch.device
+) -> torch.Tensor:
+    """Create the packed zero-point tensor for symmetric quantization.
+
+    GPTQv1 +1 quirk: the kernel adds 1 to the stored zeros, so encode
+    (bias - 1) = 7 for uint4b8 (bias=8).
+    """
+    zeros = torch.full(
+        (groups, out_features),
+        scalar_types.uint4b8.bias - 1,
+        dtype=torch.int32,
+        device=device,
+    )
+    return pack_quantized_values_into_int32(zeros, scalar_types.uint4b8, packed_dim=1)
+
+
+def _process_weights_rdna3(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    group_size: int,
+) -> tuple[
+    torch.Tensor,  # w13_qweight
+    torch.Tensor,  # w2_qweight
+    torch.Tensor,  # w13_scales
+    torch.Tensor,  # w2_scales
+    torch.Tensor | None,  # w13_qzeros
+    torch.Tensor | None,  # w2_qzeros
+    torch.Tensor | None,  # w13_input_global_scale
+    torch.Tensor | None,  # w2_input_global_scale
+    torch.Tensor | None,  # w13_bias
+    torch.Tensor | None,  # w2_bias
+]:
+    """RDNA3 (gfx1100) W4A16 weight post-processing.
+
+    Interleaves the packed nibbles per expert (the exllama shuffle the dense
+    RDNA3 kernel also uses) and synthesizes the symmetric zero points that
+    ``moe_gptq_gemm_rdna3`` dequantizes with. The packed layout
+    ``[E, K // 8, N]`` and the ``[E, groups, N]`` scales are already what the
+    kernel wants, so neither is repacked.
+    """
+    device = w13.device
+    num_experts = w13.size(0)
+
+    for e in range(num_experts):
+        w13_e = w13[e].contiguous()
+        ops.gptq_shuffle(w13_e, 4)
+        w13[e] = w13_e
+        w2_e = w2[e].contiguous()
+        ops.gptq_shuffle(w2_e, 4)
+        w2[e] = w2_e
+
+    def _qzeros(w: torch.Tensor) -> torch.Tensor:
+        qz = _synthesize_rdna3_qzeros((w.size(1) * 8) // group_size, w.size(2), device)
+        return qz.unsqueeze(0).expand(num_experts, -1, -1).contiguous()
+
+    return (
+        w13,
+        w2,
+        w13_scale.contiguous(),
+        w2_scale.contiguous(),
+        _qzeros(w13),
+        _qzeros(w2),
+        None,  # w13_input_global_scale
+        None,  # w2_input_global_scale
+        None,  # w13_bias
+        None,  # w2_bias
     )
 
 
@@ -1432,6 +1533,15 @@ def convert_to_wna16_moe_kernel_format(
                 w13_bias,
                 w2_bias,
             )
+    elif backend == WNA16MoEBackend.RDNA3:
+        assert isinstance(quant_config, QuantizationArgs)
+        return _process_weights_rdna3(
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            quant_config.group_size,
+        )
     elif backend == WNA16MoEBackend.CPU:
         return _process_weights_cpu(
             quant_config,
