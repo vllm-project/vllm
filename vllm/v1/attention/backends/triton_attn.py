@@ -272,10 +272,22 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
 
 class TritonAttentionBackend(AttentionBackend):
+    supports_inline_scales: ClassVar[bool] = True
+
     @classmethod
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
         """Per-token-head modes pack inline fp32 scales after each head's
-        data, so the content is (data + one scale) per K/V side."""
+        data by default, so the content is (data + one scale) per K/V side.
+
+        Note: Inline scale packing assumes contiguous KV access and is not
+        suitable for backends that gather scattered tokens (such as sparse or
+        selective attention), where non-128B-aligned row strides can cause
+        significant kernel slowdown. Backends requiring 128B memory coalescing
+        can set `supports_inline_scales = False` to opt into decoupled side-tensor
+        scale cache allocation.
+        """
+        if not cls.supports_inline_scales:
+            return spec
         mode = spec.kv_quant_mode
         if spec.state_content_bytes is not None or not mode.is_per_token_head:
             return spec
@@ -375,13 +387,22 @@ class TritonAttentionBackend(AttentionBackend):
 
 
 class TritonAttentionImpl(AttentionImpl):
-    # Per-token-head quant: scale views carved from inline head padding.
+    # Per-token-head quant: scale views carved from inline head padding
+    # or allocated as decoupled side tensors when supports_inline_scales is False.
+    supports_inline_scales: bool = True
     _k_scale_cache: torch.Tensor | None = None
     _v_scale_cache: torch.Tensor | None = None
 
     def _ensure_scale_caches(self, kv_cache: torch.Tensor) -> None:
-        """Extract per-head scale views from the padded content dimension.
+        """Extract per-head scale views from the padded content dimension,
+        or allocate decoupled side tensors if supports_inline_scales is False.
 
+        When supports_inline_scales is False:
+        Allocates decoupled side-tensor scale caches with shape
+        (num_blocks, block_size, num_kv_heads) filled with 1.0, preserving
+        natural 128B memory alignment for KV data.
+
+        When supports_inline_scales is True:
         The KV cache is packed as logical shape
         ``(num_blocks, nkv, block_size, 2 * (hs + pad))`` where
         ``pad = sizeof(float32) / sizeof(cache_dtype)``.  The content dim holds
@@ -395,6 +416,21 @@ class TritonAttentionImpl(AttentionImpl):
         """
         if self._k_scale_cache is not None:
             return
+
+        if not getattr(self, "supports_inline_scales", True):
+            num_blocks, nkv, block_size = kv_cache.shape[:3]
+            self._k_scale_cache = torch.ones(
+                (num_blocks, block_size, nkv),
+                dtype=torch.float32,
+                device=kv_cache.device,
+            )
+            self._v_scale_cache = torch.ones(
+                (num_blocks, block_size, nkv),
+                dtype=torch.float32,
+                device=kv_cache.device,
+            )
+            return
+
         from vllm.utils.torch_utils import get_dtype_size
 
         num_blocks, nkv, block_size, content = kv_cache.shape
@@ -460,11 +496,15 @@ class TritonAttentionImpl(AttentionImpl):
         sinks: torch.Tensor | None = None,
         use_alibi_sqrt: bool = False,
         chunk_lookback: int = -1,
+        supports_inline_scales: bool | None = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
+        if supports_inline_scales is None:
+            supports_inline_scales = TritonAttentionBackend.supports_inline_scales
+        self.supports_inline_scales = supports_inline_scales
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
@@ -695,8 +735,8 @@ class TritonAttentionImpl(AttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Per-token-head K/V cache views (ensures scale caches; FP8 retyped)."""
         self._ensure_scale_caches(kv_cache)
-        padded_hs = kv_cache.shape[-1] // 2
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(padded_hs, dim=-1)
+        split_hs = kv_cache.shape[-1] // 2
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(split_hs, dim=-1)
         if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
