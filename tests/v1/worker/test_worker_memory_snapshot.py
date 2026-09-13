@@ -12,8 +12,14 @@ import torch
 
 from vllm.config import set_current_vllm_config
 from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import current_platform
 from vllm.utils.mem_utils import MemorySnapshot
-from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
+
+if current_platform.is_xpu():
+    from vllm.v1.worker.xpu_worker import XPUWorker as Worker
+    from vllm.v1.worker.xpu_worker import init_worker_distributed_environment
+else:
+    from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 
 # Global queue to track operation order across processes
 _QUEUE: Queue | None = None
@@ -81,7 +87,9 @@ def worker_process(
 
         # Apply minimal patches to track operation order
         init_patch = patch(
-            "vllm.v1.worker.gpu_worker.init_worker_distributed_environment",
+            "vllm.v1.worker.xpu_worker.init_worker_distributed_environment"
+            if current_platform.is_xpu()
+            else "vllm.v1.worker.gpu_worker.init_worker_distributed_environment",
             side_effect=make_operation_tracker(
                 "init_distributed", original_init_worker
             ),
