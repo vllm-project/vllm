@@ -25,7 +25,6 @@ use crate::{
 
 mod error;
 mod format;
-mod generation;
 mod template;
 mod tojson;
 
@@ -443,6 +442,12 @@ fn to_template_openai_content(
                         .ok_or(Error::UnsupportedMultimodalContent("audio"))?;
                     Ok(TemplateContentPart::Audio)
                 }
+                ChatContentPart::ImageEmbeds { .. } => {
+                    multimodal
+                        .and_then(|multimodal| multimodal.image_token.as_ref())
+                        .ok_or(Error::UnsupportedMultimodalContent("image_embeds"))?;
+                    Ok(TemplateContentPart::Image)
+                }
             })
             .collect(),
     }
@@ -477,6 +482,13 @@ fn to_template_string_content(
                             .ok_or(Error::UnsupportedMultimodalContent("audio"))?;
                         out.push_str(audio_token);
                     }
+                    ChatContentPart::ImageEmbeds { .. } => {
+                        let image_token = multimodal
+                            .and_then(|multimodal| multimodal.image_token.as_ref())
+                            .ok_or(Error::UnsupportedMultimodalContent("image_embeds"))?;
+                        out.push_str(image_token);
+                    }
+            
                 }
             }
             Ok(out)
@@ -641,22 +653,6 @@ mod tests {
         .prompt
         .into_text()
         .map_err(|_| unreachable!("HF renderer should return text prompt"))
-    }
-
-    #[test]
-    fn generation_blocks_allow_content_format_detection_and_request_overrides() {
-        let template = "{% for message in messages %}{% generation %}{% for part in message.content %}{{ part.text }}{% endfor %}{% endgeneration %}{% endfor %}";
-        let mut request = sample_request(vec![ChatMessage::user("hello")]);
-        let default = render(Some(template), &request).unwrap();
-        request.chat_options.chat_template = Some(template.to_string());
-        let overridden = render(Some("unused"), &request).unwrap();
-        expect![[r#"
-            (
-                "hello",
-                "hello",
-            )
-        "#]]
-        .assert_debug_eq(&(default, overridden));
     }
 
     fn render_mm(
