@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use serde_json_fmt::JsonFormat;
 
 use llm_multimodal::DEEPSEEK_V41_IMAGE_PLACEHOLDER;
@@ -685,19 +685,18 @@ fn encode_arguments_to_dsml(
     dialect: DsDialect,
 ) -> Result<()> {
     let parameter_tag = dialect.parameter_tag();
-    let arguments: Value = serde_json::from_str(&tool_call.arguments).map_err(|error| {
-        Error::ChatTemplate(format!(
-            "assistant tool call has invalid JSON arguments for DeepSeek: {error}"
-        ))
-    })?;
-    let Some(arguments) = arguments.as_object() else {
-        return Err(Error::ChatTemplate(
-            "assistant tool call arguments for DeepSeek must be a JSON object".to_string(),
-        ));
-    };
+    // Match deepseek-recipe's render_tool_arguments for both V4 and V4.1:
+    // https://github.com/deepseek-ai/deepseek-recipe/blob/8cadfede7063c896b944e7bae05daa3549ae97ea/deepseek-recipe-encoding/src/v4/mod.rs#L48-L58
+    let arguments = serde_json::from_str::<Map<String, Value>>(&tool_call.arguments)
+        .unwrap_or_else(|_| {
+            Map::from_iter([(
+                "arguments".to_owned(),
+                Value::String(tool_call.arguments.clone()),
+            )])
+        });
 
     let mut wrote_parameter = false;
-    for (key, value) in arguments {
+    for (key, value) in &arguments {
         if wrote_parameter {
             out.push('\n');
         }

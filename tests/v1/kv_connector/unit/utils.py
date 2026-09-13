@@ -155,6 +155,7 @@ def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
     kv_cache_config: KVCacheConfig | None = None,
+    hash_block_size: int | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
@@ -185,6 +186,7 @@ def create_scheduler(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
+        hash_block_size=hash_block_size,
     )
 
 
@@ -539,6 +541,7 @@ def make_nixl_scheduler(
         sched._heartbeat_interval = kv_lease_duration // 6
         # Fields touched by build_connector_meta / request_finished:
         sched._reqs_need_recv = {}
+        sched._hisparse_host_blocks_to_recv = {}
         sched._reqs_need_send = {}
         sched._reqs_in_batch = set()
         sched._reqs_not_processed = set()

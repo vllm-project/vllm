@@ -375,3 +375,85 @@ def test_vllm_config_runs_the_mm_processor_device_check():
         pytest.raises(ValueError, match="also runs the language model"),
     ):
         VllmConfig._validate_mm_processor_device(vllm_config)
+
+
+def _resolve_mm_video_decode_device(
+    *,
+    ec_role: ECRole | None,
+    mm_tensor_ipc: str = "torch_shm",
+    device: str | None = None,
+    video_kwargs: dict | None = None,
+    torchcodec_available: bool = True,
+) -> dict:
+    """Run processor-device then video-decode-device resolution and report
+    the resulting video media IO kwargs."""
+    mm_config = MultiModalConfig(
+        mm_processor_kwargs={} if device is None else {"device": device},
+        mm_tensor_ipc=mm_tensor_ipc,  # type: ignore[arg-type]
+        media_io_kwargs={} if video_kwargs is None else {"video": dict(video_kwargs)},
+    )
+    model_config = MagicMock(spec=ModelConfig)
+    model_config.multimodal_config = mm_config
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.model_config = model_config
+    vllm_config.ec_transfer_config = (
+        None
+        if ec_role is None
+        else ECTransferConfig(ec_connector="ECExampleConnector", ec_role=ec_role)
+    )
+
+    with (
+        patch("vllm.platforms.current_platform.device_type", "cuda"),
+        patch(
+            "vllm.utils.import_utils.check_torchcodec_available",
+            side_effect=None if torchcodec_available else ImportError("torchcodec"),
+        ),
+    ):
+        VllmConfig._resolve_mm_processor_device(vllm_config)
+        VllmConfig._resolve_mm_video_decode_device(vllm_config)
+    return mm_config.media_io_kwargs.get("video", {})
+
+
+def test_auto_video_decode_uses_nvdec_on_encoder_instance():
+    """The processor runs on the accelerator there, so decoded frames should
+    stay on-device too."""
+    assert _resolve_mm_video_decode_device(ec_role="ec_producer") == {
+        "backend": "torchcodec",
+        "device": "cuda",
+    }
+
+
+@pytest.mark.parametrize("ec_role", [None, "ec_consumer", "ec_both"])
+def test_auto_video_decode_stays_on_cpu_off_encoder_instance(
+    ec_role: ECRole | None,
+):
+    """The processor stays on CPU off encode-only instances, so video
+    decoding should too."""
+    assert _resolve_mm_video_decode_device(ec_role=ec_role) == {}
+
+
+def test_auto_video_decode_follows_explicit_processor_device():
+    assert _resolve_mm_video_decode_device(ec_role="ec_producer", device="cpu") == {}
+    assert _resolve_mm_video_decode_device(ec_role="ec_producer", device="cuda") == {
+        "backend": "torchcodec",
+        "device": "cuda",
+    }
+
+
+def test_auto_video_decode_respects_explicit_media_io_kwargs():
+    assert _resolve_mm_video_decode_device(
+        ec_role="ec_producer", video_kwargs={"backend": "opencv"}
+    ) == {"backend": "opencv"}
+    assert _resolve_mm_video_decode_device(
+        ec_role="ec_producer", video_kwargs={"device": "cpu"}
+    ) == {"device": "cpu"}
+
+
+def test_auto_video_decode_skipped_without_torchcodec():
+    assert (
+        _resolve_mm_video_decode_device(
+            ec_role="ec_producer",
+            torchcodec_available=False,
+        )
+        == {}
+    )

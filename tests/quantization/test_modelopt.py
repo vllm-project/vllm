@@ -127,6 +127,23 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head():
     assert method.spec.activation is kNvfp4Dynamic
 
 
+def test_modelopt_mxfp8_preserves_per_row_checkpoint_scales(dist_init, monkeypatch):
+    """Standard MXFP8 checkpoints already have one scale row per weight row."""
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    kernel = Mock()
+    kernel.input_quant_key.return_value = None
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.modelopt.init_mxfp8_linear_kernel",
+        lambda **kwargs: kernel,
+    )
+    config = ModelOptMxFp8Config.from_config({"quant_method": "mxfp8"})
+    linear = ReplicatedLinear(64, 64, bias=False, quant_config=config)
+    scales = torch.arange(128, dtype=torch.uint8).reshape(64, 2)
+    linear.weight_scale.weight_loader(linear.weight_scale, scales)
+    assert torch.equal(linear.weight_scale, scales)
+
+
 def test_modelopt_fp8_updates_weight_dims_after_transpose():
     """Humming reads weight.input_dim/output_dim. Swapping the
     ModelWeightParameter for a plain Parameter drops them, so the per-tensor
