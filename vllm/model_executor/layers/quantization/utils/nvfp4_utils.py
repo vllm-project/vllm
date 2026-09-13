@@ -6,8 +6,43 @@ import torch
 from vllm._custom_ops import (
     cutlass_scaled_mm_supports_fp4,
 )
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
+
+logger = init_logger(__name__)
+
+
+def reconcile_nvfp4_moe_w13_scales(
+    w13_scale: torch.Tensor,
+    w13_scale_2: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reconcile fused MoE gate/up weights to one scale per expert.
+
+    The block scales are adjusted so that ``block_scale * scale_2`` is
+    preserved, within E4M3 rounding error.
+    """
+    gate_scale_2 = w13_scale_2[:, 0]
+    up_scale_2 = w13_scale_2[:, 1]
+    if torch.allclose(gate_scale_2, up_scale_2):
+        return w13_scale, gate_scale_2.contiguous()
+
+    logger.warning_once(
+        "Detected mismatched w1/w3 NVFP4 global scales for fused MoE "
+        "weights; reconciling them to a shared per-expert scale."
+    )
+
+    common_scale_2 = torch.maximum(gate_scale_2, up_scale_2)
+    scale_factors = w13_scale_2 / common_scale_2.unsqueeze(1)
+    num_experts, fused_size, block_count = w13_scale.shape
+    assert fused_size % 2 == 0
+    reconciled_scale = w13_scale.reshape(
+        num_experts, 2, fused_size // 2, block_count
+    ).float()
+    reconciled_scale *= scale_factors[:, :, None, None]
+    reconciled_scale = reconciled_scale.to(w13_scale.dtype).reshape(w13_scale.shape)
+
+    return reconciled_scale.contiguous(), common_scale_2.contiguous()
 
 
 def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:
