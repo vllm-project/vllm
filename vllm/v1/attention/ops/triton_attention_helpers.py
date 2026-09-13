@@ -466,15 +466,15 @@ def softmax_step(S, M, L):
     # compute running maximum
     # m_j : (BLOCK_M,)
     m_j = tl.maximum(M, tl.max(S, axis=1))
-    # For sliding window there's a chance the max is -inf due to masking of
-    # the entire row. In this case we need to set m_j 0 to avoid NaN
-    m_j = tl.where(m_j > float("-inf"), m_j, 0.0)
+    # Keep an empty row's maximum at -inf for later tiles; use a finite shift
+    # only for the exponent arithmetic below.
+    safe_m_j = tl.where(m_j > float("-inf"), m_j, 0.0)
     # P : (BLOCK_M, TILE_SIZE)
-    P = tl.exp(S - m_j[:, None])
+    P = tl.exp(S - safe_m_j[:, None])
     # l_j : (BLOCK_M,)
     l_j = tl.sum(P, axis=1)
     # alpha : (BLOCK_M, )
-    alpha = tl.exp(M - m_j)
+    alpha = tl.exp(M - safe_m_j)
     # update constants
     L_new = L * alpha + l_j
     return m_j, L_new, P, alpha

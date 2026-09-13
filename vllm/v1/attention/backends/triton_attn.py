@@ -39,7 +39,10 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
     triton_reshape_and_cache_flash_per_token_head_quant,
 )
-from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+from vllm.v1.attention.ops.triton_unified_attention import (
+    MAX_UNIFORM_DECODE_QUERY_LEN,
+    unified_attention,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVQuantMode,
@@ -94,6 +97,7 @@ class TritonAttentionMetadata:
     mm_prefix_range_tensor: torch.Tensor | None = None
     rswa_prefix_lens: torch.Tensor | None = None
     rswa_window: int | None = None
+    is_uniform_decode: bool = False
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -153,9 +157,23 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
         headdim_padded = next_power_of_2(self.headdim)
+        max_query_len_3d = 1
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None:
+            num_speculative_tokens = speculative_config.num_speculative_tokens or 0
+            query_len = 1 + num_speculative_tokens * (
+                2 if speculative_config.parallel_drafting else 1
+            )
+            if query_len <= MAX_UNIFORM_DECODE_QUERY_LEN:
+                max_query_len_3d = query_len
+        # Scratch is indexed by query token, including verification tokens.
+        max_num_tokens_3d = (
+            min(self.seq_threshold_3D, vllm_config.scheduler_config.max_num_seqs)
+            * max_query_len_3d
+        )
         self.softmax_segm_output = torch.empty(
             (
-                self.seq_threshold_3D,
+                max_num_tokens_3d,
                 self.num_heads_q,
                 self.num_par_softmax_segments,
                 headdim_padded,
@@ -164,12 +182,12 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             device=device,
         )
         self.softmax_segm_max = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (max_num_tokens_3d, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
         )
         self.softmax_segm_expsum = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (max_num_tokens_3d, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
         )
@@ -188,8 +206,11 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         attn_metadata = self.build(0, common_attn_metadata)
         # When doing full graph capture, setting seq_lens to
         # max_model_len will cause graph capture to be extremely
-        # slow, so here we set it to 1.
-        attn_metadata.seq_lens.fill_(1)
+        # slow. Uniform verification still needs seq_len >= query_len.
+        capture_seq_len = (
+            attn_metadata.max_query_len if attn_metadata.is_uniform_decode else 1
+        )
+        attn_metadata.seq_lens.fill_(capture_seq_len)
         return attn_metadata
 
     def build(
@@ -201,6 +222,29 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
+        is_uniform_decode = False
+        is_prefilling = common_attn_metadata.is_prefilling
+        speculative_config = self.vllm_config.speculative_config
+        if (
+            1 < max_query_len <= MAX_UNIFORM_DECODE_QUERY_LEN
+            and is_prefilling is not None
+            and not (
+                speculative_config is not None
+                and speculative_config.enable_adaptive_verification
+            )
+        ):
+            query_starts = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
+            query_lens = query_starts[1:] - query_starts[:-1]
+            # MRV2 pads query offsets but keeps prefill flags at the active size.
+            num_phase_rows = min(num_reqs, len(is_prefilling))
+            is_uniform_decode = bool(
+                torch.any(query_lens > 0)
+                and torch.all((query_lens == 0) | (query_lens == max_query_len))
+                and torch.all(
+                    (query_lens[:num_phase_rows] == 0) | ~is_prefilling[:num_phase_rows]
+                )
+                and torch.all(query_lens[num_phase_rows:] == 0)
+            )
 
         max_seq_len = common_attn_metadata.max_seq_len
         query_start_loc = common_attn_metadata.query_start_loc
@@ -228,6 +272,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         attn_metadata = TritonAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
+            is_uniform_decode=is_uniform_decode,
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
@@ -668,6 +713,7 @@ class TritonAttentionImpl(AttentionImpl):
             q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
+            is_uniform_decode=attn_metadata.is_uniform_decode,
             seq_threshold_3D=seq_threshold_3D,
             num_par_softmax_segments=num_par_softmax_segments,
             softmax_segm_output=softmax_segm_output,
