@@ -43,6 +43,29 @@ def test_api_key_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
     assert "VLLM_API_KEY" not in envs.compile_factors()
 
 
+def test_shm_broadcast_spin_tunables_are_not_compile_factors(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Retuning the shm_broadcast spin/park timings must not invalidate the
+    torch.compile cache: they only change how long a process waits."""
+    tunables = {
+        "VLLM_SHM_BROADCAST_ADAPTIVE_BUDGET_MS": "4.0",
+        "VLLM_SHM_BROADCAST_ADAPTIVE_MIN_GRACE_MS": "0.5",
+        "VLLM_SHM_BROADCAST_ADAPTIVE_MAX_GRACE_MS": "8.0",
+        "VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA": "0.9",
+        "VLLM_SHM_BROADCAST_WRITE_PARK_MAX_MS": "5.0",
+    }
+    for name in tunables:
+        monkeypatch.delenv(name, raising=False)
+    before = envs.compile_factors()
+
+    for name, value in tunables.items():
+        monkeypatch.setenv(name, value)
+
+    assert envs.compile_factors() == before
+    assert tunables.keys() <= environment_variables.keys()
+
+
 def test_scale_out_endpoints_flag_is_runtime_only(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", "1")
 
