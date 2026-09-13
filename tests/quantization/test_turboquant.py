@@ -320,7 +320,14 @@ class TestTurboQuantWorkspaceReservation:
         max_model_len: int = 8192,
         dtype: torch.dtype = torch.float16,
         max_num_kv_splits: int = 4,
+        num_spec_tokens: int | None = None,
     ):
+        speculative_config = None
+        if num_spec_tokens is not None:
+            speculative_config = SimpleNamespace(
+                num_speculative_tokens=num_spec_tokens,
+                parallel_drafting=False,
+            )
         return SimpleNamespace(
             scheduler_config=SimpleNamespace(
                 max_num_seqs=max_num_seqs,
@@ -339,6 +346,8 @@ class TestTurboQuantWorkspaceReservation:
             attention_config=SimpleNamespace(
                 tq_max_kv_splits_for_cuda_graph=max_num_kv_splits
             ),
+            speculative_config=speculative_config,
+            compilation_config=SimpleNamespace(cudagraph_capture_sizes=None),
         )
 
     @staticmethod
@@ -429,6 +438,48 @@ class TestTurboQuantWorkspaceReservation:
                 ((16, 8, 4, 129), torch.float32),
                 ((16, 8, 128), torch.float16),
                 ((16, 8), torch.float32),
+            )
+        ]
+
+    def test_metadata_builder_scales_decode_workspace_for_spec_decode(
+        self, monkeypatch
+    ):
+        """Decode scratch is sized in tokens: a spec-as-decode verify batch
+        has max_num_seqs * (1 + num_speculative_tokens) decode rows."""
+        from vllm.v1.attention.backends import turboquant_attn
+
+        calls = []
+
+        class FakeWorkspaceManager:
+            def get_simultaneous(self, *shapes_and_dtypes):
+                calls.append(shapes_and_dtypes)
+
+        monkeypatch.setattr(
+            turboquant_attn,
+            "current_workspace_manager",
+            lambda: FakeWorkspaceManager(),
+        )
+        monkeypatch.setattr(
+            turboquant_attn,
+            "is_workspace_manager_initialized",
+            lambda: True,
+        )
+
+        turboquant_attn.TurboQuantMetadataBuilder(
+            kv_cache_spec=self._fake_kv_cache_spec(),
+            layer_names=["layers.0.self_attn.attn"],
+            vllm_config=self._fake_vllm_config(
+                enable_chunked_prefill=False, num_spec_tokens=3
+            ),
+            device=torch.device("cuda"),
+        )
+
+        # 16 requests * (1 + 3) tokens = 64 decode rows.
+        assert calls == [
+            (
+                ((64, 8, 4, 129), torch.float32),
+                ((64, 8, 128), torch.float16),
+                ((64, 8), torch.float32),
             )
         ]
 
