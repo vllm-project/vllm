@@ -64,7 +64,7 @@ class PoolingRunner:
         req_id: str,
         req_index: int,
         pooling_params: PoolingParams,
-        prompt_token_ids: list[int],
+        prompt_token_ids: list[int] | None,
     ) -> None:
         task = pooling_params.task
         if task not in self.supported_tasks:
@@ -77,6 +77,7 @@ class PoolingRunner:
         self.pooling_params[req_index] = pooling_params
         self.pooling_states[req_index] = PoolingStates()
         if pooling_params.requires_token_ids:
+            assert prompt_token_ids is not None
             self.prompt_token_ids[req_index] = torch.tensor(
                 prompt_token_ids, dtype=torch.int64
             )
