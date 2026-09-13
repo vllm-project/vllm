@@ -1910,8 +1910,16 @@ async fn control_abort_resolves_external_id_and_empty_is_noop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn control_reports_server_and_model_info() {
+    let mut ready = default_ready_response();
+    ready.effective_attention_block_size = Some(64);
     let (generate_service, control_service, engine_health, _engine_task) =
-        setup_grpc_service(b"engine-grpc-info", default_stream_output_specs()).await;
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-info".to_vec(),
+            ready,
+            Arc::new(FakeTextBackend),
+            |_, _| boxed_test_future(async {}),
+        )
+        .await;
     let (channel, server_task) = start_grpc_test_server(
         generate_service,
         control_service,
@@ -1927,6 +1935,7 @@ async fn control_reports_server_and_model_info() {
         .expect("get server info")
         .into_inner();
     assert_eq!(server.engine_version, "test-vllm-version");
+    assert_eq!(server.effective_attention_block_size, Some(64));
     assert_eq!(server.api_version, "vllm");
     assert_eq!(server.instance_id, "test-instance");
     assert_eq!(server.max_model_len, DEFAULT_MOCK_MAX_MODEL_LEN as u32);
@@ -2194,6 +2203,7 @@ async fn control_aggregates_multi_engine_capacity() {
     ready_0.weight_transfer_backend = Some("nccl".to_string());
     ready_0.enable_sleep_mode = true;
     ready_0.supports_draft_weight_updates = true;
+    ready_0.effective_attention_block_size = Some(64);
 
     let mut ready_1 = default_ready_response();
     ready_1.max_model_len = 4_096;
@@ -2247,6 +2257,7 @@ async fn control_aggregates_multi_engine_capacity() {
     .into_inner();
     assert_eq!(server.max_model_len, 4_096);
     assert_eq!(server.total_kv_blocks, 30);
+    assert!(server.effective_attention_block_size.is_none());
     let rl = server.rl_capabilities.expect("RL capabilities");
     assert!(!rl.weight_transfer_enabled);
     assert!(rl.weight_transfer_backend.is_empty());

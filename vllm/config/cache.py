@@ -211,6 +211,8 @@ class CacheConfig:
     """The number of blocks to allocate for CPU memory."""
 
     # Set after KV cache initialization.
+    effective_attention_block_size: int | None = field(default=None, init=False)
+    """Full-attention block size in tokens, including DCP, or None if unavailable."""
     kv_cache_size_tokens: int | None = field(default=None, init=False)
     """Per-DP-engine KV cache capacity in tokens (group-aware). Uses
     group-aware capacity since num_gpu_blocks * block_size can be wrong
@@ -277,6 +279,7 @@ class CacheConfig:
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
+            "effective_attention_block_size",
             "kv_cache_size_tokens",
             "kv_cache_max_concurrency",
             # WIP feature toggle not impacting compiled graph shape
