@@ -62,12 +62,10 @@ def app(registry):
     """
     import vllm.entrypoints.serve.instrumentator.metrics as metrics_mod
 
-    original = metrics_mod.get_prometheus_registry
-    metrics_mod.get_prometheus_registry = lambda: registry
-    try:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+        monkeypatch.setattr(metrics_mod, "get_prometheus_registry", lambda: registry)
         app = build_app(_build_args(), supported_tasks=())
-    finally:
-        metrics_mod.get_prometheus_registry = original
 
     @app.get("/raise_http_exception_400")
     async def raise_http_exception_400():

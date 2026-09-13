@@ -785,7 +785,7 @@ portalocker==3.2.0
     # via sacrebleu
 pqdm==0.2.0
     # via -r requirements/test/rocm.in
-prometheus-client==0.24.1
+prometheus-client==0.25.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
