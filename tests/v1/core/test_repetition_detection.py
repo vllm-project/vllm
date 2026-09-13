@@ -26,6 +26,49 @@ class TestCheckSequenceRepetition:
         )
         assert check_sequence_repetition(token_ids, params)
 
+    def test_a_cycle_is_only_matched_at_multiples_of_its_period(self):
+        """A cycle of period p is detected only at candidate lengths divisible
+        by p, so raising min_pattern_size can hide a shorter cycle when no
+        multiple of its period falls in the configured range.
+
+        This pins the tuning rule documented on ReasoningConfig
+        .loop_break_min_pattern_size, which said the opposite until it was
+        measured (review on #52677).
+        """
+        three_cycle = [7, 8, 9] * 12
+
+        def fires(min_size: int, max_size: int) -> bool:
+            return check_sequence_repetition(
+                three_cycle,
+                RepetitionDetectionParams(
+                    max_pattern_size=max_size,
+                    min_pattern_size=min_size,
+                    min_count=3,
+                ),
+            )
+
+        # No multiple of 3 in [4, 4] or [5, 5]: the cycle is missed.
+        assert not fires(4, 4)
+        assert not fires(5, 5)
+        # 6 is a multiple of 3, so widening the range catches the same cycle.
+        assert fires(4, 6)
+        assert fires(6, 6)
+        assert fires(3, 4)
+
+    def test_a_single_repeated_token_matches_at_every_pattern_size(self):
+        """Period 1 divides every candidate length, which is why separator
+        runs still fire at a raised min_pattern_size."""
+        run = [42] * 24
+        for min_size in range(1, 9):
+            assert check_sequence_repetition(
+                run,
+                RepetitionDetectionParams(
+                    max_pattern_size=min_size,
+                    min_pattern_size=min_size,
+                    min_count=3,
+                ),
+            ), min_size
+
     def test_repetition_below_min_count(self):
         """Test that pattern below min_count is not detected"""
         token_ids = [1, 2, 3, 1, 2, 3]
