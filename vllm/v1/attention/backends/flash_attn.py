@@ -335,7 +335,7 @@ def _maybe_symmetrize_window(
 
 
 class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetadata]):
-    # FA3:
+    # FA3/FA4:
     # Supports full cudagraphs for all cases.
     #
     # FA2:
@@ -353,9 +353,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     # to FULL_AND_PIECEWISE.
     # TODO(luka, lucas): audit FA2 as part of:
     #  https://github.com/vllm-project/vllm/issues/22945
+    # FA3 and FA4 both capture cleanly for mixed prefill-decode and for varlen
+    # decode; only FA2 needs the UNIFORM_BATCH fallback the comment above
+    # describes. FA4 builds no AOT scheduler metadata at all (aot_schedule is
+    # gated on version == 3), so there is nothing for a captured graph to stale.
     _cudagraph_support = (
         AttentionCGSupport.ALWAYS
-        if get_flash_attn_version() == 3
+        if get_flash_attn_version() in (3, 4)
         else AttentionCGSupport.UNIFORM_BATCH
     )
     supports_update_block_table: bool = True
