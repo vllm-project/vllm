@@ -166,20 +166,5 @@ def test_min_cprr_qlen_is_above_two():
     assert MIN_QLEN > 2
 
 
-# --------------------------------------------------------------------------
-# numerics parity -- the real correctness gate (GPU)
-# --------------------------------------------------------------------------
-
-@pytest.mark.skip(
-    reason="needs a gfx950 GPU with DCP initialised and both routes built; "
-    "run under the ROCm DCP CI job"
-)
-def test_cprr_matches_segmented_numerically():
-    """asm cprr and segmented must agree on identical inputs.
-
-    They differ only in HOW causality is applied -- segmented expands the
-    verify group into one single-query row per token and carries the causal
-    window in per-row lengths; cprr keeps one row of qlen queries and
-    reconstructs global positions in-kernel from g_kv_indptr. The outputs
-    must be identical within fp8 tolerance.
-    """
+# Kernel numerics live in test_rocm_aiter_mla_dcp_cprr_numerics.py, which runs
+# the real builder and the real asm kernel on a gfx950 GPU.
