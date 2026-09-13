@@ -633,6 +633,7 @@ def test_flashinfer_sparse_dcp_mtp_keeps_per_token_causal_pages(
     impl.topk_indices_buffer = topk_indices
     impl.dcp_world_size = world
     impl.dcp_rank = dcp_rank
+    impl.index_group = None
     impl._workspace_buffer = torch.empty(1, device=device, dtype=torch.int8)
     impl.bmm1_scale = None
     impl.bmm2_scale = None
