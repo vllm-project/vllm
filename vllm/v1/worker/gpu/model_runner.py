@@ -113,7 +113,11 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 from vllm.v1.worker.gpu.cudagraph_utils import (
     profile_cudagraph_memory as _profile_cudagraph_memory,
 )
-from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
+from vllm.v1.worker.gpu.dp_utils import (
+    DPProfilerSync,
+    DPSyncState,
+    dispatch_cg_and_sync_dp,
+)
 from vllm.v1.worker.gpu.ec_connector import get_ec_connector
 from vllm.v1.worker.gpu.eplb_utils import EPLBController, step_eplb_after
 from vllm.v1.worker.gpu.input_batch import (
@@ -247,6 +251,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Dual batch overlap. Created in initialize_kv_cache(), once everything
         # it runs the microbatched forward with exists.
         self.ubatch_runner: UBatchRunner | None = None
+
+        # Syncs torch profiler start across DP ranks (see DPProfilerSync).
+        self.dp_profiler_sync: DPProfilerSync | None = (
+            DPProfilerSync()
+            if (envs.VLLM_ENABLE_MULTINODE_PROFILING and self.dp_size > 1)
+            else None
+        )
 
         # Detect EP all2all peer faults to prevent emitting corrupted output.
         # Only meaningful for MoE + DP with an FT-capable all2all backend.
@@ -1700,6 +1711,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.ubatch_runner is not None and not skip_attn_for_dummy_run
             ),
             uniform_decode=uniform_tok_count == self.decode_query_len,
+            profiler_sync=self.dp_profiler_sync,
         )
 
         if batch_desc.num_tokens == 0:
