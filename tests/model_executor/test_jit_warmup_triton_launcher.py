@@ -21,6 +21,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_kernel_dispatcher_with_warmup,
     triton_warmup_inputs,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -257,10 +258,11 @@ def test_triton_kernel_decorator_propagates_dispatch_assertions(
         dispatch.get_warmup_keys()
 
 
-def test_triton_kernel_dispatch_uses_cuda_fake_tensors(
+def test_triton_kernel_dispatch_uses_device_fake_tensors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     kernel = _FakeTritonKernel()
+    device_type = current_platform.device_type
 
     def warmup_inputs() -> dict[str, Any]:
         return dict(
@@ -271,7 +273,7 @@ def test_triton_kernel_dispatch_uses_cuda_fake_tensors(
     @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
     def dispatch(first: torch.Tensor, second: int) -> LaunchSpec:
         assert isinstance(first, torch.Tensor)
-        assert first.is_cuda
+        assert first.device.type == device_type
         assert first[0].is_contiguous()
         return (first.shape[0],), dict(CONST=first[0].numel())
 
@@ -282,7 +284,7 @@ def test_triton_kernel_dispatch_uses_cuda_fake_tensors(
 
     keys = dispatch.get_warmup_keys()
     assert len(keys) == 1
-    assert dict(keys[0].inputs)["first"].device.type == "cuda"
+    assert dict(keys[0].inputs)["first"].device.type == device_type
 
 
 def test_triton_kernel_decorates_native_launchers(
