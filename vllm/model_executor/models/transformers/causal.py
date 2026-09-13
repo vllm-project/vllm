@@ -32,13 +32,22 @@ if TYPE_CHECKING:
 
     from vllm.config import VllmConfig
 
+    from .base import Base
 
-class CausalMixin(VllmModelForTextGeneration):
+    _CausalMixinBase = Base
+else:
+    _CausalMixinBase = VllmModelForTextGeneration
+
+
+class CausalMixin(_CausalMixinBase):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip VllmModelForTextGeneration.__init__ and call the next class in MRO
-        super(VllmModelForTextGeneration, self).__init__(
-            vllm_config=vllm_config, prefix=prefix
-        )
+        if TYPE_CHECKING:
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
+        else:
+            super(VllmModelForTextGeneration, self).__init__(
+                vllm_config=vllm_config, prefix=prefix
+            )
 
         tie_word_embeddings = self._get_tie_word_embeddings()
 

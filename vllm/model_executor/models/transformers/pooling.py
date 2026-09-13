@@ -29,15 +29,24 @@ from vllm.model_executor.models.interfaces_base import VllmModelForPooling
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+    from .base import Base
 
-class EmbeddingMixin(VllmModelForPooling):
+    _PoolingMixinBase = Base
+else:
+    _PoolingMixinBase = VllmModelForPooling
+
+
+class EmbeddingMixin(_PoolingMixinBase):
     default_seq_pooling_type = "CLS"
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip VllmModelForPooling.__init__ and call the next class in MRO
-        super(VllmModelForPooling, self).__init__(
-            vllm_config=vllm_config, prefix=prefix
-        )
+        if TYPE_CHECKING:
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
+        else:
+            super(VllmModelForPooling, self).__init__(
+                vllm_config=vllm_config, prefix=prefix
+            )
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -45,14 +54,17 @@ class EmbeddingMixin(VllmModelForPooling):
         self.pooler = DispatchPooler.for_embedding(pooler_config)
 
 
-class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
+class SequenceClassificationMixin(SupportsCrossEncoding, _PoolingMixinBase):
     default_seq_pooling_type = "CLS"
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip VllmModelForPooling.__init__ and call the next class in MRO
-        super(VllmModelForPooling, self).__init__(
-            vllm_config=vllm_config, prefix=prefix
-        )
+        if TYPE_CHECKING:
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
+        else:
+            super(VllmModelForPooling, self).__init__(
+                vllm_config=vllm_config, prefix=prefix
+            )
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
@@ -83,16 +95,26 @@ class SequenceClassificationMixin(SupportsCrossEncoding, VllmModelForPooling):
             )
         self.init_parameters(self.classifier, dtype=self.model_config.head_dtype)
 
-        class ClassifierWithReshape(self.classifier.__class__):
-            """
-            Token extraction has already been applied in `pooler.pooling`.
-            Add dim to match expected input shape of `classifier.forward`.
-            """
+        if TYPE_CHECKING:
 
-            def forward(self, *args, **kwargs):
-                if len(args) > 0:
-                    args = (args[0].unsqueeze(1), *args[1:])
-                return super().forward(*args, **kwargs)
+            class ClassifierWithReshape(torch.nn.Module):
+                def forward(self, *args, **kwargs):
+                    if len(args) > 0:
+                        args = (args[0].unsqueeze(1), *args[1:])
+                    return super().forward(*args, **kwargs)
+
+        else:
+
+            class ClassifierWithReshape(self.classifier.__class__):
+                """
+                Token extraction has already been applied in `pooler.pooling`.
+                Add dim to match expected input shape of `classifier.forward`.
+                """
+
+                def forward(self, *args, **kwargs):
+                    if len(args) > 0:
+                        args = (args[0].unsqueeze(1), *args[1:])
+                    return super().forward(*args, **kwargs)
 
         self.classifier.__class__ = ClassifierWithReshape
 
