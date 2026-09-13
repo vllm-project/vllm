@@ -301,7 +301,11 @@ def get_xpu_runtime_version():
 
 
 def get_pkg_version(run_lambda, pkg):
-    assert get_platform() == "linux"
+    # These versions come from Linux package managers; there is nothing to query
+    # on other platforms, so return None instead of raising (keeps collect_env
+    # working on macOS/Windows).
+    if get_platform() != "linux":
+        return None
 
     if pkg in ["vllm_xpu_kernels", "oneccl"]:
         rc, out, _ = run_lambda(f"pip show {pkg}")
