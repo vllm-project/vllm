@@ -5,11 +5,11 @@
 Set up this example by starting a vLLM OpenAI-compatible server with tool call
 options enabled for xLAM-2 models:
 
-vllm serve --model Salesforce/Llama-xLAM-2-8b-fc-r --enable-auto-tool-choice --tool-call-parser xlam
+vllm serve Salesforce/Llama-xLAM-2-8b-fc-r --enable-auto-tool-choice --tool-call-parser xlam
 
 OR
 
-vllm serve --model Salesforce/xLAM-2-3b-fc-r --enable-auto-tool-choice --tool-call-parser xlam
+vllm serve Salesforce/xLAM-2-3b-fc-r --enable-auto-tool-choice --tool-call-parser xlam
 
 This example demonstrates streaming tool calls with xLAM models.
 """
