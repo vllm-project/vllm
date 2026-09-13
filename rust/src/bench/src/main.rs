@@ -6,17 +6,27 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
     name = "vllm-bench",
-    about = "Benchmark online serving throughput",
+    about = "Benchmark online serving throughput and offline multimodal preprocessing",
     version = vllm_build_info::VERSION
 )]
 struct Cli {
     #[command(flatten)]
     args: vllm_bench::BenchServeArgs,
+
+    /// Optional subcommand; absent by default for the online serving benchmark.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Offline multimodal preprocessing latency benchmark.
+    MmProcessor(vllm_bench::MmProcessorArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -30,5 +40,8 @@ fn main() -> anyhow::Result<()> {
         .build()
         .context("Failed to build tokio runtime")?;
 
-    runtime.block_on(vllm_bench::run(cli.args))
+    match cli.command {
+        Some(Command::MmProcessor(args)) => runtime.block_on(vllm_bench::run_mm_processor(args)),
+        None => runtime.block_on(vllm_bench::run(cli.args)),
+    }
 }
