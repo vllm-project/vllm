@@ -600,7 +600,10 @@ class Scheduler(SchedulerInterface):
         # For logging.
         scheduled_timestamp = time.monotonic()
 
-        self.kv_cache_manager.new_step_starts()
+        # The step this pass may schedule will get fence seq sched_step_seq + 1
+        # (non-empty steps advance the fence at the end of schedule()); state
+        # hashes published this pass are guarded behind that seq.
+        self.kv_cache_manager.new_step_starts(self.sched_step_seq + 1)
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
@@ -1449,7 +1452,9 @@ class Scheduler(SchedulerInterface):
 
         # Advance the fence only for non-empty steps (those that actually
         # write KV and have their output processed later in update_from_output).
-        if self.defer_block_free and total_num_scheduled_tokens > 0:
+        # Unconditional (not just defer_block_free): the mamba publish guard
+        # uses this seq to know which schedule pass a state hash belongs to.
+        if total_num_scheduled_tokens > 0:
             self.sched_step_seq += 1
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
@@ -1889,9 +1894,14 @@ class Scheduler(SchedulerInterface):
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
-        if self.defer_block_free and scheduler_output.total_num_scheduled_tokens > 0:
+        # processed_step_seq advances for every non-empty step regardless of
+        # defer_block_free: the mamba publish guard consumes it as the commit
+        # fence even when deferred frees are disabled.
+        if scheduler_output.total_num_scheduled_tokens > 0:
             self.processed_step_seq += 1
-            self._drain_deferred_frees()
+            self.kv_cache_manager.commit_step(self.processed_step_seq)
+            if self.defer_block_free:
+                self._drain_deferred_frees()
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():

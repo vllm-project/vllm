@@ -921,6 +921,17 @@ class KVCacheManager:
             offloads.append((group_id, block.block_id, boundary_tokens))
         return offloads
 
-    def new_step_starts(self) -> None:
-        """Notify the coordinator that a new step is starting."""
-        self.coordinator.new_step_starts()
+    def new_step_starts(self, step_seq: int) -> None:
+        """Notify the coordinator that a new step is starting.
+
+        step_seq is the fence seq the step scheduled this pass will get
+        (scheduler sched_step_seq + 1); mamba state hashes published this
+        pass stay guarded until the commit fence reaches it.
+        """
+        self.coordinator.new_step_starts(step_seq)
+
+    def commit_step(self, step_seq: int) -> None:
+        """Mark the executed step with fence seq step_seq as committed: every
+        GPU write it enqueued has landed, so mamba state hashes published
+        for it become safe to hit."""
+        self.coordinator.commit_step(step_seq)
