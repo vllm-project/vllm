@@ -415,7 +415,7 @@ async def async_request_openai_chat_completions(
         output.prompt_len = request_func_input.prompt_len
 
         generated_text = ""
-        ttft = 0.0
+        first_chunk_received = False
         st = time.perf_counter()
         most_recent_timestamp = st
         try:
@@ -442,9 +442,9 @@ async def async_request_openai_chat_completions(
                             if choices := data.get("choices"):
                                 content = choices[0]["delta"].get("content")
                                 # First token
-                                if ttft == 0.0:
-                                    ttft = timestamp - st
-                                    output.ttft = ttft
+                                if not first_chunk_received:
+                                    first_chunk_received = True
+                                    output.ttft = timestamp - st
 
                                 # Decoding phase
                                 else:
@@ -458,9 +458,7 @@ async def async_request_openai_chat_completions(
                                 output.output_tokens = usage.get("completion_tokens")
 
                     output.generated_text = generated_text
-                    # ttft is only set by a token chunk, so a stream carrying
-                    # nothing but a usage trailer has produced no tokens.
-                    if ttft != 0.0:
+                    if first_chunk_received:
                         output.success = True
                     else:
                         output.success = False
@@ -539,7 +537,7 @@ async def async_request_openai_audio(
             output.prompt_len = request_func_input.prompt_len
 
             generated_text = ""
-            ttft = 0.0
+            first_chunk_received = False
             st = time.perf_counter()
             most_recent_timestamp = st
             try:
@@ -560,9 +558,9 @@ async def async_request_openai_audio(
                                 if choices := data.get("choices"):
                                     content = choices[0]["delta"].get("content")
                                     # First token
-                                    if ttft == 0.0:
-                                        ttft = timestamp - st
-                                        output.ttft = ttft
+                                    if not first_chunk_received:
+                                        first_chunk_received = True
+                                        output.ttft = timestamp - st
 
                                     # Decoding phase
                                     else:
@@ -581,8 +579,7 @@ async def async_request_openai_audio(
                                     )
 
                         output.generated_text = generated_text
-                        # See the note in async_request_openai_chat_completions.
-                        if ttft != 0.0:
+                        if first_chunk_received:
                             output.success = True
                         else:
                             output.success = False

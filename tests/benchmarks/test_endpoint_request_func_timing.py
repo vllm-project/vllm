@@ -11,9 +11,12 @@ Driven against a fake session and a scripted clock: no GPU, model, or socket.
 """
 
 import asyncio
+import importlib.util
 import json
+from pathlib import Path
 from typing import Any
 
+import aiohttp
 import numpy as np
 import pytest
 
@@ -115,6 +118,10 @@ class _FakeContent:
                 await asyncio.sleep(delay)
             yield payload
 
+    # The legacy script iterates ``response.content`` directly.
+    def __aiter__(self):
+        return self.iter_any()
+
 
 class _FakeResponse:
     def __init__(self, chunks: list[tuple[float, bytes]]) -> None:
@@ -138,6 +145,12 @@ class _FakeSession:
     def post(self, **kwargs: Any) -> _FakeResponse:
         del kwargs
         return _FakeResponse(self._chunks)
+
+    async def __aenter__(self) -> "_FakeSession":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        return False
 
 
 # (id, request function, api url, is_chat_payload)
@@ -330,3 +343,122 @@ def test_usage_only_stream_is_not_reported_as_success(
     assert not output.success
     assert output.itl == []
     assert "TTFT" in output.error
+
+
+# ``benchmarks/backend_request_func.py`` is a standalone script rather than a
+# package module, so it is loaded by path. It also builds its own ClientSession,
+# so the scripted stream is injected by swapping the module's aiohttp reference.
+_LEGACY_PATH = Path(__file__).parents[2] / "benchmarks" / "backend_request_func.py"
+
+
+class _FakeAiohttp:
+    """Stands in for the legacy module's aiohttp import."""
+
+    def __init__(self, chunks: list[tuple[float, bytes]]) -> None:
+        self._chunks = chunks
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(aiohttp, name)
+
+    def ClientSession(self, **kwargs: Any) -> _FakeSession:  # noqa: N802
+        del kwargs
+        return _FakeSession(self._chunks)
+
+
+def _load_legacy():
+    spec = importlib.util.spec_from_file_location(
+        "legacy_backend_request_func", _LEGACY_PATH
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+LEGACY_ENDPOINTS = [
+    (
+        "completions",
+        "async_request_openai_completions",
+        "http://test/v1/completions",
+        False,
+    ),
+    (
+        "chat",
+        "async_request_openai_chat_completions",
+        "http://test/v1/chat/completions",
+        True,
+    ),
+    (
+        "audio",
+        "async_request_openai_audio",
+        "http://test/v1/audio/transcriptions",
+        True,
+    ),
+]
+
+
+def _run_legacy(
+    monkeypatch, func_name, api_url, endpoint_id, chunks, n_tokens, clock=None
+):
+    module = _load_legacy()
+    monkeypatch.setattr(module, "aiohttp", _FakeAiohttp(chunks))
+    if clock is not None:
+        monkeypatch.setattr(module, "time", _FakeTime(clock))
+    request_func = getattr(module, func_name)
+    return asyncio.run(request_func(_make_input(api_url, n_tokens, endpoint_id)))
+
+
+@pytest.mark.parametrize(
+    "endpoint_id,func_name,api_url,chat",
+    LEGACY_ENDPOINTS,
+    ids=[e[0] for e in LEGACY_ENDPOINTS],
+)
+def test_legacy_decode_span_identity_is_exact(
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint_id: str,
+    func_name: str,
+    api_url: str,
+    chat: bool,
+) -> None:
+    """benchmarks/backend_request_func.py must honour the same identity."""
+    tick = 1.0
+    n_tokens = 5
+    chunks = _build_stream(n_tokens, chat=chat)
+    output = _run_legacy(
+        monkeypatch,
+        func_name,
+        api_url,
+        endpoint_id,
+        chunks,
+        n_tokens,
+        clock=_ScriptedClock(tick=tick),
+    )
+
+    assert output.success, output.error
+    assert len(output.itl) == n_tokens - 1
+
+    residual = (output.latency - output.ttft) - sum(output.itl)
+    assert residual == pytest.approx(0.0, abs=tick / 1000), (
+        f"legacy {endpoint_id}: (latency - ttft) - sum(itl) = {residual!r}"
+    )
+    assert output.latency == pytest.approx(n_tokens * tick, abs=tick / 1000)
+
+
+@pytest.mark.parametrize(
+    "endpoint_id,func_name,api_url,chat",
+    LEGACY_ENDPOINTS,
+    ids=[e[0] for e in LEGACY_ENDPOINTS],
+)
+def test_legacy_usage_only_stream_is_not_reported_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+    endpoint_id: str,
+    func_name: str,
+    api_url: str,
+    chat: bool,
+) -> None:
+    """A usage-only stream must fail rather than report a zero-duration success."""
+    chunks = [(0.0, _usage_chunk(0)), (0.0, b"data: [DONE]\n\n")]
+    output = _run_legacy(monkeypatch, func_name, api_url, endpoint_id, chunks, 0)
+
+    assert not output.success
+    assert output.itl == []
