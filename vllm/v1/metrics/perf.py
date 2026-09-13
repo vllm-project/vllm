@@ -10,7 +10,7 @@ import json
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
 import prometheus_client
@@ -124,8 +124,12 @@ class ExecutionContext:
     decode_context_len: int = 0  # sum of context_len for decode requests
     decode_token_context_product: int = 0  # sum of (num_tokens * context_len)
 
+    # Per-request records: (num_tokens, context_len, is_prefill)
+    requests: list[tuple[int, int, bool]] = field(default_factory=list)
+
     def add(self, num_tokens: int, context_len: int, is_prefill: bool) -> None:
         """Add a single request's statistics to this batch context."""
+        self.requests.append((num_tokens, context_len, is_prefill))
         if is_prefill:
             self.num_prefill_requests += 1
             self.prefill_num_tokens += num_tokens
@@ -141,9 +145,40 @@ class ExecutionContext:
         """Total number of tokens across all requests in the batch."""
         return self.prefill_num_tokens + self.decode_num_tokens
 
-    def total_token_context_product(self) -> int:
-        """Total sum of (num_tokens * context_len) across all requests."""
-        return self.prefill_token_context_product + self.decode_token_context_product
+    def total_token_context_product(self, sliding_window: int | None = None) -> int:
+        """Total sum of (num_tokens * context_len) across all requests.
+
+        If sliding_window is provided, context length per request is clamped to
+        sliding_window.
+        """
+        if sliding_window is None:
+            return (
+                self.prefill_token_context_product + self.decode_token_context_product
+            )
+        return sum(
+            num_tokens * min(context_len, sliding_window)
+            for num_tokens, context_len, _ in self.requests
+        )
+
+    def prefill_context_len_for_window(self, sliding_window: int | None = None) -> int:
+        """Sum of context_len for prefill requests, clamped to sliding_window if set."""
+        if sliding_window is None:
+            return self.prefill_context_len
+        return sum(
+            min(context_len, sliding_window)
+            for _, context_len, is_prefill in self.requests
+            if is_prefill
+        )
+
+    def decode_context_len_for_window(self, sliding_window: int | None = None) -> int:
+        """Sum of context_len for decode requests, clamped to sliding_window if set."""
+        if sliding_window is None:
+            return self.decode_context_len
+        return sum(
+            min(context_len, sliding_window)
+            for _, context_len, is_prefill in self.requests
+            if not is_prefill
+        )
 
     def num_logits_tokens(self) -> int:
         """Number of tokens that require logits computation (unembedding).
@@ -214,6 +249,7 @@ class ParserChain:
         self.parsers.append(parser)
 
     def parse(self, vllm_config: VllmConfig) -> ParsedArgs:
+        """Apply all parsers in sequence and return the accumulated ParsedArgs."""
         args = ParsedArgs()
         for parser in self.parsers:
             args = parser.parse(args, vllm_config)
@@ -234,7 +270,9 @@ class ComponentMetrics(BaseModel, ABC):
 
     @classmethod
     @abstractmethod
-    def component_type(cls) -> str: ...
+    def component_type(cls) -> str:
+        """Return the unique string key identifying this component in the registry."""
+        ...
 
     @classmethod
     @abstractmethod
@@ -273,17 +311,23 @@ class ComponentMetrics(BaseModel, ABC):
     @abstractmethod
     def get_num_flops_breakdown(
         self, ctx: ExecutionContext, per_gpu: bool = True
-    ) -> dict[str, int]: ...
+    ) -> dict[str, int]:
+        """Return per-operation FLOPs breakdown for this component."""
+        ...
 
     @abstractmethod
     def get_read_bytes_breakdown(
         self, ctx: ExecutionContext, per_gpu: bool = True
-    ) -> dict[str, int]: ...
+    ) -> dict[str, int]:
+        """Return per-operation read-memory-traffic breakdown for this component."""
+        ...
 
     @abstractmethod
     def get_write_bytes_breakdown(
         self, ctx: ExecutionContext, per_gpu: bool = True
-    ) -> dict[str, int]: ...
+    ) -> dict[str, int]:
+        """Return per-operation write-memory-traffic breakdown for this component."""
+        ...
 
     def get_num_flops(self, ctx: ExecutionContext, per_gpu: bool = True) -> int:
         return sum(self.get_num_flops_breakdown(ctx, per_gpu).values())
@@ -306,6 +350,7 @@ class BaseConfigParser(Parser):
     """
 
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
+        """Parse base model dimensions, dtype byte sizes, and parallelism config."""
         model_config = vllm_config.model_config
 
         args.vocab_size = model_config.get_vocab_size()
@@ -357,6 +402,7 @@ class BaseAttentionConfigParser(Parser):
     """
 
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
+        """Parse KV head count, head dimension, and KV-cache dtype byte size."""
         model_config = vllm_config.model_config
 
         args.num_key_value_heads = model_config.get_total_num_kv_heads()
@@ -371,6 +417,54 @@ class BaseAttentionConfigParser(Parser):
         return args
 
 
+class SlidingWindowAttentionParser(Parser):
+    """
+    Parses sliding window attention configuration and layer breakdown.
+    Provides: sliding_window, num_swa_layers
+    """
+
+    def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
+        """Determine sliding_window size and count of SWA layers.
+
+        Detects per-layer type lists (e.g. Llama-4), Gemma 2 alternating
+        pattern, and uniform SWA models (Mistral, Qwen2.5).
+        """
+        model_config = vllm_config.model_config
+
+        sliding_window: int | None = None
+        if not getattr(model_config, "disable_sliding_window", False):
+            sliding_window = model_config.get_sliding_window()
+            if sliding_window is None and hasattr(vllm_config, "cache_config"):
+                sliding_window = getattr(
+                    vllm_config.cache_config, "sliding_window", None
+                )
+
+        args.sliding_window = sliding_window
+
+        num_layers = args.num_hidden_layers
+        if sliding_window is not None and sliding_window > 0:
+            hf_text_config = getattr(model_config, "hf_text_config", None)
+            layer_types = getattr(hf_text_config, "layer_types", None)
+            if layer_types is not None and isinstance(layer_types, list):
+                num_swa = sum(
+                    1 for lt in layer_types[:num_layers] if "sliding" in lt.lower()
+                )
+                args.num_swa_layers = num_swa
+            elif (
+                getattr(getattr(model_config, "hf_config", None), "model_type", None)
+                == "gemma2"
+            ):
+                # Gemma 2 alternates sliding window: even layers (0, 2, ...) are sliding
+                args.num_swa_layers = (num_layers + 1) // 2
+            else:
+                # Full SWA model (e.g. Mistral, Qwen2.5 with sliding_window)
+                args.num_swa_layers = num_layers
+        else:
+            args.num_swa_layers = 0
+
+        return args
+
+
 class AttentionQuantizationConfigParser(Parser):
     """
     Parses quantization configuration for attention layers.
@@ -378,6 +472,7 @@ class AttentionQuantizationConfigParser(Parser):
     """
 
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
+        """Override weight_byte_size based on the active quantization method."""
         cfg = vllm_config.quant_config
 
         if cfg is None:
@@ -401,6 +496,7 @@ class AttentionDetectionParser(Parser):
     """
 
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
+        """Raise InvalidComponent for MLA models so AttentionMetrics is skipped."""
         if vllm_config.model_config.is_deepseek_mla:
             raise InvalidComponent(
                 "Model uses MLA attention; use MLAAttentionMetrics instead"
@@ -425,25 +521,48 @@ class AttentionMetrics(ComponentMetrics):
     # From BaseConfig Parser, overridden by AttentionQuantizationConfigParser
     weight_byte_size: int | float = Field(..., gt=0)
 
-    # TODO: discern cases where we have mixture of different attention layer types
-    # such as SWA, MLA, etc.
+    # From SlidingWindowAttentionParser
+    sliding_window: int | None = Field(None)
+    num_swa_layers: int = Field(0, ge=0)
 
     @classmethod
     def component_type(cls) -> str:
+        """Return the component registry key for standard (non-MLA) attention."""
         return "attn"
 
     @classmethod
     def get_parser(cls) -> ParserChain:
+        """Return the parser chain for AttentionMetrics.
+
+        Parsers run in order: MLA detection guard, base model config,
+        attention-specific config, sliding-window breakdown, quantization
+        weight-size override.
+        """
         return ParserChain(
             AttentionDetectionParser(),
             BaseConfigParser(),
             BaseAttentionConfigParser(),
+            SlidingWindowAttentionParser(),
             AttentionQuantizationConfigParser(),
         )
 
     def get_num_flops_breakdown(
         self, ctx: ExecutionContext, per_gpu: bool = True
     ) -> dict[str, int]:
+        """Compute FLOPs breakdown for attention layers.
+
+        Accounts for hybrid models by splitting total layers into full-attention
+        (L_full) and sliding-window (L_swa) sublayers. When per_gpu=True, divides
+        L by pp_size first, then derives L_swa proportionally to preserve the
+        L_full + L_swa == L invariant under integer division.
+
+        Args:
+            ctx: Execution context describing the current batch.
+            per_gpu: If True, scale counts down by tensor/pipeline parallelism.
+
+        Returns:
+            Dict with keys: qkv_proj, out_proj, attn_qk, attn_av.
+        """
         L, D, q, kv, d = (
             self.num_hidden_layers,
             self.hidden_size,
@@ -452,24 +571,57 @@ class AttentionMetrics(ComponentMetrics):
             self.head_dim,
         )
         T = ctx.total_num_tokens()
-        TC = ctx.total_token_context_product()
+        TC_full = ctx.total_token_context_product()
+
+        L_swa = self.num_swa_layers
+        L_full = L - L_swa
 
         if per_gpu:
             L //= self.pp_size
+            L_swa = round(L * self.num_swa_layers / self.num_hidden_layers)
+            L_full = L - L_swa
             # tensor parallel along heads
             q = max(1, q // self.tp_size)
             kv = max(1, kv // self.tp_size)
 
-        return {
+        flops = {
             "qkv_proj": 2 * T * D * (q + 2 * kv) * d * L,
-            "attn_qk": 2 * q * TC * d * L,
-            "attn_av": 2 * q * TC * d * L,
             "out_proj": 2 * T * D * q * d * L,
         }
+
+        attn_qk = 0
+        attn_av = 0
+        if L_full > 0:
+            attn_qk += 2 * q * TC_full * d * L_full
+            attn_av += 2 * q * TC_full * d * L_full
+
+        if L_swa > 0 and self.sliding_window is not None:
+            TC_swa = ctx.total_token_context_product(self.sliding_window)
+            attn_qk += 2 * q * TC_swa * d * L_swa
+            attn_av += 2 * q * TC_swa * d * L_swa
+
+        flops["attn_qk"] = attn_qk
+        flops["attn_av"] = attn_av
+
+        return flops
 
     def get_read_bytes_breakdown(
         self, ctx: ExecutionContext, per_gpu: bool = True
     ) -> dict[str, int]:
+        """Compute read-memory-traffic breakdown for attention layers.
+
+        Splits layers into full-attention and sliding-window sublayers using
+        the same proportional derivation as get_num_flops_breakdown to preserve
+        the L_full + L_swa == L invariant under pipeline parallelism.
+
+        Args:
+            ctx: Execution context describing the current batch.
+            per_gpu: If True, scale counts down by tensor/pipeline parallelism.
+
+        Returns:
+            Dict with keys: qkv_input, qkv_weight, attn_input (conditional),
+            out_input, out_weight.
+        """
         L, D, q, kv, d = (
             self.num_hidden_layers,
             self.hidden_size,
@@ -479,8 +631,13 @@ class AttentionMetrics(ComponentMetrics):
         )
         T = ctx.total_num_tokens()
 
+        L_swa = self.num_swa_layers
+        L_full = L - L_swa
+
         if per_gpu:
             L //= self.pp_size
+            L_swa = round(L * self.num_swa_layers / self.num_hidden_layers)
+            L_full = L - L_swa
             # tensor parallel along heads
             q = max(1, q // self.tp_size)
             kv = max(1, kv // self.tp_size)
@@ -490,22 +647,49 @@ class AttentionMetrics(ComponentMetrics):
         read_bytes["qkv_input"] = T * D * self.activation_byte_size * L
         read_bytes["qkv_weight"] = int(D * (q + 2 * kv) * d * self.weight_byte_size * L)
 
-        # Attention input reads differ between prefill and decode
-        # Prefill: read Q, K, V activations (all in activation_byte_size)
-        if ctx.prefill_num_tokens > 0:
-            read_bytes["attn_input"] = (
-                (ctx.prefill_num_tokens * q + 2 * ctx.prefill_context_len * kv)
-                * d
-                * self.activation_byte_size
-                * L
-            )
+        attn_input = 0
 
-        # Decode: read Q activations + read K, V from cache (in cache_byte_size)
-        if ctx.decode_num_tokens > 0:
-            read_bytes["attn_input"] = read_bytes.get("attn_input", 0) + (
-                ctx.decode_num_tokens * q * d * self.activation_byte_size * L
-                + 2 * ctx.decode_context_len * kv * d * self.cache_byte_size * L
-            )
+        # Full attention layers
+        if L_full > 0:
+            if ctx.prefill_num_tokens > 0:
+                attn_input += (
+                    (ctx.prefill_num_tokens * q + 2 * ctx.prefill_context_len * kv)
+                    * d
+                    * self.activation_byte_size
+                    * L_full
+                )
+            if ctx.decode_num_tokens > 0:
+                attn_input += (
+                    ctx.decode_num_tokens * q * d * self.activation_byte_size * L_full
+                    + 2
+                    * ctx.decode_context_len
+                    * kv
+                    * d
+                    * self.cache_byte_size
+                    * L_full
+                )
+
+        # Sliding window attention layers
+        if L_swa > 0:
+            sw = self.sliding_window
+            prefill_sw_len = ctx.prefill_context_len_for_window(sw)
+            decode_sw_len = ctx.decode_context_len_for_window(sw)
+
+            if ctx.prefill_num_tokens > 0:
+                attn_input += (
+                    (ctx.prefill_num_tokens * q + 2 * prefill_sw_len * kv)
+                    * d
+                    * self.activation_byte_size
+                    * L_swa
+                )
+            if ctx.decode_num_tokens > 0:
+                attn_input += (
+                    ctx.decode_num_tokens * q * d * self.activation_byte_size * L_swa
+                    + 2 * decode_sw_len * kv * d * self.cache_byte_size * L_swa
+                )
+
+        if ctx.prefill_num_tokens > 0 or ctx.decode_num_tokens > 0:
+            read_bytes["attn_input"] = attn_input
 
         read_bytes["out_input"] = T * q * d * self.activation_byte_size * L
         read_bytes["out_weight"] = int(q * d * D * self.weight_byte_size * L)
@@ -549,6 +733,7 @@ class MLADetectionParser(Parser):
     """
 
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
+        """Raise InvalidComponent if the model does not use MLA attention."""
         if not vllm_config.model_config.is_deepseek_mla:
             raise InvalidComponent("Model does not use MLA attention")
         return args
@@ -562,6 +747,7 @@ class MLAConfigParser(Parser):
     """
 
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
+        """Parse MLA-specific compression dimensions and KV-cache dtype byte size."""
         model_config = vllm_config.model_config
         cfg = model_config.hf_text_config
 
@@ -616,10 +802,16 @@ class MLAAttentionMetrics(ComponentMetrics):
 
     @classmethod
     def component_type(cls) -> str:
+        """Return the component registry key for MLA attention."""
         return "mla_attn"
 
     @classmethod
     def get_parser(cls) -> ParserChain:
+        """Return the parser chain for MLAAttentionMetrics.
+
+        Parsers run in order: MLA detection guard, base model config,
+        MLA-specific config, quantization weight-size override.
+        """
         return ParserChain(
             MLADetectionParser(),
             BaseConfigParser(),
@@ -923,6 +1115,7 @@ class FfnQuantizationConfigParser(Parser):
     """
 
     def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
+        """Override weight_byte_size based on the active FFN quantization method."""
         cfg = vllm_config.quant_config
 
         if cfg is None:
@@ -980,10 +1173,16 @@ class FfnMetrics(ComponentMetrics):
 
     @classmethod
     def component_type(cls) -> str:
+        """Return the component registry key for FFN layers."""
         return "ffn"
 
     @classmethod
     def get_parser(cls) -> ParserChain:
+        """Return the parser chain for FfnMetrics.
+
+        Parsers run in order: base model config, FFN parallelism, base FFN
+        config, MoE interleave step, MoE layer frequency, quantization override.
+        """
         return ParserChain(
             BaseConfigParser(),
             FfnParallelParser(),
@@ -1207,10 +1406,12 @@ class UnembedMetrics(ComponentMetrics):
 
     @classmethod
     def component_type(cls) -> str:
+        """Return the component registry key for the unembedding (LM head) layer."""
         return "unembed"
 
     @classmethod
     def get_parser(cls) -> ParserChain:
+        """Return the parser chain for UnembedMetrics (base model config only)."""
         return ParserChain(
             BaseConfigParser(),
         )

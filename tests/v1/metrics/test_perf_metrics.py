@@ -8,6 +8,7 @@ import types
 from types import SimpleNamespace
 
 import pytest
+from transformers import Gemma2Config, MistralConfig
 from transformers.models.deepseek_v3.configuration_deepseek_v3 import DeepseekV3Config
 from transformers.models.llama4.configuration_llama4 import (
     Llama4Config,
@@ -31,6 +32,7 @@ from vllm.v1.metrics.perf import (
     MLAAttentionMetrics,
     ModelMetrics,
     ParsedArgs,
+    SlidingWindowAttentionParser,
     UnembedMetrics,
 )
 
@@ -38,7 +40,8 @@ from vllm.v1.metrics.perf import (
 class MockModelConfig:
     """Mock ModelConfig that implements the getter methods used by parsers."""
 
-    def __init__(self, hf_config, dtype):
+    def __init__(self, hf_config, dtype, disable_sliding_window=False):
+        """Initialize MockModelConfig with HF config and options."""
         self.hf_config = hf_config
         self.hf_text_config = get_hf_text_config(hf_config)
         convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
@@ -49,8 +52,10 @@ class MockModelConfig:
         ).convert()
         self.dtype = dtype
         self.is_attention_free = False
+        self.disable_sliding_window = disable_sliding_window
 
     def __getattr__(self, name):
+        """Delegate attribute lookups to ModelConfig."""
         # 1. Check if ModelConfig actually has this attribute
         if not hasattr(ModelConfig, name):
             raise AttributeError(
@@ -86,9 +91,13 @@ def create_mock_vllm_config(
     tensor_parallel_size=1,
     pipeline_parallel_size=1,
     enable_expert_parallel=False,
+    disable_sliding_window=False,
 ) -> SimpleNamespace:
+    """Create a mock VllmConfig object for unit tests."""
     vllm_config = SimpleNamespace()
-    vllm_config.model_config = MockModelConfig(hf_config, model_dtype)
+    vllm_config.model_config = MockModelConfig(
+        hf_config, model_dtype, disable_sliding_window=disable_sliding_window
+    )
 
     vllm_config.cache_config = SimpleNamespace()
     vllm_config.cache_config.cache_dtype = cache_dtype
@@ -1336,3 +1345,296 @@ def test_mla_attention_scaling_with_layers():
     assert double_metrics.get_num_flops(ctx) == 2 * base_metrics.get_num_flops(ctx)
     assert double_metrics.get_read_bytes(ctx) == 2 * base_metrics.get_read_bytes(ctx)
     assert double_metrics.get_write_bytes(ctx) == 2 * base_metrics.get_write_bytes(ctx)
+
+
+#### Sliding Window Attention Tests ####
+
+
+def test_sliding_window_parser_no_swa():
+    """Test parser defaults to no SWA when sliding_window is unset."""
+    hf_config = Qwen3Config(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_hidden_layers=12,
+    )
+    vllm_config = create_mock_vllm_config(hf_config)
+    parser = SlidingWindowAttentionParser()
+    args = ParsedArgs()
+    args.num_hidden_layers = 12
+    result = parser.parse(args, vllm_config)
+
+    assert result.sliding_window is None
+    assert result.num_swa_layers == 0
+
+
+def test_sliding_window_parser_uniform_swa():
+    """Test SlidingWindowAttentionParser for full SWA model (e.g. Mistral)."""
+    hf_config = MistralConfig(
+        hidden_size=4096,
+        num_attention_heads=32,
+        num_key_value_heads=8,
+        num_hidden_layers=32,
+        sliding_window=4096,
+    )
+    vllm_config = create_mock_vllm_config(hf_config)
+    parser = SlidingWindowAttentionParser()
+    args = ParsedArgs()
+    args.num_hidden_layers = 32
+    result = parser.parse(args, vllm_config)
+
+    assert result.sliding_window == 4096
+    assert result.num_swa_layers == 32
+
+
+def test_sliding_window_parser_explicit_layer_types():
+    """Test SlidingWindowAttentionParser with explicit layer_types list."""
+    hf_config = Qwen3Config(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_hidden_layers=6,
+    )
+    hf_config.sliding_window = 2048
+    hf_config.layer_types = [
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+    ]
+    vllm_config = create_mock_vllm_config(hf_config)
+    parser = SlidingWindowAttentionParser()
+    args = ParsedArgs()
+    args.num_hidden_layers = 6
+    result = parser.parse(args, vllm_config)
+
+    assert result.sliding_window == 2048
+    assert result.num_swa_layers == 3
+
+
+def test_sliding_window_parser_gemma2():
+    """Test SlidingWindowAttentionParser detects alternating SWA for Gemma 2."""
+    hf_config = Gemma2Config(
+        hidden_size=2304,
+        num_attention_heads=8,
+        num_key_value_heads=4,
+        num_hidden_layers=26,
+        sliding_window=4096,
+    )
+    vllm_config = create_mock_vllm_config(hf_config)
+    parser = SlidingWindowAttentionParser()
+    args = ParsedArgs()
+    args.num_hidden_layers = 26
+    result = parser.parse(args, vllm_config)
+
+    assert result.sliding_window == 4096
+    # Gemma 2 alternates: even layers are sliding window (26 layers -> 13 SWA)
+    assert result.num_swa_layers == 13
+
+
+def test_sliding_window_parser_disabled():
+    """Test SlidingWindowAttentionParser respects disable_sliding_window."""
+    hf_config = MistralConfig(
+        hidden_size=4096,
+        num_attention_heads=32,
+        num_key_value_heads=8,
+        num_hidden_layers=32,
+        sliding_window=4096,
+    )
+    vllm_config = create_mock_vllm_config(hf_config, disable_sliding_window=True)
+    parser = SlidingWindowAttentionParser()
+    args = ParsedArgs()
+    args.num_hidden_layers = 32
+    result = parser.parse(args, vllm_config)
+
+    assert result.sliding_window is None
+    assert result.num_swa_layers == 0
+
+
+def test_attention_metrics_sliding_window_flops_bounds():
+    """Test that SWA clamps attention core FLOPs when context_len > sliding_window."""
+    sw = 1024
+    dense_config = MistralConfig(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_key_value_heads=16,
+        num_hidden_layers=8,
+        sliding_window=None,
+    )
+    swa_config = MistralConfig(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_key_value_heads=16,
+        num_hidden_layers=8,
+        sliding_window=sw,
+    )
+
+    dense_vllm = create_mock_vllm_config(dense_config)
+    swa_vllm = create_mock_vllm_config(swa_config)
+
+    dense_metrics = AttentionMetrics.from_vllm_config(dense_vllm)
+    swa_metrics = AttentionMetrics.from_vllm_config(swa_vllm)
+
+    # 1. When context <= sliding_window: FLOPs should be identical
+    short_ctx = ExecutionContext.from_single_request(
+        num_tokens=1, context_len=512, is_prefill=False
+    )
+    assert swa_metrics.get_num_flops(short_ctx) == dense_metrics.get_num_flops(
+        short_ctx
+    )
+
+    # 2. When context > sliding_window: FLOPs for SWA must be strictly smaller
+    long_ctx = ExecutionContext.from_single_request(
+        num_tokens=1, context_len=8192, is_prefill=False
+    )
+    dense_flops = dense_metrics.get_num_flops_breakdown(long_ctx)
+    swa_flops = swa_metrics.get_num_flops_breakdown(long_ctx)
+
+    # Projections (qkv_proj, out_proj) are unaffected by sliding window
+    assert swa_flops["qkv_proj"] == dense_flops["qkv_proj"]
+    assert swa_flops["out_proj"] == dense_flops["out_proj"]
+
+    # Attention core FLOPs are clamped: 8192 vs 1024 (8x difference)
+    assert swa_flops["attn_qk"] < dense_flops["attn_qk"]
+    assert swa_flops["attn_av"] < dense_flops["attn_av"]
+    assert swa_flops["attn_qk"] * 8 == dense_flops["attn_qk"]
+    assert swa_flops["attn_av"] * 8 == dense_flops["attn_av"]
+
+
+def test_attention_metrics_sliding_window_read_bytes():
+    """Test that SWA bounds decode KV-cache read bytes to sliding_window."""
+    sw = 2048
+    dense_config = MistralConfig(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_key_value_heads=4,
+        num_hidden_layers=4,
+        sliding_window=None,
+    )
+    swa_config = MistralConfig(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_key_value_heads=4,
+        num_hidden_layers=4,
+        sliding_window=sw,
+    )
+
+    dense_vllm = create_mock_vllm_config(dense_config)
+    swa_vllm = create_mock_vllm_config(swa_config)
+
+    dense_metrics = AttentionMetrics.from_vllm_config(dense_vllm)
+    swa_metrics = AttentionMetrics.from_vllm_config(swa_vllm)
+
+    # Long decode context: 8192 tokens
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=1, context_len=8192, is_prefill=False
+    )
+    dense_reads = dense_metrics.get_read_bytes_breakdown(ctx)
+    swa_reads = swa_metrics.get_read_bytes_breakdown(ctx)
+
+    # Attention input read traffic is lower for SWA
+    assert swa_reads["attn_input"] < dense_reads["attn_input"]
+
+    # Weight reads and projection inputs are identical
+    assert swa_reads["qkv_weight"] == dense_reads["qkv_weight"]
+    assert swa_reads["out_weight"] == dense_reads["out_weight"]
+    assert swa_reads["qkv_input"] == dense_reads["qkv_input"]
+
+
+def test_attention_metrics_hybrid_alternating_layers():
+    """Test hybrid model where half layers are full attention and half are SWA."""
+    sw = 1024
+    hybrid_config = Qwen3Config(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_key_value_heads=16,
+        num_hidden_layers=4,
+    )
+    hybrid_config.sliding_window = sw
+    hybrid_config.layer_types = [
+        "sliding_attention",
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+    ]
+
+    vllm_config = create_mock_vllm_config(hybrid_config)
+    metrics = AttentionMetrics.from_vllm_config(vllm_config)
+
+    assert metrics.num_swa_layers == 2
+    assert metrics.sliding_window == sw
+
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=1, context_len=4096, is_prefill=False
+    )
+    flops = metrics.get_num_flops_breakdown(ctx)
+
+    # 2 full layers attend to 4096; 2 SWA layers attend to 1024
+    # Expected TC total = 2 * 4096 + 2 * 1024 = 8192 + 2048 = 10240
+    # Formula: 2 * q * d * (L_full * 4096 + L_swa * 1024)
+    q = metrics.num_attention_heads
+    d = metrics.head_dim
+    expected_core_flops = 2 * q * d * (2 * 4096 + 2 * 1024)
+    assert flops["attn_qk"] == expected_core_flops
+    assert flops["attn_av"] == expected_core_flops
+
+
+def test_attention_metrics_sliding_window_per_gpu():
+    """Test that SWA metrics scale properly with tensor and pipeline parallelism."""
+    sw = 1024
+    hf_config = MistralConfig(
+        hidden_size=4096,
+        num_attention_heads=32,
+        num_key_value_heads=8,
+        num_hidden_layers=16,
+        sliding_window=sw,
+    )
+    single_vllm = create_mock_vllm_config(hf_config)
+    tp_vllm = create_mock_vllm_config(hf_config, tensor_parallel_size=2)
+    pp_vllm = create_mock_vllm_config(hf_config, pipeline_parallel_size=2)
+
+    single_metrics = AttentionMetrics.from_vllm_config(single_vllm)
+    tp_metrics = AttentionMetrics.from_vllm_config(tp_vllm)
+    pp_metrics = AttentionMetrics.from_vllm_config(pp_vllm)
+
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=1, context_len=4096, is_prefill=False
+    )
+
+    # Both TP=2 and PP=2 should halve the per-GPU attention core FLOPs
+    single_flops = single_metrics.get_num_flops_breakdown(ctx, per_gpu=True)
+    tp_flops = tp_metrics.get_num_flops_breakdown(ctx, per_gpu=True)
+    pp_flops = pp_metrics.get_num_flops_breakdown(ctx, per_gpu=True)
+
+    assert tp_flops["attn_qk"] == single_flops["attn_qk"] // 2
+    assert pp_flops["attn_qk"] == single_flops["attn_qk"] // 2
+
+
+def test_attention_metrics_hybrid_sliding_window_per_gpu():
+    """Test that hybrid SWA models preserve L_full + L_swa == L under PP."""
+    sw = 1024
+    hybrid_config = Gemma2Config(
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_key_value_heads=16,
+        num_hidden_layers=30,
+        sliding_window=sw,
+    )
+    pp_vllm = create_mock_vllm_config(hybrid_config, pipeline_parallel_size=2)
+    pp_metrics = AttentionMetrics.from_vllm_config(pp_vllm)
+
+    ctx = ExecutionContext.from_single_request(
+        num_tokens=1, context_len=4096, is_prefill=False
+    )
+    pp_flops = pp_metrics.get_num_flops_breakdown(ctx, per_gpu=True)
+    pp_read_bytes = pp_metrics.get_read_bytes_breakdown(ctx, per_gpu=True)
+
+    # Under PP=2, 30 layers -> 15 layers per GPU.
+    # SWA layers = round(15 * 15 / 30) = 8, Full layers = 15 - 8 = 7.
+    # Total attention layers = 7 + 8 = 15, preserving L_full + L_swa == L.
+    q = pp_metrics.num_attention_heads
+    d = pp_metrics.head_dim
+    expected_pp_attn = 2 * q * d * (7 * 4096 + 8 * sw)
+    assert pp_flops["attn_qk"] == expected_pp_attn
+    assert pp_flops["attn_av"] == expected_pp_attn
+    assert "attn_input" in pp_read_bytes
