@@ -1518,6 +1518,10 @@ def _v41_combine_case(case, window):
         qsl = torch.tensor([0, 64, 128], dtype=torch.int32, device=dev)
         sl = torch.tensor([64, 64], dtype=torch.int32, device=dev)
         rows = 8
+    elif case == "seq_len_below_query_len":
+        qsl = torch.tensor([0, 64], dtype=torch.int32, device=dev)
+        sl = torch.tensor([32], dtype=torch.int32, device=dev)
+        rows = 64
     elif case == "empty_seq_lens":
         qsl = torch.tensor([0], dtype=torch.int32, device=dev)
         sl = torch.zeros(0, dtype=torch.int32, device=dev)
@@ -1542,6 +1546,7 @@ def _v41_combine_case(case, window):
 @pytest.mark.parametrize(
     "case,window",
     [
+        ("seq_len_below_query_len", 128),
         ("empty_seq_lens", 128),
         ("compress_ratio_zero", 128),
         ("plain", 96),
@@ -1559,6 +1564,67 @@ def test_v41_combine_topk_swa_indices_matches_torch(case, window) -> None:
         f"lens differ: ref={ref_lens.tolist()} got={got_lens.tolist()}"
     )
     assert torch.equal(got_indices, ref_indices)
+
+
+@requires_gfx950
+def test_v41_combine_topk_swa_indices_does_not_write_past_the_rows() -> None:
+    """The token loop is bounded by the row count, and the length store is unmasked.
+
+    Driving the kernel directly with a sentinel past the rows catches that: going
+    through the host wrapper cannot, since it sizes the buffers to the rows and an
+    overrun then lands outside anything the comparison reads.
+    """
+    import triton
+
+    from vllm.models.deepseek_v4_1.amd.rocm import (
+        _SPARSE_PREFILL_TOPK_ALIGNMENT,
+        _combine_topk_swa_indices_kernel,
+    )
+
+    dev = "cuda"
+    # query_start_loc claims 128 tokens; topk_indices has 8 rows.
+    window, ratio, topk, rows, sentinel = 128, 2, 512, 8, -12345
+    qsl = torch.tensor([0, 64, 128], dtype=torch.int32, device=dev)
+    seq_lens = torch.tensor([64, 64], dtype=torch.int32, device=dev)
+    gather_lens = torch.minimum(seq_lens, torch.full_like(seq_lens, window))
+    gen = torch.Generator(device="cpu").manual_seed(0)
+    topk_indices = torch.randint(
+        0, 4096, (rows, topk), generator=gen, dtype=torch.int32
+    ).to(dev)
+
+    align = _SPARSE_PREFILL_TOPK_ALIGNMENT
+    combined_topk = (topk + window + align - 1) // align * align
+    guard = 256
+    indices = torch.full(
+        (rows + guard, combined_topk), sentinel, dtype=torch.int32, device=dev
+    )
+    lens = torch.full((rows + guard,), sentinel, dtype=torch.int32, device=dev)
+
+    _combine_topk_swa_indices_kernel[(seq_lens.shape[0], 128)](
+        indices,
+        indices.stride(0),
+        lens,
+        topk_indices,
+        topk_indices.stride(0),
+        qsl,
+        seq_lens,
+        gather_lens,
+        100000,
+        4096,
+        rows,
+        TOP_K=min(topk, topk_indices.shape[-1]),
+        COMPRESS_RATIO=ratio,
+        WINDOW_SIZE=window,
+        PADDED_WINDOW=triton.next_power_of_2(window),
+        TOPK_WIDTH=topk_indices.shape[-1],
+        PADDED_TOP_K=triton.next_power_of_2(topk_indices.shape[-1]),
+    )
+    torch.cuda.synchronize()
+
+    assert torch.all(lens[rows:] == sentinel), (
+        f"wrote {int((lens[rows:] != sentinel).sum())} lengths past the rows"
+    )
+    assert torch.all(indices[rows:] == sentinel)
 
 
 @requires_gfx950
