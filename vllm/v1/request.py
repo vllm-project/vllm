@@ -229,6 +229,10 @@ class Request:
         self.resumable = resumable
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
+        # Deadline (time.time()) after which a request parked in
+        # WAITING_FOR_STREAMING_REQ is aborted. Set on entering that
+        # status, cleared on leaving it. None means not waiting.
+        self.streaming_wait_deadline: float | None = None
 
         # If True, request should be aborted immediately after being added to
         # the scheduler so the connector's request_finished hook runs.
