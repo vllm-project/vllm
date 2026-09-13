@@ -100,7 +100,9 @@ def test_cuda_profiler_requests_reach_engine_core(monkeypatch: pytest.MonkeyPatc
     asyncio.run(profile())
 
     assert engine.profiler is None
-    engine_core.profile_async.assert_has_awaits([call(True, None), call(False)])
+    engine_core.profile_async.assert_has_awaits(
+        [call(True, None, None, None), call(False)]
+    )
 
 
 async def generate(

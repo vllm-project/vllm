@@ -341,8 +341,13 @@ class LLMEngine:
 
         return processed_outputs.request_outputs
 
-    def start_profile(self, profile_prefix: str | None = None):
-        self.engine_core.profile(True, profile_prefix)
+    def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
+        self.engine_core.profile(True, profile_prefix, delay_iterations, max_iterations)
 
     def stop_profile(self):
         self.engine_core.profile(False)

@@ -927,8 +927,22 @@ impl EngineCoreClient {
     }
 
     /// Start profiling the engine.
-    pub async fn start_profile(&self, profile_prefix: Option<&str>) -> Result<()> {
-        self.call_utility::<(), _>("profile", (true, profile_prefix)).await?;
+    pub async fn start_profile(
+        &self,
+        profile_prefix: Option<&str>,
+        delay_iterations: Option<u64>,
+        max_iterations: Option<u64>,
+    ) -> Result<()> {
+        self.call_utility::<(), _>(
+            "profile",
+            (
+                true,
+                profile_prefix,
+                delay_iterations,
+                max_iterations,
+            ),
+        )
+        .await?;
         Ok(())
     }
 

@@ -771,8 +771,16 @@ class EngineCore:
         cleanup_dist_env_and_memory()
         logger.debug_once("[shutdown] EngineCore: local resource teardown complete")
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
-        self.model_executor.profile(is_start, profile_prefix)
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ):
+        self.model_executor.profile(
+            is_start, profile_prefix, delay_iterations, max_iterations
+        )
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
