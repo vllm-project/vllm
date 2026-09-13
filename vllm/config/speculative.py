@@ -1428,14 +1428,13 @@ class SpeculativeConfig:
                     draft_hf_config.architectures = [
                         "DSparkV41DraftModel" if is_v41 else "DSparkDraftModel"
                     ]
-                    if is_v41:
-                        # hf_config_override set n_predict to the number of
-                        # MTP stages (3), but one DSpark round drafts
-                        # dspark_block_size tokens; num_speculative_tokens
-                        # divisibility is checked against n_predict below.
-                        draft_hf_config.n_predict = getattr(
-                            draft_hf_config, "dspark_block_size", None
-                        ) or getattr(draft_hf_config, "n_predict", None)
+                    # hf_config_override set n_predict to the number of
+                    # MTP stages (3), but one DSpark round drafts
+                    # dspark_block_size tokens; num_speculative_tokens
+                    # divisibility is checked against n_predict below.
+                    draft_hf_config.n_predict = getattr(
+                        draft_hf_config, "dspark_block_size", None
+                    ) or getattr(draft_hf_config, "n_predict", None)
                     self.draft_model_config.quantization = (
                         self.target_model_config.quantization
                     )
