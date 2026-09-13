@@ -6,7 +6,7 @@ import json
 import types
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from functools import cached_property, lru_cache, partial
 from itertools import accumulate
@@ -57,6 +57,7 @@ from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFlatField,
@@ -66,7 +67,7 @@ from vllm.multimodal.inputs import (
     VisionChunkVideo,
 )
 from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
-from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.processing import BaseMultiModalProcessor, ProcessorInputs
 from vllm.renderers.embed_utils import (
     safe_load_prompt_embeds,
     safe_load_prompt_embeds_async,
@@ -441,6 +442,9 @@ ModalityStr = Literal[
 ]
 _T = TypeVar("_T")
 _AsyncMultiModalItem: TypeAlias = Callable[[], Awaitable[tuple[object, str | None]]]
+MultiModalMediaFallbacks: TypeAlias = dict[
+    tuple[str, int], Callable[[], object | Awaitable[object]]
+]
 
 
 # Backward compatibility for single item input
@@ -596,11 +600,17 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self,
         model_config: ModelConfig,
         media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        mm_processor_cache: BaseMultiModalProcessorCache | None = None,
+        skip_early_mm_lookup: bool = False,
+        media_fallbacks: MultiModalMediaFallbacks | None = None,
     ):
         super().__init__()
 
         self._model_config = model_config
         self._media_io_kwargs = media_io_kwargs
+        self._mm_processor_cache = mm_processor_cache
+        self._skip_early_mm_lookup = skip_early_mm_lookup
+        self._media_fallbacks = media_fallbacks
 
         self._items_by_modality = defaultdict[str, list[_T]](list)
         # Track original modality for each vision_chunk item (image or video)
@@ -645,6 +655,42 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     @cached_property
     def mm_processor(self):
         return self.mm_registry.create_processor(self.model_config)
+
+    def is_mm_item_cached(
+        self,
+        modality: str,
+        uuid: str | None,
+        mm_processor_kwargs: Mapping[str, object] | None,
+    ) -> bool:
+        cache = self._mm_processor_cache
+        if (
+            self._skip_early_mm_lookup
+            or self.use_unified_vision_chunk_modality
+            or uuid is None
+            or cache is None
+        ):
+            return False
+
+        mm_config = self.model_config.get_multimodal_config()
+        mm_hash = ProcessorInputs.get_mm_item_hash(
+            modality,
+            None,
+            uuid,
+            self.model_config.model,
+            mm_config.mm_hasher_algorithm,
+            mm_processor_kwargs or {},
+            self.media_io_kwargs or {},
+        )
+        return cache.is_cached_item(mm_hash)
+
+    def add_media_fallback(
+        self,
+        modality: Literal["image", "video"],
+        loader: Callable[[], object | Awaitable[object]],
+    ) -> None:
+        if self._media_fallbacks is not None:
+            item_idx = len(self._items_by_modality[modality])
+            self._media_fallbacks[modality, item_idx] = loader
 
     @property
     def video_processor_name(self) -> str | None:
@@ -1071,8 +1117,18 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._tracker.add("prompt_embeds", (tensor, None))
         self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
+    def _fetch_image(self, image_url: str) -> object:
+        return self._connector.fetch_image(image_url)
+
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
-        image = self._connector.fetch_image(image_url) if image_url else None
+        is_cached = self._tracker.is_mm_item_cached(
+            "image", uuid, self._mm_processor_kwargs
+        )
+        if is_cached and image_url is not None:
+            self._tracker.add_media_fallback(
+                "image", partial(self._fetch_image, image_url)
+            )
+        image = None if is_cached or image_url is None else self._fetch_image(image_url)
 
         placeholder = self._tracker.add("image", (image, uuid))
         self._add_placeholder("image", placeholder)
@@ -1159,15 +1215,21 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
         return self.parse_audio(audio_url, uuid)
 
-    def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
-        video = (
-            self._connector.fetch_video(
-                video_url=video_url,
-                video_processor=self._tracker.video_processor_name,
-            )
-            if video_url
-            else None
+    def _fetch_video(self, video_url: str) -> object:
+        return self._connector.fetch_video(
+            video_url=video_url,
+            video_processor=self._tracker.video_processor_name,
         )
+
+    def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
+        is_cached = self._tracker.is_mm_item_cached(
+            "video", uuid, self._mm_processor_kwargs
+        )
+        if is_cached and video_url is not None:
+            self._tracker.add_media_fallback(
+                "video", partial(self._fetch_video, video_url)
+            )
+        video = None if is_cached or video_url is None else self._fetch_video(video_url)
 
         placeholder = self._tracker.add("video", (video, uuid))
         self._add_placeholder("video", placeholder)
@@ -1264,15 +1326,28 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         tensor = await safe_load_prompt_embeds_async(self.model_config, data_bytes)
         return tensor, None
 
+    async def _fetch_image_async(self, image_url: str) -> object:
+        return await self._connector.fetch_image_async(image_url)
+
     async def _image_with_uuid_async(self, image_url: str | None, uuid: str | None):
-        image = (
-            await self._connector.fetch_image_async(image_url) if image_url else None
-        )
+        image = await self._fetch_image_async(image_url) if image_url else None
         return image, uuid
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
+        is_cached = self._tracker.is_mm_item_cached(
+            "image", uuid, self._mm_processor_kwargs
+        )
+        if is_cached and image_url is not None:
+            self._tracker.add_media_fallback(
+                "image", partial(self._fetch_image_async, image_url)
+            )
         placeholder = self._tracker.add(
-            "image", partial(self._image_with_uuid_async, image_url, uuid)
+            "image",
+            partial(
+                self._image_with_uuid_async,
+                None if is_cached else image_url,
+                uuid,
+            ),
         )
         self._add_placeholder("image", placeholder)
 
@@ -1380,20 +1455,31 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
         return self.parse_audio(audio_url, uuid)
 
-    async def _video_with_uuid_async(self, video_url: str | None, uuid: str | None):
-        video = (
-            await self._connector.fetch_video_async(
-                video_url,
-                video_processor=self._tracker.video_processor_name,
-            )
-            if video_url
-            else None
+    async def _fetch_video_async(self, video_url: str) -> object:
+        return await self._connector.fetch_video_async(
+            video_url,
+            video_processor=self._tracker.video_processor_name,
         )
+
+    async def _video_with_uuid_async(self, video_url: str | None, uuid: str | None):
+        video = await self._fetch_video_async(video_url) if video_url else None
         return video, uuid
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
+        is_cached = self._tracker.is_mm_item_cached(
+            "video", uuid, self._mm_processor_kwargs
+        )
+        if is_cached and video_url is not None:
+            self._tracker.add_media_fallback(
+                "video", partial(self._fetch_video_async, video_url)
+            )
         placeholder = self._tracker.add(
-            "video", partial(self._video_with_uuid_async, video_url, uuid)
+            "video",
+            partial(
+                self._video_with_uuid_async,
+                None if is_cached else video_url,
+                uuid,
+            ),
         )
         self._add_placeholder("video", placeholder)
 
@@ -2161,6 +2247,9 @@ def parse_chat_messages(
     content_format: ChatTemplateContentFormat,
     media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
+    mm_processor_cache: BaseMultiModalProcessorCache | None = None,
+    skip_early_mm_lookup: bool = False,
+    media_fallbacks: MultiModalMediaFallbacks | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
@@ -2170,6 +2259,9 @@ def parse_chat_messages(
     mm_tracker = MultiModalItemTracker(
         model_config,
         media_io_kwargs=media_io_kwargs,
+        mm_processor_cache=mm_processor_cache,
+        skip_early_mm_lookup=skip_early_mm_lookup,
+        media_fallbacks=media_fallbacks,
     )
 
     for msg in messages:
@@ -2200,6 +2292,9 @@ async def parse_chat_messages_async(
     content_format: ChatTemplateContentFormat,
     media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
+    mm_processor_cache: BaseMultiModalProcessorCache | None = None,
+    skip_early_mm_lookup: bool = False,
+    media_fallbacks: MultiModalMediaFallbacks | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
@@ -2209,6 +2304,9 @@ async def parse_chat_messages_async(
     mm_tracker = AsyncMultiModalItemTracker(
         model_config,
         media_io_kwargs=media_io_kwargs,
+        mm_processor_cache=mm_processor_cache,
+        skip_early_mm_lookup=skip_early_mm_lookup,
+        media_fallbacks=media_fallbacks,
     )
 
     for msg in messages:
