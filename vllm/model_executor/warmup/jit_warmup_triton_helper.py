@@ -15,7 +15,7 @@ from vllm.model_executor.warmup.jit_warmup import (
     get_function_source_node,
 )
 from vllm.platforms import current_platform
-from vllm.triton_utils import triton
+from vllm.triton_utils import HAS_TRITON, triton
 
 CompileKeyT = TypeVar("CompileKeyT")
 P = ParamSpec("P")
@@ -428,6 +428,8 @@ class _AutomaticTritonJitKernel(VllmTritonJitKernel[TritonCompileKey]):
 
 
 def _is_autotuned(kernel: Any) -> bool:
+    if not HAS_TRITON:
+        return False
     Autotuner = triton.runtime.autotuner.Autotuner
 
     while kernel is not None:

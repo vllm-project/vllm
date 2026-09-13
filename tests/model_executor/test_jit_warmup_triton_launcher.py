@@ -206,6 +206,26 @@ def test_triton_kernel_decorator_returns_launcher(
         launch(first, 1, 7, stale_constexpr=True)
 
 
+def test_triton_kernel_decorator_without_triton(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(jit_warmup_triton_helper, "HAS_TRITON", False)
+    monkeypatch.setattr(jit_warmup_triton_helper, "triton", object())
+    kernel = _FakeTritonKernel()
+
+    def warmup_inputs() -> dict[str, Any]:
+        return dict(first="warmup", second=1)
+
+    @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
+    def launch(first: str, second: int) -> LaunchSpec:
+        return (2,), dict(CONST=7)
+
+    launch("runtime", 2)
+    assert kernel.runtime_calls == [
+        ((2,), (), {"first": "runtime", "second": 2, "CONST": 7})
+    ]
+
+
 def test_triton_kernel_decorator_exhausts_large_ranges_before_deduplication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
