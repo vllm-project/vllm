@@ -49,6 +49,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     TRITON_ATTN_DIFFKV = (
         "vllm.v1.attention.backends.triton_attn_diffkv.TritonAttentionDiffKVBackend"
     )
+    TRITON_FLASH_ATTN = (
+        "vllm.v1.attention.backends.triton_flash_attn.TritonFlashAttentionBackend"
+    )
     ROCM_ATTN = "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
     ROCM_AITER_MLA = "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"
     ROCM_AITER_TRITON_MLA = (

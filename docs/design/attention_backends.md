@@ -56,6 +56,23 @@ llm = LLM(
 
 ## Backend Selection Behavior
 
+### Triton/FlashAttention Composite
+
+On Hopper, `TRITON_FLASH_ATTN` is preferred for compatible multimodal-prefix
+configurations. It uses Triton when the current queries need bidirectional
+image attention and FlashAttention for causal text prefills and decode, with a
+shared KV cache. The causal child must resolve to FA4. This happens
+automatically for FA4-only shapes such as head size 512 and models whose
+version policy promotes all layers to FA4, including Gemma 4. A standalone
+head-size-256 configuration whose version policy selects FA3 falls back to
+Triton for the whole layer.
+
+No attention override is needed for supported multimodal models:
+
+```bash
+vllm serve google/gemma-4-31B-it
+```
+
 ### Triton/FlashInfer Composite
 
 On Blackwell, `TRITON_FLASHINFER` is preferred for compatible

@@ -166,6 +166,11 @@ def _get_backend_priorities(
             ]
         else:
             return [
+                *(
+                    [AttentionBackendEnum.TRITON_FLASH_ATTN]
+                    if device_capability.major == 9 and use_mm_prefix
+                    else []
+                ),
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.TRITON_ATTN,

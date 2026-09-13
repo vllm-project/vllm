@@ -679,12 +679,19 @@ def test_composite_routes_queries_that_need_image_masking(
     "reverse_children,cache_dtype",
     [(False, "auto"), (True, "auto"), (False, "fp8_e4m3")],
 )
-def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
-    head_size, reverse_children, cache_dtype
+@pytest.mark.parametrize("causal_backend_name", ["FLASHINFER", "FLASH_ATTN"])
+def test_composite_shared_cache_across_image_and_causal_steps(
+    head_size, reverse_children, cache_dtype, causal_backend_name
 ):
     """Changing routes must preserve KV writes, image masking and graph replay."""
-    if not current_platform.is_device_capability_family(100):
-        pytest.skip("The composite supports Blackwell")
+    if causal_backend_name == "FLASHINFER":
+        if not current_platform.is_device_capability_family(100):
+            pytest.skip("The Triton/FlashInfer composite supports Blackwell")
+    else:
+        if not current_platform.is_device_capability(90):
+            pytest.skip("The Triton/FlashAttention composite supports Hopper")
+        if reverse_children or cache_dtype != "auto":
+            pytest.skip("Reverse-child and FP8 coverage is backend-independent")
 
     from vllm.config import set_current_vllm_config
     from vllm.engine.arg_utils import EngineArgs
@@ -694,6 +701,9 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
     from vllm.v1.attention.backends.composite import (
         MMPrefixAttentionRouting,
         create_composite_attention_backend,
+    )
+    from vllm.v1.attention.backends.flash_attn import (
+        FlashAttentionMetadata,
     )
     from vllm.v1.attention.backends.flashinfer import (
         FlashInferBackend,
@@ -705,14 +715,27 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
         TritonAttentionBackend,
         TritonAttentionMetadata,
     )
+    from vllm.v1.attention.backends.triton_flash_attn import (
+        TritonFlashAttentionBackend,
+    )
     from vllm.v1.attention.backends.triton_flashinfer import (
         TritonFlashInferBackend,
     )
     from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 
-    (block_size,) = TritonFlashInferBackend.get_supported_kernel_block_sizes()
+    if causal_backend_name == "FLASHINFER":
+        backend = TritonFlashInferBackend
+        causal_metadata_type = FlashInferMetadata
+        block_size = backend.get_supported_kernel_block_sizes()[0]
+    else:
+        backend = TritonFlashAttentionBackend
+        causal_metadata_type = FlashAttentionMetadata
+        block_size = backend.get_preferred_block_size(16)
     num_blocks = (209 + block_size - 1) // block_size
     torch.manual_seed(42)
+    attention_config = {"backend": backend.get_name()}
+    if causal_backend_name == "FLASH_ATTN":
+        attention_config["flash_attn_version"] = 4
     cfg = EngineArgs(
         model="google/gemma-4-31B-it",
         dtype="bfloat16",
@@ -722,7 +745,7 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
         block_size=block_size,
         kv_cache_dtype=cache_dtype,
         enforce_eager=True,
-        attention_config={"backend": "TRITON_FLASHINFER"},
+        attention_config=attention_config,
     ).create_engine_config()
     cfg.cache_config.kv_cache_layout = "LBHNC"
     window = 128 if head_size == 256 else None
@@ -739,7 +762,6 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
         if window
         else FullAttentionSpec(**spec_kwargs)
     )
-    backend = TritonFlashInferBackend
     if reverse_children:
         # Swapping the children and policy must preserve outputs and KV writes;
         # dispatch cannot depend on a particular child's class or position.
@@ -802,8 +824,8 @@ def test_triton_flashinfer_shared_cache_across_image_and_causal_steps(
         previous = 0
         for end, spans, metadata_type in [
             (128, [(32, 111)], TritonAttentionMetadata),
-            (129, [(32, 111)], FlashInferMetadata),
-            (145, [(32, 111)], FlashInferMetadata),
+            (129, [(32, 111)], causal_metadata_type),
+            (145, [(32, 111)], causal_metadata_type),
             (209, [(32, 111), (160, 207)], TritonAttentionMetadata),
         ]:
             qlen = end - previous
