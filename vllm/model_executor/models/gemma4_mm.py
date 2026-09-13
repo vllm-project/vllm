@@ -456,6 +456,29 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
 # ---------------------------------------------------------------------------
 
 
+def _dummy_audio_num_samples(processor: Any) -> int:
+    """Length in samples of a worst-case dummy audio item.
+
+    ``fft_length`` exists only on the mel/tower feature extractor. The unified
+    (encoder-free) Gemma 4 variant uses ``Gemma4UnifiedAudioFeatureExtractor``,
+    which does not define it, so reading the attribute unconditionally raises
+    ``AttributeError`` during memory profiling. That path is reached whenever
+    audio is the modality with the largest per-item token count, which happens
+    as soon as ``audio_seq_length`` is raised above the video budget.
+
+    Fall back to the audio budget the processor itself declares, which is the
+    same pair of values used to warn about over-long audio elsewhere in this
+    file.
+    """
+    fft_length = getattr(processor.feature_extractor, "fft_length", None)
+    if fft_length is not None:
+        return fft_length
+
+    sampling_rate = processor.feature_extractor.sampling_rate
+    max_duration_s = processor.audio_seq_length * processor.audio_ms_per_token / 1000.0
+    return int(max_duration_s * sampling_rate)
+
+
 class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -508,7 +531,7 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
         }
 
         if num_audios > 0:
-            audio_len = processor.feature_extractor.fft_length
+            audio_len = _dummy_audio_num_samples(processor)
             data["audio"] = self._get_dummy_audios(
                 length=audio_len,
                 num_audios=num_audios,
