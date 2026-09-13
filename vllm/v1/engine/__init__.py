@@ -21,7 +21,7 @@ from vllm.v1.metrics.stats import (
     RequestSpecDecodeMetrics,
     SchedulerStats,
 )
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplingMaskLists
+from vllm.v1.outputs import IterStats, LogprobsLists, LogprobsTensors, SamplingMaskLists
 from vllm.v1.serial_utils import UtilityResult
 
 # Type for pause_generation mode parameter.
@@ -172,6 +172,25 @@ class EngineCoreEventType(enum.IntEnum):
     QUEUED = 1
     SCHEDULED = 2
     PREEMPTED = 3
+    KV_CACHE_TRANSFER_SENDING_FINISHED = 4
+    KV_CACHE_TRANSFER_RECVING_FINISHED = 5
+
+
+EventMap: dict[EngineCoreEventType, str] = {
+    EngineCoreEventType.QUEUED: "queued",
+    EngineCoreEventType.SCHEDULED: "scheduled",
+    EngineCoreEventType.PREEMPTED: "preempted",
+    EngineCoreEventType.KV_CACHE_TRANSFER_SENDING_FINISHED: (
+        "kv_cache_transfer_sending_finished"
+    ),
+    EngineCoreEventType.KV_CACHE_TRANSFER_RECVING_FINISHED: (
+        "kv_cache_transfer_recving_finished"
+    ),
+}
+
+
+def get_event_name(event_type: EngineCoreEventType) -> str:
+    return EventMap.get(event_type, f"unknown_event_{event_type}")
 
 
 class EngineCoreEvent(msgspec.Struct):
@@ -184,13 +203,33 @@ class EngineCoreEvent(msgspec.Struct):
 
     type: EngineCoreEventType
     timestamp: float
+    wall_clock_timestamp: float
+    attributes: dict[str, Any] | None = None
+
+    @property
+    def name(self) -> str:
+        return get_event_name(self.type)
+
+    @property
+    def timestamp_ns(self) -> int:
+        return int(self.wall_clock_timestamp * 1e9)
 
     @classmethod
     def new_event(
-        cls, event_type: EngineCoreEventType, timestamp: float | None = None
+        cls,
+        event_type: EngineCoreEventType,
+        timestamp: float | None = None,
+        attributes: dict[str, Any] | None = None,
     ) -> "EngineCoreEvent":
+        wall_clock_timestamp = (
+            time.time()
+            if timestamp is None
+            # timestamp are relative to the engine core, so we need to convert
+            # them to wall-clock timestamp
+            else (time.time() - time.monotonic() + timestamp)
+        )
         timestamp = time.monotonic() if timestamp is None else timestamp
-        return cls(event_type, timestamp)
+        return cls(event_type, timestamp, wall_clock_timestamp, attributes)
 
 
 class EngineCoreOutput(
@@ -230,8 +269,11 @@ class EngineCoreOutput(
     new_sampling_mask: SamplingMaskLists | None = None
 
     # Per-request spec-decode acceptance; attached only on the final output.
-    # Appended last so `array_like` positional serialization stays compatible.
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
+
+    # Appended after all existing fields so `array_like` positional
+    # serialization stays backward compatible.
+    iter_stats: IterStats | None = None
 
     @property
     def finished(self) -> bool:

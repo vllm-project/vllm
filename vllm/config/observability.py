@@ -45,6 +45,10 @@ class ObservabilityConfig:
     Note that collecting detailed timing information for each request can be
     expensive."""
 
+    token_level_profiling: bool = False
+    """Enable token-level profiling to collect detailed timing information for
+    each token to trace."""
+
     per_request_spec_decode_metrics: Literal["none", "summary", "detailed"] = "none"
     """Include per-request speculative-decoding acceptance metrics in the
     response under `metrics.speculative_decoding`. `none` disables; `summary` adds mean
@@ -167,5 +171,9 @@ class ObservabilityConfig:
         if self.collect_detailed_traces and not self.otlp_traces_endpoint:
             raise ValueError(
                 "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
+            )
+        if self.token_level_profiling and not self.otlp_traces_endpoint:
+            raise ValueError(
+                "token_level_profiling requires `--otlp-traces-endpoint` to be set."
             )
         return self
