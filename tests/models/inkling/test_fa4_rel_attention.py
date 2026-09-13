@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for Inkling's NVIDIA relative-attention backends.
 
-Checks FA4 and the SM8x FlexAttention fallback against a pure-PyTorch reference
+Checks FA4 and the SM8x Triton fallback against a pure-PyTorch reference
 that implements the relative bias documented in the Inkling architecture guide::
 
     logit(i, j, h) = (1 / head_dim) * dot(q[i, h], k[j, h]) + rel_bias(i, j, h)
@@ -13,14 +13,18 @@ with causal (and optionally sliding-window) masking handled by the backend.
 """
 
 import importlib
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from vllm.models.inkling.common.triton_rel_attention import (
+    inkling_triton_rel_attention,
+)
 from vllm.models.inkling.nvidia.attention import (
     InklingAttention,
-    _use_sm8x_flex_attention,
+    _use_sm8x_triton_attention,
     compute_log_scaling_tau,
 )
 from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
@@ -28,11 +32,12 @@ from vllm.models.inkling.nvidia.ops.fa4_rel_attention import (
     _use_sheared_bias,
     inkling_fa4_num_splits,
 )
-from vllm.models.inkling.nvidia.ops.flex_rel_attention import (
-    make_inkling_flex_score_mod,
-)
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backends.flash_attn import (
+    FlashAttentionBackend,
+    FlashAttentionMetadata,
+)
 from vllm.v1.attention.backends.flex_attention import (
     FlexAttentionImpl,
     FlexAttentionMetadata,
@@ -75,22 +80,59 @@ def test_split_packed_kv_cache():
     ("major", "expected"),
     [(8, True), (9, False), (10, False), (11, False), (12, False)],
 )
-def test_sm8x_flex_attention_selection(monkeypatch, major, expected):
+def test_sm8x_triton_attention_selection(monkeypatch, major, expected):
     monkeypatch.setattr(
         current_platform,
         "get_device_capability",
         lambda: DeviceCapability(major=major, minor=0),
     )
-    _use_sm8x_flex_attention.cache_clear()
+    _use_sm8x_triton_attention.cache_clear()
     try:
-        assert _use_sm8x_flex_attention() is expected
+        assert _use_sm8x_triton_attention() is expected
     finally:
-        _use_sm8x_flex_attention.cache_clear()
+        _use_sm8x_triton_attention.cache_clear()
 
 
-def test_flex_score_mod_relative_bias():
+def _make_flex_score_mod(
+    rel_logits: torch.Tensor,
+    rel_extent: int,
+) -> Callable[..., torch.Tensor]:
+    """Preserve the published FlexAttention implementation as a test oracle."""
+
+    def score_mod_rel_bias(
+        score: torch.Tensor,
+        batch_index: torch.Tensor,
+        head_index: torch.Tensor,
+        logical_query_index: torch.Tensor,
+        logical_kv_index: torch.Tensor,
+        *,
+        physical_q: torch.Tensor,
+    ) -> torch.Tensor:
+        del batch_index
+        relative_distance = logical_query_index - logical_kv_index
+        relative_index = torch.clamp(relative_distance, min=0, max=rel_extent - 1)
+        safe_query_index = torch.clamp(
+            physical_q,
+            min=0,
+            max=rel_logits.shape[0] - 1,
+        )
+        relative_bias = rel_logits[
+            safe_query_index,
+            head_index,
+            relative_index,
+        ].to(torch.float32)
+        return score + torch.where(
+            (relative_distance >= 0) & (relative_distance < rel_extent),
+            relative_bias,
+            torch.zeros_like(score),
+        )
+
+    return score_mod_rel_bias
+
+
+def test_flex_reference_score_mod_relative_bias():
     rel_logits = torch.arange(2 * 3 * 4, dtype=torch.bfloat16).reshape(2, 3, 4)
-    score_mod = make_inkling_flex_score_mod(rel_logits, rel_extent=4)
+    score_mod = _make_flex_score_mod(rel_logits, rel_extent=4)
     score = torch.tensor(2.0)
 
     actual = score_mod(
@@ -242,10 +284,12 @@ def _ref_rel_attn(
         qi = q[start : start + ql].float()  # [ql, H, D]
         rl = rel_logits[start : start + ql].float()  # [ql, H, rel_extent]
 
-        nblk = (kl + BLOCK_SIZE - 1) // BLOCK_SIZE
+        block_size = key_cache.shape[1]
+        head_dim = q.shape[-1]
+        nblk = (kl + block_size - 1) // block_size
         blk = bt[i, :nblk]
-        k = key_cache[blk].reshape(-1, num_kv_heads, HEAD_DIM)[:kl].float()
-        v = value_cache[blk].reshape(-1, num_kv_heads, HEAD_DIM)[:kl].float()
+        k = key_cache[blk].reshape(-1, num_kv_heads, head_dim)[:kl].float()
+        v = value_cache[blk].reshape(-1, num_kv_heads, head_dim)[:kl].float()
         k = k.repeat_interleave(g, dim=1)  # [kl, H, D]
         v = v.repeat_interleave(g, dim=1)
 
@@ -331,7 +375,13 @@ def _run_case(seq_lens, num_heads, num_kv_heads, rel_extent, window_left, seed=0
         num_kv_heads=num_kv_heads,
         max_kv_len=max(kv_lens),
     )
-    out = _INKLING_FA4_REL_ATTENTION_KERNEL(
+    use_triton = _cap is not None and _cap.major == 8
+    attention = (
+        inkling_triton_rel_attention
+        if use_triton
+        else _INKLING_FA4_REL_ATTENTION_KERNEL
+    )
+    out = attention(
         q,
         key_cache,
         value_cache,
@@ -346,6 +396,7 @@ def _run_case(seq_lens, num_heads, num_kv_heads, rel_extent, window_left, seed=0
         rel_logits=rel_logits,
         num_splits=num_splits,
         out=preallocated_out,
+        **({"max_kv_len": max(kv_lens)} if use_triton else {}),
     )
     assert out.data_ptr() == preallocated_out.data_ptr()
     out = out.view(total_q, num_heads, HEAD_DIM)
@@ -366,156 +417,207 @@ def _run_case(seq_lens, num_heads, num_kv_heads, rel_extent, window_left, seed=0
     torch.testing.assert_close(out.float(), ref.float(), atol=2e-2, rtol=2e-2)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
-@pytest.mark.skipif(
-    _cap is None or _cap.major != 8,
-    reason="Inkling FlexAttention fallback is specific to SM8x",
-)
-@pytest.mark.parametrize("local_extent", [None, 16])
-@torch.inference_mode()
-def test_sm8x_flex_attention_matches_paged_reference(monkeypatch, local_extent):
-    query_len = 3
-    sequence_len = 35
-    num_heads = 8
-    num_kv_heads = 2
-    rel_extent = local_extent or 64
-    total_blocks = 4
-    block_indices = (3, 1, 2)
-    block_table = torch.tensor([block_indices], device="cuda", dtype=torch.int32)
-
-    generator = torch.Generator(device="cuda").manual_seed(20260730 + rel_extent)
-    q = torch.randn(
-        query_len,
-        num_heads,
-        HEAD_DIM,
-        device="cuda",
-        dtype=DTYPE,
-        generator=generator,
-    )
-    key_cache = torch.zeros(
+def _make_sm8x_comparison_case(
+    seq_lens,
+    *,
+    num_heads=8,
+    num_kv_heads=2,
+    rel_extent=128,
+    head_dim=HEAD_DIM,
+    block_size=BLOCK_SIZE,
+    dtype=DTYPE,
+    seed=0,
+):
+    """Use shuffled physical pages and the model's packed KV strides."""
+    torch.manual_seed(seed)
+    q_lens = [q for q, _ in seq_lens]
+    kv_lens = [kv for _, kv in seq_lens]
+    max_blocks = (max(kv_lens) + block_size - 1) // block_size
+    total_blocks = len(seq_lens) * max_blocks + 1
+    packed = torch.randn(
         total_blocks,
-        BLOCK_SIZE,
         num_kv_heads,
-        HEAD_DIM,
+        block_size,
+        2 * head_dim,
         device="cuda",
-        dtype=DTYPE,
+        dtype=dtype,
     )
-    value_cache = torch.zeros_like(key_cache)
-    logical_key = torch.randn(
-        sequence_len,
-        num_kv_heads,
-        HEAD_DIM,
+    key_cache, value_cache = packed.transpose(1, 2).split(head_dim, dim=-1)
+    block_table = (
+        (torch.randperm(total_blocks - 1, device="cuda") + 1)
+        .reshape(len(seq_lens), max_blocks)
+        .to(torch.int32)
+    )
+    query_start_loc = torch.tensor(
+        [0, *torch.cumsum(torch.tensor(q_lens), 0).tolist()],
+        dtype=torch.int32,
         device="cuda",
-        dtype=DTYPE,
-        generator=generator,
     )
-    logical_value = torch.randn(
-        sequence_len,
-        num_kv_heads,
-        HEAD_DIM,
-        device="cuda",
-        dtype=DTYPE,
-        generator=generator,
+    seq_lens_tensor = torch.tensor(kv_lens, dtype=torch.int32, device="cuda")
+    q = torch.randn(sum(q_lens), num_heads, head_dim, device="cuda", dtype=dtype)
+    rel_logits = torch.randn(
+        sum(q_lens), num_heads, rel_extent, device="cuda", dtype=dtype
     )
-    for logical_index in range(sequence_len):
-        logical_block, offset = divmod(logical_index, BLOCK_SIZE)
-        physical_block = block_indices[logical_block]
-        key_cache[physical_block, offset] = logical_key[logical_index]
-        value_cache[physical_block, offset] = logical_value[logical_index]
+    return dict(
+        q=q,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        packed=packed,
+        rel_logits=rel_logits,
+        block_table=block_table,
+        query_start_loc=query_start_loc,
+        seq_lens=seq_lens_tensor,
+        q_lens=q_lens,
+        kv_lens=kv_lens,
+    )
 
-    query_start_loc = torch.tensor([0, query_len], device="cuda", dtype=torch.int32)
-    seq_lens = torch.tensor([sequence_len], device="cuda", dtype=torch.int32)
+
+def _make_flex_reference(case, local_extent):
+    q = case["q"]
+    block_table = case["block_table"]
+    query_start_loc = case["query_start_loc"]
+    seq_lens = case["seq_lens"]
+    total_blocks, block_size, num_kv_heads, head_dim = case["key_cache"].shape
+    num_reqs = len(case["q_lens"])
     metadata = FlexAttentionMetadata(
         causal=True,
-        num_actual_tokens=query_len,
-        max_query_len=query_len,
+        num_actual_tokens=q.shape[0],
+        max_query_len=max(case["q_lens"]),
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
-        max_seq_len=sequence_len,
+        max_seq_len=max(case["kv_lens"]),
         seq_lens=seq_lens,
         block_table=block_table,
-        slot_mapping=torch.arange(query_len, device="cuda", dtype=torch.int64),
+        slot_mapping=torch.zeros(q.shape[0], device="cuda", dtype=torch.int64),
         use_cascade=False,
         common_prefix_len=0,
         cu_prefix_query_lens=None,
         prefix_kv_lens=None,
         suffix_kv_lens=None,
-        total_cache_tokens=total_blocks * BLOCK_SIZE,
-        block_size=BLOCK_SIZE,
-        max_possible_sequence_length=total_blocks * BLOCK_SIZE,
-        num_reqs=1,
+        total_cache_tokens=total_blocks * block_size,
+        block_size=block_size,
+        max_possible_sequence_length=block_table.shape[1] * block_size,
+        num_reqs=num_reqs,
         physical_to_logical=physical_to_logical_mapping(
-            block_table, seq_lens, BLOCK_SIZE, total_blocks
+            block_table, seq_lens, block_size, total_blocks
         ),
-        decode_offset=torch.tensor(
-            [sequence_len - query_len], device="cuda", dtype=torch.int32
-        ),
-        num_blocks_per_seq=torch.tensor(
-            [len(block_indices)], device="cuda", dtype=torch.int32
-        ),
+        decode_offset=seq_lens - query_start_loc.diff(),
+        num_blocks_per_seq=(seq_lens + block_size - 1) // block_size,
         persistent_kv_indices=torch.empty(
-            (1, BLOCK_SIZE * total_blocks), device="cuda", dtype=torch.int32
+            (num_reqs, block_size * block_table.shape[1]),
+            device="cuda",
+            dtype=torch.int32,
         ),
-        persistent_kv_num_blocks=torch.empty(1, device="cuda", dtype=torch.int32),
-        persistent_doc_ids=torch.empty(query_len, device="cuda", dtype=torch.int32),
+        persistent_kv_num_blocks=torch.empty(
+            num_reqs, device="cuda", dtype=torch.int32
+        ),
+        persistent_doc_ids=torch.empty(q.shape[0], device="cuda", dtype=torch.int32),
         direct_build=True,
-        q_block_size=BLOCK_SIZE,
-        kv_block_size=BLOCK_SIZE,
+        q_block_size=block_size,
+        kv_block_size=block_size,
     )
-
-    attention = InklingAttention.__new__(InklingAttention)
-    torch.nn.Module.__init__(attention)
-    attention.prefix = "test.layer"
-    attention.rel_extent = rel_extent
-    attention._use_flex_attention = True
-    attention._flex_attention_impl = FlexAttentionImpl(
-        num_heads=num_heads,
-        head_size=HEAD_DIM,
-        scale=1.0 / HEAD_DIM,
+    impl = FlexAttentionImpl(
+        num_heads=q.shape[1],
+        head_size=head_dim,
+        scale=1.0 / head_dim,
         num_kv_heads=num_kv_heads,
         alibi_slopes=None,
         sliding_window=local_extent,
         kv_cache_dtype="auto",
-        block_m=BLOCK_SIZE,
-        block_n=BLOCK_SIZE,
+        block_m=block_size,
+        block_n=block_size,
     )
-    attention.kv_cache = torch.cat((key_cache, value_cache), dim=-1).permute(0, 2, 1, 3)
+    return impl, metadata
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or _cap is None or _cap.major != 8,
+    reason="requires SM8x",
+)
+@pytest.mark.parametrize("local_extent", [None, 16])
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [(3, 35)],  # original validated FlexAttention case
+        [(5, 5), (1, 35), (3, 49)],  # mixed prefill, decode, and extend
+        [(1, 8193), (1, 13)],  # split-KV decode and mostly empty splits
+    ],
+)
+@torch.inference_mode()
+def test_sm8x_triton_matches_flex_and_reference(monkeypatch, local_extent, seq_lens):
+    rel_extent = local_extent or 64
+    case = _make_sm8x_comparison_case(seq_lens, rel_extent=rel_extent)
+    q = case["q"]
+    flex_impl, flex_metadata = _make_flex_reference(case, local_extent)
+    metadata = FlashAttentionMetadata(
+        num_actual_tokens=q.shape[0],
+        max_query_len=max(case["q_lens"]),
+        query_start_loc=case["query_start_loc"],
+        max_seq_len=max(case["kv_lens"]),
+        seq_lens=case["seq_lens"],
+        block_table=case["block_table"],
+        slot_mapping=flex_metadata.slot_mapping,
+        use_cascade=False,
+        common_prefix_len=0,
+        cu_prefix_query_lens=None,
+        prefix_kv_lens=None,
+        suffix_kv_lens=None,
+    )
+    attention = InklingAttention.__new__(InklingAttention)
+    torch.nn.Module.__init__(attention)
+    attention.prefix = "test.layer"
+    attention.rel_extent = rel_extent
+    attention.head_dim = q.shape[-1]
+    attention.scaling = 1.0 / attention.head_dim
+    attention.window_size = (-1, -1) if local_extent is None else (local_extent - 1, 0)
+    attention._use_triton_attention = True
+    attention.kv_cache = case["packed"]
+    assert attention.get_attn_backend() is FlashAttentionBackend
     monkeypatch.setattr(
         "vllm.models.inkling.nvidia.attention.get_forward_context",
         lambda: SimpleNamespace(attn_metadata={attention.prefix: metadata}),
     )
 
-    first_rel_logits = torch.zeros(
-        query_len, num_heads, rel_extent, device="cuda", dtype=DTYPE
-    )
-    second_rel_logits = torch.randn(
-        query_len,
-        num_heads,
-        rel_extent,
-        device="cuda",
-        dtype=DTYPE,
-        generator=generator,
-    )
-    first_output = torch.empty_like(q)
-    attention._attention(q, first_rel_logits, first_output)
-    actual = torch.empty_like(q)
-    attention._attention(q, second_rel_logits, actual)
-
-    expected = _ref_rel_attn(
-        q,
-        key_cache,
-        value_cache,
-        second_rel_logits,
-        q_lens=[query_len],
-        kv_lens=[sequence_len],
-        block_table=block_table,
-        scale=1.0 / HEAD_DIM,
-        rel_extent=rel_extent,
-        window_left=None if local_extent is None else local_extent - 1,
-    )
-    torch.testing.assert_close(actual.float(), expected.float(), atol=0.04, rtol=0.04)
-    assert torch.isfinite(actual).all()
-    assert (actual.float() - first_output.float()).abs().max() > 1e-3
+    first_output = None
+    for rel_logits in (torch.zeros_like(case["rel_logits"]), case["rel_logits"]):
+        actual = torch.empty_like(q)
+        attention._attention(q, rel_logits, actual)
+        flex_metadata.score_mod = _make_flex_score_mod(rel_logits, rel_extent)
+        flex_metadata.transformed_score_mod = flex_metadata.get_transformed_score_mod()
+        flex_out = torch.empty_like(q)
+        flex_impl.forward(
+            layer=attention,
+            query=q,
+            key=q.new_empty((0,)),
+            value=q.new_empty((0,)),
+            kv_cache=case["packed"],
+            attn_metadata=flex_metadata,
+            output=flex_out,
+        )
+        expected = _ref_rel_attn(
+            q,
+            case["key_cache"],
+            case["value_cache"],
+            rel_logits,
+            q_lens=case["q_lens"],
+            kv_lens=case["kv_lens"],
+            block_table=case["block_table"],
+            scale=attention.scaling,
+            rel_extent=rel_extent,
+            window_left=None if local_extent is None else local_extent - 1,
+        )
+        for result in (actual, flex_out):
+            assert torch.isfinite(result).all()
+            torch.testing.assert_close(
+                result.float(), expected.float(), atol=0.02, rtol=0.02
+            )
+        torch.testing.assert_close(
+            actual.float(), flex_out.float(), atol=0.02, rtol=0.02
+        )
+        if first_output is None:
+            first_output = actual
+        else:
+            assert (actual.float() - first_output.float()).abs().max() > 1e-3
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
@@ -538,8 +640,8 @@ def test_score_mod_relative_attention(monkeypatch):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @pytest.mark.skipif(
-    _cap is None or _cap.major < 9,
-    reason="FA4 score-mod requires Hopper+ (SM90+)",
+    _cap is None or _cap.major < 8,
+    reason="requires SM8x Triton or SM90+ FA4",
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(
@@ -563,8 +665,8 @@ def test_full_attention(seq_lens, num_heads, rel_extent):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @pytest.mark.skipif(
-    _cap is None or _cap.major < 9,
-    reason="FA4 score-mod requires Hopper+ (SM90+)",
+    _cap is None or _cap.major < 8,
+    reason="requires SM8x Triton or SM90+ FA4",
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(
@@ -584,8 +686,8 @@ def test_chunked_prefill(seq_lens, num_heads, rel_extent):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @pytest.mark.skipif(
-    _cap is None or _cap.major < 9,
-    reason="FA4 score-mod requires Hopper+ (SM90+)",
+    _cap is None or _cap.major < 8,
+    reason="requires SM8x Triton or SM90+ FA4",
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(
@@ -613,8 +715,8 @@ def test_sliding_window(seq_lens, num_heads, local_extent):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
 @pytest.mark.skipif(
-    _cap is None or _cap.major < 9,
-    reason="FA4 score-mod requires Hopper+ (SM90+)",
+    _cap is None or _cap.major < 8,
+    reason="requires SM8x Triton or SM90+ FA4",
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize(

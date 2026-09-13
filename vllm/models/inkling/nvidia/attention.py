@@ -28,17 +28,13 @@ from vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend,
     FlashAttentionMetadata,
 )
-from vllm.v1.attention.backends.flex_attention import (
-    FlexAttentionBackend,
-    FlexAttentionImpl,
-    FlexAttentionMetadata,
-)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
     SlidingWindowSpec,
 )
 
+from ..common.triton_rel_attention import inkling_triton_rel_attention
 from ..configs import InklingModelConfig
 from .layernorm import InklingRMSNorm
 from .ops.fa4_rel_attention import (
@@ -46,14 +42,13 @@ from .ops.fa4_rel_attention import (
     bucket_max_seqlen_q,
     inkling_fa4_num_splits,
 )
-from .ops.flex_rel_attention import make_inkling_flex_score_mod
 from .ops.qkvr_prep import fused_qkvr_prep
 from .sconv_swa_attn import _K, _V, InklingConvState, InklingSconvMetadata
 from .short_conv import InklingShortConv
 
 
 @cache
-def _use_sm8x_flex_attention() -> bool:
+def _use_sm8x_triton_attention() -> bool:
     capability = current_platform.get_device_capability()
     return capability is not None and capability.major == 8
 
@@ -104,7 +99,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         self.log_scaling_alpha = config.log_scaling_alpha
         # q/k are per-head RMS-normed (unit norm), so Inkling scales by 1/head_dim.
         self.scaling = 1.0 / head_dim
-        self._use_flex_attention = _use_sm8x_flex_attention()
+        self._use_triton_attention = _use_sm8x_triton_attention()
 
         tp_size = get_tensor_model_parallel_world_size()
         self.num_total_heads = num_heads
@@ -182,30 +177,19 @@ class InklingAttention(nn.Module, AttentionLayerBase):
         )
         self.register_buffer("k_scale", torch.ones((), dtype=torch.float32))
         self.register_buffer("v_scale", torch.ones((), dtype=torch.float32))
-        self._flex_attention_impl: FlexAttentionImpl | None = None
-        if self._use_flex_attention:
-            self._flex_attention_impl = FlexAttentionImpl(
-                num_heads=self.num_heads,
-                head_size=self.head_dim,
-                scale=self.scaling,
-                num_kv_heads=self.num_kv_heads,
-                alibi_slopes=None,
-                sliding_window=self.local_extent,
-                kv_cache_dtype=self.kv_cache_dtype,
-            )
-
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
         self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
 
-        if vllm_config.kernel_config.enable_jit_warmup and not self._use_flex_attention:
+        if (
+            vllm_config.kernel_config.enable_jit_warmup
+            and not self._use_triton_attention
+        ):
             _INKLING_FA4_REL_ATTENTION_KERNEL.register_warmup()
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        if self._use_flex_attention:
-            return FlexAttentionBackend
         return FlashAttentionBackend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
@@ -256,10 +240,7 @@ class InklingAttention(nn.Module, AttentionLayerBase):
             conv_meta = attn_metadata[self.conv_owner.prefix]
             md = attn_metadata[self.prefix]
             assert isinstance(conv_meta, InklingSconvMetadata)
-            if self._use_flex_attention:
-                slot_mapping = cast(FlexAttentionMetadata, md).slot_mapping
-            else:
-                slot_mapping = cast(FlashAttentionMetadata, md).slot_mapping
+            slot_mapping = cast(FlashAttentionMetadata, md).slot_mapping
             assert self.kv_cache.numel() > 0
             assert self.conv_owner.kv_cache.numel() > 0
             # One launch: K/V sconv (conv-cache insert + conv + residual),
@@ -310,32 +291,29 @@ class InklingAttention(nn.Module, AttentionLayerBase):
     ) -> None:
         attn_metadata = get_forward_context().attn_metadata
         assert isinstance(attn_metadata, dict)
-        raw_md = attn_metadata[self.prefix]
-
-        if self._use_flex_attention:
-            flex_md = cast(FlexAttentionMetadata, raw_md)
-            nt = flex_md.num_actual_tokens
-            flex_md.score_mod = make_inkling_flex_score_mod(
-                rel_logits[:nt], self.rel_extent
-            )
-            flex_md.transformed_score_mod = flex_md.get_transformed_score_mod()
-            assert self._flex_attention_impl is not None
-            empty_kv = q.new_empty((0,))
-            self._flex_attention_impl.forward(
-                layer=self,
-                query=q[:nt],
-                key=empty_kv,
-                value=empty_kv,
-                kv_cache=self.kv_cache,
-                attn_metadata=flex_md,
-                output=output[:nt],
-            )
-            return
-
-        md = cast(FlashAttentionMetadata, raw_md)
+        md = cast(FlashAttentionMetadata, attn_metadata[self.prefix])
         nt = md.num_actual_tokens
         key_cache, value_cache = self._split_kv_cache()
         max_seqlen_q = bucket_max_seqlen_q(md.max_query_len)
+        if self._use_triton_attention:
+            inkling_triton_rel_attention(
+                q[:nt],
+                key_cache,
+                value_cache,
+                block_table=md.block_table,
+                cache_seqlens=md.seq_lens,
+                cu_seqlens_q=md.query_start_loc,
+                max_seqlen_q=max_seqlen_q,
+                softmax_scale=self.scaling,
+                causal=True,
+                window_size=self.window_size,
+                rel_extent=self.rel_extent,
+                rel_logits=rel_logits[:nt],
+                max_kv_len=md.max_seq_len,
+                out=output[:nt],
+            )
+            return
+
         num_splits = inkling_fa4_num_splits(
             is_local=self.is_local,
             batch_size=md.seq_lens.shape[0],
