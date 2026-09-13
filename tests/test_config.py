@@ -548,6 +548,29 @@ def test_v2_model_runner_supports_extract_hidden_states():
     assert config._get_v2_model_runner_unsupported_features() == []
 
 
+def test_v2_model_runner_requires_uva(monkeypatch):
+    """Without UVA (pinned host memory) the V2 runner cannot build its
+    buffers and would die at init_device with a bare "UVA is not available".
+    The gate sits beside the Triton one, not in the unsupported-features
+    list: forcing V2 fails at config time, and the default falls back to V1
+    with nothing listed as unsupported."""
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    monkeypatch.setattr(vllm_config_module, "is_uva_available", lambda: False)
+
+    # Explicit V2 must reach the validator from __post_init__.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with pytest.raises(ValueError, match="UVA"):
+        VllmConfig()
+
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    config = VllmConfig()
+    assert config._get_v2_model_runner_unsupported_features() == []
+    assert config.use_v2_model_runner is False
+
+    monkeypatch.setattr(vllm_config_module, "is_uva_available", lambda: True)
+    assert config.use_v2_model_runner
+
+
 def test_dflash2_draft_forces_v2_model_runner():
     """A DFlash2 draft must reach the V2 speculator, the only one that runs its
     candidate selector; on V1 it would draft as DFlash1 without raising."""

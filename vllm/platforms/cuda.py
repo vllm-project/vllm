@@ -310,11 +310,15 @@ class CudaPlatformBase(Platform):
                     "down performance. Please run `wsl --update`."
                 )
                 return False
-            # On compatible WSL2 kernels, pinned memory is supported but
-            # disabled by default. Enable it via VLLM_WSL2_ENABLE_PIN_MEMORY=1.
-            import vllm.envs as envs
-
-            return envs.VLLM_WSL2_ENABLE_PIN_MEMORY
+            # On compatible WSL2 kernels pinned memory is supported. It
+            # follows the model runner, on unless the V1 runner is selected,
+            # since the V2 runner needs it for UVA; VLLM_WSL2_ENABLE_PIN_MEMORY
+            # decides it directly when set. This keys on the env rather than
+            # on the resolved runner: the config's runner selection reads
+            # UVA, which reads this.
+            if envs.VLLM_WSL2_ENABLE_PIN_MEMORY is not None:
+                return envs.VLLM_WSL2_ENABLE_PIN_MEMORY
+            return envs.VLLM_USE_V2_MODEL_RUNNER is not False
         return True
 
     @classmethod
