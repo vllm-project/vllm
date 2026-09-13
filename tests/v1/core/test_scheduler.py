@@ -1425,6 +1425,10 @@ def uno_scheduler_factory(tmp_path, monkeypatch):
     )
 
     def create(**kwargs):
+        tail_mode = kwargs.pop("uno_tail_mode", "early")
+        monkeypatch.setattr(
+            "vllm.v1.core.sched.scheduler.UNO_TAIL_MODE", tail_mode, raising=False
+        )
         options = dict(
             model=str(tmp_path),
             skip_tokenizer_init=True,
@@ -1530,12 +1534,16 @@ def test_uno_terminal_length_bound_skips_only_all_terminal_batches(
 
 
 @pytest.mark.parametrize("num_output_tokens", [88, 95])
+@pytest.mark.parametrize("tail_mode", ["early", "exact"])
 def test_uno_tail_respects_explicit_context_limit(
-    uno_scheduler_factory, num_output_tokens
+    uno_scheduler_factory, num_output_tokens, tail_mode
 ):
     """An explicit large output cap still finishes at the context boundary."""
     scheduler = uno_scheduler_factory(
-        num_speculative_tokens=8, max_num_batched_tokens=4096, max_model_len=4096
+        num_speculative_tokens=8,
+        max_num_batched_tokens=4096,
+        max_model_len=4096,
+        uno_tail_mode=tail_mode,
     )
     (request,) = create_requests(
         num_requests=1, num_tokens=4000, max_tokens=4096, block_size=4
@@ -1549,9 +1557,14 @@ def test_uno_tail_respects_explicit_context_limit(
     scheduler.running.append(request)
 
     output = scheduler.schedule()
-    assert output.skip_speculator_proposal
-    assert output.num_scheduled_tokens == {request.request_id: 1}
-    assert not output.scheduled_spec_decode_tokens
+    if tail_mode == "early" or num_output_tokens == 95:
+        assert output.skip_speculator_proposal
+        assert output.num_scheduled_tokens == {request.request_id: 1}
+        assert not output.scheduled_spec_decode_tokens
+    else:
+        assert not output.skip_speculator_proposal
+        assert output.num_scheduled_tokens == {request.request_id: 8}
+        assert len(output.scheduled_spec_decode_tokens[request.request_id]) == 7
     if num_output_tokens == 95:
         _model_output(scheduler, output, [[11]])
         assert request.num_output_tokens == 96
@@ -1559,9 +1572,12 @@ def test_uno_tail_respects_explicit_context_limit(
         assert request.is_finished()
 
 
-def test_uno_tail_overlapping_steps_before_output_delivery(uno_scheduler_factory):
+@pytest.mark.parametrize("tail_mode", ["early", "exact"])
+def test_uno_tail_overlapping_steps_before_output_delivery(
+    uno_scheduler_factory, tail_mode
+):
     """The second dispatched step must be draft-free while O still lags at 0."""
-    scheduler = uno_scheduler_factory()
+    scheduler = uno_scheduler_factory(uno_tail_mode=tail_mode)
     (request,) = create_requests(
         num_requests=1, num_tokens=3, max_tokens=2, block_size=4
     )
@@ -1579,8 +1595,8 @@ def test_uno_tail_overlapping_steps_before_output_delivery(uno_scheduler_factory
     assert second.zero_next_draft_req_ids == {request.request_id}
     assert request.spec_token_ids == []
     assert request.num_output_placeholders == 2
-    # EngineCore drains the oldest output at depth two before scheduling
-    # again. P=2 alone must not be interpreted as two guaranteed outputs.
+    # EngineCore drains the oldest output at depth two before scheduling again.
+    # At each new Uno dispatch, at most one sampling step remains unresolved.
     assert scheduler.vllm_config.max_concurrent_batches == 2
     _model_output(scheduler, first, [[10]])
     assert not scheduler.schedule().num_scheduled_tokens
@@ -1589,10 +1605,15 @@ def test_uno_tail_overlapping_steps_before_output_delivery(uno_scheduler_factory
     assert request.is_finished()
 
 
-def test_uno_tail_all_reject_pending_nine_is_not_terminal(uno_scheduler_factory):
-    """O=120/P=9 can reach only 122; upper-bound tail mode must stay usable."""
+@pytest.mark.parametrize("tail_mode", ["early", "exact"])
+def test_uno_tail_all_reject_pending_nine_is_not_terminal(
+    uno_scheduler_factory, tail_mode
+):
+    """O=120/P=9 can reach only 122; only early mode forgoes those drafts."""
     scheduler = uno_scheduler_factory(
-        num_speculative_tokens=8, max_num_batched_tokens=256
+        num_speculative_tokens=8,
+        max_num_batched_tokens=256,
+        uno_tail_mode=tail_mode,
     )
     (request,) = create_requests(
         num_requests=1, num_tokens=3, max_tokens=128, block_size=4
@@ -1617,20 +1638,65 @@ def test_uno_tail_all_reject_pending_nine_is_not_terminal(uno_scheduler_factory)
     assert not scheduler._will_finish_after_next_sample(request)
 
     current = scheduler.schedule()
-    assert current.num_scheduled_tokens == {request.request_id: 1}
-    assert current.skip_speculator_proposal
+    expected_queries = 1 if tail_mode == "early" else 9
+    assert current.num_scheduled_tokens == {request.request_id: expected_queries}
+    assert current.skip_speculator_proposal == (tail_mode == "early")
     _model_output(scheduler, pending, [[20]])
     _model_output(scheduler, current, [[21]])
     assert request.num_output_tokens == 122
     assert not request.is_finished()
     assert request.num_output_placeholders == 0
-    # The upper trigger no longer holds after all-reject rollback, but the
-    # policy persists and synchronous retrieval cannot reinstall stale drafts.
+    # Early mode persists after rollback. Exact mode keeps using valid drafts.
     scheduler.update_draft_token_ids(DraftTokenIds([request.request_id], [[30] * 8]))
     continuation = scheduler.schedule()
-    assert continuation.num_scheduled_tokens == {request.request_id: 1}
-    assert continuation.skip_speculator_proposal
-    assert not continuation.scheduled_spec_decode_tokens
+    assert continuation.num_scheduled_tokens == {request.request_id: expected_queries}
+    assert continuation.skip_speculator_proposal == (tail_mode == "early")
+    assert bool(continuation.scheduled_spec_decode_tokens) == (tail_mode == "exact")
+
+
+@pytest.mark.parametrize("tail_mode", ["early", "exact"])
+def test_uno_short_cap_retains_drafting_in_exact_mode(uno_scheduler_factory, tail_mode):
+    """A short cap still permits useful overlapping verification in exact mode."""
+    scheduler = uno_scheduler_factory(num_speculative_tokens=8, uno_tail_mode=tail_mode)
+    (request,) = create_requests(
+        num_requests=1, num_tokens=3, max_tokens=16, block_size=4
+    )
+    scheduler.add_request(request)
+    prefill = scheduler.schedule()
+    first_decode = scheduler.schedule()
+    assert len(first_decode.scheduled_spec_decode_tokens[request.request_id]) == 8
+    _model_output(scheduler, prefill, [[10]])
+    assert request.num_output_tokens == 1
+    assert request.num_output_placeholders == 9
+
+    next_decode = scheduler.schedule()
+    assert next_decode.skip_speculator_proposal == (tail_mode == "early")
+    assert next_decode.num_scheduled_tokens == {
+        request.request_id: 1 if tail_mode == "early" else 9
+    }
+    assert bool(next_decode.scheduled_spec_decode_tokens) == (tail_mode == "exact")
+
+
+def test_uno_exact_tail_preserves_accepted_draft_leap(uno_scheduler_factory):
+    """The worker's exact accepted-prefix check must handle a leap to the cap."""
+    scheduler = uno_scheduler_factory(uno_tail_mode="exact")
+    (request,) = create_requests(
+        num_requests=1, num_tokens=3, max_tokens=5, block_size=4
+    )
+    scheduler.add_request(request)
+    _model_output(scheduler, scheduler.schedule(), [[10]])
+    scheduler.update_draft_token_ids(
+        DraftTokenIds([request.request_id], [[11, 12, 13, 14]])
+    )
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {request.request_id: 5}
+    assert output.scheduled_spec_decode_tokens == {request.request_id: [11, 12, 13, 14]}
+    assert not output.skip_speculator_proposal
+    assert not output.zero_next_draft_req_ids
+    assert scheduler.num_lookahead_tokens == 4
+    _model_output(scheduler, output, [[11, 12, 13, 14, 15]])
+    assert list(request.output_token_ids) == [10, 11, 12, 13, 14]
+    assert request.is_finished()
 
 
 @pytest.mark.parametrize("async_scheduling", [False, True])
@@ -1728,6 +1794,54 @@ def test_uno_tail_nonfinal_prefill_does_not_count_as_sampling(
     assert final.num_scheduled_tokens == {request.request_id: 1}
     assert final.skip_speculator_proposal
     assert final.zero_next_draft_req_ids == {request.request_id}
+
+
+@pytest.mark.parametrize("tail_mode", ["early", "exact"])
+def test_uno_preemption_waits_for_deliverable_output_before_tail_admission(
+    uno_scheduler_factory, tail_mode
+):
+    """Reset placeholders cannot hide pending output from a same-step resume."""
+    scheduler = uno_scheduler_factory(
+        num_speculative_tokens=8,
+        max_num_batched_tokens=256,
+        uno_tail_mode=tail_mode,
+    )
+    (request,) = create_requests(
+        num_requests=1, num_tokens=3, max_tokens=128, block_size=4
+    )
+    request.append_output_token_ids([10] * 119)
+    scheduler.add_request(request)
+    request.num_computed_tokens = request.num_tokens - 1
+    request.spec_token_ids = [-1] * 8
+    request.status = RequestStatus.RUNNING
+    scheduler.waiting.pop_request()
+    scheduler.running.append(request)
+    pending = SchedulerOutput.make_empty()
+    pending.num_scheduled_tokens = {request.request_id: 9}
+    pending.total_num_scheduled_tokens = 9
+    pending.scheduled_spec_decode_tokens = {request.request_id: [-1] * 8}
+    pending.num_spec_tokens_to_schedule = 8
+    scheduler._update_after_schedule(pending)
+    assert request.num_output_placeholders == 9
+
+    scheduler.running.remove(request)
+    scheduler._preempt_request(request, 0.0)
+    assert request.num_output_placeholders == 0
+    assert request.num_stale_output_tokens == 9
+    blocked = scheduler.schedule()
+    assert not blocked.num_scheduled_tokens
+    assert request.status == RequestStatus.PREEMPTED
+    _model_output(scheduler, pending, [[20] * 8])
+    assert request.num_output_tokens == 127
+    assert request.num_stale_output_tokens == 0
+
+    resumed = scheduler.schedule()
+    assert resumed.skip_speculator_proposal
+    assert resumed.num_scheduled_tokens == {request.request_id: request.num_tokens}
+    assert not resumed.scheduled_spec_decode_tokens
+    _model_output(scheduler, resumed, [[21]])
+    assert request.is_finished()
+    assert request.num_output_tokens == 128
 
 
 @pytest.mark.parametrize("drop_stale_output", [False, True])

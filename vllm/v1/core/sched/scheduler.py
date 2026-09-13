@@ -41,6 +41,7 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     UNO_STEP_TIMING_DEBUG,
+    UNO_TAIL_MODE,
     CachedRequestData,
     GrammarOutput,
     KVConnectorBlockState,
@@ -1430,28 +1431,29 @@ class Scheduler(SchedulerInterface):
         if self.use_uno:
             for req_id, num_tokens in num_scheduled_tokens.items():
                 request = self.requests[req_id]
-                will_sample = (
-                    request.num_computed_tokens + num_tokens
-                    >= request.num_tokens + request.num_output_placeholders
-                )
-                guaranteed_terminal = (
-                    will_sample and self._will_finish_after_next_sample(request)
-                )
                 in_tail = request in self._uno_tail_requests
-                if in_tail or guaranteed_terminal:
+                if in_tail:
                     zero_next_draft_req_ids.add(req_id)
                 if uno_tail_debug is not None:
+                    will_sample = (
+                        request.num_computed_tokens + num_tokens
+                        >= request.num_tokens + request.num_output_placeholders
+                    )
                     uno_tail_debug.append(
                         {
                             "req_id": req_id,
                             "O": request.num_output_tokens,
                             "P": request.num_output_placeholders,
-                            "M": request.max_tokens,
+                            "B": int(request.num_output_placeholders > 0),
+                            "M": self._uno_output_token_limit(request),
                             "current_k": len(
                                 scheduled_spec_decode_tokens.get(req_id, ())
                             ),
                             "will_sample": will_sample,
-                            "sound_bound": guaranteed_terminal,
+                            "sound_bound": (
+                                will_sample
+                                and self._will_finish_after_next_sample(request)
+                            ),
                             "tail_mode": in_tail,
                         }
                     )
@@ -1535,19 +1537,19 @@ class Scheduler(SchedulerInterface):
         return scheduler_output
 
     def _uno_output_token_limit(self, request: Request) -> int:
-        return min(
-            request.max_tokens, self.max_model_len - request.num_prompt_tokens
-        )
+        return min(request.max_tokens, self.max_model_len - request.num_prompt_tokens)
 
     def _will_finish_after_next_sample(self, request: Request) -> bool:
         """Lower bound for a step qualified by the caller as sampling.
 
-        Pending speculative placeholders guarantee only one output token,
-        regardless of how many draft candidates they include. Stops are
-        unknown before sampling; an earlier stop also makes drafts unusable.
+        Uno permits one unresolved sampling step when a new step is scheduled.
+        That step guarantees only one output token regardless of draft width.
+        Deliver-mode preemption cannot resume until stale output is observed.
+        An earlier stop also makes subsequent proposals unusable.
         """
+        unresolved_steps = int(request.num_output_placeholders > 0)
         return (
-            request.num_output_tokens + int(request.num_output_placeholders > 0) + 1
+            request.num_output_tokens + unresolved_steps + 1
             >= self._uno_output_token_limit(request)
         )
 
@@ -1563,12 +1565,16 @@ class Scheduler(SchedulerInterface):
         if num_new_tokens < target_queries:
             # Preserve nonfinal prefill chunks without treating them as samples.
             return num_new_tokens
-        max_output = num_new_tokens - target_queries + 1
-        if (
-            request.num_output_tokens + request.num_output_placeholders + max_output
-            >= self._uno_output_token_limit(request)
-        ):
-            # This is an upper-bound policy trigger, not a terminal proof.
+        if UNO_TAIL_MODE == "exact":
+            enter_tail = self._will_finish_after_next_sample(request)
+        else:
+            max_output = num_new_tokens - target_queries + 1
+            # This upper-bound policy deliberately forgoes usable drafts.
+            enter_tail = (
+                request.num_output_tokens + request.num_output_placeholders + max_output
+                >= self._uno_output_token_limit(request)
+            )
+        if enter_tail:
             self._uno_tail_requests.add(request)
         if request in self._uno_tail_requests:
             request.spec_token_ids = []
