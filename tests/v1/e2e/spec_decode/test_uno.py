@@ -49,9 +49,12 @@ from .uno_kv_budget import (
     SURVIVOR_MAX_MODEL_LEN,
     SURVIVOR_NUM_SPECULATIVE_TOKENS,
     SURVIVOR_PROMPT_TOKENS,
+    TIE_MARGIN_NATS,
+    MatrixArm,
     allocatable_blocks,
     engine_minimum_kv_bytes,
     format_divergences,
+    format_ties,
     kv_bytes_per_block,
     matrix_verdicts,
     mid_generation_preemption_counts,
@@ -63,7 +66,6 @@ from .uno_kv_budget import (
     resolve_internal_request_ids,
     survivor_kv_budget,
     text_agreement,
-    text_verdict,
     token_agreement,
     usage_with_free_blocks,
     worst_case_crossing_tokens,
@@ -96,6 +98,10 @@ _RECEIPT_ENV = "VLLM_UNO_SURVIVOR_RECEIPT"
 # Set to "2" to run the greedy matrix's separate-plain-engine control on every
 # case instead of only the representative one; see the matrix case's comment.
 _CONTROL_ENGINES_ENV = "VLLM_UNO_GREEDY_CONTROL_ENGINES"
+# Overrides the near-tie margin once a card's real margins have been measured.
+# Every candidate divergence prints its margin, tie or not, so the first run on
+# a new card supplies the number this would be set from.
+_TIE_MARGIN_ENV = "VLLM_UNO_TIE_MARGIN_NATS"
 
 
 def _gpu_memory_utilization_from_env(
@@ -1207,7 +1213,14 @@ def test_uno_greedy_matches_base_model(
     batches = [prompts]
     if enable_prefix_caching:
         batches.append(list(reversed(prompts)))
-    sampling = SamplingParams(temperature=0, max_tokens=64, ignore_eos=True, seed=0)
+    # logprobs=2 on EVERY arm, reference and candidate alike: the tie rule
+    # reads the reference's runner-up, and configuring only one side would
+    # make the two engines differ in their request as well as their method.
+    # Greedy selection is unaffected -- the ranked list is read from the same
+    # logits the argmax comes from.
+    sampling = SamplingParams(
+        temperature=0, max_tokens=64, ignore_eos=True, seed=0, logprobs=2
+    )
     prefill_budget = 256
     # The K=1/K=8 matrix uses its own budget; check it against the same floor.
     assert engine_minimum_kv_bytes(MATRIX_MAX_MODEL_LEN) <= MATRIX_KV_BUDGET_BYTES, (
@@ -1286,7 +1299,35 @@ def test_uno_greedy_matches_base_model(
     def _texts(batch_outputs):
         return [output.outputs[0].text for output in batch_outputs]
 
+    def _ranked(batch_outputs):
+        """Per prompt, per position, the requested alternatives by logprob.
+
+        Ranked by logprob rather than by the reported rank so the rule does not
+        depend on a field the sampler may leave unset; a position that carried
+        no alternatives yields a short list and classifies nothing.
+        """
+        ranked = []
+        for output in batch_outputs:
+            positions = []
+            for entry in output.outputs[0].logprobs or []:
+                positions.append(
+                    sorted(
+                        (
+                            (token_id, value.logprob)
+                            for token_id, value in entry.items()
+                        ),
+                        key=lambda item: item[1],
+                        reverse=True,
+                    )
+                )
+            ranked.append(positions)
+        return ranked
+
+    tie_margin = float(os.environ.get(_TIE_MARGIN_ENV, TIE_MARGIN_NATS))
+    batch_ties: list[list] = [[] for _ in batches]
+
     adapter_off_divergences: list[tuple[int, int]] | None = None
+    adapter_off_ids: list[list[int]] | None = None
     adapter_off_text: list[int] | None = None
     control_arms: list[str] = ["repeat_1", "repeat_2"]
     control_divergences: list[set[tuple[int, int]]] = [set() for _ in batches]
@@ -1315,6 +1356,8 @@ def test_uno_greedy_matches_base_model(
             "control_divergences="
             f"{[format_divergences(sorted(batch)) for batch in control_divergences]}"
             f", prompts_per_batch={[len(batch) for batch in ref_outputs]}"
+            f", tie_margin_nats={tie_margin:g}"
+            f", ties={[format_ties(batch) for batch in batch_ties]}"
         )
 
     with vllm_runner(
@@ -1379,6 +1422,9 @@ def test_uno_greedy_matches_base_model(
             _text_matched, adapter_off_text = text_agreement(
                 _texts(ref_outputs[-1]), _texts(adapter_off_outputs)
             )
+            # Kept for the verdict below: the tie rule reads this arm's tokens
+            # too, and the outputs themselves do not outlive the engine context.
+            adapter_off_ids = _ids(adapter_off_outputs)
             assert_request_outputs_match(
                 ref_outputs[-1],
                 adapter_off_outputs,
@@ -1451,7 +1497,6 @@ def test_uno_greedy_matches_base_model(
             f"Uno K={k}, prefix_cache={enable_prefix_caching}, batch={batch_index}"
         )
         control_batch = sorted(control_divergences[batch_index])
-        control_prompts = [prompt for prompt, _ in control_batch]
         uno_matched, uno_divergences = token_agreement(
             _ids(ref_batch), _ids(spec_batch)
         )
@@ -1474,12 +1519,28 @@ def test_uno_greedy_matches_base_model(
         # including the adapter-disabled arm, which is collected inside the Uno
         # engine's context but judged here so it cannot be held to a floor that
         # the separate-engine control had not yet joined.
-        candidates: dict[str, list[tuple[int, int]]] = {context: uno_divergences}
-        text_candidates: dict[str, list[int]] = {context: uno_text}
+        candidates: dict[str, MatrixArm] = {
+            context: MatrixArm(uno_divergences, _ids(spec_batch), uno_text)
+        }
         if batch_index == len(batches) - 1 and adapter_off_divergences is not None:
-            candidates["adapter-disabled"] = adapter_off_divergences
-            text_candidates["adapter-disabled"] = adapter_off_text or []
-        verdicts = matrix_verdicts(control_batch, candidates, len(ref_batch))
+            candidates["adapter-disabled"] = MatrixArm(
+                adapter_off_divergences,
+                adapter_off_ids or [],
+                adapter_off_text or [],
+            )
+        # Both views and the tie rule come from one call, so the
+        # adapter-disabled arm cannot be judged by a different rule than Uno.
+        reference_ranked = _ranked(ref_batch)
+        verdicts = matrix_verdicts(
+            control_batch,
+            candidates,
+            len(ref_batch),
+            _ids(ref_batch),
+            reference_ranked,
+            tie_margin,
+        )
+        for verdict in verdicts.values():
+            batch_ties[batch_index].extend(verdict.ties)
 
         # Printed on the passing path too: a green run must still say where the
         # candidate diverged and what the floor was, or the next reader cannot
@@ -1491,24 +1552,40 @@ def test_uno_greedy_matches_base_model(
             f"uno_text_divergences={[f'p{p}' for p in uno_text]}, "
             f"control_divergences={format_divergences(control_batch)}"
         )
-        for name, (ok, reason) in verdicts.items():
-            print(f"{name}: {reason}")
-            assert ok, f"{name}: {reason}.\n{instrument_receipt()}"
-        for name, divergent_prompts in text_candidates.items():
-            ok, reason = text_verdict(
-                control_prompts, divergent_prompts, len(ref_batch)
+        # Every candidate divergence prints its measured margin, excused or
+        # not, so a run on a new card reports the numbers a threshold would be
+        # set from instead of only its own verdict.
+        for prompt, position in uno_divergences:
+            ranked = reference_ranked[prompt] if prompt < len(reference_ranked) else []
+            gap = (
+                ranked[position][0][1] - ranked[position][1][1]
+                if position < len(ranked) and len(ranked[position]) > 1
+                else float("nan")
             )
-            print(f"{name} (text): {reason}")
-            assert ok, f"{name} (text): {reason}.\n{instrument_receipt()}"
+            print(
+                f"{context}: divergence p{prompt}/t{position} "
+                f"reference margin={gap:.6f}"
+            )
+        for name, verdict in verdicts.items():
+            print(f"{name}: {verdict.reason}")
+            assert verdict.ok, f"{name}: {verdict.reason}.\n{instrument_receipt()}"
+            print(f"{name} (text): {verdict.text_reason}")
+            assert verdict.text_ok, (
+                f"{name} (text): {verdict.text_reason}.\n{instrument_receipt()}"
+            )
             # Identical tokens with different text is not a sampling
             # difference; it is the detokeniser, and it gets its own verdict
-            # rather than being folded into either containment message.
-            token_prompts = {
-                prompt for prompt, _ in candidates.get(name, uno_divergences)
-            }
-            text_only = sorted(set(divergent_prompts) - token_prompts)
-            assert not text_only, (
-                f"{name}: prompts {text_only} produced identical token ids but "
-                "different text, so the difference is in detokenisation rather "
-                f"than in generation.\n{instrument_receipt()}"
+            # rather than being folded into either containment message. It is
+            # judged against the arm UNFILTERED divergences, because a tie
+            # does change the tokens and its text is expected to differ.
+            assert not verdict.detokenisation_only, (
+                f"{name}: prompts {verdict.detokenisation_only} produced "
+                "identical token ids but different text, so the difference is "
+                f"in detokenisation rather than in generation.\n"
+                f"{instrument_receipt()}"
             )
+
+    # The receipt again, now that every batch has been judged: the line printed
+    # before the loop cannot carry the tie count, and the tie count is what
+    # says whether this card needed the exception at all.
+    print(instrument_receipt())

@@ -911,6 +911,22 @@ def test_text_agreement_reports_prompt_indices():
         budget.text_agreement(["a"], ["a", "b"])
 
 
+def _arm(divergences, token_ids, text_prompts=()):
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    return budget.MatrixArm(divergences, token_ids, list(text_prompts))
+
+
+def _four_prompts(diverge_at=None, replacement=None):
+    """Four short outputs; optionally one prompt diverges at one position."""
+    ids = [[10, 11, 12, 13] for _ in range(4)]
+    if diverge_at is not None:
+        prompt, position = diverge_at
+        ids[prompt] = list(ids[prompt])
+        ids[prompt][position] = replacement
+    return ids
+
+
 def test_matrix_verdicts_hold_every_candidate_to_one_floor():
     """Both matrix arms are judged against the same completed control.
 
@@ -926,22 +942,268 @@ def test_matrix_verdicts_hold_every_candidate_to_one_floor():
     control = [(2, 31)]
     verdicts = budget.matrix_verdicts(
         control,
-        {"uno batch 1": [(2, 31)], "adapter-disabled": [(2, 55)]},
+        {
+            "uno batch 1": _arm([(2, 31)], _four_prompts()),
+            "adapter-disabled": _arm([(2, 55)], _four_prompts()),
+        },
         4,
     )
     assert set(verdicts) == {"uno batch 1", "adapter-disabled"}
-    for name, (ok, reason) in verdicts.items():
-        assert ok, f"{name}: {reason}"
-        assert "p2/t31" in reason, f"{name} was not judged against the control"
+    for name, verdict in verdicts.items():
+        assert verdict.ok, f"{name}: {verdict.reason}"
+        assert "p2/t31" in verdict.reason, f"{name} was not judged against the control"
+        assert verdict.ties == []
 
     # And the floor still bites: a candidate outside it fails in the same call.
     verdicts = budget.matrix_verdicts(
-        control, {"uno": [(2, 31)], "adapter-disabled": [(0, 0)]}, 4
+        control,
+        {
+            "uno": _arm([(2, 31)], _four_prompts()),
+            "adapter-disabled": _arm([(0, 0)], _four_prompts()),
+        },
+        4,
     )
-    assert verdicts["uno"][0] and not verdicts["adapter-disabled"][0]
+    assert verdicts["uno"].ok and not verdicts["adapter-disabled"].ok
 
     with pytest.raises(TypeError):
-        budget.matrix_verdicts(3, {"uno": [(2, 31)]}, 4)
+        budget.matrix_verdicts(3, {"uno": _arm([(2, 31)], _four_prompts())}, 4)
+
+
+def test_matrix_verdicts_refuse_a_bare_divergence_list():
+    """An arm that cannot carry token ids cannot be judged by the tie rule.
+
+    The verdict helper is the single place the token view, the text view and
+    the near-tie exception are decided. A call site that passed coordinates
+    alone would silently opt that arm out of the tie rule and out of the text
+    verdict, which is the drift the one-call design exists to prevent, so the
+    shape that cannot be judged raises instead of being judged partly.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    with pytest.raises(TypeError):
+        budget.matrix_verdicts([(2, 31)], {"uno": [(2, 31)]}, 4)
+
+
+def test_matrix_verdicts_excuse_the_reference_own_near_tie():
+    """A runner-up within the margin is the card's rounding, not a divergence.
+
+    The candidate emits the reference's second-ranked token at a gap far below
+    the threshold. Nothing about that outcome distinguishes the two arms'
+    arithmetic, so the containment failure it would otherwise cause is
+    excused -- in the token view and in the text view together, since the
+    tokens really do differ and the prompt's text differs with them.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    reference = _four_prompts()
+    candidate = _four_prompts(diverge_at=(2, 3), replacement=99)
+    ranked: list[list[list[tuple[int, float]]]] = [
+        [[] for _ in range(4)] for _ in range(4)
+    ]
+    ranked[2][3] = [(13, -0.2000), (99, -0.2004)]
+
+    verdicts = budget.matrix_verdicts(
+        [],
+        {"uno": _arm([(2, 3)], candidate, [2])},
+        4,
+        reference,
+        ranked,
+    )
+    verdict = verdicts["uno"]
+    assert verdict.ok and verdict.text_ok, verdict.reason
+    assert [(tie.prompt, tie.token) for tie in verdict.ties] == [(2, 3)]
+    assert verdict.ties[0].reference_id == 13
+    assert verdict.ties[0].candidate_id == 99
+    assert verdict.ties[0].margin == pytest.approx(0.0004, abs=1e-9)
+    assert "ties excused" in verdict.reason
+    assert "ties excused" in verdict.text_reason
+    # The detokenisation check still reads the unfiltered divergences, so an
+    # excused prompt is not then reported as text differing without tokens.
+    assert verdict.detokenisation_only == []
+
+
+def test_matrix_verdicts_keep_a_runner_up_at_a_wide_margin():
+    """The right token rank is not enough; the gap has to be unresolvable.
+
+    A candidate that picks the runner-up where the reference preferred it by a
+    wide margin has computed something different, not rounded something
+    differently. Excusing it would let the tie rule absorb real defects, which
+    is the only way this rule can do harm.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    reference = _four_prompts()
+    candidate = _four_prompts(diverge_at=(2, 3), replacement=99)
+    ranked: list[list[list[tuple[int, float]]]] = [
+        [[] for _ in range(4)] for _ in range(4)
+    ]
+    ranked[2][3] = [(13, -0.2), (99, -3.7)]
+
+    verdicts = budget.matrix_verdicts(
+        [], {"uno": _arm([(2, 3)], candidate, [2])}, 4, reference, ranked
+    )
+    verdict = verdicts["uno"]
+    assert not verdict.ok and not verdict.text_ok
+    assert verdict.ties == []
+    assert "p2/t3" in verdict.reason
+
+
+def test_matrix_verdicts_keep_a_token_outside_the_reference_top_two():
+    """A small gap between the top two says nothing about a third token.
+
+    The reference's own top two are a hair apart, but the candidate emitted
+    neither of them. That is a different continuation, and the margin between
+    tokens it did not choose cannot excuse it.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    reference = _four_prompts()
+    candidate = _four_prompts(diverge_at=(2, 3), replacement=7)
+    ranked: list[list[list[tuple[int, float]]]] = [
+        [[] for _ in range(4)] for _ in range(4)
+    ]
+    ranked[2][3] = [(13, -0.2000), (99, -0.2001)]
+
+    verdicts = budget.matrix_verdicts(
+        [], {"uno": _arm([(2, 3)], candidate, [2])}, 4, reference, ranked
+    )
+    verdict = verdicts["uno"]
+    assert not verdict.ok
+    assert verdict.ties == []
+
+
+def test_matrix_verdicts_do_not_excuse_on_mismatched_diagnostics():
+    """Ranked data that disagrees with the emitted token licenses nothing.
+
+    If the top-ranked alternative is not the token the reference actually
+    produced, the ranked list does not describe this run. Excusing a divergence
+    on diagnostics that do not match the run is exactly the failure mode the
+    tie rule must not introduce.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    reference = _four_prompts()
+    candidate = _four_prompts(diverge_at=(2, 3), replacement=99)
+    ranked: list[list[list[tuple[int, float]]]] = [
+        [[] for _ in range(4)] for _ in range(4)
+    ]
+    ranked[2][3] = [(55, -0.2000), (99, -0.2001)]
+
+    verdicts = budget.matrix_verdicts(
+        [], {"uno": _arm([(2, 3)], candidate, [2])}, 4, reference, ranked
+    )
+    assert not verdicts["uno"].ok
+    assert verdicts["uno"].ties == []
+
+
+def test_matrix_verdicts_replay_the_ampere_p2_t31_coordinate():
+    """The r5 failure, replayed: a whitespace tie with an empty control floor.
+
+    On an RTX 3090 (sm_86) in CUDA-graph mode the K=8 case failed because Uno
+    diverged at prompt 2 token 31 while three in-process plain arms happened to
+    agree. Round 3's fresh-process plain control showed the plain engine itself
+    flipping that coordinate between token 18611 and token 2303 in one process
+    of three, and round 4's token dump identifies both as whitespace. The token
+    ids here are round 4's; the margin is synthetic, because no run has
+    recorded one yet. With the margin small, the coordinate is excused and the
+    case passes; the control stays empty, so nothing else is weakened.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    prefix = [
+        18315,
+        295,
+        748,
+        77778,
+        10962,
+        220,
+        16,
+        21,
+        18805,
+        817,
+        1899,
+        13,
+        2303,
+        7941,
+        49677,
+        220,
+        18,
+        18805,
+        369,
+        17496,
+        13,
+        2303,
+        7941,
+        5711,
+        220,
+        19,
+        18805,
+        369,
+        54304,
+        1330,
+        13,
+    ]
+    reference = [[1, 2], [3, 4], prefix + [18611], [5, 6]]
+    candidate = [[1, 2], [3, 4], prefix + [2303], [5, 6]]
+    assert len(reference[2]) == 32 and reference[2][31] == 18611
+    assert candidate[2][31] == 2303
+    ranked: list[list[list[tuple[int, float]]]] = [
+        [[] for _ in range(32)] for _ in range(4)
+    ]
+    ranked[2][31] = [(18611, -1.250000), (2303, -1.250122)]
+
+    verdicts = budget.matrix_verdicts(
+        [], {"uno": _arm([(2, 31)], candidate, [2])}, 4, reference, ranked
+    )
+    verdict = verdicts["uno"]
+    assert verdict.ok and verdict.text_ok, verdict.reason
+    assert budget.format_ties(verdict.ties) == [
+        "p2/t31 ref=18611 candidate=2303 margin=0.000122"
+    ]
+
+    # The same coordinate at a wide margin is still a finding on that card.
+    ranked[2][31] = [(18611, -1.25), (2303, -2.75)]
+    wide = budget.matrix_verdicts(
+        [], {"uno": _arm([(2, 31)], candidate, [2])}, 4, reference, ranked
+    )
+    assert not wide["uno"].ok
+
+
+def test_tie_margin_default_is_the_bfloat16_resolution():
+    """The default threshold is a stated quantity, not a tuned one.
+
+    bfloat16 carries 8 significand bits, so 2**-8 is its relative resolution
+    and the scale below which a reduction-order change cannot be distinguished.
+    It is a stand-in rather than a derivation, which is why every divergence
+    prints its measured margin and the environment can override the default
+    once a card has reported real numbers.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    assert budget.TIE_MARGIN_NATS == 2.0**-8
+    assert pytest.approx(0.00390625) == budget.TIE_MARGIN_NATS
+
+
+def test_classify_ties_without_logprobs_changes_nothing():
+    """A run that requested no alternatives behaves as it did before the rule.
+
+    The tie rule is an exception granted on evidence. With no ranked data there
+    is no evidence, so every divergence stays a divergence rather than being
+    excused by default.
+    """
+    from tests.v1.e2e.spec_decode import uno_kv_budget as budget
+
+    reference = _four_prompts()
+    candidate = _four_prompts(diverge_at=(2, 3), replacement=99)
+    real, ties = budget.classify_ties([(2, 3)], reference, candidate, None)
+    assert real == [(2, 3)] and ties == []
+
+    # Short ranked data classifies nothing either, rather than raising.
+    real, ties = budget.classify_ties([(2, 3)], reference, candidate, [[], [], [], []])
+    assert real == [(2, 3)] and ties == []
+
+    with pytest.raises(TypeError):
+        budget.classify_ties(3, reference, candidate, None)
 
 
 def test_exact_token_verdict_refuses_match_counts():

@@ -16,6 +16,7 @@ module, which already requires the model, cross-checks the literals against
 
 from collections.abc import Iterable, Mapping, Sequence
 from itertools import combinations
+from typing import NamedTuple
 
 from vllm.utils.math_utils import cdiv
 
@@ -389,11 +390,145 @@ def text_verdict(
     return _containment_reason(extra, control_text, candidate_text, total, "text")
 
 
+# The margin below which a greedy divergence is the card's rounding rather
+# than a different computation. bfloat16 carries 8 significand bits, so its
+# relative resolution is 2**-8; a log-probability gap smaller than that cannot
+# survive a change in reduction order inside the forward, which is what a
+# different query length, a different attention split or a different process
+# produces. This is an order-of-magnitude stand-in, not a derivation: the
+# accumulated error through 36 layers is not a single rounding. It is therefore
+# used only to EXCUSE a divergence that is already the reference's runner-up,
+# every candidate divergence prints its measured margin whether it is excused
+# or not, and `VLLM_UNO_TIE_MARGIN_NATS` overrides it once a card's real
+# margins are known. On an RTX 3090 (sm_86) in CUDA-graph mode the plain engine
+# flips prompt 2 token 31 between two whitespace tokens about one process in
+# three; that coordinate is what this rule exists to classify.
+TIE_MARGIN_NATS = 2.0**-8
+
+
+class TieRow(NamedTuple):
+    """One divergence classified as the reference's own near-tie."""
+
+    prompt: int
+    token: int
+    reference_id: int
+    candidate_id: int
+    margin: float
+
+
+class MatrixArm(NamedTuple):
+    """One candidate arm of the greedy matrix, as the verdict needs it.
+
+    Carrying the token ids beside the divergence coordinates is what lets the
+    single verdict helper classify ties; an arm that passed coordinates alone
+    could not be judged by the same rule as its neighbours.
+    """
+
+    divergences: Sequence[tuple[int, int]]
+    token_ids: Sequence[Sequence[int]]
+    text_prompts: Sequence[int]
+
+
+class ArmVerdict(NamedTuple):
+    """Every judgment one arm receives, from one call."""
+
+    ok: bool
+    reason: str
+    text_ok: bool
+    text_reason: str
+    ties: list[TieRow]
+    detokenisation_only: list[int]
+
+
+def format_ties(ties: Sequence[TieRow]) -> list[str]:
+    """Render ties with their measured margins, for the receipt."""
+    return [
+        f"p{tie.prompt}/t{tie.token} ref={tie.reference_id} "
+        f"candidate={tie.candidate_id} margin={tie.margin:.6f}"
+        for tie in ties
+    ]
+
+
+def classify_ties(
+    divergences: Sequence[tuple[int, int]],
+    reference_ids: Sequence[Sequence[int]],
+    candidate_ids: Sequence[Sequence[int]],
+    reference_ranked: Sequence[Sequence[Sequence[tuple[int, float]]]] | None,
+    margin_nats: float = TIE_MARGIN_NATS,
+) -> tuple[list[tuple[int, int]], list[TieRow]]:
+    """Split divergences into real ones and the reference's own near-ties.
+
+    A divergence is a TIE only when all three hold at that position: the
+    reference's top-ranked alternative is the token the reference actually
+    emitted (otherwise the ranked list does not describe this run and nothing
+    is excused), the candidate emitted the reference's runner-up, and the gap
+    between the two is at most ``margin_nats``. A candidate token outside the
+    reference's top two is never a tie however small the gap, and a runner-up
+    at a wide margin is a real divergence: both are a different computation,
+    not a different rounding.
+
+    ``reference_ranked`` is per prompt, per position, ranked
+    ``(token_id, logprob)`` pairs. Missing or short ranked data classifies
+    nothing, so a run without logprobs behaves exactly as before this rule
+    existed.
+    """
+    if isinstance(divergences, int) or isinstance(reference_ids, int):
+        raise TypeError(
+            "classify_ties takes divergence coordinates and token ids, not counts"
+        )
+    real: list[tuple[int, int]] = []
+    ties: list[TieRow] = []
+    for prompt, token in divergences:
+        tie = _tie_row(
+            prompt, token, reference_ids, candidate_ids, reference_ranked, margin_nats
+        )
+        if tie is None:
+            real.append((prompt, token))
+        else:
+            ties.append(tie)
+    return real, ties
+
+
+def _tie_row(
+    prompt: int,
+    token: int,
+    reference_ids: Sequence[Sequence[int]],
+    candidate_ids: Sequence[Sequence[int]],
+    reference_ranked: Sequence[Sequence[Sequence[tuple[int, float]]]] | None,
+    margin_nats: float,
+) -> TieRow | None:
+    if reference_ranked is None or prompt >= len(reference_ranked):
+        return None
+    positions = reference_ranked[prompt]
+    if token >= len(positions):
+        return None
+    ranked = list(positions[token])
+    if len(ranked) < 2:
+        return None
+    if prompt >= len(reference_ids) or token >= len(reference_ids[prompt]):
+        return None
+    if prompt >= len(candidate_ids) or token >= len(candidate_ids[prompt]):
+        return None
+    (top_id, top_logprob), (second_id, second_logprob) = ranked[0], ranked[1]
+    if top_id != reference_ids[prompt][token]:
+        # The ranked list does not describe the tokens this run emitted, so it
+        # cannot license an exception. Excusing a divergence on mismatched
+        # diagnostics is exactly the failure this rule is meant to prevent.
+        return None
+    margin = float(top_logprob) - float(second_logprob)
+    if candidate_ids[prompt][token] != second_id or margin > margin_nats:
+        return None
+    return TieRow(prompt, token, top_id, second_id, margin)
+
+
 def matrix_verdicts(
     control_divergences: Sequence[tuple[int, int]],
-    candidates: Mapping[str, Sequence[tuple[int, int]]],
+    candidates: Mapping[str, MatrixArm],
     total: int,
-) -> dict[str, tuple[bool, str]]:
+    reference_ids: Sequence[Sequence[int]] | None = None,
+    reference_ranked: Sequence[Sequence[Sequence[tuple[int, float]]]] | None = None,
+    margin_nats: float = TIE_MARGIN_NATS,
+) -> dict[str, ArmVerdict]:
     """Judge every candidate for one batch against ONE completed floor.
 
     The adapter-disabled arm used to be judged inside the Uno engine's context,
@@ -401,11 +536,57 @@ def matrix_verdicts(
     held to a weaker floor than the Uno comparison while the comment promised
     the same one. Taking every candidate for a batch through a single call is
     the structural form of that promise.
+
+    Both views and the tie rule live here for the same reason. The token
+    comparison, the detokenised-text comparison and the near-tie exception are
+    one judgment about one arm; splitting them across call sites is how the
+    adapter-disabled arm drifted onto its own floor once already. A caller
+    that hands this a bare sequence instead of a `MatrixArm` raises, because
+    such a caller could not be carrying the token ids the tie rule reads.
+
+    Ties are removed from the token view and from the text view together. A
+    tie is a real difference in the emitted tokens -- it just is not evidence
+    of a different computation -- so the prompt's text differs too, and
+    excusing one view while failing the other would report the same rounding
+    twice under two names.
     """
-    return {
-        name: exact_token_verdict(control_divergences, divergences, total)
-        for name, divergences in candidates.items()
-    }
+    verdicts: dict[str, ArmVerdict] = {}
+    control_prompts = [prompt for prompt, _ in control_divergences]
+    for name, arm in candidates.items():
+        if not isinstance(arm, MatrixArm):
+            raise TypeError(
+                f"{name}: matrix_verdicts takes MatrixArm values carrying token "
+                "ids, not bare divergence lists"
+            )
+        real, ties = classify_ties(
+            arm.divergences,
+            reference_ids if reference_ids is not None else [],
+            arm.token_ids,
+            reference_ranked,
+            margin_nats,
+        )
+        ok, reason = exact_token_verdict(control_divergences, real, total)
+        tie_prompts = {tie.prompt for tie in ties}
+        real_prompts = {prompt for prompt, _ in real}
+        text_prompts = [
+            prompt
+            for prompt in arm.text_prompts
+            if prompt not in tie_prompts or prompt in real_prompts
+        ]
+        text_ok, text_reason = text_verdict(control_prompts, text_prompts, total)
+        if ties:
+            rendered = ", ".join(format_ties(ties))
+            reason = f"{reason}; ties excused: {rendered}"
+            text_reason = f"{text_reason}; ties excused: {rendered}"
+        # Identical tokens with different text is not a sampling difference; it
+        # is the detokeniser. Judged against the arm's UNFILTERED divergences:
+        # a tie changes the tokens, so its text is expected to differ too.
+        diverged_prompts = {prompt for prompt, _ in arm.divergences}
+        detokenisation_only = sorted(set(arm.text_prompts) - diverged_prompts)
+        verdicts[name] = ArmVerdict(
+            ok, reason, text_ok, text_reason, ties, detokenisation_only
+        )
+    return verdicts
 
 
 def resolve_internal_request_ids(
