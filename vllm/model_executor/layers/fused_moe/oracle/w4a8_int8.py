@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     FusedMoEQuantDesc,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -358,3 +359,46 @@ def make_w4a8_int8_moe_kernel(
     )
 
     return kernel
+
+
+class W4A8Int8MoEKernelOracle(MoEKernelOracle[W4A8Int8MoeBackend]):
+    """Class-based view of the W4A8 Int8 MoE kernel oracle."""
+
+    def backend_enum_cls(self) -> type[W4A8Int8MoeBackend]:
+        return W4A8Int8MoeBackend
+
+    def get_priority_backends(
+        self, moe_config: FusedMoEConfig
+    ) -> list[W4A8Int8MoeBackend]:
+        return _get_priority_backends(moe_config)
+
+    def backend_to_kernel_cls(
+        self, backend: W4A8Int8MoeBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
+
+    def map_backend(self, runner_backend: MoEBackend) -> W4A8Int8MoeBackend:
+        return map_w4a8_int8_backend(runner_backend)
+
+    def select_backend(
+        self,
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None = None,
+        activation_key: QuantKey | None = None,
+    ) -> tuple[W4A8Int8MoeBackend, type[mk.FusedMoEExperts] | None]:
+        return select_w4a8_int8_moe_backend(
+            moe_config, weight_key=weight_key, activation_key=activation_key
+        )
+
+    def make_kernel(
+        self,
+        quant_config: FusedMoEQuantConfig,
+        moe_config: FusedMoEConfig,
+        backend: W4A8Int8MoeBackend,
+        experts_cls: type[mk.FusedMoEExperts],
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEKernel:
+        return make_w4a8_int8_moe_kernel(
+            quant_config, moe_config, experts_cls, routing_tables
+        )
+

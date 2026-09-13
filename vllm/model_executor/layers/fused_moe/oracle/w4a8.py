@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     int4_w4afp8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8DynamicTokenSym,
@@ -193,3 +194,56 @@ def make_w4a8_moe_kernel(
         prepare_finalize,
         experts,
     )
+
+
+class W4A8MoEKernelOracle(MoEKernelOracle[W4A8MoeBackend]):
+    """Class-based view of the W4A8 MoE kernel oracle."""
+
+    def backend_enum_cls(self) -> type[W4A8MoeBackend]:
+        return W4A8MoeBackend
+
+    def get_priority_backends(
+        self, moe_config: FusedMoEConfig
+    ) -> list[W4A8MoeBackend]:
+        return [W4A8MoeBackend.CUTLASS]
+
+    def backend_to_kernel_cls(
+        self, backend: W4A8MoeBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return backend_to_kernel_cls(backend)
+
+    def map_backend(self, runner_backend: str) -> W4A8MoeBackend:
+        if runner_backend in ("auto", "cutlass"):
+            return W4A8MoeBackend.CUTLASS
+        raise ValueError(f"Unsupported runner backend: {runner_backend}")
+
+    def select_backend(
+        self,
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None = kInt4Static,
+        activation_key: QuantKey | None = kFp8DynamicTokenSym,
+    ) -> tuple[W4A8MoeBackend, type[mk.FusedMoEExperts] | None]:
+        return select_w4a8_moe_backend(moe_config, weight_key, activation_key)
+
+    def make_kernel(
+        self,
+        quant_config: FusedMoEQuantConfig,
+        moe_config: FusedMoEConfig,
+        backend: W4A8MoeBackend,
+        experts_cls: type[mk.FusedMoEExperts],
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+        b_strides1: torch.Tensor | None = None,
+        b_strides2: torch.Tensor | None = None,
+        group_size: int = 128,
+    ) -> mk.FusedMoEKernel:
+        assert b_strides1 is not None and b_strides2 is not None
+        return make_w4a8_moe_kernel(
+            quant_config,
+            moe_config,
+            experts_cls,
+            b_strides1,
+            b_strides2,
+            group_size,
+            routing_tables,
+        )
+
