@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use vllm_text::Prompt;
 
 use crate::error::Result;
-use crate::request::{ChatRequest, ReasoningEffort};
+use crate::request::{ChatContent, ChatMessage, ChatRequest, ReasoningEffort};
 
 mod deepseek;
 pub mod deepseek_v32;
@@ -40,15 +40,87 @@ pub struct RenderedPrompt {
     pub effective_template_kwargs: HashMap<String, Value>,
 }
 
+/// Location of one multimodal content part in the source chat request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MediaPartSource {
+    message_index: usize,
+    content_part_index: usize,
+}
+
+impl MediaPartSource {
+    /// Identify one content part by its message and part indices.
+    pub const fn new(message_index: usize, content_part_index: usize) -> Self {
+        Self {
+            message_index,
+            content_part_index,
+        }
+    }
+
+    /// Return the zero-based message index in the source request.
+    pub const fn message_index(self) -> usize {
+        self.message_index
+    }
+
+    /// Return the zero-based content-part index within the source message.
+    pub const fn content_part_index(self) -> usize {
+        self.content_part_index
+    }
+}
+
 /// Minimal chat-prompt renderer used by `vllm-chat`.
 pub trait ChatRenderer: Send + Sync {
     /// Render one chat request into the text prompt submitted to the text
     /// backend.
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt>;
+
+    /// Render one request and return media sources in placeholder order.
+    ///
+    /// The default is suitable for renderers that preserve message and content
+    /// order. Renderers that reorder or omit multimodal content must override
+    /// this method and derive the media order while rendering.
+    fn render_with_media_order(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<(RenderedPrompt, Vec<MediaPartSource>)> {
+        let rendered = self.render(request)?;
+        Ok((rendered, request_media_order(request)))
+    }
 }
 
 /// Shared trait-object form of [`ChatRenderer`].
 pub type DynChatRenderer = Arc<dyn ChatRenderer>;
+
+fn request_media_order(request: &ChatRequest) -> Vec<MediaPartSource> {
+    let mut media_order = Vec::new();
+    for (message_index, message) in request.messages.iter().enumerate() {
+        let content = match message {
+            ChatMessage::System { content }
+            | ChatMessage::Developer { content, .. }
+            | ChatMessage::User { content }
+            | ChatMessage::ToolResponse { content, .. } => content,
+            ChatMessage::Assistant { .. } => continue,
+        };
+        record_content_media(&mut media_order, message_index, content);
+    }
+    media_order
+}
+
+fn record_content_media(
+    media_order: &mut Vec<MediaPartSource>,
+    message_index: usize,
+    content: &ChatContent,
+) {
+    let ChatContent::Parts(parts) = content else {
+        return;
+    };
+    media_order.extend(
+        parts
+            .iter()
+            .enumerate()
+            .filter(|(_, part)| part.is_multimodal())
+            .map(|(content_part_index, _)| MediaPartSource::new(message_index, content_part_index)),
+    );
+}
 
 /// Extract the effective chat-template kwargs visible to the renderer from the request,
 /// using the provided defaults as the base.

@@ -285,6 +285,64 @@ fn partial_tool_results_keep_assistant_call_position() {
 }
 
 #[test]
+fn media_order_follows_reordered_tool_results() {
+    let mut request = crate::request::ChatRequest::for_test();
+    request.messages = vec![
+        ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::ToolCall(AssistantToolCall {
+                id: "call-a".to_string(),
+                name: "tool-a".to_string(),
+                arguments: "{}".to_string(),
+            }),
+            AssistantContentBlock::ToolCall(AssistantToolCall {
+                id: "call-b".to_string(),
+                name: "tool-b".to_string(),
+                arguments: "{}".to_string(),
+            }),
+        ]),
+        ChatMessage::tool_response(
+            vec![ChatContentPart::text("result-b"), image_part("image-b")],
+            "call-b",
+        ),
+        ChatMessage::tool_response(
+            vec![ChatContentPart::text("result-a"), image_part("image-a")],
+            "call-a",
+        ),
+    ];
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+    let renderer = KimiK3ChatRenderer::new(Arc::new(test_tokenizer()));
+
+    let (rendered, media_order) = renderer.render_with_media_order(&request).unwrap();
+    let Prompt::TokenIds(token_ids) = rendered.prompt else {
+        panic!("kimi k3 renderer should return token IDs")
+    };
+    let prompt = test_tokenizer().decode(&token_ids, false).unwrap();
+
+    assert!(prompt.find("result-a").unwrap() < prompt.find("result-b").unwrap());
+    expect![[r#"
+        [
+            MediaPartSource {
+                message_index: 2,
+                content_part_index: 1,
+            },
+            MediaPartSource {
+                message_index: 1,
+                content_part_index: 1,
+            },
+        ]
+    "#]]
+    .assert_debug_eq(&media_order);
+}
+
+fn image_part(uuid: &str) -> ChatContentPart {
+    ChatContentPart::ImageUrl {
+        image_url: format!("data:image/png;base64,{uuid}"),
+        detail: None,
+        uuid: Some(uuid.to_string()),
+    }
+}
+
+#[test]
 fn defaults_thinking_effort_to_max() {
     let rendered = render_request(&crate::request::ChatRequest::for_test());
 

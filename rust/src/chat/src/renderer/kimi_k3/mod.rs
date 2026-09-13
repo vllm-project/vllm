@@ -10,7 +10,7 @@ mod tests;
 use vllm_text::Prompt;
 use vllm_text::tokenizer::DynTokenizer;
 
-use super::{ChatRenderer, RenderedPrompt, request_template_kwargs};
+use super::{ChatRenderer, MediaPartSource, RenderedPrompt, request_template_kwargs};
 use crate::Result;
 use crate::request::ChatRequest;
 
@@ -29,11 +29,23 @@ impl KimiK3ChatRenderer {
 
 impl ChatRenderer for KimiK3ChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
-        request.validate()?;
+        self.render_with_media_order(request).map(|(rendered, _)| rendered)
+    }
 
-        Ok(RenderedPrompt {
-            prompt: Prompt::TokenIds(encoding::render_request(request, self.tokenizer.as_ref())?),
-            effective_template_kwargs: request_template_kwargs(request),
-        })
+    fn render_with_media_order(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<(RenderedPrompt, Vec<MediaPartSource>)> {
+        request.validate()?;
+        let (token_ids, media_order) =
+            encoding::render_request_with_media_order(request, self.tokenizer.as_ref())?;
+
+        Ok((
+            RenderedPrompt {
+                prompt: Prompt::TokenIds(token_ids),
+                effective_template_kwargs: request_template_kwargs(request),
+            },
+            media_order,
+        ))
     }
 }
