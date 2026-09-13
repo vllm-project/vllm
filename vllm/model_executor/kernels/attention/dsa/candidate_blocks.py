@@ -11,7 +11,7 @@ def _max_with_nan(a, b):
     return tl.maximum(a, b, propagate_nan=tl.PropagateNan.ALL)
 
 
-@triton.jit(do_not_specialize=["width", "nblocks"])
+@triton.jit(do_not_specialize=["width", "nblocks", "out_width"])
 def _block_scores_kernel(
     logits,
     starts,
@@ -21,11 +21,15 @@ def _block_scores_kernel(
     stride_col,
     stride_start,
     stride_end,
+    stride_out_row,
+    stride_out_col,
     width,
     nblocks,
+    out_width,
     BLOCK_SIZE: tl.constexpr,
     HAS_STARTS: tl.constexpr,
     ROW_REPEAT: tl.constexpr,
+    ALL_BLOCKS: tl.constexpr,
     TILE: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -48,7 +52,13 @@ def _block_scores_kernel(
         float("inf"),
         reduced,
     )
-    tl.store(scores + row * nblocks + blocks, reduced, blocks < nblocks)
+    if ALL_BLOCKS:
+        reduced = tl.where((blocks < nblocks) & (reduced > -float("inf")), blocks, -1)
+    tl.store(
+        scores + row * stride_out_row + blocks * stride_out_col,
+        reduced,
+        blocks < out_width,
+    )
 
 
 @triton.jit(do_not_specialize=["k"])
@@ -150,6 +160,7 @@ def select_candidate_blocks(
 
     Row bounds are in packed column space; absent starts mean zero.
     Decode rows share bounds in groups of ``row_repeat``. Output is -1 padded.
+    Candidate order is unspecified when every block fits in the budget.
     """
     assert logits.is_cuda
     rows, width = logits.shape
@@ -159,8 +170,10 @@ def select_candidate_blocks(
         out.fill_(-1)
         return
     nblocks = triton.cdiv(width, block_size)
-    scores = logits.new_empty((rows, nblocks))
-    _block_scores_kernel[(rows, triton.cdiv(nblocks, 128))](
+    all_blocks = topk_blocks >= nblocks
+    scores = out if all_blocks else logits.new_empty((rows, nblocks))
+    out_width = topk_blocks if all_blocks else nblocks
+    _block_scores_kernel[(rows, triton.cdiv(out_width, 128))](
         logits,
         row_ks,
         row_ke,
@@ -168,13 +181,18 @@ def select_candidate_blocks(
         *logits.stride(),
         row_ks.stride(0) if row_ks is not None else 0,
         row_ke.stride(0),
+        *scores.stride(),
         width,
         nblocks,
+        out_width,
         block_size,
         row_ks is not None,
         row_repeat,
+        all_blocks,
         128,
     )
+    if all_blocks:
+        return
     # Keep the existing top-k tie behavior.
     top = scores.topk(min(topk_blocks, nblocks), dim=-1)
     _store_candidates_kernel[(rows, triton.cdiv(topk_blocks, 256))](
