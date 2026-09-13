@@ -7,6 +7,10 @@ import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config.lora import LoRAConfig
+from vllm.lora.ops.trainable_tokens import (
+    TrainableTokensBuffer,
+    replace_token_embeddings,
+)
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -51,6 +55,33 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             self.lora_a_stacked.shape[0] * self.lora_a_stacked.shape[1],
             self.lora_a_stacked.shape[2],
         )
+        self.trainable_tokens = (
+            TrainableTokensBuffer(
+                max_loras,
+                lora_config.max_lora_trainable_tokens,
+                self.base_layer.embedding_dim,
+                self.base_layer.weight.dtype
+                if self.base_layer.weight.dtype
+                in (torch.float16, torch.bfloat16, torch.float32, torch.float64)
+                else lora_config.lora_dtype,
+                self.base_layer.weight.device,
+            )
+            if lora_config.max_lora_trainable_tokens
+            else None
+        )
+
+    def reset_trainable_tokens(self, index: int) -> None:
+        if self.trainable_tokens is not None:
+            self.trainable_tokens.reset(index)
+
+    def set_trainable_tokens(
+        self, index: int, token_indices: torch.Tensor, weights: torch.Tensor
+    ) -> None:
+        if self.trainable_tokens is None:
+            raise ValueError(
+                "Set max_lora_trainable_tokens to enable trainable tokens."
+            )
+        self.trainable_tokens.set(index, token_indices, weights)
 
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
@@ -104,6 +135,15 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
 
         if not current_platform.can_update_inplace():
             full_output = lora_output
+
+        if self.trainable_tokens is not None:
+            replace_token_embeddings(
+                full_output,
+                x.reshape(-1),
+                self.punica_wrapper._token_lora_indices[: x.numel()],
+                self.trainable_tokens.token_ids,
+                self.trainable_tokens.weights,
+            )
 
         return full_output.view_as(full_output_org)
 

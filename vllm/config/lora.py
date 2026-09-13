@@ -34,6 +34,11 @@ class LoRAConfig:
 
     max_lora_rank: MaxLoRARanks = 16
     """Max LoRA rank."""
+    max_lora_trainable_tokens: int = Field(default=0, ge=0)
+    """Maximum number of PEFT trainable token rows per embedding module and
+    adapter. Set to a positive value to serve adapters trained with
+    `trainable_token_indices`. Token IDs must be in the base model vocabulary.
+    Zero disables this feature and avoids allocating its GPU buffers."""
     max_loras: int = Field(default=1, ge=1)
     """Max number of LoRAs in a single batch."""
     fully_sharded_loras: bool = False
@@ -99,6 +104,7 @@ class LoRAConfig:
         """
         factors: list[Any] = []
         factors.append(self.max_lora_rank)
+        factors.append(self.max_lora_trainable_tokens)
         factors.append(self.max_loras)
         factors.append(self.fully_sharded_loras)
         factors.append(self.lora_dtype)
