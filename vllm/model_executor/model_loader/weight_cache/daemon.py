@@ -375,12 +375,6 @@ def main() -> None:
 
     nnodes = parallel_config.nnodes
     node_rank = parallel_config.node_rank
-    if not 0 <= node_rank < nnodes:
-        raise ValueError(f"--node-rank must be in [0, {nnodes}), got {node_rank}")
-    if tp_size % nnodes != 0:
-        raise ValueError(
-            f"tensor-parallel-size ({tp_size}) must be divisible by --nnodes ({nnodes})"
-        )
     local_world_size = tp_size // nnodes
 
     # The daemon forms its own TP group and holds it open while serving, so it
