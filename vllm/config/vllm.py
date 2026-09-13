@@ -50,7 +50,7 @@ from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config, replace
+from .utils import SupportsHash, config, get_field, replace
 from .watermarking import WatermarkConfig
 from .weight_transfer import WeightTransferConfig
 
@@ -110,10 +110,17 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        # Breakable CUDA graphs currently regress performance on ROCm, so no
-        # architecture opts in by default here. Users can still force it with
+        # Breakable CUDA graphs currently regress performance on ROCm for
+        # models that can use torch.compile piecewise graphs instead. Do not
+        # opt those in by default. Users can still force them with
         # VLLM_USE_BREAKABLE_CUDAGRAPH=1.
-        return frozenset()
+        #
+        # DeepseekV41ForCausalLM cannot torch.compile, and the ROCm sparse
+        # SWA backend only reports AttentionCGSupport.UNIFORM_BATCH. Default
+        # FULL_AND_PIECEWISE then dies at capture unless breakable CUDA
+        # graphs are on. Enable this architecture so the published AMD
+        # recipe can start.
+        return frozenset({"DeepseekV41ForCausalLM"})
     return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 
@@ -1142,14 +1149,67 @@ class VllmConfig:
         watermark_config = getattr(self, "watermark_config", None)
         if watermark_config is None:
             return
-        if (
-            self.speculative_config is not None
-            and not watermark_config.supports_speculative_decoding
-        ):
-            raise ValueError(
-                f"The {watermark_config.algorithm} watermarking algorithm "
-                "does not support speculative decoding."
-            )
+        if self.speculative_config is not None:
+            speculative_config = self.speculative_config
+            if speculative_config.draft_sample_method != "probabilistic":
+                raise ValueError(
+                    "Speculative decoding with watermarking requires "
+                    "draft_sample_method='probabilistic'."
+                )
+            if speculative_config.rejection_sample_method != "standard":
+                raise ValueError(
+                    "Speculative decoding with watermarking requires "
+                    "rejection_sample_method='standard'."
+                )
+            if (
+                speculative_config.parallel_drafting
+                and speculative_config.method != "dspark"
+            ):
+                raise ValueError(
+                    "Parallel speculative drafting is not supported with watermarking."
+                )
+            if speculative_config.method not in ("dspark", "eagle", "eagle3", "mtp"):
+                raise ValueError(
+                    "Watermarking supports only autoregressive model-based "
+                    "speculative decoding."
+                )
+            if (
+                not watermark_config.allow_target_only_watermarking
+                and not watermark_config.supports_speculative_decoding
+            ):
+                raise ValueError(
+                    f"The '{watermark_config.algorithm}' watermarking algorithm "
+                    "does not support speculative decoding. Set "
+                    "allow_target_only_watermarking=true to leave draft tokens "
+                    "unwatermarked."
+                )
+            if (
+                watermark_config.allow_target_only_watermarking
+                and not watermark_config.supports_speculative_decoding
+            ):
+                logger.warning_once(
+                    "Target-only watermarking leaves accepted draft tokens "
+                    "unwatermarked, weakening detectability in proportion to the "
+                    "share of output tokens supplied by accepted drafts.",
+                    scope="global",
+                )
+            if watermark_config.deduplicate_contexts != "none":
+                logger.warning_once(
+                    "Context deduplication is not supported with speculative "
+                    "decoding and will not be applied to accepted drafts, "
+                    "rejection-recovery tokens, or bonus tokens.",
+                    scope="global",
+                )
+            if watermark_config.algorithm == "dual_key_gumbel" and (
+                watermark_config.alpha != get_field(WatermarkConfig, "alpha").default
+            ):
+                logger.warning_once(
+                    "Speculative decoding selects the watermark key by token role: "
+                    "draft tokens use key A, recovery and bonus tokens use key B. "
+                    "The configured alpha=%s is not used.",
+                    watermark_config.alpha,
+                    scope="global",
+                )
         if beam_search:
             raise ValueError("Beam search is not supported with watermarking.")
         if custom_sampler:
