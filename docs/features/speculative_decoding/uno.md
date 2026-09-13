@@ -43,7 +43,7 @@ Normal sampling settings, including greedy decoding, temperature, top-k and top-
 - `max_loras` must be at least `2`; Uno reserves one slot for its shared adapter while native graph setup may use another slot.
 - `max_num_batched_tokens` must be at least `max_num_seqs * K` to fit the draft queries and native LoRA metadata buffers.
 
-The initial scope is one NVIDIA GPU, text-only decoder models with one homogeneous full-attention KV group, and FlashAttention. Model Runner V2 and async scheduling are required. Request-specific LoRA adapters, tensor/pipeline/data/context parallelism, sliding or hybrid attention, dynamic speculation depth, adaptive verification, KV transfer/offloading, `--kv-sharing-fast-prefill` and dual batch overlap are unsupported.
+The initial scope is NVIDIA GPUs, text-only decoder models with one homogeneous full-attention KV group, and FlashAttention. Model Runner V2 and async scheduling are required. Tensor parallelism is supported and the draft uses the target's `tensor_parallel_size`. Request-specific LoRA adapters, pipeline/data/context parallelism, sliding or hybrid attention, dynamic speculation depth, adaptive verification, KV transfer/offloading, `--kv-sharing-fast-prefill` and dual batch overlap are unsupported.
 
 Prefix caching and chunked prefill use the native scheduler. Draft sampling retains raw logits by persistent request slot for native probabilistic rejection sampling. Uno uses native full CUDA graphs for drafting when the target graph mode and attention backend support uniform decode capture; a draft decode graph exists only when some `cudagraph_capture_sizes` entry is at most `max_num_seqs * K`, so small products (for example `K=1` with few sequences) draft eagerly. `--enforce-eager` disables graphs.
 

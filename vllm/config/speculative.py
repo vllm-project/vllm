@@ -1647,17 +1647,23 @@ class SpeculativeConfig:
             raise ValueError(
                 "Uno requires full draft logits; local argmax is unsupported"
             )
-        if self.draft_tensor_parallel_size not in (None, 1) or any(
+        if self.draft_tensor_parallel_size not in (
+            None,
+            parallel_config.tensor_parallel_size,
+        ) or any(
             getattr(parallel_config, name) != 1
             for name in (
-                "tensor_parallel_size",
                 "pipeline_parallel_size",
                 "data_parallel_size",
                 "prefill_context_parallel_size",
                 "decode_context_parallel_size",
             )
         ):
-            raise ValueError("Uno currently supports only single-GPU execution")
+            raise ValueError(
+                "Uno supports tensor parallelism; pipeline/data/context "
+                "parallelism are not supported, and the draft must use the "
+                "target's tensor_parallel_size"
+            )
         if (
             model_config.runner_type != "generate"
             or model_config.is_diffusion

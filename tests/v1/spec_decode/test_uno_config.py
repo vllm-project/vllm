@@ -81,7 +81,7 @@ def test_uno_forces_probabilistic_draft_sampling(uno_config_factory):
         ({"uno_mask_token_id": 129}, "target vocabulary size"),
         ({"model": "other-model"}, "shares the target"),
         ({"target_model_config": None}, "target model"),
-        ({"draft_tensor_parallel_size": 2}, "single-GPU"),
+        ({"draft_tensor_parallel_size": 2}, "target's tensor_parallel_size"),
         ({"rejection_sample_method": "synthetic"}, "standard"),
         ({"num_speculative_tokens_per_batch_size": [(1, 8, 4)]}, "fixed"),
         ({"use_heterogeneous_vocab": True}, "target vocabulary"),
@@ -117,7 +117,6 @@ def test_uno_rejects_unsupported_model_types(
 @pytest.mark.parametrize(
     "parallelism",
     [
-        "tensor_parallel_size",
         "pipeline_parallel_size",
         "data_parallel_size",
         "prefill_context_parallel_size",
@@ -125,10 +124,38 @@ def test_uno_rejects_unsupported_model_types(
     ],
 )
 def test_uno_rejects_parallel_execution(uno_config_factory, parallelism):
+    """Every parallelism except tensor parallelism is still refused."""
     parallel = uno_config_factory().target_parallel_config
     setattr(parallel, parallelism, 2)
-    with pytest.raises(ValueError, match="single-GPU"):
+    with pytest.raises(ValueError, match="not supported"):
         uno_config_factory(target_parallel_config=parallel)
+
+
+def test_uno_accepts_tensor_parallelism(uno_config_factory):
+    """Tensor parallelism is supported; the draft shares the target's degree.
+
+    Measured on two RTX 5090s at TP=2: Uno's greedy tokens equal the plain
+    engine's on 4 of 4 prompts against two separate plain runs, the plain engine
+    reproduces itself at TP=2, and Uno equals plain at TP=1. The only divergence
+    was plain at TP=1 against plain at TP=2 (prompt 1, token 5), which is the
+    engine's reduction order rather than anything Uno does.
+    """
+    parallel = uno_config_factory().target_parallel_config
+    parallel.tensor_parallel_size = 2
+
+    config = uno_config_factory(target_parallel_config=parallel)
+    assert config.use_uno()
+    assert config.draft_parallel_config is config.target_parallel_config
+
+    # The draft may name the same degree explicitly, and nothing else.
+    config = uno_config_factory(
+        target_parallel_config=parallel, draft_tensor_parallel_size=2
+    )
+    assert config.use_uno()
+    with pytest.raises(ValueError, match="target's tensor_parallel_size"):
+        uno_config_factory(
+            target_parallel_config=parallel, draft_tensor_parallel_size=1
+        )
 
 
 def test_uno_rejects_sliding_window_attention(uno_config_factory):
@@ -263,6 +290,58 @@ def test_uno_rejects_forced_v1_runner(uno_config_factory, monkeypatch):
     monkeypatch.setattr("vllm.config.vllm.envs.VLLM_USE_V2_MODEL_RUNNER", False)
     with pytest.raises(ValueError, match="Model Runner V2"):
         _make_vllm_uno_config(uno_config_factory)
+
+
+def test_uno_vllm_config_accepts_tensor_parallelism(uno_config_factory, monkeypatch):
+    """The VllmConfig mirror must allow what the speculative config allows.
+
+    The two checks are deliberate duplicates, so a half-applied change is the
+    hazard: this builds the whole config at TP=2, which the speculative config
+    accepts, and fails if only one of the two sites was updated.
+    """
+    monkeypatch.setattr("vllm.config.vllm.HAS_TRITON", True)
+    monkeypatch.setattr("vllm.config.vllm.envs.VLLM_USE_V2_MODEL_RUNNER", True)
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(
+        current_platform, "apply_config_platform_defaults", lambda _config: None
+    )
+    monkeypatch.setattr(
+        current_platform, "check_and_update_config", lambda _config: None
+    )
+    parallel = uno_config_factory().target_parallel_config
+    parallel.tensor_parallel_size = 2
+    config = VllmConfig(
+        device_config=DeviceConfig(device="cpu"),
+        speculative_config=uno_config_factory(target_parallel_config=parallel),
+        parallel_config=parallel,
+        lora_config=LoRAConfig(max_loras=2, lora_dtype=torch.bfloat16),
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            max_num_seqs=4,
+            max_num_batched_tokens=256,
+            is_encoder_decoder=False,
+            async_scheduling=None,
+        ),
+    )
+    assert config.parallel_config.tensor_parallel_size == 2
+
+    # And still refuses the parallelisms Uno has not been run under.
+    parallel.pipeline_parallel_size = 2
+    with pytest.raises(ValueError, match="not supported"):
+        VllmConfig(
+            device_config=DeviceConfig(device="cpu"),
+            speculative_config=uno_config_factory(),
+            parallel_config=parallel,
+            lora_config=LoRAConfig(max_loras=2, lora_dtype=torch.bfloat16),
+            scheduler_config=SchedulerConfig(
+                max_model_len=2048,
+                max_num_seqs=4,
+                max_num_batched_tokens=256,
+                is_encoder_decoder=False,
+                async_scheduling=None,
+            ),
+        )
 
 
 def test_uno_requires_lora_enabled(uno_config_factory, monkeypatch):

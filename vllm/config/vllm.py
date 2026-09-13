@@ -1194,14 +1194,16 @@ class VllmConfig:
         if any(
             getattr(self.parallel_config, name) != 1
             for name in (
-                "tensor_parallel_size",
                 "pipeline_parallel_size",
                 "data_parallel_size",
                 "prefill_context_parallel_size",
                 "decode_context_parallel_size",
             )
         ):
-            raise ValueError("Uno currently supports only single-GPU execution")
+            raise ValueError(
+                "Uno supports tensor parallelism; pipeline/data/context "
+                "parallelism are not supported"
+            )
         if (
             self.kv_transfer_config is not None
             or self.cache_config.kv_offloading_size is not None
