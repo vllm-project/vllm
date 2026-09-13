@@ -671,11 +671,14 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
-                    if parser is not None:
+                    if parser is not None and self._include_reasoning_tokens_details:
                         generated_token_ids[i].extend(output.token_ids)
-                        previous_reasoning_tokens[i] = parser.count_reasoning_tokens(
-                            tuple(generated_token_ids[i])
-                        )
+                        if include_continuous_usage:
+                            previous_reasoning_tokens[i] = (
+                                parser.count_reasoning_tokens(
+                                    tuple(generated_token_ids[i])
+                                )
+                            )
 
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
@@ -812,6 +815,13 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
+
+            if self._include_reasoning_tokens_details and not include_continuous_usage:
+                for i, parser in enumerate(parsers):
+                    if parser is not None and generated_token_ids[i]:
+                        previous_reasoning_tokens[i] = parser.count_reasoning_tokens(
+                            tuple(generated_token_ids[i])
+                        )
 
             # once the final token is handled, if stream_options.include_usage
             # is sent, send the usage
