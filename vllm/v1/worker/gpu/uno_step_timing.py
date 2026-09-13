@@ -36,6 +36,7 @@ class UnoStepTimingTrace:
     running_request_count: int
     scheduled_request_count: int
     request_steps: tuple[int, ...]
+    proposal_skipped_terminal: bool
     capture_cuda_events: bool
     _wall_starts: dict[str, float] = field(default_factory=dict)
     wall_ms: dict[str, float] = field(default_factory=dict)
@@ -108,6 +109,7 @@ class UnoStepTimingTrace:
             "running_request_count": self.running_request_count,
             "scheduled_request_count": self.scheduled_request_count,
             "request_steps": self.request_steps,
+            "proposal_skipped_terminal": self.proposal_skipped_terminal,
             "allocator_allocated_bytes": self._allocated_bytes,
             "allocator_reserved_bytes": self._reserved_bytes,
         }
@@ -148,6 +150,7 @@ class UnoStepTimingTracer:
             running_request_count=running_count,
             scheduled_request_count=len(scheduler_output.num_scheduled_tokens),
             request_steps=request_steps,
+            proposal_skipped_terminal=scheduler_output.skip_speculator_proposal,
             capture_cuda_events=self._capture_cuda_events,
         )
 

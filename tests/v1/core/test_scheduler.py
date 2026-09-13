@@ -1425,6 +1425,7 @@ def uno_scheduler_factory(tmp_path, monkeypatch):
     )
 
     def create(**kwargs):
+        max_num_seqs = kwargs.pop("max_num_seqs", 1)
         return create_scheduler(
             model=str(tmp_path),
             skip_tokenizer_init=True,
@@ -1434,7 +1435,7 @@ def uno_scheduler_factory(tmp_path, monkeypatch):
             speculative_method="uno",
             device="cpu",
             block_size=4,
-            max_num_seqs=1,
+            max_num_seqs=max_num_seqs,
             max_num_batched_tokens=32,
             **kwargs,
         )
@@ -1466,6 +1467,48 @@ def test_uno_reserves_suffix_before_first_draft(
 
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
     assert manager.block_pool.get_num_free_blocks() == num_available_blocks
+
+
+def test_uno_terminal_length_bound_skips_only_all_terminal_batches(
+    uno_scheduler_factory,
+):
+    """A last target token needs no post-sample proposal, but mixed rows do."""
+    scheduler = uno_scheduler_factory()
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=3,
+        max_tokens=2,
+        block_size=4,
+    )
+    scheduler.add_request(request)
+
+    # Full prompt iteration: two output tokens remain, so the normal Uno
+    # proposal path is retained.
+    first = scheduler.schedule()
+    assert not first.skip_speculator_proposal
+    _model_output(scheduler, first, [[10]])
+
+    # The next target sample must reach the cap. This is the exact worker
+    # batch that must become a plain finishing step.
+    terminal = scheduler.schedule()
+    assert terminal.skip_speculator_proposal
+
+    scheduler = uno_scheduler_factory(max_num_seqs=2)
+    terminal_req, nonterminal_req = create_requests(
+        num_requests=2,
+        num_tokens=3,
+        max_tokens=1,
+        block_size=4,
+        req_ids=["terminal", "nonterminal"],
+    )
+    nonterminal_req.max_tokens = 2
+    scheduler.add_request(terminal_req)
+    scheduler.add_request(nonterminal_req)
+
+    # The dense proposer remains engaged for a mixed batch. This protects the
+    # batch contract until per-row proposal packing exists.
+    mixed = scheduler.schedule()
+    assert not mixed.skip_speculator_proposal
 
 
 @pytest.mark.parametrize("num_accepted", [0, 3, 4])

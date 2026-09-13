@@ -1403,6 +1403,20 @@ class Scheduler(SchedulerInterface):
                 scheduled_encoder_inputs
             )
 
+        # A target sample adds at least one output token. Once every request
+        # in this worker batch is one token from its length cap, drafts proposed
+        # after the sample cannot be consumed. Keep this batch-wide: Uno's
+        # proposer is dense across the active rows, so selectively skipping a
+        # row would require a different packed-batch contract.
+        skip_speculator_proposal = (
+            self.num_sampled_tokens_per_step > 0
+            and bool(num_scheduled_tokens)
+            and all(
+                self._will_finish_after_next_sample(self.requests[req_id])
+                for req_id in num_scheduled_tokens
+            )
+        )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1424,6 +1438,7 @@ class Scheduler(SchedulerInterface):
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            skip_speculator_proposal=skip_speculator_proposal,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
@@ -1460,13 +1475,26 @@ class Scheduler(SchedulerInterface):
             ) * 1000
             logger.info(
                 "UNO_STEP_TIMING_SCHEDULE step_id=%d schedule_wall_ms=%.3f "
-                "scheduled_request_count=%d finished_before_step_count=%d",
+                "scheduled_request_count=%d finished_before_step_count=%d "
+                "skip_speculator_proposal=%s",
                 scheduler_output.debug_uno_step_id,
                 scheduler_output.debug_schedule_wall_ms,
                 len(scheduler_output.num_scheduled_tokens),
                 len(scheduler_output.finished_req_ids),
+                scheduler_output.skip_speculator_proposal,
             )
         return scheduler_output
+
+    @staticmethod
+    def _will_finish_after_next_sample(request: Request) -> bool:
+        """Whether a target sample will reach this request's length cap.
+
+        ``num_tokens`` excludes speculative drafts, so this remains a lower
+        bound when a target verification row is present. The predicate is
+        intentionally limited to the known length cap; stop tokens are only
+        known after sampling and therefore retain the normal proposal path.
+        """
+        return request.num_tokens + 1 >= request.num_prompt_tokens + request.max_tokens
 
     def _build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput

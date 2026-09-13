@@ -2243,6 +2243,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ec_connector_output=ec_connector_output,
             routed_experts=routed_experts,
             cudagraph_stats=cudagraph_stats,
+            skip_speculator_proposal=scheduler_output.skip_speculator_proposal,
             uno_step_trace=uno_step_trace,
         )
 
@@ -2278,6 +2279,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         routed_experts = self.execute_model_state.routed_experts
         cudagraph_stats = self.execute_model_state.cudagraph_stats
+        skip_speculator_proposal = self.execute_model_state.skip_speculator_proposal
         uno_step_trace = self.execute_model_state.uno_step_trace
         self.execute_model_state = None
 
@@ -2392,7 +2394,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if uno_step_trace is not None:
             uno_step_trace.end_stage("output_publish")
 
-        if self.speculator is not None:
+        if self.speculator is not None and not skip_speculator_proposal:
             assert self.sampler is not None
             # Let the target override the hidden state fed to the drafter
             # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
@@ -2422,6 +2424,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             if uno_step_trace is not None:
                 uno_step_trace.end_stage("propose")
+        elif self.speculator is not None and UNO_STEP_TIMING_DEBUG:
+            # Keep publishing the existing draft buffer below: PP ranks and
+            # structured-output validation still consume that collective shape.
+            # Only the newly-unusable proposal is omitted.
+            logger.info("UNO_TERMINAL_PROPOSAL_SUPPRESSED")
 
         # Spec-decode and diffusion LLMs both use draft tokens but the latter does
         # not have a speculator (i.e. self.speculator is None).
@@ -2572,6 +2579,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     routed_experts: RoutedExpertsTensors | None
     cudagraph_stats: CUDAGraphStat | None
+    skip_speculator_proposal: bool = False
     uno_step_trace: UnoStepTimingTrace | None = None
 
 

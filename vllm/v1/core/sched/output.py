@@ -318,6 +318,12 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
+    # A worker-side proposal after this target step cannot be consumed: every
+    # request scheduled in the batch has at most one output token remaining.
+    # This is deliberately batch-wide because the current speculator proposes
+    # one dense batch rather than an independently maskable set of rows.
+    skip_speculator_proposal: bool = False
+
     # Launch-debug-only timing metadata.  These are ignored by scheduling and
     # remain ``None`` unless VLLM_UNO_STEP_TIMING_DEBUG=1.
     debug_uno_step_id: int | None = None
