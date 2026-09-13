@@ -1038,12 +1038,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             row_count_tensor = torch.from_numpy(
                 self._sampler_row_counts(num_reqs, num_rows)
             ).to(self.device)
-            with capture_sampler_branches(self.sampler) as observed_branches:
-                with record_topk_topp_launches():
-                    self._dummy_sampler_run(
-                        sample_hidden_states.repeat_interleave(row_count_tensor, dim=0),
-                        num_reqs=num_reqs,
-                    )
+            with (
+                capture_sampler_branches(self.sampler) as observed_branches,
+                record_topk_topp_launches(),
+            ):
+                self._dummy_sampler_run(
+                    sample_hidden_states.repeat_interleave(row_count_tensor, dim=0),
+                    num_reqs=num_reqs,
+                )
         finally:
             self.sampler.needs_logits_processing[:num_reqs] = saved_needs_processing
             states.temperature.np[:num_reqs] = saved_temperature

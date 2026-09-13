@@ -1108,7 +1108,9 @@ def test_uno_sampler_warmup_keeps_the_served_sampler_backend(
 
 
 @pytest.mark.parametrize("use_flashinfer", [True, False])
-def test_sampler_selects_flashinfer_without_an_explicit_seed(monkeypatch, use_flashinfer):
+def test_sampler_selects_flashinfer_without_an_explicit_seed(
+    monkeypatch, use_flashinfer
+):
     """The actual production sampler chooses FlashInfer before Triton filters."""
     from vllm.v1.worker.gpu.sample import sampler as sampler_module
 
@@ -1564,8 +1566,8 @@ def test_uno_self_check_launch_counter_only_records_an_armed_scope(monkeypatch):
 def test_uno_launch_key_debug_is_gated_and_has_no_generic_serving_wrapper():
     """Generic sampling stays untouched; only opt-in startup proxies record."""
     from vllm.v1.sample.ops import topk_topp_triton
-    from vllm.v1.worker.gpu.sample import gumbel
     from vllm.v1.worker.gpu import launch_key_debug
+    from vllm.v1.worker.gpu.sample import gumbel
     from vllm.v1.worker.gpu.spec_decode import uno_prepare
 
     assert "launch_key_debug" not in inspect.getsource(topk_topp_triton)
@@ -1576,7 +1578,9 @@ def test_uno_launch_key_debug_is_gated_and_has_no_generic_serving_wrapper():
     assert "record_topk_topp_launches" in inspect.getsource(launch_key_debug)
 
 
-def test_uno_launch_key_debug_records_sampler_launches_only_in_startup_scope(monkeypatch):
+def test_uno_launch_key_debug_records_sampler_launches_only_in_startup_scope(
+    monkeypatch,
+):
     """The opt-in warmup proxy emits a receipt from each real launch object."""
     from vllm.v1.sample.ops import topk_topp_triton
     from vllm.v1.worker.gpu import launch_key_debug

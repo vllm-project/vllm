@@ -421,8 +421,10 @@ def run_uno_served_jit_self_check(
     missing_launches: dict[str, tuple[str, ...]] = {}
     ran = True
     try:
-        with preserve_rng_state(getattr(model_runner, "device", None)):
-            with capture_compilations() as compilations:
+        with (
+            preserve_rng_state(getattr(model_runner, "device", None)),
+            capture_compilations() as compilations,
+        ):
                 check_tokens = uno_self_check_token_count(
                     model_runner.max_num_tokens,
                     model_runner.decode_query_len,
@@ -447,23 +449,25 @@ def run_uno_served_jit_self_check(
                         sample_call_count += 1
                         return worker_sample_tokens(grammar_output)
 
-                    with capture_sampler_branches(
-                        getattr(model_runner, "sampler", None)
-                    ) as branches:
-                        with capture_topk_topp_launches() as launches:
-                            mode_ran = run_mixed_prefill_decode_warmup(
-                                model_runner,
-                                worker_execute_model,
-                                counted_sample_tokens,
-                                check_tokens,
-                                req_id_prefix=f"_uno_jit_self_check_{mode.name}",
-                                sampling_params=SamplingParams(
-                                    max_tokens=2,
-                                    temperature=0.9,
-                                    top_k=-1 if mode.top_k is None else mode.top_k,
-                                    top_p=1.0 if mode.top_p is None else mode.top_p,
-                                ),
-                            )
+                    with (
+                        capture_sampler_branches(
+                            getattr(model_runner, "sampler", None)
+                        ) as branches,
+                        capture_topk_topp_launches() as launches,
+                    ):
+                        mode_ran = run_mixed_prefill_decode_warmup(
+                            model_runner,
+                            worker_execute_model,
+                            counted_sample_tokens,
+                            check_tokens,
+                            req_id_prefix=f"_uno_jit_self_check_{mode.name}",
+                            sampling_params=SamplingParams(
+                                max_tokens=2,
+                                temperature=0.9,
+                                top_k=-1 if mode.top_k is None else mode.top_k,
+                                top_p=1.0 if mode.top_p is None else mode.top_p,
+                            ),
+                        )
                     torch.accelerator.synchronize()
                     sampler_calls[mode.name] = sample_call_count
                     sampler_launches[mode.name] = dict(launches)
