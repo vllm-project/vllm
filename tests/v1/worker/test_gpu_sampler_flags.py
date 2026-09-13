@@ -23,7 +23,7 @@ class MockReasoningConfig:
     natural_reasoning_end_token_ids = [91]
 
 
-def _make_sampler() -> Sampler:
+def _make_sampler(return_sampling_mask: bool = False) -> Sampler:
     req_states = RequestState(
         max_num_reqs=4,
         max_model_len=64,
@@ -38,6 +38,7 @@ def _make_sampler() -> Sampler:
         device=DEVICE,
         req_states=req_states,
         reasoning_config=MockReasoningConfig(),
+        return_sampling_mask=return_sampling_mask,
     )
 
 
@@ -88,3 +89,12 @@ def test_logits_processing_cache_only_checks_active_requests():
 
     assert not np.any(sampler.needs_logits_processing[sampling_only])
     assert np.any(sampler.needs_logits_processing[with_processing])
+
+
+def test_sampling_mask_width_uses_all_active_requests():
+    sampler = _make_sampler(return_sampling_mask=True)
+    sampler.add_request(0, 1, SamplingParams(top_k=3))
+    sampler.add_request(2, 1, SamplingParams(top_k=7))
+
+    assert sampler.get_sampling_mask_width(np.array([0], dtype=np.int32)) == 3
+    assert sampler.get_sampling_mask_width(np.array([0, 2], dtype=np.int32)) == 7
