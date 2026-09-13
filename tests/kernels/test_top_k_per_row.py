@@ -735,6 +735,106 @@ def test_deepseek_workspace_topk(
     )
 
 
+@pytest.mark.skipif(not _has_device_capability(80), reason="Requires SM80+")
+@pytest.mark.parametrize("rows", [65, 128])
+@pytest.mark.parametrize("top_k", [512, 1024, 2048])
+@pytest.mark.parametrize(
+    "distribution", ["random", "10LSBits", "ascending", "constant", "sampled_peaks"]
+)
+@torch.inference_mode()
+def test_persistent_topk_sampled_graph(
+    rows: int, top_k: int, distribution: str
+) -> None:
+    """Sampling and both fallbacks preserve exact values across graph replays."""
+    if torch.cuda.get_device_properties(0).shared_memory_per_block_optin < 144 * 1024:
+        pytest.skip("Sampled top-k requires at least 144 KiB of shared memory")
+    set_random_seed(42)
+    min_sampled_length = 98304 if top_k == 512 else 65536
+    width = min_sampled_length + 3
+    lengths = torch.full((rows,), width, dtype=torch.int32, device="cuda")
+    logits = create_random_logits(
+        torch.zeros_like(lengths),
+        lengths,
+        torch.float32,
+        42,
+        False,
+        "10LSBits" if distribution == "10LSBits" else "random",
+    )
+    if distribution == "ascending":
+        logits.copy_(torch.arange(width, device="cuda", dtype=torch.float32))
+    elif distribution == "constant":
+        logits.fill_(1.0)
+    elif distribution == "sampled_peaks":
+        # A biased sample leaves fewer than k survivors and must fall back.
+        logits.zero_()
+        sample = torch.arange(4096, device="cuda")
+        positions = (sample // 32) * (width // 128) + sample % 32
+        logits[:, positions] = 1 + sample.float() / 4096
+    original = logits.clone()
+    indices = torch.empty((rows, top_k), dtype=torch.int32, device="cuda")
+    workspace = torch.empty(RADIX_TOPK_WORKSPACE_SIZE, dtype=torch.uint8, device="cuda")
+
+    def run() -> None:
+        torch.ops._C.persistent_topk(
+            logits,
+            lengths.view(-1, 4 if rows == 128 else 1),
+            indices,
+            workspace,
+            top_k,
+            width,
+        )
+
+    run()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    positions = torch.arange(width, device="cuda")
+    slots = torch.arange(top_k, device="cuda")
+    for step in range(3):
+        bounds = torch.tensor(
+            [
+                -1,
+                0,
+                1,
+                top_k - 1,
+                top_k,
+                32769,
+                min_sampled_length - 1,
+                min_sampled_length,
+                width,
+                width + 17,
+            ],
+            dtype=torch.int32,
+            device="cuda",
+        )
+        lengths.copy_(
+            bounds[(torch.arange(rows, device="cuda") + step) % bounds.numel()]
+        )
+        logits.copy_(original if step != 1 else original.flip(1))
+        logits.masked_fill_(positions[None] >= lengths[:, None], float("nan"))
+        indices.fill_(-2)
+        graph.replay()
+        valid = slots[None] < lengths.clamp(max=top_k)[:, None]
+        assert torch.all(indices[~valid] == -1)
+        assert torch.all(((indices >= 0) & (indices < lengths[:, None])) == valid)
+        ordered_indices = indices.sort(dim=1).values
+        assert torch.all(
+            (ordered_indices[:, 1:] != ordered_indices[:, :-1])
+            | (ordered_indices[:, 1:] == -1)
+        )
+        selected = logits.gather(1, indices.clamp_min(0).long())
+        selected.masked_fill_(~valid, -float("inf"))
+        expected = logits.masked_fill(
+            positions[None] >= lengths[:, None], -float("inf")
+        )
+        torch.testing.assert_close(
+            selected.sort(dim=1, descending=True).values,
+            expected.topk(top_k, dim=1).values,
+            atol=0,
+            rtol=0,
+        )
+
+
 def run_large_context_topk_test(
     batch_size: int,
     seq_lens: list[int],
