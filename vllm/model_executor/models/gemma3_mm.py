@@ -19,6 +19,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
@@ -686,43 +687,16 @@ class Gemma3ForConditionalGeneration(
             tower_model="vision_tower",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        """
-        Calculate the number of tokens output by the vision encoder.
-
-        The vision encoder processes images into patch embeddings. For Gemma3,
-        the relationship between prompt placeholder tokens and actual vision
-        encoder output tokens depends on the patch grid size.
-
-        Args:
-            num_image_tokens: Number of image placeholder tokens in the prompt
-                              (typically mm_tokens_per_image per image)
-
-        Returns:
-            Number of tokens output by the vision encoder
-        """
-        # For Gemma3, the vision encoder outputs tokens_per_side x tokens_per_side
-        # tokens per image. Since num_image_tokens represents the number of
-        # connector output tokens (mm_tokens_per_image = 256), and tokens_per_side
-        # is sqrt(256) = 16, we need to account for the token expansion.
-        # Based on empirical testing, the multiplier of 16 works correctly.
-        return num_image_tokens * 16
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        """
-        Calculate the number of tokens output by the multimodal connector.
-
-        The connector applies projection and normalization but maintains the
-        token count for Gemma3.
-
-        Args:
-            num_vision_tokens: Number of tokens from vision encoder
-
-        Returns:
-            Number of tokens after connector processing
-        """
-        # The Gemma3 connector maintains a 1:1 token mapping
-        return num_vision_tokens
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        tower_tokens = num_mm_embeds * 16
+        return tower_tokens, tower_tokens
 
     def get_encoder_cudagraph_config(self):
         from vllm.v1.worker.encoder_cudagraph_defs import (

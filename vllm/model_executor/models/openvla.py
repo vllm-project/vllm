@@ -24,7 +24,11 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+from vllm.multimodal.inputs import (
+    MultiModalFieldConfig,
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+)
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
@@ -487,11 +491,15 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
             tower_model="vision_backbone",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        return num_image_tokens
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        return num_vision_tokens
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        return num_mm_embeds, num_mm_embeds
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def maybe_rename_vision_weights(

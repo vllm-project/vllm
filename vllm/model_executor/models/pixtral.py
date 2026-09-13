@@ -42,6 +42,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsOptionalItems,
     NestedTensors,
 )
@@ -623,17 +624,18 @@ class PixtralForConditionalGeneration(
             tower_model="vision_encoder",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         if getattr(self, "patch_merger", None) is None:
-            return num_image_tokens
+            return num_mm_embeds, num_mm_embeds
         merge_size = self.vision_args.spatial_merge_size
-        return num_image_tokens * (merge_size**2)
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        if getattr(self, "patch_merger", None) is None:
-            return num_vision_tokens
-        merge_size = self.vision_args.spatial_merge_size
-        return num_vision_tokens // (merge_size**2)
+        return num_mm_embeds * (merge_size**2), num_mm_embeds
 
 
 # Vision encoder

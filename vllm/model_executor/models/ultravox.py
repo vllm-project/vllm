@@ -29,6 +29,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
     NestedTensors,
 )
@@ -373,9 +374,9 @@ def _build_chunk_attn_metadata(
     valid/padding boundary (equivalent to the key-padding mask the HF
     implementation uses), while every row still flows through the
     (potentially LoRA-wrapped) linears, keeping the per-chunk token counts
-    constant as required by `get_num_mm_encoder_tokens` /
-    `get_num_mm_connector_tokens`. Queries at padding positions produce
-    (garbage) outputs, which are trimmed by `audio_token_len` downstream.
+    constant as required by `get_mm_lora_token_counts`. Queries at padding
+    positions produce (garbage) outputs, which are trimmed by `audio_token_len`
+    downstream.
     """
     batch_size = feature_lens.shape[0]
     starts = np.arange(batch_size, dtype=np.int64) * seq_len
@@ -684,7 +685,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
         # LoRA on the tower/connector requires per-item token counts that are
         # predictable from the placeholder count alone (see
-        # `get_num_mm_encoder_tokens`), so pad every audio chunk's mel input
+        # `get_mm_lora_token_counts`), so pad every audio chunk's mel input
         # to the tower's full context instead of the batch's max length.
         self.pad_audio_to_max_context = bool(
             lora_config is not None and lora_config.enable_tower_connector_lora
@@ -769,22 +770,26 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             self.config.audio_config.max_source_positions / self.config.stack_factor
         )
 
-    def get_num_mm_encoder_tokens(self, num_audio_tokens: int) -> int:
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         # With `pad_audio_to_max_context` (enforced when tower/connector LoRA
         # is enabled), the tower's LoRA-wrapped linears always run on
         # `max_source_positions` conv-downsampled tokens per chunk, regardless
         # of the valid frame count.
-        num_chunks = math.ceil(num_audio_tokens / self._get_max_tokens_per_chunk())
-        return num_chunks * self.config.audio_config.max_source_positions
-
-    def get_num_mm_connector_tokens(self, num_encoder_tokens: int) -> int:
+        num_chunks = math.ceil(num_mm_embeds / self._get_max_tokens_per_chunk())
+        tower_tokens = num_chunks * self.config.audio_config.max_source_positions
         # The connector runs on the frame-stacked tower output. Stacking pads
         # each chunk to a multiple of `stack_factor`, so this is
         # ceil(max_source_positions / stack_factor) tokens per chunk (188 for
-        # whisper's 1500), not `num_encoder_tokens // stack_factor` (187).
-        max_source_positions = self.config.audio_config.max_source_positions
-        num_chunks = num_encoder_tokens // max_source_positions
-        return num_chunks * self._get_max_tokens_per_chunk()
+        # whisper's 1500), not `tower_tokens // stack_factor` (187).
+        connector_tokens = num_chunks * self._get_max_tokens_per_chunk()
+        return tower_tokens, connector_tokens
 
     def _audio_features_to_embeddings(
         self,
@@ -866,7 +871,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             # Pad every chunk to the tower's full context so the number of
             # tokens processed by the tower/connector per chunk is constant,
             # keeping the LoRA token mappings computed by
-            # `get_num_mm_encoder_tokens`/`get_num_mm_connector_tokens` exact.
+            # `get_mm_lora_token_counts` exact.
             # Attention to the extra padding is masked via `audio_lens`.
             # Over-long inputs are not trimmed here; the tower raises on them.
             pad_len = self.audio_tower.max_context_length - audio_features.shape[-1]
