@@ -602,6 +602,7 @@ class DeepseekV32IndexerMetadata:
 
     decode: DeepSeekV32IndexerDecodeMetadata | None = None
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
+    block_table_cpu: torch.Tensor | None = None
 
 
 def compute_kpool_tail_slot_mapping(
@@ -1175,6 +1176,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         compressed_slot_mapping = slot_mapping
         compressed_seq_lens = seq_lens
         indexer_block_table = block_table
+        indexer_block_table_cpu = common_attn_metadata.block_table_cpu
         if self.compress_ratio > 1:
             kernel_block_size = self.kernel_block_size
             if (
@@ -1184,6 +1186,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             ):
                 factor = self.kv_cache_spec.block_size // kernel_block_size
                 indexer_block_table = (block_table[:, ::factor] // factor).contiguous()
+                if indexer_block_table_cpu is not None:
+                    indexer_block_table_cpu = (
+                        indexer_block_table_cpu[:, ::factor] // factor
+                    ).contiguous()
             padded_num_tokens = num_tokens
             if self.pcp_world_size > 1:
                 padded_num_tokens = slot_mapping.shape[0] // self.pcp_world_size
@@ -1499,6 +1505,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             num_prefill_tokens=num_prefill_tokens,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            block_table_cpu=indexer_block_table_cpu,
         )
 
         return attn_metadata

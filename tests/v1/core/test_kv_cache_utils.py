@@ -1478,6 +1478,30 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
+def test_pp_empty_uniform_group_does_not_allocate_remote_layers():
+    """An empty projected group retains its type, but must allocate no layers."""
+    spec = new_kv_cache_spec()
+    remote_spec = UniformTypeKVCacheSpecs(
+        block_size=spec.block_size,
+        kv_cache_specs={"remote": spec},
+    )
+    groups = kv_cache_utils._project_kv_cache_groups_to_worker(
+        [
+            KVCacheGroupSpec(["remote"], remote_spec),
+            KVCacheGroupSpec(["local"], spec),
+        ],
+        {"local": spec},
+    )
+    config = VllmConfig()
+    config.cache_config.kv_cache_layout = "BLHNC"
+    cache = kv_cache_utils.get_kv_cache_config_from_groups(
+        config, groups, spec.page_size_bytes * 4
+    )
+    assert cache.num_blocks == 4
+    assert [tensor.layers for tensor in cache.kv_cache_tensors] == [["local"]]
+    assert cache.kv_cache_groups[0].layer_names == []
+
+
 def test_dcp_world_size_for_kv_cache_spec_shards_full_attention_only():
     dcp = 8
     full = FullAttentionSpec(

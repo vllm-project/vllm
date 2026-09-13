@@ -465,6 +465,9 @@ class CommonAttentionMetadata:
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
 
+    # Snapshot of scheduler-owned tables for eager pipeline sharing.
+    block_table_cpu: torch.Tensor | None = None
+
     def batch_size(self) -> int:
         return self.seq_lens.shape[0]
 
@@ -525,6 +528,7 @@ class CommonAttentionMetadata:
             max_query_len=self.max_query_len,
             max_seq_len=self.max_seq_len,
             block_table_tensor=self.block_table_tensor[:num_actual_reqs],
+            block_table_cpu=maybe_slice_reqs(self.block_table_cpu),
             slot_mapping=self.slot_mapping[:num_actual_tokens],
             causal=self.causal[:num_actual_reqs]
             if isinstance(self.causal, torch.Tensor)
