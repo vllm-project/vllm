@@ -1120,23 +1120,6 @@ class FlashAttentionImpl(AttentionImpl):
             )
             self.vllm_flash_attn_version = 2
             self.fa4_hd256 = False
-        self.fa4_dense_warmup_eligible = (
-            vllm_config is not None
-            and vllm_config.model_config is not None
-            and vllm_config.model_config.hf_config.model_type
-            in ("gemma4", "gemma4_unified")
-            and vllm_config.parallel_config.decode_context_parallel_size == 1
-            and vllm_config.model_config.rswa_window is None
-            and not is_quantized_kv_cache(kv_cache_dtype)
-            and (
-                self.fa4_hd256
-                or (
-                    self.vllm_flash_attn_version == 4
-                    and head_size == 512
-                    and current_platform.is_device_capability_family(90)
-                )
-            )
-        )
         logger.info_once(
             "Using FlashAttention version %s",
             self.vllm_flash_attn_version,
@@ -1402,26 +1385,7 @@ class FlashAttentionImpl(AttentionImpl):
                     block_table = block_table[:, :num_pages]
                     num_splits = 1
 
-                use_fa4_dense_warmup = (
-                    self.fa4_dense_warmup_eligible
-                    and (
-                        self.fa4_hd256
-                        or (
-                            sliding_window_size == [-1, -1]
-                            and self.logits_soft_cap == 0
-                            and self.sinks is None
-                        )
-                    )
-                    and causal is True
-                    and not is_dynamic_causal
-                )
-                flash_attn_fn = (
-                    _FA4_DENSE_ATTENTION_KERNEL
-                    if use_fa4_dense_warmup
-                    else flash_attn_varlen_func
-                )
-                assert flash_attn_fn is not None
-                flash_attn_fn(
+                _FA4_DENSE_ATTENTION_KERNEL(
                     q=query[:num_actual_tokens],
                     k=key_cache,
                     v=value_cache,
