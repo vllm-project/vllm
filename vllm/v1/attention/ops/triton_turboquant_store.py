@@ -47,6 +47,15 @@ def _store_quantized_value(
         )
         val_min = tl.min(tl.where(d_mask, val_vec, float("inf")), axis=0)
         val_max = tl.max(tl.where(d_mask, val_vec, -float("inf")), axis=0)
+        # The per-vector scale and zero point are stored as fp16 further down.
+        # Clamp the observed range into fp16's finite limits *before* deriving
+        # the scale and quantizing, so the zero point used to quantize is the
+        # same one that is stored and later used to reconstruct. A bf16 value
+        # outlier (an attention sink of |min| > 65504 has been measured in real
+        # checkpoints) would otherwise cast to -inf at store time and poison
+        # every element of the vector on reconstruction.
+        val_min = tl.maximum(val_min, -65504.0)
+        val_max = tl.minimum(val_max, 65504.0)
         v_scale = (val_max - val_min) / 7.0
         v_scale = tl.where(v_scale > 1e-8, v_scale, 1e-8)
 
@@ -100,6 +109,15 @@ def _store_quantized_value(
         )
         val_min = tl.min(tl.where(d_mask, val_vec, float("inf")), axis=0)
         val_max = tl.max(tl.where(d_mask, val_vec, -float("inf")), axis=0)
+        # The per-vector scale and zero point are stored as fp16 further down.
+        # Clamp the observed range into fp16's finite limits *before* deriving
+        # the scale and quantizing, so the zero point used to quantize is the
+        # same one that is stored and later used to reconstruct. A bf16 value
+        # outlier (an attention sink of |min| > 65504 has been measured in real
+        # checkpoints) would otherwise cast to -inf at store time and poison
+        # every element of the vector on reconstruction.
+        val_min = tl.maximum(val_min, -65504.0)
+        val_max = tl.minimum(val_max, 65504.0)
         v_scale = (val_max - val_min) / 15.0
         v_scale = tl.where(v_scale > 1e-8, v_scale, 1e-8)
 
