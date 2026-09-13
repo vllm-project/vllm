@@ -162,10 +162,13 @@ class SparseIndexerTopk(torch.nn.Module):
     kernel_config.sparse_indexer_topk_backend) and runs the chosen one.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, backend: str | None = None) -> None:
         super().__init__()
-        kernel_config = get_current_vllm_config().kernel_config
-        self._backend = kernel_config.sparse_indexer_topk_backend
+        if backend is None:
+            backend = (
+                get_current_vllm_config().kernel_config.sparse_indexer_topk_backend
+            )
+        self._backend = backend
         self._is_cuda = current_platform.is_cuda()
         self._has_deep_select = self._is_cuda and (
             current_platform.is_device_capability_family(100)
