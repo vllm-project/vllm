@@ -808,3 +808,29 @@ def test_fa4_hd256_impl_selection(attn_type, sliding_window, expected):
         )
     assert impl.vllm_flash_attn_version == expected
     assert impl.fa4_hd256 == (expected == 4)
+
+
+@pytest.mark.skipif(RocmPlatform is None, reason="requires ROCm")
+@pytest.mark.parametrize("gfx11", [True, False])
+def test_rocm_attn_priority_gfx11(monkeypatch: pytest.MonkeyPatch, gfx11: bool):
+    """gfx11 ranks TRITON_ATTN above ROCM_ATTN; other ROCm parts do not."""
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setattr(rocm, "on_gfx11", lambda: gfx11)
+    order = rocm._get_backend_priorities(use_mla=False, use_sparse=False)
+    triton_idx = order.index(AttentionBackendEnum.TRITON_ATTN)
+    rocm_idx = order.index(AttentionBackendEnum.ROCM_ATTN)
+    assert (triton_idx < rocm_idx) is gfx11
+
+
+@pytest.mark.skipif(RocmPlatform is None, reason="requires ROCm")
+def test_rocm_attn_still_dropped_for_kv_connector(monkeypatch: pytest.MonkeyPatch):
+    """The KV-connector carve-out must survive the gfx11 reordering."""
+    import vllm.platforms.rocm as rocm
+
+    monkeypatch.setattr(rocm, "on_gfx11", lambda: True)
+    order = rocm._get_backend_priorities(
+        use_mla=False, use_sparse=False, use_kv_connector=True
+    )
+    assert AttentionBackendEnum.ROCM_ATTN not in order
+    assert AttentionBackendEnum.TRITON_ATTN in order

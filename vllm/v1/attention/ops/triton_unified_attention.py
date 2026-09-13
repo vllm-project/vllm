@@ -30,6 +30,12 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
 )
 from vllm.v1.kv_cache_interface import KVQuantMode
 
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import _ON_GFX11, _ON_GFX1151
+else:
+    _ON_GFX11 = False
+    _ON_GFX1151 = False
+
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
@@ -289,6 +295,9 @@ def kernel_unified_attention(
     # instead of letting them override it. Default False preserves the
     # original (causal AND SW) OR mm_prefix behavior for all other models.
     MM_PREFIX_CLAMP_SW: tl.constexpr = False,
+    # Read the 2D grid as (kv_heads, q_blocks) rather than the default
+    # (q_blocks, kv_heads). See ``_use_swapped_grid`` for the gating.
+    USE_SWAPPED_GRID: tl.constexpr = False,
 ):
     # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = (KV_QUANT_MODE >= 2) and (
@@ -302,8 +311,12 @@ def kernel_unified_attention(
             "USE_TD requires BLOCK_SIZE to be a multiple of TILE_SIZE",
         )
 
-    q_block_global_idx = tl.program_id(0)
-    kv_head_idx = tl.program_id(1)
+    if USE_SWAPPED_GRID:
+        kv_head_idx = tl.program_id(0)
+        q_block_global_idx = tl.program_id(1)
+    else:
+        q_block_global_idx = tl.program_id(0)
+        kv_head_idx = tl.program_id(1)
     segm_idx = tl.program_id(2) if IS_3D else 0
 
     (
@@ -786,13 +799,65 @@ def _is_gemma3_attention(head_size: int, sliding_window: int) -> bool:
     return sliding_window == 1024 and head_size in (128, 256)
 
 
+# gfx11 exposes 64KB of LDS per workgroup.
+_GFX11_LDS_BUDGET = 65536
+
+
+def _gfx11_tile_size(
+    head_size: int,
+    sliding_window: int,
+    element_size: int,
+    block_size: int,
+) -> int:
+    """Select the KV tile size on gfx11.
+
+    Match the tile to the KV cache block size. A tile deeper than the block
+    straddles two blocks, which are not contiguous in the paged cache, so
+    every tile load turns into a scatter; on Qwen3-8B at an 8k prefill a
+    32-deep tile over 16-token blocks costs 21% of end-to-end TTFT against
+    a matched tile. Gemma3 keeps its tuned decode tile of 32.
+
+    One software-pipeline stage holds a K and a V tile of
+    ``tile_size * head_size * element_size`` bytes each, so the tile is then
+    shrunk until that pair fits the LDS budget. Without it Triton aborts
+    engine startup with ``OutOfResources: shared memory`` — a ``block_size``
+    of 1056 rounds up to a 2048-deep tile, which overflows at every head size.
+
+    Args:
+        head_size: Attention head dimension.
+        sliding_window: Window size, used to recognise Gemma3.
+        element_size: Bytes per KV element.
+        block_size: KV cache block size.
+
+    Returns:
+        A power-of-2 tile size that fits the budget.
+    """
+    # Note: tile size must be at least 32 for fp8 (element_size == 1).
+    min_tile = 16 if element_size >= 2 else 32
+
+    if _is_gemma3_attention(head_size, sliding_window):
+        tile_size = 32
+    else:
+        tile_size = triton.next_power_of_2(block_size)
+
+    max_tile = _GFX11_LDS_BUDGET // (2 * head_size * element_size)
+    while tile_size > min_tile and tile_size > max_tile:
+        tile_size //= 2
+
+    return tile_size
+
+
 def _get_tile_size(
     head_size: int,
     sliding_window: int,
     element_size: int,
     is_prefill: bool,
+    block_size: int,
 ) -> int:
     """Select tile size with Gemma3-specific optimization."""
+    if _ON_GFX11:
+        return _gfx11_tile_size(head_size, sliding_window, element_size, block_size)
+
     if _is_gemma3_attention(head_size, sliding_window):
         # Gemma3: use 32 for decode (default is 16)
         return 32
@@ -802,6 +867,133 @@ def _get_tile_size(
         return 32
     # Note: tile size must be at least 32 for fp8 (element_size == 1).
     return 16 if element_size >= 2 else 32
+
+
+def _select_query_block(
+    max_seqlen_q: int, num_queries_per_kv: int, head_size: int
+) -> tuple[int, int, bool]:
+    """Pick ``(BLOCK_M, BLOCK_Q, tuned)`` for the 2D query blocking.
+
+    Long prefill on gfx1151 is served far better by a wider query block than
+    the generic selection gives it. Architectures are opted in explicitly;
+    everything else keeps the generic block.
+
+    Returns:
+        The query block size, the derived per-KV-head block, and whether the
+        tuned path was taken (the launch config keys off the flag).
+    """
+    if max_seqlen_q >= 256 and _ON_GFX1151:
+        block_m = max(
+            64 if head_size >= 80 else 128,
+            triton.next_power_of_2(num_queries_per_kv),
+        )
+        return block_m, block_m // num_queries_per_kv, True
+
+    block_m = (
+        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
+    )
+    return block_m, block_m // num_queries_per_kv, False
+
+
+def _use_swapped_grid(head_size: int) -> bool:
+    """Whether to launch the 2D grid as ``(kv_heads, q_blocks)``.
+
+    gfx1151 schedules the 2D kernel better when the KV head is the fastest
+    varying axis, but head_size 64 regresses under that order, so it keeps the
+    default. Every other architecture keeps the default too.
+    """
+    return _ON_GFX1151 and head_size >= 80
+
+
+def _cap_num_stages_for_gfx11_lds(
+    num_stages: int,
+    block_m: int,
+    tile_size: int,
+    head_size: int,
+    element_size: int,
+) -> int:
+    """Cap the K/V software-pipeline depth to fit the gfx11 LDS budget.
+
+    Each stage holds independent K and V tiles, so LDS grows with
+    ``num_stages``.  Wide heads overflow the budget at the depths chosen
+    below and Triton aborts with ``OutOfResources: shared memory``.
+    Estimated layout::
+
+        Q tile : block_m * head_size * element_size
+        S accum: block_m * tile_size * 4          (fp32)
+        K + V  : num_stages * 2 * tile_size * head_size * element_size
+
+    Args:
+        num_stages: Requested pipeline depth.
+        block_m: Query rows per block.
+        tile_size: KV tile depth.
+        head_size: Attention head dimension.
+        element_size: Bytes per KV element.
+
+    Returns:
+        The capped depth. Never below 1: a single stage that still does not
+        fit cannot be shortened any further.
+    """
+    q_bytes = block_m * head_size * element_size
+    s_bytes = block_m * tile_size * 4
+    kv_bytes_per_stage = 2 * tile_size * head_size * element_size
+    remaining = _GFX11_LDS_BUDGET - q_bytes - s_bytes
+    return max(1, min(num_stages, remaining // kv_bytes_per_stage))
+
+
+def _gfx11_launch_config(
+    max_seqlen_q: int,
+    num_kv_heads: int,
+    head_size: int,
+    element_size: int,
+    block_m: int,
+    tile_size: int,
+    tuned_query_block: bool,
+) -> dict[str, int]:
+    """Launch parameters for the 2D unified-attention kernel on gfx11.
+
+    Triton's defaults are tuned for NVIDIA and leave the 2D path an order of
+    magnitude below the bf16 peak on RDNA3. The 3D path is not covered.
+
+    Args:
+        max_seqlen_q: Longest query in the batch; ``1`` means decode.
+        num_kv_heads: KV head count, used to spot MQA.
+        head_size: Attention head dimension.
+        element_size: Bytes per query element.
+        block_m: Query rows per block.
+        tile_size: KV tile depth the kernel will launch with.
+        tuned_query_block: Whether ``_select_query_block`` took its tuned
+            gfx1151 path.
+
+    Returns:
+        Keyword arguments for the kernel launch.
+    """
+    waves_per_eu = 2
+    if max_seqlen_q == 1:
+        # A wide head lets the K/V tiles dominate LDS, so decode cannot
+        # afford a deep pipeline.
+        num_stages = 1 if head_size >= 80 else 3
+    else:
+        num_stages = 1
+        if tuned_query_block:
+            # A wider query block pays for a deeper pipeline and more
+            # occupancy per EU. Only reachable on gfx1151, the sole
+            # architecture measured here.
+            num_stages = 3
+            waves_per_eu = 6 if head_size >= 80 else 4
+            if head_size == 256 and num_kv_heads == 1:
+                # Gemma-2B style MQA: the single KV head starves the deeper
+                # pipeline, so keep it shallow.
+                num_stages = 1
+                waves_per_eu = 4
+
+    return {
+        "num_warps": 4,
+        "num_stages": _cap_num_stages_for_gfx11_lds(
+            num_stages, block_m, tile_size, head_size, element_size
+        ),
+        "waves_per_eu": waves_per_eu,
+    }
 
 
 def unified_attention(
@@ -934,10 +1126,9 @@ def unified_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
 
-    BLOCK_M = (
-        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
+    BLOCK_M, BLOCK_Q, tuned_query_block = _select_query_block(
+        max_seqlen_q, num_queries_per_kv, head_size
     )
-    BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     # Tuned launch parameters; ``None`` lets Triton pick its defaults.
     launch_num_warps: int | None = None
@@ -981,10 +1172,18 @@ def unified_attention(
         chunk_lookback = -1
 
     TILE_SIZE_PREFILL = _get_tile_size(
-        head_size, sliding_window_val, q.element_size(), is_prefill=True
+        head_size,
+        sliding_window_val,
+        q.element_size(),
+        is_prefill=True,
+        block_size=block_size,
     )
     TILE_SIZE_DECODE = _get_tile_size(
-        head_size, sliding_window_val, q.element_size(), is_prefill=False
+        head_size,
+        sliding_window_val,
+        q.element_size(),
+        is_prefill=False,
+        block_size=block_size,
     )
 
     # Wider KV tile for the tuned large-head path (see above). Only the 2D
@@ -1078,15 +1277,33 @@ def unified_attention(
     segm_expsum_ptr = softmax_segm_expsum if use_3d else None
     num_segments = num_par_softmax_segments if use_3d else 1
 
+    use_swapped_grid = not use_3d and _use_swapped_grid(head_size)
+
     grid: tuple[Any, ...]
     if not use_3d:
-        grid = (total_num_q_blocks, num_kv_heads)
+        grid = (
+            (num_kv_heads, total_num_q_blocks)
+            if use_swapped_grid
+            else (total_num_q_blocks, num_kv_heads)
+        )
         tile_size = TILE_SIZE_PREFILL
     else:
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE
 
+    # Lowest precedence first: platform tuning, then the caller's explicit
+    # ``launch_*`` overrides. An empty dict leaves the Triton defaults.
     launch_kwargs: dict[str, int] = {}
+    if not use_3d and _ON_GFX11:
+        launch_kwargs = _gfx11_launch_config(
+            max_seqlen_q,
+            num_kv_heads,
+            head_size,
+            q.element_size(),
+            BLOCK_M,
+            tile_size,
+            tuned_query_block,
+        )
     if launch_num_warps is not None:
         launch_kwargs["num_warps"] = launch_num_warps
     if launch_num_stages is not None:
@@ -1168,6 +1385,7 @@ def unified_attention(
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
         MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
+        USE_SWAPPED_GRID=use_swapped_grid,
         **launch_kwargs,
     )
 
