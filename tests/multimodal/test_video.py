@@ -1562,6 +1562,54 @@ class TestGLMGASamplingCaps:
         assert all(0 <= idx < 1000 for idx in indices)
 
 
+class TestGlm5NextSamplingCaps:
+    """The sampler walks `duration * target_fps` candidates, so an fps above the
+    source rate sizes the walk from the request. Clamping to the source rate
+    bounds it without changing which frames come back."""
+
+    def test_target_fps_clamped_to_source_rate(self, monkeypatch):
+        # Output alone cannot catch a removed clamp: both rates usually
+        # deduplicate to the same list, which is why the clamp is safe.
+        import vllm.transformers_utils.processors.glm5next as proc
+
+        seen: dict = {}
+        real = proc.glm_sample_frame_indices
+        monkeypatch.setattr(
+            proc,
+            "glm_sample_frame_indices",
+            lambda *a, **kw: (seen.update(kw), real(*a, **kw))[1],
+        )
+        source = VideoSourceMetadata(900, 30.0, 30.0)
+        Glm5NextVideoBackend.compute_frames_index_to_sample(
+            source, VideoTargetMetadata(num_frames=-1, fps=2_000_000, max_duration=-1)
+        )
+        assert seen["target_fps"] == source.original_fps
+
+        # No fps requested still means the sampler's own default, not the
+        # source rate.
+        Glm5NextVideoBackend.compute_frames_index_to_sample(
+            source, VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
+        )
+        assert seen["target_fps"] is None
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            VideoSourceMetadata(2, 2.0, 1.0),
+            VideoSourceMetadata(900, 30.0, 30.0),
+            VideoSourceMetadata(10_000, 30.0, 334.0),
+        ],
+    )
+    def test_clamp_does_not_change_sampling(self, source):
+        def sample(fps):
+            return Glm5NextVideoBackend.compute_frames_index_to_sample(
+                source, VideoTargetMetadata(num_frames=-1, fps=fps, max_duration=-1)
+            )
+
+        assert sample(2_000_000) == sample(int(source.original_fps))
+        assert len(sample(2_000_000)) <= source.total_frames_num
+
+
 def test_glm5next_backend_selected_for_processor():
     """Glm5NextVideoProcessor maps to the glm5next loader so only the
     sampled frames are decoded instead of the whole container. Both the
