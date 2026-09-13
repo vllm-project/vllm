@@ -3,6 +3,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
+from fractions import Fraction
 
 import pytest
 
@@ -238,6 +239,16 @@ def test_scheduler_config_hash_includes_max_num_seqs():
 def test_cache_config_hash_ignores_prefix_cache_retention_interval():
     base_hash = CacheConfig().compute_hash()
     assert CacheConfig(prefix_cache_retention_interval=64).compute_hash() == base_hash
+
+
+def test_cache_config_hash_ignores_runtime_offload_sizing():
+    config = CacheConfig()
+    base_hash = config.compute_hash()
+
+    config.worker_kv_cache_configs = [Fraction(1, 2)]
+    config.simple_cpu_offload_num_blocks = 42
+
+    assert config.compute_hash() == base_hash
 
 
 def test_envs_compile_factors_relocation_invariant(tmp_path):
