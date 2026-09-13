@@ -351,6 +351,11 @@ class Qwen3ASRForConditionalGeneration(
 ):
     # LoRA support
     packed_modules_mapping = {
+        "qkv": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
         "qkv_proj": [
             "q_proj",
             "k_proj",
