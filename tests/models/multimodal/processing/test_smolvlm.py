@@ -23,6 +23,7 @@ from ...utils import build_model_context
     [
         ({"max_image_size": {"longest_edge": 384}}, 1377),
         ({"max_image_size": {"longest_edge": 768}}, 405),
+        ({"do_image_splitting": False}, 81),
     ],
 )
 @pytest.mark.parametrize("num_imgs", [1, 2])
@@ -69,6 +70,14 @@ def test_processor_override(
 
     # Ensure the placeholders format are correct
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
+    num_patches = processor.info.get_num_patches(
+        image_width=dummy_image.width,
+        image_height=dummy_image.height,
+        processor=hf_processor,
+        mm_kwargs=hf_processor_mm_kwargs,
+    )
+    assert num_patches == expected_toks_per_img // hf_processor.image_seq_len
+
     hf_processed_inputs = hf_processor(
         text=prompt,
         images=mm_data["image"],
