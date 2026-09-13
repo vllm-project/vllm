@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -60,6 +61,21 @@ class MHCPreNormKernel(VllmJitKernel["MHCPreNormKernel.CompileKey"]):
             self._compiled_cache[compile_key] = self.kernel.compile(
                 **asdict(compile_key)
             )
+
+    def compile_many(self, compile_keys: Iterable[CompileKey]) -> None:
+        missing = list(
+            dict.fromkeys(
+                key for key in compile_keys if key not in self._compiled_cache
+            )
+        )
+        if len(missing) < 2:
+            return super().compile_many(missing)
+
+        # TileLang elaborates serially before compiling independent TIR modules.
+        compiled = self.kernel.par_compile(
+            [asdict(key) for key in missing], num_workers=min(4, len(missing))
+        )
+        self._compiled_cache.update(zip(missing, compiled, strict=True))
 
     def __call__(self, *tensors, **fields):
         compile_key = self.dispatch(
