@@ -510,9 +510,9 @@ def test_mamba_groups_support_different_state_specs():
     assert mamba_groups == {gdn_spec: [0], short_conv_spec: [1]}
 
     model_state = object.__new__(MambaHybridModelState)
-    model_state._mamba_group_ids = []
-    model_state._mamba_spec = None
-    group_ids, representative_spec = model_state._get_mamba_group_info(kv_cache_config)
+    model_state._align_mode = True
+    model_state.set_kv_cache_config(kv_cache_config)
+    group_ids, representative_spec = model_state._get_mamba_group_info()
     assert group_ids == [0, 1]
     assert representative_spec is gdn_spec
 
@@ -598,9 +598,9 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
 
     # The group is listed once per spec, so its id must not be repeated.
     model_state = object.__new__(MambaHybridModelState)
-    model_state._mamba_group_ids = []
-    model_state._mamba_spec = None
-    group_ids, representative_spec = model_state._get_mamba_group_info(kv_cache_config)
+    model_state._align_mode = True
+    model_state.set_kv_cache_config(kv_cache_config)
+    group_ids, representative_spec = model_state._get_mamba_group_info()
     assert group_ids == [0]
     assert representative_spec is gdn_spec
 
