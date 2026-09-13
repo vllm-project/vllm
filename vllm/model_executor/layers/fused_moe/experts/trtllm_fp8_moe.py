@@ -12,14 +12,14 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer import (
+    activation_to_flashinfer_int,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     fi_moe_largest_bucket,
-)
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    activation_to_flashinfer_int,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
