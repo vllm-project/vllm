@@ -201,6 +201,29 @@ class TurboQuantConfig:
             logger.info("TQ hybrid: full-attention layers %s", attn_indices)
             return []
 
+        # Models with heterogeneous head dimensions (e.g. Gemma4: head_dim=256
+        # for sliding-window layers, global_head_dim=512 for full-attention)
+        # already have sliding-window layers falling back to fp8. Skip boundary
+        # protection for these models to avoid inflating the shared page size.
+        # Newer transformers raises AmbiguousGlobalPerLayerAttributeError when
+        # head_dim varies per layer -- catch it as a heterogeneity signal.
+        try:
+            hf_text_config = model_config.hf_text_config
+            head_dim = getattr(hf_text_config, "head_dim", None)
+            global_head_dim = getattr(hf_text_config, "global_head_dim", None)
+            is_heterogeneous_head_dim = (
+                head_dim is not None
+                and global_head_dim is not None
+                and head_dim != global_head_dim
+            )
+        except Exception:
+            is_heterogeneous_head_dim = True
+        if is_heterogeneous_head_dim:
+            logger.info(
+                "TQ: skipping boundary protection for heterogeneous head_dim model."
+            )
+            return []
+
         num_layers = model_config.hf_text_config.num_hidden_layers
         if n <= 0 or num_layers <= 0:
             return []
