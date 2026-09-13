@@ -2189,12 +2189,20 @@ def _warn_if_unannotated_eagle_mamba(
     which align-mode checkpointing never produces, so reuse drops to zero with
     no error and no metric to show it.
 
+    Every flag-all fallback is gated on ``use_eagle_block_drop()``:
+    ``KVCacheCoordinator.__init__`` (also reached through
+    ``simple_kv_offload/manager.py``), ``SchedulerOffloadConfig.from_spec`` and
+    ``MooncakeStoreCoordinator._verify_and_split_kv_cache_groups``. So
+    ``disable_eagle_block_drop`` leaves every group unflagged *and* leaves
+    reuse intact, and this warning must not fire -- what keeping the volatile
+    trailing block implies is logged by the scheduler instead.
+
     Args:
         vllm_config: Config supplying the speculative method, if any.
         kv_cache_groups: Groups as they will be handed to consumers.
     """
     spec_config = vllm_config.speculative_config
-    if spec_config is None or not spec_config.use_eagle():
+    if spec_config is None or not spec_config.use_eagle_block_drop():
         return
     if any(group.is_eagle_group for group in kv_cache_groups):
         return
