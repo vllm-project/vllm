@@ -192,6 +192,10 @@ class RequestOutput:
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )
+                        # R3 is returned on the terminal output and must survive
+                        # aggregation with earlier chunks that have no R3.
+                        if next_completion.routed_experts is not None:
+                            completion.routed_experts = next_completion.routed_experts
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
                     else:
