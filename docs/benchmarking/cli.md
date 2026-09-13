@@ -596,6 +596,44 @@ vllm bench serve \
     --max-concurrency 512
 ```
 
+#### Responses API Benchmark
+
+The `openai-responses` backend benchmarks vLLM's
+[Responses API](../serving/online_serving/openai_compatible_server.md#responses-api)
+directly, instead of routing the same workload through `/v1/chat/completions`.
+
+```bash
+# Server
+vllm serve openai/gpt-oss-20b
+
+# Client
+vllm bench serve \
+    --backend openai-responses \
+    --endpoint /v1/responses \
+    --model openai/gpt-oss-20b \
+    --dataset-name random \
+    --random-input-len 1024 \
+    --random-output-len 1024 \
+    --num-prompts 200
+```
+
+Reasoning deltas (`response.reasoning_text.delta`) count towards TTFT and ITL,
+because the server is already decoding tokens when it emits them. Only output
+text (`response.output_text.delta`) is collected as the generated text, which
+matches how the `openai-chat` backend treats `DeltaMessage.reasoning`. End-to-end
+latency is measured up to `response.completed`, and the input and output token
+counts come from the usage block that event carries.
+
+The backend measures one streamed text-generation request per prompt. Built-in
+tools, MCP, and multi-turn state via `previous_response_id` are out of scope.
+All sampling parameter flags are supported except `--min-p`, which the
+Responses API does not accept.
+
+!!! warning
+    Do not pass `--extra-body '{"include_reasoning": false}'` when benchmarking
+    a reasoning model. The server still generates reasoning tokens but emits no
+    events for them, so the whole reasoning phase is absorbed into TTFT.
+
 #### Running With Sampling Parameters
 
 When using OpenAI-compatible backends such as `vllm`, optional sampling
