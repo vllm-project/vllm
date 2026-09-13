@@ -309,8 +309,16 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
         cu_seqlens_q = torch.arange(
             0, q_rope.shape[0] + 1, dtype=torch.int32, device=q_rope.device
         )
-        k_cache = kv_rows[:, self.kv_lora_rank :].unsqueeze(1).unsqueeze(1)
         v_cache = kv_rows[:, : self.kv_lora_rank].unsqueeze(1).unsqueeze(1)
+        if self.qk_rope_head_dim == 0:
+            # FA3's QV path requires the 64-wide Q/K specialization. For NoPE MLA,
+            # zero Q preserves QV-only attention scores
+            # while providing a valid TMA shape.
+            _FA3_QV_HEAD_DIM = 64
+            q_rope = q_nope.new_zeros(*q_nope.shape[:-1], _FA3_QV_HEAD_DIM)
+            k_cache = v_cache[..., :_FA3_QV_HEAD_DIM]
+        else:
+            k_cache = kv_rows[:, self.kv_lora_rank :].unsqueeze(1).unsqueeze(1)
 
         out = flash_attn_varlen_func(
             q=q_rope,
