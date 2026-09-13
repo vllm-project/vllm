@@ -546,6 +546,19 @@ def fp8_fp4_mqa_logits(
     """
     _lazy_init()
     if _fp8_fp4_mqa_logits_impl is None:
+        # DeepGEMM only builds for sm90/sm100. On the SM12x Triton sparse-MLA
+        # path the indexer's constructor guard is relaxed on the promise that
+        # this call is served by the portable fallback instead of raising.
+        from vllm.v1.attention.ops.flashmla import _use_triton_sparse_mla
+
+        if _use_triton_sparse_mla():
+            from vllm.v1.attention.ops.deepseek_v4_ops.sm12x_deep_gemm_fallbacks import (  # noqa: E501
+                _fp8_mqa_logits_sm12x,
+            )
+
+            return _fp8_mqa_logits_sm12x(
+                q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits
+            )
         return _missing()
     return _fp8_fp4_mqa_logits_impl(
         q,
@@ -601,6 +614,19 @@ def get_paged_mqa_logits_metadata(
     """
     _lazy_init()
     if _get_paged_mqa_logits_metadata_impl is None:
+        # The indexer gates this call on has_deep_gemm(), which only checks that
+        # the module *spec* exists (the vendored copy ships in the wheel), so on
+        # SM12x it fires even when DeepGEMM cannot actually import/run. Return
+        # empty scheduling metadata on the Triton sparse-MLA path instead of
+        # raising: _fp8_paged_mqa_logits_sm12x self-schedules and ignores it, and
+        # the metadata and logits impls go None together in _lazy_init, so this
+        # is symmetric with the fp8_fp4_paged_mqa_logits fallback. The [0, 2]
+        # int32 shape matches the real [slots + 1, 2] return so the indexer's
+        # buffer slice+copy is a no-op.
+        from vllm.v1.attention.ops.flashmla import _use_triton_sparse_mla
+
+        if _use_triton_sparse_mla():
+            return torch.empty((0, 2), dtype=torch.int32, device=context_lens.device)
         return _missing()
     next_n = context_lens.shape[1] if context_lens.dim() == 2 else 1
     num_slots = _paged_mqa_logits_schedule_slots(num_sms, next_n)
@@ -652,6 +678,19 @@ def fp8_fp4_paged_mqa_logits(
     """
     _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
+        # See fp8_fp4_mqa_logits: SM12x has no DeepGEMM, so serve the paged
+        # variant from the portable fallback (which masks via context_lens and
+        # so needs neither schedule_metadata nor the indices/clean_logits args).
+        from vllm.v1.attention.ops.flashmla import _use_triton_sparse_mla
+
+        if _use_triton_sparse_mla():
+            from vllm.v1.attention.ops.deepseek_v4_ops.sm12x_deep_gemm_fallbacks import (  # noqa: E501
+                _fp8_paged_mqa_logits_sm12x,
+            )
+
+            return _fp8_paged_mqa_logits_sm12x(
+                q, kv_cache, weights, context_lens, block_tables, max_model_len
+            )
         return _missing()
     # DeepGEMM asserts block_tables.stride(-1)==1. A trailing size-1 dim
     # (e.g. block_table shape [B,1] for short seqs under a large block_size)
