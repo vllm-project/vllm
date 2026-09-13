@@ -61,6 +61,16 @@ if target_enabled cuda-13-0; then
   docker manifest create "vllm/vllm-openai:v${RELEASE_VERSION}" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64"
   docker manifest push vllm/vllm-openai:latest
   docker manifest push "vllm/vllm-openai:v${RELEASE_VERSION}"
+
+  PUBLISH_ZSTD_IMAGE=$(buildkite-agent meta-data get publish-zstd-image --default false)
+  if [ "$PUBLISH_ZSTD_IMAGE" = "true" ]; then
+    ZSTD_DIGEST=$(docker buildx imagetools inspect \
+      "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64" \
+      --format '{{json .Manifest.Digest}}' | tr -d '"')
+    .buildkite/scripts/publish-zstd-image.sh \
+      "public.ecr.aws/q9t5s3a7/vllm-release-repo@${ZSTD_DIGEST}" \
+      "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-zstd"
+  fi
 fi
 
 # ---- CUDA 12.9 ----
