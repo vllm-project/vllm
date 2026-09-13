@@ -484,6 +484,7 @@ def _topk(
         logits.shape[0] <= 64
         and logits.stride(0) % 4 == 0
         and current_platform.has_device_capability(90)
+        and not current_platform.is_device_capability_family(110)
         and not current_platform.is_device_capability_family(120)
     )
     topk_op = (
