@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -20,6 +20,9 @@ from vllm.v1.worker.gpu.model_states.interface import (
 )
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.mm.lora import MMEncoderLoraActivation
 
 
 @dataclass
@@ -76,6 +79,7 @@ class EncoderDecoderModelState(ModelState):
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
         req_states: RequestState,
+        mm_lora_activation: "MMEncoderLoraActivation | None" = None,
     ) -> None:
         # Ensure encoder inputs are ordered consistently with input_batch.req_ids.
         encoder_inputs: dict[str, list[int]] = {}
@@ -91,7 +95,9 @@ class EncoderDecoderModelState(ModelState):
             # directly. No need to store in encoder_cache: cross-attention K/V are
             # written to the KV cache on the first step; decode steps use the cache.
             with self.encoder_runner.timed_encoder_operation(encoder_inputs.keys()):
-                self.encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+                self.encoder_outputs = self.encoder_runner.execute_mm_encoder(
+                    mm_kwargs, mm_lora_activation=mm_lora_activation
+                )
         else:
             # Decode steps: encoder K/V are in cross-attention KV cache.
             self.encoder_outputs = []
