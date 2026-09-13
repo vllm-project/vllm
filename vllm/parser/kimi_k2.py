@@ -29,6 +29,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.parser.utils import resolve_enable_thinking
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -157,13 +158,7 @@ class KimiK2Parser(ParserEngine):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        thinking = chat_kwargs.get("thinking", None)
-        enable_thinking = chat_kwargs.get("enable_thinking", None)
-        self.thinking_enabled = (
-            True
-            if thinking is None and enable_thinking is None
-            else bool(thinking) or bool(enable_thinking)
-        )
+        self.thinking_enabled = resolve_enable_thinking(chat_kwargs, default=True)
         kwargs.setdefault(
             "parser_engine_config",
             kimi_k2_config(thinking=self.thinking_enabled),

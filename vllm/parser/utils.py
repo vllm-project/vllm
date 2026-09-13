@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 
 from openai.types.responses import ResponseFunctionToolCall
 
@@ -11,6 +12,25 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+
+
+def resolve_enable_thinking(
+    chat_kwargs: Mapping[str, Any] | None,
+    *,
+    default: bool = True,
+) -> bool:
+    """Resolve whether thinking/reasoning mode is enabled.
+
+    ``enable_thinking`` is the canonical chat_template_kwargs name.
+    ``thinking`` is accepted as a backward-compatible alias so parsers and
+    chat templates stay in sync (see #43728).
+    """
+    chat_kwargs = chat_kwargs or {}
+    thinking = chat_kwargs.get("thinking")
+    enable_thinking = chat_kwargs.get("enable_thinking")
+    if thinking is None and enable_thinking is None:
+        return default
+    return bool(thinking) or bool(enable_thinking)
 
 
 def count_tool_calls(tool_calls: object) -> int:
