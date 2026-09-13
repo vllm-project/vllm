@@ -4,9 +4,10 @@
 
 from __future__ import annotations
 
+import json
 from enum import Enum
 from itertools import product
-from typing import cast
+from typing import Any, cast
 
 from prometheus_client import REGISTRY, Counter
 
@@ -14,6 +15,9 @@ _model_name: str | None = None
 
 _TOOL_CALL_PARSER_INVOCATIONS_TOTAL = "vllm:tool_call_parser_invocations_total"
 _tool_call_parser_invocations: Counter | None = None
+
+_TOOL_CALLS_COMPLETED_TOTAL = "vllm:tool_calls_completed_total"
+_tool_calls_completed: Counter | None = None
 
 
 class ToolCallOutcome(Enum):
@@ -25,6 +29,12 @@ class RequestType(Enum):
     CHAT_COMPLETIONS = "chat_completions"
     RESPONSES = "responses"
     OTHER = "other"
+
+
+class ValidationOutcome(Enum):
+    VALID = "valid"
+    UNKNOWN_TOOL = "unknown_tool"
+    INVALID_ARGS = "invalid_args"
 
 
 def init_parser_metrics(*, model_name: str) -> None:
@@ -61,6 +71,43 @@ def init_parser_metrics(*, model_name: str) -> None:
             request_type=request_type.value,
         )
 
+    global _tool_calls_completed
+    try:
+        _tool_calls_completed = Counter(
+            name=_TOOL_CALLS_COMPLETED_TOTAL,
+            documentation=(
+                "Total number of completed tool calls. "
+                "Incremented once per finished call. "
+                "Streaming and non-streaming share this counter."
+            ),
+            labelnames=["model_name", "request_type", "validation_outcome"],
+        )
+    except ValueError:
+        _tool_calls_completed = cast(
+            Counter,
+            REGISTRY._names_to_collectors[_TOOL_CALLS_COMPLETED_TOTAL],
+        )
+
+    for request_type, validation_outcome in product(RequestType, ValidationOutcome):
+        _tool_calls_completed.labels(
+            model_name=_model_name,
+            request_type=request_type.value,
+            validation_outcome=validation_outcome.value,
+        )
+
+
+def _request_type(request: object) -> RequestType:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+
+    match request:
+        case ChatCompletionRequest():
+            return RequestType.CHAT_COMPLETIONS
+        case ResponsesRequest():
+            return RequestType.RESPONSES
+        case _:
+            return RequestType.OTHER
+
 
 def record_tool_parser_invocation(
     *,
@@ -79,17 +126,6 @@ def record_tool_parser_invocation(
     if _tool_call_parser_invocations is None:
         return
 
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-
-    match request:
-        case ChatCompletionRequest():
-            request_type = RequestType.CHAT_COMPLETIONS
-        case ResponsesRequest():
-            request_type = RequestType.RESPONSES
-        case _:
-            request_type = RequestType.OTHER
-
     match is_tool_called:
         case bool():
             outcome = (
@@ -104,5 +140,52 @@ def record_tool_parser_invocation(
         model_name=_model_name,
         mode="streaming" if is_streaming else "non_streaming",
         outcome=outcome.value,
-        request_type=request_type.value,
+        request_type=_request_type(request).value,
     ).inc()
+
+
+def record_tool_call_completed(
+    *,
+    request: object,
+    outcome: ValidationOutcome,
+) -> None:
+    """Increment the completed tool-call counter when registered."""
+    if _tool_calls_completed is None:
+        return
+
+    _tool_calls_completed.labels(
+        model_name=_model_name,
+        request_type=_request_type(request).value,
+        validation_outcome=outcome.value,
+    ).inc()
+
+
+def classify_completed_tool_call(
+    name: str,
+    arguments: str,
+    tools: object | None,
+) -> ValidationOutcome:
+    """Return one validation label for a completed tool call.
+
+    Never raises. Unexpected errors map to ``invalid_args``.
+    """
+    try:
+        import jsonschema
+
+        from vllm.tool_parsers.utils import find_tool_name, find_tool_parameters
+
+        catalog = cast(Any, tools)
+        if not find_tool_name(catalog, name):
+            return ValidationOutcome.UNKNOWN_TOOL
+
+        try:
+            instance = json.loads(arguments)
+        except json.JSONDecodeError:
+            return ValidationOutcome.INVALID_ARGS
+
+        params = find_tool_parameters(catalog, name)
+        schema = params if params is not None else {"type": "object", "properties": {}}
+        jsonschema.validate(instance=instance, schema=schema)
+        return ValidationOutcome.VALID
+    except Exception:
+        return ValidationOutcome.INVALID_ARGS
