@@ -60,8 +60,13 @@ def _mxfp8_backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
             AiterMxfp8Experts,
         )
+        from vllm.model_executor.layers.fused_moe.experts.minimax_m3_flydsl_mxfp8_moe import (  # noqa: E501
+            MiniMaxM3FlyDSLMxfp8Experts,
+        )
 
-        return [AiterMxfp8Experts]
+        # MiniMax-M3 shapes on gfx950 take the FlyDSL chains (same weights);
+        # everything else aiter's kernels
+        return [MiniMaxM3FlyDSLMxfp8Experts, AiterMxfp8Experts]
     if backend == Fp8MoeBackend.TRITON_MXFP8:
         from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
             Mxfp8NativeTritonExperts,
