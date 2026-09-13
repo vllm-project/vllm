@@ -1085,7 +1085,6 @@ def test_uno_prefill_returns_before_its_draft_proposal(monkeypatch):
     runner.output_copy_stream = object()
     runner.eplb = SimpleNamespace(step=lambda **_kwargs: None)
     runner._draft_workspace_lane = 0
-    runner._pending_uno_proposal = None
     runner.model = SimpleNamespace(compute_logits=object())
     runner.model_state = SimpleNamespace()
     runner.prompt_logprobs_worker = SimpleNamespace(
@@ -1126,10 +1125,13 @@ def test_uno_prefill_returns_before_its_draft_proposal(monkeypatch):
     proposer.supports_mm_inputs = False
     proposer.draft_token_confidence_probs = None
 
+    proposer._step = 7
+
     def propose(*args, **kwargs):
         assert args[3] is target_hidden
         assert kwargs == {"dp_sync": None, "mm_inputs": None}
-        events.append("propose")
+        events.append(f"propose-step-{proposer._step}")
+        proposer._step += 1
         return torch.tensor([[8, 9]], dtype=torch.int64)
 
     proposer.propose = propose
@@ -1138,14 +1140,12 @@ def test_uno_prefill_returns_before_its_draft_proposal(monkeypatch):
     output = runner.sample_tokens(None)
 
     assert isinstance(output, FakeAsyncOutput)
-    assert events == ["output", "postprocess", "kv"]
-    assert runner._pending_uno_proposal is not None
-    assert runner.req_states.draft_tokens.tolist() == [[0, 0]]
-
-    runner._flush_deferred_uno_proposal()
-
-    assert events == ["output", "postprocess", "kv", "propose", "publish"]
-    assert runner._pending_uno_proposal is None
+    assert events == ["output", "postprocess", "propose-step-7", "publish", "kv"]
+    # Simulate the step mutation formerly caused by a DP dummy run. It is
+    # necessarily after the proposal now, rather than between defer and flush.
+    proposer._step += 1
+    assert proposer._step == 9
+    assert not hasattr(runner, "_pending_uno_proposal")
     assert runner.req_states.draft_tokens.tolist() == [[8, 9]]
 
 

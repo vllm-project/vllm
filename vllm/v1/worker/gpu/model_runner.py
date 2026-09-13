@@ -363,11 +363,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
 
-        # Uno can publish a sampled prefill token before scheduling its draft
-        # proposal.  The continuation is drained before the next input batch
-        # can read draft_tokens, preserving speculative-decode ordering.
-        self._pending_uno_proposal: PendingUnoProposal | None = None
-
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
         self.routed_experts_capturer: RoutedExpertsCapturer | None = None
@@ -1198,50 +1193,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.pp_handler is not None:
             self.pp_handler.broadcast_drafts(self.req_states.draft_tokens, input_batch)
 
-    def _defer_uno_proposal(
-        self,
-        input_batch: InputBatch,
-        attn_metadata: dict[str, Any] | None,
-        slot_mappings_by_layer: dict[str, torch.Tensor] | None,
-        last_hidden_states: torch.Tensor,
-        aux_hidden_states: list[torch.Tensor] | None,
-        num_sampled: torch.Tensor,
-        num_rejected: torch.Tensor,
-        dp_sync: DPSyncState | None,
-        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None,
-    ) -> None:
-        """Hold the Uno proposal until the sampled output has been handed off."""
-        if getattr(self, "_pending_uno_proposal", None) is not None:
-            raise RuntimeError("Cannot defer a second Uno proposal before flushing first")
-        self._pending_uno_proposal = PendingUnoProposal(
-            input_batch,
-            attn_metadata,
-            slot_mappings_by_layer,
-            last_hidden_states,
-            aux_hidden_states,
-            num_sampled,
-            num_rejected,
-            dp_sync,
-            mm_inputs,
-        )
-
-    @torch.inference_mode()
-    def _flush_deferred_uno_proposal(self) -> None:
-        """Queue the saved Uno proposal before any next-step input mutation.
-
-        The previous step's target buffers and request-index mapping remain
-        valid only until ``finish_requests``/``add_requests`` run.  Drain the
-        continuation first; CUDA stream order then makes the following input
-        preparation consume the proposal's draft tokens.
-        """
-        pending = getattr(self, "_pending_uno_proposal", None)
-        if pending is None:
-            return
-        self._pending_uno_proposal = None
-        assert isinstance(self.speculator, UnoSpeculator)
-        self._run_speculator_proposal(*pending)
-        self._publish_draft_tokens(pending.input_batch)
-
     @torch.inference_mode()
     def capture_model(self, *, profile_only: bool = False) -> int:
         assert self.cudagraph_manager is not None
@@ -1883,10 +1834,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         valid_dummy_state_slots: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
-            # Async scheduling publishes the sampled token before Uno's draft
-            # work.  Its continuation must run before this call changes the
-            # request-index mapping or prepares the next input tensors.
-            self._flush_deferred_uno_proposal()
             # Update the request states.
             self.update_pp_decode_requests()
             self.finish_requests(scheduler_output)
@@ -2313,9 +2260,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
             cudagraph_stats=cudagraph_stats,
         )
-        # Start the async output copy before postprocessing.  Uno defers its
-        # K-row proposal to the next worker turn, so the handoff is no longer
-        # held behind draft work.
+        # Start the async output copy before postprocessing. The proposal is
+        # queued below, after this copy-stream handoff, so it can overlap the
+        # token copy without retaining a prior turn's tensors.
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
             sampler_output=sampler_output,
@@ -2351,7 +2298,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
-        deferred_uno_proposal = False
         if self.speculator is not None:
             assert self.sampler is not None
             # Let the target override the hidden state fed to the drafter
@@ -2362,40 +2308,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: draft_hidden_states.size(0)]
-            if isinstance(self.speculator, UnoSpeculator) and self.pp_handler is None:
-                # Do not let the K-row Uno proposal hold the prefill token in
-                # the engine.  The continuation is queued at the beginning of
-                # the next worker turn, before its input preparation reads the
-                # draft-token buffer.
-                self._defer_uno_proposal(
-                    input_batch,
-                    attn_metadata,
-                    slot_mappings_by_layer,
-                    spec_hidden_states,
-                    aux_hidden_states,
-                    num_sampled,
-                    num_rejected,
-                    dp_sync,
-                    mm_inputs,
-                )
-                deferred_uno_proposal = True
-            else:
-                self._run_speculator_proposal(
-                    input_batch,
-                    attn_metadata,
-                    slot_mappings_by_layer,
-                    spec_hidden_states,
-                    aux_hidden_states,
-                    num_sampled,
-                    num_rejected,
-                    dp_sync,
-                    mm_inputs,
-                )
+            # AsyncOutput has already recorded its D2H copy event on the
+            # output stream. Queue Uno's K-row proposal only after that
+            # handoff; the main-stream work cannot delay the already-recorded
+            # token copy, and no proposal inputs must survive into another
+            # worker turn.
+            self._run_speculator_proposal(
+                input_batch,
+                attn_metadata,
+                slot_mappings_by_layer,
+                spec_hidden_states,
+                aux_hidden_states,
+                num_sampled,
+                num_rejected,
+                dp_sync,
+                mm_inputs,
+            )
 
-        if not deferred_uno_proposal:
-            # Spec-decode and diffusion LLMs both use draft tokens but the latter does
-            # not have a speculator (i.e. self.speculator is None)
-            self._publish_draft_tokens(input_batch)
+        # Spec-decode and diffusion LLMs both use draft tokens but the latter does
+        # not have a speculator (i.e. self.speculator is None).
+        self._publish_draft_tokens(input_batch)
 
         # Post-step KV connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
@@ -2405,11 +2337,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        # Synchronous scheduling and structured output validation ask for
-        # drafts before they construct the next SchedulerOutput.  Preserve
-        # that contract while leaving the normal async prefill handoff free to
-        # return first.
-        self._flush_deferred_uno_proposal()
         return self.draft_tokens_handler.get_draft_tokens()
 
     @torch.inference_mode()
@@ -2542,20 +2469,6 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     routed_experts: RoutedExpertsTensors | None
     cudagraph_stats: CUDAGraphStat | None
-
-
-class PendingUnoProposal(NamedTuple):
-    """The Uno proposal retained across the sampled-token handoff."""
-
-    input_batch: InputBatch
-    attn_metadata: dict[str, Any] | None
-    slot_mappings_by_layer: dict[str, torch.Tensor] | None
-    last_hidden_states: torch.Tensor
-    aux_hidden_states: list[torch.Tensor] | None
-    num_sampled: torch.Tensor
-    num_rejected: torch.Tensor
-    dp_sync: DPSyncState | None
-    mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None
 
 
 class BatchReqState(NamedTuple):
