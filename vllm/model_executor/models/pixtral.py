@@ -17,7 +17,7 @@ from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens,
 )
 from transformers.models.pixtral.modeling_pixtral import (
-    PixtralRotaryEmbedding,
+    PixtralVisionRotaryEmbedding,
     apply_rotary_pos_emb,
     position_ids_in_meshgrid,
 )
@@ -1465,7 +1465,7 @@ class PixtralHFVisionModel(nn.Module):
 
         self.dtype = next(self.parameters()).dtype
         self.device = next(self.parameters()).device
-        self.patch_positional_embedding = PixtralRotaryEmbedding(config, self.device)
+        self.patch_positional_embedding = PixtralVisionRotaryEmbedding(config, self.device)
 
     def forward(
         self,
