@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
 import regex as re
 
@@ -25,7 +25,11 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import is_complete_json, partial_tag_overlap
+from vllm.tool_parsers.utils import (
+    find_tag_outside_json_strings,
+    is_complete_json,
+    partial_tag_overlap,
+)
 from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
@@ -35,9 +39,6 @@ class Hermes2ProToolParser(ToolParser):
     structural_tag_model = "hermes"
     tool_call_start_token: str = "<tool_call>"
     tool_call_end_token: str = "</tool_call>"
-    tool_call_regex = re.compile(
-        r"<tool_call>(.*?)</tool_call>|<tool_call>(.*)", re.DOTALL
-    )
     scratch_pad_regex = re.compile(r"<scratch_pad>(.*?)</scratch_pad>", re.DOTALL)
 
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
@@ -67,6 +68,29 @@ class Hermes2ProToolParser(ToolParser):
             request.skip_special_tokens = False
         return request
 
+    def _iter_tool_call_bodies(self, text: str) -> Iterator[tuple[str, bool, bool]]:
+        """Yield the raw body of each tool call region in ``text``.
+
+        The end token is located with JSON string awareness so that a literal
+        ``</tool_call>`` inside a string argument does not end the region. A
+        region without an end token extends to the end of ``text``.
+
+        Yields:
+            The body, whether the end token was found, and whether the body
+            ends inside an unterminated JSON string literal.
+        """
+        pos = 0
+        while (start := text.find(self.tool_call_start_token, pos)) != -1:
+            body_start = start + len(self.tool_call_start_token)
+            end, in_string = find_tag_outside_json_strings(
+                text, self.tool_call_end_token, body_start
+            )
+            if end == -1:
+                yield text[body_start:], False, in_string
+                return
+            yield text[body_start:end], True, False
+            pos = end + len(self.tool_call_end_token)
+
     def extract_tool_calls(
         self,
         model_output: str,
@@ -80,17 +104,11 @@ class Hermes2ProToolParser(ToolParser):
 
         else:
             try:
-                # there are two possible captures - between tags, or between a
-                # tag and end-of-string so the result of
-                # findall is an array of tuples where one is a function call and
-                # the other is None
-                function_call_tuples = self.tool_call_regex.findall(model_output)
-
                 # load the JSON, and then use it to build the Function and
                 # Tool Call
                 raw_function_calls = [
-                    json.loads(match[0] if match[0] else match[1])
-                    for match in function_call_tuples
+                    json.loads(body)
+                    for body, _, _ in self._iter_tool_call_bodies(model_output)
                 ]
                 tool_calls = [
                     ToolCall(
@@ -141,28 +159,21 @@ class Hermes2ProToolParser(ToolParser):
     def _extract_tool_call_jsons(self, text: str) -> list[tuple[str, bool]]:
         """Extract (json_text, is_complete) for each <tool_call> region."""
         results: list[tuple[str, bool]] = []
-        pos = 0
-        while True:
-            start = text.find(self.tool_call_start_token, pos)
-            if start == -1:
-                break
-            json_start = start + len(self.tool_call_start_token)
-            json_end = text.find(self.tool_call_end_token, json_start)
-            if json_end != -1:
-                results.append((text[json_start:json_end].strip(), True))
-                pos = json_end + len(self.tool_call_end_token)
-            else:
-                raw = text[json_start:]
-                # Strip partial </tool_call> suffix if present.
+        for raw, terminated, in_string in self._iter_tool_call_bodies(text):
+            if terminated:
+                results.append((raw.strip(), True))
+                continue
+            if not in_string:
+                # Strip partial </tool_call> suffix if present. Inside a
+                # string literal those characters are argument data.
                 overlap = partial_tag_overlap(raw, self.tool_call_end_token)
                 if overlap:
                     raw = raw[:-overlap]
-                tc_json = raw.strip()
-                # Valid JSON without closing tag = complete body,
-                # tag tokens just haven't arrived yet.
-                is_complete = is_complete_json(tc_json) if tc_json else False
-                results.append((tc_json, is_complete))
-                break
+            tc_json = raw.strip()
+            # Valid JSON without closing tag = complete body,
+            # tag tokens just haven't arrived yet.
+            is_complete = is_complete_json(tc_json) if tc_json else False
+            results.append((tc_json, is_complete))
         return results
 
     @staticmethod
