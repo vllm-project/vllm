@@ -78,6 +78,24 @@ class WeightsMapper:
         result = self._map_name_with_shard(key)
         return result[0] if result is not None else None
 
+    @staticmethod
+    def _replace_stacked_component(key: str, old: str, new: str) -> str | None:
+        """Replace ``old`` with ``new`` when ``old`` is a dotted path component.
+
+        Unlike a raw substring replace, ``v_proj`` does not match inside
+        ``qkv_proj``. Leading dots on ``old``/``new`` (e.g. ``.q_proj``) are
+        ignored for matching; separators already present in ``key`` are kept.
+        """
+        old_norm = old.lstrip(".")
+        new_norm = new.lstrip(".")
+        if not old_norm:
+            return None
+        pattern = re.compile(rf"(^|\.)({re.escape(old_norm)})(\.|$)")
+        match = pattern.search(key)
+        if match is None:
+            return None
+        return key[: match.start(2)] + new_norm + key[match.end(2) :]
+
     def _map_name_with_shard(self, key: str) -> tuple[str, ShardId | None] | None:
         """Map a weight name and extract any shard_id metadata.
 
@@ -113,10 +131,21 @@ class WeightsMapper:
                 key = key.replace(substr, new_key, 1)
 
         shard_id: ShardId | None = None
-        for substr, (new_key, new_shard_id) in self.orig_to_new_stacked.items():
-            if substr in key:
-                key = key.replace(substr, new_key, 1)
+        # Match stacked patterns as dotted path components (not raw substrings)
+        # and stop after the first hit. Otherwise `v_proj` rewrites inside
+        # `qkv_proj` (→ `qkqkv_proj`) and overwrites the q/k shard id — see
+        # https://github.com/vllm-project/vllm/issues/48423.
+        stacked_items = sorted(
+            self.orig_to_new_stacked.items(),
+            key=lambda item: len(item[0].lstrip(".")),
+            reverse=True,
+        )
+        for substr, (new_key, new_shard_id) in stacked_items:
+            replaced = self._replace_stacked_component(key, substr, new_key)
+            if replaced is not None:
+                key = replaced
                 shard_id = new_shard_id
+                break
 
         for prefix, new_key in self.orig_to_new_prefix.items():
             if key.startswith(prefix):
