@@ -292,6 +292,9 @@ def check_and_fallback_input_schema(
 
     weight_schema = weight_schema.to_humming_schema(param_dtype)
     input_schema = input_schema.to_humming_schema(param_dtype)
+    fp6_dtypes = (humming_dtypes.float6e2m3, humming_dtypes.float6e3m2)
+    if input_schema.input_dtype in fp6_dtypes:
+        input_schema.input_dtype = humming_dtypes.float8e4m3
     input_dtype = input_schema.input_dtype
     input_bits = input_dtype.num_bits if input_dtype is not None else 16
     input_group_size = input_schema.input_scale_group_size
