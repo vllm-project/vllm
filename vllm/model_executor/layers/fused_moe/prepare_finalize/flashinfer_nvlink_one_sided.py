@@ -40,6 +40,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         self.num_experts = num_experts
         self.hidden_size = hidden_size
         self.num_dispatchers_ = num_dispatchers
+        self.has_x_sf_payload = x_sf_bytes_per_token > 0
 
         device_communicator = get_ep_group().device_communicator
         assert device_communicator is not None
@@ -99,9 +100,14 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         if defer_input_quant:
             dispatch_x, dispatch_x_sf = a1, None
         else:
+            input_sf = (
+                quant_config.a1_gscale
+                if quant_config.use_nvfp4_w4a4
+                else quant_config.a1_scale
+            )
             dispatch_x, dispatch_x_sf = moe_kernel_quantize_input(
                 a1,
-                quant_config.a1_gscale,
+                input_sf,
                 quant_config.quant_dtype,
                 quant_config.per_act_token_quant,
                 quant_config.block_shape,
@@ -109,8 +115,11 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
                 mx_alignment=quant_config.mx_alignment,
             )
 
+        dispatch_scale = dispatch_x_sf is not None and self.has_x_sf_payload
+
         payloads = [dispatch_x]
-        if dispatch_x_sf is not None:
+        if dispatch_scale:
+            assert dispatch_x_sf is not None
             payloads.append(dispatch_x_sf)
         topk_ids_payload_index = len(payloads)
         payloads.append(topk_ids)
@@ -124,7 +133,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             invalid_token_expert_id=-1,  # Follow TRTLLM Pattern
             expert_id_payload_index=topk_ids_payload_index,
         )
-        if dispatch_x_sf is not None:
+        if dispatch_scale:
             recv_x, recv_x_sf, topk_ids_recv, topk_weights_recv = recv_payloads
             x_sf_width = recv_x_sf.shape[-1]
             # Apply scale interleaving only for CUTLASS (not TRT-LLM)
@@ -135,7 +144,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             recv_x_sf = recv_x_sf.view(-1, x_sf_width)
         else:
             recv_x, topk_ids_recv, topk_weights_recv = recv_payloads
-            recv_x_sf = None
+            recv_x_sf = dispatch_x_sf
         recv_x = recv_x.view(-1, recv_x.shape[-1])
         topk_ids_recv = topk_ids_recv.view(-1, topk_ids_recv.shape[-1])
         topk_weights_recv = topk_weights_recv.view(-1, topk_weights_recv.shape[-1])
