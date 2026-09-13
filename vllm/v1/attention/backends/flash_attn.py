@@ -60,7 +60,6 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.config.cache import CacheDType
-from vllm.config.compilation import CompilationMode
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
@@ -282,12 +281,16 @@ class FlashAttentionBackend(AttentionBackend):
         if vllm_config is None or vllm_config.model_config is None:
             return None
 
-        arch_config = vllm_config.model_config.model_arch_config
-        head_sizes = {arch_config.head_size}
+        model_config = vllm_config.model_config
+        head_sizes = {model_config.get_head_size()}
+        arch_config = model_config.model_arch_config
+        # The model-wide size is the maximum; smaller layers can still need
+        # FA4's 128-token pages.
         if arch_config.per_layer_overrides is not None:
             head_sizes.update(
-                layer.get("head_size", arch_config.head_size)
+                layer["head_size"]
                 for layer in arch_config.per_layer_overrides
+                if "head_size" in layer
             )
         for head_size in head_sizes:
             if uses_fa4_hd256_kernel(head_size, cls.head_size_v) and (
@@ -655,7 +658,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             capability is not None
             and capability.major == 9
             and self.headdim == 512
-            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and get_flash_attn_version(
                 head_size=self.headdim,
                 kv_cache_block_size=self.block_size,
@@ -1150,8 +1152,6 @@ class FlashAttentionImpl(AttentionImpl):
             and head_size == 512
             and capability is not None
             and capability.major == 9
-            and vllm_config is not None
-            and vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
         )
         if self.fa4_hd256 and not uses_kv_cache and sliding_window is not None:
             # The hd256 kernel requires seqused_k for local attention.
