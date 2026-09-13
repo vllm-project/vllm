@@ -1,7 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import vllm.envs as envs
 from vllm.triton_utils import tl, triton
+
+
+def batch_invariant_autotune_configs(
+    configs: list[triton.Config], pinned: triton.Config
+) -> list[triton.Config]:
+    """Autotune candidates for a Mamba2 SSD kernel.
+
+    Under ``VLLM_BATCH_INVARIANT`` the kernel runs one fixed configuration.
+    Autotuning picks a tile by timing, so two processes that share these kernels
+    (a trainer and an inference engine, or two engine restarts) can otherwise
+    settle on different tiles, and tile sizes change the reduction order and
+    therefore the bits.
+    """
+    if envs.VLLM_BATCH_INVARIANT:
+        return [pinned]
+    return configs
 
 
 @triton.jit
