@@ -59,6 +59,14 @@ def _kda_recurrent_step(
     return state + correction[:, None] * normalized_k[None, :], correction
 
 
+@triton.heuristics(
+    {
+        "BV": lambda args: min(
+            triton.next_power_of_2(args["V"]),
+            4 if args["BATCH"] <= 4 else 8 if args["BATCH"] <= 8 else 16,
+        )
+    }
+)
 @triton.jit
 def _kda_recoverssm_verify_kernel(
     q_ptr,
@@ -102,6 +110,7 @@ def _kda_recoverssm_verify_kernel(
     BV: tl.constexpr,
     SPEC_QUERY_LEN: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
+    BATCH: tl.constexpr,
 ):
     pid_v = tl.program_id(0)
     pid_b = tl.program_id(1)
@@ -137,8 +146,13 @@ def _kda_recoverssm_verify_kernel(
         + offs_v[:, None] * stride_state_v
         + offs_k[None, :] * stride_state_k
     )
-    state = tl.load(state_ptrs, mask=mask_state, other=0.0).to(tl.float32)
     A = tl.exp(tl.load(A_log_ptr + pid_h).to(tl.float32))
+    dt_bias = tl.load(
+        dt_bias_ptr + pid_h * K + offs_k,
+        mask=mask_k,
+        other=0.0,
+    ).to(tl.float32)
+    state = tl.load(state_ptrs, mask=mask_state, other=0.0).to(tl.float32)
 
     for token_offset in tl.static_range(SPEC_QUERY_LEN):
         token_valid = token_offset < query_len
@@ -147,32 +161,34 @@ def _kda_recoverssm_verify_kernel(
             q_ptr + token * stride_q_token + pid_h * K + offs_k,
             mask=token_valid & mask_k,
             other=0.0,
+            eviction_policy="evict_last",
         ).to(tl.float32)
         k = tl.load(
             k_ptr + token * stride_k_token + pid_h * K + offs_k,
             mask=token_valid & mask_k,
             other=0.0,
+            eviction_policy="evict_last",
         ).to(tl.float32)
         v = tl.load(
             v_ptr + token * stride_v_token + pid_h * V + offs_v,
             mask=token_valid & mask_v,
             other=0.0,
+            eviction_policy="evict_first",
         ).to(tl.float32)
         raw_g = tl.load(
             raw_g_ptr + token * stride_g_token + pid_h * K + offs_k,
             mask=token_valid & mask_k,
             other=0.0,
+            eviction_policy="evict_last",
         ).to(tl.float32)
         raw_beta = tl.load(
             raw_beta_ptr + token * stride_beta_token + pid_h,
             mask=token_valid,
             other=0.0,
+            eviction_policy="evict_last",
         ).to(tl.float32)
 
         q *= tl.rsqrt(tl.sum(q * q) + 1e-6) * (K**-0.5)
-        dt_bias = tl.load(dt_bias_ptr + pid_h * K + offs_k, mask=mask_k, other=0.0).to(
-            tl.float32
-        )
         updated_state, correction = _kda_recurrent_step(
             state,
             k,
@@ -191,6 +207,7 @@ def _kda_recoverssm_verify_kernel(
             out_ptr + token * stride_out_token + pid_h * V + offs_v,
             out,
             mask=token_valid & mask_v,
+            eviction_policy="evict_first",
         )
 
         correction_ptr = (
@@ -317,6 +334,28 @@ def _prepare_commit_plan_kernel(
     )
 
 
+def _compact_conv_block_d(args: dict[str, Any]) -> int:
+    batch = args["BATCH"]
+    if not args["ALIGN_MODE"]:
+        return 64 if batch <= 2 else 128
+    if batch == 1:
+        return 128
+    return 256 if batch == 4 else 64
+
+
+def _compact_conv_num_warps(args: dict[str, Any]) -> int:
+    batch = args["BATCH"]
+    if args["ALIGN_MODE"]:
+        return 4 if batch in (2, 4) else 1
+    return 2 if batch == 1 else 1
+
+
+@triton.heuristics(
+    {
+        "BLOCK_D": _compact_conv_block_d,
+        "num_warps": _compact_conv_num_warps,
+    }
+)
 @triton.jit
 def _compact_conv_state_kernel(
     conv_state_ref_ptr,
@@ -336,6 +375,7 @@ def _compact_conv_state_kernel(
     BLOCK_D: tl.constexpr,
     BLOCK_HISTORY: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
+    BATCH: tl.constexpr,
 ):
     pid_d = tl.program_id(0)
     pid_b = tl.program_id(1)
@@ -395,6 +435,27 @@ def _compact_conv_state_kernel(
     )
 
 
+def _commit_kda_value_block(args: dict[str, Any]) -> int:
+    batch = args["BATCH"]
+    if not args["ALIGN_MODE"]:
+        return 4 if batch <= 2 else 16
+    if batch == 2:
+        return 16
+    return 32 if batch == 4 else 8
+
+
+def _commit_kda_num_warps(args: dict[str, Any]) -> int:
+    if not args["ALIGN_MODE"]:
+        return 1
+    return 4 if args["BATCH"] == 1 else 2 if args["BATCH"] == 2 else 1
+
+
+@triton.heuristics(
+    {
+        "BV": _commit_kda_value_block,
+        "num_warps": _commit_kda_num_warps,
+    }
+)
 @triton.jit
 def _commit_kda_state_kernel(
     state_ref_ptr,
@@ -437,7 +498,16 @@ def _commit_kda_state_kernel(
     NUM_HEADS: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
+    BATCH: tl.constexpr,
+    LAUNCH_DEPENDENT_KERNELS: tl.constexpr,
 ):
+    if LAUNCH_DEPENDENT_KERNELS:
+        # Expected operation is plan -> KDA commit -> conv where plan and KDA
+        # are launched normally, conv is launched as a dependent kernel and KDA
+        # immediately releases conv.  This guarantees correctness as both KDA
+        # and conv depend on the plan but not each other.  Better than two
+        # streams as we want to make sure KDA goes first, as it is longer tailed.
+        tl.extra.cuda.gdc_launch_dependents()
     pid_v = tl.program_id(0)
     pid_b = tl.program_id(1)
     pid_lh = tl.program_id(2)
@@ -509,13 +579,17 @@ def _commit_kda_state_kernel(
         mask=mask_k,
         other=0.0,
     ).to(tl.float32)
-    final_decay = tl.full([BK], 1.0, tl.float32)
-    final_correction = tl.zeros([BV, BK], tl.float32)
-    boundary_decay = tl.full([BK], 1.0, tl.float32)
-    boundary_correction = tl.zeros([BV, BK], tl.float32)
+    state = initial_state
+    if ALIGN_MODE:
+        boundary_ptrs = (
+            state_ptr
+            + boundary_state_idx * state_block_stride
+            + pid_h * stride_state_head
+            + offs_v[:, None] * stride_state_v
+            + offs_k[None, :] * stride_state_k
+        )
 
-    for reverse_offset in range(commit_len):
-        token_offset = commit_len - reverse_offset - 1
+    for token_offset in range(commit_len):
         correction_ptr = (
             correction_cache_ptr + token_offset * stride_correction_cache_pos
         )
@@ -543,34 +617,12 @@ def _commit_kda_state_kernel(
             lower_bound,
             USE_LOWER_BOUND,
         )
-        update = correction[:, None] * normalized_k[None, :]
         decay = tl.exp(gate)
-        final_correction += update * final_decay[None, :]
-        final_decay *= decay
-        if ALIGN_MODE:
-            before_boundary = token_offset < boundary_recovery_len
-            boundary_correction += tl.where(
-                before_boundary,
-                update * boundary_decay[None, :],
-                0.0,
-            )
-            boundary_decay *= tl.where(before_boundary, decay, 1.0)
-
-    state = initial_state * final_decay[None, :] + final_correction
-    if ALIGN_MODE:
-        boundary_ptrs = (
-            state_ptr
-            + boundary_state_idx * state_block_stride
-            + pid_h * stride_state_head
-            + offs_v[:, None] * stride_state_v
-            + offs_k[None, :] * stride_state_k
-        )
-        boundary_state = initial_state * boundary_decay[None, :] + boundary_correction
-        tl.store(
-            boundary_ptrs,
-            boundary_state,
-            mask=mask_state & (boundary_state_idx > null_block_id),
-        )
+        update = correction[:, None] * normalized_k[None, :]
+        state = state * decay[None, :] + update
+        if ALIGN_MODE:  # noqa: SIM102
+            if token_offset == boundary_recovery_len - 1:
+                tl.store(boundary_ptrs, state)
 
     final_ptrs = (
         state_ptr
@@ -678,8 +730,7 @@ def kda_recoverssm_verify(
         return out
 
     block_k = triton.next_power_of_2(key_dim)
-    block_v = min(triton.next_power_of_2(value_dim), 32)
-    grid = (triton.cdiv(value_dim, block_v), batch, num_heads)
+    grid = lambda meta: (triton.cdiv(value_dim, meta["BV"]), batch, num_heads)
     _kda_recoverssm_verify_kernel[grid](
         q,
         k,
@@ -719,10 +770,10 @@ def kda_recoverssm_verify(
         K=key_dim,
         V=value_dim,
         BK=block_k,
-        BV=block_v,
         SPEC_QUERY_LEN=spec_query_len,
         USE_LOWER_BOUND=lower_bound is not None,
-        num_warps=4,
+        BATCH=batch,
+        num_warps=1,
         num_stages=2,
     )
     return out
@@ -915,6 +966,7 @@ class KDARecoverSSMCommitContext:
         block_table: torch.Tensor | None = None,
         num_computed_tokens: torch.Tensor | None = None,
         mamba_block_size: int | None = None,
+        use_pdl: bool = False,
     ) -> None:
         """Fold accepted KDA and convolution inputs into every layer."""
         batch = state_indices.shape[0]
@@ -959,7 +1011,6 @@ class KDARecoverSSMCommitContext:
         num_computed_stride = (
             0 if num_computed_tokens is None else num_computed_tokens.stride(0)
         )
-
         num_layers = len(self.checkpoints)
         conv_ref = self.conv_states[0]
         conv_dim = conv_ref.shape[1]
@@ -988,36 +1039,18 @@ class KDARecoverSSMCommitContext:
             SPEC_QUERY_LEN=self.spec_query_len,
             num_warps=1,
         )
-        _compact_conv_state_kernel[(triton.cdiv(conv_dim, 256), batch, num_layers)](
-            conv_ref,
-            self.conv_state_base_addrs,
-            self.conv_state_block_strides,
-            self.conv_state_dim_strides,
-            self.conv_state_token_strides,
-            state_indices,
-            self.commit_lens,
-            self.final_state_indices,
-            self.boundary_state_indices,
-            self.boundary_recovery_lens,
-            NULL_BLOCK_ID,
-            conv_dim,
-            self.conv_history_len,
-            state_indices.stride(0),
-            BLOCK_D=256,
-            BLOCK_HISTORY=block_history,
-            ALIGN_MODE=block_table is not None,
-            num_warps=4,
-        )
-
         state_ref = self.checkpoints[0]
         _, num_heads, value_dim, key_dim = state_ref.shape
         block_k = triton.next_power_of_2(key_dim)
-        block_v = min(triton.next_power_of_2(value_dim), 32)
-        grid = (
-            triton.cdiv(value_dim, block_v),
+        grid = lambda meta: (
+            triton.cdiv(meta["V"], meta["BV"]),
             batch,
             num_layers * num_heads,
         )
+        # This deliberately reverses the natural conv-then-KDA order. KDA's
+        # longer execution leaves more useful tail time for compact to overlap.
+        # Do not set launch_pdl here: KDA consumes the plan output and must run
+        # normally; LAUNCH_DEPENDENT_KERNELS makes it the producer for compact.
         _commit_kda_state_kernel[grid](
             state_ref,
             self.state_base_addrs,
@@ -1055,12 +1088,41 @@ class KDARecoverSSMCommitContext:
             K=key_dim,
             V=value_dim,
             BK=block_k,
-            BV=block_v,
             NUM_HEADS=num_heads,
             USE_LOWER_BOUND=self.lower_bound is not None,
             ALIGN_MODE=block_table is not None,
-            num_warps=4,
+            BATCH=batch,
+            LAUNCH_DEPENDENT_KERNELS=use_pdl,
             num_stages=2,
+        )
+        # Compact is the PDL-dependent consumer, with no PDL instruction in
+        # its body. Every input it reads is ready before the dependency is
+        # released: stream order completes the plan before KDA starts, and
+        # compact reads no KDA output.
+        conv_grid = lambda meta: (
+            triton.cdiv(meta["conv_dim"], meta["BLOCK_D"]),
+            batch,
+            num_layers,
+        )
+        _compact_conv_state_kernel[conv_grid](
+            conv_ref,
+            self.conv_state_base_addrs,
+            self.conv_state_block_strides,
+            self.conv_state_dim_strides,
+            self.conv_state_token_strides,
+            state_indices,
+            self.commit_lens,
+            self.final_state_indices,
+            self.boundary_state_indices,
+            self.boundary_recovery_lens,
+            NULL_BLOCK_ID,
+            conv_dim,
+            self.conv_history_len,
+            state_indices.stride(0),
+            BLOCK_HISTORY=block_history,
+            ALIGN_MODE=block_table is not None,
+            BATCH=batch,
+            launch_pdl=use_pdl,
         )
 
 
