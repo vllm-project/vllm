@@ -314,3 +314,69 @@ def test_nested_image_fields_split_per_image(processor_cls):
     for item in items:
         pixel_values = item["pixel_values"].data
         assert pixel_values.shape[1] == int(item["num_image_patches"].data)
+
+
+_MODEL_ID = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+# The stock processor size is 384x384, so this changes the feature count.
+_SCOPED_SIZE = {"height": 768, "width": 768}
+
+
+def _probe_num_image_tokens(mm_processor_kwargs, request_kwargs=None) -> list[int]:
+    """The per-image token counts vLLM predicts for a single image."""
+    from vllm.config import ModelConfig
+    from vllm.model_executor.models.transformers.multimodal import (
+        MultiModalDummyInputsBuilder,
+        MultiModalProcessingInfo,
+    )
+    from vllm.multimodal.processing import InputProcessingContext
+    from vllm.tokenizers.registry import cached_tokenizer_from_config
+
+    model_config = ModelConfig(
+        model=_MODEL_ID,
+        model_impl="transformers",
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
+    info = MultiModalProcessingInfo(
+        InputProcessingContext(model_config, cached_tokenizer_from_config(model_config))
+    )
+    mm_processor = LegacyMultiModalProcessor(info, MultiModalDummyInputsBuilder(info))
+    image = ImageAsset("cherry_blossom").pil_image
+    mm_items = mm_processor.info.parse_mm_data({"image": image})
+    tokens = mm_processor._get_num_multimodal_tokens(mm_items, request_kwargs or {})
+    return list(tokens["num_image_tokens"])
+
+
+def test_scoped_images_kwargs_reach_the_token_count():
+    """A nested ``images_kwargs`` override must reach vLLM's own token count.
+
+    ``_get_num_multimodal_tokens`` is how vLLM predicts how many placeholder
+    tokens an image expands to. The HF processor honors a nested
+    ``images_kwargs`` in its ``__call__``, so a vLLM-side read that only looks
+    at the flat namespace makes the two disagree.
+    """
+    stock = _probe_num_image_tokens(None)
+    flat = _probe_num_image_tokens({"size": _SCOPED_SIZE})
+    # Precondition: this override really does move the count, so the
+    # assertion below cannot pass by coincidence.
+    assert flat != stock
+
+    scoped = _probe_num_image_tokens({"images_kwargs": {"size": _SCOPED_SIZE}})
+    assert scoped == flat
+
+
+def test_request_mm_processor_kwargs_reach_the_token_count():
+    """Per-request ``mm_processor_kwargs`` must reach vLLM's own token count too.
+
+    The request overrides build the HF processor that produces the features, so
+    a token count that only merges the model-config overrides predicts a
+    different number of placeholder tokens than the processor actually emits.
+    """
+    stock = _probe_num_image_tokens(None)
+    flat = _probe_num_image_tokens({"size": _SCOPED_SIZE})
+    assert flat != stock
+
+    for request_kwargs in (
+        {"size": _SCOPED_SIZE},
+        {"images_kwargs": {"size": _SCOPED_SIZE}},
+    ):
+        assert _probe_num_image_tokens(None, request_kwargs) == flat
