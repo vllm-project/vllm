@@ -140,6 +140,7 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
     return ParserEngineConfig(
         name="deepseek_v4",
         initial_state=ParserState.REASONING if thinking else ParserState.CONTENT,
+        wait_for_reasoning=thinking,
         terminals={
             "THINK_START": DSML_THINK_START,
             "THINK_END": DSML_THINK_END,

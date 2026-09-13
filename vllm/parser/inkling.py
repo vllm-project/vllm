@@ -282,6 +282,7 @@ def inkling_config() -> ParserEngineConfig:
         # `<|message_model|>`. Non-streaming parsing receives only the generated
         # suffix, so begin in the corresponding message-header state as well.
         initial_state=ParserState.MESSAGE_HEADER,
+        wait_for_reasoning=True,
         terminals=terminals,
         # Inkling content-kind markers are the grammar. When the engine is
         # used through DelegatingParser, the reasoning pass can hand the tool
