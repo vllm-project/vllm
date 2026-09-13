@@ -518,3 +518,129 @@ def test_rdna_hybrid_w4a16_dispatch(dtype, M, K, N, G):
     ref = _hip_skinny_reference(a, w_int4_nk, scales, group_size=G, zp_bias=8)
 
     torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
+
+
+# ---------------------------------------------------------------------------
+# gfx11 weight row-stride padding
+# ---------------------------------------------------------------------------
+
+_cliff_pad_bytes = hybrid_module._cliff_pad_bytes
+_STRIDE_CLIFF_BYTES = hybrid_module._STRIDE_CLIFF_BYTES
+_STRIDE_PAD_BYTES = hybrid_module._STRIDE_PAD_BYTES
+
+
+def test_cliff_pad_bytes_only_moves_strides_on_the_cliff():
+    """Pad 2048 B multiples, leave everything else dense."""
+    # On the cliff (K % 4096 == 0): 2048, 4096, 6144, 8192 B rows.
+    for row_bytes in (2048, 4096, 6144, 8192):
+        assert _cliff_pad_bytes(row_bytes) == _STRIDE_PAD_BYTES
+
+    # Off it, including strides that are 512 B multiples but not 2048 B ones:
+    # padding those measured as a small loss, and it costs weight memory.
+    for row_bytes in (1024, 1280, 1536, 2560, 4864, 5120, 9472):
+        assert _cliff_pad_bytes(row_bytes) == 0
+
+    # The padded stride is never back on the cliff.
+    for row_bytes in range(16, 16384, 16):
+        padded = row_bytes + _cliff_pad_bytes(row_bytes)
+        assert padded % _STRIDE_CLIFF_BYTES != 0 or row_bytes % _STRIDE_CLIFF_BYTES
+
+
+def _row_padded_copy(t: torch.Tensor, pad_cols: int) -> torch.Tensor:
+    """Copy of ``t`` whose stride(0) is ``t.shape[1] + pad_cols``."""
+    rows, cols = t.shape
+    buf = torch.empty((rows, cols + pad_cols), dtype=t.dtype, device=t.device)
+    buf[:, :cols].copy_(t)
+    return buf[:, :cols]
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("has_zp", [False, True])
+@pytest.mark.parametrize("M", [1, MAX_SKINNY_BATCH_SIZE + 1])
+def test_weight_row_padding_does_not_change_results(dtype, has_zp, M):
+    """Padding the weight rows is a pure layout change.
+
+    Both the HIP skinny kernel (M small) and the Triton prefill kernel take the
+    weight row stride from the tensor, so a padded layout must produce exactly
+    the same numbers as the dense one.
+    """
+    from vllm.utils.platform_utils import num_compute_units
+
+    set_random_seed(0)
+    K, N, G = 512, 256, 128
+
+    a = (0.25 * torch.randn((M, K), device=device, dtype=torch.float32)).to(dtype)
+    w_int4_nk = torch.randint(0, 16, (N, K), device=device, dtype=torch.int32)
+    w_q = pack_int4_exllama_shuffle(w_int4_nk).view(torch.int8)
+    scales = (0.05 * torch.rand((N, K // G), device=device, dtype=torch.float32)).to(
+        dtype
+    )
+    zp = (
+        torch.randint(0, 16, (N, K // G), device=device, dtype=torch.int32).to(dtype)
+        if has_zp
+        else None
+    )
+
+    # 32 int32 columns = 128 B of pad, the production pad size.
+    w_q_pad = _row_padded_copy(w_q.view(torch.int32), 32).view(torch.int8)
+    assert w_q_pad.stride(0) == w_q.stride(0) + _STRIDE_PAD_BYTES
+
+    cu_count = num_compute_units()
+    dense = torch.ops.vllm.rdna_hybrid_w4a16_apply(
+        a, w_q, scales, zp, None, cu_count, G
+    )
+    padded = torch.ops.vllm.rdna_hybrid_w4a16_apply(
+        a, w_q_pad, scales, zp, None, cu_count, G
+    )
+    torch.testing.assert_close(padded, dense, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not hybrid_module._on_gfx1151(),
+    reason="row-stride padding is only enabled on gfx1151",
+)
+@pytest.mark.parametrize(
+    "K,expected_weight_stride",
+    [
+        (512, 256),  # 256 B row: off the cliff, stored dense
+        (8192, 4096 + 128),  # 4096 B row: on the cliff, padded
+    ],
+)
+def test_process_weights_pads_cliff_rows(K, expected_weight_stride, dist_init):
+    """The stored weight row stride follows the padding rule."""
+    from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+        MPLinearLayerConfig,
+    )
+    from vllm.scalar_type import scalar_types
+
+    set_random_seed(0)
+    N, G = 128, 128
+
+    w_int4_kn = torch.randint(0, 16, (K, N), device=device, dtype=torch.int32)
+    layer = _build_dummy_layer(
+        _pack_int4_along_k_to_ckpt(w_int4_kn),
+        0.05 * torch.rand((N, K // G), device=device, dtype=torch.float16),
+        zeros_ckpt=None,
+    )
+    config = MPLinearLayerConfig(
+        full_weight_shape=(K, N),
+        partition_weight_shape=(K, N),
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.float16,
+        group_size=G,
+        zero_points=False,
+    )
+    RDNAHybridW4A16LinearKernel(
+        config,
+        w_q_param_name="weight_packed",
+        w_s_param_name="weight_scale",
+        w_zp_param_name=None,
+    ).process_weights_after_loading(layer)
+
+    # Weight rows: stride is in int8 elements, i.e. bytes.
+    assert layer.weight_packed.stride(0) == expected_weight_stride
+    # The int32 view the Triton path uses survives the padded stride.
+    assert tuple(layer.weight_packed.view(torch.int32).shape) == (N, K // 8)
+    # Metadata is untouched by this change.
+    assert layer.weight_scale.is_contiguous()
