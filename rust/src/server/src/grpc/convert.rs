@@ -65,6 +65,7 @@ pub fn to_text_request(
 
     let mut sampling_params =
         build_sampling_params(req.temperature, sampling, decoding, stopping, response)?;
+    sampling_params.watermarking = req.watermarking.unwrap_or(true);
 
     // Thread KVCacheParameters → SamplingParams fields.
     if let Some(kv) = kv {
@@ -517,6 +518,7 @@ impl ResponseOpts {
 
 #[cfg(test)]
 mod tests {
+    use prost::Message as _;
     use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{FinishReason, Finished, Prompt};
 
@@ -529,6 +531,26 @@ mod tests {
             model: "test-model".to_string(),
             prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn watermarking_defaults_and_opt_out_survive_protobuf_conversion() {
+        for watermarking in [None, Some(true), Some(false)] {
+            let request = pb::GenerateRequest {
+                watermarking,
+                ..base_request()
+            };
+            let encoded = request.encode_to_vec();
+            for stream in [false, true] {
+                let decoded = pb::GenerateRequest::decode(encoded.as_slice()).unwrap();
+                let text = to_text_request(decoded, stream, &["test-model".to_string()])
+                    .expect("convert request");
+                assert_eq!(
+                    text.sampling_params.watermarking,
+                    watermarking.unwrap_or(true)
+                );
+            }
         }
     }
 
