@@ -433,15 +433,6 @@ pub struct ServerUnsupportedArgs {
     )]
     pub enable_server_load_tracking: Option<Noop>,
 
-    /// If set to True, including usage on every request.
-    #[arg(
-        long,
-        visible_alias = "no-enable-force-include-usage",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_force_include_usage: Option<Unsupported>,
-
     /// Enable the `/tokenizer_info` endpoint. May expose chat
     /// templates and other tokenizer configuration.
     ///

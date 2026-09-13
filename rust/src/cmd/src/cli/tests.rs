@@ -195,6 +195,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
+                        enable_force_include_usage: false,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -572,6 +573,23 @@ fn serve_passes_enable_prompt_tokens_details_into_config() {
 }
 
 #[test]
+fn serve_passes_enable_force_include_usage_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-force-include-usage",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(config.api_server_options.enable_force_include_usage);
+}
+
+#[test]
 fn serve_passes_tls_into_config() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -826,6 +844,29 @@ fn frontend_args_json_passes_lora_modules_into_config() {
 }
 
 #[test]
+fn frontend_args_json_passes_enable_force_include_usage_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_force_include_usage":true}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert!(config.api_server_options.enable_force_include_usage);
+}
+
+#[test]
 fn serve_passes_api_keys_into_config() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -1030,6 +1071,7 @@ fn frontend_args_accept_json() {
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
+                        enable_force_include_usage: false,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -1629,6 +1671,7 @@ fn serve_args_accept_handshake_aliases() {
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
                         enable_request_id_headers: false,
+                        enable_force_include_usage: false,
                         disable_log_stats: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
@@ -1780,6 +1823,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
+                enable_force_include_usage: false,
             },
             cors: CorsConfig {
                 allow_origins: [
@@ -1868,6 +1912,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
+                enable_force_include_usage: false,
             },
             cors: CorsConfig {
                 allow_origins: [
@@ -1977,6 +2022,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
                 enable_request_id_headers: false,
+                enable_force_include_usage: false,
             },
             cors: CorsConfig {
                 allow_origins: [

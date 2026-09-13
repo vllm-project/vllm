@@ -241,6 +241,7 @@ async fn completion_chunk_stream(
     ApiServerOptions {
         enable_log_requests,
         enable_prompt_tokens_details,
+        enable_force_include_usage,
         ..
     }: ApiServerOptions,
     ResponseOptions {
@@ -256,6 +257,8 @@ async fn completion_chunk_stream(
     }: ResponseOptions,
     mut y: TryYielder<CompletionSseChunk, ApiError>,
 ) -> Result<(), ApiError> {
+    let include_usage = enable_force_include_usage || include_usage;
+    let include_continuous_usage = enable_force_include_usage || include_continuous_usage;
     pin_mut!(stream);
     let envelope = Arc::new(StreamResponseEnvelope::new(
         request_id,
