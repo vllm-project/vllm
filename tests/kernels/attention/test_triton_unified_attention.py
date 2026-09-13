@@ -12,7 +12,10 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.triton_attention_helpers import (
     compute_tile_loop_bounds,
 )
-from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+from vllm.v1.attention.ops.triton_unified_attention import (
+    _get_tile_size,
+    unified_attention,
+)
 from vllm.v1.kv_cache_interface import KVQuantMode
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -898,3 +901,143 @@ def test_triton_unified_attn_use_td_tile_clamp(
         soft_cap=None,
         seq_threshold_3D=0,
     )
+
+
+@pytest.mark.parametrize("num_heads", [(4, 1)])
+@pytest.mark.parametrize("head_size", [64])
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("sliding_window", [5, 11])
+@torch.inference_mode()
+def test_triton_unified_attn_sw_tile_base_bit_exact(
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    sliding_window: int,
+) -> None:
+    """The 2D SWA decode path must give bit-exact output for two runs whose
+    sliding window covers the same logical (Q, K, V) values, even when one
+    run's window fits in a single KV tile while the other's straddles a
+    tile boundary (so the runs iterate a different number of tiles and
+    online-softmax-merge through the accumulator a different number of
+    times).
+
+    Before the tile-base-shift fix, ``compute_tile_loop_bounds`` floor-
+    rounded the iteration start to ``first_allowed_key // TILE_SIZE``. When
+    the window straddles a tile boundary, the run iterates one extra tile
+    and online softmax merges across it; bf16 ``acc_new = acc_old *
+    exp(m_old - m_new) + sum_of_tile_p`` is order-sensitive, so the same
+    logical Q x K window accumulates differently and the output drifts at
+    ULP scale between the two runs. With the fix, iteration begins exactly
+    at ``first_allowed_key``, so both runs do a single-tile reduce over the
+    same values and match bit-for-bit.
+    """
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    num_query_heads, num_kv_heads = num_heads
+    assert num_query_heads % num_kv_heads == 0
+    dtype = torch.bfloat16
+    scale = head_size**-0.5
+    sw = sliding_window
+    window_size = (sw - 1, 0)
+    num_blocks = 2048
+    seq_threshold_3D = 0  # force the 2D decode kernel
+    num_par_softmax_segments = 16
+    head_size_padded = next_power_of_2(head_size)
+
+    # bf16 decode (element_size=2) with sliding_window != 1024 (non-Gemma3)
+    # always selects TILE_SIZE=16; assert instead of hardcoding in case
+    # ``_get_tile_size`` changes.
+    tile_size = _get_tile_size(head_size, sw, element_size=2, is_prefill=False)
+    assert sw < tile_size, "test requires a window smaller than one tile"
+
+    # Run 1: window starts exactly on a tile boundary -> fits in one tile.
+    kv_len_1 = sw + tile_size
+    # Run 2: window starts one before the end of a tile -> straddles two.
+    kv_len_2 = sw + 2 * tile_size - 1
+    assert (kv_len_1 - 1) // tile_size == (kv_len_1 - sw) // tile_size, (
+        "run 1 should be single-tile"
+    )
+    assert (kv_len_2 - 1) // tile_size != (kv_len_2 - sw) // tile_size, (
+        "run 2 should straddle a tile boundary"
+    )
+
+    # Single decode step per sequence (query_len=1).
+    cu_query_lens = torch.tensor([0, 1], dtype=torch.int32)
+
+    # Shared per-token tensors placed inside the SW window in both runs.
+    q_token = torch.randn(num_query_heads, head_size, dtype=dtype)
+    shared_k = torch.randn(sw, num_kv_heads, head_size, dtype=dtype)
+    shared_v = torch.randn(sw, num_kv_heads, head_size, dtype=dtype)
+
+    def _run(kv_len: int) -> torch.Tensor:
+        max_num_blocks_per_seq = (kv_len + block_size - 1) // block_size
+        key_cache = torch.randn(
+            num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+        )
+        value_cache = torch.randn_like(key_cache)
+        block_table = torch.arange(
+            1, 1 + max_num_blocks_per_seq, dtype=torch.int32
+        ).view(1, max_num_blocks_per_seq)
+        # The query sits at logical position kv_len - 1; its SW window
+        # covers keys at logical positions [kv_len - sw, kv_len - 1].
+        # Write shared_k / shared_v into those slots via the block_table so
+        # the window's *content* is identical across both runs even though
+        # its physical tile alignment differs.
+        for i, pos in enumerate(range(kv_len - sw, kv_len)):
+            blk = int(block_table[0, pos // block_size].item())
+            slot = pos % block_size
+            key_cache[blk, slot] = shared_k[i]
+            value_cache[blk, slot] = shared_v[i]
+
+        query = q_token[None, :, :].clone()
+        kv_lens = torch.tensor([kv_len], dtype=torch.int32)
+        output = torch.empty_like(query)
+
+        softmax_segm_output = torch.empty(
+            (
+                seq_threshold_3D,
+                num_query_heads,
+                num_par_softmax_segments,
+                head_size_padded,
+            ),
+            dtype=torch.float32,
+        )
+        softmax_segm_max = torch.empty(
+            (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+            dtype=torch.float32,
+        )
+        softmax_segm_expsum = torch.empty(
+            (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+            dtype=torch.float32,
+        )
+
+        unified_attention(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=output,
+            cu_seqlens_q=cu_query_lens,
+            seqused_k=kv_lens,
+            max_seqlen_q=1,
+            max_seqlen_k=kv_len,
+            softmax_scale=scale,
+            causal=True,
+            window_size=window_size,
+            block_table=block_table,
+            softcap=0,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+            seq_threshold_3D=seq_threshold_3D,
+            num_par_softmax_segments=num_par_softmax_segments,
+            softmax_segm_output=softmax_segm_output,
+            softmax_segm_max=softmax_segm_max,
+            softmax_segm_expsum=softmax_segm_expsum,
+            kv_quant_mode=KVQuantMode.NONE,
+        )
+        return output
+
+    output_1 = _run(kv_len_1)
+    output_2 = _run(kv_len_2)
+    torch.testing.assert_close(output_1, output_2, atol=0, rtol=0)
