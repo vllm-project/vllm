@@ -54,7 +54,12 @@ from .glm4_moe import (
     Glm4MoE,
     Glm4MoeDecoderLayer,
 )
-from .utils import get_spec_layer_idx_from_weight_name, maybe_prefix
+from .interfaces import SupportsPP
+from .utils import (
+    get_spec_layer_idx_from_weight_name,
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
 
 
 class SharedHead(nn.Module):
@@ -191,12 +196,17 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
         return logits
 
 
-class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
+class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.model = Glm4MoeMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        # The drafter is only built on the last PP rank so the SupportsPP-shaped
+        # forward is never called; the factory is here to satisfy the interface.
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], self.config.hidden_size
         )
 
         # Set MoE hyperparameters
@@ -224,7 +234,7 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
