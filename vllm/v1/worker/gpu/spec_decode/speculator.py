@@ -26,6 +26,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
@@ -34,6 +35,10 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
+)
+from vllm.v1.worker.gpu.spec_decode.draft_support import (
+    apply_draft_top_k_top_p,
+    draft_top_k_top_p_threshold,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -62,6 +67,20 @@ class BaseSpeculator(ABC):
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         pass
+
+    def set_draft_sampling_params(
+        self,
+        # [max_num_reqs] per-request top-k (vocab_size if unused)
+        top_k: UvaBackedTensor,
+        # [max_num_reqs] per-request top-p (1.0 if unused)
+        top_p: UvaBackedTensor,
+    ) -> None:
+        """Give the drafter the sampler's per-request top-k / top-p for
+        probabilistic draft sampling. Called once, before CUDA graph capture.
+
+        Speculators that do not sample drafts probabilistically ignore them.
+        """
+        return
 
     @abstractmethod
     def capture(self) -> None:
@@ -170,6 +189,15 @@ class DraftModelSpeculator(BaseSpeculator):
         )
         self.use_acceptance_estimator = self.enable_adaptive_verification
         self.acceptance_estimator: OnlineAcceptanceEstimator | None = None
+
+        # Per-request top-k / top-p for probabilistic drafting: drafter-owned
+        # [max_num_reqs] tensors, refreshed from the sampler on every step like
+        # the temperature. None until the model runner sets the sources and for
+        # greedy drafting.
+        self.draft_top_k: torch.Tensor | None = None
+        self.draft_top_p: torch.Tensor | None = None
+        self._draft_top_k_src: UvaBackedTensor | None = None
+        self._draft_top_p_src: UvaBackedTensor | None = None
 
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
@@ -406,6 +434,29 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         if draft_logits is not None:
             logits = self.model.compute_logits(hidden_states)
+            threshold = None
+            if self.draft_top_k is not None and self.draft_top_p is not None:
+                # Runs for every batch, with or without top-k / top-p, so that
+                # a captured CUDA graph applies it too; rows without top-k are
+                # skipped on the GPU.
+                if self.draft_watermarker is None:
+                    # The sampling kernel applies the threshold in its vocab pass.
+                    threshold = draft_top_k_top_p_threshold(
+                        logits,
+                        idx_mapping,
+                        self.draft_top_k,
+                        self.draft_top_p,
+                        temperature,
+                    )
+                else:
+                    # The watermarker resamples from the logits, so mask them.
+                    logits = apply_draft_top_k_top_p(
+                        logits,
+                        idx_mapping,
+                        self.draft_top_k,
+                        self.draft_top_p,
+                        temperature,
+                    )
             sampled = gumbel_sample(
                 logits,
                 idx_mapping,
@@ -417,6 +468,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache=draft_logits,
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
+                logits_threshold=threshold,
             )
             if self.draft_watermarker is not None:
                 sampled = self.draft_watermarker.sample(
@@ -456,6 +508,35 @@ class DraftModelSpeculator(BaseSpeculator):
         if self.acceptance_estimator is not None:
             self.acceptance_estimator.step(idx_mapping, num_sampled, num_rejected)
 
+    def set_draft_sampling_params(
+        self,
+        top_k: UvaBackedTensor,
+        top_p: UvaBackedTensor,
+    ) -> None:
+        if self.draft_logits is None:
+            # Greedy drafting takes the argmax, which top-k / top-p never remove.
+            return
+        # The sampler moves `.gpu` to the next buffer of its ring on every
+        # step, so keep the owners and copy into tensors with a fixed address,
+        # which the drafter's CUDA graphs can capture.
+        self._draft_top_k_src = top_k
+        self._draft_top_p_src = top_p
+        self.draft_top_k = torch.full(
+            (self.max_num_reqs,), self.vocab_size, dtype=torch.int32, device=self.device
+        )
+        self.draft_top_p = torch.ones(
+            self.max_num_reqs, dtype=torch.float32, device=self.device
+        )
+
+    def _copy_draft_sampling_params(self) -> None:
+        # Call once per step, after the sampler applied its staged writes.
+        if self.draft_top_k is None or self.draft_top_p is None:
+            return
+        assert self._draft_top_k_src is not None
+        assert self._draft_top_p_src is not None
+        self.draft_top_k.copy_(self._draft_top_k_src.gpu, non_blocking=True)
+        self.draft_top_p.copy_(self._draft_top_p_src.gpu, non_blocking=True)
+
     def prepare_watermarking(
         self, contexts: torch.Tensor, watermarking: torch.Tensor
     ) -> None:
@@ -475,13 +556,14 @@ class DraftModelSpeculator(BaseSpeculator):
         dummy_run: bool = False,
     ) -> None:
         # Copy temperature, seeds, and idx mapping to the pre-allocated buffers.
-        # NOTE(woosuk): For draft sampling, we only consider the temperature
-        # and ignore the other sampling parameters such as top_k and top_p,
-        # for simplicity and performance.
-        # While this may slightly degrade the acceptance rate, it does not
+        # NOTE: Draft sampling considers the temperature and, through
+        # set_draft_sampling_params, top_k and top_p. It ignores the other
+        # sampling parameters (penalties, min_p, bad words) for simplicity and
+        # performance. That may lower the acceptance rate, but it does not
         # affect the output distribution after rejection sampling.
         self.temperature.copy_(temperature)
         self.seeds.copy_(seeds)
+        self._copy_draft_sampling_params()
         # idx_mapping == -1 marks a row the drafter must not act on: sampling
         # skips it and compute_slot_mappings emits PAD. CUDA-graph padded rows
         # always get it; a dummy batch gets it for every row, since its arange
