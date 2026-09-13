@@ -30,6 +30,20 @@ class NvFp4LinearKernel(ABC):
     match for the current hardware.
     """
 
+    nvfp4_weight_layout: str | None = None
+    """Name of the on-device weight layout this kernel consumes after
+    ``process_weights_after_loading``.
+
+    Two kernels can serve one set of weights, and therefore be paired for
+    per-forward dispatch, only if they declare the *same* layout. They do not
+    have to leave the weights checkpoint-native: a shared prepared layout is
+    equally valid, and is the likelier way this gets satisfied.
+
+    ``None`` means unspecified, and such a kernel is never paired. A silent
+    layout mismatch produces wrong numerics rather than an error, so the
+    default has to fail closed. See nvfp4/dynamic.py.
+    """
+
     def __init__(self, config: NvFp4LinearLayerConfig) -> None:
         assert self.can_implement(config)[0]
         assert self.is_supported()[0]
