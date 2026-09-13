@@ -1529,6 +1529,36 @@ def test_uno_terminal_length_bound_skips_only_all_terminal_batches(
     assert not mixed.skip_speculator_proposal
 
 
+@pytest.mark.parametrize("num_output_tokens", [88, 95])
+def test_uno_tail_respects_explicit_context_limit(
+    uno_scheduler_factory, num_output_tokens
+):
+    """An explicit large output cap still finishes at the context boundary."""
+    scheduler = uno_scheduler_factory(
+        num_speculative_tokens=8, max_num_batched_tokens=4096, max_model_len=4096
+    )
+    (request,) = create_requests(
+        num_requests=1, num_tokens=4000, max_tokens=4096, block_size=4
+    )
+    request.append_output_token_ids([10] * num_output_tokens)
+    scheduler.add_request(request)
+    request.num_computed_tokens = request.num_tokens - 1
+    request.spec_token_ids = [-1] * 8
+    request.status = RequestStatus.RUNNING
+    scheduler.waiting.pop_request()
+    scheduler.running.append(request)
+
+    output = scheduler.schedule()
+    assert output.skip_speculator_proposal
+    assert output.num_scheduled_tokens == {request.request_id: 1}
+    assert not output.scheduled_spec_decode_tokens
+    if num_output_tokens == 95:
+        _model_output(scheduler, output, [[11]])
+        assert request.num_output_tokens == 96
+        assert request.num_tokens == 4096
+        assert request.is_finished()
+
+
 def test_uno_tail_overlapping_steps_before_output_delivery(uno_scheduler_factory):
     """The second dispatched step must be draft-free while O still lags at 0."""
     scheduler = uno_scheduler_factory()

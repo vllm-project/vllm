@@ -1534,8 +1534,12 @@ class Scheduler(SchedulerInterface):
             )
         return scheduler_output
 
-    @staticmethod
-    def _will_finish_after_next_sample(request: Request) -> bool:
+    def _uno_output_token_limit(self, request: Request) -> int:
+        return min(
+            request.max_tokens, self.max_model_len - request.num_prompt_tokens
+        )
+
+    def _will_finish_after_next_sample(self, request: Request) -> bool:
         """Lower bound for a step qualified by the caller as sampling.
 
         Pending speculative placeholders guarantee only one output token,
@@ -1544,7 +1548,7 @@ class Scheduler(SchedulerInterface):
         """
         return (
             request.num_output_tokens + int(request.num_output_placeholders > 0) + 1
-            >= request.max_tokens
+            >= self._uno_output_token_limit(request)
         )
 
     def _apply_uno_tail_policy(
@@ -1562,7 +1566,7 @@ class Scheduler(SchedulerInterface):
         max_output = num_new_tokens - target_queries + 1
         if (
             request.num_output_tokens + request.num_output_placeholders + max_output
-            >= request.max_tokens
+            >= self._uno_output_token_limit(request)
         ):
             # This is an upper-bound policy trigger, not a terminal proof.
             self._uno_tail_requests.add(request)
