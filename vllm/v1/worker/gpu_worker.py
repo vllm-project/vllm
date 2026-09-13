@@ -935,6 +935,13 @@ class Worker(WorkerBase):
         # intra-op parallelism.
         set_torch_threads_for_runtime()
 
+        # Expert pool: placement frozen during profiling/capture; open it now.
+        from vllm.model_executor.layers.fused_moe.expert_pool.install import (
+            open_pool_gate,
+        )
+
+        open_pool_gate(self.model_runner.model)
+
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
