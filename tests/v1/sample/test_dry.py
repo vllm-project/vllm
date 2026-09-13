@@ -622,3 +622,64 @@ def test_update_from_tokenizer_skips_when_dry_is_off():
     params = SamplingParams(dry_sequence_breakers=["\n"])
     params.update_from_tokenizer(_StubTokenizer())
     assert params._dry_breaker_ids is None
+
+
+# ---------------------------------------------------------------------------
+# The REST boundary. Added 2026-09-13 after the Python-side bool guard was
+# mistaken, in our own notes, for a guard that also covers HTTP.
+# ---------------------------------------------------------------------------
+
+
+def test_rest_numeric_fields_coerce_json_booleans_like_every_other_param():
+    """Where the bool guard reaches, and where it does not.
+
+    ``SamplingParams._verify_args`` rejects a bool in a ``dry_*`` numeric field
+    (``test_sampling_params_rejects_json_booleans`` above), because ``bool`` is
+    an ``int`` subclass and an isinstance check alone would let JSON ``true``
+    through to the sampler.
+
+    Over the REST API that guard is never reached. Pydantic coerces JSON
+    ``true`` to ``1.0`` while validating the request model, so what arrives at
+    ``SamplingParams`` is a genuine float and ``isinstance(x, bool)`` is False.
+    ``{"dry_multiplier": true}`` is therefore a request for multiplier 1.0
+    rather than an error.
+
+    That is not specific to DRY: ``temperature`` and every other numeric
+    sampling field in vLLM behave identically, which is why this test asserts
+    the same coercion for an upstream field beside ours. It is pinned so that
+    nobody reads the Python-side guard as a REST-side guard, and so that a
+    future pydantic that starts rejecting bools fails here loudly rather than
+    silently changing what an existing request means.
+    """
+    from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+
+    req = CompletionRequest(
+        model="m", prompt="p", dry_multiplier=True, temperature=True
+    )
+    # Coerced at the model boundary, before any vLLM validation runs.
+    assert req.dry_multiplier == 1.0
+    assert not isinstance(req.dry_multiplier, bool)
+    assert req.temperature == 1.0, "upstream's own numeric field coerces the same way"
+
+    params = req.to_sampling_params(max_tokens=8)
+    assert params.dry_multiplier == 1.0
+    # And it is a real enable, not a no-op: the sampler gate is multiplier > 0.
+    from vllm.v1.worker.gpu.sample.dry import use_dry
+
+    assert use_dry(params)
+
+
+def test_rest_dry_fields_default_to_off():
+    """A request that says nothing about DRY must produce DRY-off params.
+
+    This is the property that matters to anyone who applies the patch to a
+    running server and does not want the feature: the REST default has to be
+    the disabled default, not merely a small multiplier.
+    """
+    from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+
+    params = CompletionRequest(model="m", prompt="p").to_sampling_params(max_tokens=8)
+    assert params.dry_multiplier == 0.0
+    from vllm.v1.worker.gpu.sample.dry import use_dry
+
+    assert not use_dry(params)
