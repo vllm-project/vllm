@@ -41,9 +41,6 @@ from vllm.model_executor.warmup.qwen_vl_triton_warmup import qwen_vl_triton_warm
 from vllm.model_executor.warmup.replayssm_warmup import (
     replayssm_autotune_warmup,
 )
-from vllm.model_executor.warmup.spec_decode_rejection_warmup import (
-    spec_decode_rejection_warmup,
-)
 from vllm.model_executor.warmup.watermark_sample_warmup import (
     watermark_sample_warmup,
 )
@@ -178,7 +175,10 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         logger.info("JIT kernel warmup starting.")
         jit_warmup_start = time.perf_counter()
         try:
-            worker.model_runner.jit_warmup_registry.warmup()
+            registry = (
+                worker.model_runner.jit_warmup_registry  # type: ignore[attr-defined]
+            )
+            registry.warmup()
         except Exception:
             logger.exception(
                 "JIT kernel warmup failed after %.2fs.",
@@ -209,7 +209,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     # Run next so input-prep kernels JIT against pristine runner state.
     if enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
-        spec_decode_rejection_warmup(worker)
         watermark_sample_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
 
