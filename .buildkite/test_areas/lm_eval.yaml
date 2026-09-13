@@ -79,6 +79,26 @@ steps:
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) LM Eval Small Models Distributed"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/model_executor/layers/quantization
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - tests/evals/gsm8k/configs/models-mi3xx-fp8-and-mixed.txt
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
 - label: ":nvidia: (B200) LM Eval PCP"
   key: lm-eval-pcp-4xb200
@@ -90,17 +110,44 @@ steps:
   - csrc/
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP2-PCP2-EP.yaml
   - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-EP.yaml
+  - tests/evals/gsm8k/configs/GLM-5.2-NVFP4-TP1-PCP4-DCP4-EP.yaml
   - tests/evals/gsm8k/configs/models-pcp.txt
   - vllm/model_executor/layers/quantization
   - vllm/config/parallel.py
   - vllm/distributed/parallel_state.py
   - vllm/model_executor/layers/attention/mla_attention.py
   - vllm/model_executor/layers/attention/pcp.py
+  - vllm/model_executor/layers/attention/sparse_mla_attention.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/v1/attention/backends/mla/flashmla_sparse.py
+  - vllm/v1/attention/backends/mla/indexer.py
   - vllm/v1/worker/gpu/model_runner.py
   - vllm/v1/worker/gpu/pcp_manager.py
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt
+
+- label: ":nvidia: (H100) LM Eval Watermark Feature Combination"
+  key: lm-eval-dspark-watermark-2xh100
+  device: h100
+  num_devices: 2
+  # Local TP2 runs took 84–379 seconds, including startup.
+  timeout_in_minutes: 15
+  source_file_dependencies:
+  - .buildkite/test_areas/lm_eval.yaml
+  - tests/evals/gsm8k/
+  - vllm/config/speculative.py
+  - vllm/config/vllm.py
+  - vllm/config/watermarking.py
+  - vllm/sampling_params.py
+  - vllm/model_executor/models/qwen3_dspark.py
+  - vllm/model_executor/models/qwen3_dflash.py
+  - vllm/model_executor/warmup/
+  - vllm/v1/watermarking/
+  - vllm/v1/worker/gpu/
+  autorun_on_main: true
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark-dspark-tp2.txt
 
 - label: ":nvidia: (B200) LM Eval Spec Decode"
   key: lm-eval-spec-decode-4xb200
@@ -375,6 +422,28 @@ steps:
   commands:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt
+  mirror:
+    amd:
+      label: ":amd: (MI355) GPQA Eval (GPT-OSS)"
+      dind: false
+      device: mi355_2
+      timeout_in_minutes: 40
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/model_executor/layers/quantization
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - vllm/model_executor/layers/fused_moe/
+      - tests/evals/gpt_oss/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - uv pip install --system 'gpt-oss[eval]==0.0.5'
+      - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx950.txt
 
 - label: ":nvidia: (B200) Qwen3.8-Flash-Next-FP8 Accuracy Eval"
   key: accuracy-eval-qwen3-8-flash-next-fp8-b200
@@ -470,6 +539,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"
 
 - label: ":nvidia: (H200 MIG 35GB) MRCR Eval Small Models"
+  key: mrcr-eval-small-models
   device: h200_35gb
   timeout_in_minutes: 25
   source_file_dependencies:

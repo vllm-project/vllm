@@ -164,10 +164,11 @@ def test_model_tensor_schema(model_id: str):
             "Kimi-K2.5's offline inference has issues about vision chunks. Fix later."
         )
 
-    if model_id == "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp" and not (
-        current_platform.is_cuda()
+    if (
+        model_id == "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp"
+        and not current_platform.is_cuda_alike()
     ):
-        pytest.skip("Deepseek V4 is only supported on CUDA")
+        pytest.skip("Deepseek V4 vision is only supported on CUDA and ROCm")
 
     if model_id == "zai-org/GLM-5.3-Flash" and (current_platform.is_xpu()):
         pytest.skip("GLM-5.3-Flash is not supported on XPU")

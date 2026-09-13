@@ -17,7 +17,7 @@ Repository setup requires a `BUF_TOKEN` GitHub Actions secret with permission to
 
 ```toml
 [dependencies]
-vllm-proto = "0.1"
+vllm-proto = "0.2"
 ```
 
 For example, import `vllm_proto::inference_client::InferenceClient` or

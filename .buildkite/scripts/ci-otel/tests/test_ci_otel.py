@@ -8,6 +8,7 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import pytest
 SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS_DIR))
 
+import ci_gpu  # noqa: E402
 import ci_otel  # noqa: E402
 from ci_otel import Span  # noqa: E402
 
@@ -251,9 +253,15 @@ def test_export_failure_is_soft_and_bounded(monkeypatch):
     assert time.monotonic() - started < 0.5
 
 
-def test_export_batches_with_one_oidc_token(monkeypatch):
+@pytest.mark.parametrize("byte_limited", [False, True])
+def test_export_batches_with_one_oidc_token(monkeypatch, byte_limited):
     monkeypatch.setenv("BUILDKITE", "true")
-    monkeypatch.setattr(ci_otel, "MAX_BATCH_SIZE", 2)
+    if byte_limited:
+        monkeypatch.setattr(
+            ci_otel, "MAX_BATCH_BYTES", len(ci_otel._encode_span(_span())) * 2
+        )
+    else:
+        monkeypatch.setattr(ci_otel, "MAX_BATCH_SIZE", 2)
     token_calls = []
     requests = []
 
@@ -786,3 +794,127 @@ def test_pytest_plugin_failure_cannot_fail_pytest(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "1 passed" in result.stdout
+
+
+def test_gpu_samples_preserve_zero_and_omit_unsupported_metrics():
+    events = ci_gpu.parse_samples(
+        "0, GPU-a, H200, 0, 1024, 2048, Disabled\n"
+        "1, GPU-b, H200, [N/A], [N/A], 2048, Disabled\n"
+        "2, GPU-c, H200, 50, 1024, 2048, Enabled\n"
+        "3, GPU-d, H200, NaN, -1, inf, Disabled\n",
+        1234,
+    )
+    assert len(events) == 4
+    assert events[0]["attributes"]["gpu.utilization"] == 0
+    assert events[0]["attributes"]["gpu.memory.used"] == 1024**3
+    for event in events[1:]:
+        assert "gpu.utilization" not in event["attributes"]
+        assert "gpu.memory.used" not in event["attributes"]
+    assert events[2]["attributes"]["gpu.status"] == "unsupported_mig"
+    assert "gpu.memory.total" not in events[2]["attributes"]
+
+
+def test_gpu_batches_keep_command_identity_and_survive_spool_roundtrip(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("CI_INFRA_TRACE_ID", "01" * 16)
+    monkeypatch.setenv("CI_INFRA_COMMAND_SPAN_ID", "02" * 8)
+    monkeypatch.setenv("CI_INFRA_OTEL_SPOOL_DIR", str(tmp_path))
+    span = ci_gpu.sample_span(
+        ci_gpu.parse_samples("0, GPU-a, H200, 90, 1, 2, Disabled", 1234)
+    )
+    assert span.parent_span_id == "02" * 8
+    assert span.trace_id == "01" * 16
+    assert ci_otel.record_spans([span])
+    assert ci_otel.load_spans() == [span]
+    assert b"ci.gpu.sample" in ci_otel.encode_request([span])
+
+
+def test_gpu_query_failures_are_bounded_and_never_synthesize_idle_samples(monkeypatch):
+    calls = []
+
+    def query(*args, **kwargs):
+        calls.append(kwargs["timeout"])
+        raise subprocess.TimeoutExpired("nvidia-smi", kwargs["timeout"])
+
+    monkeypatch.setattr(ci_gpu.subprocess, "run", query)
+    monkeypatch.setattr(ci_gpu, "INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(
+        ci_gpu, "record_spans", lambda _: pytest.fail("fabricated sample")
+    )
+    ci_gpu.collect(os.getppid(), threading.Event())
+    assert calls == [2, 2, 2]
+
+
+def test_gpu_periodic_batches_are_bounded_even_when_upload_fails(monkeypatch):
+    monkeypatch.setenv("CI_INFRA_TRACE_ID", "01" * 16)
+    monkeypatch.setenv("CI_INFRA_COMMAND_SPAN_ID", "02" * 8)
+    monkeypatch.setattr(ci_gpu, "BATCH_SECONDS", 0)
+    monkeypatch.setattr(ci_gpu, "INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(
+        ci_gpu.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            a, 0, "0, GPU-a, H200, 50, 1, 2, Disabled"
+        ),
+    )
+    stop = threading.Event()
+    batches = []
+
+    def upload(spans, timeout_seconds):
+        batches.append(spans)
+        assert timeout_seconds == 2
+        if len(batches) == 3:
+            stop.set()
+        return False
+
+    monkeypatch.setattr(ci_gpu, "export_spans", upload)
+    ci_gpu.collect(os.getppid(), stop)
+    assert [len(batch[0].events) for batch in batches] == [1, 1, 1]
+
+
+@pytest.mark.parametrize("sampling", ["1", "0"])
+def test_gpu_sampler_stops_with_command_and_preserves_failure_status(
+    tmp_path, sampling
+):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    smi = bin_dir / "nvidia-smi"
+    smi.write_text('#!/bin/sh\necho "0, GPU-a, H200, 70, 1024, 2048, Disabled"\n')
+    smi.chmod(0o755)
+    # Keep the spool for inspection, and avoid any network upload.
+    shell = (
+        f'. "{SCRIPTS_DIR / "ci_otel.sh"}"\n'
+        "ci_otel_run 1 workload sh -c 'sleep 1.3; exit 7'\n"
+        "exit $?"
+    )
+    result = subprocess.run(
+        ["/bin/sh", "-c", shell],
+        capture_output=True,
+        text=True,
+        timeout=8,
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "BUILDKITE": "false",
+            "CI_INFRA_GPU_SAMPLING": sampling,
+            "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+            "CI_INFRA_OTEL_RUNTIME_DIR": str(tmp_path / "runtime"),
+            "CI_INFRA_OTEL_SPOOL_DIR": str(tmp_path / "spans"),
+        },
+    )
+    assert result.returncode == 7, result.stderr
+    records = [
+        json.loads(line)
+        for path in (tmp_path / "spans").glob("spans-*.jsonl")
+        for line in path.read_text().splitlines()
+    ]
+    command = next(record for record in records if record["name"] == "ci.command")
+    batches = [record for record in records if record["name"] == "ci.gpu.samples"]
+    assert bool(batches) == (sampling == "1")
+    if batches:
+        assert batches[0]["parent_span_id"] == command["span_id"]
+        assert all(
+            command["start_ns"] <= event["time_ns"] <= command["end_ns"]
+            for event in batches[0]["events"]
+        )

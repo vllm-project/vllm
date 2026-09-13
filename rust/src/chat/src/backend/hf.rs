@@ -129,7 +129,7 @@ pub(super) async fn load_model_backends(
     model_id: &str,
     options: LoadModelBackendsOptions,
 ) -> Result<LoadedModelBackends> {
-    let files = ResolvedModelFiles::new(model_id).await?;
+    let files = ResolvedModelFiles::new(model_id, options.revision.as_deref()).await?;
     let text_backend = HfTextBackend::from_resolved_model_files(
         files.clone(),
         model_id.to_string(),
@@ -231,6 +231,7 @@ mod tests {
             resolved_files(config_json, tokenizer_config_json),
             "test-model".to_string(),
             LoadModelBackendsOptions {
+                revision: None,
                 generation_config: Default::default(),
                 renderer,
                 language_model_only: false,

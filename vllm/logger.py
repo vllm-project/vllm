@@ -258,8 +258,10 @@ _configure_vllm_root_logger()
 
 # Transformers uses httpx to access the Hugging Face Hub. httpx is quite verbose,
 # so we set its logging level to WARNING when vLLM's logging level is INFO.
+# httpx2 is the successor huggingface_hub switches to in its 2.x releases.
 if envs.VLLM_LOGGING_LEVEL == "INFO":
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpx2").setLevel(logging.WARNING)
 
 logger = init_logger(__name__)
 

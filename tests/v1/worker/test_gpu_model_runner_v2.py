@@ -237,6 +237,7 @@ def _make_capture_runner(captured: bool) -> GPUModelRunner:
     runner.attn_groups = None
     runner.kv_cache_config = None
     runner.use_aux_hidden_state_outputs = False
+    runner.kv_connector = model_runner_module.NO_OP_KV_CONNECTOR
     return runner
 
 

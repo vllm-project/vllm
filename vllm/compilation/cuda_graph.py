@@ -221,7 +221,9 @@ class CUDAGraphWrapper:
 
     def unwrap(self) -> Callable[..., Any]:
         # in case we need to access the original runnable.
-        return self.runnable
+        runnable = self.runnable
+        # Recurse through nested wrappers.
+        return runnable.unwrap() if hasattr(runnable, "unwrap") else runnable
 
     @property
     def cudagraph_wrapper(self) -> "CUDAGraphWrapper":

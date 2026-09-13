@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
@@ -334,6 +335,72 @@ def test_worker_kv_bytes_preserves_tensor_layout(packed: bool):
     assert offloading_config.worker_kv_bytes_per_block == 16
     assert offloading_config.parallel.world_size == 6
     assert offloading_config.cache.blocks_per_chunk == 2
+
+
+def test_hisparse_offloads_only_indexer_group():
+    source = KVCacheGroupSpec(
+        ["source"],
+        _full_attention_spec(),
+        host_resident=True,
+    )
+    indexer = KVCacheGroupSpec(
+        ["indexer"],
+        _full_attention_spec(),
+        role=KVCacheGroupRole.HISPARSE_INDEXER,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[source, indexer],
+        hisparse_host_num_blocks=4,
+    )
+    config = _make_vllm_config()
+
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    scheduler_config = SchedulerOffloadConfig.from_spec(
+        MockOffloadingSpec(offloading_config), config, kv_cache_config
+    )
+
+    assert [
+        (group.group_id, group.layer_names) for group in offloading_config.groups
+    ] == [(1, ("indexer",))]
+    assert [group.group_idx for group in scheduler_config.kv_group_configs] == [1]
+
+
+def test_hisparse_partial_group_size_survives_scheduler_flattening():
+    """Worker and scheduler representations must produce identical mmap rows."""
+    layer_specs = {name: _full_attention_spec() for name in ("indexer.0", "indexer.1")}
+    wrapped = UniformTypeKVCacheSpecs.from_specs(layer_specs)
+    assert wrapped is not None
+    source = KVCacheGroupSpec(
+        ["source"],
+        _full_attention_spec(),
+        host_resident=True,
+        role=KVCacheGroupRole.HISPARSE_SOURCE,
+    )
+    worker_indexer = KVCacheGroupSpec(
+        list(layer_specs), wrapped, role=KVCacheGroupRole.HISPARSE_INDEXER
+    )
+    scheduler_indexer = KVCacheGroupSpec(
+        list(layer_specs),
+        next(iter(layer_specs.values())),
+        role=KVCacheGroupRole.HISPARSE_INDEXER,
+    )
+
+    def make_config(indexer: KVCacheGroupSpec) -> KVCacheConfig:
+        return KVCacheConfig(
+            num_blocks=4,
+            kv_cache_tensors=[],
+            kv_cache_groups=[source, indexer],
+            hisparse_host_num_blocks=4,
+        )
+
+    config = _make_vllm_config()
+    worker = build_offloading_config(config, make_config(worker_indexer))
+    scheduler = build_offloading_config(config, make_config(scheduler_indexer))
+
+    assert worker.worker_kv_bytes_per_block == scheduler.worker_kv_bytes_per_block
+    assert worker.worker_kv_bytes_per_block == wrapped.page_size_bytes
 
 
 def test_zero_blocks_skips_tensor_layout_validation():
@@ -792,7 +859,6 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
             False,
             id="uniform-uncertifiable-inner",
         ),
-        pytest.param([], False, id="attention-free"),
     ],
 )
 def test_canonical_layout_gate(kv_cache_groups, certified):

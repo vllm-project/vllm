@@ -134,6 +134,7 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
     vllm_config.cache_config = CacheConfig()
     vllm_config.cache_config.num_gpu_blocks_override = None
     vllm_config.cache_config.kv_cache_layout = "BLHNC"
+    vllm_config.attention_config.hisparse_config = None
     config = get_kv_cache_config_from_groups(vllm_config, groups, 8 * 1024 * 1024)
     views = allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout.BLHNC, None)
     buf_ptr = views["g1.big"].data_ptr()

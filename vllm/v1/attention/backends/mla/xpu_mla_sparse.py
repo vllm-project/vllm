@@ -13,6 +13,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SharedTopkIndicesBuffer,
+)
 from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -125,7 +128,7 @@ class XPUMLASparseMetadataBuilder(AttentionMetadataBuilder[XPUMLASparseMetadata]
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens = vllm_config.model_config.hf_config.index_topk
+        self.topk_tokens = vllm_config.model_config.hf_text_config.index_topk
         self.topk_tokens_tensor = torch.tensor(
             [self.topk_tokens], device=device, dtype=torch.int32
         )
@@ -183,7 +186,7 @@ class XPUMLASparseMetadataBuilder(AttentionMetadataBuilder[XPUMLASparseMetadata]
         return metadata
 
 
-class XPUMLASparseImpl(MLAAttentionImpl[XPUMLASparseMetadata]):
+class XPUMLASparseImpl(MLAAttentionImpl[XPUMLASparseMetadata], SharedTopkIndicesBuffer):
     is_sparse = True
 
     def __init__(
@@ -210,12 +213,7 @@ class XPUMLASparseImpl(MLAAttentionImpl[XPUMLASparseMetadata]):
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.softmax_scale = scale
-        # The indexer carries the shared buffer for normal layers and tests;
-        # the explicitly-passed buffer covers backbone skip layers, whose
-        # indexer is not constructed (see deepseek_v2.py).
-        self.topk_indices_buffer: torch.Tensor | None = (
-            indexer.topk_indices_buffer if indexer is not None else topk_indices_buffer
-        )
+        self.init_topk_indices_buffer(indexer, topk_indices_buffer)
 
     def _forward_bf16_kv(
         self,

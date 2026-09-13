@@ -75,6 +75,7 @@ def _mock_vllm_config(layout: str | None):
     config.cache_config = CacheConfig()
     config.cache_config.num_gpu_blocks_override = None
     config.cache_config.kv_cache_layout = layout
+    config.attention_config.hisparse_config = None
     return config
 
 

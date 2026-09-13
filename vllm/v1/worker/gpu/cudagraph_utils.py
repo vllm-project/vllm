@@ -34,6 +34,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import current_stream
+from vllm.v1.hisparse.binding import release_hisparse_profiling_cache
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -931,6 +932,7 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     if (model := getattr(runner, "model", None)) is not None:
         layers = itertools.chain(layers, model.modules())
     clear_layer_kv_caches(layers)
+    release_hisparse_profiling_cache(runner.compilation_config.static_forward_context)
     runner.cache_config.num_gpu_blocks = None
     runner.maybe_remove_all_loras(runner.lora_config)
     gc.collect()
