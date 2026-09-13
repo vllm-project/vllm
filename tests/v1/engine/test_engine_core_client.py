@@ -122,6 +122,8 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         def recv_multipart(self):
             return (b"\x00\x00", b"")
 
+    shadow_socket = ShadowSocket()
+
     class DummySocket:
         def send_multipart(self, _msg, *, copy: bool = False, track: bool = False):
             if track:
@@ -142,7 +144,7 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         def setsockopt(self, *_args, **_kwargs):
             pass
 
-    monkeypatch.setattr(core_client_mod.zmq.Socket, "shadow", lambda *_: ShadowSocket())
+    monkeypatch.setattr(core_client_mod.zmq.Socket, "shadow", lambda *_: shadow_socket)
     monkeypatch.setattr(
         core_client_mod, "make_zmq_socket", lambda *_, **__: DummySocket()
     )
@@ -175,6 +177,25 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         assert poll_timeouts == [timeout_value * 1000]
     finally:
         client.shutdown()
+
+
+def test_ready_wait_timeout_reports_elapsed_and_jit_hint():
+    """The ready-wait timeout (operative for externally-managed engines and
+    elastic-EP scale-up) must name JIT compilation as a possible cause
+    (#48031) and report the actual elapsed wait."""
+    core_client_mod = _reload_core_client_module()
+
+    client = object.__new__(core_client_mod.MPClient)
+    client.core_engines = [b"\x00\x00"]
+
+    class NeverReadySocket:
+        def poll(self, timeout: int) -> int:
+            return 0
+
+    with pytest.raises(TimeoutError, match="VLLM_ENGINE_READY_TIMEOUT_S") as exc_info:
+        client._wait_for_engine_ready(NeverReadySocket())
+    assert "JIT" in str(exc_info.value)
+    assert "after" in str(exc_info.value)
 
 
 def _make_pooling_request(
