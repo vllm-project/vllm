@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 import pytest
 import torch
 
@@ -962,3 +963,37 @@ def test_sparse_decode_dcp_short_context_matches_non_dcp():
     dcp_out, dcp_lse = _dcp_lse_merge(local_outs, local_lses)
     torch.testing.assert_close(dcp_out, ref_out, atol=1e-5, rtol=1e-5)
     torch.testing.assert_close(dcp_lse, ref_lse, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("dcp_world_size", [2, 4, 8])
+@pytest.mark.parametrize("req_lens", [[7], [8, 8], [1, 9], [256, 1, 2730]])
+def test_pcp_plan_deinterleave_restores_global_order(dcp_world_size, req_lens):
+    """The index gather must undo DCP sharding per request"""
+    from vllm.v1.attention.backends.mla.indexer import build_pcp_global_chunk_plan
+
+    scheduled = np.array(req_lens, dtype=np.int64)
+    shard_rows = -(-scheduled // dcp_world_size)
+    rows = np.arange(len(scheduled))
+    plan = build_pcp_global_chunk_plan(
+        rows, shard_rows, dcp_world_size, torch.device("cpu")
+    )
+
+    starts = np.concatenate([[0], np.cumsum(scheduled)])
+
+    # Build each rank's padded shard exactly as the cache gather would.
+    padded_cu = plan.padded_local_cu.tolist()
+    shards = torch.zeros(dcp_world_size, plan.padded_local_total, 1)
+    for r in range(dcp_world_size):
+        for i, g in enumerate(req_lens):
+            for t in range(r, g, dcp_world_size):
+                shards[r, padded_cu[i] + t // dcp_world_size, 0] = starts[i] + t
+
+    gathered = shards.reshape(dcp_world_size * plan.padded_local_total, 1)
+    restored = gathered[plan.deinterleave_idx]
+    # The layout is padded per request; only the real positions are read.
+    row_start = plan.row_start_cu.tolist()
+    for i, g in enumerate(req_lens):
+        torch.testing.assert_close(
+            restored[row_start[i] : row_start[i] + g, 0],
+            torch.arange(starts[i], starts[i] + g, dtype=torch.float32),
+        )

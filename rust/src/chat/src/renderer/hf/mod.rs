@@ -25,6 +25,7 @@ use crate::{
 
 mod error;
 mod format;
+mod generation;
 mod template;
 mod tojson;
 
@@ -640,6 +641,22 @@ mod tests {
         .prompt
         .into_text()
         .map_err(|_| unreachable!("HF renderer should return text prompt"))
+    }
+
+    #[test]
+    fn generation_blocks_allow_content_format_detection_and_request_overrides() {
+        let template = "{% for message in messages %}{% generation %}{% for part in message.content %}{{ part.text }}{% endfor %}{% endgeneration %}{% endfor %}";
+        let mut request = sample_request(vec![ChatMessage::user("hello")]);
+        let default = render(Some(template), &request).unwrap();
+        request.chat_options.chat_template = Some(template.to_string());
+        let overridden = render(Some("unused"), &request).unwrap();
+        expect![[r#"
+            (
+                "hello",
+                "hello",
+            )
+        "#]]
+        .assert_debug_eq(&(default, overridden));
     }
 
     fn render_mm(
