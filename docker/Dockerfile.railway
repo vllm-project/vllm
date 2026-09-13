@@ -1,0 +1,18 @@
+# Railway deployment image.
+#
+# Railway builders have no GPU and cannot compile the vLLM kernels, so this
+# image reuses the pre-built x86_64 CPU release image instead of building
+# from source. Runtime settings (model, port, extra args) come from the
+# service's environment variables; see docs/deployment/railway.md.
+ARG VLLM_CPU_IMAGE=vllm/vllm-openai-cpu:v0.29.0-x86_64
+FROM ${VLLM_CPU_IMAGE}
+
+COPY docker/entrypoints/railway-entrypoint.sh /usr/local/bin/railway-entrypoint.sh
+RUN chmod +x /usr/local/bin/railway-entrypoint.sh
+
+ENV HF_HOME=/root/.cache/huggingface \
+    VLLM_CPU_OMP_THREADS_BIND=nobind
+
+EXPOSE 8000
+
+ENTRYPOINT ["/usr/local/bin/railway-entrypoint.sh"]
