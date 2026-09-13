@@ -30,7 +30,10 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     RequestResponseMetadata,
 )
-from vllm.entrypoints.generate.base.serving import GenerateBaseServing
+from vllm.entrypoints.generate.base.serving import (
+    GenerateBaseServing,
+    build_per_request_timing_metrics,
+)
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.context import (
@@ -109,6 +112,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         tool_server: ToolServer | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        enable_per_request_metrics: bool = False,
         enable_log_outputs: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
@@ -136,6 +140,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+        self.enable_per_request_metrics = enable_per_request_metrics
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
@@ -645,6 +650,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
 
             async for res in generator:
+                context.request_metrics = res.metrics
                 context.append_output(res)
                 # NOTE(woosuk): The stop condition is handled by the engine.
                 yield context
@@ -654,6 +660,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 break
 
             # Call the tool and update the context with the result.
+            context.request_metrics_cover_all_generation_turns = False
             tool_output = await context.call_tool()
             context.append_tool_output(tool_output)
 
@@ -856,6 +863,14 @@ class OpenAIServingResponses(GenerateBaseServing):
                 ],
             ),
         )
+        per_request_metrics = None
+        if (
+            self.enable_per_request_metrics
+            and context.request_metrics_cover_all_generation_turns
+        ):
+            per_request_metrics = build_per_request_timing_metrics(
+                context.request_metrics, num_generated_tokens
+            )
         response = ResponsesResponse.from_request(
             request,
             sampling_params,
@@ -866,6 +881,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             output=output,
             status=status,
             usage=usage,
+            metrics=per_request_metrics,
             kv_transfer_params=context.kv_transfer_params,
             ec_transfer_params=context.ec_transfer_params,
         )
