@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from vllm import envs
+from vllm.distributed.ec_transfer.proxy import register as epd_register
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 from vllm.utils.gc_utils import freeze_gc_heap
@@ -81,12 +82,18 @@ async def lifespan(app: FastAPI):
         else:
             task = None
 
+        # Announce only once the server is about to serve: the proxy routes
+        # to an instance the moment it registers.
+        registrar = epd_register.maybe_start(app.state)
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
         try:
             yield
         finally:
+            if registrar is not None:
+                await registrar.stop()
             if task is not None:
                 task.cancel()
             for attr_name in (
