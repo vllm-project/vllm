@@ -73,6 +73,7 @@ class TritonAttentionMetadata:
     slot_mapping: torch.Tensor
 
     seq_threshold_3D: int
+    max_q_len_3D: int
     num_par_softmax_segments: int
     softmax_segm_output: torch.Tensor
     softmax_segm_max: torch.Tensor
@@ -151,11 +152,33 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 key=lambda x: abs(x - self.seq_threshold_3D),
             )
 
+        # Largest query length the 3D (split-KV) path may serve. The kernel
+        # and ``reduce_segments`` index the ``softmax_segm_*`` scratch per
+        # *query row*, so the scratch must cover ``query_len`` rows per
+        # sequence, not one. Size it by how many query rows still count as a
+        # decode -- 1 without speculation, and the spec-decode query width
+        # with it -- which excludes true prefill in a way that
+        # ``max_seqlen_q > 1`` could not.
+        self.max_q_len_3D = 1
+        speculative_config = self.vllm_config.speculative_config
+        if (
+            speculative_config is not None
+            and speculative_config.num_speculative_tokens is not None
+        ):
+            self.max_q_len_3D = (
+                1
+                + (2 if speculative_config.parallel_drafting else 1)
+                * speculative_config.num_speculative_tokens
+            )
+
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
         headdim_padded = next_power_of_2(self.headdim)
+        # Scratch is indexed per query row: seq_threshold_3D sequences each
+        # contributing up to max_q_len_3D rows.
+        num_segm_rows = self.seq_threshold_3D * self.max_q_len_3D
         self.softmax_segm_output = torch.empty(
             (
-                self.seq_threshold_3D,
+                num_segm_rows,
                 self.num_heads_q,
                 self.num_par_softmax_segments,
                 headdim_padded,
@@ -164,12 +187,12 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             device=device,
         )
         self.softmax_segm_max = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (num_segm_rows, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
         )
         self.softmax_segm_expsum = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (num_segm_rows, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
         )
@@ -241,6 +264,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             seq_threshold_3D=self.seq_threshold_3D,
+            max_q_len_3D=self.max_q_len_3D,
             num_par_softmax_segments=self.num_par_softmax_segments,
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,
@@ -642,6 +666,7 @@ class TritonAttentionImpl(AttentionImpl):
         block_table = attn_metadata.block_table
 
         seq_threshold_3D = attn_metadata.seq_threshold_3D
+        max_q_len_3D = attn_metadata.max_q_len_3D
         num_par_softmax_segments = attn_metadata.num_par_softmax_segments
         softmax_segm_output = attn_metadata.softmax_segm_output
         softmax_segm_max = attn_metadata.softmax_segm_max
@@ -669,6 +694,7 @@ class TritonAttentionImpl(AttentionImpl):
             k_descale=k_descale,
             v_descale=v_descale,
             seq_threshold_3D=seq_threshold_3D,
+            max_q_len_3D=max_q_len_3D,
             num_par_softmax_segments=num_par_softmax_segments,
             softmax_segm_output=softmax_segm_output,
             softmax_segm_max=softmax_segm_max,
