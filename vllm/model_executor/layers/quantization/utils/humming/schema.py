@@ -141,13 +141,13 @@ def input_schema_to_quant_key(
                 param_dtype = torch.float16
 
     schema = schema.to_humming_schema(param_dtype)
-    if schema.input_dtype is None or schema.input_dtype.num_bits >= 16:
+    if schema.a_dtype is None or schema.a_dtype.num_bits >= 16:
         return None
 
     mode = schema.input_quant_mode
     if mode == InputQuantizationMode.Disabled:
         return None
-    dtype = _HUMMING_TO_QUANT_DTYPE[schema.input_dtype]
+    dtype = _HUMMING_TO_QUANT_DTYPE[schema.a_dtype]
 
     gs = schema.input_scale_group_size
     group_shape = GroupShape(row=1, col=gs) if gs > 0 else GroupShape.PER_TOKEN
@@ -232,7 +232,7 @@ def quant_key_to_input_schema(key: QuantKey | None) -> "HummingInputSchema":
         raise ValueError("Humming tensor and token input scales must be float32")
 
     return HummingInputSchema(
-        input_dtype=quant_dtypes[key.dtype],
+        a_dtype=quant_dtypes[key.dtype],
         input_scale_group_size=group_size,
         input_scale_dtype=scale_dtypes[scale.dtype],
         input_quant_mode=mode,
@@ -296,10 +296,10 @@ def check_and_fallback_input_schema(
     weight_schema = weight_schema.to_humming_schema(param_dtype)
     input_schema = input_schema.to_humming_schema(param_dtype)
     fp6_dtypes = (humming_dtypes.float6e2m3, humming_dtypes.float6e3m2)
-    if input_schema.input_dtype in fp6_dtypes:
-        input_schema.input_dtype = humming_dtypes.float8e4m3
-    input_dtype = input_schema.input_dtype
-    input_bits = input_dtype.num_bits if input_dtype is not None else 16
+    if input_schema.a_dtype in fp6_dtypes:
+        input_schema.a_dtype = humming_dtypes.float8e4m3
+    a_dtype = input_schema.a_dtype
+    input_bits = a_dtype.num_bits if a_dtype is not None else 16
     input_group_size = input_schema.input_scale_group_size
     input_scale_dtype = input_schema.input_scale_dtype
     input_quant_mode = input_schema.input_quant_mode
@@ -311,17 +311,17 @@ def check_and_fallback_input_schema(
 
     if input_schema.is_compatible_with(weight_schema, param_dtype):
         if not allow_fallback:
-            if is_deprecated(input_dtype):
-                logger.warning_once(f"{input_dtype} is deprecated on SM{sm_version}")
+            if is_deprecated(a_dtype):
+                logger.warning_once(f"{a_dtype} is deprecated on SM{sm_version}")
             return input_schema
 
-        if input_dtype is None or input_dtype.num_bits == 16:
+        if a_dtype is None or a_dtype.num_bits == 16:
             return input_schema
 
-        if not is_deprecated(input_dtype):
+        if not is_deprecated(a_dtype):
             is_mxfp8 = (
-                input_dtype.is_floating_point_type
-                and input_dtype.num_bits == 8
+                a_dtype.is_floating_point_type
+                and a_dtype.num_bits == 8
                 and input_group_size == 32
                 and input_scale_dtype == humming_dtypes.float8e8m0
                 and sm_version >= 120
@@ -332,7 +332,7 @@ def check_and_fallback_input_schema(
                 if input_quant_mode == InputQuantizationMode.StaticTensor:
                     new_quant_mode = InputQuantizationMode.StaticTensor
                 candidate = HummingInputSchema(
-                    input_dtype=input_dtype,
+                    a_dtype=a_dtype,
                     input_scale_group_size=0,
                     input_scale_dtype=humming_dtypes.float32,
                     input_quant_mode=new_quant_mode,
@@ -343,8 +343,8 @@ def check_and_fallback_input_schema(
 
     if allow_fallback:
         fallback_dtypes = (
-            input_dtype,
-            *dtype_fallback_order_map.get(input_dtype, ()),
+            a_dtype,
+            *dtype_fallback_order_map.get(a_dtype, ()),
             humming_dtypes.DataType.from_any(param_dtype),
         )
         for dtype in fallback_dtypes:
@@ -368,7 +368,7 @@ def check_and_fallback_input_schema(
                     quant_mode = InputQuantizationMode.DynamicGroup
 
             candidate = HummingInputSchema(
-                input_dtype=dtype,
+                a_dtype=dtype,
                 input_scale_group_size=group_size,
                 input_scale_dtype=scale_dtype,
                 input_quant_mode=quant_mode,

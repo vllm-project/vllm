@@ -128,10 +128,10 @@ def get_humming_moe_quant_config(
     input_schema = layer.input_schemas["w13"]
     weight_schema = layer.weight_schemas["w13"]
 
-    if input_schema.input_dtype is None or input_schema.input_dtype.num_bits == 16:
+    if input_schema.a_dtype is None or input_schema.a_dtype.num_bits == 16:
         q_dtype = None
     else:
-        q_dtype = str(input_schema.input_dtype)
+        q_dtype = str(input_schema.a_dtype)
 
     # Block-FP8 (group-128) activations are quantized *before* the EP all-to-all
     # dispatch (so FP8 rather than BF16 crosses the interconnect) and consumed by
@@ -146,7 +146,7 @@ def get_humming_moe_quant_config(
         and input_schema.input_quant_mode in (None, "dynamic_group")
     ):
         q_dtype = humming_schema._HUMMING_TO_QUANT_DTYPE.get(
-            input_schema.input_dtype, FP8_DTYPE
+            input_schema.a_dtype, FP8_DTYPE
         )
         activation_group_shape = GroupShape(row=1, col=input_scale_group_size)
 

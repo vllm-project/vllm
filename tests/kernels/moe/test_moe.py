@@ -1352,7 +1352,7 @@ def _make_humming_indexed_experts(activation: MoEActivation):
     humming_utils.convert_to_humming_moe_kernel_format(
         layer,
         weight_schema=weight_schema,
-        input_schema=humming.HummingInputSchema(input_dtype=humming.dtypes.bfloat16),
+        input_schema=humming.HummingInputSchema(a_dtype=humming.dtypes.bfloat16),
     )
 
     layer.local_num_experts = layer.global_num_experts = num_experts
