@@ -12,16 +12,15 @@ from cutlass import Float32, Int32, Uint32, Uint64
 from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import recast_val
+from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_cutedsl_helper import (
     CuTeDSLLaunchSpec,
     VllmCuTeDSLJitKernel,
-    cutedsl_kernel_launcher,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
-    kernel_launcher,
 )
 from vllm.triton_utils import tl, triton
 
@@ -569,7 +568,7 @@ class StableTopKFromGatheredCandidatesKernel(
         )
         return gathered, out
 
-    @cutedsl_kernel_launcher
+    @kernel_launcher
     def __call__(
         self,
         gathered: torch.Tensor,
@@ -577,16 +576,11 @@ class StableTopKFromGatheredCandidatesKernel(
         *,
         topk: int,
     ) -> CuTeDSLLaunchSpec[CompileKey]:
-        compile_key = self.dispatch(topk=topk, num_candidates=gathered.shape[1])
-        return (
-            compile_key,
-            (gathered, out),
-            {
-                "gathered_shape": tuple(gathered.shape),
-                "out_shape": tuple(out.shape),
-                "topk": topk,
-            },
+        compile_key = self.dispatch(
+            topk=topk,
+            num_candidates=gathered.shape[1],
         )
+        return compile_key, (gathered, out)
 
 
 _PACK_DCP_TOPK_CANDIDATES_KERNEL = PackDCPTopkCandidatesKernel()

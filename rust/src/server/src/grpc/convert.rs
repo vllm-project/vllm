@@ -4,10 +4,9 @@
 //! Conversion between gRPC protobuf types and internal `vllm-text`
 //! request/response types.
 
+use thiserror_ext::AsReport as _;
 use tonic::Status;
-use url::Url;
 use uuid::Uuid;
-use vllm_chat::MediaContentPart;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
@@ -16,95 +15,6 @@ use vllm_text::{
 };
 
 use super::pb;
-
-pub fn media_parts_from_request(
-    media: Vec<pb::MediaItem>,
-) -> Result<Vec<MediaContentPart>, Status> {
-    let mut parts = Vec::with_capacity(media.len());
-    for (index, item) in media.into_iter().enumerate() {
-        let modality = item.modality();
-        if modality == pb::Modality::Unspecified {
-            return Err(Status::invalid_argument(format!(
-                "media[{index}].modality is required"
-            )));
-        }
-        let uuid = (!item.uuid.is_empty()).then_some(item.uuid);
-        let mime_type = (!item.mime_type.is_empty()).then_some(item.mime_type);
-        let source = item.source.ok_or_else(|| {
-            Status::invalid_argument(format!("media[{index}].source is required"))
-        })?;
-        match &source {
-            pb::media_item::Source::Url(url) => {
-                validate_media_uri(index, "url", url, &["http", "https"])?;
-            }
-            pb::media_item::Source::DataUri(uri) => {
-                validate_media_uri(index, "data_uri", uri, &["data"])?;
-            }
-            pb::media_item::Source::RawBytes(_) => {}
-        }
-        let part = match (modality, source) {
-            (
-                pb::Modality::Image,
-                pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
-            ) => MediaContentPart::ImageUrl {
-                url,
-                detail: None,
-                uuid,
-            },
-            (pb::Modality::Image, pb::media_item::Source::RawBytes(data)) => {
-                MediaContentPart::ImageData {
-                    data,
-                    mime_type,
-                    uuid,
-                    detail: None,
-                }
-            }
-            (
-                pb::Modality::Video,
-                pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
-            ) => MediaContentPart::VideoUrl { url, uuid },
-            (pb::Modality::Video, pb::media_item::Source::RawBytes(data)) => {
-                MediaContentPart::VideoData {
-                    data,
-                    mime_type,
-                    uuid,
-                }
-            }
-            (
-                pb::Modality::Audio,
-                pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
-            ) => MediaContentPart::AudioUrl { url, uuid },
-            (pb::Modality::Audio, pb::media_item::Source::RawBytes(data)) => {
-                MediaContentPart::AudioData {
-                    data,
-                    mime_type,
-                    uuid,
-                }
-            }
-            (pb::Modality::Unspecified, _) => unreachable!("modality validated above"),
-        };
-        parts.push(part);
-    }
-    Ok(parts)
-}
-
-fn validate_media_uri(
-    index: usize,
-    field: &str,
-    value: &str,
-    allowed_schemes: &[&str],
-) -> Result<(), Status> {
-    let uri = Url::parse(value).map_err(|_| {
-        Status::invalid_argument(format!("media[{index}].{field} is not a valid URI"))
-    })?;
-    if !allowed_schemes.contains(&uri.scheme()) {
-        return Err(Status::invalid_argument(format!(
-            "media[{index}].{field} must use the {} scheme",
-            allowed_schemes.join(" or ")
-        )));
-    }
-    Ok(())
-}
 
 // ========================================================================================
 // Request conversion
@@ -350,6 +260,9 @@ fn convert_structured_output(
             StructuredOutputsParams::structural_tag(tag.clone())
         }
     };
+    params
+        .validate()
+        .map_err(|error| Status::invalid_argument(error.to_report_string()))?;
     Ok(Some(params))
 }
 
@@ -635,6 +548,20 @@ mod tests {
             .expect("convert ok");
         // The gRPC API defaults to greedy (0.0) when temperature is not specified.
         assert_eq!(text.sampling_params.temperature, Some(0.0));
+    }
+
+    #[test]
+    fn grpc_rejects_empty_grammar_before_engine() {
+        use super::pb::decoding_parameters::StructuredOutput;
+        let req = pb::GenerateRequest {
+            decoding: Some(pb::DecodingParameters {
+                structured_output: Some(StructuredOutput::Grammar("  ".to_string())),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+        let err = to_text_request(req, false, &["test-model".to_string()]).unwrap_err();
+        assert!(err.message().contains("grammar cannot be an empty string"));
     }
 
     #[test]

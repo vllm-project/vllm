@@ -160,6 +160,14 @@ steps:
   # Use `find` to launch multiple instances of pytest so that
   # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
   - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_cudagraph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+  mirror:
+    amd:
+      label: ":amd: (MI355) PyTorch Fullgraph"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
 
 # Hopper-only DeepSeek-V2-Lite cases in this file require two 29.3-GiB model
 # instances and cannot fit a 35GB MIG slice. L4 retains the original coverage:

@@ -27,7 +27,7 @@ MODEL_NAME = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 NUM_GSM8K_QUESTIONS = 256
 EXPECTED_ACCURACY = 0.58
 ACCURACY_TOL = 0.08
-MAX_NUM_SEQS = 32
+DEFAULT_ALL2ALL_BACKEND = "allgather_reducescatter"
 
 
 def _send_scale_command(server: RemoteOpenAIServer, new_dp_size: int) -> bool:
@@ -161,7 +161,12 @@ def _run_gsm8k_eval(server: RemoteOpenAIServer, stage: str) -> float:
     return accuracy
 
 
-def _base_serve_args(dp_size: int = 2, enforce_eager: bool = False) -> list[str]:
+def _base_serve_args(
+    dp_size: int = 2,
+    max_dp_size: int = 4,
+    enforce_eager: bool = False,
+    all2all_backend: str = DEFAULT_ALL2ALL_BACKEND,
+) -> list[str]:
     args = [
         "--trust-remote-code",
         "--tensor-parallel-size",
@@ -170,12 +175,12 @@ def _base_serve_args(dp_size: int = 2, enforce_eager: bool = False) -> list[str]
         "0.8",
         "--max-model-len",
         "4096",
-        "--max-num-seqs",
-        str(MAX_NUM_SEQS),
         "--enable-expert-parallel",
         "--all2all-backend",
-        "allgather_reducescatter",
+        all2all_backend,
         "--enable-elastic-ep",
+        "--elastic-ep-max-dp-size",
+        str(max_dp_size),
         "--enable-eplb",
         "--eplb-config.num_redundant_experts",
         "0",
@@ -205,28 +210,43 @@ def _base_serve_args(dp_size: int = 2, enforce_eager: bool = False) -> list[str]
 
 
 @pytest.mark.parametrize(
-    ("enforce_eager", "traffic_mode"),
+    ("enforce_eager", "traffic_mode", "all2all_backend"),
     [
-        pytest.param(True, "none", id="enforce_eager_none"),
-        pytest.param(True, "light", id="enforce_eager_light"),
-        pytest.param(True, "heavy", id="enforce_eager_heavy"),
-        pytest.param(False, "heavy", id="cuda_graphs_heavy"),
+        pytest.param(True, "none", DEFAULT_ALL2ALL_BACKEND, id="enforce_eager_none"),
+        pytest.param(True, "light", DEFAULT_ALL2ALL_BACKEND, id="enforce_eager_light"),
+        pytest.param(True, "heavy", DEFAULT_ALL2ALL_BACKEND, id="enforce_eager_heavy"),
+        pytest.param(
+            False,
+            "heavy",
+            DEFAULT_ALL2ALL_BACKEND,
+            id="cuda_graphs_heavy",
+        ),
+        pytest.param(False, "heavy", "nixl_ep", id="cuda_graphs_heavy_nixl_ep"),
     ],
 )
 @multi_gpu_test(num_gpus=4)
-def test_elastic_ep_scaling(enforce_eager: bool, traffic_mode: str):
+def test_elastic_ep_scaling(
+    enforce_eager: bool, traffic_mode: str, all2all_backend: str
+):
     from vllm.distributed.eplb.eplb_communicator import has_nixl
+    from vllm.utils.import_utils import has_nixl_ep
 
     if not has_nixl():
         pytest.skip("Async EPLB with elastic EP requires NIXL (not installed)")
+    if all2all_backend == "nixl_ep" and not has_nixl_ep():
+        pytest.skip("NIXL EP is not installed")
 
     initial_dp_size = int(os.getenv("VLLM_TEST_ELASTIC_EP_INITIAL_DP", "2"))
     target_dp_size = int(os.getenv("VLLM_TEST_ELASTIC_EP_TARGET_DP", "4"))
     assert target_dp_size > initial_dp_size
-    vllm_serve_args = _base_serve_args(initial_dp_size, enforce_eager)
+    vllm_serve_args = _base_serve_args(
+        initial_dp_size, target_dp_size, enforce_eager, all2all_backend
+    )
 
     with RemoteOpenAIServer(
-        MODEL_NAME, vllm_serve_args, env_dict={}, max_wait_seconds=1200
+        MODEL_NAME,
+        vllm_serve_args,
+        max_wait_seconds=1200,
     ) as server:
         initial_accuracy = _run_gsm8k_eval(server, "Initial")
 
@@ -245,58 +265,6 @@ def test_elastic_ep_scaling(enforce_eager: bool, traffic_mode: str):
         )
 
         print("\nAccuracy Summary:")
-        print(f"  Initial:    {initial_accuracy:.3f}")
-        print(
-            f"  Scale up:   {scale_up_accuracy:.3f} "
-            f"(diff: {scale_up_accuracy - initial_accuracy:+.3f})"
-        )
-        print(
-            f"  Scale down: {scale_down_accuracy:.3f} "
-            f"(diff: {scale_down_accuracy - initial_accuracy:+.3f})"
-        )
-        print(f"  Tolerance:  {ACCURACY_TOL:.3f}")
-
-
-@multi_gpu_test(num_gpus=4)
-def test_elastic_ep_scaling_uneven():
-    """Test scale up with uneven worker distribution.
-
-    This tests the case where num_new_workers % old_dp_size != 0,
-    specifically 2 -> 3 where remainder = 1 % 2 = 1.
-    This exercises the remainder handling in sender-receiver pairing.
-    """
-    from vllm.distributed.eplb.eplb_communicator import has_nixl
-
-    if not has_nixl():
-        pytest.skip("Async EPLB with elastic EP requires NIXL (not installed)")
-
-    vllm_serve_args = _base_serve_args()
-
-    with RemoteOpenAIServer(
-        MODEL_NAME, vllm_serve_args, env_dict={}, max_wait_seconds=1200
-    ) as server:
-        initial_accuracy = _run_gsm8k_eval(server, "Initial (2 GPUs)")
-
-        # Scale 2 -> 3: This has remainder = 1 % 2 = 1
-        # Tests uneven sender-receiver pairing
-        assert _send_scale_command(server, 3)
-        scale_up_accuracy = _run_gsm8k_eval(server, "After scale up (3 GPUs)")
-
-        assert scale_up_accuracy >= initial_accuracy - ACCURACY_TOL, (
-            f"Scale up accuracy {scale_up_accuracy:.3f} dropped more than "
-            f"{ACCURACY_TOL} below initial accuracy {initial_accuracy:.3f}"
-        )
-
-        # Scale back down to 2
-        assert _send_scale_command(server, 2)
-        scale_down_accuracy = _run_gsm8k_eval(server, "After scale down (2 GPUs)")
-
-        assert scale_down_accuracy >= initial_accuracy - ACCURACY_TOL, (
-            f"Scale down accuracy {scale_down_accuracy:.3f} dropped more than "
-            f"{ACCURACY_TOL} below initial accuracy {initial_accuracy:.3f}"
-        )
-
-        print("\nAccuracy Summary (Uneven Scaling):")
         print(f"  Initial:    {initial_accuracy:.3f}")
         print(
             f"  Scale up:   {scale_up_accuracy:.3f} "
