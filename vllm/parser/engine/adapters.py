@@ -62,6 +62,10 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         finally:
             self._parser_engine.skip_tool_parsing = saved
 
+    @property
+    def emits_reasoning_span(self) -> bool:
+        return self._parser_engine.emits_reasoning_span
+
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser_engine.is_reasoning_end(list(input_ids))
 

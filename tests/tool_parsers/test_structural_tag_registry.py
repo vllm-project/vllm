@@ -524,10 +524,13 @@ def test_get_structural_tag_disables_reasoning(
     assert captured == [False]
 
 
-def test_unified_parser_get_structural_tag_disables_reasoning(
+@pytest.mark.parametrize("emits_reasoning_span", [False, True])
+def test_unified_parser_get_structural_tag_reasoning_follows_reasoning_parser(
     monkeypatch: pytest.MonkeyPatch,
     sample_tools_strict: list[ChatCompletionToolsParam],
+    emits_reasoning_span: bool,
 ):
+    """The tag's reasoning span must match the request's thinking mode."""
     captured: list[bool] = []
 
     def fake_get_model_structural_tag(*, reasoning: bool, **kwargs):
@@ -549,11 +552,14 @@ def test_unified_parser_get_structural_tag_disables_reasoning(
         tool_choice="auto",
     )
     parser = TestParser(MagicMock(), tools=sample_tools_strict)
-    parser.reasoning_parser = MagicMock(adjust_request=lambda request: request)
+    parser.reasoning_parser = MagicMock(
+        adjust_request=lambda request: request,
+        emits_reasoning_span=emits_reasoning_span,
+    )
 
     parser.adjust_request(request)
 
-    assert captured == [False]
+    assert captured == [emits_reasoning_span]
 
 
 def test_xgrammar_function_parameters_are_preserved(
