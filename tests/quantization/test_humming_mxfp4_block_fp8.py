@@ -120,3 +120,92 @@ def test_default_activation_quant_config_defers_to_humming():
     )
     assert not qc.is_block_quantized
     assert qc.per_act_token_quant
+
+
+def _ct_input_quant(**kwargs):
+    from compressed_tensors.quantization import QuantizationArgs
+
+    return QuantizationArgs(num_bits=8, type="float", symmetric=True, **kwargs)
+
+
+@pytest.mark.skipif(not has_humming(), reason="humming is not installed")
+@pytest.mark.parametrize(
+    "input_quant_kwargs,expected_group_size",
+    [
+        # The MXFP4xFP8_BLOCK recipe: dynamic FP8 activations, group 128.
+        (dict(dynamic=True, strategy="group", group_size=128), 128),
+        # Per-token dynamic FP8 activations keep Humming's per-token path.
+        (dict(dynamic=True, strategy="token"), 0),
+    ],
+)
+def test_checkpoint_activations_drive_humming_input_schema(
+    input_quant_kwargs, expected_group_size
+):
+    """The checkpoint's ``input_activations`` pick the Humming activation
+    schema, keeping the group size that humming's own compressed-tensors
+    schema would drop for FP8."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa: E501
+        _humming_input_schema,
+    )
+    from vllm.utils.humming import dtypes as humming_dtypes
+
+    schema = _humming_input_schema(_ct_input_quant(**input_quant_kwargs))
+    assert schema.a_dtype == humming_dtypes.float8e4m3
+    assert schema.input_scale_group_size == expected_group_size
+
+
+@pytest.mark.skipif(not has_humming(), reason="humming is not installed")
+def test_weight_only_checkpoint_keeps_bf16_activations():
+    """No ``input_activations`` means W4A16: Humming dequantizes the weights."""
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa: E501
+        _humming_input_schema,
+    )
+
+    assert _humming_input_schema(None).a_dtype is None
+
+
+@pytest.mark.skipif(not has_humming(), reason="humming is not installed")
+def test_env_input_quant_config_overrides_checkpoint(monkeypatch: pytest.MonkeyPatch):
+    """VLLM_HUMMING_INPUT_QUANT_CONFIG wins: returning None leaves the
+    conversion on its env-driven path."""
+    from vllm import envs
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4 import (  # noqa: E501
+        _humming_input_schema,
+    )
+
+    monkeypatch.setattr(
+        envs, "VLLM_HUMMING_INPUT_QUANT_CONFIG", {"dtype": "float8e4m3"}
+    )
+    input_quant = _ct_input_quant(dynamic=True, strategy="group", group_size=128)
+    assert _humming_input_schema(input_quant) is None
+
+
+def test_compressed_tensors_mxfp4_moe_backend_selects_humming(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """``--moe-backend humming`` routes the compressed-tensors MXFP4 MoE
+    through the oracle instead of the Cutlass/Marlin device probe."""
+    from types import SimpleNamespace
+
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+        compressed_tensors_moe_w4a4_mxfp4 as ct_mxfp4,
+    )
+
+    sentinel_experts = type("SentinelExperts", (), {})
+    monkeypatch.setattr(
+        ct_mxfp4.CutlassExpertsMxfp4, "_supports_current_device", lambda: True
+    )
+    monkeypatch.setattr(
+        ct_mxfp4,
+        "select_mxfp4_moe_backend",
+        lambda moe: (Mxfp4MoeBackend.HUMMING, sentinel_experts),
+    )
+
+    method = ct_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod(
+        SimpleNamespace(w13_num_shards=2, moe_backend="humming")
+    )
+
+    assert method.mxfp4_backend == Mxfp4MoeBackend.HUMMING
+    assert method.experts_cls is sentinel_experts
+    assert not method.use_cutlass_mxfp4
