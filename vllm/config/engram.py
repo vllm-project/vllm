@@ -37,6 +37,11 @@ def model_has_engram_layers(model_config: "ModelConfig | None") -> bool:
     return bool(getattr(model_config.hf_text_config, field, None))
 
 
+def _default_disk_offload_dir() -> str | None:
+    """Env default, so a deployment can set the path without changing flags."""
+    return envs.VLLM_ENGRAM_DISK_OFFLOAD_DIR or None
+
+
 @config
 class EngramConfig:
     """Configuration for Engram embedding storage and sharding."""
@@ -55,6 +60,21 @@ class EngramConfig:
     DP replicas. Each node stores one copy of every TP shard, reducing host
     memory without per-step Engram DP collectives. Requires sufficient
     /dev/shm capacity and a shared IPC namespace."""
+
+    disk_offload_dir: str | None = Field(default_factory=_default_disk_offload_dir)
+    """Directory holding file-backed n-gram tables, one shard per rank.
+
+    Requires `cpu_offload`, and is an alternative to `dp_shared_memory` rather
+    than a companion to it. The shard is memory-mapped from
+    `<dir>/engram_r<shard>.{weight,scale}.bin` instead of occupying anonymous
+    pinned host RAM, so what it costs in memory is whatever the page cache
+    keeps rather than the size of the table. Lookups then gather their rows on
+    the host and copy only those rows to the device: a mapped file cannot be
+    read through UVA, which needs page-locked memory, and pinning the mapping
+    would pull the whole table back into RAM.
+
+    Point this at local NVMe. On a network filesystem every row gather becomes
+    a network round trip. Defaults to VLLM_ENGRAM_DISK_OFFLOAD_DIR."""
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
