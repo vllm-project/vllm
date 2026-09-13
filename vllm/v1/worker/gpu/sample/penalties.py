@@ -226,6 +226,7 @@ def _bincount_kernel(
     prompt_bin_mask_stride,
     output_bin_counts_ptr,
     output_bin_counts_stride,
+    vocab_size,
     BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
@@ -243,13 +244,14 @@ def _bincount_kernel(
         prompt_tokens = tl.load(
             all_token_ids_ptr + req_state_idx * all_token_ids_stride + block, mask=mask
         )
+        valid_mask = mask & (prompt_tokens >= 0) & (prompt_tokens < vocab_size)
         idx = prompt_tokens // 32
         bit_idx = prompt_tokens % 32
         bit = tl.full((BLOCK_SIZE,), 1, tl.int32) << bit_idx
         tl.atomic_or(
             prompt_bin_mask_ptr + req_state_idx * prompt_bin_mask_stride + idx,
             bit,
-            mask=mask,
+            mask=valid_mask,
         )
 
     if (block_idx + 1) * BLOCK_SIZE >= prompt_len:
@@ -258,12 +260,13 @@ def _bincount_kernel(
         output_tokens = tl.load(
             all_token_ids_ptr + req_state_idx * all_token_ids_stride + block, mask=mask
         )
+        valid_mask = mask & (output_tokens >= 0) & (output_tokens < vocab_size)
         tl.atomic_add(
             output_bin_counts_ptr
             + req_state_idx * output_bin_counts_stride
             + output_tokens,
             1,
-            mask=mask,
+            mask=valid_mask,
         )
 
 
@@ -281,6 +284,7 @@ def bincount(
     prompt_bin_mask.index_fill_(0, idx_long, 0)
     output_bin_counts.index_fill_(0, idx_long, 0)
     num_tokens = expanded_idx_mapping.shape[0]
+    vocab_size = output_bin_counts.shape[1]
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(max_prefill_len, BLOCK_SIZE)
     _bincount_kernel[(num_tokens, num_blocks)](
@@ -293,6 +297,7 @@ def bincount(
         prompt_bin_mask.stride(0),
         output_bin_counts,
         output_bin_counts.stride(0),
+        vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 
