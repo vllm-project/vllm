@@ -65,6 +65,8 @@ def dispatch_topk_softmax_func(
     use_rocm_aiter: bool = False,
 ) -> Callable[..., tuple[torch.Tensor, ...]]:
     if use_rocm_aiter:
+        if rocm_aiter_ops.is_topk_gating_enabled():
+            return rocm_aiter_ops.topk_gating
         return rocm_aiter_ops.topk_softmax
     return vllm_topk_softmax
 
