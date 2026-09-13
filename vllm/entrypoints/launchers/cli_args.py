@@ -63,6 +63,28 @@ class LoRAParserAction(argparse.Action):
         setattr(namespace, self.dest, lora_list)
 
 
+def parse_reasoning_effort_budgets(value: str) -> dict[str, int]:
+    """Parse a JSON mapping from reasoning effort names to token budgets."""
+    try:
+        budgets = json.loads(value)
+    except json.JSONDecodeError as e:
+        raise argparse.ArgumentTypeError(
+            "must be a JSON object mapping effort names to non-negative integers"
+        ) from e
+
+    if not isinstance(budgets, dict) or any(
+        not isinstance(key, str)
+        or not isinstance(budget, int)
+        or isinstance(budget, bool)
+        or budget < 0
+        for key, budget in budgets.items()
+    ):
+        raise argparse.ArgumentTypeError(
+            "must be a JSON object mapping effort names to non-negative integers"
+        )
+    return budgets
+
+
 @config
 class BaseFrontendArgs:
     """Base arguments for the OpenAI-compatible frontend server.
@@ -96,6 +118,11 @@ class BaseFrontendArgs:
     with request values taking precedence. Useful for setting default
     behavior for reasoning models. Example: '{"enable_thinking": false}'
     to disable thinking mode by default for Qwen3/DeepSeek models."""
+    reasoning_effort_budgets: dict[str, int] | None = None
+    """Optional JSON mapping from reasoning effort to thinking token budget.
+
+    An explicit per-request ``thinking_token_budget`` takes precedence.
+    """
     response_role: str = "assistant"
     """The role name to return if `request.add_generation_prompt=true`."""
     return_tokens_as_token_ids: bool = False
@@ -206,6 +233,9 @@ class BaseFrontendArgs:
         """
         # Special case: default_chat_template_kwargs needs json.loads type
         frontend_kwargs["default_chat_template_kwargs"]["type"] = json.loads
+        frontend_kwargs["reasoning_effort_budgets"]["type"] = (
+            parse_reasoning_effort_budgets
+        )
 
         # Special case: LoRA modules need custom parser action and
         # optional_type(str)

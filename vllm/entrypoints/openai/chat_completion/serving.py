@@ -3,7 +3,7 @@
 
 import asyncio
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
 from typing import Any, Final, cast
@@ -137,6 +137,7 @@ class OpenAIServingChat(GenerateBaseServing):
         enable_log_outputs: bool = False,
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        reasoning_effort_budgets: Mapping[str, int] | None = None,
         enable_per_request_metrics: bool = False,
     ) -> None:
         super().__init__(
@@ -152,6 +153,7 @@ class OpenAIServingChat(GenerateBaseServing):
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}
+        self.reasoning_effort_budgets = reasoning_effort_budgets or {}
         self.enable_log_outputs = enable_log_outputs
         self.enable_log_deltas = enable_log_deltas
 
@@ -327,6 +329,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 sampling_params = request.to_sampling_params(
                     max_tokens,
                     self.default_sampling_params,
+                    self.reasoning_effort_budgets,
                 )
 
             self._log_inputs(
