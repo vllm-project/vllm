@@ -46,6 +46,10 @@ global_thread_pool = ThreadPoolExecutor(
 )
 atexit.register(global_thread_pool.shutdown)
 
+# Empty/tiny payloads have st_size 0 (or a few bytes) and would never
+# consume the byte budget. Bill each file at least one filesystem block.
+_MEDIA_CACHE_MIN_ENTRY_BYTES = 4096
+
 MEDIA_CONNECTOR_REGISTRY = ExtensionManager()
 
 MODALITY_IO_MAP: dict[str, type[MediaIO]] = {
@@ -251,7 +255,7 @@ class MediaConnector:
 
     def _put_cached_bytes(self, url: str, data: bytes) -> None:
         """Store downloaded bytes and evict if over budget."""
-        if not self._media_cache_dir:
+        if not self._media_cache_dir or not data:
             return
         cache_path = self._media_cache_path(url)
         # Atomic write via temp file + rename
@@ -289,11 +293,12 @@ class MediaConnector:
             if age > self._media_cache_ttl_secs:
                 expired.append(f)
                 continue
-            total_size += stat.st_size
+            charged = max(stat.st_size, _MEDIA_CACHE_MIN_ENTRY_BYTES)
+            total_size += charged
             # Never evict the file we just wrote
             if exclude is not None and f.name == exclude.name:
                 continue
-            entries.append((stat.st_mtime, stat.st_size, f))
+            entries.append((stat.st_mtime, charged, f))
 
         # Evict items according to LRU policy
         entries.sort(key=lambda e: e[0], reverse=True)
@@ -309,6 +314,16 @@ class MediaConnector:
         url_hash = hashlib.sha256(url.encode()).hexdigest()[:20]
         ext = Path(url.split("?", 1)[0]).suffix or ""
         return Path(self._media_cache_dir) / f"{url_hash}{ext}"  # type: ignore[arg-type]
+
+    def _decode_then_cache(
+        self,
+        url: str,
+        media_io: MediaIO[_M],
+        data: bytes,
+    ) -> _M:  # type: ignore[type-var]
+        loaded = media_io.load_bytes(data)
+        self._put_cached_bytes(url, data)
+        return loaded
 
     def _load_data_url(
         self,
@@ -397,8 +412,7 @@ class MediaConnector:
                     raise wrapped from e
                 raise
 
-            self._put_cached_bytes(url, data)
-            return media_io.load_bytes(data)
+            return self._decode_then_cache(url, media_io, data)
 
         if url_spec.scheme == "file":
             return self._load_file_url(url_spec, media_io)
@@ -450,11 +464,9 @@ class MediaConnector:
                     raise wrapped from e
                 raise
 
-            await loop.run_in_executor(
-                global_thread_pool, self._put_cached_bytes, url, data
+            return await loop.run_in_executor(
+                global_thread_pool, self._decode_then_cache, url, media_io, data
             )
-            future = loop.run_in_executor(global_thread_pool, media_io.load_bytes, data)
-            return await future
 
         if url_spec.scheme == "file":
             future = loop.run_in_executor(
