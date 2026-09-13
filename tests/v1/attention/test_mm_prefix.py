@@ -780,7 +780,7 @@ def test_flashinfer_mm_prefix_validate_configuration_rejects_dcp():
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
-    def validate(use_dcp: bool) -> list[str]:
+    def validate(use_dcp: bool = False, use_rswa: bool = False) -> list[str]:
         return FlashInferBackend.validate_configuration(
             head_size=128,
             dtype=torch.bfloat16,
@@ -794,12 +794,20 @@ def test_flashinfer_mm_prefix_validate_configuration_rejects_dcp():
             device_capability=DeviceCapability(8, 0),
             attn_type="decoder",
             use_dcp=use_dcp,
+            use_rswa=use_rswa,
         )
 
     with_dcp = validate(use_dcp=True)
     assert any("DCP" in reason for reason in with_dcp)
     without_dcp = validate(use_dcp=False)
     assert not any("DCP" in reason for reason in without_dcp)
+
+    # R-SWA is decided by the base class, so this override has to keep passing
+    # the flag through rather than swallow it.
+    with_rswa = validate(use_rswa=True)
+    assert any("R-SWA not supported" in reason for reason in with_rswa)
+    without_rswa = validate(use_rswa=False)
+    assert not any("R-SWA" in reason for reason in without_rswa)
 
 
 def _flashinfer_builder_env(sliding_window: int | None):

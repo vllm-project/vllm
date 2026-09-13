@@ -819,7 +819,9 @@ def blackwell_selection():
             return_value=DeviceCapability(10, 0),
         ),
         patch(
-            "vllm.v1.attention.backends.fa_utils.is_fa_version_supported",
+            # get_flash_attn_version() imports this inside the call, so the
+            # patch has to land on the defining module, not on fa_utils.
+            "vllm.vllm_flash_attn.flash_attn_interface.is_fa_version_supported",
             return_value=True,
         ),
     ):
@@ -835,7 +837,9 @@ def hopper_selection():
             return_value=DeviceCapability(9, 0),
         ),
         patch(
-            "vllm.v1.attention.backends.fa_utils.is_fa_version_supported",
+            # get_flash_attn_version() imports this inside the call, so the
+            # patch has to land on the defining module, not on fa_utils.
+            "vllm.vllm_flash_attn.flash_attn_interface.is_fa_version_supported",
             return_value=True,
         ),
     ):
