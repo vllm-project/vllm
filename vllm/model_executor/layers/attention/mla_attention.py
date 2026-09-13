@@ -2237,7 +2237,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     """
 
     kv_cache_spec: AttentionSpec
-
     # Defines the level of query length support for this backend.
     # - SINGLE_ONLY: Only single-token queries (no spec decode support)
     # - UNIFORM: Supports uniform multi-token queries (spec decode with uniform lengths)
@@ -2245,6 +2244,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     # If set to UNIFORM or VARLEN, this will increase `reorder_batch_threshold` when
     # speculative decoding is enabled.
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.SINGLE_ONLY
+
+    @property
+    def supports_multi_step_drafting(self) -> bool:
+        return self.query_len_support != QueryLenSupport.SINGLE_ONLY
 
     # Whether this builder can flatten a non-causal query block into decode rows.
     supports_non_causal_multi_token_decode: ClassVar[bool] = False
