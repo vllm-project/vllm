@@ -9,6 +9,11 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -68,6 +73,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         )
 
         self.cudagraph_manager: SpeculatorCudaGraphManager | None = None
+
+        _shift_input_ids.register_warmup()
+        _shift_input_embeds.register_warmup(speculator=self)
 
     def load_draft_model(
         self,
@@ -226,10 +234,9 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             slot_mappings = build_slot_mappings_by_layer(
                 slot_mappings_tensor, self.kv_cache_config
             )
-            draft_attn_metadata = self._build_draft_attn_metadata(
+            draft_attn_metadata = self._build_attn_metadata(
                 num_reqs=num_reqs,
-                num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                num_tokens_padded=batch_desc.num_tokens,
+                batch_desc=batch_desc,
                 query_start_loc_np=input_batch.query_start_loc_np,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 step=0,
@@ -1009,6 +1016,32 @@ def _shift_input_ids_kernel(
     tl.store(input_ids_ptr + last_token_index, draft_token)
 
 
+def _shift_input_ids_warmup_inputs() -> dict[str, Any]:
+    return dict(
+        input_ids=TritonWarmupTensor(torch.int32),
+        idx_mapping=TritonWarmupTensor(torch.int32),
+        query_start_loc=TritonWarmupTensor(torch.int32),
+        last_token_indices=TritonWarmupTensor(torch.int64),
+        draft_tokens=TritonWarmupTensor(torch.int64),
+        num_reqs=1,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_shift_input_ids_kernel,
+    warmup_inputs=_shift_input_ids_warmup_inputs,
+)
+def _shift_input_ids(
+    input_ids: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    last_token_indices: torch.Tensor,
+    draft_tokens: torch.Tensor,
+    num_reqs: int,
+) -> DispatchSpec:
+    return (num_reqs,), dict(BLOCK_SIZE=1024)
+
+
 @triton.jit
 def _shift_input_embeds_kernel(
     input_embeds_ptr,
@@ -1066,6 +1099,44 @@ def _shift_input_embeds_kernel(
     )
 
 
+def _shift_input_embeds_warmup_inputs(
+    *, speculator: MultiModuleMTPSpeculator
+) -> dict[str, Any]:
+    hidden = TritonWarmupTensor(
+        speculator.dtype,
+        shape=(1, speculator.hidden_size),
+        strides=(speculator.hidden_size, 1),
+    )
+    return dict(
+        input_embeds=hidden,
+        draft_embeds=hidden,
+        idx_mapping=TritonWarmupTensor(torch.int32),
+        query_start_loc=TritonWarmupTensor(torch.int32),
+        last_token_indices=TritonWarmupTensor(torch.int64),
+        num_reqs=1,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_shift_input_embeds_kernel,
+    warmup_inputs=_shift_input_embeds_warmup_inputs,
+)
+def _shift_input_embeds(
+    input_embeds: torch.Tensor,
+    draft_embeds: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    last_token_indices: torch.Tensor,
+    num_reqs: int,
+) -> DispatchSpec:
+    hidden_size = input_embeds.shape[-1]
+    return (num_reqs, triton.cdiv(hidden_size, 256)), dict(
+        hidden_size=hidden_size,
+        BLOCK_SIZE_Q=16,
+        BLOCK_SIZE_H=256,
+    )
+
+
 def update_draft_inputs(
     draft_tokens: torch.Tensor,
     draft_embeds: torch.Tensor | None,
@@ -1075,29 +1146,21 @@ def update_draft_inputs(
     idx_mapping: torch.Tensor,
     num_reqs: int,
 ) -> None:
-    _shift_input_ids_kernel[(num_reqs,)](
+    _shift_input_ids(
         input_buffers.input_ids,
         idx_mapping,
         input_buffers.query_start_loc,
         last_token_indices,
         draft_tokens,
-        BLOCK_SIZE=1024,
+        num_reqs=num_reqs,
     )
     if input_embeds is not None:
         assert draft_embeds is not None
-        hidden_size = input_embeds.shape[-1]
-        hidden_block_size = 256
-        _shift_input_embeds_kernel[
-            (num_reqs, triton.cdiv(hidden_size, hidden_block_size))
-        ](
+        _shift_input_embeds(
             input_embeds,
-            input_embeds.stride(0),
             draft_embeds,
-            draft_embeds.stride(0),
             idx_mapping,
             input_buffers.query_start_loc,
             last_token_indices,
-            hidden_size,
-            BLOCK_SIZE_Q=16,
-            BLOCK_SIZE_H=hidden_block_size,
+            num_reqs=num_reqs,
         )

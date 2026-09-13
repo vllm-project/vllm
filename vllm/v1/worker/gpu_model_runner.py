@@ -66,10 +66,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByTy
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
-from vllm.model_executor.layers.rotary_embedding import (
-    MRotaryEmbedding,
-    XDRotaryEmbedding,
-)
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
@@ -80,14 +77,12 @@ from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMRoPE,
     SupportsMultiModal,
-    SupportsXDRoPE,
     get_mixture_of_experts_model,
     supports_eagle3,
     supports_mrope,
     supports_multimodal_pruning,
     supports_realtime,
     supports_transcription,
-    supports_xdrope,
 )
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling,
@@ -486,6 +481,7 @@ class ExecuteModelState(NamedTuple):
 class GPUModelRunner(
     LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ECConnectorModelRunnerMixin
 ):
+    @JitWarmupRegistry.capture
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -502,7 +498,6 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
-        self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -556,7 +551,7 @@ class GPUModelRunner(
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-        self.uses_xdrope_dim = model_config.uses_xdrope_dim
+        self.mrope_num_dims = model_config.mrope_num_dims
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
@@ -735,36 +730,35 @@ class GPUModelRunner(
             self.parallel_config.cp_kv_cache_interleave_size
         )
         # Capture warmup providers registered by the initial placeholder InputBatch
-        with self.jit_warmup_registry.activate():
-            self.input_batch = InputBatch(
-                max_num_reqs=self.max_num_reqs,
-                # We need to use the encoder length for encoder-decoder
-                # because of KV cache for cross-attention.
-                max_model_len=max(self.max_model_len, self.max_encoder_len),
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=[placeholder_block_size],
-                kernel_block_sizes=[placeholder_block_size],
-                max_num_blocks_per_req=[placeholder_max_num_blocks],
-                num_spec_tokens=self.num_spec_tokens,
-                logitsprocs=build_logitsprocs(
-                    self.vllm_config,
-                    self.device,
-                    PIN_MEMORY,
-                    self.is_pooling_model,
-                    custom_logitsprocs,
-                ),
-                # We currently don't know whether a particular custom logits processor
-                # uses output token ids so we set this conservatively. Thinking-budget
-                # tracking is requested dynamically when a budgeted request is in the
-                # batch.
-                logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
-                is_pooling_model=self.is_pooling_model,
-                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
-                reasoning_config=self.vllm_config.reasoning_config,
-                use_replayssm=self.cache_config.use_replayssm,
-            )
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            # We need to use the encoder length for encoder-decoder
+            # because of KV cache for cross-attention.
+            max_model_len=max(self.max_model_len, self.max_encoder_len),
+            max_num_batched_tokens=self.max_num_tokens,
+            device=self.device,
+            vocab_size=self.model_config.get_vocab_size(),
+            block_sizes=[placeholder_block_size],
+            kernel_block_sizes=[placeholder_block_size],
+            max_num_blocks_per_req=[placeholder_max_num_blocks],
+            num_spec_tokens=self.num_spec_tokens,
+            logitsprocs=build_logitsprocs(
+                self.vllm_config,
+                self.device,
+                PIN_MEMORY,
+                self.is_pooling_model,
+                custom_logitsprocs,
+            ),
+            # We currently don't know whether a particular custom logits processor
+            # uses output token ids so we set this conservatively. Thinking-budget
+            # tracking is requested dynamically when a budgeted request is in the
+            # batch.
+            logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
+            is_pooling_model=self.is_pooling_model,
+            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+            reasoning_config=self.vllm_config.reasoning_config,
+            use_replayssm=self.cache_config.use_replayssm,
+        )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
@@ -798,6 +792,9 @@ class GPUModelRunner(
 
         # Persistent buffers for CUDA graphs.
         self.input_ids = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
+        # [max_num_reqs, depth] prompt token ids preceding each request's chunk
+        # start, for models exposing `token_lookback_depth`. Sized after load.
+        self.lookback_token_ids: CpuGpuBuffer | None = None
         self.positions = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=self.device
         )
@@ -852,20 +849,11 @@ class GPUModelRunner(
             # with torch compile.
             # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
 
-            # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
-            # the modality of inputs. For text-only inputs, each dimension has
-            # identical position IDs, making M-RoPE functionally equivalent to
-            # 1D-RoPE.
+            # NOTE: For text-only inputs, each dimension has identical position
+            # IDs, making M-RoPE functionally equivalent to 1D-RoPE.
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = self._make_buffer(
-                (3, self.max_num_tokens + 1), dtype=torch.int64
-            )
-
-        # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-        if self.uses_xdrope_dim > 0:
-            # Similar to mrope but use assigned dimension number for RoPE, 4 as default.
-            self.xdrope_positions = self._make_buffer(
-                (self.uses_xdrope_dim, self.max_num_tokens + 1), dtype=torch.int64
+                (self.mrope_num_dims, self.max_num_tokens + 1), dtype=torch.int64
             )
 
         # None in the first PP rank. The rest are set after load_model.
@@ -1016,14 +1004,10 @@ class GPUModelRunner(
         if isinstance(num_tokens, int):
             if self.uses_mrope:
                 return self.mrope_positions.gpu[:, :num_tokens]
-            if self.uses_xdrope_dim > 0:
-                return self.xdrope_positions.gpu[:, :num_tokens]
             return self.positions[:num_tokens]
         else:
             if self.uses_mrope:
                 return self.mrope_positions.gpu[:, num_tokens]
-            if self.uses_xdrope_dim > 0:
-                return self.xdrope_positions.gpu[:, num_tokens]
             return self.positions[num_tokens]
 
     def _make_buffer(
@@ -1063,8 +1047,35 @@ class GPUModelRunner(
             )
         return self._mamba_bufs
 
-    def _init_model_kwargs(self):
+    def _prepare_lookback_token_ids(self, num_reqs: int) -> torch.Tensor:
+        """Gather, per request, the `depth` prompt token ids preceding its
+        first scheduled token (column j is position start - 1 - j); -1 where
+        the position is before the prompt or already past it. Generated
+        positions are left to the model: under async scheduling the CPU token
+        table holds placeholders for them."""
+        buf = self.lookback_token_ids
+        assert buf is not None
+        buf.np.fill(-1)
+        if num_reqs > 0:
+            depth = buf.np.shape[1]
+            starts = self.input_batch.num_computed_tokens_cpu[:num_reqs, None]
+            pos = starts - np.arange(1, depth + 1)
+            num_prompt = self.input_batch.num_prompt_tokens[:num_reqs, None]
+            valid = (pos >= 0) & (pos < num_prompt)
+            rows = np.arange(num_reqs)[:, None]
+            ids = self.input_batch.token_ids_cpu[rows, np.clip(pos, 0, None)]
+            buf.np[:num_reqs] = np.where(valid, ids, -1)
+        return buf.copy_to_gpu()
+
+    def _init_model_kwargs(self, num_reqs: int | None = None):
         model_kwargs = dict[str, Any]()
+
+        if self.lookback_token_ids is not None:
+            if num_reqs is None:
+                num_reqs = self.input_batch.num_reqs
+            model_kwargs["lookback_token_ids"] = self._prepare_lookback_token_ids(
+                num_reqs
+            )
 
         if not self.is_pooling_model:
             return model_kwargs
@@ -1311,10 +1322,6 @@ class GPUModelRunner(
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
                 self._init_mrope_positions(req_state)
-
-            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-            if self.uses_xdrope_dim > 0:
-                self._init_xdrope_positions(req_state)
 
             reqs_to_add.append(req_state)
             # Track new requests for ngram_gpu full tensor copy
@@ -1682,19 +1689,6 @@ class GPUModelRunner(
             )
         )
 
-    def _init_xdrope_positions(self, req_state: CachedRequestState):
-        model = self.get_model()
-        xdrope_model = cast(SupportsXDRoPE, model)
-        assert req_state.prompt_token_ids is not None, (
-            "XD-RoPE requires prompt_token_ids to be available."
-        )
-        assert supports_xdrope(model), "XD-RoPE support is not implemented."
-
-        req_state.xdrope_positions = xdrope_model.get_xdrope_input_positions(
-            req_state.prompt_token_ids,
-            req_state.mm_features,
-        )
-
     def _extract_mm_kwargs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1997,11 +1991,6 @@ class GPUModelRunner(
         if self.uses_mrope:
             self._calc_mrope_positions(scheduler_output)
 
-        # Calculate XD-RoPE positions.
-        # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-        if self.uses_xdrope_dim > 0:
-            self._calc_xdrope_positions(scheduler_output)
-
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
@@ -2209,7 +2198,7 @@ class GPUModelRunner(
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             # Copy one row at a time. mrope_positions is allocated as
-            # [3, max_num_tokens + 1] with a dummy trailing column to keep it
+            # [num_dims, max_num_tokens + 1] with a dummy trailing column to keep it
             # non-contiguous for torch.compile, so cpu[:, :N] is a strided view.
             # copy_() cannot express a strided source as a single
             # cudaMemcpyAsync, so it first gathers into a contiguous *pageable*
@@ -2222,20 +2211,7 @@ class GPUModelRunner(
                     self.mrope_positions.cpu[row, :total_num_scheduled_tokens],
                     non_blocking=True,
                 )
-        elif self.uses_xdrope_dim > 0:
-            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL).
-            # xdrope_positions is allocated as [uses_xdrope_dim, max_num_tokens
-            # + 1] with the same trailing-column trick as mrope_positions above,
-            # so cpu[:, :N] is a strided view of the pinned buffer and the
-            # single-slice copy_() runs into the same pageable-fallback silent
-            # sync described in PR #51841. Split into per-row copies for the
-            # same reason.
-            for row in range(self.xdrope_positions.gpu.shape[0]):
-                self.xdrope_positions.gpu[row, :total_num_scheduled_tokens].copy_(
-                    self.xdrope_positions.cpu[row, :total_num_scheduled_tokens],
-                    non_blocking=True,
-                )
-        if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
+        if self.use_async_spec_decode and self.uses_mrope:
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
             ) - async_tensor_h2d(
@@ -2243,8 +2219,7 @@ class GPUModelRunner(
                 device=self.device,
                 dtype=torch.int64,
             )
-            target = self.mrope_positions if self.uses_mrope else self.xdrope_positions
-            target.gpu[:, :total_num_scheduled_tokens] += drift
+            self.mrope_positions.gpu[:, :total_num_scheduled_tokens] += drift
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -2369,8 +2344,7 @@ class GPUModelRunner(
         num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
             :num_reqs_padded
         ]
-        seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
-        seq_lens_cpu_upper_bound = seq_lens_cpu
+        seq_lens_cpu_upper_bound = self.optimistic_seq_lens_cpu[:num_reqs_padded]
 
         # is_prefilling: True if request is still in prefill phase.
         # Used by mamba backends to distinguish actual decodes from
@@ -2379,11 +2353,6 @@ class GPUModelRunner(
         # Zero out padded rows so stale data from condense() doesn't
         # misclassify padding as prefill in CUDA graph mode.
         is_prefilling[num_reqs:] = False
-
-        if self.use_async_spec_decode:
-            # GPU tensors are authoritative in async mode.
-            seq_lens_cpu = None
-            num_computed_tokens_cpu = None
 
         # Compute mm_prefix bidirectional ranges before building
         # attention metadata so builders handle them during build().
@@ -2458,8 +2427,6 @@ class GPUModelRunner(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
             seq_lens=self.seq_lens[:num_reqs_padded],
-            _seq_lens_cpu=seq_lens_cpu,
-            _num_computed_tokens_cpu=num_computed_tokens_cpu,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             replayssm_decode_base_cpu=replayssm_decode_base_cpu,
             num_reqs=num_reqs_padded,
@@ -2486,7 +2453,7 @@ class GPUModelRunner(
             self.dcp_local_seq_lens.copy_to_gpu(num_reqs_padded)
 
             cm_base.dcp_local_seq_lens = self.dcp_local_seq_lens.gpu[:num_reqs_padded]
-            cm_base.dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[
+            cm_base.dcp_local_seq_lens_cpu_upper_bound = self.dcp_local_seq_lens.cpu[
                 :num_reqs_padded
             ]
 
@@ -2829,53 +2796,6 @@ class GPUModelRunner(
                 )
 
                 mrope_pos_ptr += completion_part_len
-
-    def _calc_xdrope_positions(self, scheduler_output: "SchedulerOutput"):
-        xdrope_pos_ptr = 0
-        for index, req_id in enumerate(self.input_batch.req_ids):
-            req = self.requests[req_id]
-            assert req.xdrope_positions is not None
-
-            num_computed_tokens = self.input_batch.num_computed_tokens_cpu[index]
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-                req.prompt_token_ids, req.prompt_embeds
-            )
-
-            if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
-                prompt_part_len = max(0, num_prompt_tokens - num_computed_tokens)
-                completion_part_len = max(0, num_scheduled_tokens - prompt_part_len)
-            else:
-                prompt_part_len = num_scheduled_tokens
-                completion_part_len = 0
-
-            assert num_scheduled_tokens == prompt_part_len + completion_part_len
-
-            if prompt_part_len > 0:
-                # prompt's xdrope_positions are pre-computed
-                dst_start = xdrope_pos_ptr
-                dst_end = xdrope_pos_ptr + prompt_part_len
-                src_start = num_computed_tokens
-                src_end = num_computed_tokens + prompt_part_len
-
-                self.xdrope_positions.cpu[:, dst_start:dst_end] = req.xdrope_positions[
-                    :, src_start:src_end
-                ]
-                xdrope_pos_ptr += prompt_part_len
-
-            if completion_part_len > 0:
-                # compute completion's xdrope_positions on-the-fly
-                dst_start = xdrope_pos_ptr
-                dst_end = xdrope_pos_ptr + completion_part_len
-
-                XDRotaryEmbedding.get_next_input_positions_tensor(
-                    out=self.xdrope_positions.np,
-                    out_offset=dst_start,
-                    context_len=num_computed_tokens + prompt_part_len,
-                    num_new_tokens=completion_part_len,
-                )
-
-                xdrope_pos_ptr += completion_part_len
 
     def _calc_spec_decode_metadata(
         self,
@@ -3271,7 +3191,6 @@ class GPUModelRunner(
 
         req_start_idx = 0
         should_sync_mrope_positions = False
-        should_sync_xdrope_positions = False
 
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
@@ -3363,10 +3282,6 @@ class GPUModelRunner(
         if should_sync_mrope_positions:
             self._calc_mrope_positions(scheduler_output)
             self.mrope_positions.copy_to_gpu(total_num_scheduled_tokens)
-
-        if should_sync_xdrope_positions:
-            self._calc_xdrope_positions(scheduler_output)
-            self.xdrope_positions.copy_to_gpu(total_num_scheduled_tokens)
 
         return mm_embeds, is_mm_embed
 
@@ -3677,8 +3592,6 @@ class GPUModelRunner(
 
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
-        elif self.uses_xdrope_dim > 0:
-            positions = self.xdrope_positions.gpu[:, :num_input_tokens]
         else:
             positions = self.positions[:num_input_tokens]
             if num_input_tokens > num_scheduled_tokens:
@@ -5346,9 +5259,14 @@ class GPUModelRunner(
                     self.load_config.load_format = "dummy"
                 model_loader = get_model_loader(self.load_config)
                 # Capture warmup providers selected while constructing the model.
-                with self.jit_warmup_registry.activate():
+                with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
                     self.model = model_loader.load_model(
                         vllm_config=self.vllm_config, model_config=self.model_config
+                    )
+                lookback_depth = getattr(self.model, "token_lookback_depth", 0)
+                if lookback_depth > 0:
+                    self.lookback_token_ids = self._make_buffer(
+                        self.max_num_reqs, lookback_depth, dtype=torch.int32
                     )
                 if self.lora_config:
                     self.model = self.load_lora_model(
@@ -5470,13 +5388,22 @@ class GPUModelRunner(
             and cudagraph_mode != CUDAGraphMode.NONE
             and not self.parallel_config.use_ubatching
         ):
-            self.model = BreakableCUDAGraphWrapper(self.model, self.vllm_config)
+            # Scoped to PIECEWISE dispatch; FULL cudagraphs (below) are
+            # unaffected. PIECEWISE dispatch can also arise after wrapping
+            # (drafters under a FULL target mode, or a later FULL ->
+            # FULL_AND_PIECEWISE upgrade in _check_and_update_cudagraph_mode).
+            self.model = BreakableCUDAGraphWrapper(
+                self.model, self.vllm_config, runtime_mode=CUDAGraphMode.PIECEWISE
+            )
             drafter = getattr(self, "drafter", None)
             if drafter is not None and hasattr(drafter, "model"):
                 drafter.model = BreakableCUDAGraphWrapper(
-                    drafter.model, self.vllm_config
+                    drafter.model,
+                    self.vllm_config,
+                    runtime_mode=CUDAGraphMode.PIECEWISE,
                 )
-        elif (
+
+        if (
             cudagraph_mode.has_full_cudagraphs()
             and not self.parallel_config.use_ubatching
         ):
@@ -6112,7 +6039,7 @@ class GPUModelRunner(
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
-            model_kwargs = self._init_model_kwargs()
+            model_kwargs = self._init_model_kwargs(num_reqs=0)
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
                 input_ids, inputs_embeds = self._prepare_mm_inputs(num_tokens_padded)
 
@@ -6123,15 +6050,13 @@ class GPUModelRunner(
             elif self.enable_prompt_embeds:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
-                model_kwargs = self._init_model_kwargs()
+                model_kwargs = self._init_model_kwargs(num_reqs=0)
             else:
                 input_ids = self.input_ids.gpu[:num_tokens_padded]
                 inputs_embeds = None
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
-            elif self.uses_xdrope_dim > 0:
-                positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
                 positions = self.positions[:num_tokens_padded]
 
@@ -7306,7 +7231,7 @@ class GPUModelRunner(
                 self.parallel_config.cp_kv_cache_interleave_size
             )
             # Capture warmup providers registered after final KV-cache geometry is known
-            with self.jit_warmup_registry.activate():
+            with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
                 self.input_batch = InputBatch(
                     max_num_reqs=self.max_num_reqs,
                     max_model_len=max_model_len,
@@ -7456,7 +7381,7 @@ class GPUModelRunner(
         # Reinitialize need to after initialize_attn_backend
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
         # Capture warmup providers that depend on allocated KV-cache strides.
-        with self.jit_warmup_registry.activate():
+        with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
             kv_caches = self.initialize_kv_cache_tensors(
                 kv_cache_config,
                 kernel_block_sizes,

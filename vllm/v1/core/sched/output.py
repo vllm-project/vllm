@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
@@ -59,7 +60,6 @@ class NewRequestData:
         block_ids: tuple[list[int], ...],
         prefill_token_ids: list[int] | None = None,
         uses_mrope: bool = False,
-        uses_xdrope: bool = False,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
@@ -68,7 +68,6 @@ class NewRequestData:
                 request.mm_features,
                 request.num_computed_tokens,
                 uses_mrope=uses_mrope,
-                uses_xdrope=uses_xdrope,
             ),
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
@@ -213,10 +212,17 @@ class ScheduledEncoderInputStats:
 class KVConnectorBlockState:
     """Scheduler-local block state offered to a producer-side KV connector."""
 
-    # Authoritative current block-table snapshots.
-    block_ids: dict[str, tuple[list[int], ...]]
+    # Requests scheduled this step and requests with a boundary-state hand-off.
+    req_ids: set[str]
+    # Resolve on access to avoid copying tables the connector never reads.
+    resolve_block_ids: Callable[[str], tuple[list[int], ...]]
     # Exact Mamba "align" boundary-state hand-offs.
     boundary_state_offloads: dict[str, list[tuple[int, int, int]]]
+
+    def get_block_ids(self, req_id: str) -> tuple[list[int], ...] | None:
+        if req_id not in self.req_ids:
+            return None
+        return self.resolve_block_ids(req_id)
 
 
 @dataclass
@@ -294,6 +300,9 @@ class SchedulerOutput:
 
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
+
+    # Complete block-table rows that replace incrementally appended block IDs.
+    block_table_updates: dict[str, tuple[list[int], ...]] | None = None
 
     # Scheduler-local; always None by the time this reaches a worker.
     kv_connector_block_state: KVConnectorBlockState | None = None

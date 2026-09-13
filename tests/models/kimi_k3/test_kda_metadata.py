@@ -512,6 +512,8 @@ def test_mixed_regular_and_spec_decode_uses_packed_decode_metadata():
     assert actual.non_spec_query_start_loc is None
     torch.testing.assert_close(actual.non_spec_token_indx, torch.tensor([0, 1]))
     torch.testing.assert_close(actual.spec_token_indx, torch.tensor([2, 3, 4]))
+    assert actual.non_spec_token_start == 0
+    assert actual.spec_token_start == 2
     torch.testing.assert_close(
         actual.spec_query_start_loc,
         torch.tensor([0, 3], dtype=torch.int32),
@@ -539,6 +541,8 @@ def test_mixed_regular_and_spec_decode_excludes_request_padding():
     assert actual.non_spec_state_indices_tensor.shape == (1,)
     torch.testing.assert_close(actual.non_spec_token_indx, torch.tensor([0]))
     torch.testing.assert_close(actual.spec_token_indx, torch.tensor([1, 2, 3]))
+    assert actual.non_spec_token_start == 0
+    assert actual.spec_token_start == 1
 
 
 @pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])

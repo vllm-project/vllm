@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -12,6 +12,15 @@ from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
+    WarmupIntRange,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -38,6 +47,13 @@ class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.prefill_context_parallel_size > 1:
+            vllm_config = copy.copy(vllm_config)
+            vllm_config.parallel_config = replace(
+                parallel_config,
+                prefill_context_parallel_size=1,
+            )
         super().__init__(vllm_config, device)
 
         self.hidden_states = torch.zeros(
@@ -103,6 +119,7 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
         self.draft_kv_cache_group_id: int = -1
+        prepare_dflash_inputs.register_warmup(speculator=self)
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
@@ -292,33 +309,6 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs, self.num_speculative_steps
         )
 
-    def _build_draft_attn_metadata(
-        self,
-        num_reqs: int,
-        num_reqs_padded: int,
-        num_tokens_padded: int,
-        seq_lens_cpu_upper_bound: torch.Tensor,
-        step: int,
-        num_query_per_req: int | None = None,
-        causal: bool | Mapping[int, bool] = False,
-        query_start_loc_np: np.ndarray | None = None,
-        dcp_local_seq_lens: torch.Tensor | None = None,
-    ) -> dict[str, Any] | None:
-        if not self.draft_attn_layer_names:
-            return None
-        assert num_query_per_req is None  # Omitted for DFlash, read from self instead
-        return super()._build_draft_attn_metadata(
-            num_reqs,
-            num_reqs_padded,
-            num_tokens_padded,
-            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-            step=step,
-            num_query_per_req=self.num_query_per_req,
-            causal=causal,
-            query_start_loc_np=query_start_loc_np,
-            dcp_local_seq_lens=dcp_local_seq_lens,
-        )
-
     @torch.inference_mode()
     def propose(
         self,
@@ -387,6 +377,11 @@ class DFlashSpeculator(DraftModelSpeculator):
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )
             return self.draft_tokens[:num_reqs]
+
+        if self.pcp_manager is not None and not dummy_run:
+            self.block_tables.gather_block_tables(
+                input_batch.idx_mapping, num_reqs_padded=num_reqs
+            )
 
         # The query slot mapping is written into the shared BlockTables slot_mappings.
         # That buffer's address is what the captured CUDA graph reads from at replay.
@@ -459,7 +454,6 @@ class DFlashSpeculator(DraftModelSpeculator):
             need_eager=is_profile,
             dp_sync=batch_sync,
         )
-        num_reqs_padded = batch_desc.num_reqs or num_reqs
         num_tokens_padded = batch_desc.num_tokens
         num_tokens_across_dp = (
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
@@ -467,10 +461,10 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         # Rebuild the draft attention metadata even when replaying the FULL
         # graph so that any attention metadata builder state is updated.
-        draft_attn_metadata = self._build_draft_attn_metadata(
+        draft_attn_metadata = self._build_uniform_attn_metadata(
             num_reqs=num_reqs,
-            num_reqs_padded=num_reqs_padded,
-            num_tokens_padded=num_tokens_padded,
+            batch_desc=batch_desc,
+            num_query_per_req=self.num_query_per_req,
             seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
             step=self.num_query_per_req,
             causal=self._group_causal,
@@ -700,6 +694,64 @@ def _prepare_dflash_inputs_kernel(
                 tl.store(out_query_slot_mapping_ptr + block, PAD_SLOT_ID, mask=mask)
 
 
+def _prepare_dflash_warmup_inputs(*, speculator: DFlashSpeculator) -> dict[str, Any]:
+    int32 = TritonWarmupTensor(torch.int32)
+    int64 = TritonWarmupTensor(torch.int64)
+    float32 = TritonWarmupTensor(torch.float32)
+    input_buffers = SimpleNamespace(
+        input_ids=int32, positions=int64, query_start_loc=int32, seq_lens=int32
+    )
+    gid: Any = WarmupChoices(*speculator.draft_kv_cache_group_ids)
+    max_target_query_len: Any = WarmupIntRange(1, 257, advance=lambda value: value * 2)
+    block_table_stride = int(speculator.block_tables.input_block_tables[gid].stride(0))
+    block_table = TritonWarmupTensor(
+        torch.int32,
+        shape=(1, block_table_stride),
+        strides=(block_table_stride, 1),
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=1,
+        num_scheduled_tokens=np.array([max_target_query_len]),
+        positions=int64,
+        query_start_loc=int32,
+        idx_mapping=int64,
+    )
+    return dict(
+        input_buffers=input_buffers,
+        query_slot_mapping=int64,
+        context_positions=int64,
+        context_slot_mapping=int64,
+        sample_indices=int64,
+        sample_pos=int64,
+        sample_idx_mapping=int32,
+        temperature=float32,
+        seeds=int64,
+        input_batch=input_batch,
+        num_sampled=int32,
+        num_rejected=int32,
+        last_sampled=int64,
+        next_prefill_tokens=int32,
+        input_temperature=float32,
+        input_seeds=int64,
+        block_table=block_table,
+        block_size=speculator.block_tables.kernel_block_sizes[gid],
+        cp_rank=speculator.block_tables.cp_rank,
+        cp_size=speculator.block_tables.cp_size,
+        cp_interleave=speculator.block_tables.cp_interleave,
+        parallel_drafting_token_id=speculator.parallel_drafting_token_id,
+        num_query_per_req=speculator.num_query_per_req,
+        num_speculative_steps=speculator.num_speculative_steps,
+        max_num_reqs=speculator.max_num_reqs,
+        max_num_tokens=speculator.max_num_tokens,
+        max_model_len=speculator.max_model_len,
+        sample_from_anchor=speculator.sample_from_anchor,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_prepare_dflash_inputs_kernel,
+    warmup_inputs=_prepare_dflash_warmup_inputs,
+)
 def prepare_dflash_inputs(
     input_buffers: InputBuffers,
     query_slot_mapping: torch.Tensor,
@@ -736,50 +788,33 @@ def prepare_dflash_inputs(
     max_num_tokens: int,
     max_model_len: int,
     sample_from_anchor: bool = False,
-) -> None:
+) -> DispatchSpec:
     num_reqs = input_batch.num_reqs
     assert num_reqs > 0
     # Cover the longest possible per-request span (ctx + query). Use the max
     # per-request query length, not the total token count across the batch.
     max_target_query_len = int(input_batch.num_scheduled_tokens.max())
     max_tokens_per_req = max_target_query_len + num_query_per_req
-    BLOCK_SIZE = min(256, triton.next_power_of_2(max(1, max_tokens_per_req)))
-    num_blocks = triton.cdiv(max_tokens_per_req, BLOCK_SIZE)
-    _prepare_dflash_inputs_kernel[(num_reqs, num_blocks)](
-        input_buffers.input_ids,
-        input_buffers.positions,
-        input_buffers.query_start_loc,
-        input_buffers.seq_lens,
-        query_slot_mapping,
-        context_positions,
-        context_slot_mapping,
-        sample_indices,
-        sample_pos,
-        sample_idx_mapping,
-        temperature,
-        seeds,
-        input_batch.positions,
-        input_batch.query_start_loc,
-        input_batch.idx_mapping,
-        last_sampled,
-        next_prefill_tokens,
-        num_sampled,
-        num_rejected,
-        input_temperature,
-        input_seeds,
-        block_table,
-        block_table.stride(0),
-        parallel_drafting_token_id,
-        block_size,
-        num_query_per_req,
-        num_speculative_steps,
-        max_num_reqs,
-        max_num_tokens,
-        max_model_len,
-        cp_rank,
-        SAMPLE_FROM_ANCHOR=sample_from_anchor,
+    block = min(256, triton.next_power_of_2(max(1, max_tokens_per_req)))
+    num_blocks = triton.cdiv(max_tokens_per_req, block)
+    return (num_reqs, num_blocks), dict(
+        out_input_ids_ptr=input_buffers.input_ids,
+        out_query_positions_ptr=input_buffers.positions,
+        out_query_start_loc_ptr=input_buffers.query_start_loc,
+        out_seq_lens_ptr=input_buffers.seq_lens,
+        out_query_slot_mapping_ptr=query_slot_mapping,
+        out_context_positions_ptr=context_positions,
+        out_context_slot_mapping_ptr=context_slot_mapping,
+        out_sample_indices_ptr=sample_indices,
+        out_sample_pos_ptr=sample_pos,
+        out_sample_idx_mapping_ptr=sample_idx_mapping,
+        out_temperature_ptr=temperature,
+        out_seeds_ptr=seeds,
+        target_positions_ptr=input_batch.positions,
+        target_query_start_loc_ptr=input_batch.query_start_loc,
+        idx_mapping_ptr=input_batch.idx_mapping,
+        temperature_ptr=input_temperature,
+        seeds_ptr=input_seeds,
         PAD_SLOT_ID=PAD_SLOT_ID,
-        CP_SIZE=cp_size,
-        CP_INTERLEAVE=cp_interleave,
-        BLOCK_SIZE=BLOCK_SIZE,
+        BLOCK_SIZE=block,
     )
