@@ -1288,6 +1288,14 @@ class Scheduler(SchedulerInterface):
                         if self.ec_connector is not None:
                             self.ec_connector.update_state_after_alloc(request, i)
 
+            # When the loop above stops on the budget/capacity checks (or never
+            # runs), the rest of skipped_waiting is left unvisited. Promote it
+            # here so saturation cannot starve promotion or failed-grammar
+            # detection (#53130).
+            for request in self.skipped_waiting.iter_unordered():
+                if self._is_blocked_waiting_status(request.status):
+                    self._try_promote_blocked_waiting_request(request)
+
             # re-queue requests skipped in this pass ahead of older skipped items.
             if step_skipped_waiting:
                 self.skipped_waiting.prepend_requests(step_skipped_waiting)
