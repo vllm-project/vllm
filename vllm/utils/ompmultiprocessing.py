@@ -46,12 +46,12 @@ class OMPProcessManager:
         self.reserve_cpu_num = (
             self.local_world_size
             if current_platform.get_cpu_architecture()
-            in (CpuArchEnum.ARM, CpuArchEnum.RISCV)
+            in (CpuArchEnum.X86, CpuArchEnum.ARM, CpuArchEnum.RISCV)
             else 1
         )
         # reserve at one more core for nixl_connector under p/d case
         if config.kv_transfer_config:
-            self.reserve_cpu_num += 1
+            self.reserve_cpu_num += self.local_world_size
 
         if envs.VLLM_CPU_NUM_OF_RESERVED_CPU is not None:
             if self.reserve_cpu_num > envs.VLLM_CPU_NUM_OF_RESERVED_CPU:
