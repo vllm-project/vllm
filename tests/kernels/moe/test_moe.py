@@ -1467,8 +1467,8 @@ def test_humming_grouped_apply_forwards_valid_prefix(
         num_experts=2,
         estimate_local_valid_shape_m=lambda _: 6,
         prepare_buffers=lambda *_: buffers,
-        _get_permute_scratch=lambda _: None,
-        quantize_input=Mock(
+        _get_permute_scratch=lambda _, *, indices_only=False: object(),
+        process_input=Mock(
             side_effect=lambda _, **kwargs: (
                 kwargs["inputs"],
                 kwargs.get("input_scale"),
@@ -1488,14 +1488,8 @@ def test_humming_grouped_apply_forwards_valid_prefix(
     expert_offsets = torch.tensor([0, 2, 4], dtype=torch.int64)
     monkeypatch.setattr(
         humming,
-        "moe_permute",
-        lambda **_: (
-            torch.empty(6, 4),
-            None,
-            expert_offsets,
-            torch.arange(6),
-            None,
-        ),
+        "moe_prepare_scatter",
+        lambda *_: (expert_offsets, torch.arange(6).view(3, 2)),
     )
     monkeypatch.setattr(humming, "moe_unpermute", lambda **_: None)
 
@@ -1518,11 +1512,11 @@ def test_humming_grouped_apply_forwards_valid_prefix(
         apply_router_weight_on_input=False,
     )
 
-    call_kwargs = experts.quantize_input.call_args.kwargs
+    call_kwargs = experts.process_input.call_args.kwargs
     assert call_kwargs["activation"] == MoEActivation.SITU
     assert call_kwargs["inputs"].shape == (6, 4)
     assert call_kwargs["quanted_input"].shape == (6, 2)
-    torch.testing.assert_close(call_kwargs["expert_layout"], expert_offsets)
+    torch.testing.assert_close(call_kwargs["num_valid_tokens"], expert_offsets[-1:])
 
 
 def test_batched_marlin_activation_uses_expert_token_counts(
