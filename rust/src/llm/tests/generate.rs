@@ -167,6 +167,7 @@ fn sample_generate_request(request_id: &str, max_tokens: u32) -> GenerateRequest
         data_parallel_rank: None,
         session_id: None,
         reasoning_parser_kwargs: None,
+        reasoning_ended: None,
         lora_request: None,
     }
 }

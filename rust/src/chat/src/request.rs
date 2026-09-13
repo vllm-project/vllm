@@ -460,6 +460,17 @@ pub enum ChatToolChoice {
     },
 }
 
+impl From<&ChatToolChoice> for xgrammar_structural_tag::ToolChoice {
+    fn from(tool_choice: &ChatToolChoice) -> Self {
+        match tool_choice {
+            ChatToolChoice::None => Self::none(),
+            ChatToolChoice::Auto => Self::auto(),
+            ChatToolChoice::Required => Self::required(),
+            ChatToolChoice::Function { name } => Self::function(name.clone()),
+        }
+    }
+}
+
 /// Resolved tool state shared by rendering, output parsing, and constraints.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResolvedToolContext {

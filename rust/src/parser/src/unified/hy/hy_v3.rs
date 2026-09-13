@@ -4,8 +4,9 @@
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 
 use super::detect_hy_token_suffix;
+use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
 use crate::reasoning::HyReasoningParser;
-use crate::tool::{HyDialect, HyToolMarkers, HyToolParser, StructuralTagBuilder, Tool};
+use crate::tool::{HyDialect, HyToolMarkers, HyToolParser, Tool};
 use crate::unified::{CombinedParser, Result, UnifiedParser, UnifiedParserOutput, token_id};
 
 /// Unified reasoning and tool parser for HY3 output.
@@ -46,8 +47,11 @@ impl UnifiedParser for HyV3UnifiedParser {
         self.inner.preserve_special_tokens()
     }
 
-    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
-        self.inner.structural_tag_builder()
+    fn build_output_grammar(
+        &self,
+        ctx: &OutputGrammarContext<'_>,
+    ) -> output_grammar::Result<Option<BuiltOutputGrammar>> {
+        self.inner.build_output_grammar(ctx)
     }
 
     fn tool_call_id(&self, tool_index: usize) -> Option<&str> {
@@ -73,12 +77,10 @@ mod tests {
 
     use serde_json::json;
     use vllm_tokenizer::{DecodedText, Tokenizer, test_utils::TestTokenizer};
-    use xgrammar_structural_tag::builders::StructuralTagOptions;
-    use xgrammar_structural_tag::{
-        FunctionDefinition, FunctionToolParam, ToolChoice, ToolParam, build_structural_tag,
-    };
+    use xgrammar_structural_tag::{StructuralTag, ToolChoice};
 
     use super::{HyV3UnifiedParser, UnifiedParser};
+    use crate::output_grammar::{GrammarCoverage, OutputGrammarContext};
     use crate::tool::Tool;
     use crate::unified::{UnifiedParserEvent, UnifiedParserOutput};
 
@@ -151,24 +153,17 @@ mod tests {
 
     #[test]
     fn structural_tag_uses_tokenizer_detected_suffix() {
-        let parser = HyV3UnifiedParser::new(&tools(), Arc::new(tokenizer())).unwrap();
-        let structural_tools = [ToolParam::Function(FunctionToolParam::new(
-            FunctionDefinition::new("get_weather").with_parameters(json!({
-                "type": "object",
-                "properties": { "city": { "type": "string" } },
-                "required": ["city"]
-            })),
-        ))];
-
-        let tag = build_structural_tag(
-            parser.structural_tag_builder().unwrap(),
-            &structural_tools,
-            ToolChoice::required(),
-            StructuralTagOptions::default().with_reasoning(false),
-        )
-        .unwrap()
-        .to_json_string()
-        .unwrap();
+        let tools = tools();
+        let parser = HyV3UnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
+        let tag = parser
+            .build_output_grammar(&OutputGrammarContext {
+                tools: &tools,
+                tool_choice: &ToolChoice::required(),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(tag.coverage, GrammarCoverage::FinalOutputOnly);
+        let tag = StructuralTag::new(tag.format).to_json_string().unwrap();
 
         assert!(tag.contains("<tool_calls:opensource>"));
         assert!(tag.contains("<arg_value:opensource>"));
