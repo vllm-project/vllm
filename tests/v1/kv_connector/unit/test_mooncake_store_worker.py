@@ -1274,6 +1274,7 @@ def test_eagle_aligned_boundary_writes_only_completed_attention_proof(
         block_ids=([1, 2, 3], [5]),
         block_hashes=hs,
         can_save=True,
+        num_prompt_tokens=37,
         completed_token_len=completed_token_len,
         boundary_state_offloads=[(1, 7, 32)],
     )
@@ -1338,6 +1339,7 @@ def test_eagle_swa_boundary_uses_physical_block_margin(
         block_ids=([1, 2, 3], [5]),
         block_hashes=hs,
         can_save=True,
+        num_prompt_tokens=49,
         completed_token_len=completed_token_len,
         boundary_state_offloads=[(1, 7, 32)],
     )
@@ -1368,6 +1370,7 @@ def test_multiple_eagle_boundaries_deduplicate_attention_puts():
         block_ids=([1, 2, 3], [5]),
         block_hashes=hs,
         can_save=True,
+        num_prompt_tokens=40,
         completed_token_len=40,
         boundary_state_offloads=[(1, 9, 32), (1, 7, 36)],
     )

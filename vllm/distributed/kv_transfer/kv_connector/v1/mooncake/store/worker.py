@@ -803,6 +803,29 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 puts.append((db.key_for(key_hash), addr, size, db.metadata))
         return puts
 
+    def _is_eagle_replay_boundary(self, req_meta: ReqMeta, boundary: int) -> bool:
+        """Whether an aligned Mamba state is a prompt replay endpoint."""
+        if (
+            req_meta.num_prompt_tokens is None
+            or not self.coord.eagle_peek_margin_by_group
+        ):
+            return False
+        fine_grained = self.coord.enable_partial_hash_hits and all(
+            group.manager_cls.supports_fine_grained_hash_lookup
+            or group.spec.block_size == self.coord.hash_block_size
+            for group in self.coord.attention_groups
+        )
+        alignment = (
+            self.coord.hash_block_size if fine_grained else self.coord.lcm_block_size
+        )
+        prompt_tokens = req_meta.num_prompt_tokens
+        resend = (prompt_tokens - 1) // alignment * alignment
+        extension = prompt_tokens // alignment * alignment
+        return boundary in {
+            max(resend - alignment, 0),
+            max(extension - alignment, 0),
+        }
+
     def _maybe_offload_boundary_states(self, req_meta: ReqMeta) -> bool:
         """Persist connector-pinned mamba "align" boundary states handed off
         for this request, deduped against the store.
@@ -814,8 +837,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         The two entry kinds use different Mamba sources:
 
         - block-aligned for its group: a committed boundary-state snapshot,
-          the handed-off block itself; its attention proof is included only
-          when the completed prefix covers the required EAGLE peek margin;
+          the handed-off block itself; only a prompt replay boundary includes
+          an attention companion;
         - not block-aligned: the sub-block CoW partial tail, which also has to
           cover the other groups' blocks in the normal save's lcm gap.
 
@@ -840,7 +863,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 if boundary % self.token_databases[entry[0]].block_size == 0
             ]
             has_sub_block = len(snapshots) != len(entries)
-            can_write_proof = any(
+            is_replay_boundary = self._is_eagle_replay_boundary(req_meta, boundary)
+            can_write_proof = is_replay_boundary and any(
                 boundary + margin <= req_meta.completed_token_len
                 for margin in self.coord.eagle_peek_margin_by_group.values()
             )
