@@ -479,6 +479,7 @@ def _make_flex_reference(case, local_extent):
     seq_lens = case["seq_lens"]
     total_blocks, block_size, num_kv_heads, head_dim = case["key_cache"].shape
     num_reqs = len(case["q_lens"])
+    num_query_groups = (q.shape[0] + block_size - 1) // block_size
     metadata = FlexAttentionMetadata(
         causal=True,
         num_actual_tokens=q.shape[0],
@@ -504,12 +505,12 @@ def _make_flex_reference(case, local_extent):
         decode_offset=seq_lens - query_start_loc.diff(),
         num_blocks_per_seq=(seq_lens + block_size - 1) // block_size,
         persistent_kv_indices=torch.empty(
-            (num_reqs, block_size * block_table.shape[1]),
+            (num_query_groups, block_size * block_table.shape[1]),
             device="cuda",
             dtype=torch.int32,
         ),
         persistent_kv_num_blocks=torch.empty(
-            num_reqs, device="cuda", dtype=torch.int32
+            num_query_groups, device="cuda", dtype=torch.int32
         ),
         persistent_doc_ids=torch.empty(q.shape[0], device="cuda", dtype=torch.int32),
         direct_build=True,
@@ -540,6 +541,7 @@ def _make_flex_reference(case, local_extent):
     [
         [(3, 35)],  # original validated FlexAttention case
         [(5, 5), (1, 35), (3, 49)],  # mixed prefill, decode, and extend
+        [(128, 128), (31, 31)],  # more query groups than requests
         [(1, 8193), (1, 13)],  # split-KV decode and mostly empty splits
     ],
 )
