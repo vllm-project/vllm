@@ -978,6 +978,12 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     hisparse_cache: "HiSparseCacheHandle | None" = None
     supports_pcp: bool = True
 
+    # Whether this impl provides the masked-MHA prefill path. Selection code in
+    # mla_attention.py reads this attribute off a bare MLAAttentionImpl, so it
+    # must be defined for every MLA impl. Impls that do support masked MHA set
+    # it to True themselves, which shadows this default.
+    masked_mha_available: bool = False
+
     @abstractmethod
     def __init__(
         self,
