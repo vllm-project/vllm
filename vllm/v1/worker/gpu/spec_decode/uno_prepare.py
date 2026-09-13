@@ -15,13 +15,30 @@ the captured draft forward, so the live step must remain a launch argument.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.worker.gpu.launch_key_debug import record_triton_launch
+
+
+def _launch_key_debug_enabled() -> bool:
+    """Read the diagnostic flag once and reject ambiguous boolean values."""
+    value = os.environ.get("VLLM_UNO_LAUNCH_KEY_DEBUG")
+    if value is None or value == "0":
+        return False
+    if value == "1":
+        return True
+    raise ValueError("VLLM_UNO_LAUNCH_KEY_DEBUG must be 0 or 1")
+
+
+_LAUNCH_KEY_DEBUG_ENABLED = _launch_key_debug_enabled()
+if _LAUNCH_KEY_DEBUG_ENABLED:
+    from vllm.v1.worker.gpu.launch_key_debug import record_triton_launch
+else:
+    record_triton_launch = None
 
 
 # Keep this contract shared with the CPU launch-key test.  These arguments
@@ -34,7 +51,13 @@ UNO_PREPARE_RUNTIME_SCALARS = (
 )
 
 
-@triton.jit(do_not_specialize=list(UNO_PREPARE_RUNTIME_SCALARS))
+@triton.jit(
+    do_not_specialize=list(UNO_PREPARE_RUNTIME_SCALARS),
+    # The target sampler allocates these two result tensors. Their alignment is
+    # not an arithmetic property of Uno preparation, so a caching-allocator
+    # offset must not create a cold prepare specialization after warmup.
+    do_not_specialize_on_alignment=["num_sampled_ptr", "num_rejected_ptr"],
+)
 def _prepare_uno_inputs_kernel(
     # Request state and target batch inputs.
     idx_mapping_ptr,
@@ -319,6 +342,64 @@ def _prepare_uno_specialization_kwargs(
     }
 
 
+def prepare_uno_launch_key(
+    buffers: Any,
+    slot_mapping: torch.Tensor,
+    sample_idx_mapping: torch.Tensor,
+    input_batch: Any,
+    num_sampled: torch.Tensor,
+    num_rejected: torch.Tensor | None,
+    block_table: torch.Tensor,
+    *,
+    num_reqs: int,
+    k: int,
+    state_capacity: int,
+    block_size: int,
+    max_model_len: int,
+    noise_seed: int,
+    noise_high: int,
+    has_rejected: bool,
+    block: int,
+) -> tuple[tuple[str, int | bool], ...]:
+    """Return the prepare kernel's compile-time key for one live batch.
+
+    The caller intentionally passes the live input batch even though its
+    target-view lengths are not returned: they are runtime bounds declared in
+    ``UNO_PREPARE_RUNTIME_SCALARS``. It also accepts the two live
+    sampler-result tensors so its contract covers the real launch arguments.
+    They deliberately do not appear in the returned key because the kernel
+    opts out of their allocator alignment. Keeping this production helper at
+    the launch site makes the CPU contract compare distinct dummy and serving
+    batches without reconstructing a test table of Triton constants.
+    """
+    target_query_len, target_position_len = _target_input_lengths(input_batch)
+    if target_query_len < num_reqs + 1 or target_position_len < num_reqs:
+        raise ValueError("Uno prepare launch key received a short target view")
+    if num_sampled.numel() < num_reqs:
+        raise ValueError("Uno prepare launch key received short num_sampled")
+    if num_rejected is not None and num_rejected.numel() < num_reqs:
+        raise ValueError("Uno prepare launch key received short num_rejected")
+    return tuple(
+        sorted(
+            _prepare_uno_specialization_kwargs(
+                buffers,
+                slot_mapping,
+                sample_idx_mapping,
+                block_table,
+                num_reqs=num_reqs,
+                k=k,
+                state_capacity=state_capacity,
+                block_size=block_size,
+                max_model_len=max_model_len,
+                noise_seed=noise_seed,
+                noise_high=noise_high,
+                has_rejected=has_rejected,
+                block=block,
+            ).items()
+        )
+    )
+
+
 def prepare_uno_inputs_fused(
     buffers: Any,
     slot_mapping: torch.Tensor,
@@ -420,46 +501,52 @@ def prepare_uno_inputs_fused(
     block = 256
     launch_grid = (triton.cdiv(output_capacity, block),)
     target_query_len, target_position_len = _target_input_lengths(input_batch)
-    launch_kwargs = _prepare_uno_specialization_kwargs(
-        buffers,
-        slot_mapping,
-        sample_idx_mapping,
-        block_table,
-        num_reqs=num_reqs,
-        k=int(k),
-        state_capacity=state_capacity,
-        block_size=int(block_size),
-        max_model_len=int(max_model_len),
-        noise_seed=int(noise_seed),
-        noise_high=int(noise_high),
-        has_rejected=num_rejected is not None,
-        block=block,
+    launch_kwargs = dict(
+        prepare_uno_launch_key(
+            buffers,
+            slot_mapping,
+            sample_idx_mapping,
+            input_batch,
+            num_sampled,
+            num_rejected,
+            block_table,
+            num_reqs=num_reqs,
+            k=int(k),
+            state_capacity=state_capacity,
+            block_size=int(block_size),
+            max_model_len=int(max_model_len),
+            noise_seed=int(noise_seed),
+            noise_high=int(noise_high),
+            has_rejected=num_rejected is not None,
+            block=block,
+        )
     )
-    record_triton_launch(
-        "_prepare_uno_inputs_kernel",
-        _prepare_uno_inputs_kernel,
-        launch_grid,
-        input_batch.idx_mapping,
-        num_sampled,
-        num_sampled if num_rejected is None else num_rejected,
-        input_batch.query_start_loc,
-        input_batch.positions,
-        last_sampled,
-        next_prefill_tokens,
-        seeds,
-        block_table,
-        block_table.stride(0),
-        buffers.input_ids,
-        buffers.positions,
-        slot_mapping,
-        sample_idx_mapping,
-        buffers.seq_lens,
-        buffers.query_start_loc,
-        int(step),
-        target_query_len,
-        target_position_len,
-        **launch_kwargs,
-    )
+    if record_triton_launch is not None:
+        record_triton_launch(
+            "_prepare_uno_inputs_kernel",
+            _prepare_uno_inputs_kernel,
+            launch_grid,
+            input_batch.idx_mapping,
+            num_sampled,
+            num_sampled if num_rejected is None else num_rejected,
+            input_batch.query_start_loc,
+            input_batch.positions,
+            last_sampled,
+            next_prefill_tokens,
+            seeds,
+            block_table,
+            block_table.stride(0),
+            buffers.input_ids,
+            buffers.positions,
+            slot_mapping,
+            sample_idx_mapping,
+            buffers.seq_lens,
+            buffers.query_start_loc,
+            int(step),
+            target_query_len,
+            target_position_len,
+            **launch_kwargs,
+        )
     _prepare_uno_inputs_kernel[launch_grid](
         input_batch.idx_mapping,
         num_sampled,
@@ -484,4 +571,8 @@ def prepare_uno_inputs_fused(
     )
 
 
-__all__ = ["UNO_PREPARE_RUNTIME_SCALARS", "prepare_uno_inputs_fused"]
+__all__ = [
+    "UNO_PREPARE_RUNTIME_SCALARS",
+    "prepare_uno_inputs_fused",
+    "prepare_uno_launch_key",
+]

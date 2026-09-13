@@ -4,6 +4,7 @@
 
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -149,6 +150,240 @@ def draft_warmup_request_counts(max_num_reqs: int) -> list[int]:
     if max_num_reqs <= 0:
         return []
     return list(range(1, max_num_reqs + 1))
+
+
+@dataclass(frozen=True)
+class UnoSamplingMode:
+    """One top-k/top-p branch the serving sampler can select."""
+
+    name: str
+    top_k: int | None
+    top_p: float | None
+
+    @property
+    def topk_enabled(self) -> bool:
+        return self.top_k is not None
+
+    @property
+    def topp_enabled(self) -> bool:
+        return self.top_p is not None
+
+
+UNO_SAMPLING_MODES = (
+    UnoSamplingMode("top_p_only", None, 0.9),
+    UnoSamplingMode("top_k_top_p", 50, 0.9),
+    UnoSamplingMode("top_k_only", 50, None),
+    UnoSamplingMode("neither", None, None),
+)
+
+
+@dataclass(frozen=True)
+class UnoSamplerWarmup:
+    """A real sampler call selected to warm one or more Triton keys."""
+
+    num_reqs: int
+    num_rows: int
+    mode: UnoSamplingMode
+    source: str
+    kernel_keys: tuple[tuple[object, ...], ...]
+
+
+@dataclass(frozen=True)
+class UnoServedLaunches:
+    """The bounded launch model used by both Uno warmup and CPU contracts."""
+
+    prepare_request_counts: tuple[int, ...]
+    sampler_warmups: tuple[UnoSamplerWarmup, ...]
+    # This is the raw served domain, separately retained from the minimal
+    # representative calls below. It makes a future selector regression fail
+    # closed rather than allowing a test to compare a plan to itself.
+    served_sampler_keys: frozenset[tuple[object, ...]] = frozenset()
+
+    @property
+    def sampler_keys(self) -> frozenset[tuple[object, ...]]:
+        return frozenset(
+            key for warmup in self.sampler_warmups for key in warmup.kernel_keys
+        )
+
+
+def _triton_integer_bucket(value: int) -> str:
+    """Return the plain-integer specialization bucket used by Triton.
+
+    ``BATCH_SIZE`` is a plain integer argument of ``_topk_topp_kernel``.
+    It is not in that kernel's ``do_not_specialize`` list, so the binder has
+    distinct ``== 1`` and ``% 16 == 0`` cases in addition to the generic
+    integer case.
+    """
+    if value == 1:
+        return "one"
+    if value % 16 == 0:
+        return "multiple_of_16"
+    return "generic"
+
+
+def _served_sampler_shapes(
+    max_num_reqs: int,
+    k: int,
+    max_num_tokens: int,
+    max_model_len: int,
+) -> tuple[tuple[int, int, str], ...]:
+    """Enumerate bounded sampler row layouts the scheduler can create.
+
+    A pure prefill has one logit row per request. Verification has ``K + 1``
+    rows per request. Chunked and mixed batches can land at every intermediate
+    row count between those endpoints, so they are deliberately represented
+    as valid uneven request layouts rather than discarded as non-divisible
+    ``num_reqs * K`` shapes.
+    """
+    if max_num_reqs <= 0:
+        return ()
+    if k <= 0:
+        raise ValueError("Uno sampler launch enumeration requires positive K")
+    if max_num_tokens < max_num_reqs:
+        raise ValueError(
+            "Uno sampler launch enumeration requires one token per request"
+        )
+    if max_model_len <= 0:
+        raise ValueError(
+            "Uno sampler launch enumeration requires positive max_model_len"
+        )
+
+    # Each verification request has at most K draft rows plus its sampled row.
+    # ``max_num_tokens`` bounds scheduler admission and ``max_model_len``
+    # bounds each request. Keeping both in the model makes a newly introduced
+    # shape axis fail closed until it has a bound here.
+    max_rows = min(
+        max_num_tokens,
+        max_num_reqs * min(k + 1, max_model_len),
+    )
+    if max_rows < max_num_reqs:
+        raise ValueError("Uno sampler row bound excludes reachable prefills")
+
+    shapes: dict[tuple[int, int], str] = {}
+
+    def add(num_reqs: int, num_rows: int, source: str) -> None:
+        if num_rows <= max_rows:
+            shapes.setdefault((num_reqs, num_rows), source)
+
+    for num_reqs in range(1, max_num_reqs + 1):
+        add(num_reqs, num_reqs, "pure_prefill")
+        add(num_reqs, num_reqs * (k + 1), "verification")
+
+    # A mixed/chunked batch can distribute any valid total over active request
+    # slots. The warmup synthesizes that exact uneven layout in InputBatch.
+    for num_rows in range(1, max_rows + 1):
+        add(min(num_rows, max_num_reqs), num_rows, "chunked_or_mixed")
+
+    return tuple(
+        (num_reqs, num_rows, source)
+        for (num_reqs, num_rows), source in sorted(shapes.items())
+    )
+
+
+def _sampler_kernel_keys(
+    mode: UnoSamplingMode,
+    num_rows: int,
+    num_sm: int,
+) -> tuple[tuple[object, ...], ...]:
+    """Return the real top-k/top-p kernel keys selected for one call."""
+    # Use the production split arithmetic and branch threshold rather than
+    # recreating either in a CPU-only test.
+    from vllm.v1.sample.ops.topk_topp_triton import (
+        _SPLIT_MAX_BATCH,
+        _topp_split_count,
+    )
+
+    if not mode.topk_enabled and not mode.topp_enabled:
+        return ()
+
+    use_split = mode.topp_enabled and num_rows <= _SPLIT_MAX_BATCH
+    keys: list[tuple[object, ...]] = []
+    if not (use_split and not mode.topk_enabled):
+        keys.append(
+            (
+                "_topk_topp_kernel",
+                _triton_integer_bucket(num_rows),
+                mode.topk_enabled,
+                mode.topp_enabled,
+                use_split,
+            )
+        )
+    if use_split:
+        split_count = _topp_split_count(num_rows, num_sm)
+        has_k = mode.topk_enabled
+        keys.extend(
+            (kernel, has_k, split_count)
+            for kernel in (
+                "_topp_sb_stats_kernel",
+                "_topp_sb_step_kernel",
+                "_topp_sb_mask_kernel",
+            )
+        )
+    return tuple(keys)
+
+
+def enumerate_uno_served_launches(
+    *,
+    max_num_reqs: int,
+    k: int,
+    max_num_tokens: int,
+    max_model_len: int,
+    num_sm: int,
+) -> UnoServedLaunches:
+    """Build the complete bounded Uno warmup plan from serving behavior.
+
+    This is production code: startup drives these calls and the CPU contract
+    reads the same plan. The candidate row domain covers pure prefill,
+    verification, and all chunked/mixed intermediates. One valid call is kept
+    for each actual Triton key, including the plain-integer ``== 1`` and
+    ``% 16 == 0`` buckets and every split-count specialization.
+    """
+    if num_sm <= 0:
+        raise ValueError("Uno sampler launch enumeration requires positive num_sm")
+
+    prepare_counts = tuple(draft_warmup_request_counts(max_num_reqs))
+    shapes = _served_sampler_shapes(
+        max_num_reqs, k, max_num_tokens, max_model_len
+    )
+    served_sampler_keys = frozenset(
+        key
+        for _num_reqs, num_rows, _source in shapes
+        for mode in UNO_SAMPLING_MODES
+        for key in _sampler_kernel_keys(mode, num_rows, num_sm)
+    )
+    covered: set[tuple[object, ...]] = set()
+    selected: list[UnoSamplerWarmup] = []
+
+    for mode in UNO_SAMPLING_MODES:
+        mode_selected = False
+        for num_reqs, num_rows, source in shapes:
+            kernel_keys = _sampler_kernel_keys(mode, num_rows, num_sm)
+            new_keys = set(kernel_keys).difference(covered)
+            # The no-filter path launches no top-k/top-p kernel, but must still
+            # execute once so the self-check can prove that branch is reached.
+            if new_keys or (not kernel_keys and not mode_selected):
+                selected.append(
+                    UnoSamplerWarmup(
+                        num_reqs,
+                        num_rows,
+                        mode,
+                        source,
+                        kernel_keys,
+                    )
+                )
+                covered.update(kernel_keys)
+                mode_selected = True
+
+    selected_keys = frozenset(
+        key for warmup in selected for key in warmup.kernel_keys
+    )
+    missing = served_sampler_keys.difference(selected_keys)
+    if missing:
+        raise RuntimeError(
+            "Uno sampler warmup selection missed served Triton keys: "
+            f"{sorted(missing)!r}"
+        )
+    return UnoServedLaunches(prepare_counts, tuple(selected), served_sampler_keys)
 
 
 class UnoSpeculator(DraftModelSpeculator):
@@ -324,21 +559,12 @@ class UnoSpeculator(DraftModelSpeculator):
         """
         return draft_warmup_request_counts(self.max_num_reqs)
 
-    def draft_sampler_warmup_shapes(self) -> list[tuple[int, int]]:
-        """Return ``(requests, rows)`` for every Uno sampler warmup.
-
-        Uno proposes ``K`` rows per request.  Its proposal sampler runs at
-        that extent, while the target sampler's top-k/top-p path is reached
-        in the same prefill step and must cover it too.  Keep the request
-        count alongside the row count: the former selects the request-state
-        slots while the latter is the actual sampler launch shape.
-        """
-        return [
-            (num_reqs, num_reqs * self.k)
-            for num_reqs in self.draft_warmup_token_counts()
-        ]
-
-    def report_draft_warmup(self, shapes: int) -> None:
+    def report_draft_warmup(
+        self,
+        prepare_shapes: int,
+        sampler_calls: int,
+        sampler_keys: int,
+    ) -> None:
         """State once what warmup covered, so a cold serve stays visible.
 
         A silent warmup is worse than none: if the shapes it compiles are not
@@ -348,13 +574,15 @@ class UnoSpeculator(DraftModelSpeculator):
         warmup covered what the requests asked for.
         """
         logger.info(
-            "Uno draft kernels warmed: %d request shapes (1..%d requests at "
-            "num_speculative_tokens=%d). Any later "
-            "'JIT compilation during inference' warning names a shape this "
-            "missed.",
-            shapes,
+            "Uno draft kernels warmed: %d prepare request shapes (1..%d "
+            "requests at num_speculative_tokens=%d), %d sampler calls, and "
+            "%d sampler launch keys. Any later 'JIT compilation during "
+            "inference' warning names a shape this missed.",
+            prepare_shapes,
             self.max_num_reqs,
             self.k,
+            sampler_calls,
+            sampler_keys,
         )
 
     def _log_draft_graph_coverage(self) -> None:

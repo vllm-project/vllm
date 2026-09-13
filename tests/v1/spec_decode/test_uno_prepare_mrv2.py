@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Parity and layout checks for native MRV2 Uno input preparation."""
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -11,9 +12,9 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.spec_decode.uno import prepare_uno_inputs_reference
 from vllm.v1.worker.gpu.spec_decode.uno_prepare import (
-    _prepare_uno_specialization_kwargs,
     _target_input_lengths,
     prepare_uno_inputs_fused,
+    prepare_uno_launch_key,
 )
 
 requires_cuda = pytest.mark.skipif(
@@ -358,11 +359,21 @@ def test_uno_prepare_specialization_ignores_dynamic_target_view_lengths(
     assert _target_input_lengths(warmup) == (num_reqs + 1, num_reqs)
     assert _target_input_lengths(served) == (num_reqs + 1, served_tokens)
 
+    # Warmup gets fresh result allocations. Serving may pass a view into a
+    # persistent sampler result buffer, which deliberately differs in both
+    # pointer alignment and storage offset.
+    warmup_num_sampled = torch.empty(num_reqs, dtype=torch.int32, device=device)
+    warmup_num_rejected = torch.empty(num_reqs, dtype=torch.int32, device=device)
+    served_num_sampled = torch.empty(num_reqs + 1, dtype=torch.int32, device=device)[
+        1:
+    ]
+    served_num_rejected = torch.empty(
+        num_reqs + 1, dtype=torch.int32, device=device
+    )[1:]
+    assert warmup_num_sampled.storage_offset() == 0
+    assert served_num_sampled.storage_offset() == 1
+
     kwargs = dict(
-        buffers=buffers,
-        slot_mapping=slot_mapping,
-        sample_idx_mapping=sample_idx_mapping,
-        block_table=block_table,
         num_reqs=num_reqs,
         k=8,
         state_capacity=4,
@@ -373,12 +384,35 @@ def test_uno_prepare_specialization_ignores_dynamic_target_view_lengths(
         has_rejected=True,
         block=256,
     )
-    warmup_specialization = _prepare_uno_specialization_kwargs(**kwargs)
-    served_specialization = _prepare_uno_specialization_kwargs(**kwargs)
+    warmup_specialization = prepare_uno_launch_key(
+        buffers,
+        slot_mapping,
+        sample_idx_mapping,
+        warmup,
+        warmup_num_sampled,
+        warmup_num_rejected,
+        block_table,
+        **kwargs,
+    )
+    served_specialization = prepare_uno_launch_key(
+        buffers,
+        slot_mapping,
+        sample_idx_mapping,
+        served,
+        served_num_sampled,
+        served_num_rejected,
+        block_table,
+        **kwargs,
+    )
 
     assert warmup_specialization == served_specialization
-    assert "TARGET_QUERY_CAP" not in warmup_specialization
-    assert "TARGET_POSITION_CAP" not in warmup_specialization
+    assert "TARGET_QUERY_CAP" not in dict(warmup_specialization)
+    assert "TARGET_POSITION_CAP" not in dict(warmup_specialization)
+    import vllm.v1.worker.gpu.spec_decode.uno_prepare as uno_prepare
+
+    assert 'do_not_specialize_on_alignment=["num_sampled_ptr", "num_rejected_ptr"]' in inspect.getsource(
+        uno_prepare
+    )
 
 
 def test_fused_uno_rejects_non_native_last_sampled_layout_on_cpu():

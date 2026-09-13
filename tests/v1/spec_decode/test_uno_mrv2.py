@@ -718,71 +718,157 @@ def test_draft_warmup_request_counts_are_independent_of_k():
     assert draft_warmup_request_counts(-1) == []
 
 
-@pytest.mark.parametrize("k", [1, 4, 8])
-def test_uno_sampler_warmup_covers_every_proposal_row_count(k):
-    """The sampler warmup follows Uno's K-row proposal arithmetic.
+def test_uno_served_launches_cover_sampler_flags_and_integer_buckets():
+    """The production plan includes every sampler branch serving can reach."""
+    from vllm.v1.worker.gpu.spec_decode.uno import enumerate_uno_served_launches
 
-    A normal sampler warmup has one row per request.  This is deliberately
-    different: every reachable request count has K proposal rows and must go
-    through the sampler's own top-k/top-p path before JIT monitoring begins.
-    """
-    proposer = object.__new__(UnoSpeculator)
-    proposer.k = k
-    proposer.max_num_reqs = 4
+    plan = enumerate_uno_served_launches(
+        max_num_reqs=16,
+        k=8,
+        max_num_tokens=2048,
+        max_model_len=4096,
+        num_sm=82,
+    )
 
-    assert proposer.draft_sampler_warmup_shapes() == [
-        (1, k),
-        (2, 2 * k),
-        (3, 3 * k),
-        (4, 4 * k),
-    ]
+    assert plan.prepare_request_counts == tuple(range(1, 17))
+    assert {warmup.mode.name for warmup in plan.sampler_warmups} == {
+        "top_p_only",
+        "top_k_top_p",
+        "top_k_only",
+        "neither",
+    }
+    assert {warmup.source for warmup in plan.sampler_warmups} >= {
+        "pure_prefill",
+        "verification",
+        "chunked_or_mixed",
+    }
+    assert ("_topp_sb_stats_kernel", False, 32) in plan.sampler_keys
+    assert ("_topp_sb_stats_kernel", True, 32) in plan.sampler_keys
+    assert (
+        "_topk_topp_kernel",
+        "one",
+        True,
+        False,
+        False,
+    ) in plan.sampler_keys
+    assert (
+        "_topk_topp_kernel",
+        "multiple_of_16",
+        True,
+        True,
+        True,
+    ) in plan.sampler_keys
+    assert plan.served_sampler_keys <= plan.sampler_keys
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_num_reqs": 2, "k": 0, "max_num_tokens": 4, "max_model_len": 4},
+        {"max_num_reqs": 4, "k": 2, "max_num_tokens": 3, "max_model_len": 4},
+        {"max_num_reqs": 4, "k": 2, "max_num_tokens": 8, "max_model_len": 0},
+    ],
+)
+def test_uno_served_launch_enumerator_rejects_unbounded_axes(kwargs):
+    from vllm.v1.worker.gpu.spec_decode.uno import enumerate_uno_served_launches
+
+    with pytest.raises(ValueError):
+        enumerate_uno_served_launches(**kwargs, num_sm=82)
 
 
 def test_draft_warmup_runs_every_shape_through_the_real_dummy_run(monkeypatch):
-    """The runner warms each shape and says how many it covered.
+    """The runner drives every production-plan call through its real sampler.
 
-    Warming through the runner's own dummy run is what keeps the compiled
-    specialisations identical to the ones serving will ask for: the tensors,
-    their dtypes and the proposal path are the production ones rather than
-    synthesised stand-ins, which is the way a warmup silently misses.
+    The prepare and sampler inputs deliberately have different token lengths;
+    the runner must use the plan's request count and row count instead of
+    reconstituting the old ``num_reqs * K`` table.
     """
+    from vllm.v1.worker.gpu import model_runner as model_runner_module
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.spec_decode.uno import (
+        UnoSamplerWarmup,
+        UnoSamplingMode,
+        UnoServedLaunches,
+    )
 
     runner = object.__new__(GPUModelRunner)
     ran: list[int] = []
-    reported: list[int] = []
-    runner.speculator = SimpleNamespace(
-        draft_warmup_token_counts=lambda: [1, 2, 3, 4],
-        draft_sampler_warmup_shapes=lambda: [(1, 8), (2, 16), (3, 24), (4, 32)],
-        report_draft_warmup=reported.append,
+    reported: list[tuple[int, int]] = []
+    proposer = object.__new__(UnoSpeculator)
+    proposer.k = 8
+    proposer.report_draft_warmup = lambda *args: reported.append(args)
+    runner.speculator = proposer
+    plan = UnoServedLaunches(
+        prepare_request_counts=(1, 2, 3, 4),
+        sampler_warmups=(
+            UnoSamplerWarmup(
+                1,
+                1,
+                UnoSamplingMode("top_p_only", None, 0.9),
+                "pure_prefill",
+                (("_topp_sb_stats_kernel", False, 32),),
+            ),
+            UnoSamplerWarmup(
+                2,
+                18,
+                UnoSamplingMode("top_k_top_p", 50, 0.9),
+                "verification",
+                (("_topp_sb_stats_kernel", True, 16),),
+            ),
+            UnoSamplerWarmup(
+                3,
+                17,
+                UnoSamplingMode("top_k_only", 50, None),
+                "chunked_or_mixed",
+                (("_topk_topp_kernel", "generic", True, False, False),),
+            ),
+            UnoSamplerWarmup(
+                4,
+                4,
+                UnoSamplingMode("neither", None, None),
+                "pure_prefill",
+                (),
+            ),
+        ),
     )
+    runner.max_num_reqs = 4
+    runner.max_num_tokens = 64
+    runner.max_model_len = 128
+    runner.device = torch.device("cuda", 0)
+    monkeypatch.setattr(model_runner_module, "enumerate_uno_served_launches", lambda **_: plan)
+    monkeypatch.setattr(model_runner_module, "num_compute_units", lambda _: 82)
     sampler_runs: list[tuple[int, int, int]] = []
 
     def dummy_run(num_tokens):
+        # Model/draft code is free to consume a global generator during
+        # warmup. The production wrapper must put it back before serving.
+        torch.rand(3)
         ran.append(num_tokens)
         return None, torch.empty(num_tokens, 3)
 
     runner._dummy_run = dummy_run
-    def warm_up_uno_sampler(hidden, *, num_reqs, num_rows):
-        sampler_runs.append((hidden.shape[0], num_reqs, num_rows))
+
+    def warm_up_uno_sampler(hidden, *, warmup):
+        sampler_runs.append((hidden.shape[0], warmup.num_reqs, warmup.num_rows))
 
     runner._warm_up_uno_sampler = warm_up_uno_sampler
 
-    runner._warm_up_draft_kernels()
+    prior_state = torch.random.get_rng_state()
+    try:
+        torch.manual_seed(917)
+        served_rng_state = torch.random.get_rng_state()
+        runner._warm_up_draft_kernels()
 
-    assert ran == [1, 2, 3, 4]
-    assert sampler_runs == [(1, 1, 8), (2, 2, 16), (3, 3, 24), (4, 4, 32)]
-    assert reported == [4]
+        assert ran == [1, 2, 3, 4]
+        assert sampler_runs == [(1, 1, 1), (2, 2, 18), (3, 3, 17), (4, 4, 4)]
+        assert reported == [(4, 4, 3)]
+        assert torch.equal(torch.random.get_rng_state(), served_rng_state)
+    finally:
+        torch.random.set_rng_state(prior_state)
 
 
-def test_draft_warmup_skips_a_speculator_that_does_not_ask_for_it(monkeypatch):
-    """Other drafters are untouched, and an empty set costs no dummy runs.
-
-    The hook is opt-in by attribute so a speculator whose kernels do not
-    specialise per request count pays nothing at startup, and a configuration
-    with no reachable request counts does not start a loop over an empty set
-    and then report a warmup that did not happen.
-    """
+def test_draft_warmup_skips_a_speculator_that_does_not_ask_for_it():
+    """Other drafters are untouched by Uno's fixed launch family."""
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
     runner = object.__new__(GPUModelRunner)
@@ -793,63 +879,24 @@ def test_draft_warmup_skips_a_speculator_that_does_not_ask_for_it(monkeypatch):
     runner._warm_up_draft_kernels()
     assert ran == []
 
-    reported: list[int] = []
-    runner.speculator = SimpleNamespace(
-        draft_warmup_token_counts=lambda: [],
-        draft_sampler_warmup_shapes=lambda: [],
-        report_draft_warmup=reported.append,
-    )
+    runner.speculator = SimpleNamespace(report_draft_warmup=Mock())
     runner._warm_up_draft_kernels()
-    assert ran == [] and reported == []
-
-
-def _cpu_launch_contract(
-    kernel: str,
-    tensors: dict[str, torch.Tensor],
-    scalars: dict[str, object],
-    runtime_scalars: tuple[str, ...],
-) -> tuple[dict[str, tuple[str, tuple[int, ...], tuple[int, ...]]], tuple]:
-    """Build a non-data-bearing launch record and its binder contract.
-
-    The record includes each tensor's dtype, logical shape and stride.  The
-    key mirrors Triton's distinction between pointer layout and logical view
-    extent: dynamic scalar bounds are excluded only when the kernel declares
-    them ``do_not_specialize``; fixed capacities remain in ``scalars``.
-    """
-    arguments = {
-        name: (str(tensor.dtype), tuple(tensor.shape), tuple(tensor.stride()))
-        for name, tensor in tensors.items()
-    }
-    key = (
-        kernel,
-        tuple((name, dtype, stride) for name, (dtype, _shape, stride) in arguments.items()),
-        tuple(
-            sorted(
-                (name, repr(value))
-                for name, value in scalars.items()
-                if name not in runtime_scalars
-            )
-        ),
-    )
-    return arguments, key
+    assert ran == []
 
 
 def test_uno_warmup_key_set_covers_served_prepare_and_sampler_shapes():
-    """CPU_OBSERVED/CUDA_UNVERIFIED contract for the five affected kernels.
+    """CPU_OBSERVED/CUDA_UNVERIFIED launch-set contract.
 
-    This is a no-GPU binder model, not a substitute for Probe 0's actual
-    Triton receipts.  It feeds the same tensor dtype/shape/stride facts and
-    constexprs into both sides, then asserts the warmup key set covers every
-    C=1..16 served bucket on the RTX 3090's 82-SM split policy.
+    Warmup and serving use deliberately different input batches. The
+    production enumerator supplies both the raw served domain and the selected
+    warmup calls, so this can fail when a warmup is changed back to the old
+    ``num_reqs * K`` sample list.
     """
-    from vllm.v1.sample.ops.topk_topp_triton import (
-        _SPLIT_FANOUT,
-        _SPLIT_ROUNDS,
-        _topp_split_count,
-    )
+    from vllm.v1.worker.gpu.spec_decode.uno import enumerate_uno_served_launches
     from vllm.v1.worker.gpu.spec_decode.uno_prepare import (
         UNO_PREPARE_RUNTIME_SCALARS,
-        _prepare_uno_specialization_kwargs,
+        _target_input_lengths,
+        prepare_uno_launch_key,
     )
 
     max_reqs, k, vocab, num_sms = 16, 8, 151936, 82
@@ -857,26 +904,20 @@ def test_uno_warmup_key_set_covers_served_prepare_and_sampler_shapes():
     slot_mapping = torch.empty(2048, dtype=torch.int64)
     sample_idx = torch.empty(max_reqs * k, dtype=torch.int32)
     block_table = torch.empty((max_reqs, 256), dtype=torch.int32)
-    persistent = {
-        "last_sampled": torch.empty((max_reqs, 1), dtype=torch.int64),
-        "next_prefill_tokens": torch.empty((1, max_reqs), dtype=torch.int32),
-        "seeds": torch.empty(max_reqs, dtype=torch.int64),
-        "block_table": block_table,
-        "out_input_ids": buffers.input_ids,
-        "out_positions": buffers.positions,
-        "out_slot_mapping": slot_mapping,
-        "out_sample_idx_mapping": sample_idx,
-        "out_seq_lens": buffers.seq_lens,
-        "out_query_start_loc": buffers.query_start_loc,
-    }
+    assert UNO_PREPARE_RUNTIME_SCALARS == (
+        "step",
+        "target_query_len",
+        "target_position_len",
+    )
 
-    def uno_key(num_reqs: int, target_rows: int, step: int):
-        target_query = torch.empty(num_reqs + 1, dtype=torch.int32)
-        target_positions = torch.empty(target_rows, dtype=torch.int64)
-        constexprs = _prepare_uno_specialization_kwargs(
+    def prepare_key(input_batch, num_sampled, num_rejected, num_reqs):
+        return prepare_uno_launch_key(
             buffers,
             slot_mapping,
             sample_idx,
+            input_batch,
+            num_sampled,
+            num_rejected,
             block_table,
             num_reqs=num_reqs,
             k=k,
@@ -888,145 +929,58 @@ def test_uno_warmup_key_set_covers_served_prepare_and_sampler_shapes():
             has_rejected=True,
             block=256,
         )
-        return _cpu_launch_contract(
-            "_prepare_uno_inputs_kernel",
-            {
-                "idx_mapping": torch.empty(num_reqs, dtype=torch.int64),
-                "num_sampled": torch.empty(num_reqs, dtype=torch.int32),
-                "num_rejected": torch.empty(num_reqs, dtype=torch.int32),
-                "target_query_start_loc": target_query,
-                "target_positions": target_positions,
-                **persistent,
-            },
-            {
-                "step": step,
-                "target_query_len": target_query.numel(),
-                "target_position_len": target_positions.numel(),
-                "block_table_stride": block_table.stride(0),
-                **constexprs,
-            },
-            UNO_PREPARE_RUNTIME_SCALARS,
-        )
 
-    def sampler_keys(rows: int) -> set[tuple]:
-        # Meta tensors preserve the actual layout facts without CPU allocation.
-        logits = torch.empty((rows, vocab), dtype=torch.float32, device="meta")
-        top_k = torch.empty(rows, dtype=torch.int32, device="meta")
-        top_p = torch.empty(rows, dtype=torch.float32, device="meta")
-        programs = min(rows, num_sms)
-        buffer = torch.empty((programs, vocab), dtype=torch.float32, device="meta")
-        stats = torch.empty((64 * 32, 4), dtype=torch.float32, device="meta")
-        parts = torch.empty(
-            (64, _SPLIT_ROUNDS, 32, _SPLIT_FANOUT, 3),
-            dtype=torch.float32,
-            device="meta",
+    warmup_prepare_keys = set()
+    served_prepare_keys = set()
+    for num_reqs in range(1, max_reqs + 1):
+        warmup_batch = SimpleNamespace(
+            query_start_loc=torch.empty(num_reqs + 1, dtype=torch.int32),
+            positions=torch.empty(num_reqs, dtype=torch.int64),
         )
-        common = {"logits": logits, "top_k": top_k, "top_p": top_p}
-        split = _topp_split_count(rows, num_sms)
-        keys = {
-            _cpu_launch_contract(
-                "_topk_topp_kernel",
-                {
-                    **common,
-                    "buffer": buffer,
-                    "percentile_table": torch.empty(200, device="meta"),
-                    "normal_cdf_table": torch.empty(200, device="meta"),
-                },
-                {
-                    "LOGITS_STRIDE_0": logits.stride(0),
-                    "BATCH_SIZE": rows,
-                    "MASK_VALUE": float("-inf"),
-                    "VOCAB_SIZE": vocab,
-                    "BLOCK_SIZE": 8192,
-                    "BLOCK_SIZE_TRUNC": 4096,
-                    "TOPK_ENABLED": True,
-                    "TOPP_ENABLED": True,
-                    "SPLIT_COVERS_PONLY": True,
-                    "num_warps": 8,
-                },
-                ("LOGITS_STRIDE_0", "BATCH_SIZE"),
-            )[1],
-            _cpu_launch_contract(
-                "_topp_sb_stats_kernel",
-                {**common, "stats": stats},
-                {
-                    "LOGITS_STRIDE_0": logits.stride(0),
-                    "HAS_K": True,
-                    "VOCAB_SIZE": vocab,
-                    "S": split,
-                    "BLOCK": 8192,
-                    "num_warps": 8,
-                },
-                ("LOGITS_STRIDE_0",),
-            )[1],
-            _cpu_launch_contract(
-                "_topp_sb_mask_kernel",
-                {**common, "stats": stats, "parts": parts},
-                {
-                    "LOGITS_STRIDE_0": logits.stride(0),
-                    "HAS_K": True,
-                    "MASK_VALUE": float("-inf"),
-                    "S": split,
-                    "F": _SPLIT_FANOUT,
-                    "NUM_ROUNDS": _SPLIT_ROUNDS,
-                    "VOCAB_SIZE": vocab,
-                    "BLOCK": 8192,
-                    "num_warps": 8,
-                },
-                ("LOGITS_STRIDE_0",),
-            )[1],
-        }
-        for round_i in range(_SPLIT_ROUNDS):
-            # ROUND is a regular integer argument, but the Triton binder may
-            # specialize values such as 1. Keep all five values as keys.
-            keys.add(
-                _cpu_launch_contract(
-                    "_topp_sb_step_kernel",
-                    {**common, "stats": stats, "parts": parts},
-                    {
-                        "LOGITS_STRIDE_0": logits.stride(0),
-                        "ROUND": round_i,
-                        "HAS_K": True,
-                        "S": split,
-                        "F": _SPLIT_FANOUT,
-                        "NUM_ROUNDS": _SPLIT_ROUNDS,
-                        "VOCAB_SIZE": vocab,
-                        "BLOCK": 2048,
-                        "num_warps": 8,
-                    },
-                    ("LOGITS_STRIDE_0",),
-                )[1]
+        served_batch = SimpleNamespace(
+            query_start_loc=torch.empty(num_reqs + 1, dtype=torch.int32),
+            positions=torch.empty(1900 + num_reqs, dtype=torch.int64),
+        )
+        assert _target_input_lengths(warmup_batch) != _target_input_lengths(
+            served_batch
+        )
+        warmup_num_sampled = torch.empty(num_reqs, dtype=torch.int32)
+        warmup_num_rejected = torch.empty(num_reqs, dtype=torch.int32)
+        served_num_sampled = torch.empty(num_reqs + 1, dtype=torch.int32)[1:]
+        served_num_rejected = torch.empty(num_reqs + 1, dtype=torch.int32)[1:]
+        assert served_num_sampled.storage_offset() == 1
+        warmup_prepare_keys.add(
+            prepare_key(
+                warmup_batch,
+                warmup_num_sampled,
+                warmup_num_rejected,
+                num_reqs,
             )
-        return keys
+        )
+        served_prepare_keys.add(
+            prepare_key(
+                served_batch,
+                served_num_sampled,
+                served_num_rejected,
+                num_reqs,
+            )
+        )
+    assert served_prepare_keys <= warmup_prepare_keys
 
-    proposer = object.__new__(UnoSpeculator)
-    proposer.k, proposer.max_num_reqs = k, max_reqs
-    warmup_shapes = proposer.draft_sampler_warmup_shapes()
-    served_shapes = [(n, n * k) for n in range(1, max_reqs + 1)]
-    assert warmup_shapes == served_shapes
-    assert UNO_PREPARE_RUNTIME_SCALARS == (
-        "step",
-        "target_query_len",
-        "target_position_len",
+    plan = enumerate_uno_served_launches(
+        max_num_reqs=max_reqs,
+        k=k,
+        max_num_tokens=2048,
+        max_model_len=4096,
+        num_sm=num_sms,
     )
-
-    warmup_keys: set[tuple] = set()
-    served_keys: set[tuple] = set()
-    split_counts: set[int] = set()
-    for num_reqs, rows in served_shapes:
-        warm_args, warm_key = uno_key(num_reqs, num_reqs, step=7)
-        served_args, served_key = uno_key(num_reqs, 32 + num_reqs, step=99)
-        assert warm_args["target_positions"][1] != served_args["target_positions"][1]
-        assert warm_key == served_key
-        assert "target_position_len" not in dict(warm_key[2])
-        warmup_keys.add(warm_key)
-        served_keys.add(served_key)
-        warmup_keys.update(sampler_keys(rows))
-        served_keys.update(sampler_keys(rows))
-        split_counts.add(_topp_split_count(rows, num_sms))
-
-    assert {1, 2, 4, 8} <= split_counts
-    assert served_keys <= warmup_keys
+    # ``served_sampler_keys`` is produced before the representative-call
+    # selector. Mutating that selector back to the legacy ``num_reqs * K``
+    # list therefore leaves the served set intact and makes this contract red.
+    assert plan.served_sampler_keys == plan.sampler_keys
+    assert {dict(key)["NUM_REQS"] for key in served_prepare_keys} == set(
+        plan.prepare_request_counts
+    )
 
 
 def test_uno_startup_jit_self_check_reports_the_compiled_kernel(monkeypatch):
