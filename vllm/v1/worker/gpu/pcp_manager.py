@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+import torch.distributed as dist
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
@@ -16,6 +18,9 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -51,6 +56,7 @@ class PCPManager:
         dcp_world_size: int = 1,
         dcp_rank: int = 0,
         cp_interleave: int = 1,
+        restore_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
@@ -64,6 +70,14 @@ class PCPManager:
         self._local_gather_idx: torch.Tensor | None = None
         self.draft_prefill_batch: InputBatch | None = None
         self._block_tables = block_tables
+        self._restore_buffers = restore_buffers
+        self._restore_output_index = 0
+        self._restore_group_name = (
+            get_pcp_group().cpu_group.group_name if restore_buffers is not None else ""
+        )
+        self._hidden_restore_idx_cpu: np.ndarray | None = None
+        self._sample_local_row_idx: torch.Tensor | None = None
+        self._sample_restore_idx: torch.Tensor | None = None
         self._hidden_restore_idx: torch.Tensor | None = None
         self._padded_gather_idx: torch.Tensor | None = None
         self._gathered_kv_write_mask: torch.Tensor | None = None
@@ -348,9 +362,27 @@ class PCPManager:
                     dtype=np.int64,
                 )
 
-        self._hidden_restore_idx = async_copy_to_gpu(
-            hidden_restore_idx, device=self.device
-        )
+        self._hidden_restore_idx = None
+        self._hidden_restore_idx_cpu = None
+        self._sample_local_row_idx = None
+        self._sample_restore_idx = None
+        if np.any(is_prefilling):
+            self._hidden_restore_idx_cpu = hidden_restore_idx
+            # Map sampled rows into a padded, compact all-gather.
+            final_rows = hidden_restore_idx[query_start_loc_np[1:] - 1]
+            owners, rows = np.divmod(final_rows, padded_num_tokens)
+            counts = np.bincount(owners, minlength=self.pcp_world_size)
+            stride = int(counts.max())
+            local_rows = np.zeros(stride, dtype=np.int64)
+            local_rows[: counts[self.pcp_rank]] = rows[owners == self.pcp_rank]
+            restore = np.empty(len(rows), dtype=np.int64)
+            for rank in range(self.pcp_world_size):
+                restore[owners == rank] = rank * stride + np.arange(counts[rank])
+            indices = async_copy_to_gpu(
+                np.concatenate((local_rows, restore)), device=self.device
+            )
+            self._sample_local_row_idx = indices[:stride]
+            self._sample_restore_idx = indices[stride:]
         self._padded_gather_idx = async_copy_to_gpu(
             padded_gather_idx, device=self.device
         )
@@ -671,11 +703,48 @@ class PCPManager:
         )
         return gathered_kv_slot_mappings
 
+    def restore_sample_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self._global_batch is not None
+        if not self._global_batch.has_prefill:
+            if self._global_batch.num_tokens == self._global_batch.num_reqs:
+                return hidden_states[: self._global_batch.num_reqs]
+            return hidden_states[self._global_batch.logits_indices]
+        local_rows, restore = self._sample_local_row_idx, self._sample_restore_idx
+        assert local_rows is not None and restore is not None
+        if hidden_states.shape[0] == local_rows.shape[0] == 1:
+            return get_pcp_group().all_gather(hidden_states, dim=0)[restore]
+        if self._restore_buffers is not None:
+            packed, gathered, outputs = self._restore_buffers
+            n, rows = local_rows.numel(), restore.numel()
+            assert n <= packed.shape[0] and rows <= outputs.shape[1]
+            packed = packed[:n]
+            gathered = gathered[: n * self.pcp_world_size]
+            output = outputs[self._restore_output_index, :rows]
+            torch.index_select(hidden_states, 0, local_rows, out=packed)
+            torch.ops.symm_mem.multimem_all_gather_out(
+                packed, self._restore_group_name, gathered
+            )
+            torch.index_select(gathered, 0, restore, out=output)
+            self._restore_output_index ^= 1
+            return output
+        return get_pcp_group().all_gather(hidden_states[local_rows], dim=0)[restore]
+
+    def release_restore_buffers(self) -> None:
+        if self._restore_buffers is not None:
+            torch.accelerator.synchronize()
+            dist.barrier(group=get_pcp_group().cpu_group)
+            self._restore_buffers = None
+
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self._hidden_restore_idx is None:
-            return hidden_states
-        gathered = get_pcp_group().all_gather(hidden_states, dim=0)
-        return gathered[self._hidden_restore_idx]
+            if self._hidden_restore_idx_cpu is None:
+                return hidden_states
+            self._hidden_restore_idx = async_copy_to_gpu(
+                self._hidden_restore_idx_cpu, device=self.device
+            )
+        return get_pcp_group().all_gather(hidden_states, dim=0)[
+            self._hidden_restore_idx
+        ]
 
     def get_draft_input_buffers(
         self, input_buffers: InputBuffers
@@ -720,9 +789,16 @@ class PCPManager:
     def restore_for_sampling(
         self,
         hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, InputBatch]:
+        *,
+        needs_full_hidden_states: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, InputBatch]:
         assert self._global_batch is not None
-        return self.restore_hidden_states(hidden_states), self._global_batch
+        if needs_full_hidden_states:
+            hidden_states = self.restore_hidden_states(hidden_states)
+            sampled = hidden_states[self._global_batch.logits_indices]
+        else:
+            sampled = self.restore_sample_hidden_states(hidden_states)
+        return hidden_states, sampled, self._global_batch
 
 
 def maybe_partition_pcp_batch(
@@ -749,14 +825,74 @@ def maybe_get_pcp_dummy_slot_mappings(
 
 
 def maybe_restore_pcp_for_sampling(
-    manager: PCPManager | None,
+    runner: "GPUModelRunner",
     hidden_states: torch.Tensor | None,
     input_batch: InputBatch,
-) -> tuple[torch.Tensor, InputBatch]:
+) -> tuple[torch.Tensor, torch.Tensor | None, InputBatch]:
     assert hidden_states is not None
+    manager = runner.pcp_manager
     if manager is None:
-        return hidden_states, input_batch
-    return manager.restore_for_sampling(hidden_states)
+        return hidden_states, None, input_batch
+    assert manager._global_batch is not None
+    prompt_logprobs_worker = runner.prompt_logprobs_worker
+    return manager.restore_for_sampling(
+        hidden_states,
+        needs_full_hidden_states=(
+            runner.batch_sharder is not None
+            or runner.speculator is not None
+            or prompt_logprobs_worker is None
+            or prompt_logprobs_worker.needs_prompt_hidden_states(
+                manager._global_batch, runner.req_states.prompt_len.np
+            )
+        ),
+    )
+
+
+def allocate_pcp_restore_buffers(
+    config: VllmConfig,
+    device: torch.device,
+    supports_mm_inputs: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Allocate compact multicast storage before KV memory profiling."""
+    if config.parallel_config.prefill_context_parallel_size <= 1:
+        return None
+    PCPManager.validate_config(config, supports_mm_inputs)
+    dtype = config.model_config.dtype
+    if dtype not in (torch.bfloat16, torch.float16):
+        return None
+    try:
+        import torch.distributed._symmetric_memory as symm_mem
+    except ImportError:
+        return None
+    group = get_pcp_group().cpu_group
+    rows = config.scheduler_config.max_num_seqs
+    width = config.model_config.get_hidden_size()
+    buffers = None
+    for phase in ("allocation", "rendezvous"):
+        error = None
+        try:
+            if phase == "allocation":
+                gathered = symm_mem.empty(
+                    (rows * group.size(), width), dtype=dtype, device=device
+                )
+                packed = torch.empty((rows, width), dtype=dtype, device=device)
+                outputs = torch.empty((2, rows, width), dtype=dtype, device=device)
+                buffers = packed, gathered, outputs
+            elif symm_mem.rendezvous(gathered, group).multicast_ptr == 0:
+                raise RuntimeError("CUDA multicast is unsupported")
+        except RuntimeError as exc:
+            error = exc
+        ready = torch.tensor([error is None], dtype=torch.int32, device="cpu")
+        dist.all_reduce(ready, op=dist.ReduceOp.MIN, group=group)
+        if not ready.item():
+            logger.warning_once(
+                "PCP multicast %s failed on at least one rank; "
+                "using compact AllGather: %s",
+                phase,
+                error,
+            )
+            return None
+    return buffers
 
 
 def maybe_build_pcp_manager(
@@ -765,6 +901,7 @@ def maybe_build_pcp_manager(
     supports_mm_inputs: bool,
     block_tables: BlockTables,
     cls: type[PCPManager] = PCPManager,
+    restore_buffers: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> PCPManager | None:
     parallel_config = vllm_config.parallel_config
     pcp_size = parallel_config.prefill_context_parallel_size
@@ -787,4 +924,5 @@ def maybe_build_pcp_manager(
         dcp_world_size=dcp_size,
         dcp_rank=dcp_rank,
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
+        restore_buffers=restore_buffers,
     )
