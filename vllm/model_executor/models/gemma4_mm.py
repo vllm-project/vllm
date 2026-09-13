@@ -629,6 +629,9 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 
                 # Process frames as images with max_soft_tokens=70
                 video_mm_kwargs = dict(hf_processor_mm_kwargs)
+                # Override configured image options too: these inputs are video
+                # frames, whose cache keys exclude images_kwargs.
+                video_mm_kwargs["images_kwargs"] = {}
                 video_mm_kwargs["max_soft_tokens"] = _VIDEO_MAX_SOFT_TOKENS
 
                 dummy_prompt = ("\t" + processor.image_token) * len(frames)
