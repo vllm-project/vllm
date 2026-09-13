@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_layers_from_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -128,15 +132,16 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     layer_type = cast(type[Any], AttentionLayerBase)
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
-    for layer_name, attn_module in attn_layers.items():
-        if getattr(attn_module, "kv_sharing_target_layer_name", None):
-            # This layer will use KV cache of the sharing target layer.
-            continue
-        # Skip modules that don't need KV cache (eg encoder-only attention)
-        if spec := attn_module.get_kv_cache_spec(vllm_config):
-            if isinstance(spec, AttentionSpec):
-                spec = attn_module.get_attn_backend().customize_spec(spec)
-            kv_cache_spec[layer_name] = spec
+    with set_current_vllm_config(vllm_config):
+        for layer_name, attn_module in attn_layers.items():
+            if getattr(attn_module, "kv_sharing_target_layer_name", None):
+                # This layer will use KV cache of the sharing target layer.
+                continue
+            # Skip modules that don't need KV cache (eg encoder-only attention)
+            if spec := attn_module.get_kv_cache_spec(vllm_config):
+                if isinstance(spec, AttentionSpec):
+                    spec = attn_module.get_attn_backend().customize_spec(spec)
+                kv_cache_spec[layer_name] = spec
     resolve_hisparse_block_size(vllm_config, kv_cache_spec, attn_layers)
     return kv_cache_spec
 
