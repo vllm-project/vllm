@@ -14,6 +14,7 @@ PROMPTS = [
 def test_reset_prefix_cache_e2e(monkeypatch):
     # "spawn" is required for test to be deterministic
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     engine_args = EngineArgs(
         model="Qwen/Qwen3-0.6B",
         gpu_memory_utilization=0.2,

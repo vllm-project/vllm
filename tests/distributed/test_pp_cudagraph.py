@@ -38,4 +38,6 @@ def test_pp_cudagraph(
 
     eager_args = cudagraph_args + ["--enforce-eager"]
 
-    compare_two_settings(MODEL_NAME, eager_args, cudagraph_args)
+    compare_two_settings(
+        MODEL_NAME, eager_args, cudagraph_args, method="generate_close"
+    )
