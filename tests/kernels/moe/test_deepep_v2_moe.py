@@ -3,20 +3,22 @@
 """
 Test DeepEP v2 (ElasticBuffer) dispatch-combine logic.
 Compares against a pure-PyTorch reference MoE implementation.
+
+DeepEP v2 emits a padded contiguous layout (PaddedStandard), so it can only be
+paired with padding-aware experts. All experts exercised here are TRTLLM-Gen
+kernels, which skip padding rows at tile granularity.
 """
 
 import dataclasses
 
 import pytest
 import torch.distributed
-from torch.distributed import ProcessGroup
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from tests.kernels.moe.utils import make_dummy_moe_config, make_test_weights
+from tests.kernels.moe.utils import make_dummy_moe_config
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -39,13 +41,12 @@ requires_deep_ep_v2 = pytest.mark.skipif(
     reason="Requires DeepEP v2 (ElasticBuffer)",
 )
 
-
-def assert_fp8_close(actual: torch.Tensor, expected: torch.Tensor) -> None:
-    close = torch.isclose(actual, expected, atol=2e-1, rtol=2e-1)
-    close_fraction = close.float().mean().item()
-    assert close_fraction > 0.99, (
-        f"Only {close_fraction:.1%} of FP8 outputs are within tolerance"
-    )
+# TRTLLM-Gen experts (the only padding-aware experts usable with DeepEP v2)
+# require FlashInfer on SM100.
+requires_flashinfer_sm100 = pytest.mark.skipif(
+    not has_flashinfer() or not current_platform.has_device_capability(100),
+    reason="Requires FlashInfer TRTLLM fused MoE (SM100)",
+)
 
 
 @dataclasses.dataclass
@@ -100,205 +101,6 @@ class TestTensors:
         )
 
 
-def make_modular_kernel(
-    pg: ProcessGroup,
-    pgi: ProcessGroupInfo,
-    dp_size: int,
-    hidden_size: int,
-    num_experts: int,
-    num_local_experts: int,
-    topk: int,
-    q_dtype: torch.dtype | None,
-    use_fp8_dispatch: bool,
-    quant_config: FusedMoEQuantConfig,
-    use_cudagraph: bool = False,
-) -> FusedMoEKernel:
-    v2_args = DeepEPV2Args(
-        num_local_experts=num_local_experts,
-        num_experts=num_experts,
-        num_topk=topk,
-        hidden_size=hidden_size,
-        max_tokens_per_rank=8192,
-        use_fp8_dispatch=use_fp8_dispatch,
-    )
-
-    a2a = make_deepep_v2_a2a(
-        pg=pg,
-        pgi=pgi,
-        dp_size=dp_size,
-        v2_args=v2_args,
-        use_cudagraph=use_cudagraph,
-    )
-
-    moe_config = make_dummy_moe_config(
-        num_experts=num_local_experts,
-        experts_per_token=topk,
-        hidden_dim=hidden_size,
-    )
-
-    fused_experts = TritonExperts(
-        moe_config=moe_config,
-        quant_config=quant_config,
-    )
-
-    mk = FusedMoEKernel(
-        prepare_finalize=a2a,
-        fused_experts=fused_experts,
-    )
-    return mk
-
-
-def deepep_v2_moe_impl(
-    pg: ProcessGroup,
-    pgi: ProcessGroupInfo,
-    dp_size: int,
-    test_tensors: TestTensors,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w1_scale: torch.Tensor | None,
-    w2_scale: torch.Tensor | None,
-    num_experts: int,
-    topk: int,
-    use_fp8_dispatch: bool,
-    per_act_token_quant: bool,
-) -> torch.Tensor:
-    num_local_experts = w1.size(0)
-
-    def build_expert_map():
-        expert_map = torch.full((num_experts,), fill_value=-1, dtype=torch.int32)
-        s = pgi.rank * num_local_experts
-        e = s + num_local_experts
-        expert_map[s:e] = torch.tensor(list(range(num_local_experts)))
-        device = torch.accelerator.current_device_index()
-        return expert_map.to(device=device, dtype=torch.int32)
-
-    is_quantized = w1.dtype == torch.float8_e4m3fn
-    q_dtype = torch.float8_e4m3fn if is_quantized else None
-
-    quant_config = FusedMoEQuantConfig.make(
-        q_dtype,
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
-        per_act_token_quant=per_act_token_quant,
-        a1_scale=test_tensors.rank_token_scales,
-        a2_scale=test_tensors.intermediate_scales,
-    )
-
-    hidden_size = test_tensors.rank_tokens.size(1)
-
-    mk: FusedMoEKernel = make_modular_kernel(
-        pg,
-        pgi,
-        dp_size,
-        hidden_size,
-        num_experts,
-        num_local_experts,
-        topk,
-        q_dtype,
-        use_fp8_dispatch,
-        quant_config,
-    )
-
-    out = mk.apply(
-        hidden_states=test_tensors.rank_tokens,
-        w1=w1,
-        w2=w2,
-        topk_weights=test_tensors.topk_weights,
-        topk_ids=test_tensors.topk,
-        activation=MoEActivation.SILU,
-        global_num_experts=num_experts,
-        expert_map=build_expert_map(),
-        apply_router_weight_on_input=False,
-    )
-
-    return out
-
-
-def _deep_ep_v2_moe(
-    pgi: ProcessGroupInfo,
-    dp_size: int,
-    config: TestConfig,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w1_scale: torch.Tensor | None,
-    w2_scale: torch.Tensor | None,
-    use_fp8_dispatch: bool,
-    per_act_token_quant: bool,
-):
-    device = torch.device(f"cuda:{pgi.local_rank}")
-    init_workspace_manager(device)
-
-    is_quantized = w1.dtype == torch.float8_e4m3fn
-    device_idx = torch.accelerator.current_device_index()
-    w1 = w1.to(device=device_idx)
-    w2 = w2.to(device=device_idx)
-    if is_quantized:
-        assert w1_scale is not None and w2_scale is not None
-        w1_scale = w1_scale.to(device=device_idx)
-        w2_scale = w2_scale.to(device=device_idx)
-
-    pg = torch.distributed.new_group(list(range(pgi.world_size)))
-    # The caller's set_random_seed() only seeds the parent; spawn() gives each
-    # worker a fresh unseeded RNG, so seed here too or the inputs below differ
-    # every run. Offset by rank to keep the ranks' data distinct.
-    set_random_seed(7 + pgi.rank)
-    test_tensors = TestTensors.make(config)
-
-    with set_current_vllm_config(VllmConfig()):
-        # Reference
-        q_dtype = torch.float8_e4m3fn if is_quantized else None
-        torch_combined = torch_experts(
-            test_tensors.rank_tokens,
-            w1,
-            w2,
-            test_tensors.topk_weights,
-            test_tensors.topk,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=test_tensors.rank_token_scales,
-            a2_scale=test_tensors.intermediate_scales,
-            quant_dtype=q_dtype,
-            per_act_token_quant=per_act_token_quant,
-        )
-
-        # Splice experts for this rank
-        num_local_experts = config.num_experts // pgi.world_size
-        e_start = num_local_experts * pgi.rank
-        e_end = e_start + num_local_experts
-        w1_ep = w1[e_start:e_end]
-        w2_ep = w2[e_start:e_end]
-
-        w1_scale_ep, w2_scale_ep = None, None
-        if is_quantized:
-            w1_scale_ep = w1_scale[e_start:e_end]  # type: ignore
-            w2_scale_ep = w2_scale[e_start:e_end]  # type: ignore
-
-        deepep_combined = deepep_v2_moe_impl(
-            pg,
-            pgi,
-            dp_size,
-            test_tensors,
-            w1_ep,
-            w2_ep,
-            w1_scale_ep,
-            w2_scale_ep,
-            config.num_experts,
-            config.topk,
-            use_fp8_dispatch,
-            per_act_token_quant,
-        )
-
-    if is_quantized:
-        assert_fp8_close(torch_combined, deepep_combined)
-    else:
-        torch.testing.assert_close(
-            torch_combined,
-            deepep_combined,
-            atol=6e-2,
-            rtol=6e-2,
-        )
-
-
 MNKs = [
     (1, 256, 256),
     (2, 256, 512),
@@ -311,59 +113,34 @@ MNKs = [
 
 DTYPES = [torch.bfloat16, torch.float8_e4m3fn]
 
-
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("m,n,k", MNKs)
-@pytest.mark.parametrize("num_experts", [32])
-@pytest.mark.parametrize("topk", [6])
-@pytest.mark.parametrize("world_dp_size", [(2, 1)])
-@multi_gpu_test(num_gpus=2)
-@requires_deep_ep_v2
-def test_deep_ep_v2_moe(
-    dtype: torch.dtype,
-    m: int,
-    n: int,
-    k: int,
-    num_experts: int,
-    topk: int,
-    world_dp_size: tuple[int, int],
-    workspace_init,
-):
-    per_act_token_quant = False
-    use_fp8_dispatch = False
-
-    set_random_seed(7)
-    world_size, dp_size = world_dp_size
-    config = TestConfig(dtype=dtype, topk=topk, m=m, k=k, n=n, num_experts=num_experts)
-
-    quant_dtype = dtype if dtype == torch.float8_e4m3fn else None
-    (_, w1, w1_scale, _), (_, w2, w2_scale, _) = make_test_weights(
-        num_experts,
-        n,
-        k,
-        quant_dtype=quant_dtype,
-        per_out_ch_quant=True,
-    )
-
-    parallel_launch(
-        world_size,
-        _deep_ep_v2_moe,
-        dp_size,
-        config,
-        w1,
-        w2,
-        w1_scale,
-        w2_scale,
-        use_fp8_dispatch,
-        per_act_token_quant,
-    )
-
-
+# DeepEP v2 emits a padded contiguous layout (PaddedStandard). Only experts
+# that skip padding rows can consume it; flashinfer_cutlass processes all rows
+# (Standard) and is therefore excluded here.
 EXPERTS_BACKENDS = [
     "flashinfer_trtllm",
-    "flashinfer_cutlass",
     "trtllm_fp8",
 ]
+
+
+def _dtype_to_backend(dtype: torch.dtype) -> str:
+    return "trtllm_fp8" if dtype == torch.float8_e4m3fn else "flashinfer_trtllm"
+
+
+def _scaled_tolerances(reference: torch.Tensor, frac: float) -> tuple[float, float]:
+    """Tolerances scaled to the magnitude of the reference output.
+
+    Kernel and reference disagree by a near-constant fraction of the signal at
+    every shape, while the signal itself grows with the accumulation length
+    (n, k). A fixed atol is therefore simultaneously too tight for the largest
+    (m, n, k) and far too loose for the smallest. Where the reference nearly
+    cancels to zero the elementwise rtol contributes almost nothing, so atol
+    alone has to carry that noise floor.
+
+    Measured max_err/std over the MNKs here peaks at 0.06 (bf16) and 0.33
+    (fp8), creeping up with element count as more of the error tail gets
+    sampled; ``frac`` leaves roughly 2x headroom on top of that.
+    """
+    return frac * reference.std().item(), 6e-2
 
 
 def _make_experts(
@@ -412,7 +189,8 @@ def _make_experts(
             moe_config=moe_config,
             quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
         )
-        return fused_experts, w1_ep, w2_ep, torch_combined, 1e-1, 2e-1
+        atol, rtol = _scaled_tolerances(torch_combined, 0.15)
+        return fused_experts, w1_ep, w2_ep, torch_combined, atol, rtol
 
     from tests.kernels.moe.test_moe_layer import _quantize_fp8_halves
     from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
@@ -476,10 +254,14 @@ def _make_experts(
             w2_scale=w2_scale_ep,
         ),
     )
-    return fused_experts, w1_ep, w2_ep, torch_combined, 6e-2, 6e-2
+    # Both sides are fp8 approximations quantized differently (the reference
+    # per-token-group, the kernel in its own block layout), so fp8 needs a much
+    # larger fraction than the unquantized path above.
+    atol, rtol = _scaled_tolerances(torch_combined, 0.6)
+    return fused_experts, w1_ep, w2_ep, torch_combined, atol, rtol
 
 
-def _deep_ep_v2_moe_backends(
+def _deep_ep_v2_moe(
     pgi: ProcessGroupInfo,
     dp_size: int,
     config: TestConfig,
@@ -610,6 +392,38 @@ def _deep_ep_v2_moe_backends(
     torch.testing.assert_close(torch_combined, out, atol=atol, rtol=rtol)
 
 
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("m,n,k", MNKs)
+@pytest.mark.parametrize("num_experts", [32])
+@pytest.mark.parametrize("topk", [6])
+@pytest.mark.parametrize("world_dp_size", [(2, 1)])
+@multi_gpu_test(num_gpus=2)
+@requires_deep_ep_v2
+@requires_flashinfer_sm100
+def test_deep_ep_v2_moe(
+    dtype: torch.dtype,
+    m: int,
+    n: int,
+    k: int,
+    num_experts: int,
+    topk: int,
+    world_dp_size: tuple[int, int],
+    workspace_init,
+):
+    set_random_seed(7)
+    world_size, dp_size = world_dp_size
+    config = TestConfig(dtype=dtype, topk=topk, m=m, k=k, n=n, num_experts=num_experts)
+
+    parallel_launch(
+        world_size,
+        _deep_ep_v2_moe,
+        dp_size,
+        config,
+        False,
+        _dtype_to_backend(dtype),
+    )
+
+
 @pytest.mark.parametrize("m,n,k", [(32, 256, 1024)])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [6])
@@ -618,10 +432,7 @@ def _deep_ep_v2_moe_backends(
 @pytest.mark.parametrize("use_cudagraph", [True, False])
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep_v2
-@pytest.mark.skipif(
-    not has_flashinfer() or not current_platform.has_device_capability(100),
-    reason="Requires FlashInfer TRTLLM fused MoE (SM100)",
-)
+@requires_flashinfer_sm100
 def test_deep_ep_v2_moe_backends(
     m: int,
     n: int,
@@ -648,7 +459,7 @@ def test_deep_ep_v2_moe_backends(
 
     parallel_launch(
         world_size,
-        _deep_ep_v2_moe_backends,
+        _deep_ep_v2_moe,
         dp_size,
         config,
         use_cudagraph,

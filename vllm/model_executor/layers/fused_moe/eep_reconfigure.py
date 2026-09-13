@@ -36,7 +36,7 @@ def _make_eep_experts(
         "moe_config": moe_config,
         "quant_config": quant_method.moe_quant_config,
     }
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if prepare_finalize.activation_format.is_batched:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts_kwargs.update(
@@ -69,11 +69,9 @@ def make_eep_staged_quant_method(
     if getattr(quant_method, "wraps_legacy_quant_method", False):
         return None
 
-    old_batched_format = (
-        module.moe_config.moe_parallel_config.use_batched_activation_format
-    )
-    new_batched_format = moe_config.moe_parallel_config.use_batched_activation_format
-    assert old_batched_format == new_batched_format
+    old_format = module.moe_config.activation_format
+    new_format = moe_config.activation_format
+    assert new_format.is_superset(old_format)
 
     moe_kernel = quant_method.moe_kernel
     if moe_kernel is None:
