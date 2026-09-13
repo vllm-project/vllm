@@ -37,7 +37,8 @@ class WeightCacheDaemon:
         self._cmd = [
             sys.executable,
             "-m",
-            "vllm.model_executor.model_loader.weight_cache.daemon",
+            "vllm.entrypoints.cli.main",
+            "preload",
             "--model",
             model,
             "--tensor-parallel-size",
